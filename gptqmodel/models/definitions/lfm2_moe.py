@@ -23,13 +23,13 @@ class LFM2MoeQModel(BaseQModel):
         {
             "operator_norm": ("operator_norm:!",),
             "conv": ("in_proj", "out_proj"),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "ffn_norm": ("ffn_norm:!",),
             "feed_forward:moe": {
                 "gate": ("gate:!",),
-                "": ("w1:0", "w3:0", "w2:1"),
-                "experts": {
-                    "#": ("w1:0", "w3:0", "w2:1"),
+                "": ("w1:0:gate", "w3:0:up", "w2:1:down"),
+                "experts:routed": {
+                    "#": ("w1:0:gate", "w3:0:up", "w2:1:down"),
                 },
             },
         }

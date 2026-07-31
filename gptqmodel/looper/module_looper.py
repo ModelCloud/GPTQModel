@@ -167,6 +167,12 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
+
+    # These are set during __init__, but tests that instantiate with __new__
+    # may bypass initialization; class defaults keep helper methods safe.
+    input_embeddings_name: Optional[str] = None
+    output_embeddings_name: Optional[str] = None
+
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_config: Optional[QuantizeEmbedConfig] = None):
         """Initialize loop state, device policy, and callback wiring."""
 
@@ -338,15 +344,15 @@ class ModuleLooper():
         if self.embed_quant_mode is not None:
             self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
-        self.input_embeddings_module = self.gptq_model.get_input_embeddings()
-        self.output_embeddings_module = self.gptq_model.get_output_embeddings()
+        self.input_embeddings_module = getattr(self.gptq_model, "get_input_embeddings", lambda: None)()
+        self.output_embeddings_module = getattr(self.gptq_model, "get_output_embeddings", lambda: None)()
         self.input_embeddings_name = (
-            self.gptq_model.get_input_embeddings_name()
+            getattr(self.gptq_model, "get_input_embeddings_name", lambda: None)()
             if self.input_embeddings_module is not None
             else None
         )
         self.output_embeddings_name = (
-            self.gptq_model.get_output_embeddings_name()
+            getattr(self.gptq_model, "get_output_embeddings_name", lambda: None)()
             if self.output_embeddings_module is not None
             else None
         )

@@ -269,6 +269,10 @@ class GPTQ:
         self.module_copy = None
 
         self.nsamples = 0
+        # Tracks the largest sample count ever observed for this module. Any
+        # later code path (especially Hessian materialization) that lowers
+        # ``self.nsamples`` below this value is a regression and must fail.
+        self._max_observed_nsamples = 0
 
         self.quantizer = self.create_quantizer(name=self.name)
 
@@ -326,6 +330,19 @@ class GPTQ:
         self._borrow_workspace_last_summary: Optional[Dict[str, object]] = None
         self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
         self._borrow_workspace_last_chunk_rows: Optional[int] = None
+
+    def _set_nsamples(self, nsamples: int) -> None:
+        """Set ``self.nsamples`` and assert it never drops below the observed maximum."""
+
+        if not isinstance(nsamples, int):
+            nsamples = int(nsamples)
+        self.nsamples = nsamples
+        assert self.nsamples >= self._max_observed_nsamples, (
+            f"Module `{getattr(self, 'name', '<unknown>')}` sample count regressed from "
+            f"{self._max_observed_nsamples} to {self.nsamples}."
+        )
+        if self.nsamples > self._max_observed_nsamples:
+            self._max_observed_nsamples = self.nsamples
 
     def _validate_act_group_aware_shape(self) -> None:
         if not getattr(self.qcfg, "act_group_aware", False):
@@ -493,7 +510,7 @@ class GPTQ:
                     del counts
                 tok_n = ids.numel()
                 self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + tok_n
-                self.nsamples += tok_n
+                self._set_nsamples(self.nsamples + tok_n)
                 self._hessian_dirty = True
             return
 
@@ -552,7 +569,7 @@ class GPTQ:
                 del reshaped_inp
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
-            self.nsamples += batch_token_size
+            self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
 
     def add_batch_from_hessian(
@@ -590,7 +607,7 @@ class GPTQ:
                     existing.add_(xtx)
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
-            self.nsamples += batch_token_size
+            self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
 
     def record_shared_hessian_batch(self, batch_token_size: int, shared_state) -> None:
@@ -601,7 +618,7 @@ class GPTQ:
 
         with self.lock:
             self.fwd_counter += 1
-            self.nsamples += batch_token_size
+            self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
             self._shared_hessian_state = shared_state
 
@@ -866,22 +883,46 @@ class GPTQ:
                 if not self._hessian_dirty and self._H_diag is not None:
                     if self._H_diag.device != device:
                         self._H_diag = self._H_diag.to(device=device)
+                    self.H = None
+                    self._set_nsamples(getattr(self, "_hessian_total_samples", 0))
+                    self._hessian_dirty = False
+                    self._final_hessian_device_hint = device
                     return
 
-                total_tokens = sum(self._device_sample_counts.values())
+                total_old = getattr(self, "_hessian_total_samples", 0)
+                total_new = sum(
+                    int(counts.sum().item())
+                    for counts in self._device_embedding_counts.values()
+                )
+                total = total_old + total_new
 
-                # Reuse buffer if possible
-                if self._H_diag is not None and self._H_diag.shape == (self.columns,) and self._H_diag.device == device:
+                # Reuse buffer if possible; a reused buffer already contains the
+                # previously merged and scaled diagonal, so do not zero it unless
+                # there is no prior data.
+                if (
+                    self._H_diag is not None
+                    and self._H_diag.shape == (self.columns,)
+                ):
+                    if self._H_diag.device != device or self._H_diag.dtype != torch.float32:
+                        self._H_diag = self._H_diag.to(device=device, dtype=torch.float32)
                     diag = self._H_diag
-                    diag.zero_()
                 else:
+                    torch_sync(device)
                     diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
+                    total_old = 0
 
-                for partial_device, counts in self._device_embedding_counts.items():
-                    diag.add_(counts.to(device=device, dtype=torch.float32))
+                if total_new > 0:
+                    if total > 0:
+                        scale_new = 2.0 / float(total)
+                        if total_old > 0:
+                            diag.mul_(float(total_old) / float(total))
+                    else:
+                        scale_new = 1.0
 
-                if total_tokens > 0:
-                    diag.mul_(2.0 / float(total_tokens))
+                    for counts in self._device_embedding_counts.values():
+                        counts = counts.to(device=device, dtype=torch.float32)
+                        diag.add_(counts, alpha=scale_new)
+
                 # Apply a tiny floor to avoid zeros for unseen tokens (stabilizes inverse)
                 abs_max = max(diag.max().item(), 1.0)
                 floor = abs_max * 1e-6
@@ -889,12 +930,13 @@ class GPTQ:
 
                 self._H_diag = diag
                 self.H = None  # No dense matrix for Embedding
-                self.nsamples = total_tokens
+                self._set_nsamples(total)
+                self._hessian_total_samples = total
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = device
                 # Keep per-device sample counts so a mock-quantization recursion (after
                 # ``self.H`` is released for peak memory) can still report the correct
-                # number of observed calibration tokens.
+                # number of observed calibration tokens. The merged counts are freed.
                 self._device_embedding_counts.clear()
                 return
 
@@ -909,24 +951,29 @@ class GPTQ:
             # If the Hessian partials have already been merged and freed (e.g. the
             # mock-quantization recursion path after ``self.H`` was released for peak
             # memory), rebuilding a dense Hessian here would create an all-zero matrix.
-            # That makes every column look dead and zeroes the whole weight. Flag the
-            # rebuild as invalid so ``quantize()`` can route to fallback instead.
+            # That makes every column look dead and zeroes the whole weight. The
+            # per-device sample counts are intentionally preserved so the correct
+            # number of calibration tokens is still known; route straight to fallback.
             if total_samples > 0 and not self._device_hessian_partials and self.H is None:
                 self._hessian_rebuild_invalid = True
+                self._set_nsamples(total_samples)
+                return
+
+            # Track how many samples the existing ``self.H`` already represents so
+            # a second materialization (new batches after ``self.H`` was already
+            # built) re-weights the existing Hessian instead of zeroing it.
+            # ``total_samples`` is cumulative; ``_hessian_total_samples`` is the
+            # count already merged into ``self.H``.
+            total_old = getattr(self, "_hessian_total_samples", 0) if self.H is not None else 0
+            total = total_samples
 
             # Reuse the existing tensor when possible to avoid an extra allocation.
-            reuse_buffer = (
-                self.H is not None
-                and self.H.shape == (self.columns, self.columns)
-                and self.H.device == device
-            )
-
-            result_accum: torch.Tensor
-            if reuse_buffer and self.H.dtype == torch.float32:
+            if self.H is not None and self.H.shape == (self.columns, self.columns):
+                if self.H.device != device or self.H.dtype != torch.float32:
+                    self.H = self.H.to(device=device, dtype=torch.float32)
                 result_accum = self.H
-                result_accum.zero_()
             else:
-                torch_sync(device) # try to avoid torch.AcceleratorError: CUDA error: unspecified launch failure
+                torch_sync(device)  # try to avoid torch.AcceleratorError: CUDA error: unspecified launch failure
                 result_accum = torch.zeros(
                     (self.columns, self.columns),
                     dtype=torch.float32,
@@ -934,38 +981,44 @@ class GPTQ:
                 )
 
             if total_samples == 0:
+                if self._max_observed_nsamples > 0:
+                    self._hessian_rebuild_invalid = True
                 self.H = result_accum
-                self.nsamples = 0
+                self._set_nsamples(self._max_observed_nsamples)
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = device
                 self._device_hessian_partials.clear()
-                self._device_sample_counts.clear()
                 return
 
             # Merge per-device partials into the final Hessian and delete each
             # partial as it is added so the peak stays at result + one partial.
+            if total > 0:
+                if total_old > 0:
+                    result_accum.mul_(float(total_old) / float(total))
+                scale_new = 2.0 / float(total)
+            else:
+                scale_new = 1.0
+
             while self._device_hessian_partials:
                 _, partial = self._device_hessian_partials.popitem()
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     try:
-                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                        partial = partial.to(device=result_accum.device, dtype=torch.float32)
                     except Exception:
                         log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
                         time.sleep(0.25)
                         try:
-                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                            partial = partial.to(device=result_accum.device, dtype=torch.float32)
                         except Exception:
                             log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
                             time.sleep(0.75)
-                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                else:
-                    result_accum.add_(partial)
+                            partial = partial.to(device=result_accum.device, dtype=torch.float32)
+                result_accum.add_(partial, alpha=scale_new)
                 del partial
 
-            result_accum.mul_(2.0 / float(total_samples))
-
             self.H = result_accum
-            self.nsamples = total_samples
+            self._hessian_total_samples = total
+            self._set_nsamples(total)
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
             # Keep per-device sample counts so a mock-quantization recursion (after
@@ -984,29 +1037,44 @@ class GPTQ:
 
         with shared_state["lock"]:
             hessian = shared_state.get("H")
-            if hessian is not None and not shared_state.get("dirty", False):
+            if (
+                hessian is not None
+                and not shared_state.get("dirty", False)
+                and shared_state.get("total_samples", 0) > 0
+            ):
                 if hessian.device != device:
                     hessian = hessian.to(device=device)
                     shared_state["H"] = hessian
                 self.H = hessian
-                self.nsamples = int(shared_state.get("total_samples", self.nsamples) or 0)
+                self._set_nsamples(int(shared_state["total_samples"]))
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = hessian.device
                 return
 
             partials = shared_state["partials"]
             sample_counts = shared_state["sample_counts"]
-            total_samples = sum(sample_counts.values())
+            total_old = int(shared_state.get("total_samples", 0) or 0)
+            total_new = sum(sample_counts.values())
+            # If this is a re-accumulation after a previous materialization, the
+            # existing Hessian was scaled by 2/total_old and must be re-weighted
+            # so the new partials can be merged without losing earlier batches.
+            total = total_old + total_new if total_old > 0 else total_new
 
-            reuse_buffer = (
+            # The shared Hessian was freed but the sample count is still recorded;
+            # rebuilding from an empty partial set would produce an all-zero H.
+            if hessian is None and total_old > 0 and not partials:
+                self._hessian_rebuild_invalid = True
+                self._set_nsamples(total_old)
+                return
+
+            if (
                 hessian is not None
                 and hessian.shape == (self.columns, self.columns)
-                and hessian.device == device
-                and hessian.dtype == torch.float32
-            )
-            if reuse_buffer:
+            ):
+                if hessian.device != device or hessian.dtype != torch.float32:
+                    hessian = hessian.to(device=device, dtype=torch.float32)
+                    shared_state["H"] = hessian
                 result_accum = hessian
-                result_accum.zero_()
             else:
                 torch_sync(device)
                 result_accum = torch.zeros(
@@ -1015,24 +1083,42 @@ class GPTQ:
                     device=device,
                 )
 
-            if total_samples:
-                # Merge shared partials and delete each one as it is added.
+            # If we are reusing a previously allocated Hessian buffer but no prior
+            # scaled contributions are recorded, zero it to avoid double-counting.
+            if total_old == 0:
+                result_accum.zero_()
+
+            if total_new:
+                # Merge shared partials directly into result_accum. The existing
+                # Hessian (if any) was scaled by 2/total_old, so re-weight it by
+                # total_old/total and add each new partial scaled by 2/total.
+                # This avoids allocating a second full columns x columns buffer.
+                if total > 0:
+                    scale_new = 2.0 / float(total)
+                    if total_old > 0:
+                        result_accum.mul_(float(total_old) / float(total))
+                else:
+                    scale_new = 1.0
+
                 while partials:
                     _, partial = partials.popitem()
-                    if partial.device != result_accum.device or partial.dtype != torch.float32:
-                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                    else:
-                        result_accum.add_(partial)
+                    if (
+                        partial.device != result_accum.device
+                        or partial.dtype != torch.float32
+                    ):
+                        partial = partial.to(
+                            device=result_accum.device, dtype=torch.float32
+                        )
+                    result_accum.add_(partial, alpha=scale_new)
                     del partial
-                result_accum.mul_(2.0 / float(total_samples))
 
             shared_state["H"] = result_accum
             shared_state["dirty"] = False
-            shared_state["total_samples"] = total_samples
+            shared_state["total_samples"] = total
             sample_counts.clear()
 
             self.H = result_accum
-            self.nsamples = total_samples
+            self._set_nsamples(total)
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
 
@@ -1280,6 +1366,15 @@ class GPTQ:
 
     @torch.inference_mode()
     def _compute_hessian_inverse_uncached(self, H: torch.Tensor):
+        # A Hessian with non-finite entries can only produce a non-finite inverse.
+        # Bail out early so the caller can fall back instead of propagating NaN/Inf.
+        if not torch.isfinite(H).all():
+            log.warn(
+                f"Quantization: Module `{self.name}` -> Hessian contains non-finite values; "
+                "skipping Cholesky inversion and using fallback."
+            )
+            return None, 1.0
+
         # Keep the original Hessian untouched; only a clone's diagonal is modified.
         orig_diag = H.diagonal().clone()
 
@@ -1305,10 +1400,14 @@ class GPTQ:
                 current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
                 if attempt == 1:
                     log.warn(
-                        f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
+                        f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor "
+                        f"(+{floor_increment:.2e}) to recover positive definiteness."
+                    )
                 else:
                     log.warn(
-                        f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
+                        f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal "
+                        f"floor to +{floor_increment:.2e}."
+                    )
 
             mean = current_diag.mean()
             damp = self.qcfg.damp_percent
@@ -1327,13 +1426,24 @@ class GPTQ:
                     H_eff.diagonal().add_(diag_delta)
                     try:
                         Hinv_result = npu_inverse_cholesky_factor(H_eff)
-                        used_damp = damp
-                        if damp_recovery_started:
-                            log.warn(
-                                f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={damp:.5f}` "
-                                f"(started at {recovery_initial_damp:.5f})."
-                            )
-                        return Hinv_result, used_damp
+                        is_valid = (
+                            Hinv_result is not None
+                            and torch.isfinite(Hinv_result).all().item()
+                            and (Hinv_result.diagonal() > 0).all().item()
+                        )
+                        if is_valid:
+                            used_damp = damp
+                            if damp_recovery_started:
+                                log.warn(
+                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
+                                    f"`damp_percent={damp:.5f}` "
+                                    f"(started at {recovery_initial_damp:.5f})."
+                                )
+                            return Hinv_result, used_damp
+                        # Treat a numerically bad inverse the same as a Cholesky failure.
+                        raise torch.linalg.LinAlgError(
+                            "Hessian inverse contains non-finite or non-positive-definite entries."
+                        )
                     except torch._C._LinAlgError as e:
                         last_error = e
                         if self.qcfg.damp_auto_increment != 0:
@@ -1348,7 +1458,9 @@ class GPTQ:
                             recovery_last_damp = damp
                         else:
                             log.warn(
-                                f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
+                                f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with "
+                                f"`damp_percent={damp:.5f}` and no auto increment configured."
+                            )
                             break
                     continue
 
@@ -1363,14 +1475,23 @@ class GPTQ:
                     if success.item():
                         Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
 
-                if success.item():
-                    used_damp = damp
-                    if damp_recovery_started:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={damp:.5f}` "
-                            f"(started at {recovery_initial_damp:.5f})."
-                        )
-                    return Hinv_result, used_damp
+                if success.item() and Hinv_result is not None:
+                    is_valid = (
+                        torch.isfinite(Hinv_result).all().item()
+                        and (Hinv_result.diagonal() > 0).all().item()
+                    )
+                    if is_valid:
+                        used_damp = damp
+                        if damp_recovery_started:
+                            log.warn(
+                                f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
+                                f"`damp_percent={damp:.5f}` "
+                                f"(started at {recovery_initial_damp:.5f})."
+                            )
+                        return Hinv_result, used_damp
+                    # The factorization produced a non-finite or non-positive-definite
+                    # inverse. Treat it as a Cholesky failure and continue damping.
+                    success = H.new_tensor(False, dtype=torch.bool)
 
                 if self.qcfg.damp_auto_increment != 0:
                     if not damp_recovery_started:
@@ -1384,19 +1505,24 @@ class GPTQ:
                     recovery_last_damp = damp
                 else:
                     log.warn(
-                        f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
+                        f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with "
+                        f"`damp_percent={damp:.5f}` and no auto increment configured."
+                    )
                     break
 
             if damp_recovery_started:
                 final_damp = recovery_last_damp if recovery_last_damp is not None else damp
                 log.warn(
-                    f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching `damp_percent={final_damp:.5f}`."
+                    f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching "
+                    f"`damp_percent={final_damp:.5f}`."
                 )
 
             attempt += 1
 
         log.error(
-            f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after diagonal floor attempts. Last `damp_percent` tried = {damp:.5f}.")
+            f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite "
+            f"after diagonal floor attempts. Last `damp_percent` tried = {damp:.5f}."
+        )
         if last_error is not None:
             log.debug(f"Hessian failure detail: {last_error}")
         return None, 1.0
@@ -2361,14 +2487,23 @@ class GPTQ:
                                 "please try increasing calibration data samples or enable fallback=True"
                             )
                     if fallback_configured:
-                        log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
+                        log.info(
+                            f"Quantization: Failed due to `NaN` loss for `{self.name}`, "
+                            f"use mock quantization retry for `{self.name}`."
+                        )
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
-                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fallback=True")
+                        raise ValueError(
+                            f"Quantization: Failed due to `NaN` loss for `{self.name}`; "
+                            "please try increasing calibration data samples or enable fallback=True."
+                        )
             else:
                 if fallback_configured:
-                    log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
+                    log.warn(
+                        f"Quantization: Module `{self.name}` -> using fail safe mode. "
+                        "Please check if calibration data is sufficient."
+                    )
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
                 avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999

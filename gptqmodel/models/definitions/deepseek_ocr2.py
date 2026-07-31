@@ -9,8 +9,7 @@ import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
-from ...utils.model import MODALITY, get_module
-from ...utils.model import move_to
+from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
@@ -40,14 +39,14 @@ class DeepSeekOCR2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "gate": ("gate:!",),
-                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                "experts:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
         },

@@ -26,19 +26,19 @@ class NemotronHPuzzleQModel(NemotronHQModel):
                 # Puzzle layers are heterogeneous. A mixer is either Mamba,
                 # attention, or MoE, so missing paths are intentionally skipped.
                 "": (
-                    "q_proj:0",
-                    "k_proj:0",
-                    "v_proj:0",
+                    "q_proj:0:q",
+                    "k_proj:0:k",
+                    "v_proj:0:v",
                     "in_proj:0",
                     "o_proj:1",
                     "out_proj:1",
                 ),
                 "fc1_latent_proj:2": ("fc1_latent_proj:0",),
-                "experts": {
-                    "#": ("up_proj:0", "down_proj:1"),
+                "experts:routed": {
+                    "#": ("up_proj:0:up", "down_proj:1:down"),
                 },
                 "fc2_latent_proj:3": ("fc2_latent_proj:0",),
-                "shared_experts": ("up_proj:0", "down_proj:1"),
+                "shared_experts:shared": ("up_proj:0:up", "down_proj:1:down"),
             },
         },
     ]

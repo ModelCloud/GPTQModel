@@ -22,15 +22,15 @@ class Glm4MoeLiteQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "self_attn": ("q_proj:0:q", "q_a_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "q_b_proj:1:q", "kv_b_proj:1:k:v", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 "gate": ("gate:!",),
-                "experts:0": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts:0:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
-                "shared_experts:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             },
         }
     ]

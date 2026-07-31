@@ -12,11 +12,17 @@ from torch.nn import Module
 
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_USED_MEMORY)
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+)
 from ..quantization.config import QuantizeConfig
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
@@ -24,6 +30,7 @@ from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1
+
 
 log = setup_logger()
 
@@ -412,7 +419,7 @@ class EoraProcessor(LoopProcessor):
 
         assert isinstance(module.adapter_cfg, Lora)
 
-        self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()
+        self.draw_progress(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer")
 
         start = time.time()
 

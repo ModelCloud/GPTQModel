@@ -35,8 +35,8 @@ class HymbaQModel(BaseQModel):
             "mamba": ("in_proj:0", "out_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "moe:moe": {
-                "experts": {
-                    "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts:routed": {
+                    "0": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 }
             }
         }

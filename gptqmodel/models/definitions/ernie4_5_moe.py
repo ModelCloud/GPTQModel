@@ -22,20 +22,20 @@ class Ernie4_5_MoeQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
-                "gate_proj": ("gate_proj",),
-                "up_proj": ("up_proj",),
-                "down_proj": ("down_proj",),
+                "gate_proj": ("gate_proj:gate",),
+                "up_proj": ("up_proj:up",),
+                "down_proj": ("down_proj:down",),
                 "gate": ("gate:!",),
-                "shared_experts": {
-                    "gate_proj": ("gate_proj:0",),
-                    "up_proj": ("up_proj:0",),
-                    "down_proj": ("down_proj:1",),
+                "shared_experts:shared": {
+                    "gate_proj": ("gate_proj:0:gate",),
+                    "up_proj": ("up_proj:0:up",),
+                    "down_proj": ("down_proj:1:down",),
                 },
-                "experts": {
-                    "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
+                "experts:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
         }

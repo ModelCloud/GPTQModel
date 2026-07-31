@@ -17,9 +17,9 @@ class BaiChuanQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("W_pack:0", "o_proj:1"),
+            "self_attn": ("W_pack:0:k:q:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
         }
     ]
 

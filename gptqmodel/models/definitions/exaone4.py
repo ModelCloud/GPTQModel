@@ -16,16 +16,16 @@ class Exaone4QModel(BaseQModel):
         {
             # Skip q_norm and k_norm (too small, RMSNorm layers)
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:q",
+                "k_proj:0:k",
+                "v_proj:0:v",
                 "o_proj:1",
                 "q_norm:!",
                 "k_norm:!"
             ),
             # Skip post_attention_layernorm (RMSNorm, too small)
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             # Skip post_feedforward_layernorm (RMSNorm, too small)
             "post_feedforward_layernorm": ("post_feedforward_layernorm:!",),
         }

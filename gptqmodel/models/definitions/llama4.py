@@ -29,14 +29,14 @@ class Llama4QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "feed_forward:moe": {
                 "router": ("router:!",), # Llama4Router.forward() returns two values, skipping its quantization.
-                "experts:0": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts:0:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
-                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             },
         }
     ]
@@ -54,14 +54,14 @@ class Llama4TextQModel(Llama4QModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "feed_forward:moe": {
                 "router": ("router:!",),
-                "experts:0": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts:0:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
-                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             },
         },
     ]

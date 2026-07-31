@@ -94,7 +94,7 @@ class MoELifecycleHooks:
         # Get MoE module name from model definition
         moe_module_name = model_class.get_moe_module_name()
 
-        if moe_module_name is None:
+        if not moe_module_name:
             log.error(f"No :moe flag found in module_tree for {model_class.__name__}")
             return None
 

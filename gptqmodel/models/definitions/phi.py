@@ -15,8 +15,8 @@ class PhiQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "dense:3"),
+            "self_attn": ("q_proj:0:q", "k_proj:1:k", "v_proj:2:v", "dense:3"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("fc1:0", "fc2:1"),
+            "mlp": ("fc1:0:up", "fc2:1:down"),
         }
     ]

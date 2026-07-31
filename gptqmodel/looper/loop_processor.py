@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import json
 import os
-import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,6 +60,126 @@ DEFAULT_LOG_COLUMNS: List[str] = [
     PROCESS_USED_MEMORY,
     "dynamic",
 ]
+
+
+class _SafeDict(dict):
+    """Thread-safe dict subclass that protects reads, writes, and iteration.
+
+    ``LoopProcessor`` exposes its ``tasks`` mapping to worker threads (e.g.
+    ``pre_process_fwd_hook`` closures running inside ``DEVICE_THREAD_POOL``).
+    This wrapper lets us keep the normal ``self.tasks[name]`` / ``for task in
+    self.tasks.values()`` API while guaranteeing the dict is never in an
+    inconsistent state under free-threading ``GIL=0``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lock = threading.RLock()
+
+    def __getitem__(self, key):
+        with self._lock:
+            return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        with self._lock:
+            super().__delitem__(key)
+
+    def __contains__(self, key):
+        with self._lock:
+            return super().__contains__(key)
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(super().__iter__()))
+
+    def __len__(self):
+        with self._lock:
+            return super().__len__()
+
+    def get(self, key, default=None):
+        with self._lock:
+            return super().get(key, default)
+
+    def setdefault(self, key, default=None):
+        with self._lock:
+            return super().setdefault(key, default)
+
+    def pop(self, key, *args):
+        with self._lock:
+            return super().pop(key, *args)
+
+    def popitem(self):
+        with self._lock:
+            return super().popitem()
+
+    def clear(self):
+        with self._lock:
+            super().clear()
+
+    def update(self, *args, **kwargs):
+        with self._lock:
+            super().update(*args, **kwargs)
+
+    def keys(self):
+        with self._lock:
+            return list(super().keys())
+
+    def values(self):
+        with self._lock:
+            return list(super().values())
+
+    def items(self):
+        with self._lock:
+            return list(super().items())
+
+
+class _ThreadSafeInputCache:
+    """Thread-safe proxy around an ``InputCache`` instance.
+
+    ``LoopProcessor.inputs_cache`` is read and written by the main
+    orchestration thread and by worker threads during stage hand-offs. This
+    proxy makes every attribute access a short critical section while still
+    allowing the rest of the code to use normal attribute syntax.
+    """
+
+    def __init__(self, cache: InputCache):
+        object.__setattr__(self, "_cache", cache)
+        object.__setattr__(self, "_lock", threading.RLock())
+
+    def set_cache(self, cache: InputCache) -> None:
+        """Replace the wrapped cache with ``cache`` (unwraps another proxy)."""
+        if isinstance(cache, _ThreadSafeInputCache):
+            cache = cache.unwrap()
+        with self._lock:
+            object.__setattr__(self, "_cache", cache)
+
+    def unwrap(self) -> InputCache:
+        """Return the underlying ``InputCache`` instance."""
+        with self._lock:
+            return object.__getattribute__(self, "_cache")
+
+    def __getattr__(self, name: str):
+        with self._lock:
+            return getattr(object.__getattribute__(self, "_cache"), name)
+
+    def __setattr__(self, name: str, value):
+        if name in ("_cache", "_lock"):
+            object.__setattr__(self, name, value)
+        else:
+            with self._lock:
+                setattr(
+                    object.__getattribute__(self, "_cache"),
+                    name,
+                    value,
+                )
+
+    def __delattr__(self, name: str):
+        with self._lock:
+            delattr(object.__getattribute__(self, "_cache"), name)
 
 
 @dataclass
@@ -121,6 +240,12 @@ class LoopProcessor:
         self._results: Dict[str, Any] = {}
         self._results_lock = threading.Lock()
 
+        # Locks for the remaining shared state that workers touch concurrently.
+        self._pb_lock = threading.Lock()
+        self._fwd_time_lock = threading.Lock()
+        self._device_smi_lock = threading.RLock()
+        self._cache_lock = threading.RLock()
+
         self.tokenizer = tokenizer
         self.qcfg = qcfg
         self.qcfg_dynamic = None # cloned and dynamic filtered
@@ -129,12 +254,23 @@ class LoopProcessor:
         # one execution mode instead of a scattered set of booleans.
         self.execution_config = execution_config or ExecutionConfig()
 
-        self.inputs_cache: InputCache = InputCache(None, None, None, None, None)
-        self.tasks = {}
+        self.inputs_cache = _ThreadSafeInputCache(InputCache(None, None, None, None, None))
+        self.tasks = _SafeDict()
 
         self.pb = None
         self.fwd_time = None
         self.layer_count = None
+
+        # Processor sub-classes that are data-independent must not participate in
+        # calibration sample-count validation.
+        self.is_weight_only = False
+
+        # Global reference sample count taken from the first calibrated module.
+        # Every later calibrated module must match it, with MoE experts being the
+        # only allowed exception (they may see fewer tokens than dense modules
+        # unless moe.routing is set to bypass).
+        self._global_reference_nsamples: Optional[int] = None
+        self._global_sample_count_lock = threading.Lock()
 
 
         self.gpu_memorys = []
@@ -208,6 +344,18 @@ class LoopProcessor:
             self.calibration_dataset = []
 
         self.total_calibration_tokens = self._compute_total_tokens(self.calibration_dataset)
+        # Upper bound on the number of token positions that can ever be observed,
+        # including padding. Modules that receive flattened (2-D) activations from
+        # a model's MoE forward may legitimately count padded positions, so they
+        # are allowed to be as high as this value.
+        self._global_max_padded_nsamples: int = self._compute_max_padded_tokens(self.calibration_dataset)
+        # Model-derived upper bound on the number of token positions actually
+        # observed by calibration modules; starts from the dataset bounds and is
+        # increased when a non-MoE module reports a larger count (e.g. multimodal
+        # inputs where visual placeholders expand into many token embeddings).
+        self._global_observed_max_nsamples: int = max(
+            self.total_calibration_tokens, self._global_max_padded_nsamples
+        )
 
         # Track the current calibration batch index on a per-thread basis so
         # processors can retrieve deterministic ordering information (e.g.
@@ -223,53 +371,224 @@ class LoopProcessor:
         moe = getattr(self.qcfg, "moe", None)
         return moe is not None and isinstance(getattr(moe, "routing", None), ExpertsRoutingBypass)
 
+    def _module_tree_flags(self, task: Optional[Any] = None, name: Optional[str] = None) -> frozenset:
+        """Return the module-tree flags stored on the wrapped module, if any.
+
+        Accepts either a task object that carries ``_named_module`` or a
+        module ``name`` that can be resolved from ``self.tasks``.
+        """
+
+        if task is not None:
+            named_module = getattr(task, "_named_module", None)
+            if isinstance(named_module, NamedModule):
+                return named_module.state.get("module_tree_flags", frozenset())
+        if name is not None:
+            task = getattr(self, "tasks", {}).get(name)
+            if task is not None:
+                return self._module_tree_flags(task)
+        return frozenset()
+
     def _module_expert_isolation_key(self, name: str) -> Optional[Tuple[str, int]]:
         """Return (expert_block_name, expert_index) if ``name`` points inside a routed expert list.
 
+        Primary source is the ``module_tree_flags`` on the wrapped module:
+        a path inside a routed expert block carries the ``routed`` flag. If that
+        flag is unavailable, fall back to a structural parse of the name using
+        the model's ``expert_block_names``.
+
         Example:
-            For ``name = "model.layers.0.mlp.experts.12.gate_proj"`` and
-            ``expert_block_names = ["experts"]``, the regex
-            ``(?<!\\w)experts\\.(\\d+)(?:\\.|$)`` matches the ``.12.`` segment,
-            captures ``12``, and returns ``("experts", 12)``.
-
-            This deliberately uses a negative lookbehind ``(?<!\\w)`` to avoid
-            matching substrings like ``shared_experts.0.gate_proj`` when the
-            true expert block name is ``experts``; only the word ``experts``
-            preceded by a non-word character (typically a dot) is accepted.
-
-        Returns:
-            A ``(block_name, expert_index)`` tuple when an expert index is
-            found, otherwise ``None`` (e.g. for shared experts or non-MoE
-            modules).
+            For ``name = "model.layers.0.mlp.experts.12.gate_proj"`` the path
+            segment ``experts.12`` indicates expert index ``12`` inside the
+            ``experts`` block, so this returns ``("experts", 12)``. A shared
+            expert path such as ``mlp.shared_experts.0.gate_proj`` returns
+            ``None`` because shared experts are not isolated per index.
         """
 
+        flags = self._module_tree_flags(name=name)
+        if "routed" in flags:
+            parts = name.split(".")
+            if len(parts) >= 2 and parts[-2].isdigit():
+                block = parts[-3] if len(parts) >= 3 else "experts"
+                return (block, int(parts[-2]))
+            # The routed flag is set, but the expert index is not in the
+            # expected position; fall through to the structural parse below.
+
+        # Fallback for module trees that do not yet carry the ``:routed`` flag.
         hooks = getattr(getattr(self, "gptq_model", None), "moe_lifecycle_hooks", None)
         if hooks is None:
             return None
 
-        for block_name in getattr(hooks, "expert_block_names", ["experts"]):
-            pattern = rf"(?<!\w){re.escape(block_name)}\.(\d+)(?:\.|$)"
-            match = re.search(pattern, name)
-            if match:
-                return (block_name, int(match.group(1)))
+        parts = name.split(".")
+        for i, part in enumerate(parts):
+            if part in getattr(hooks, "expert_block_names", ["experts"]):
+                if i + 1 < len(parts) and parts[i + 1].isdigit():
+                    return (part, int(parts[i + 1]))
         return None
 
-    def _module_tree_flags(self, task: Any) -> frozenset:
-        """Return the module-tree flags stored on the wrapped module, if any."""
-
-        named_module = getattr(task, "_named_module", None)
-        if isinstance(named_module, NamedModule):
-            return named_module.state.get("module_tree_flags", frozenset())
-        return frozenset()
-
     def _module_is_expert_down_proj(self, name: str) -> bool:
-        """Fallback for modules without ``module_tree_flags`` already set."""
+        """Return True if ``name`` is the down projection of an expert."""
 
+        flags = self._module_tree_flags(name=name)
+        if "down" in flags:
+            # A down projection is only an expert projection when it lives inside
+            # a routed or shared expert block; ordinary dense MLP down projections
+            # also carry the ``:down`` role flag.
+            return bool(flags & {"routed", "shared"})
+
+        # Fallback for module trees without role/structural flags: check the
+        # down-projection suffix and that the module is inside a routed expert list.
         hooks = getattr(getattr(self, "gptq_model", None), "moe_lifecycle_hooks", None)
         if hooks is None:
             return False
         down_name = getattr(hooks, "down_proj_name", None)
-        return down_name is not None and name.endswith(f".{down_name}")
+        if down_name is None or not name.endswith(f".{down_name}"):
+            return False
+        return self._module_expert_isolation_key(name) is not None
+
+    def _module_is_moe_related(self, name: str) -> bool:
+        """Return True if ``name`` belongs to an MoE block (routed/shared expert or gate).
+
+        Modules inside routed expert lists, shared expert lists, or the MoE routing
+        gate are treated as MoE-related because they may receive flattened
+        activations that include padded token positions.
+
+        Primary source is the module-tree flags stored on ``NamedModule.state``.
+        If those flags do not include structural MoE markers, fall back to the
+        model definition (``BaseQModel.is_moe_module``), which derives MoE
+        membership from the module-tree :moe container flags rather than from
+        hard-coded name patterns.
+        """
+
+        task = getattr(self, "tasks", {}).get(name)
+        if isinstance(getattr(task, "_named_module", None), NamedModule):
+            flags = task._named_module.state.get("module_tree_flags", frozenset())
+            if flags & {"moe", "routed", "shared"}:
+                return True
+            # Local role flags without structural markers can still belong to a
+            # dense fallback inside an :moe container (e.g. gate_proj inside
+            # mlp:moe with an empty-string fallback key), so fall through to the
+            # model-level check.
+
+        gptq_model = getattr(self, "gptq_model", None)
+        if gptq_model is not None:
+            is_moe_fn = getattr(type(gptq_model), "is_moe_module", None)
+            if is_moe_fn is not None:
+                return is_moe_fn(name)
+        return False
+
+    def _module_is_embedding(self, name: str) -> bool:
+        """Return True if ``name`` is the model's input embedding module."""
+
+        if not hasattr(self, "_input_embeddings_name"):
+            gptq_model = getattr(self, "gptq_model", None)
+            input_name = None
+            if gptq_model is not None:
+                # ``get_input_embeddings_name`` can recurse on uninitialized
+                # ``nn.Module`` objects (e.g. test fixtures built with
+                # ``object.__new__``), so only call it on a properly constructed
+                # model instance.
+                if "_modules" in getattr(gptq_model, "__dict__", {}):
+                    input_name = getattr(gptq_model, "get_input_embeddings_name", lambda: None)()
+            # Only cache a resolved name; a lazy/wrapped model that is not yet
+            # initialized should be re-checked on the next call.
+            if input_name is not None:
+                self._input_embeddings_name = input_name
+            else:
+                return False
+        return name == self._input_embeddings_name
+
+    def _assert_calibration_sample_count(self, name: str, nsamples: int) -> None:
+        """Enforce that calibration sample counts stay within allowed bounds.
+
+        The first observed non-zero count is recorded as a diagnostic reference.
+        Different module types may legitimately observe different counts:
+
+        * Dense modules are normally keep-mask filtered (``total_calibration_tokens``)
+          or flattened (``_global_max_padded_nsamples``), and may be unactivated (0).
+        * Bypass routing forces every targeted module to see all valid tokens
+          (``total_calibration_tokens``).
+        * Input embeddings count all token positions including padding.
+        * Native-routed MoE experts see a variable subset bounded by the padded total.
+
+        Weight-only processors skip this validation because they never run a
+        calibration forward pass.
+        """
+
+        if self.is_weight_only:
+            return
+
+        if not isinstance(nsamples, int):
+            nsamples = int(nsamples)
+
+        if nsamples < 0:
+            raise AssertionError(
+                f"Module `{name}` reported a negative sample count ({nsamples})."
+            )
+
+        is_moe = self._module_is_moe_related(name)
+        is_bypass = self._is_bypass_moe_routing()
+        is_embedding = self._module_is_embedding(name)
+
+        total_unpadded = getattr(self, "total_calibration_tokens", 0)
+        max_padded = getattr(self, "_global_max_padded_nsamples", 0)
+        observed_max = max(
+            getattr(self, "_global_observed_max_nsamples", 0),
+            total_unpadded,
+            max_padded,
+        )
+
+        with self._global_sample_count_lock:
+            ref = self._global_reference_nsamples
+            if ref is None and nsamples > 0:
+                self._global_reference_nsamples = nsamples
+                ref = nsamples
+
+            if is_embedding:
+                expected = max_padded if max_padded > 0 else ref
+                allowed = {0, expected} if expected is not None else {0}
+            elif is_bypass:
+                # Bypass targets should all see the same token count; an
+                # unactivated expert (0) or an expanded-position count are also
+                # legitimate because the all-experts replay can fall back to the
+                # model's native routed forward.
+                expected = total_unpadded if total_unpadded > 0 else ref
+                allowed = {0}
+                if expected is not None:
+                    allowed.add(expected)
+                if observed_max > 0 and observed_max not in allowed:
+                    allowed.add(observed_max)
+            elif not is_moe:
+                # Dense modules may be unactivated, keep-mask filtered, flattened,
+                # or expanded by the model (multimodal visual tokens).
+                expected = total_unpadded if total_unpadded > 0 else ref
+                allowed = {0}
+                if expected is not None:
+                    allowed.add(expected)
+                if max_padded > 0 and max_padded != expected:
+                    allowed.add(max_padded)
+                if observed_max > 0 and observed_max not in allowed:
+                    allowed.add(observed_max)
+            else:
+                # Native-routed MoE: any subset up to the observed position count.
+                if observed_max > 0 and nsamples > observed_max:
+                    raise AssertionError(
+                        f"MoE module `{name}` received {nsamples} samples, "
+                        f"exceeding the observed token bound {observed_max}."
+                    )
+                return
+
+            if nsamples not in allowed:
+                # A non-embedding module reporting more positions than the dataset
+                # bound has discovered an expanded sequence (e.g. multimodal visual
+                # tokens). Only treat it as a new maximum when a bound is known.
+                if not is_embedding and observed_max > 0 and nsamples > observed_max:
+                    self._global_observed_max_nsamples = nsamples
+                    return
+
+                raise AssertionError(
+                    f"Module `{name}` sample count {nsamples} is outside the allowed "
+                    f"set {sorted(allowed)} for this module type."
+                )
 
     @staticmethod
     def _build_log_file_path(processor_name: str, current_time: str) -> Path:
@@ -283,7 +602,8 @@ class LoopProcessor:
 
         if self.pb is None:
             return
-        self.pb.title(title).subtitle(subtitle).draw()
+        with self._pb_lock:
+            self.pb.title(title).subtitle(subtitle).draw()
 
     @staticmethod
     def _compute_total_tokens(calibration_dataset) -> int:
@@ -315,6 +635,37 @@ class LoopProcessor:
                     total += len(input_ids)
                 except Exception:
                     total += 0
+        return total
+
+    @staticmethod
+    def _compute_max_padded_tokens(calibration_dataset) -> int:
+        """Count every calibration token position, including padding."""
+
+        if not calibration_dataset:
+            return 0
+        total = 0
+        for row in calibration_dataset:
+            if not isinstance(row, dict):
+                continue
+            input_ids = row.get("input_ids")
+            if input_ids is not None:
+                if isinstance(input_ids, torch.Tensor):
+                    total += int(input_ids.numel())
+                else:
+                    try:
+                        total += len(input_ids)
+                    except Exception:
+                        total += 0
+                continue
+            attention_mask = row.get("attention_mask")
+            if attention_mask is not None:
+                if isinstance(attention_mask, torch.Tensor):
+                    total += int(attention_mask.numel())
+                else:
+                    try:
+                        total += len(attention_mask)
+                    except Exception:
+                        total += 0
         return total
 
     def _set_current_batch_index(self, batch_index: Optional[int]) -> None:
@@ -611,34 +962,37 @@ class LoopProcessor:
     def _safe_query_metric(self, device_key: str, handle: Device):
         """Queries Device-SMI metrics once per device, suppressing repeated failures."""
 
-        try:
-            return handle.metrics(fast=True)
-        except Exception as exc:  # pragma: no cover - defensive, external tool
-            if device_key not in self._device_metric_failures:
-                log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
-                self._device_metric_failures.add(device_key)
-            return None
+        with self._device_smi_lock:
+            try:
+                return handle.metrics(fast=True)
+            except Exception as exc:  # pragma: no cover - defensive, external tool
+                if device_key not in self._device_metric_failures:
+                    log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
+                    self._device_metric_failures.add(device_key)
+                return None
 
     def _snapshot_device_memory_gib(self) -> Dict[str, float]:
         """Captures current accelerator memory usage in GiB per device."""
 
-        snapshot: Dict[str, float] = {}
-        for device_id, handle in self._device_smi_handles.items():
-            metrics = self._safe_query_metric(device_id, handle)
-            if metrics is None:
-                continue
-            snapshot[device_id] = metrics.memory_used / (1024 ** 3)
-        return snapshot
+        with self._device_smi_lock:
+            snapshot: Dict[str, float] = {}
+            for device_id, handle in self._device_smi_handles.items():
+                metrics = self._safe_query_metric(device_id, handle)
+                if metrics is None:
+                    continue
+                snapshot[device_id] = metrics.memory_used / (1024 ** 3)
+            return snapshot
 
     def _snapshot_cpu_memory_gib(self) -> Optional[float]:
         """Captures current CPU memory usage in GiB when supported."""
 
-        if self._cpu_device_smi is None:
-            return None
-        metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
-        if metrics is None:
-            return None
-        return metrics.memory_used / (1024 ** 3)
+        with self._device_smi_lock:
+            if self._cpu_device_smi is None:
+                return None
+            metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
+            if metrics is None:
+                return None
+            return metrics.memory_used / (1024 ** 3)
 
     def device_memory_report(self) -> str:
         """Formats current accelerator memory usage for processor log rows."""
@@ -651,10 +1005,10 @@ class LoopProcessor:
             """Formats a GiB value without unnecessary trailing zeros."""
 
             text = f"{value:.2f}"
-            if text.endswith("00"):
-                text = text[:-2]
-            elif text.endswith("0"):
-                text = text[:-1]
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            if not text:
+                text = "0"
             return f"{text}G"
 
         grouped: Dict[str, List[Tuple[str, float, int]]] = {}
@@ -685,19 +1039,20 @@ class LoopProcessor:
     def _close_device_smi_handles(self) -> None:
         """Closes all Device-SMI handles owned by this processor."""
 
-        for handle in self._device_smi_handles.values():
-            try:
-                handle.close()
-            except Exception:
-                pass
-        self._device_smi_handles.clear()
+        with self._device_smi_lock:
+            for handle in self._device_smi_handles.values():
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            self._device_smi_handles.clear()
 
-        if self._cpu_device_smi is not None:
-            try:
-                self._cpu_device_smi.close()
-            except Exception:
-                pass
-            self._cpu_device_smi = None
+            if self._cpu_device_smi is not None:
+                try:
+                    self._cpu_device_smi.close()
+                except Exception:
+                    pass
+                self._cpu_device_smi = None
 
     # Loop Procssor level scoped state data
     def result_save(self, key: str, value: Any):
@@ -725,7 +1080,8 @@ class LoopProcessor:
     def results(self):
         """Returns the full processor result mapping."""
 
-        return self._results
+        with self._results_lock:
+            return dict(self._results)
 
     def collect_memory_info(self, layer_index: int):
         """Records current accelerator and CPU memory snapshots for diagnostics."""
@@ -752,13 +1108,15 @@ class LoopProcessor:
     def set_fwd_time(self, fwd_time: float):
         """Stores the latest forward-pass duration for logging."""
 
-        self.fwd_time = fwd_time
+        with self._fwd_time_lock:
+            self.fwd_time = fwd_time
 
     def formatted_fwd_time(self) -> str:
         """Returns the stored forward time as a fixed-width string."""
 
-        fwd_time = self.fwd_time if self.fwd_time is not None else 0.0
-        return f"{fwd_time:.3f}"
+        with self._fwd_time_lock:
+            fwd_time = self.fwd_time if self.fwd_time is not None else 0.0
+            return f"{fwd_time:.3f}"
 
     # called first
     def preprocess(self, module: NamedModule, **kwargs):
@@ -775,14 +1133,16 @@ class LoopProcessor:
     def receive_input_cache(self, input_cache: InputCache):
         """Injects the shared input cache for the current processor stage."""
 
-        self.inputs_cache = input_cache
+        with self._cache_lock:
+            self.inputs_cache.set_cache(input_cache)
 
     # called after every module generate
     # may be called multiple times due to batch
     def receive_layer_inputs(self, layer_inputs: List[List[Tensor]]):
         """Replaces cached layer outputs that feed the next loop stage."""
 
-        self.inputs_cache.layer_inputs = layer_inputs
+        with self._cache_lock:
+            self.inputs_cache.layer_inputs = layer_inputs
 
     def receive_layer_forward_context(
         self,
@@ -836,8 +1196,9 @@ class LoopProcessor:
     def clear_cache_data(self):
         """Drops transient task data and cached layer inputs after replay."""
 
-        self.tasks = {}
-        self.inputs_cache.layer_inputs = []
+        self.tasks.clear()
+        with self._cache_lock:
+            self.inputs_cache.layer_inputs = []
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Override point for per-module forward hooks used during capture."""

@@ -18,8 +18,12 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
+from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
 from .gptq import GPTQ
+
+
+log = setup_logger()
 
 
 class GPTAQ(GPTQ):
@@ -129,6 +133,7 @@ class GPTAQ(GPTQ):
 
         self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_size
         self.nsamples += batch_size
+        self._set_nsamples(self.nsamples)
 
     @torch.inference_mode()
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
@@ -142,46 +147,79 @@ class GPTAQ(GPTQ):
 
             total_samples = sum(self._device_sample_counts.values())
 
-            H = torch.zeros(
-                (self.columns, self.columns),
-                dtype=torch.float32,
-                device=target_device,
-            )
-            dXXT = torch.zeros(
-                (self.columns, self.columns),
-                dtype=torch.float32,
-                device=target_device,
-            )
+            # The Hessian was released after the partials were already consumed;
+            # rebuilding from an empty partial set would produce an all-zero matrix.
+            if (
+                total_samples > 0
+                and not self._device_H_partials
+                and not self._device_dXXT_partials
+                and self.H is None
+            ):
+                self._hessian_rebuild_invalid = True
+                self._set_nsamples(total_samples)
+                return
+
+            # Track the cumulative sample count already merged into ``self.H`` so a
+            # second materialization re-weights the existing Hessian instead of
+            # zeroing it and re-merging only the new partials.
+            total_old = getattr(self, "_hessian_total_samples", 0) if self.H is not None else 0
+            total = total_samples
+
+            if self.H is not None:
+                H = self.H
+                if H.device != target_device or H.dtype != torch.float32:
+                    H = H.to(device=target_device, dtype=torch.float32)
+                    self.H = H
+            else:
+                H = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=target_device,
+                )
+
+            if self.dXXT is not None:
+                dXXT = self.dXXT
+                if dXXT.device != target_device or dXXT.dtype != torch.float32:
+                    dXXT = dXXT.to(device=target_device, dtype=torch.float32)
+                    self.dXXT = dXXT
+            else:
+                dXXT = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=target_device,
+                )
+
+            if total > 0:
+                if total_old > 0:
+                    scale_old = float(total_old) / float(total)
+                    H.mul_(scale_old)
+                    dXXT.mul_(scale_old)
+                scale_new = 2.0 / float(total)
+            else:
+                scale_new = 1.0
 
             # Merge per-device partials into the final tensors and delete each
             # partial as it is added to keep the materialization peak low.
             while self._device_H_partials:
                 _, partial = self._device_H_partials.popitem()
-                if partial.device == target_device and partial.dtype == torch.float32:
-                    H.add_(partial)
-                else:
-                    H.add_(partial.to(device=target_device, dtype=torch.float32))
+                if partial.device != H.device or partial.dtype != torch.float32:
+                    partial = partial.to(device=H.device, dtype=torch.float32)
+                H.add_(partial, alpha=scale_new)
                 del partial
 
             while self._device_dXXT_partials:
                 _, partial = self._device_dXXT_partials.popitem()
-                if partial.device == target_device and partial.dtype == torch.float32:
-                    dXXT.add_(partial)
-                else:
-                    dXXT.add_(partial.to(device=target_device, dtype=torch.float32))
+                if partial.device != dXXT.device or partial.dtype != torch.float32:
+                    partial = partial.to(device=dXXT.device, dtype=torch.float32)
+                dXXT.add_(partial, alpha=scale_new)
                 del partial
-
-            if total_samples > 0:
-                scale = 2.0 / float(total_samples)
-                H.mul_(scale)
-                dXXT.mul_(scale)
 
             self.H = H
             self.dXXT = dXXT
-            self.nsamples = total_samples
-            self._device_sample_counts.clear()
-            if hasattr(self, "_hessian_dirty"):
-                self._hessian_dirty = False
+            self._hessian_total_samples = total
+            self._set_nsamples(total)
+            self._hessian_dirty = False
+            self._final_hessian_device_hint = target_device
 
     @torch.inference_mode()
     def quantize(
@@ -193,6 +231,15 @@ class GPTAQ(GPTQ):
         start = time.time()
 
         self.finalize_hessian()
+
+        # If the Hessian partials were already consumed, fall back to a
+        # data-independent strategy instead of quantizing against an all-zero matrix.
+        if getattr(self, "_hessian_rebuild_invalid", False):
+            log.warn(
+                f"Quantization: Module `{self.name}` -> Hessian data already consumed, "
+                f"using fallback."
+            )
+            return super().quantize(blocksize)
 
         # `hessian_inverse` compilation remains unsafe on torch >= 2.8
         # (Inductor `tangents_token` errors on 2.13). Keep eager for modern PyTorch.

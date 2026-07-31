@@ -18,7 +18,7 @@ class NemotronHQModel(BaseQModel):
         "#",
         {
             "norm": ("norm:!",),
-            "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:2", "gate_proj:3", "up_proj:3", "down_proj:4"),
+            "mixer": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1", "in_proj:2", "out_proj:2", "gate_proj:3:gate", "up_proj:3:up", "down_proj:4:down"),
         }
     ]
 

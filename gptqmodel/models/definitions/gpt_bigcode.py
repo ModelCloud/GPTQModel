@@ -15,8 +15,8 @@ class GptBigCodeQModel(BaseQModel):
         "#",
         {
             "ln_1": ("ln_1:!",),
-            "attn": ("c_attn:0", "c_proj:1"),
+            "attn": ("c_attn:0:k:q:v", "c_proj:1"),
             "ln_2": ("ln_2:!",),
-            "mlp": ("c_fc:0", "c_proj:1"),
+            "mlp": ("c_fc:0:up", "c_proj:1:down"),
         }
     ]

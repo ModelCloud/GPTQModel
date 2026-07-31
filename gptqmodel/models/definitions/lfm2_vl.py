@@ -43,15 +43,15 @@ class LFM2VLQModel(BaseQModel):
             "operator_norm": ("operator_norm:!",),
             "conv": ("in_proj:0", "out_proj:1"),
             "self_attn": (
-                "q_proj:0",
+                "q_proj:0:q",
                 "q_layernorm:0:!",
-                "k_proj:0",
+                "k_proj:0:k",
                 "k_layernorm:0:!",
-                "v_proj:0",
+                "v_proj:0:v",
                 "out_proj:1",
             ),
             "ffn_norm": ("ffn_norm:!",),
-            "feed_forward": ("w1:0", "w3:0", "w2:1"),
+            "feed_forward": ("w1:0:gate", "w3:0:up", "w2:1:down"),
         },
     ]
 

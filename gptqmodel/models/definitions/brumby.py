@@ -19,9 +19,9 @@ class BrumbyQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:0:!",),
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:q",
+                "k_proj:0:k",
+                "v_proj:0:v",
                 "g_proj:0:!",
                 "o_proj:1",
                 "q_norm:0:!",
@@ -29,9 +29,9 @@ class BrumbyQModel(BaseQModel):
             ),
             "post_attention_layernorm": ("post_attention_layernorm:1:!",),
             "mlp": (
-                "gate_proj:0",
-                "up_proj:0",
-                "down_proj:1",
+                "gate_proj:0:gate",
+                "up_proj:0:up",
+                "down_proj:1:down",
             ),
         },
     ]

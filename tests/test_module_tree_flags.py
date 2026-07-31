@@ -63,11 +63,11 @@ def test_laguna_moe_expansion_caches_role_flags():
     gate_block = next(b for b in simple if "mlp.experts.0.gate_proj" in b)
     assert "mlp.experts.0.gate_proj" in gate_block
 
-    assert LagunaQModel.get_module_tree_flags("mlp.experts.0.gate_proj") == frozenset({"gate"})
-    assert LagunaQModel.get_module_tree_flags("mlp.experts.2.up_proj") == frozenset({"up"})
-    assert LagunaQModel.get_module_tree_flags("mlp.experts.3.down_proj") == frozenset({"down"})
-    assert LagunaQModel.get_module_tree_flags("mlp.shared_expert.gate_proj") == frozenset({"gate"})
-    assert LagunaQModel.get_module_tree_flags("mlp.shared_experts.up_proj") == frozenset({"up"})
+    assert LagunaQModel.get_module_tree_flags("mlp.experts.0.gate_proj") == frozenset({"gate", "moe", "routed"})
+    assert LagunaQModel.get_module_tree_flags("mlp.experts.2.up_proj") == frozenset({"up", "moe", "routed"})
+    assert LagunaQModel.get_module_tree_flags("mlp.experts.3.down_proj") == frozenset({"down", "moe", "routed"})
+    assert LagunaQModel.get_module_tree_flags("mlp.shared_expert.gate_proj") == frozenset({"gate", "moe", "shared"})
+    assert LagunaQModel.get_module_tree_flags("mlp.shared_experts.up_proj") == frozenset({"up", "moe", "shared"})
 
 
 def test_build_layer_modules_direct_expert_placeholder():
@@ -76,7 +76,7 @@ def test_build_layer_modules_direct_expert_placeholder():
     tree = ["model", "layers", "#", {"mlp": {"experts": {"#": "#"}}}]
     blocks = BaseQModel._build_layer_modules_for_tree(tree)
     assert blocks == [["mlp.experts.{expert_index}"]]
-    assert BaseQModel.get_module_tree_flags("mlp.experts.{expert_index}") == frozenset()
+    assert BaseQModel.get_module_tree_flags("mlp.experts.{expert_index}") == frozenset({"routed"})
 
 
 def test_module_looper_create_named_modules_sets_module_tree_flags():
@@ -293,3 +293,33 @@ def test_loop_processor_module_tree_helpers():
     processor.gptq_model = SimpleNamespace(moe_lifecycle_hooks=GateUpDownMoELifecycleHooks())
     assert processor._module_is_expert_down_proj("mlp.experts.0.down_proj") is True
     assert processor._module_is_expert_down_proj("mlp.experts.0.gate_proj") is False
+
+
+def test_module_is_moe_related_uses_module_tree_flags_and_fallback():
+    """MoE membership is derived from module_tree flags, not name patterns."""
+
+    processor = LoopProcessor.__new__(LoopProcessor)
+    processor.gptq_model = None
+
+    module = nn.Linear(4, 4)
+    named = NamedModule(module, name="a", full_name="b", layer_index=0)
+    named.state["module_tree_flags"] = frozenset({"moe"})
+
+    # When the wrapped module is in the processor's task map, use its flags.
+    processor.tasks = {"model.layers.0.mlp.gate": SimpleNamespace(_named_module=named)}
+    assert processor._module_is_moe_related("model.layers.0.mlp.gate") is True
+
+    # A dense path (no moe/routed/shared flag) is not treated as MoE.
+    named.state["module_tree_flags"] = frozenset({"gate"})
+    assert processor._module_is_moe_related("model.layers.0.mlp.gate_proj") is False
+
+    # When no tasks are present, fall back to the model definition.
+    processor.tasks = {}
+    processor.gptq_model = object.__new__(LagunaQModel)
+    assert processor._module_is_moe_related("model.layers.0.mlp.gate") is True
+    assert processor._module_is_moe_related("model.layers.0.mlp.experts.0.gate_proj") is True
+    assert processor._module_is_moe_related("model.layers.0.self_attn.q_proj") is False
+
+    # A model without module_tree MoE flags returns False.
+    processor.gptq_model = object.__new__(LlamaQModel)
+    assert processor._module_is_moe_related("model.layers.0.mlp.gate_proj") is False

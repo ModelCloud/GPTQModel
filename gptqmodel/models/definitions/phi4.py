@@ -22,7 +22,7 @@ class Phi4MMGPTQ(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": {
                 "qkv_proj": {
-                    "base_layer": ("base_layer",),
+                    "base_layer": ("base_layer:k:q:v",),
                 },
                 "o_proj": {
                     "base_layer": ("base_layer",),
@@ -31,10 +31,10 @@ class Phi4MMGPTQ(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
                 "gate_up_proj": {
-                    "base_layer": ("base_layer",),
+                    "base_layer": ("base_layer:gate:up",),
                 },
                 "down_proj": {
-                    "base_layer": ("base_layer",),
+                    "base_layer": ("base_layer:down",),
                 }
             }
         }

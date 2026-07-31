@@ -24,21 +24,22 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 import pcre
 import torch
 
-from .awq_processor import AWQProcessor
-from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
-from ..quantization.config import GcMode, ExpertsRoutingBypass, VramStrategy
-from ..utils.device_telemetry import emit_device_telemetry
+from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy
 from ..utils.device import get_device
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
+from .awq_processor import AWQProcessor
+from .paroquant_processor import ParoQuantProcessor
+from .qqq_processor import QQQProcessor
+
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
@@ -95,6 +96,9 @@ class SubsetPlan:
     module_chunks: List[Dict[str, NamedModule]]
     ordered_module_names: List[str] = field(default_factory=list)
     restore_forward_device_overrides: bool = True
+    # Whether the subset forward is expected to stop early (e.g. AWQ hooks).
+    # Empty replay plans derived from this plan drop the early-stop flag.
+    forward_early_stop: bool = False
 
     def __post_init__(self) -> None:
         """Freeze an explicit ordered module list for forward replay decisions."""
@@ -112,7 +116,11 @@ class SubsetPlan:
     def need_forward_outputs(self) -> bool:
         """Whether this subset consumes forward outputs before process()."""
 
-        return self.execute_forward and not self.replay_after_process
+        return (
+            self.execute_forward
+            and not self.replay_after_process
+            and not self.forward_early_stop
+        )
 
     @property
     def batching_enabled(self) -> bool:
@@ -130,11 +138,15 @@ class SubsetPlan:
         """Reuse the same execution policy for one chunk or replay-only subset."""
 
         ordered_names = [name for name in self.ordered_module_names if name in modules]
+        # A replay with no active modules cannot trigger an early-stop hook, so
+        # it must still produce the real layer outputs.
+        forward_early_stop = self.forward_early_stop and bool(modules)
         return replace(
             self,
             modules=modules,
             ordered_module_names=ordered_names,
             module_chunks=[modules],
+            forward_early_stop=forward_early_stop,
         )
 
 
@@ -543,6 +555,7 @@ def build_subset_plan(
         calibration_coverage_policy=calibration_coverage_policy,
         module_chunks=module_chunks,
         restore_forward_device_overrides=restore_forward_device_overrides,
+        forward_early_stop=execute_forward and execution_config.subset_forward_early_stop,
     )
 
 
@@ -1253,29 +1266,29 @@ def run_subset_stage(
 
     # Keep the helper callsite compact while still passing the fully resolved
     # execution context into every chunk or single-pass invocation.
-    common_args = dict(
-        looper=looper,
-        processor=processor,
-        module=module,
-        layer_inputs=layer_inputs,
-        layer_input_kwargs=layer_input_kwargs,
-        position_ids=position_ids,
-        attention_masks=attention_masks,
-        cur_layer_device=cur_layer_device,
-        is_lm_head_module=is_lm_head_module,
-        is_embeddings_module=is_embeddings_module,
-        layer_descriptor=layer_descriptor,
-        layer_title=layer_title,
-        layer_index=layer_index,
-        full=full,
-        fallback=fallback,
-        shared_kv_cache_dict=shared_kv_cache_dict,
-        pb=pb,
-        logger=logger,
-        is_awq_processor=is_awq_processor,
-        region_timer=region_timer,
-        previous_processed_subset=previous_processed_subset,
-    )
+    common_args = {
+        "looper": looper,
+        "processor": processor,
+        "module": module,
+        "layer_inputs": layer_inputs,
+        "layer_input_kwargs": layer_input_kwargs,
+        "position_ids": position_ids,
+        "attention_masks": attention_masks,
+        "cur_layer_device": cur_layer_device,
+        "is_lm_head_module": is_lm_head_module,
+        "is_embeddings_module": is_embeddings_module,
+        "layer_descriptor": layer_descriptor,
+        "layer_title": layer_title,
+        "layer_index": layer_index,
+        "full": full,
+        "fallback": fallback,
+        "shared_kv_cache_dict": shared_kv_cache_dict,
+        "pb": pb,
+        "logger": logger,
+        "is_awq_processor": is_awq_processor,
+        "region_timer": region_timer,
+        "previous_processed_subset": previous_processed_subset,
+    }
 
     # Once a plan exists, subset execution is just a dispatch over the plan's
     # shape rather than another round of subset analysis.

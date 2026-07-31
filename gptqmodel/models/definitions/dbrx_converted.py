@@ -18,12 +18,12 @@ class DbrxConvertedQModel(BaseQModel):
         "#",
         {
             "norm_attn_norm": {
-                "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+                "attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "out_proj:1"),
             },
             "ffn:moe": {
-                "experts": {
+                "experts:routed": {
                     "mlp": {
-                        "#": ("w1:0", "v1:0", "w2:1"),
+                        "#": ("w1:0:gate", "v1:0:up", "w2:1:down"),
                     },
                 },
             },

@@ -56,9 +56,9 @@ class TestDots1Struct(ModelTest):
             key for key in Dots1QModel.module_tree[3].keys()
             if Dots1QModel._parse_module_flags(key)[0] == "mlp"
         )
-        self.assertIn("gate_proj:0", Dots1QModel.module_tree[3][mlp_key][""])
-        self.assertIn("#", Dots1QModel.module_tree[3][mlp_key]["experts"])
-        self.assertIn("shared_experts", Dots1QModel.module_tree[3][mlp_key])
+        self.assertIn("gate_proj:0:gate", Dots1QModel.module_tree[3][mlp_key][""])
+        self.assertIn("#", Dots1QModel.module_tree[3][mlp_key]["experts:routed"])
+        self.assertIn("shared_experts:shared", Dots1QModel.module_tree[3][mlp_key])
 
 
 class TestMarinModuleTree(ModelTest):
@@ -110,7 +110,7 @@ class TestQwen2ModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
         self.assertFalse(hasattr(decoder_layer.self_attn, "q_norm"))
         self.assertFalse(hasattr(decoder_layer.self_attn, "k_norm"))
-        self.assertIn("q_proj:0", Qwen2QModel.module_tree[3]["self_attn"])
+        self.assertIn("q_proj:0:q", Qwen2QModel.module_tree[3]["self_attn"])
         self.assertIn("o_proj:1", Qwen2QModel.module_tree[3]["self_attn"])
 
 
@@ -130,8 +130,8 @@ class TestQwen2MoeModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.mlp, "shared_expert_gate"))
         self.assertTrue(hasattr(decoder_layer.mlp, "experts"))
         self.assertIn("shared_expert_gate", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
-        self.assertIn("shared_expert:0", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
-        self.assertIn("experts:0", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
+        self.assertIn("shared_expert:0:shared", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
+        self.assertIn("experts:0:routed", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
 
 
 class TestQwen2VLModuleTree(ModelTest):
@@ -146,7 +146,7 @@ class TestQwen2VLModuleTree(ModelTest):
         self.assertTrue(hasattr(shell.model, "language_model"))
         self.assertTrue(hasattr(shell.model, "visual"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
-        self.assertIn("q_proj:0", Qwen2VLQModel.module_tree[-1]["self_attn"])
+        self.assertIn("q_proj:0:q", Qwen2VLQModel.module_tree[-1]["self_attn"])
         self.assertEqual(Qwen2VLQModel.module_tree[:4], ["model", "language_model", "layers", "#"])
 
 
@@ -162,7 +162,7 @@ class TestQwen2_5_VLModuleTree(ModelTest):
         self.assertTrue(hasattr(shell.model, "language_model"))
         self.assertTrue(hasattr(shell.model, "visual"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
-        self.assertIn("q_proj:0", Qwen2_5_VLQModel.module_tree[-1]["self_attn"])
+        self.assertIn("q_proj:0:q", Qwen2_5_VLQModel.module_tree[-1]["self_attn"])
         self.assertEqual(Qwen2_5_VLQModel.module_tree[:4], ["model", "language_model", "layers", "#"])
 
 
@@ -179,7 +179,7 @@ class TestQwen2_5_OmniModuleTree(ModelTest):
         self.assertTrue(hasattr(shell.thinker, "visual"))
         self.assertTrue(hasattr(shell.thinker, "audio_tower"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
-        self.assertIn("q_proj:0", Qwen2_5_OmniGPTQ.module_tree[-1]["self_attn"])
+        self.assertIn("q_proj:0:q", Qwen2_5_OmniGPTQ.module_tree[-1]["self_attn"])
         self.assertEqual(Qwen2_5_OmniGPTQ.module_tree[:4], ["thinker", "model", "layers", "#"])
 
 
@@ -244,7 +244,7 @@ class TestQwen3_5MoeModuleTree(ModelTest):
         self.assertIn("in_proj_b:!:1", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
         self.assertIn("in_proj_a:!:1", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
         self.assertIn("shared_expert_gate", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
-        self.assertIn("shared_expert:0", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
+        self.assertIn("shared_expert:0:shared", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
 
 
 class TestQwen3OmniModuleTree(ModelTest):
@@ -293,7 +293,7 @@ class TestQwen3NextModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.mlp, "shared_expert_gate"))
         self.assertIn("norm:!", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
         self.assertIn("conv1d:!", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
-        self.assertIn("in_proj_qkvz:0", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_qkvz:0:k:q:v", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
         self.assertIn("in_proj_ba:!:0", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
 
         blocks = Qwen3NextGPTQ.build_layer_modules(Qwen3NextGPTQ.module_tree)

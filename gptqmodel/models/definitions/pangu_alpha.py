@@ -20,8 +20,8 @@ class PanguAlphaQModel(BaseQModel):
         "#",
         {
             "ln_1": ("ln_1:!",),
-            "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "c_proj:1"),
+            "attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "c_proj:1"),
             "ln_2": ("ln_2:!",),
-            "mlp": ("c_fc:0", "c_proj:1"),
+            "mlp": ("c_fc:0:up", "c_proj:1:down"),
         }
     ]

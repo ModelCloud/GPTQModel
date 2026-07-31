@@ -20,9 +20,9 @@ class OptQModel(BaseQModel):
         "#",
         {
             "final_layer_norm": ("final_layer_norm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
-            "fc1": ("fc1",),
-            "fc2": ("fc2",),
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "out_proj:1"),
+            "fc1": ("fc1:up",),
+            "fc2": ("fc2:down",),
         }
     ]
 

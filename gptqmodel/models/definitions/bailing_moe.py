@@ -24,13 +24,13 @@ class BailingMoeQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "attention": ("query_key_value"),
+            "attention": ("query_key_value:k:q:v"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
-                "shared_experts": ("gate_proj", "up_proj", "down_proj"),
-                "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts:shared": ("gate_proj:gate", "up_proj:up", "down_proj:down"),
+                "experts:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
         }

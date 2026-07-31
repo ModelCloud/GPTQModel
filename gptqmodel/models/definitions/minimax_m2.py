@@ -31,19 +31,19 @@ class MiniMaxM2GPTQ(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                "q_proj:0",
+                "q_proj:0:q",
                 "q_norm:0:!",
-                "k_proj:0",
+                "k_proj:0:k",
                 "k_norm:0:!",
-                "v_proj:0",
+                "v_proj:0:v",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "block_sparse_moe:moe": {  # MoE module
                 "gate": ("gate:!",),
                 "e_score_correction_bias": ("e_score_correction_bias:!",),
-                "experts": {
-                    "#": ("w1:0", "w3:0", "w2:1"),
+                "experts:routed": {
+                    "#": ("w1:0:gate", "w3:0:up", "w2:1:down"),
                 },
             },
         },

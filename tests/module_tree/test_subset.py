@@ -481,8 +481,9 @@ def test_stage_subset_early_stop_and_callbacks():
         supported_dense_vram_strategies=[VramStrategy.EXCLUSIVE, VramStrategy.BALANCED],
         layer_modules_strict=True,
         lm_head="lm_head",
-        shell_module_materialize=lambda target_submodule, device, role, named_module=None: target_submodule,
-        prepare_layer_replay_kwargs=lambda layer, layer_input, additional_inputs, target_device: additional_inputs,
+        shell_module_materialize=lambda target_submodule, device, role, named_module=None, **kwargs: target_submodule,
+        prepare_layer_replay_kwargs=lambda layer, layer_input, additional_inputs, target_device, **kwargs: additional_inputs,
+        lazy_turtle_batch_materialize_submodules=lambda batch_prefetch, **kwargs: None,
     )
 
     processor = _StubAWQProcessor(quant_cfg)
@@ -605,10 +606,13 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
         def get_moe_module_name(cls):
             return Qwen3_5_MoeQModel.get_moe_module_name()
 
-        def shell_module_materialize(self, target_submodule, device, role=None, named_module=None):
+        def shell_module_materialize(self, target_submodule, device, role=None, named_module=None, **kwargs):
             return target_submodule
 
-        def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        def lazy_turtle_batch_materialize_submodules(self, batch_prefetch, **kwargs):
+            pass
+
+        def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device, **kwargs):
             del layer, target_device
             hidden_states = layer_input[0]
             position_ids = additional_inputs.get("position_ids")

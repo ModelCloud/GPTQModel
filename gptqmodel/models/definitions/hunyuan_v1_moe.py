@@ -25,9 +25,9 @@ class HunYuanMoEV1QModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:q",
+                "k_proj:0:k",
+                "v_proj:0:v",
                 "o_proj:1",
                 "query_layernorm:!",
                 "key_layernorm:!",
@@ -37,9 +37,9 @@ class HunYuanMoEV1QModel(BaseQModel):
                 # Router weights are tiny and are not useful weight-only targets.
                 "gate": ("gate:!",),
                 # The original forward runs shared_mlp before routed experts.
-                "shared_mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "experts:0": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                "experts:0:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
         },

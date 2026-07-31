@@ -278,7 +278,7 @@ class GPTQProcessor(LoopProcessor):
 
         expert_key = self._module_expert_isolation_key(name)
         flags = self._module_tree_flags(task)
-        is_down = "down" in flags or (not flags and self._module_is_expert_down_proj(name))
+        is_down = "down" in flags or self._module_is_expert_down_proj(name)
         if expert_key is not None and is_down:
             # Each expert's down projection consumes a distinct intermediate activation,
             # so its Hessian must not be shared with other experts.
@@ -784,6 +784,10 @@ class GPTQProcessor(LoopProcessor):
                 )
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+
+        # Crash early if a module loses calibration samples; this regressed
+        # before when MoE down_proj modules were reported with 0 samples.
+        self._assert_calibration_sample_count(module.name, nsamples)
 
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
         workspace_totals = getattr(g, "_borrow_workspace_totals", None)

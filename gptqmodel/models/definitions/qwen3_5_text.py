@@ -31,7 +31,7 @@ class Qwen3_5TextQModel(Qwen3QModel):
             "linear_attn": (
                 "norm:!",
                 "conv1d:!",
-                "in_proj_qkv:0",
+                "in_proj_qkv:0:k:q:v",
                 "in_proj_z:1",
                 "in_proj_b:!:1",
                 "in_proj_a:!:1",

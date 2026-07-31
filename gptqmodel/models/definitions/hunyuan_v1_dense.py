@@ -19,13 +19,13 @@ class HunYuanDenseV1QModel(LlamaQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
                 "query_layernorm:!",
-                "q_proj:0",
+                "q_proj:0:q",
                 "key_layernorm:!",
-                "k_proj:0",
-                "v_proj:0",
+                "k_proj:0:k",
+                "v_proj:0:v",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
         },
     ]

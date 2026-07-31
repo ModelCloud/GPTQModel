@@ -8,6 +8,7 @@ from transformers import AutoModelForImageTextToText
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
+
 class MiniMaxM3VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
     require_load_processor = False
@@ -31,11 +32,11 @@ class MiniMaxM3VLGPTQ(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": (
-                "q_proj:0",
+                "q_proj:0:q",
                 "q_norm:0:!",
-                "k_proj:0",
+                "k_proj:0:k",
                 "k_norm:0:!",
-                "v_proj:0",
+                "v_proj:0:v",
                 "indexer.q_proj:0",
                 "indexer.q_norm:0:!",
                 "indexer.k_proj:0",
@@ -45,11 +46,11 @@ class MiniMaxM3VLGPTQ(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 # Dense fallback used by early decoder blocks.
-                "": ("gate_up_proj:0", "down_proj:1"),
+                "": ("gate_up_proj:0:gate:up", "down_proj:1:down"),
                 "gate": ("gate:!", "e_score_correction_bias:!"),
-                "shared_experts": ("gate_up_proj:0", "down_proj:1"),
-                "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts:shared": ("gate_up_proj:0:gate:up", "down_proj:1:down"),
+                "experts:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
         },

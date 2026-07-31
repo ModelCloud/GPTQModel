@@ -14,7 +14,7 @@ class MptQModel(BaseQModel):
         "blocks",
         "#",
         {
-            "attn": ("Wqkv:0", "out_proj:1"),
-            "ffn": ("up_proj:0", "down_proj:1"),
+            "attn": ("Wqkv:0:k:q:v", "out_proj:1"),
+            "ffn": ("up_proj:0:up", "down_proj:1:down"),
         }
     ]

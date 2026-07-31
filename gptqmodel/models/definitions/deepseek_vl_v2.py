@@ -41,14 +41,14 @@ class DeepSeekVLV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0", "q_b_proj:0", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+            "self_attn": ("q_a_proj:0:q", "q_b_proj:0:q", "q_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                "experts:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
-                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
             },
         },
     ]

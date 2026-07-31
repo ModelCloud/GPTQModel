@@ -9,7 +9,7 @@ from typing import Optional
 
 import torch
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU, normalize_device
@@ -25,10 +25,10 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import (
+    METHOD,
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
-    METHOD,
     RTNConfig,
     clone_weight_only_config_for_module,
     resolve_quant_format,
@@ -66,6 +66,7 @@ class WeightOnlyProcessor(LoopProcessor):
                 fwd_replay_after_process=False,
             ),
         )
+        self.is_weight_only = True
         self.lock = threading.Lock()
 
     def is_skipped(self, module: NamedModule) -> bool:

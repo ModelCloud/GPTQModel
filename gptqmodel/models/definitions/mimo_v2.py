@@ -36,13 +36,13 @@ class MimoV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("qkv_proj:0", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("qkv_proj:0:k:q:v", "q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "gate": ("gate:!",),
-                "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts:routed": {
+                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
         },

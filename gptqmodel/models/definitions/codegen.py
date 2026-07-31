@@ -14,7 +14,7 @@ class CodeGenQModel(BaseQModel):
         "h",
         "#",
         {
-            "attn": ("qkv_proj:0", "out_proj:1"),
-            "mlp": ("fc_in:0", "fc_out:1"),
+            "attn": ("qkv_proj:0:k:q:v", "out_proj:1"),
+            "mlp": ("fc_in:0:up", "fc_out:1:down"),
         }
     ]

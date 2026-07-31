@@ -19,9 +19,9 @@ class ExaOneQModel(BaseQModel):
         {
             "ln_1": ("ln_1:!",),
             "attn": {
-                "attention": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+                "attention": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "out_proj:1"),
             },
             "ln_2": ("ln_2:!",),
-            "mlp": ("c_fc_0:0", "c_fc_1:0", "c_proj:1"),
+            "mlp": ("c_fc_0:0:gate", "c_fc_1:0:up", "c_proj:1:down"),
         }
     ]

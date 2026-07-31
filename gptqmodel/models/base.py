@@ -614,10 +614,10 @@ class BaseQModel(nn.Module):
         - MiniMax-M2: "block_sparse_moe:moe" -> returns "block_sparse_moe"
 
         Returns:
-            The name of the MoE module (without flags), or None if no MoE module is defined
+            A list of MoE module names (without flags), or an empty list if no MoE module is defined.
         """
         if cls.module_tree is None:
-            return None
+            return []
 
         found_names = []
         for tree in cls._iter_module_tree_variants():
@@ -3240,8 +3240,8 @@ class BaseQModel(nn.Module):
         group_seq = count()
 
         def _role_flags(flags: List[str]) -> List[str]:
-            """Return role/semantic flags (exclude structural/special/numeric markers)."""
-            return sorted(f for f in flags if f and not f.isdigit() and f not in ("!", "?", "moe"))
+            """Return role/semantic flags (exclude special/numeric markers)."""
+            return sorted(f for f in flags if f and not f.isdigit() and f not in ("!", "?"))
 
         def _parse_token(token: str) -> tuple[str, List[str]]:
             return cls._parse_module_flags(token)
@@ -3260,7 +3260,25 @@ class BaseQModel(nn.Module):
                 return None
             return parent_name.split(".", 1)[0]
 
-        def process_entries(parent_token: str, entries, parent_group_offset: int = 0, scope_key: str | None = None):
+        MOE_STRUCTURAL_FLAGS = frozenset({"moe", "routed", "shared"})
+
+        def _infer_moe_role_flags(parent_name: str, inherited_flags: frozenset[str] = frozenset()) -> frozenset[str]:
+            """Infer structural MoE flags from the module-tree path."""
+            base = parent_name.split(".")[-1] if parent_name else ""
+            inferred: set[str] = set()
+            if base == "experts":
+                inferred.add("routed")
+            elif base in ("shared_expert", "shared_experts"):
+                inferred.add("shared")
+            return frozenset(inferred) | inherited_flags
+
+        def process_entries(
+            parent_token: str,
+            entries,
+            parent_group_offset: int = 0,
+            scope_key: str | None = None,
+            inherited_role_flags: frozenset[str] = frozenset(),
+        ):
             """Process entries recursively to handle nested dict structures for MoE"""
             groups: defaultdict[int, List[tuple]] = defaultdict(list)
 
@@ -3274,12 +3292,27 @@ class BaseQModel(nn.Module):
             scope = scope_key if scope_key is not None else _get_scope(parent_name)
             parent_alias_scope = scope if parent_has_numeric else parent_name
 
-            def _make_entry(full_path: str, has_bang: bool, capture_only: bool, extra_flags: List[str], *, alias_base: int, alias_rel: int, alias_scope: str | None) -> tuple:
+            parent_role_flags = (
+                frozenset(_role_flags(parent_flags))
+                | inherited_role_flags
+                | _infer_moe_role_flags(parent_name)
+            )
+            parent_extra_flags = sorted(parent_role_flags)
+
+            def _make_entry(
+                full_path: str,
+                has_bang: bool,
+                capture_only: bool,
+                extra_flags: List[str],
+                *,
+                alias_base: int,
+                alias_rel: int,
+                alias_scope: str | None,
+            ) -> tuple:
                 return (full_path, has_bang, capture_only, extra_flags, alias_scope, (alias_base, alias_rel))
 
             child_group_offset = parent_group_offset
             add_parent = parent_has_bang or (parent_capture_only and include_capture_only)
-            parent_extra_flags = _role_flags(parent_flags)
             if add_parent:
                 cls._set_module_tree_flags(parent_name, frozenset(parent_extra_flags))
                 alias_base = parent_rel_group if parent_has_numeric else parent_group
@@ -3321,7 +3354,7 @@ class BaseQModel(nn.Module):
                     alias_scope = scope if parent_has_numeric else parent_name
                     alias_base = parent_rel_group if parent_has_numeric else grp
                     alias_rel = child_rel_group if parent_has_numeric else 0
-                    child_extra_flags = _role_flags(child_flags)
+                    child_extra_flags = sorted(frozenset(_role_flags(child_flags)) | parent_role_flags)
                     cls._set_module_tree_flags(full_path, frozenset(child_extra_flags))
                     groups[grp].append(
                         _make_entry(
@@ -3367,32 +3400,49 @@ class BaseQModel(nn.Module):
                             # For ("#",) or "#" format, use the template_parent directly with default group 0
                             alias_scope = scope if parent_has_numeric else template_parent
                             alias_base = parent_rel_group if parent_has_numeric else expert_offset
+                            cls._set_module_tree_flags(template_parent, frozenset(parent_extra_flags))
                             groups[expert_offset].append(
                                 _make_entry(
                                     template_parent,
                                     False,
                                     False,
-                                    [],
+                                    parent_extra_flags,
                                     alias_base=alias_base,
                                     alias_rel=0,
                                     alias_scope=alias_scope,
                                 )
                             )
                         else:
-                            sub_groups = process_entries(template_parent_token, sub_entries, expert_offset, scope)
+                            sub_groups = process_entries(
+                                template_parent_token,
+                                sub_entries,
+                                expert_offset,
+                                scope,
+                                parent_role_flags,
+                            )
                             for grp, items in sub_groups.items():
                                 groups[grp].extend(items)
                     else:
                         # Nested structure: process recursively with full path
                         # Special case: empty string key means use parent path directly
+                        # and drops the MoE container markers (e.g. the dense MLP fallback
+                        # inside ``mlp:moe`` in Laguna's first layer).
                         if sub_parent == "":
                             full_sub_parent = parent_name
+                            sub_role_flags = parent_role_flags - MOE_STRUCTURAL_FLAGS
                         else:
                             full_sub_parent = (
                                 f"{parent_name}.{sub_parent}"
                                 if parent_name else sub_parent
                             )
-                        sub_groups = process_entries(full_sub_parent, sub_entries, current_offset, scope)
+                            sub_role_flags = parent_role_flags
+                        sub_groups = process_entries(
+                            full_sub_parent,
+                            sub_entries,
+                            current_offset,
+                            scope,
+                            sub_role_flags,
+                        )
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
                         # Update offset for next sibling to avoid conflicts
