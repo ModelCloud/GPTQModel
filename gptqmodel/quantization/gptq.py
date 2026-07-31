@@ -1906,21 +1906,28 @@ class GPTQ:
             import copy
 
             groups = []
-            for i in range(0, self.columns, self.qcfg.group_size):
-                quantizer = copy.deepcopy(self.quantizer)
-                # Share the same region timer across group clones so all
-                # scale-search timing aggregates into one region.
-                quantizer.region_timer = self.quantizer.region_timer
-                group_end = min(i + self.qcfg.group_size, self.columns)
-                quantizer.find_params(
-                    W[:, i:group_end],
-                    weight=True,
-                    hessian=self.H[i:group_end, i:group_end],
-                )
+            # The region_timer contains a threading.Lock and cannot be deepcopied.
+            # Stash it, deepcopy the quantizer without it, then restore it on each clone.
+            original_timer = self.quantizer.region_timer
+            self.quantizer.region_timer = None
+            try:
+                for i in range(0, self.columns, self.qcfg.group_size):
+                    quantizer = copy.deepcopy(self.quantizer)
+                    # Share the same region timer across group clones so all
+                    # scale-search timing aggregates into one region.
+                    quantizer.region_timer = original_timer
+                    group_end = min(i + self.qcfg.group_size, self.columns)
+                    quantizer.find_params(
+                        W[:, i:group_end],
+                        weight=True,
+                        hessian=self.H[i:group_end, i:group_end],
+                    )
 
-                scale.append(quantizer.scale)
-                zero.append(quantizer.zero)
-                groups.append(quantizer)
+                    scale.append(quantizer.scale)
+                    zero.append(quantizer.zero)
+                    groups.append(quantizer)
+            finally:
+                self.quantizer.region_timer = original_timer
 
         if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(self.H.diagonal(), descending=True)

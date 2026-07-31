@@ -16,6 +16,7 @@ import random
 import torch
 import torch.nn as nn
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.utils.logger import QuantizationRegionTimer
 from models.model_test import ModelTest
 
 from gptqmodel.quantization import gptq as gptq_mod
@@ -185,6 +186,28 @@ def test_gptq_static_groups_keep_original_quantizer_mapping_with_gar(monkeypatch
     torch.testing.assert_close(scales, torch.cat(expected_scales, dim=1))
     torch.testing.assert_close(zeros, torch.cat(expected_zeros, dim=1))
     assert g_idx.tolist() == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2]
+
+
+@torch.inference_mode()
+def test_gptq_static_groups_quantize_with_region_timer():
+    """Regression: quantize() with static_groups=True must deepcopy a Quantizer that
+    carries a QuantizationRegionTimer (which contains a threading.Lock)."""
+    torch.manual_seed(42)
+    layer = nn.Linear(10, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=2,
+        group_size=4,
+        desc_act=False,
+        act_group_aware=True,
+        static_groups=True,
+    )
+    gptq = GPTQ(layer, qcfg=qcfg, region_timer=QuantizationRegionTimer())
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(10, 10, dtype=torch.float32), None)
+    gptq.finalize_hessian()
+    # Previously raised: TypeError: cannot pickle '_thread.lock' object
+    qweight, *_ = gptq.quantize(blocksize=4)
+    assert qweight is not None
 
 
 def test_gptq_base_quant_linear_like_shape_without_import():
