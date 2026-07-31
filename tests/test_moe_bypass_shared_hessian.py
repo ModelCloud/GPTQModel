@@ -294,3 +294,92 @@ def test_moe_bypass_logical_cache_across_devices():
         assert task.nsamples == valid_tokens, (
             f"{name} recorded {task.nsamples} samples, expected {valid_tokens}"
         )
+
+
+def _assert_down_nsamples_preserved_after_mock_recursion(processor, subset, valid_tokens):
+    """Each down projection must keep its sample count after a mock-quantization recursion."""
+
+    for name, named_module in subset.items():
+        if not name.endswith(".down_proj"):
+            continue
+        task = processor.tasks[name]
+        task.finalize_hessian(target_device=torch.device("cpu"))
+        assert task.nsamples == valid_tokens, (
+            f"{name}: pre-release nsamples {task.nsamples} != {valid_tokens}"
+        )
+        assert task.H is not None, f"{name}: H should be materialized before release"
+
+        # Simulate the peak-memory release path inside ``GPTQ.quantize()``: the dense
+        # Hessian is dropped after Hinv is computed, and a NaN loss triggers a mock
+        # quantization recursion. The partials have already been merged and freed, so a
+        # second ``finalize_hessian()`` call has no statistics left to rebuild ``H``.
+        # Without preserving per-device sample counts, that re-materialized empty
+        # Hessian reports zero samples ("using fail safe mode"); with the counts
+        # preserved but no valid Hessian, the run must not zero the weight and must
+        # keep reporting the real token count.
+        del task.H
+        task.H = None
+        task._device_hessian_partials.clear()
+        task.qcfg.mock_quantization = True
+
+        Q, _, _, _, _, avg_loss, _, nsamples = task.quantize(blocksize=8)
+        assert nsamples == valid_tokens, (
+            f"{name}: mock-recursion nsamples {nsamples} != {valid_tokens}"
+        )
+        assert not torch.allclose(Q, torch.zeros_like(Q)), (
+            f"{name}: mock recursion produced all-zero weights"
+        )
+        assert not torch.isnan(Q).any(), (
+            f"{name}: mock recursion produced NaN weights"
+        )
+        # The returned loss is either a finite float (successful mock retry) or a
+        # fallback string (no valid Hessian left to retry with); both are OK as
+        # long as the weight is not silently zeroed.
+        assert avg_loss is not None and avg_loss != 999999999, (
+            f"{name}: mock recursion should report a real loss, got {avg_loss!r}"
+        )
+
+
+def test_moe_bypass_down_proj_nsamples_preserved_after_hessian_release():
+    """Routing=bypass down projections must not lose sample counts during mock recursion."""
+
+    hidden_size = 16
+    intermediate_size = 8
+    processor, subset = _make_moe_bypass_processor(
+        num_experts=2,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+
+    batch, seq_len = 2, 8
+    hidden = torch.randn(batch, seq_len, hidden_size)
+    keep_mask = torch.tensor([[True] * 4 + [False] * 4, [True] * seq_len], dtype=torch.bool)
+    valid_tokens = int(keep_mask.sum().item())
+
+    _build_replica_and_run_bypass(processor, subset, hidden, keep_mask)
+    _assert_down_nsamples_preserved_after_mock_recursion(processor, subset, valid_tokens)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA to place experts on different devices")
+def test_moe_bypass_down_proj_nsamples_preserved_after_hessian_release_multi_gpu():
+    """Per-device down-projection copies must keep sample counts during mock recursion."""
+
+    hidden_size = 16
+    intermediate_size = 8
+    processor, subset = _make_moe_bypass_processor(
+        num_experts=2,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+    )
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+
+    batch, seq_len = 2, 8
+    hidden = torch.randn(batch, seq_len, hidden_size)
+    keep_mask = torch.tensor([[True] * 4 + [False] * 4, [True] * seq_len], dtype=torch.bool)
+    valid_tokens = int(keep_mask.sum().item())
+
+    devices = [torch.device(f"cuda:{i}") for i in range(2)]
+    _build_replica_and_run_bypass(processor, subset, hidden, keep_mask, expert_devices=devices)
+    _assert_down_nsamples_preserved_after_mock_recursion(processor, subset, valid_tokens)

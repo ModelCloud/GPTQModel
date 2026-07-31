@@ -36,6 +36,7 @@ from .gar import (
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
+
 try:
     from ._gptq_block_triton import gptq_block_triton
 except Exception:
@@ -290,6 +291,7 @@ class GPTQ:
         self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
+        self._hessian_rebuild_invalid: bool = False
 
         # GPTQ same-input Hessian sharing:
         # These fields are attached by GPTQProcessor.prepare_subset() when
@@ -858,6 +860,14 @@ class GPTQ:
         with self.lock:
             # Embedding path: merge 1D counts
             if isinstance(self.module, nn.Embedding):
+                # The diagonal Hessian is materialized once and consumed by the
+                # quantize() path; do not rebuild it from already-cleared partials
+                # on later calls such as a mock-quantization recursion.
+                if not self._hessian_dirty and self._H_diag is not None:
+                    if self._H_diag.device != device:
+                        self._H_diag = self._H_diag.to(device=device)
+                    return
+
                 total_tokens = sum(self._device_sample_counts.values())
 
                 # Reuse buffer if possible
@@ -882,8 +892,10 @@ class GPTQ:
                 self.nsamples = total_tokens
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = device
+                # Keep per-device sample counts so a mock-quantization recursion (after
+                # ``self.H`` is released for peak memory) can still report the correct
+                # number of observed calibration tokens.
                 self._device_embedding_counts.clear()
-                self._device_sample_counts.clear()
                 return
 
             # Non-Embedding path: original dense merge
@@ -893,6 +905,14 @@ class GPTQ:
                 return
 
             total_samples = sum(self._device_sample_counts.values())
+
+            # If the Hessian partials have already been merged and freed (e.g. the
+            # mock-quantization recursion path after ``self.H`` was released for peak
+            # memory), rebuilding a dense Hessian here would create an all-zero matrix.
+            # That makes every column look dead and zeroes the whole weight. Flag the
+            # rebuild as invalid so ``quantize()`` can route to fallback instead.
+            if total_samples > 0 and not self._device_hessian_partials and self.H is None:
+                self._hessian_rebuild_invalid = True
 
             # Reuse the existing tensor when possible to avoid an extra allocation.
             reuse_buffer = (
@@ -948,7 +968,10 @@ class GPTQ:
             self.nsamples = total_samples
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
-            self._device_sample_counts.clear()
+            # Keep per-device sample counts so a mock-quantization recursion (after
+            # ``self.H`` is released for peak memory) can still report the correct
+            # number of observed calibration tokens. The Hessian partials have
+            # already been merged into ``self.H`` and are freed above.
             del result_accum
 
     def materialize_shared_hessian(self, shared_state, device: torch.device) -> None:
@@ -1437,6 +1460,17 @@ class GPTQ:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
 
+        # A mock-quantization recursion (or any path that released ``self.H`` after
+        # the partials were already merged) has no calibration statistics left to
+        # rebuild a dense Hessian. Continuing would treat an all-zero matrix as valid
+        # and zero the entire weight. Route straight to a data-independent fallback.
+        if getattr(self, "_hessian_rebuild_invalid", False):
+            log.warn(
+                f"Quantization: Module `{self.name}` -> Hessian data already consumed, "
+                f"using `{resolved_strategy.value}` fallback."
+            )
+            return self._fallback_quantize(resolved_strategy, blocksize)
+
         # The top-level `hessian_inverse` method (cache/locks and the data-dependent
         # damp-recovery loop) is not compiled: torch.compile cannot represent the
         # recovery loop without graph breaks. The heavy Cholesky/inverse steps
@@ -1655,16 +1689,29 @@ class GPTQ:
             if self.nsamples != 0:
                 avg_loss = loss_sum.item() / self.nsamples
                 if math.isnan(avg_loss):
-                    if self.fail_safe:
+                    if self.qcfg.mock_quantization:
+                        # Mock retry already failed; do not recurse again.
+                        if fallback_configured:
+                            log.warn(
+                                f"Quantization: mock retry also produced `NaN` loss for `{self.name}`; "
+                                "returning current result under fallback."
+                            )
+                            avg_loss = 999999999
+                        else:
+                            raise ValueError(
+                                f"Quantization: mock retry also produced `NaN` loss for `{self.name}`; "
+                                "increase calibration or enable fallback."
+                            )
+                    elif fallback_configured:
                         log.info(f"Quantization: Failed due to NaN loss for `{self.name}`, retry with mock quantization.")
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
                         raise ValueError(
-                            f"Quantization: NaN loss for `{self.name}`; increase calibration or enable fail_safe."
+                            f"Quantization: NaN loss for `{self.name}`; increase calibration or enable fallback."
                         )
             else:
-                if self.fail_safe:
+                if fallback_configured:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check calibration sufficiency.")
                 else:
                     log.warn(f"Quantization: `{self.name}` may be inactive due to model inference logic.")
@@ -2299,6 +2346,20 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", loss_sum_item)
+                    if self.qcfg.mock_quantization:
+                        # Mock retry already failed; fall back to a data-independent strategy
+                        # rather than recursing forever.
+                        if fallback_configured:
+                            log.warn(
+                                f"Quantization: mock retry also produced `NaN` loss for `{self.name}`; "
+                                f"using `{resolved_strategy.value}` fallback."
+                            )
+                            return self._fallback_quantize(resolved_strategy, blocksize)
+                        else:
+                            raise ValueError(
+                                f"Quantization: Failed due to `NaN` loss for `{self.name}`; "
+                                "please try increasing calibration data samples or enable fallback=True"
+                            )
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
