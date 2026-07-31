@@ -650,7 +650,7 @@ def create_quant_module(
     else:
         ori_layer_device = submodule.list_buffers()[0].device
 
-    if ori_layer_device.type not in (CPU.type, "meta"):
+    if ori_layer_device.type not in {CPU.type, "meta"}:
         raise AssertionError(
             f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
@@ -763,6 +763,7 @@ def create_quant_module(
     if err is not None:
         raise err
 
+    # Keep replacement buffers on meta when Transformers builds a meta model shell.
     with torch.device(ori_layer_device):
         new_layer = linear_cls(
             bits=constructor_bits,
@@ -865,6 +866,210 @@ def create_quant_layer(
         if candidate is not TorchQuantEmbeddings
     }
     return max(non_embedding_counts or selected_counts, key=(non_embedding_counts or selected_counts).get)
+
+
+# public/stable api exposed to transformers/optimum
+@dataclass(frozen=True)
+class HFGPTQModelLoadContext:
+    """State shared between the pre- and post-weight-load Optimum hooks."""
+
+    quantize_config: QuantizeConfig
+    quant_linear: Type[BaseQuantLinear]
+
+
+def _hf_checkpoint_files(checkpoint_files) -> List[str]:
+    if checkpoint_files is None:
+        return []
+    if isinstance(checkpoint_files, (str, os.PathLike)):
+        checkpoint_files = [checkpoint_files]
+    return [os.fspath(path) for path in checkpoint_files if path is not None]
+
+
+def _hf_find_checkpoint_path(model: nn.Module, checkpoint_files) -> Optional[str]:
+    """Resolve the checkpoint directory from shard paths or model config."""
+
+    candidates = []
+    files = _hf_checkpoint_files(checkpoint_files)
+    if files:
+        common_path = os.path.commonpath([os.path.abspath(path) for path in files])
+        candidates.append(common_path if os.path.isdir(common_path) else os.path.dirname(common_path))
+        candidates.extend(
+            path if os.path.isdir(path) else os.path.dirname(path)
+            for path in files
+        )
+
+    config = getattr(model, "config", None)
+    for attribute in ("_name_or_path", "name_or_path"):
+        model_path = getattr(config, attribute, None)
+        if isinstance(model_path, (str, os.PathLike)) and os.path.isdir(model_path):
+            candidates.append(os.fspath(model_path))
+
+    config_filenames = ("quantize_config.json", "quant_config.json", "config.json")
+    seen = set()
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if any(os.path.isfile(os.path.join(candidate, filename)) for filename in config_filenames):
+            return candidate
+    return None
+
+
+def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
+    """Return whether the checkpoint needs GPTQModel's native load path."""
+
+    meta = qcfg.meta if isinstance(qcfg.meta, dict) else {}
+    quantizers = meta.get("quantizer") or []
+    if isinstance(quantizers, str):
+        quantizers = [quantizers]
+    if any("gptqmodel" in str(quantizer).lower().replace("-", "") for quantizer in quantizers):
+        return True
+
+    uri = str(meta.get("uri") or "").lower().replace("-", "")
+    return "gptqmodel" in uri or bool(qcfg.dynamic) or resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.GPTQ_V2
+
+
+def _hf_checkpoint_tensor_keys(checkpoint_path: str, checkpoint_files) -> set[str]:
+    keys = set()
+    files = _hf_checkpoint_files(checkpoint_files)
+
+    # Prefer the index so large checkpoints do not require opening every shard.
+    index_files = [
+        path
+        for path in files
+        if path.endswith(".index.json") and os.path.isfile(path)
+    ]
+    index_files.extend(
+        os.path.join(checkpoint_path, filename)
+        for filename in os.listdir(checkpoint_path)
+        if filename.endswith(".index.json")
+    )
+    for index_file in dict.fromkeys(index_files):
+        try:
+            with open(index_file, "r", encoding="utf-8") as handle:
+                weight_map = json.load(handle).get("weight_map", {})
+            keys.update(weight_map)
+        except (OSError, TypeError, ValueError):
+            continue
+    if keys:
+        return keys
+
+    # Unsharded checkpoints and indexes without a weight map fall back to headers.
+    safetensor_files = [
+        path
+        for path in files
+        if path.endswith(".safetensors") and os.path.isfile(path)
+    ]
+    if not safetensor_files:
+        safetensor_files = [
+            os.path.join(checkpoint_path, filename)
+            for filename in os.listdir(checkpoint_path)
+            if filename.endswith(".safetensors")
+        ]
+
+    for safetensor_file in dict.fromkeys(safetensor_files):
+        with safe_open(safetensor_file, framework="pt", device="cpu") as handle:
+            keys.update(handle.keys())
+    return keys
+
+
+def hf_gptqmodel_prepare_model_for_load(
+    model: nn.Module,
+    checkpoint_files=None,
+    device_map=None,
+    backend: Optional[Union[str, BACKEND]] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> Optional[HFGPTQModelLoadContext]:
+    """Prepare a native GPTQModel checkpoint for Transformers/Optimum weight loading.
+
+    Returns ``None`` for legacy GPTQ checkpoints so Optimum can retain its existing
+    homogeneous replacement path.
+    """
+
+    checkpoint_path = _hf_find_checkpoint_path(model, checkpoint_files)
+    if checkpoint_path is None:
+        return None
+
+    try:
+        qcfg = QuantizeConfig.from_pretrained(checkpoint_path)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+    if not _hf_is_native_gptqmodel_config(qcfg):
+        return None
+
+    # Serialized qweights are authoritative; dynamic rules may also name dense modules.
+    tensor_keys = _hf_checkpoint_tensor_keys(checkpoint_path, checkpoint_files)
+    quantized_module_names = tuple(
+        sorted(key.removesuffix(".qweight") for key in tensor_keys if key.endswith(".qweight"))
+    )
+    if not quantized_module_names:
+        raise ValueError(
+            "The GPTQModel checkpoint does not expose any `.qweight` tensors in its checkpoint manifest."
+        )
+
+    import defuser
+
+    from ..models.auto import MODEL_MAP
+    from ..models.base import BaseQModel
+    from .importer import hf_normalize_device_device_map
+
+    model_type = str(getattr(model.config, "model_type", "")).lower()
+    model_definition = MODEL_MAP.get(model_type, BaseQModel)
+    defuser.replace_fused_blocks(model_type)
+
+    # Rebuild fused model structures before matching serialized module names.
+    def convert_fused_modules():
+        defuser.convert_model(model, cleanup_original=True)
+        for module_path in getattr(model_definition, "defuser_module_paths", ()) or ():
+            module, _ = get_module_by_name_prefix(model, module_path)
+            if module is not None:
+                defuser.convert_model(module, cleanup_original=True)
+
+    # Expand MoE experts on meta to avoid materializing dense expert weights.
+    if _module_has_meta_tensors(model):
+        with torch.device("meta"):
+            convert_fused_modules()
+    else:
+        convert_fused_modules()
+
+    modules = find_modules(model)
+    missing_modules = sorted(set(quantized_module_names).difference(modules))
+    if missing_modules:
+        sample = ", ".join(missing_modules[:8])
+        suffix = "" if len(missing_modules) <= 8 else f", ... ({len(missing_modules)} total)"
+        raise ValueError(
+            "GPTQModel could not match quantized checkpoint tensors to model modules after structural conversion: "
+            f"{sample}{suffix}"
+        )
+    quantized_modules = {name: modules[name] for name in quantized_module_names}
+
+    target_device = hf_normalize_device_device_map(None, device_map)
+    qcfg.device = target_device
+    qcfg.runtime_format = resolve_quant_format(qcfg.format, qcfg.method)
+    if not isinstance(dtype, torch.dtype):
+        config_dtype = get_hf_config_dtype(model.config)
+        dtype = config_dtype if isinstance(config_dtype, torch.dtype) else None
+
+    # Apply full dynamic settings while selecting a supported kernel per module.
+    quant_linear = make_quant(
+        model,
+        qcfg=qcfg,
+        quant_result=quantized_modules,
+        backend=backend,
+        lm_head_name=model_definition.lm_head,
+        device=target_device,
+        dtype=dtype,
+    )
+    log.info(
+        "Transformers/Optimum: prepared `%s` native GPTQModel modules from the checkpoint manifest.",
+        len(quantized_module_names),
+    )
+    return HFGPTQModelLoadContext(
+        quantize_config=qcfg,
+        quant_linear=quant_linear,
+    )
+
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v1_to_v2_format(
@@ -1496,6 +1701,40 @@ def simple_dispatch_model(model, device_map):
 def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
     return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
+
+
+def hf_gptqmodel_post_init_for_load(
+    model: nn.Module,
+    context: HFGPTQModelLoadContext,
+    max_input_length: Optional[int] = None,
+):
+    """Finish a native GPTQModel load after Transformers has assigned checkpoint tensors."""
+
+    qcfg = context.quantize_config
+    # Format conversion and backend setup require materialized checkpoint tensors.
+    model, _ = hf_convert_gptq_v1_to_v2_format(
+        model,
+        bits=qcfg.bits,
+        qlinear_kernel=context.quant_linear,
+        checkpoint_format=qcfg.format,
+        meta=qcfg.meta,
+    )
+    model.quantize_config = qcfg
+
+    hf_quantization_config = getattr(getattr(model, "config", None), "quantization_config", None)
+    if hf_quantization_config is not None and not isinstance(hf_quantization_config, dict):
+        # Transformers GPTQConfig omits fields needed for GPTQModel save/reload.
+        hf_quantization_config.dynamic = qcfg.dynamic
+        hf_quantization_config.lm_head = qcfg.lm_head
+        hf_quantization_config.method = qcfg.method.value if isinstance(qcfg.method, Enum) else qcfg.method
+        hf_quantization_config.pack_dtype = str(qcfg.pack_dtype).removeprefix("torch.")
+
+    return hf_gptqmodel_post_init(
+        model,
+        use_act_order=qcfg.desc_act,
+        quantize_config=qcfg,
+        max_input_length=max_input_length,
+    )
 
 
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,

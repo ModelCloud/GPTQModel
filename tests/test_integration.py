@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import json
 import os
 
 
@@ -11,8 +12,9 @@ import unittest  # noqa: E402
 
 import torch
 from models.model_test import ModelTest  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig, LlamaConfig  # noqa: E402
 
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -91,6 +93,94 @@ class TestIntegration(unittest.TestCase):
 
     def test_quantize_cuda(self):
         self._test_quantize(device_map="cuda")
+
+    def test_transformers_native_gptqmodel_load_bridge(self):
+        from optimum.gptq import quantizer as optimum_quantizer
+
+        if getattr(optimum_quantizer, "_gptqmodel_load_prepare_model", None) is None:
+            self.skipTest("requires the Optimum native GPTQModel load bridge")
+
+        config = LlamaConfig(
+            vocab_size=32,
+            hidden_size=32,
+            intermediate_size=48,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            max_position_embeddings=32,
+            tie_word_embeddings=False,
+        )
+        source_model = AutoModelForCausalLM.from_config(config, dtype=torch.float16)
+        source_model.model.layers[0].self_attn.q_proj = TorchLinear(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            sym=True,
+            in_features=32,
+            out_features=32,
+            bias=False,
+            pack_dtype=torch.int32,
+            register_buffers=True,
+            dtype=torch.float16,
+            name="model.layers.0.self_attn.q_proj",
+        )
+        source_model.model.layers[0].self_attn.q_proj.scales.fill_(1)
+
+        # The manifest keeps gate_proj dense even though dynamic rules mention it.
+        quantization_config = {
+            "bits": 4,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": True,
+            "format": "gptq",
+            "quant_method": "gptq",
+            "dynamic": {
+                r"+:^model\.layers\.0\.self_attn\.q_proj$": {"bits": 4, "group_size": 32},
+                r"+:^model\.layers\.0\.mlp\.gate_proj$": {"bits": 4, "group_size": 32},
+            },
+            "meta": {"quantizer": ["gptqmodel:test"]},
+        }
+        source_model.config.quantization_config = GPTQConfig(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            sym=True,
+            format="gptq",
+            backend="gptq_torch",
+            meta=quantization_config["meta"],
+        ).to_dict()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_model.save_pretrained(tmp_dir, safe_serialization=True)
+            with open(os.path.join(tmp_dir, "quantize_config.json"), "w", encoding="utf-8") as config_file:
+                json.dump(quantization_config, config_file)
+
+            model = AutoModelForCausalLM.from_pretrained(
+                tmp_dir,
+                device_map={"": "cpu"},
+                dtype=torch.float16,
+                local_files_only=True,
+            )
+
+        q_proj = model.model.layers[0].self_attn.q_proj
+        gate_proj = model.model.layers[0].mlp.gate_proj
+        self.assertIsInstance(q_proj, TorchLinear)
+        self.assertEqual(q_proj.group_size, 32)
+        self.assertIsInstance(gate_proj, torch.nn.Linear)
+        self.assertEqual(gate_proj.out_features, 48)
+        self.assertEqual(model.config.quantization_config.dynamic, quantization_config["dynamic"])
+
+        meta_tensors = [
+            name
+            for name, tensor in (*model.named_parameters(), *model.named_buffers())
+            if tensor.is_meta
+        ]
+        self.assertEqual(meta_tensors, [])
+        self.assertTrue(torch.isfinite(model.model.rotary_emb.inv_freq).all())
+
+        del model
+        del source_model
+        torch_empty_cache()
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
