@@ -1,0 +1,180 @@
+{
+  "complementarity": [
+    {
+      "conditional_gain": 1053951.257927,
+      "name": "imatrix_01",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": 14339.037155,
+      "name": "nm_llm_03",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": 4040.05941,
+      "name": "imatrix_00",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": 3740.834091,
+      "name": "nm_llm_02",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": -3201.279572,
+      "name": "nm_llm_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -3546.486665,
+      "name": "nm_llm_01",
+      "verdict": "redundant"
+    }
+  ],
+  "config": {
+    "apply_chat_template": false,
+    "concat_size": 1024,
+    "datasets": [
+      "_shards/imatrix_00.parquet:imatrix_00",
+      "_shards/imatrix_01.parquet:imatrix_01",
+      "_shards/nm_llm_00.parquet:nm_llm_00",
+      "_shards/nm_llm_01.parquet:nm_llm_01",
+      "_shards/nm_llm_02.parquet:nm_llm_02",
+      "_shards/nm_llm_03.parquet:nm_llm_03"
+    ],
+    "device": "cpu",
+    "fallback_threshold": "0.5%",
+    "greedy_threads": 4,
+    "max_samples": 0,
+    "min_conditional_gain": 0.0,
+    "min_length": 10,
+    "model": "Qwen/Qwen3-8B",
+    "reference": "_shards/reference.parquet:reference",
+    "sketch_samples": 128,
+    "target_gain": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "torch_dtype": "float16"
+  },
+  "fallback": {
+    "per_dataset": {
+      "imatrix_00": [],
+      "imatrix_01": [],
+      "nm_llm_00": [],
+      "nm_llm_01": [],
+      "nm_llm_02": [],
+      "nm_llm_03": []
+    },
+    "selected_mix": [],
+    "threshold_setting": "0.5%"
+  },
+  "greedy_ranking": [
+    {
+      "conditional_gain": 1053951.257927,
+      "dataset": "imatrix_01",
+      "score_after": 125696.749397,
+      "step": 1,
+      "total_tokens": 30825
+    },
+    {
+      "conditional_gain": 14339.037155,
+      "dataset": "nm_llm_03",
+      "score_after": 111357.712242,
+      "step": 2,
+      "total_tokens": 62907
+    },
+    {
+      "conditional_gain": 4040.05941,
+      "dataset": "imatrix_00",
+      "score_after": 107317.652832,
+      "step": 3,
+      "total_tokens": 95381
+    },
+    {
+      "conditional_gain": 3740.834091,
+      "dataset": "nm_llm_02",
+      "score_after": 103576.818741,
+      "step": 4,
+      "total_tokens": 127402
+    }
+  ],
+  "markdown": "# Calibration coverage report\n\n## Reference\n- model: Qwen/Qwen3-8B\n- reference: reference (15504 tokens, 216 modules)\n- target tokens (floor): 131072 (selection mode: gain_per_token)\n\n## Warnings\n\n- Target token floor 131072 not reached (reached 127402); all remaining datasets are redundant.\n\n## Per-dataset standalone scores\n\n| dataset | tokens | standalone score | fallback modules |\n|---------|--------|------------------|------------------|\n| imatrix_00 | 32474 | 123214.205181 | 0 |\n| imatrix_01 | 30825 | 125696.749397 | 0 |\n| nm_llm_00 | 31886 | 128002.478668 | 0 |\n| nm_llm_01 | 32286 | 120485.328698 | 0 |\n| nm_llm_02 | 32021 | 118270.127073 | 0 |\n| nm_llm_03 | 32082 | 123692.027466 | 0 |\n\n## Greedy ranking (ranked by conditional gain)\n\n| step | dataset | conditional gain | score after | tokens |\n|------|---------|------------------|-------------|--------|\n| 1 | imatrix_01 | 1053951.257927 | 125696.749397 | 30825 |\n| 2 | nm_llm_03 | 14339.037155 | 111357.712242 | 62907 |\n| 3 | imatrix_00 | 4040.059410 | 107317.652832 | 95381 |\n| 4 | nm_llm_02 | 3740.834091 | 103576.818741 | 127402 |\n\n## Selected mix: imatrix_01 -> nm_llm_03 -> imatrix_00 -> nm_llm_02\n- score at start: 1179648.007324\n- final score: 103576.818741\n- cumulative gain: 1076071.188583\n- total tokens: 127402\n- fallback modules: 0\n\n## Complementarity vs selected mix\n\n| dataset | conditional gain | verdict |\n|---------|------------------|---------|\n| imatrix_01 | 1053951.257927 | selected |\n| nm_llm_03 | 14339.037155 | selected |\n| imatrix_00 | 4040.059410 | selected |\n| nm_llm_02 | 3740.834091 | selected |\n| nm_llm_00 | -3201.279572 | redundant |\n| nm_llm_01 | -3546.486665 | redundant |\n\n## Timing\n\n| stage | seconds |\n|-------|---------|\n| load | 23.413 |\n| scan | 7643.242 |\n| standalone_scores | 36.372 |\n| greedy | 64.411 |\n| fallback | 0.777 |\n| complementarity | 13.741 |\n| total | 7784.595 |\n\n## How to read this report\n\n*Score* is the importance-weighted tail under-coverage versus the held-out reference. For every target module and input channel we compute:\n\n- ``importance = diag / mean(diag)`` (with NaNs clamped to 0) from the reference Hessian diagonal.\n- ``gap = relu(ref_p99 - calib_p99) / ref_p99`` per channel.\n- ``score = sum(importance * gap)`` over all modules/channels.\n\nA lower score is better. A score of ``0`` means the calibration data covers every reference tail. A high score means important reference channels are not seen in the calibration set.\n\n*Standalone score* is ``score(dataset, ref)`` for each dataset alone.\n\n*Conditional gain* for a dataset is ``score(mix_before, ref) - score(mix_before + dataset, ref)``: how much adding that dataset to the current mix reduces the score. Positive values are complementary; zero or negative values are redundant. The greedy ranking always selects the next dataset by this gain. *Targets are floors, not ceilings*: once ``--target-gain`` or ``--target-tokens`` is reached, the search continues as long as the next conditional gain remains positive. The cumulative gain is ``score_start - score_final`` for the selected mix.",
+  "per_dataset": [
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "imatrix_00",
+      "standalone_score": 123214.205181,
+      "total_tokens": 32474
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "imatrix_01",
+      "standalone_score": 125696.749397,
+      "total_tokens": 30825
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_00",
+      "standalone_score": 128002.478668,
+      "total_tokens": 31886
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_01",
+      "standalone_score": 120485.328698,
+      "total_tokens": 32286
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_02",
+      "standalone_score": 118270.127073,
+      "total_tokens": 32021
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_03",
+      "standalone_score": 123692.027466,
+      "total_tokens": 32082
+    }
+  ],
+  "reference": {
+    "modules": 216,
+    "name": "reference",
+    "total_tokens": 15504
+  },
+  "selected_mix": {
+    "cumulative_gain": 1076071.188583,
+    "datasets": [
+      "imatrix_01",
+      "nm_llm_03",
+      "imatrix_00",
+      "nm_llm_02"
+    ],
+    "fallback_count": 0,
+    "fallback_modules": [],
+    "score": 103576.818741,
+    "score_start": 1179648.007324,
+    "target_gain": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "total_tokens": 127402
+  },
+  "timings": {
+    "complementarity": 13.741025,
+    "fallback": 0.777319,
+    "greedy": 64.411213,
+    "load": 23.413267,
+    "scan": 7643.241561,
+    "standalone_scores": 36.371559,
+    "total": 7784.594606
+  },
+  "warnings": [
+    "Target token floor 131072 not reached (reached 127402); all remaining datasets are redundant."
+  ]
+}

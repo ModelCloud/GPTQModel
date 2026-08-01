@@ -1,0 +1,73 @@
+{
+  "cumulative_gain": 1076071.188583,
+  "final_score": 103576.818741,
+  "greedy_ranking": [
+    {
+      "conditional_gain": 1053951.257927,
+      "dataset": "imatrix_01",
+      "score_after": 125696.749397,
+      "step": 1,
+      "total_tokens": 30825
+    },
+    {
+      "conditional_gain": 14339.037155,
+      "dataset": "nm_llm_03",
+      "score_after": 111357.712242,
+      "step": 2,
+      "total_tokens": 62907
+    },
+    {
+      "conditional_gain": 4040.05941,
+      "dataset": "imatrix_00",
+      "score_after": 107317.652832,
+      "step": 3,
+      "total_tokens": 95381
+    },
+    {
+      "conditional_gain": 3740.834091,
+      "dataset": "nm_llm_02",
+      "score_after": 103576.818741,
+      "step": 4,
+      "total_tokens": 127402
+    }
+  ],
+  "id": "calibration_mix_128k_qwen3_8b",
+  "model": "Qwen/Qwen3-8B",
+  "name": "128K-token calibration mix for Qwen3-8B (best-score floor)",
+  "reference": {
+    "modules": 216,
+    "name": "reference",
+    "total_tokens": 15504
+  },
+  "score_start": 1179648.007324,
+  "selection_mode": "gain_per_token",
+  "sources": [
+    {
+      "dataset": "lemon07r/bartowski-imatrix-v5-semantic",
+      "shards": [
+        "imatrix_01",
+        "imatrix_00"
+      ]
+    },
+    {
+      "config": "LLM",
+      "dataset": "neuralmagic/calibration",
+      "shards": [
+        "nm_llm_03",
+        "nm_llm_02"
+      ]
+    }
+  ],
+  "target_tokens_floor": 131072,
+  "timings_seconds": {
+    "complementarity": 13.741025,
+    "fallback": 0.777319,
+    "greedy": 64.411213,
+    "load": 23.413267,
+    "scan": 7643.241561,
+    "standalone_scores": 36.371559,
+    "total": 7784.594606
+  },
+  "total_examples": 153,
+  "total_tokens": 127402
+}

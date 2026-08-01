@@ -252,6 +252,41 @@ See [Quantization Runtime Sharing](docs/quantization_runtime_sharing.md) for imp
 
 GPT-QModel supports four scale-search objectives for GPTQ-style quantization: `MSE`, `ACTIVATION` (default), `HESSIAN`, and `HYBRID`. Each trades speed for different quality characteristics, and the Triton fast paths are validated against the exact per-group reference. See [docs/scale_search.md](docs/scale_search.md) for algorithm details, usage examples, per-module overrides, and accuracy checks.
 
+### Calibration Dataset Coverage Scanner
+
+`optimize/calibration_coverage.py` is a pre-quantization helper that ranks
+multiple calibration datasets (and their unions) by how well they cover a held-out
+reference set. It uses per-module, cheaply-mergeable activation profiles and
+exploits the additivity of the Hessian diagonal so dataset unions are computed
+without re-running the model.
+
+What it does:
+- Profiles `q/k/v_proj`, `gate/up_proj`, `down_proj`, and GPT-2-style `Conv1D` modules.
+- Accumulates: additive per-channel Hessian diagonal, running `max(abs)`, a mergeable percentile sketch (p50/p90/p99), and token count.
+- Deduplicates same-input modules (`q/k/v`, `gate/up`, `c_attn`) using the same sharing rules as `docs/quantization_runtime_sharing.md`.
+- Scores with `importance = diag / mean(diag)` and `gap = relu(ref_p99 - calib_p99) / ref_p99` per channel; lower score is better.
+- Greedy-selects the next dataset by conditional gain; supports `--target-gain` and `--target-tokens` floors, and `--target-tokens-mode gain_per_token` for token-budget optimization.
+- Reports per-dataset standalone scores, the selected mix, complementarity verdicts, and MoE fallback warnings.
+
+Minimal CPU run:
+
+```bash
+PYTHON_GIL=0 /home/ubuntu/.venv-gptq-gil0/bin/python optimize/calibration_coverage.py \
+  --model Qwen/Qwen3-0.6B \
+  --dataset /path/to/cal1.txt:cal1 \
+  --dataset /path/to/cal2.txt:cal2 \
+  --reference /path/to/ref.txt:ref \
+  --output-dir /tmp/coverage_out \
+  --concat-size 2048 \
+  --torch-dtype float32 \
+  --greedy-threads 4
+```
+
+Input formats: `.txt` files separated by `===========`, `.parquet` files with `text`/`messages`/`content` columns, or Hugging Face dataset specs (`path:name`).
+
+For an end-to-end example producing a public-dataset 128K-token mix, see
+`dataset/calibration_mix_128k_qwen3_0.6b/`.
+
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
