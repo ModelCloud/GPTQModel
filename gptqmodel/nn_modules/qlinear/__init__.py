@@ -367,6 +367,8 @@ class BaseQuantLinear(nn.Module):
 
         dynamic_bits = {}
         for pattern, pattern_dict in dynamic.items():
+            if not isinstance(pattern_dict, dict):
+                continue
             dynamic_bits[pattern] = pattern_dict.get("bits", bits)
         if len(cls.SUPPORTS_BITS) == 1:
             unsupported_dynamic_bits = {
@@ -593,6 +595,8 @@ class GroupedQuantLinear(BaseQuantLinear):
         if dynamic is not None:
             dynamic_group_size = {}
             for pattern, pattern_dict in dynamic.items():
+                if not isinstance(pattern_dict, dict):
+                    continue
                 dynamic_group_size[pattern] = pattern_dict.get("group_size", group_size)
             for layer, layer_group_size in dynamic_group_size.items():
                 if layer_group_size not in cls.SUPPORTS_GROUP_SIZE:
@@ -601,6 +605,8 @@ class GroupedQuantLinear(BaseQuantLinear):
 
             dynamic_sym = {}
             for pattern, pattern_dict in dynamic.items():
+                if not isinstance(pattern_dict, dict):
+                    continue
                 dynamic_sym[pattern] = pattern_dict.get("sym", sym)
             for layer, layer_sym in dynamic_sym.items():
                 if layer_sym not in cls.SUPPORTS_SYM:
@@ -609,6 +615,8 @@ class GroupedQuantLinear(BaseQuantLinear):
 
             dynamic_desc_act = {}
             for pattern, pattern_dict in dynamic.items():
+                if not isinstance(pattern_dict, dict):
+                    continue
                 dynamic_desc_act[pattern] = pattern_dict.get("desc_act", desc_act)
             for layer, layer_desc_act in dynamic_desc_act.items():
                 if layer_desc_act not in cls.SUPPORTS_DESC_ACT:

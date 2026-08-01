@@ -42,10 +42,6 @@ from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuant
 from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
-from ..utils.moe_dispatch import (
-    enable_grouped_dispatch_for_model,
-    register_linear_loop_experts,
-)
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
     build_shell_model,
@@ -72,6 +68,7 @@ from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
 from ..utils.model import (
+    _checkpoint_tensor_keys,
     auto_dtype,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
@@ -86,6 +83,10 @@ from ..utils.model import (
     make_quant,
     materialize_meta_tensors,
     simple_dispatch_model,
+)
+from ..utils.moe_dispatch import (
+    enable_grouped_dispatch_for_model,
+    register_linear_loop_experts,
 )
 from ._const import DEVICE, HAS_NPU, normalize_device
 
@@ -1482,6 +1483,36 @@ def ModelLoader(cls):
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:
+                # Partial GPTQ/AWQ checkpoints mix quantized modules (qweight present)
+                # with dense modules (weight present). Remove dense modules here so
+                # make_quant only replaces already-quantized modules with QLinear.
+                # QQQ stores weights as `B`, not `qweight`, so it is excluded from
+                # this probe; EXL3 is handled above.
+                if qcfg.method in (METHOD.GPTQ, METHOD.AWQ):
+                    checkpoint_keys = _checkpoint_tensor_keys(model_save_name)
+                    if checkpoint_keys is not None:
+                        qweight_names = {
+                            name for name in modules
+                            if f"{name}.qweight" in checkpoint_keys
+                        }
+                        if 0 < len(qweight_names) < len(modules):
+                            for name in list(modules.keys()):
+                                if name not in qweight_names:
+                                    log.info(
+                                        "Partial checkpoint: `%s` has no qweight, leaving dense.",
+                                        name,
+                                    )
+                                    del modules[name]
+                        elif qweight_names:
+                            # Full quantized checkpoint: every module has a qweight.
+                            pass
+                        else:
+                            log.warn(
+                                "Checkpoint for %s method has no `.qweight` keys; "
+                                "leaving all modules dense. This may indicate a method/format mismatch.",
+                                qcfg.method.value,
+                            )
+
                 preload_qlinear_kernel = make_quant(
                     model,
                     qcfg=qcfg,

@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import os
+import re
 import threading
 import time
 from collections import defaultdict
@@ -79,6 +81,7 @@ from ..utils.model import (
     MODALITY,
     _module_has_meta_tensors,
     find_modules,
+    get_layers_with_prefixes,
     get_module,
     get_module_by_name_prefix,
     get_module_name,
@@ -833,6 +836,83 @@ class BaseQModel(nn.Module):
     def quantize(
         self,
         calibration: Optional[Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]] = None,
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = "desc",
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
+        validation_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
+        layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
+        freeze_others: bool = True,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        """Quantize the model, optionally limited to a subset of layers.
+
+        `layer_scope` may be a layer index, slice, regex, or list of indices/regexes.
+        Non-matching layers are frozen (excluded) so one layer can be quantized,
+        saved, and later resumed via `requant` with a different config or calibration.
+        """
+
+        # Layer-scope dynamic overrides are temporary. Snapshot the original map so
+        # we can restore it before returning; this keeps saved checkpoints free of
+        # transient per-call scope exclusions.
+        if layer_scope is not None:
+            original_dynamic = copy.deepcopy(self.quantize_config.dynamic)
+        else:
+            original_dynamic = None
+
+        try:
+            self._apply_layer_scope(layer_scope=layer_scope, freeze_others=freeze_others)
+            result = self._quantize_impl(
+                calibration=calibration,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                tokenizer=tokenizer,
+                backend=backend,
+                adapter=adapter,
+                adapter_calibration_dataset=adapter_calibration_dataset,
+                calibration_data_min_length=calibration_data_min_length,
+                calibration_concat_separator=calibration_concat_separator,
+                embed_quant_config=embed_quant_config,
+                embed_quant_mode=embed_quant_mode,
+                validation_calibration=validation_calibration,
+                layer_scope=layer_scope,
+                freeze_others=freeze_others,
+            )
+            return result
+        finally:
+            if layer_scope is not None:
+                # Rebuild a clean dynamic map in precedence order:
+                # 1. original negative exclusions first (they short-circuit everything),
+                # 2. positive overrides for already-quantized layers whose effective
+                #    config differs from the base (so they win over broad user positives),
+                # 3. original positive user overrides last.
+                # Any temporary negative scope exclusions we added are already absent
+                # from `original_dynamic` and do not need to be stripped.
+                final_dynamic: Dict[str, Any] = {}
+                if original_dynamic is not None:
+                    for pattern, override in original_dynamic.items():
+                        if pattern.startswith("-:") or override is False:
+                            final_dynamic[pattern] = override
+                final_dynamic.update(self._capture_quantized_layer_dynamic())
+                if original_dynamic is not None:
+                    for pattern, override in original_dynamic.items():
+                        if not (pattern.startswith("-:") or override is False):
+                            final_dynamic[pattern] = override
+                self.quantize_config._invalidate_dynamic_cache()
+                self.quantize_config.dynamic = final_dynamic
+
+    def _quantize_impl(
+        self,
+        calibration: Optional[Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]] = None,
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_concat_size: Optional[int] = None,
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
@@ -850,6 +930,8 @@ class BaseQModel(nn.Module):
         validation_calibration: Optional[
             Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
         ] = None,
+        layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
+        freeze_others: bool = True,
     ) -> Dict[str, List[Dict[str, str]]]:
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
@@ -859,7 +941,7 @@ class BaseQModel(nn.Module):
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
-        if embed_quant_config is None and self.quantized:
+        if embed_quant_config is None and self.quantized and layer_scope is None:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1159,6 +1241,299 @@ class BaseQModel(nn.Module):
             embed_quant_config=embed_quant_config,
             validation_calibration=validation_calibration,
         )
+
+
+    def _resolve_layer_scope_indices(
+        self,
+        layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]],
+        layer_names: List[str],
+        layer_count: int,
+    ) -> Set[int]:
+        """Normalize `layer_scope` into a set of concrete layer indices."""
+
+        if layer_scope is None:
+            return set(range(layer_count))
+
+        if isinstance(layer_scope, int):
+            if not (0 <= layer_scope < layer_count):
+                raise IndexError(f"layer_scope index {layer_scope} out of range (0..{layer_count - 1})")
+            return {layer_scope}
+
+        if isinstance(layer_scope, slice):
+            return set(range(layer_count)[layer_scope])
+
+        if isinstance(layer_scope, str):
+            compiled = re.compile(layer_scope)
+            matched = {i for i, name in enumerate(layer_names) if compiled.match(name) or compiled.search(name)}
+            if not matched:
+                raise ValueError(f"layer_scope regex `{layer_scope}` did not match any of {layer_names}")
+            return matched
+
+        if isinstance(layer_scope, (list, tuple)):
+            matched: Set[int] = set()
+            for item in layer_scope:
+                if isinstance(item, int):
+                    if not (0 <= item < layer_count):
+                        raise IndexError(f"layer_scope index {item} out of range (0..{layer_count - 1})")
+                    matched.add(item)
+                elif isinstance(item, str):
+                    compiled = re.compile(item)
+                    matched.update({i for i, name in enumerate(layer_names) if compiled.match(name) or compiled.search(name)})
+                else:
+                    raise TypeError(f"layer_scope items must be int or str, got {type(item)}")
+            if not matched:
+                raise ValueError(f"layer_scope list did not match any of {layer_names}")
+            return matched
+
+        raise TypeError(f"Unsupported layer_scope type: {type(layer_scope)}")
+
+    def _get_layer_names(self) -> List[str]:
+        """Return flat transformer layer names for the current model."""
+
+        _, layer_names = get_layers_with_prefixes(self.model, self.extract_layers_node())
+        return layer_names
+
+    def _apply_layer_scope(
+        self,
+        layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
+        freeze_others: bool = True,
+    ) -> Set[str]:
+        """Add dynamic exclusions so only `layer_scope` layers are processed.
+
+        When `freeze_others=True` (the default), we emit negative dynamic patterns
+        for every non-scope transformer layer.  Scope layers keep the existing base
+        config and any user-provided dynamic overrides.  When `freeze_others=False`,
+        no negative exclusions are injected and the `layer_scope` is ignored by
+        this helper; callers should use `freeze_others=False` only when they intend
+        to quantize all layers.  Already-quantized modules are always skipped in
+        `ModuleLooper.create_named_modules`.
+
+        Returns the set of negative patterns that were added so callers can
+        strip them after quantization finishes.
+        """
+
+        if layer_scope is None or not freeze_others:
+            return set()
+
+        layer_names = self._get_layer_names()
+        layer_count = len(layer_names)
+        if layer_count == 0:
+            return set()
+
+        scope_indices = self._resolve_layer_scope_indices(layer_scope, layer_names, layer_count)
+
+        existing_dynamic = self.quantize_config.dynamic or {}
+        new_dynamic: Dict[str, Any] = {}
+        added: Set[str] = set()
+
+        # Negative patterns first so they win over any broad positive user patterns.
+        for idx, layer_name in enumerate(layer_names):
+            if idx not in scope_indices:
+                pattern = f"-:.*{re.escape(layer_name)}\\..*"
+                new_dynamic[pattern] = False
+                added.add(pattern)
+
+        # Preserve existing dynamic overrides (positives or per-layer negatives).
+        for pattern, override in existing_dynamic.items():
+            if pattern not in new_dynamic:
+                new_dynamic[pattern] = override
+
+        self.quantize_config._invalidate_dynamic_cache()
+        self.quantize_config.dynamic = new_dynamic
+        return added
+
+    def requant(
+        self,
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        quantize_config: Optional[BaseQuantizeConfig] = None,
+        layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
+        freeze_others: bool = True,
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = "desc",
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
+        validation_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        """Continue quantization on a partially (or fully) quantized model.
+
+        `quantize_config` replaces the current config for this step, letting each
+        incremental layer use a different calibration dataset, bits, group_size, etc.
+        Only layers matching `layer_scope` are processed; non-matched dense and
+        already-quantized modules are left untouched.
+        """
+
+        if quantize_config is not None:
+            if not isinstance(quantize_config, BaseQuantizeConfig):
+                raise TypeError("`quantize_config` must be a `BaseQuantizeConfig` instance.")
+            if quantize_config.method != self.quantize_config.method:
+                raise ValueError(
+                    f"`requant` cannot switch quantization method; "
+                    f"current={self.quantize_config.method.value}, requested={quantize_config.method.value}. "
+                    f"Mixed-method quantization is not yet supported."
+                )
+            # Merge the new algorithmic config into the existing config so runtime/
+            # loading state (meta, adapter, existing per-layer dynamic overrides, and
+            # the active offload temp directory) is not discarded.
+            old_config = self.quantize_config
+            new_config = quantize_config
+
+            # Carry over device/offload state explicitly. Offload is special because
+            # a new QuantizeConfig default (True) auto-creates a temp dir; we only
+            # want to inherit the previous temp dir when the new config did not
+            # explicitly provide its own path.
+            if new_config.device is None:
+                new_config.device = old_config.device
+            new_offload_path = getattr(new_config, "offload_to_disk_path", None)
+            new_temp_dir = getattr(new_config, "_offload_temp_dir", None)
+            if new_config.offload_to_disk and new_offload_path is not None and new_temp_dir is None:
+                # New config explicitly supplied an offload path; keep it.
+                offload_to_disk = new_config.offload_to_disk
+                offload_to_disk_path = new_offload_path
+                offload_temp_dir = None
+            else:
+                # New config either disabled offload or used the default temp dir.
+                # Inherit previous offload state so an in-use temp dir is not abandoned.
+                offload_to_disk = new_config.offload_to_disk
+                offload_to_disk_path = getattr(old_config, "offload_to_disk_path", None)
+                offload_temp_dir = getattr(old_config, "_offload_temp_dir", None)
+                # If offload is still enabled but no inherited path exists, fall back
+                # to whatever the new config created.
+                if offload_to_disk and offload_to_disk_path is None:
+                    offload_to_disk_path = new_offload_path
+                    offload_temp_dir = new_temp_dir
+
+            # Copy all dataclass fields from the new config, then restore the
+            # persisted/runtime fields that should be merged rather than replaced.
+            old_dynamic = old_config.dynamic or {}
+            new_dynamic = new_config.dynamic or {}
+            merged_dynamic = dict(old_dynamic)
+            if new_dynamic:
+                merged_dynamic.update(new_dynamic)
+
+            for field in dataclasses.fields(new_config):
+                if field.name in (
+                    "device",
+                    "offload_to_disk",
+                    "offload_to_disk_path",
+                    "_offload_temp_dir",
+                    "meta",
+                    "adapter",
+                    "dynamic",
+                ):
+                    continue
+                setattr(old_config, field.name, getattr(new_config, field.name))
+
+            old_config.device = new_config.device
+            old_config.offload_to_disk = offload_to_disk
+            old_config.offload_to_disk_path = offload_to_disk_path
+            old_config._offload_temp_dir = offload_temp_dir
+            old_config.meta = old_config.meta if new_config.meta is None else new_config.meta
+            old_config.adapter = old_config.adapter if new_config.adapter is None else new_config.adapter
+            old_config.dynamic = merged_dynamic
+
+        if layer_scope is None:
+            # Default to all layers that are not already quantized.
+            layer_names = self._get_layer_names()
+            quantized_indices = self._quantized_layer_indices()
+            if len(quantized_indices) >= len(layer_names):
+                raise ValueError("requant() called but all layers are already quantized.")
+            layer_scope = [i for i in range(len(layer_names)) if i not in quantized_indices]
+
+        return self.quantize(
+            calibration=calibration,
+            calibration_concat_size=calibration_concat_size,
+            calibration_sort=calibration_sort,
+            batch_size=batch_size,
+            tokenizer=tokenizer,
+            backend=backend,
+            adapter=adapter,
+            adapter_calibration_dataset=adapter_calibration_dataset,
+            calibration_data_min_length=calibration_data_min_length,
+            calibration_concat_separator=calibration_concat_separator,
+            validation_calibration=validation_calibration,
+            layer_scope=layer_scope,
+            freeze_others=freeze_others,
+        )
+
+
+    def _capture_quantized_layer_dynamic(
+        self,
+    ) -> Dict[str, Dict[str, Any]]:
+        r"""Build positive dynamic overrides for layers whose effective config differs from base.
+
+        After a per-layer quantization step, the model may contain BaseQuantLinear
+        modules quantized with different bits/group_size/sym/desc_act values. We
+        read those values and emit `+:.*<layer>\..*` patterns so that subsequent
+        save/load/requant operations reproduce the correct per-layer contract.
+        """
+
+        layer_names = self._get_layer_names()
+        if not layer_names:
+            return {}
+
+        prefix_to_index = {name: idx for idx, name in enumerate(layer_names)}
+        base = self.quantize_config
+        positives: Dict[str, Dict[str, Any]] = {}
+
+        for name, module in self.model.named_modules():
+            if not isinstance(module, BaseQuantLinear):
+                continue
+
+            # Map module to transformer layer prefix.
+            matched_layer = None
+            for layer_name, idx in prefix_to_index.items():
+                if name.startswith(f"{layer_name}."):
+                    matched_layer = layer_name
+                    break
+            if matched_layer is None:
+                continue
+
+            # Build effective config from the actual quantized module.
+            override: Dict[str, Any] = {}
+            bits = int(getattr(module, "bits", base.bits))
+            group_size = int(getattr(module, "requested_group_size", getattr(module, "group_size", base.group_size)))
+            desc_act = bool(getattr(module, "desc_act", base.desc_act))
+            sym = bool(getattr(module, "sym", base.sym))
+
+            if bits != base.bits:
+                override["bits"] = bits
+            if group_size != base.group_size:
+                override["group_size"] = group_size
+            if desc_act != base.desc_act:
+                override["desc_act"] = desc_act
+            if sym != base.sym:
+                override["sym"] = sym
+
+            if override:
+                # Emit one positive override per quantized module rather than one
+                # per layer. A layer-wide pattern would shadow module-specific user
+                # overrides and collapse modules within the same layer that were
+                # quantized with different settings.
+                pattern = f"+:.*{re.escape(name)}"
+                positives[pattern] = override
+
+        return positives
+
+    def _quantized_layer_indices(self) -> Set[int]:
+        """Return layer indices that already contain at least one BaseQuantLinear."""
+
+        layer_names = self._get_layer_names()
+        prefix_to_index = {name: idx for idx, name in enumerate(layer_names)}
+        quantized: Set[int] = set()
+        for name, module in self.model.named_modules():
+            if isinstance(module, BaseQuantLinear):
+                for layer_name, idx in prefix_to_index.items():
+                    if name.startswith(f"{layer_name}."):
+                        quantized.add(idx)
+                        break
+        return quantized
 
     def _quantize_with_calibration(
         self,

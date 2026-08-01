@@ -33,6 +33,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     METHOD,
     QuantizeEmbed,
@@ -1829,10 +1830,34 @@ class ModuleLooper():
                 subset[name].state["capture_only"] = True
 
             named_module = subset[name]
+
+            # Every wrapped module needs its tree flags before any early exit,
+            # so downstream planning (MoE isolation, down-proj detection, etc.)
+            # can inspect `full` even for already-quantized modules.
             named_module.state.setdefault(
                 "module_tree_flags",
                 get_module_tree_flags(name),
             )
+
+            # Already-quantized modules (e.g. from a partial checkpoint) must not
+            # be preprocessed again; they are passed through for forward only.
+            if isinstance(named_module.module, BaseQuantLinear):
+                # Fill in the metadata that NamedModule usually derives from nn.Linear
+                # so downstream planning helpers see a consistent shape/dtype.
+                named_module.state.setdefault("in_features", named_module.module.in_features)
+                named_module.state.setdefault("out_features", named_module.module.out_features)
+                float_buffer = next(
+                    (
+                        b for b in named_module.module.buffers()
+                        if b.is_floating_point() or b.is_complex()
+                    ),
+                    None,
+                )
+                named_module.module_dtype = (
+                    float_buffer.dtype if float_buffer is not None else torch.float16
+                )
+                skipped_modules.append(name)
+                continue
 
             preprocess_start = time.perf_counter()
             if isinstance(processor, GPTQProcessor):

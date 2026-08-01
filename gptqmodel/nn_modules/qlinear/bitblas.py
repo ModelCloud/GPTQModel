@@ -794,6 +794,9 @@ class BitblasLinear(BitblasBaseQuantLinear):
             return True, None
 
         for layer, overrides in dynamic.items():
+            if not isinstance(overrides, dict):
+                # Skip negative/boolean dynamic entries (e.g. layer-scope exclusions).
+                continue
             layer_bits = overrides.get("bits", bits)
             layer_sym = overrides.get("sym", sym)
             if layer_sym and layer_bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:

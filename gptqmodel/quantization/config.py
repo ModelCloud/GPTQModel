@@ -2888,6 +2888,9 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         for key, value in layer_dict.items():
             if key == "bits":
                 normalized_bits = self._normalize_bits_field(value, checkpoint_format=checkpoint_format)
@@ -3099,6 +3102,21 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         return sub_value
 
+    def _invalidate_dynamic_cache(self) -> None:
+        """Clear the global dynamic-resolution caches keyed by the current `dynamic` dict.
+
+        Call this before replacing `self.dynamic` with a new dict, so a recycled
+        object id does not return stale compiled patterns or override lookups.
+        """
+        if self.dynamic is None:
+            return
+        cache_key = id(self.dynamic)
+        _DYNAMIC_PATTERN_CACHE.pop(cache_key, None)
+        _DYNAMIC_OVERRIDE_CACHE.pop(cache_key, None)
+        _DYNAMIC_EXACT_LOOKUP_CACHE.pop(cache_key, None)
+        _DYNAMIC_ALL_EXACT_CACHE.pop(cache_key, None)
+        _DYNAMIC_REGEX_PATTERN_CACHE.pop(cache_key, None)
+
     def meta_set_versionable(self, key: str, value: List[str]):
         self.meta_set(key, value)
 
@@ -3137,6 +3155,9 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             return adapter_rank_patterns
 
         for k, v in self.dynamic.items():
+            if not isinstance(v, dict):
+                # Skip negative/boolean dynamic entries (e.g. layer-scope exclusions).
+                continue
             adapter_override = v.get("adapter", None)
             if adapter_override and isinstance(adapter_override, Dict):
                 rank = adapter_override.get("rank", None)
@@ -3461,6 +3482,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         dynamic = out["dynamic"]
         if dynamic:
             for _, v in dynamic.items():
+                if not isinstance(v, dict):
+                    continue
                 v.pop("adapter", None)
                 if "bits" in v:
                     v["bits"] = serialize_quant_bits(v["bits"])
@@ -3744,6 +3767,9 @@ class GPTQConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         super()._normalize_dynamic_layer_config(
             layer_name,
             layer_dict,
@@ -3958,6 +3984,9 @@ class ParoConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         # Old generic configs may carry per-layer activation-order overrides.
         # They have never affected ParoQuant weights, so discard them.
         layer_dict.pop("desc_act", None)
@@ -4197,6 +4226,9 @@ class FP8Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         del valid_bit_widths, checkpoint_format
         if "bits" in layer_dict and int(layer_dict["bits"]) != 8:
             raise ValueError(f"FP8Config: layer `{layer_name}` only supports 8-bit FP8 weights.")
@@ -4299,6 +4331,9 @@ class BitsAndBytesConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         del valid_bit_widths, checkpoint_format
         if "bits" in layer_dict and int(layer_dict["bits"]) not in {4, 8}:
             raise ValueError(f"BitsAndBytesConfig: layer `{layer_name}` only supports 4-bit or 8-bit weights.")
@@ -4400,6 +4435,9 @@ class EXL3Config(BaseQuantizeConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         del valid_bit_widths, checkpoint_format
         for key, value in layer_dict.items():
             if key == "bits":
@@ -4588,6 +4626,9 @@ class GGUFConfig(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         bits_override_present = "bits" in layer_dict
         format_override_present = FORMAT_FIELD_CODE in layer_dict
 
@@ -4834,6 +4875,9 @@ class MXFP4Config(PreProcessorConfig):
         valid_bit_widths: List[int],
         checkpoint_format: FORMAT,
     ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
         del valid_bit_widths, checkpoint_format
         if "bits" in layer_dict and int(layer_dict["bits"]) != 4:
             raise ValueError(f"MXFP4Config: layer `{layer_name}` only supports 4-bit MXFP4 weights.")
