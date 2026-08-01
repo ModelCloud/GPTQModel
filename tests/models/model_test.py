@@ -232,6 +232,7 @@ class ModelTest(unittest.TestCase):
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
     BNB_COMPRESS_STATISTICS = None
+    NATIVE_KERNEL_REPLAY = False
 
     PAROQUANT_ROTATION_EPOCHS = None
     PAROQUANT_FINETUNE_EPOCHS = None
@@ -1544,6 +1545,7 @@ class ModelTest(unittest.TestCase):
             enable_shared_hessian_cache=self.ENABLE_SHARED_HESSIAN_CACHE,
             enable_activation_x_mean_cache=self.ENABLE_AWQ_ACTIVATION_X_MEAN_CACHE,
             moe=self.MOE_CONFIG,
+            native_kernel_replay=self.NATIVE_KERNEL_REPLAY,
             offload_to_disk=self._mode_specific_test_setting("OFFLOAD_TO_DISK"),
         )
 

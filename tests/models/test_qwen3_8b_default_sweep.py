@@ -36,6 +36,7 @@ class _TestQwen3_8BSweepBase(ModelTest):
     # Extra GPTQConfig knobs not exposed by ModelTest
     STATIC_GROUPS = False
     TRUE_SEQUENTIAL = True
+    NATIVE_KERNEL_REPLAY = False
 
     # Fixed by sweep charter
     BITS = 4
@@ -56,7 +57,7 @@ class _TestQwen3_8BSweepBase(ModelTest):
                 "max_new_tokens": 256,
                 "stream": True,
             },
-            "acc,num": {"value": 0.40, "floor_pct": 0.04, "ceil_pct": 1.0},
+            "acc,num": {"value": 0.85, "floor_pct": 0.30, "ceil_pct": 0.30},
         },
         "mmlu_stem": {
             "chat_template": False,
@@ -69,7 +70,19 @@ class _TestQwen3_8BSweepBase(ModelTest):
                 "batch_size": 64,
                 "max_rows": 1024,
             },
-            "acc": {"value": 0.40, "floor_pct": 0.04, "ceil_pct": 1.0},
+            "acc": {"value": 0.70, "floor_pct": 0.30, "ceil_pct": 0.30},
+        },
+        "mmlu": {
+            "chat_template": False,
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "flash_attention_2",
+                "device": "cuda:0",
+            },
+            "evalution_suite_kwargs": {
+                "max_rows": 1024,
+            },
+            "acc": {"value": 0.65, "floor_pct": 0.30, "ceil_pct": 0.30},
         },
         "arc_challenge": {
             "chat_template": True,
@@ -81,8 +94,8 @@ class _TestQwen3_8BSweepBase(ModelTest):
             "evalution_suite_kwargs": {
                 "batch_size": 64,
             },
-            "acc": {"value": 0.30, "floor_pct": 0.04, "ceil_pct": 1.0},
-            "acc_norm": {"value": 0.30, "floor_pct": 0.04, "ceil_pct": 1.0},
+            "acc": {"value": 0.35, "floor_pct": 0.30, "ceil_pct": 0.30},
+            "acc_norm": {"value": 0.35, "floor_pct": 0.30, "ceil_pct": 0.30},
         },
     }
 
@@ -90,6 +103,7 @@ class _TestQwen3_8BSweepBase(ModelTest):
         cfg = super()._build_quantize_config()
         cfg.static_groups = self.STATIC_GROUPS
         cfg.true_sequential = self.TRUE_SEQUENTIAL
+        cfg.native_kernel_replay = self.NATIVE_KERNEL_REPLAY
         return cfg
 
     def _run_quant(self):
@@ -190,6 +204,111 @@ class TestQwen3_8B_ConfigG_GarMseScaleSearch(_TestQwen3_8BSweepBase):
     DAMP_PERCENT = 0.05
     SCALE_SEARCH = ScaleSearchConfig.MSE
     MSE = 2.0
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigH_GarActivationScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm H: GAR + activation scale-search with packed native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configH_gar_activation_native_replay"
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.ACTIVATION
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigI_GarMarlinScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm I: GAR + Marlin scale-search (kernel output loss) + native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configI_gar_marlin_native_replay"
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.MARLIN
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigJ_GarMarlinActivationScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm J: GAR + Marlin activation-diagonal scale-search + native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configJ_gar_marlin_activation_native_replay"
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.MARLIN_ACTIVATION
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigK_GarMarlinMseScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm K: GAR + Marlin MSE scale-search + native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configK_gar_marlin_mse_native_replay"
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.MARLIN_MSE
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigL_NoGarMarlinScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm L: GAR disabled + Marlin scale-search + native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configL_no_gar_marlin_native_replay"
+    ACT_GROUP_AWARE = False
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.MARLIN
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigM_NoGarMarlinActivationScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm M: GAR disabled + Marlin activation scale-search + native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configM_no_gar_marlin_activation_native_replay"
+    ACT_GROUP_AWARE = False
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.MARLIN_ACTIVATION
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
+
+    def test_qwen3_8b_quant(self):
+        self._run_quant()
+
+
+class TestQwen3_8B_ConfigN_NoGarMarlinMseScaleSearchNativeReplay(_TestQwen3_8BSweepBase):
+    """Arm N: GAR disabled + Marlin MSE scale-search + native-kernel replay."""
+
+    SAVE_PATH = "/tmp/qwen3_8b_configN_no_gar_marlin_mse_native_replay"
+    ACT_GROUP_AWARE = False
+    DESC_ACT = False
+    DAMP_PERCENT = 0.05
+    SCALE_SEARCH = ScaleSearchConfig.MARLIN_MSE
+    MSE = 0.0
+    NATIVE_KERNEL_REPLAY = True
 
     def test_qwen3_8b_quant(self):
         self._run_quant()

@@ -150,6 +150,9 @@ class ScaleSearchConfig(str, Enum):
     ACTIVATION = "activation"
     HESSIAN = "hessian"
     HYBRID = "hybrid"
+    MARLIN = "marlin"
+    MARLIN_MSE = "marlin_mse"
+    MARLIN_ACTIVATION = "marlin_activation"
 
 
 # Keep the quality-oriented default explicit while distinguishing an omitted
@@ -2832,6 +2835,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         metadata={"help": "Wait for all layer finalization tasks (packing, offloading to disk, etc) to complete before proceeding to next layer. May reduce vram pressure for some env."}
     )
 
+    native_kernel_replay: bool = field(
+        default=False,
+        metadata={"help": "If True, post-quantization per-layer replay runs through a packed native kernel (e.g. Marlin on CUDA) instead of the dense reconstructed weight. The final checkpoint is still packed independently so the replay module can be discarded."}
+    )
+
     moe: Optional[MoEConfig] = field(
         default=None,
         metadata={"help": "Mixture-of-Experts (MoE) configuration for routing strategy and expert batching. "
@@ -3317,6 +3325,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
             "quantization_diagnostics": "quantization_diagnostics",
             "fused_forward": "fused_forward",
+            "native_kernel_replay": "native_kernel_replay",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3431,6 +3440,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         )
         meta_payload["moe_vram_strategy_devices"] = self.moe_vram_strategy_devices
         self._update_meta_payload(meta_payload)
+        meta_payload["native_kernel_replay"] = self.native_kernel_replay
 
         out = {
             "bits": serialize_quant_bits(self.bits),
@@ -3554,7 +3564,8 @@ class GPTQConfig(PreProcessorConfig):
         metadata={
             "help": (
                 "Scale-search objective. Defaults to activation; pass None to disable. "
-                "Choices: mse, activation-diagonal, group-local Hessian, or hybrid shrinkage error."
+                "Choices: mse, activation-diagonal, group-local Hessian, hybrid shrinkage error, "
+                "marlin (Hessian through packed Marlin kernel), marlin_mse, or marlin_activation."
             )
         },
     )
@@ -3694,9 +3705,12 @@ class GPTQConfig(PreProcessorConfig):
             ScaleSearchConfig.ACTIVATION,
             ScaleSearchConfig.HESSIAN,
             ScaleSearchConfig.HYBRID,
+            ScaleSearchConfig.MARLIN,
+            ScaleSearchConfig.MARLIN_MSE,
+            ScaleSearchConfig.MARLIN_ACTIVATION,
         } and self.mse != 2.0:
             raise ValueError(
-                "QuantizeConfig: activation, hessian, and hybrid scale search require `mse=2.0`."
+                "QuantizeConfig: activation, hessian, hybrid, marlin, marlin_mse, and marlin_activation scale search require `mse=2.0`."
             )
 
     def scale_search_cli_summary(self) -> str:

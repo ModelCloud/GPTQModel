@@ -2035,11 +2035,15 @@ class GPTQ:
             and not self.qcfg.static_groups
             and float(getattr(self.qcfg, "mse", 0.0) or 0.0) > 0.0
         ):
-            if scale_search == ScaleSearchConfig.ACTIVATION:
+            if scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}:
                 # clone() is required: retaining a diagonal view would keep the
                 # complete dense Hessian storage alive.
                 group_scale_search_diagonal = self.H.diagonal().clone()
-            elif scale_search in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}:
+            elif scale_search in {
+                ScaleSearchConfig.HESSIAN,
+                ScaleSearchConfig.HYBRID,
+                ScaleSearchConfig.MARLIN,
+            }:
                 group_size = self.qcfg.group_size
                 group_scale_search_hessians = tuple(
                     self.H[start:min(start + group_size, self.columns), start:min(start + group_size, self.columns)].clone()
@@ -2213,14 +2217,18 @@ class GPTQ:
                         x_3d = W[:, i1:batched_last].reshape(W.shape[0], batched_group_count, group_size)
                         batched_hessian = None
                         if (
-                            scale_search == ScaleSearchConfig.ACTIVATION
+                            scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}
                             and group_scale_search_diagonal is not None
                         ):
                             batched_hessian = group_scale_search_diagonal[i1:batched_last].reshape(
                                 batched_group_count, group_size
                             )
                         elif (
-                            scale_search in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}
+                            scale_search in {
+                                ScaleSearchConfig.HESSIAN,
+                                ScaleSearchConfig.HYBRID,
+                                ScaleSearchConfig.MARLIN,
+                            }
                             and group_scale_search_hessians is not None
                         ):
                             batched_hessian = torch.stack(

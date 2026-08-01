@@ -23,6 +23,9 @@ try:
 except Exception:
     _find_params_batched_cpu = None
 
+from ..utils.backend import BACKEND
+from ..utils.marlin import replace_parameter, marlin_runtime_available
+
 
 log = setup_logger()
 
@@ -37,6 +40,12 @@ SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 16
 # activation or MSE search memory.
 CORRELATED_SCALE_SEARCH_TARGET_ELEMENTS = 128 * 1024 * 1024
 CORRELATED_SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 80
+
+MARLIN_SCALE_SEARCH_METHODS = frozenset({
+    ScaleSearchConfig.MARLIN,
+    ScaleSearchConfig.MARLIN_MSE,
+    ScaleSearchConfig.MARLIN_ACTIVATION,
+})
 
 
 def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
@@ -106,7 +115,7 @@ class Quantizer(nn.Module):
 
         if hessian is None:
             return None
-        if method == ScaleSearchConfig.ACTIVATION:
+        if method in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}:
             # Activation search only consumes the diagonal. Avoiding a full
             # symmetric Hessian copy is especially important for 8192-wide MLPs.
             if hessian.ndim == 1 and hessian.shape == (columns,):
@@ -126,27 +135,38 @@ class Quantizer(nn.Module):
             normalized = importance / safe_mean
             return torch.where(valid, normalized, torch.ones_like(normalized))
 
-        if hessian.ndim != 2 or hessian.shape != (columns, columns):
-            raise ValueError(
-                "Quantizer.find_params(): `hessian` must have shape "
-                f"({columns}, {columns}) for {method.value} scale search, got {tuple(hessian.shape)}."
-            )
-
-        prepared = hessian.detach().to(device=device, dtype=torch.float32)
-        prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
-        prepared = (prepared + prepared.t()) * 0.5
-        diagonal_mean = prepared.diagonal().clamp_min(0).mean()
-        if not torch.isfinite(diagonal_mean) or diagonal_mean <= 0:
+        if method == ScaleSearchConfig.MARLIN_MSE:
+            # Plain reconstruction MSE does not need Hessian or activation data.
             return None
-        prepared.div_(diagonal_mean)
-        if method == ScaleSearchConfig.HYBRID:
-            # Fold 50/50 diagonal shrinkage into the Hessian once instead of
-            # allocating and reducing another candidate-sized squared-error
-            # tensor for every scale-search chunk. Off-diagonal terms receive
-            # half weight while diagonal terms retain their original weight.
-            prepared.mul_(0.5)
-            prepared.diagonal().mul_(2.0)
-        return prepared
+
+        if method in {
+            ScaleSearchConfig.HESSIAN,
+            ScaleSearchConfig.HYBRID,
+            ScaleSearchConfig.MARLIN,
+        }:
+            if hessian.ndim != 2 or hessian.shape != (columns, columns):
+                raise ValueError(
+                    "Quantizer.find_params(): `hessian` must have shape "
+                    f"({columns}, {columns}) for {method.value} scale search, got {tuple(hessian.shape)}."
+                )
+
+            prepared = hessian.detach().to(device=device, dtype=torch.float32)
+            prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
+            prepared = (prepared + prepared.t()) * 0.5
+            diagonal_mean = prepared.diagonal().clamp_min(0).mean()
+            if not torch.isfinite(diagonal_mean) or diagonal_mean <= 0:
+                return None
+            prepared.div_(diagonal_mean)
+            if method == ScaleSearchConfig.HYBRID:
+                # Fold 50/50 diagonal shrinkage into the Hessian once instead of
+                # allocating and reducing another candidate-sized squared-error
+                # tensor for every scale-search chunk. Off-diagonal terms receive
+                # half weight while diagonal terms retain their original weight.
+                prepared.mul_(0.5)
+                prepared.diagonal().mul_(2.0)
+            return prepared
+
+        raise ValueError(f"Unsupported scale search method: `{method}`.")
 
     def _scale_search_error(
         self,
@@ -204,9 +224,12 @@ class Quantizer(nn.Module):
         if hessian is None:
             return None
 
-        if method == ScaleSearchConfig.ACTIVATION:
+        if method in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}:
             if hessian.ndim == 1:
                 hessian = hessian.unsqueeze(0)
+            if hessian.ndim == 3:
+                # A full group-Hessian was passed; activation search only needs the diagonal.
+                hessian = hessian.diagonal(dim1=-2, dim2=-1).contiguous()
             if hessian.ndim != 2:
                 raise ValueError(
                     f"Activation scale search expects a 2D group-diagonal tensor, got {tuple(hessian.shape)}."
@@ -220,24 +243,34 @@ class Quantizer(nn.Module):
             normalized = importance / safe_mean
             return torch.where(valid, normalized, torch.ones_like(normalized))
 
-        if hessian.ndim != 3:
-            raise ValueError(
-                f"{method.value.capitalize()} batched scale search expects a 3D group-Hessian tensor, "
-                f"got {tuple(hessian.shape)}."
-            )
-        prepared = hessian.detach().to(dtype=torch.float32, device=hessian.device)
-        prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
-        prepared = (prepared + prepared.transpose(-2, -1)) * 0.5
-        diagonal = prepared.diagonal(dim1=-2, dim2=-1).clamp_min(0)
-        # Normalize each group by its own diagonal mean to match per-group find_params.
-        diagonal_mean = diagonal.mean(dim=-1, keepdim=True).unsqueeze(-1)
-        valid = torch.isfinite(diagonal_mean) & (diagonal_mean > 0)
-        safe_mean = torch.where(valid, diagonal_mean, torch.ones_like(diagonal_mean))
-        prepared = prepared / safe_mean
-        if method == ScaleSearchConfig.HYBRID:
-            prepared.mul_(0.5)
-            prepared.diagonal(dim1=-2, dim2=-1).mul_(2.0)
-        return prepared
+        if method == ScaleSearchConfig.MARLIN_MSE:
+            return None
+
+        if method in {
+            ScaleSearchConfig.HESSIAN,
+            ScaleSearchConfig.HYBRID,
+            ScaleSearchConfig.MARLIN,
+        }:
+            if hessian.ndim != 3:
+                raise ValueError(
+                    f"{method.value.capitalize()} batched scale search expects a 3D group-Hessian tensor, "
+                    f"got {tuple(hessian.shape)}."
+                )
+            prepared = hessian.detach().to(dtype=torch.float32, device=hessian.device)
+            prepared = torch.nan_to_num(prepared, nan=0.0, posinf=0.0, neginf=0.0)
+            prepared = (prepared + prepared.transpose(-2, -1)) * 0.5
+            diagonal = prepared.diagonal(dim1=-2, dim2=-1).clamp_min(0)
+            # Normalize each group by its own diagonal mean to match per-group find_params.
+            diagonal_mean = diagonal.mean(dim=-1, keepdim=True).unsqueeze(-1)
+            valid = torch.isfinite(diagonal_mean) & (diagonal_mean > 0)
+            safe_mean = torch.where(valid, diagonal_mean, torch.ones_like(diagonal_mean))
+            prepared = prepared / safe_mean
+            if method == ScaleSearchConfig.HYBRID:
+                prepared.mul_(0.5)
+                prepared.diagonal(dim1=-2, dim2=-1).mul_(2.0)
+            return prepared
+
+        raise ValueError(f"Unsupported scale search method: `{method}`.")
 
     def _scale_search_error_batched(
         self,
@@ -277,7 +310,13 @@ class Quantizer(nn.Module):
     ) -> int:
         """Choose a bounded candidate batch that amortizes eager launch overhead."""
 
-        if method in {ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID}:
+        if method in {
+            ScaleSearchConfig.HESSIAN,
+            ScaleSearchConfig.HYBRID,
+            ScaleSearchConfig.MARLIN,
+            ScaleSearchConfig.MARLIN_MSE,
+            ScaleSearchConfig.MARLIN_ACTIVATION,
+        }:
             target_elements = CORRELATED_SCALE_SEARCH_TARGET_ELEMENTS
             max_candidates = CORRELATED_SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK
         else:
@@ -292,6 +331,234 @@ class Quantizer(nn.Module):
                 target_elements // elements_per_candidate,
             ),
         )
+
+    def _marlin_scale_search_loss(
+        self,
+        W: torch.Tensor,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        hessian: torch.Tensor | None,
+        *,
+        method: ScaleSearchConfig,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        dtype: torch.dtype,
+        pack_dtype: torch.dtype,
+        maxq_value: int,
+        mse: float,
+    ) -> torch.Tensor:
+        """Score each scale/clip candidate using the packed Marlin kernel output.
+
+        A synthetic activation matrix ``A_g`` is chosen so that the kernel-output
+        MSE ``||A_g (W - Q)^T||^2`` matches the requested objective:
+
+        - ``marlin`` / ``marlin_hessian``: ``A_g^T A_g = H_g`` from the Cholesky
+          factor of the per-group Hessian (the dense quadratic form).
+        - ``marlin_activation``: ``A_g`` is the diagonal sqrt of the per-channel
+          activation importance (diagonal Hessian objective).
+        - ``marlin_mse``: ``A_g`` is the identity, so the loss is plain weight
+          reconstruction MSE evaluated through the packed kernel.
+
+        The actual ``Y = Marlin(A_g, Q)`` path is used instead of ``A_g @ Q.T``,
+        so the loss includes the kernel's sub-byte extraction, FP16/BF16 scale
+        multiply, and accumulation order.
+        """
+
+        from ..nn_modules.qlinear.marlin import MarlinLinear
+
+        if not sym:
+            raise NotImplementedError(
+                "Quantizer: `scale_search='marlin*'` currently requires symmetric quantization."
+            )
+        if not torch.cuda.is_available():
+            raise RuntimeError("Quantizer: Marlin scale search requires a CUDA device.")
+        if not marlin_runtime_available(dtype):
+            raise RuntimeError(
+                f"Quantizer: Marlin runtime not available for dtype `{dtype}`; "
+                "cannot run kernel-aware scale search."
+            )
+
+        if method not in MARLIN_SCALE_SEARCH_METHODS:
+            raise ValueError(f"Quantizer: unsupported Marlin scale-search method `{method.value}`.")
+
+        # Mark that the kernel-aware path was reached; tests can assert this was
+        # set and that no per-group fallback was used.
+        self._marlin_scale_search_kernel_ran = True
+
+        rows, num_groups, gs = W.shape
+        C = scales.shape[0]
+        # Keep all work on the same device as the incoming weights so multi-GPU
+        # quantization threads do not silently cross devices.
+        dev = W.device
+        loss = torch.full((C, rows, num_groups), float("inf"), device=dev, dtype=torch.float32)
+
+        # Canonicalize the optional per-group Hessian/importance tensor so the loop
+        # can index it as ``hessian[g]`` for every sub-objective.
+        if hessian is not None:
+            if hessian.ndim == 1:
+                # Single-group diagonal (activation-style) importance.
+                hessian = hessian.unsqueeze(0)
+            if hessian.ndim == 2:
+                if hessian.shape == (num_groups, group_size):
+                    # Batched diagonal importance; keep as-is for activation search.
+                    pass
+                elif hessian.shape == (group_size, group_size):
+                    # Single full group Hessian; promote to a one-group batch.
+                    hessian = hessian.unsqueeze(0)
+                else:
+                    raise ValueError(
+                        "Quantizer: Marlin scale search expects a (num_groups, group_size) "
+                        f"diagonal or (group_size, group_size) Hessian, got {tuple(hessian.shape)}."
+                    )
+            if hessian.ndim == 3 and (
+                hessian.shape[0] != num_groups
+                or hessian.shape[-2] != group_size
+                or hessian.shape[-1] != group_size
+            ):
+                raise ValueError(
+                    "Quantizer: Marlin scale search expects a (num_groups, group_size, group_size) "
+                    f"Hessian, got {tuple(hessian.shape)} for W {tuple(W.shape)}."
+                )
+
+        # Use the same dtype for the kernel reference and the packed module.
+        marlin_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else torch.float16
+
+        # Marlin only supports int32-packed weights.
+        if pack_dtype != torch.int32:
+            raise ValueError(
+                f"Quantizer: Marlin scale search only supports int32 pack_dtype, got {pack_dtype}."
+            )
+        pack_factor = 32 // bits
+
+        # The synthetic per-group activation has no column reordering, so the
+        # scoring module must use desc_act=False even when the model config
+        # enables activation ordering. Otherwise MarlinLinear would consume an
+        # uninitialized g_idx and silently repack with a garbage permutation.
+        marlin_desc_act = False
+
+        for g in range(num_groups):
+            W_g = W[:, g, :].detach().to(device=dev, dtype=marlin_dtype).contiguous()
+
+            # Build the synthetic activation matrix for the requested objective.
+            if method == ScaleSearchConfig.MARLIN_MSE:
+                A_g = torch.eye(gs, device=dev, dtype=marlin_dtype)
+                Y_ref = W_g.t()
+                fallback_method = ScaleSearchConfig.MSE
+                fallback_hessian = None
+            elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                if hessian is None:
+                    raise ValueError(
+                        "Quantizer: `scale_search='marlin_activation'` requires activation importance (Hessian diagonal)."
+                    )
+                importance_g = hessian[g].to(device=dev, dtype=torch.float32)
+                importance_g = torch.nan_to_num(importance_g, nan=0.0, posinf=0.0, neginf=0.0).clamp_min_(0)
+                # If the importance vector is degenerate, fall back to identity so the
+                # kernel still returns a valid loss instead of zero for every candidate.
+                if importance_g.sum().item() <= 0 or not torch.isfinite(importance_g).all():
+                    A_g = torch.eye(gs, device=dev, dtype=marlin_dtype)
+                else:
+                    A_g = torch.diag(torch.sqrt(importance_g)).to(dtype=marlin_dtype)
+                Y_ref = torch.matmul(A_g, W_g.t())
+                fallback_method = ScaleSearchConfig.ACTIVATION
+                fallback_hessian = importance_g
+            else:  # ScaleSearchConfig.MARLIN (Hessian)
+                if hessian is None:
+                    raise ValueError(
+                        "Quantizer: `scale_search='marlin'` requires a per-group Hessian."
+                    )
+                H_g = hessian[g].to(device=dev, dtype=torch.float32)
+
+                # Add a small damping term to guarantee the group Hessian is positive-definite.
+                diag_mean = H_g.diagonal().abs().mean()
+                damping = max(1e-6, diag_mean * 1e-6)
+                H_g = H_g + torch.eye(gs, device=H_g.device, dtype=H_g.dtype) * damping
+                try:
+                    L_g = torch.linalg.cholesky(H_g)
+                except RuntimeError:
+                    H_g = torch.diag(H_g.diagonal().clamp_min(damping))
+                    L_g = torch.linalg.cholesky(H_g)
+
+                # A_g^T A_g = H_g, so ``||A_g (w - q)^T||^2`` equals the Hessian quadratic form.
+                A_g = L_g.transpose(-2, -1).to(dtype=marlin_dtype).contiguous()
+                Y_ref = torch.matmul(A_g, W_g.t())
+                fallback_method = ScaleSearchConfig.HESSIAN
+                fallback_hessian = H_g
+
+            s_g = scales[:, :, g].to(dtype=marlin_dtype).contiguous()
+            z_g = zeros[:, :, g].to(dtype=marlin_dtype).contiguous()
+
+            try:
+                # Build the integer weight for all candidates in one GEMM-shaped tile.
+                W_exp = W_g.unsqueeze(0)
+                s_exp = s_g.unsqueeze(-1)
+                z_exp = z_g.unsqueeze(-1)
+                int_weight = ((W_exp + z_exp * s_exp) / s_exp).round().clamp(0, maxq_value).to(torch.int32)
+
+                # Pack along the input-channel dimension: each int32 stores `pack_factor` input values
+                # for one output channel, matching GPTQ/Marlin qweight layout.
+                int_weight_t = int_weight.reshape(C * rows, gs).contiguous().T
+                int_weight_t = int_weight_t.view(gs // pack_factor, pack_factor, C * rows)
+                shifts = torch.arange(pack_factor, device=int_weight.device, dtype=torch.int32) * bits
+                qweight = (int_weight_t << shifts.view(1, -1, 1)).sum(dim=1, dtype=torch.int32)
+
+                scales_marlin = s_g.reshape(1, C * rows).to(dtype=marlin_dtype).contiguous()
+
+                marlin = MarlinLinear(
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=marlin_desc_act,
+                    sym=sym,
+                    in_features=gs,
+                    out_features=C * rows,
+                    bias=False,
+                    pack_dtype=pack_dtype,
+                    backend=BACKEND.GPTQ_MARLIN,
+                    dtype=marlin_dtype,
+                )
+                replace_parameter(marlin, "qweight", qweight)
+                replace_parameter(marlin, "scales", scales_marlin)
+                marlin.post_init()
+
+                Y_marlin = marlin(A_g)
+                Y_marlin = Y_marlin.reshape(gs, C, rows)
+                diff = Y_marlin - Y_ref.unsqueeze(1)
+                loss[:, :, g] = diff.to(dtype=torch.float32).pow(2).sum(dim=0)
+            except Exception as exc:
+                # Fall back to the equivalent dense objective for this group so the
+                # scale-search still returns usable parameters if Marlin packing
+                # or the kernel fails for a shape.
+                if not hasattr(self, "_marlin_scale_search_fallback_count"):
+                    self._marlin_scale_search_fallback_count = 0
+                self._marlin_scale_search_fallback_count += 1
+                log.warn.once(
+                    f"Marlin scale search ({method.value}) failed for at least one group "
+                    f"(bits={bits}, group_size={group_size}), falling back to {fallback_method.value}: {exc}"
+                )
+                x_g = W_g.unsqueeze(0).expand(C, -1, -1)
+                scale_g = s_g.unsqueeze(-1)
+                zero_g = z_g.unsqueeze(-1)
+                error = self._quantize_scale_search_candidates(
+                    x_g,
+                    scale_g,
+                    zero_g,
+                    maxq_value=maxq_value,
+                )
+                loss[:, :, g] = self._scale_search_error(
+                    error,
+                    method=fallback_method,
+                    mse=mse,
+                    hessian=fallback_hessian,
+                )
+
+        return loss
+
+    def _effective_scale_search_bits(self, maxq_value: int) -> int:
+        """Recover the bit width from the configured max quantized value."""
+
+        if self.requires_groupwise_processing():
+            return maxq_value.bit_length() + 1
+        return (maxq_value + 1).bit_length() - 1
 
     def _quantize_scale_search_candidates(
         self,
@@ -414,23 +681,94 @@ class Quantizer(nn.Module):
                 else:
                     zero_all = torch.round(-xmin_all / scale_all)
 
+                group_size = x.shape[1]
                 x_batch = x.unsqueeze(0)
                 for start in range(0, candidate_count, chunk_size):
                     end = min(start + chunk_size, candidate_count)
                     scale1 = scale_all[start:end]
                     zero1 = zero_all[start:end]
-                    error = self._quantize_scale_search_candidates(
-                        x_batch,
-                        scale1.unsqueeze(2),
-                        zero1.unsqueeze(2),
-                        maxq_value=maxq_value,
-                    )
-                    errors = self._scale_search_error(
-                        error,
-                        method=method,
-                        mse=mse,
-                        hessian=prepared_hessian,
-                    )
+                    if (
+                        method in MARLIN_SCALE_SEARCH_METHODS
+                        and x.is_cuda
+                        and group_size >= 64
+                    ):
+                        # Per-group K must be at least the Marlin GEMM's minimum
+                        # thread_k tile (64); otherwise the temporary one-group
+                        # MarlinLinear cannot be launched.
+                        from ..nn_modules.qlinear.marlin import MarlinLinear
+
+                        # Map Marlin sub-objectives to their dense fallback equivalents.
+                        if method == ScaleSearchConfig.MARLIN_MSE:
+                            fallback_method = ScaleSearchConfig.MSE
+                        elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                            fallback_method = ScaleSearchConfig.ACTIVATION
+                        else:
+                            fallback_method = ScaleSearchConfig.HESSIAN
+
+                        try:
+                            bits = self._effective_scale_search_bits(maxq_value)
+                            if bits in MarlinLinear.SUPPORTS_BITS and group_size in MarlinLinear.SUPPORTS_GROUP_SIZE:
+                                errors = self._marlin_scale_search_loss(
+                                    x.unsqueeze(1),
+                                    scale1.unsqueeze(2),
+                                    zero1.unsqueeze(2),
+                                    prepared_hessian,
+                                    method=method,
+                                    bits=bits,
+                                    group_size=group_size,
+                                    sym=self.qcfg.sym,
+                                    dtype=x.dtype,
+                                    pack_dtype=getattr(self.qcfg, "pack_dtype", torch.int32),
+                                    maxq_value=maxq_value,
+                                    mse=mse,
+                                ).squeeze(-1)
+                            else:
+                                raise RuntimeError(
+                                    f"Marlin scale search unsupported for bits={bits}, group_size={group_size}."
+                                )
+                        except Exception as exc:
+                            log.warn.once(
+                                f"Marlin scale search ({method.value}) failed, falling back to "
+                                f"{fallback_method.value}: {exc}"
+                            )
+                            effective_method = fallback_method
+                            error = self._quantize_scale_search_candidates(
+                                x_batch,
+                                scale1.unsqueeze(2),
+                                zero1.unsqueeze(2),
+                                maxq_value=maxq_value,
+                            )
+                            errors = self._scale_search_error(
+                                error,
+                                method=effective_method,
+                                mse=mse,
+                                hessian=prepared_hessian,
+                            )
+                    else:
+                        error = self._quantize_scale_search_candidates(
+                            x_batch,
+                            scale1.unsqueeze(2),
+                            zero1.unsqueeze(2),
+                            maxq_value=maxq_value,
+                        )
+                        effective_method = method
+                        if method in MARLIN_SCALE_SEARCH_METHODS:
+                            log.warn.once(
+                                f"Quantizer: `scale_search='{method.value}'` requires CUDA weights; "
+                                f"falling back to dense objective."
+                            )
+                            if method == ScaleSearchConfig.MARLIN_MSE:
+                                effective_method = ScaleSearchConfig.MSE
+                            elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                                effective_method = ScaleSearchConfig.ACTIVATION
+                            else:
+                                effective_method = ScaleSearchConfig.HESSIAN
+                        errors = self._scale_search_error(
+                            error,
+                            method=effective_method,
+                            mse=mse,
+                            hessian=prepared_hessian,
+                        )
                     # torch.min returns the first index on ties. Combining one
                     # winner per chunk with a strict comparison across chunks
                     # exactly preserves the scalar loop's first-candidate rule.
@@ -667,18 +1005,87 @@ class Quantizer(nn.Module):
                     end = min(start + chunk_size, candidate_count)
                     scale1 = scale_all[start:end]
                     zero1 = zero_all[start:end]
-                    error = self._quantize_scale_search_candidates(
-                        x_batch.expand(end - start, -1, -1, -1),
-                        scale1.unsqueeze(-1),
-                        zero1.unsqueeze(-1),
-                        maxq_value=maxq_value,
-                    )
-                    errors = self._scale_search_error_batched(
-                        error,
-                        method=method,
-                        mse=mse,
-                        hessian=prepared_hessian,
-                    )
+                    if (
+                        method in MARLIN_SCALE_SEARCH_METHODS
+                        and x.is_cuda
+                        and group_size >= 64
+                    ):
+                        # Per-group K must be at least the Marlin GEMM's minimum
+                        # thread_k tile (64); otherwise the temporary one-group
+                        # MarlinLinear cannot be launched.
+                        from ..nn_modules.qlinear.marlin import MarlinLinear
+
+                        if method == ScaleSearchConfig.MARLIN_MSE:
+                            fallback_method = ScaleSearchConfig.MSE
+                        elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                            fallback_method = ScaleSearchConfig.ACTIVATION
+                        else:
+                            fallback_method = ScaleSearchConfig.HESSIAN
+
+                        try:
+                            bits = self._effective_scale_search_bits(maxq_value)
+                            if bits in MarlinLinear.SUPPORTS_BITS and group_size in MarlinLinear.SUPPORTS_GROUP_SIZE:
+                                errors = self._marlin_scale_search_loss(
+                                    x,
+                                    scale1,
+                                    zero1,
+                                    prepared_hessian,
+                                    method=method,
+                                    bits=bits,
+                                    group_size=group_size,
+                                    sym=self.qcfg.sym,
+                                    dtype=x.dtype,
+                                    pack_dtype=getattr(self.qcfg, "pack_dtype", torch.int32),
+                                    maxq_value=maxq_value,
+                                    mse=mse,
+                                )
+                            else:
+                                raise RuntimeError(
+                                    f"Marlin scale search unsupported for bits={bits}, group_size={group_size}."
+                                )
+                        except Exception as exc:
+                            log.warn.once(
+                                f"Marlin scale search ({method.value}) failed, falling back to "
+                                f"{fallback_method.value}: {exc}"
+                            )
+                            effective_method = fallback_method
+                            error = self._quantize_scale_search_candidates(
+                                x_batch.expand(end - start, -1, -1, -1),
+                                scale1.unsqueeze(-1),
+                                zero1.unsqueeze(-1),
+                                maxq_value=maxq_value,
+                            )
+                            errors = self._scale_search_error_batched(
+                                error,
+                                method=effective_method,
+                                mse=mse,
+                                hessian=prepared_hessian,
+                            )
+                    else:
+                        error = self._quantize_scale_search_candidates(
+                            x_batch.expand(end - start, -1, -1, -1),
+                            scale1.unsqueeze(-1),
+                            zero1.unsqueeze(-1),
+                            maxq_value=maxq_value,
+                        )
+                        effective_method = method
+                        if method in MARLIN_SCALE_SEARCH_METHODS:
+                            log.warn.once(
+                                f"Quantizer: `scale_search='{method.value}'` requires CUDA weights; "
+                                f"falling back to dense objective."
+                            )
+                            if method == ScaleSearchConfig.MARLIN_MSE:
+                                effective_method = ScaleSearchConfig.MSE
+                            elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                                effective_method = ScaleSearchConfig.ACTIVATION
+                            else:
+                                effective_method = ScaleSearchConfig.HESSIAN
+                        errors = self._scale_search_error_batched(
+                            error,
+                            method=effective_method,
+                            mse=mse,
+                            hessian=prepared_hessian,
+                        )
                     chunk_best, chunk_index = errors.min(dim=0)
                     gather_index = chunk_index.unsqueeze(0)
                     chunk_scale = scale1.gather(0, gather_index).squeeze(0)

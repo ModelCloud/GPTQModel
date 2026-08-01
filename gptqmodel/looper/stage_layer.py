@@ -310,6 +310,9 @@ def _replay_layer_outputs(
                 replay_prev_devices,
                 fallback_modules=full,
             )
+        cleanup_native_replay = getattr(processor, "cleanup_native_replay", None)
+        if callable(cleanup_native_replay) and full is not None:
+            cleanup_native_replay(full)
         replay_pb.close()
 
     if region_timer is not None:
@@ -788,6 +791,12 @@ def run_layer_stage(
                         source=f"stage_layer post_process layer={layer_index}",
                     )
 
+                # Ensure any temporary packed native-replay module is restored to the
+                # dense leaf before post_quantize() finalizes/packs the layer.
+                cleanup_native_replay = getattr(processor, "cleanup_native_replay", None)
+                if callable(cleanup_native_replay) and full is not None:
+                    cleanup_native_replay(full)
+
                 if is_embeddings_module:
                     looper.gptq_model.post_quantize(module)
                 else:
@@ -836,12 +845,22 @@ def run_layer_stage(
                         if isinstance(actual_module, torch.nn.Module):
                             clear_fused_group_forward_caches(actual_module)
 
-                        get_device_new(
-                            actual_module,
-                            recursive=True,
-                            assert_mode=True,
-                            expected=CPU,
-                        )
+                        try:
+                            get_device_new(
+                                actual_module,
+                                recursive=True,
+                                assert_mode=True,
+                                expected=CPU,
+                            )
+                        except AssertionError:
+                            param_devices = [(n, str(p.device)) for n, p in actual_module.named_parameters(recurse=True)]
+                            buffer_devices = [(n, str(b.device)) for n, b in actual_module.named_buffers(recurse=True)]
+                            log.error(
+                                f"Device assert failed for {getattr(module, 'full_name', getattr(module, 'name', '?'))}: "
+                                f"actual_module type={type(actual_module).__name__} device={get_device(actual_module)} "
+                                f"params={param_devices} buffers={buffer_devices}"
+                            )
+                            raise
                         with looper._quant_device_lock:
                             key = getattr(module, "full_name", getattr(module, "name", None))
                             if key is not None:

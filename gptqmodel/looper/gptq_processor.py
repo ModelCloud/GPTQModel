@@ -6,7 +6,7 @@
 import copy
 import threading
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,12 @@ from torch.nn import Module
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import CPU
+from ..models._const import CPU, DEVICE
+from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..utils.backend import BACKEND
+from ..utils.importer import select_quant_linear
+from ..utils.marlin import replace_parameter
+from ..utils.model import create_quant_module, pack_module, recurse_getattr, recurse_setattr
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -54,7 +59,6 @@ from ..quantization.diagnostics import (
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
@@ -736,6 +740,236 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
+    @staticmethod
+    def _infer_linear_module_shape(module: nn.Module) -> Optional[Tuple[int, int, bool]]:
+        """Return (in_features, out_features, has_bias) for a leaf linear module."""
+        bias = getattr(module, "bias", None) is not None
+        if isinstance(module, nn.Linear):
+            return module.in_features, module.out_features, bias
+        if type(module).__name__ == "Conv1D" and hasattr(module, "weight") and module.weight.dim() == 2:
+            return module.weight.shape[0], module.weight.shape[1], bias
+        return None
+
+    def _pack_into_tmp_qmodule(
+        self,
+        module: NamedModule,
+        g,
+        q_scales: torch.Tensor,
+        q_zeros: torch.Tensor,
+        q_g_idx: torch.Tensor,
+        register_buffers: bool = False,
+    ) -> Optional[nn.Module]:
+        """Pack GPTQ q_scales/q_zeros/q_g_idx into a temporary packable kernel module.
+
+        The dense leaf is temporarily moved to the CPU because ``pack_original()``
+        performs CPU-side packing arithmetic. On success the leaf is left on the CPU
+        so it can be restored by ``cleanup_native_replay``; on failure it is moved
+        back to its original device before returning ``None``.
+        """
+        original = module.module
+        shape = self._infer_linear_module_shape(original)
+        if shape is None:
+            return None
+        in_f, out_f, has_bias = shape
+
+        original_device = get_device(original)
+
+        # pack_original() does CPU arithmetic and requires all operands on the same device.
+        original = original.to(CPU)
+        module.module = original
+
+        def _restore_original():
+            nonlocal original
+            if original is not None:
+                original = original.to(original_device)
+                module.module = original
+
+        packable_cls: Type[BaseQuantLinear] = self.gptq_model.qlinear_kernel
+        if not (isinstance(packable_cls, type) and issubclass(packable_cls, PackableQuantLinear)):
+            try:
+                packable_cls = select_quant_linear(
+                    bits=self.qcfg.runtime_bits,
+                    group_size=self.qcfg.group_size,
+                    desc_act=self.qcfg.desc_act,
+                    sym=self.qcfg.sym,
+                    device=DEVICE.CPU,
+                    backend=BACKEND.GPTQ_TORCH,
+                    pack=True,
+                    dynamic=self.qcfg.dynamic,
+                    pack_dtype=self.qcfg.pack_dtype,
+                    format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
+                    quant_method=self.qcfg.method,
+                )
+            except Exception as exc:
+                log.warn(f"Native replay: could not select a packable fallback kernel: {exc}")
+                _restore_original()
+                return None
+
+        weight_dtype = getattr(original.weight, "dtype", torch.float16)
+        tmp = packable_cls(
+            bits=self.qcfg.runtime_bits,
+            group_size=self.qcfg.group_size,
+            desc_act=self.qcfg.desc_act,
+            sym=self.qcfg.sym,
+            in_features=in_f,
+            out_features=out_f,
+            bias=has_bias,
+            pack_dtype=self.qcfg.pack_dtype,
+            backend=BACKEND.GPTQ_TORCH,
+            name=module.full_name,
+            lm_head_name=self.gptq_model.lm_head,
+            dtype=weight_dtype,
+            register_buffers=register_buffers,
+        )
+        try:
+            tmp.pack_original(linear=original, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+        except Exception as exc:
+            log.warn(f"Native replay: failed to pack into {packable_cls.__name__}: {exc}")
+            _restore_original()
+            return None
+
+        # pack_original() may reuse the original bias/scales/g_idx tensors when dtype/device match.
+        # Clone the small metadata tensors so the temporary replay module can be moved to the
+        # replay device without mutating the original dense module or the saved state tensors.
+        for attr in ("bias", "scales", "g_idx"):
+            tensor = getattr(tmp, attr, None)
+            if tensor is not None:
+                setattr(tmp, attr, tensor.detach().clone())
+
+        return tmp
+
+    def _try_build_marlin_replay_module(
+        self,
+        module: NamedModule,
+        g,
+        device: torch.device,
+        tmp: nn.Module,
+    ) -> Optional[nn.Module]:
+        """Build a Marlin module from a temporary packed module for native-kernel replay."""
+        if device.type != "cuda":
+            return None
+
+        try:
+            marlin_cls = select_quant_linear(
+                bits=self.qcfg.runtime_bits,
+                group_size=self.qcfg.group_size,
+                desc_act=self.qcfg.desc_act,
+                sym=self.qcfg.sym,
+                device=DEVICE.CUDA,
+                backend=BACKEND.GPTQ_MARLIN,
+                pack=False,
+                dynamic=self.qcfg.dynamic,
+                pack_dtype=self.qcfg.pack_dtype,
+                format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
+                quant_method=self.qcfg.method,
+            )
+        except Exception as exc:
+            log.warn(f"Native replay: Marlin kernel not available for replay: {exc}")
+            return None
+
+        if not (isinstance(marlin_cls, type) and hasattr(marlin_cls, "post_init")):
+            return None
+
+        original = module.module
+        shape = self._infer_linear_module_shape(original)
+        if shape is None:
+            return None
+        in_f, out_f, has_bias = shape
+        weight_dtype = getattr(original.weight, "dtype", torch.float16)
+
+        try:
+            marlin = marlin_cls(
+                bits=self.qcfg.runtime_bits,
+                group_size=self.qcfg.group_size,
+                desc_act=self.qcfg.desc_act,
+                sym=self.qcfg.sym,
+                in_features=in_f,
+                out_features=out_f,
+                bias=has_bias,
+                pack_dtype=self.qcfg.pack_dtype,
+                backend=BACKEND.GPTQ_MARLIN,
+                name=module.full_name,
+                lm_head_name=self.gptq_model.lm_head,
+                dtype=weight_dtype,
+            )
+            replace_parameter(marlin, "qweight", tmp.qweight)
+            replace_parameter(marlin, "scales", tmp.scales)
+            replace_parameter(marlin, "g_idx", tmp.g_idx)
+            if has_bias and getattr(tmp, "bias", None) is not None:
+                marlin.bias = tmp.bias
+            marlin = marlin.to(device)
+            marlin.post_init()
+        except Exception as exc:
+            log.warn(f"Native replay: failed to initialize Marlin replay module: {exc}")
+            return None
+        return marlin
+
+    def _prepare_native_replay_qmodule(
+        self,
+        module: NamedModule,
+        g,
+        device: torch.device,
+    ) -> Optional[nn.Module]:
+        """Build a packed native-kernel module for post-quantization layer replay.
+
+        The dense leaf in ``module.module`` is temporarily moved to the CPU for packing
+        by ``_pack_into_tmp_qmodule``. The model tree leaf is swapped to the packed
+        module and must be restored with ``cleanup_native_replay``.
+        """
+        if not getattr(self.qcfg, "native_kernel_replay", False):
+            return None
+        if self.gptq_model is None:
+            return None
+        if self.calculate_w_wq_diff:
+            return None
+        if getattr(module.module, "_fused_group_forward", None) is not None:
+            return None
+
+        module.stream_sync()
+        with self.lock:
+            q_scales = module.state.get("q_scales")
+            q_zeros = module.state.get("q_zeros")
+            q_g_idx = module.state.get("q_g_idx")
+        if q_scales is None or q_zeros is None or q_g_idx is None:
+            return None
+
+        tmp = self._pack_into_tmp_qmodule(module, g, q_scales, q_zeros, q_g_idx, register_buffers=False)
+        if tmp is None:
+            return None
+
+        native_qmodule = self._try_build_marlin_replay_module(module, g, device, tmp)
+        if native_qmodule is not None:
+            del tmp
+            return native_qmodule
+
+        # Fallback: run replay through the packable TorchLinear kernel.
+        tmp = tmp.to(device)
+        post_init = getattr(tmp, "post_init", None)
+        if callable(post_init):
+            try:
+                post_init()
+            except Exception as exc:
+                log.warn(f"Native replay: failed to post_init fallback kernel: {exc}")
+                return None
+        return tmp
+
+    def cleanup_native_replay(self, full: Dict[str, NamedModule]) -> None:
+        """Restore the original dense module after native-kernel replay."""
+        if self.gptq_model is None:
+            return
+        for module in full.values():
+            if not isinstance(module, NamedModule):
+                continue
+            qmodule = module.state.pop("_native_replay_qmodule", None)
+            if qmodule is None:
+                continue
+            original = module.state.pop("_native_replay_restore_module", None)
+            if original is None:
+                original = module.module
+            with parent_module_lock(module.full_name):
+                recurse_setattr(self.gptq_model.model, module.full_name, original)
+            del qmodule
+
     def process(
         self,
         module: NamedModule,
@@ -986,6 +1220,27 @@ class GPTQProcessor(LoopProcessor):
         # single largest deallocation of vram happens here
         _set_module_weight(module, wq)
 
+        replay_device = expected_device if expected_device is not None else device
+        replay_qmodule = self._prepare_native_replay_qmodule(module, g, replay_device)
+        if replay_qmodule is not None:
+            log.debug(
+                f"Native replay prepared for {module.full_name}: "
+                f"original={type(module.module).__name__} on {get_device(module.module)}, "
+                f"qmodule={type(replay_qmodule).__name__} on {get_device(replay_qmodule)}"
+            )
+            with self.lock:
+                module.state["_native_replay_restore_module"] = module.module
+                module.state["_native_replay_qmodule"] = replay_qmodule
+            # Sibling modules of the same subset are processed concurrently, and
+            # the rest of this file guards model-tree leaf replacements with
+            # parent_module_lock for exactly that reason.
+            with parent_module_lock(module.full_name):
+                recurse_setattr(self.gptq_model.model, module.full_name, replay_qmodule)
+            log.debug(
+                f"Native replay swap: {module.full_name} now in model tree: "
+                f"{type(recurse_getattr(self.gptq_model.model, module.full_name)).__name__}"
+            )
+
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Creates the quantized module and packs the saved GPTQ tensors into it."""
@@ -995,6 +1250,7 @@ class GPTQProcessor(LoopProcessor):
 
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
+        self.cleanup_native_replay({module.full_name: module})
         with (self.lock):
             # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
             if self.calculate_w_wq_diff:
