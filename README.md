@@ -458,7 +458,8 @@ model.save(quant_path)
 ##### FP8 Example: Llama 3.2 1B Instruct
 
 ```py
-from gptqmodel import BACKEND, FP8Config, GPTQModel
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import FP8Config
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
@@ -478,7 +479,8 @@ model.save(quant_path)
 
 ```py
 from datasets import load_dataset
-from gptqmodel import BACKEND, EXL3Config, GPTQModel
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import EXL3Config
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-EXL3"
