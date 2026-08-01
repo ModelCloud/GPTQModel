@@ -3636,6 +3636,18 @@ class GPTQConfig(PreProcessorConfig):
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
 
+        # Small group sizes interact badly with activation-aware reordering:
+        # the calibration Hessian is overfit when each group contains only a
+        # few columns, so we disable GAR automatically.
+        if self.act_group_aware and self.group_size is not None and self.group_size <= 32:
+            log.warn(
+                f"QuantizeConfig: group_size={self.group_size} <= 32; auto-disabling "
+                f"`act_group_aware` because activation-aware reordering overfits the "
+                f"calibration Hessian for small groups. Set `act_group_aware=False` "
+                f"explicitly to silence this warning."
+            )
+            self.act_group_aware = False
+
     def _normalize_scale_search(self) -> None:
         """Resolve the new strategy selector and the legacy MSE exponent together."""
 
