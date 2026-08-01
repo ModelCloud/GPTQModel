@@ -108,10 +108,17 @@ def _run_config(
         traceback.print_exc()
         return {"label": label, "error": str(exc)}
 
+    # Record the effective act_group_aware; the small-group safeguard may have
+    # changed it from the requested value during quantization.
+    effective_act_group_aware = act_group_aware
+    if getattr(test, "model", None) is not None and getattr(test.model, "quantize_config", None) is not None:
+        effective_act_group_aware = test.model.quantize_config.act_group_aware
+
     return {
         "label": label,
         "group_size": group_size,
-        "act_group_aware": act_group_aware,
+        "act_group_aware": effective_act_group_aware,
+        "act_group_aware_requested": act_group_aware,
         "desc_act": desc_act,
         "static_groups": static_groups,
         "damp_percent": damp_percent,

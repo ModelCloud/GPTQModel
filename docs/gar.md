@@ -53,16 +53,19 @@ quantization math or packing.
 
 ## Automatic safeguard
 
-Starting with this release, `act_group_aware` is automatically disabled when
-`group_size <= 32`. A warning is emitted so the behavior is visible:
+Starting with this release, `act_group_aware` is automatically disabled at
+quantization time for `group_size <= 32` when it was not explicitly requested.
+A warning is emitted so the behavior is visible:
 
 ```text
 QuantizeConfig: group_size=32 <= 32; auto-disabling `act_group_aware` because
 activation-aware reordering overfits the calibration Hessian for small groups.
 ```
 
-If you still want GAR with `group_size <= 32`, set `act_group_aware=True` **and**
-`group_size > 32`.
+If you explicitly set `act_group_aware=True`, the safeguard is bypassed and GAR
+remains enabled. This is useful for experiments and tests, but for production
+workloads with `group_size <= 32` the empirical results recommend leaving GAR
+off.
 
 ## References
 

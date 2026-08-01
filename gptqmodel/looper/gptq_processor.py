@@ -142,6 +142,7 @@ def clone_gptq_config_for_module(
         act_group_aware_override = dynamic_overrides.get("act_group_aware", None)
         if act_group_aware_override is not None:
             qcfg_clone.act_group_aware = act_group_aware_override
+            qcfg_clone._act_group_aware_user_value = act_group_aware_override
         qcfg_clone.damp_percent = dynamic_overrides.get("damp_percent", qcfg_clone.damp_percent)
         qcfg_clone.static_groups = dynamic_overrides.get("static_groups", qcfg_clone.static_groups)
         fallback_override = dynamic_overrides.get("fallback", None)
@@ -196,6 +197,19 @@ class GPTQProcessor(LoopProcessor):
         """Initializes GPTQ processing and optional weight-delta tracking."""
 
         log_scale_search_config(qcfg)
+
+        # Small group sizes interact badly with activation-aware reordering:
+        # the calibration Hessian is overfit when each group contains only a
+        # few columns, so we disable GAR automatically unless the user explicitly
+        # requested it.
+        if qcfg._normalize_act_group_aware_for_small_groups():
+            log.warn(
+                f"QuantizeConfig: group_size={qcfg.group_size} <= 32; auto-disabling "
+                f"`act_group_aware` because activation-aware reordering overfits the "
+                f"calibration Hessian for small groups. Set `act_group_aware=False` "
+                f"explicitly to silence this warning."
+            )
+
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -298,6 +312,17 @@ class GPTQProcessor(LoopProcessor):
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
+
+        # Apply the small-group GAR safeguard to per-module dynamic clones too.
+        if qcfg_clone._normalize_act_group_aware_for_small_groups():
+            if not getattr(self, "_gar_small_group_warned", False):
+                log.warn(
+                    f"QuantizeConfig: group_size={qcfg_clone.group_size} <= 32; "
+                    f"auto-disabling `act_group_aware` because activation-aware "
+                    f"reordering overfits the calibration Hessian for small groups. "
+                    f"Set `act_group_aware=False` explicitly to silence this warning."
+                )
+                self._gar_small_group_warned = True
 
         region_timer = kwargs.get("region_timer", None)
 

@@ -348,6 +348,22 @@ class GPTQ:
         if not getattr(self.qcfg, "act_group_aware", False):
             return
 
+        # Small group sizes interact badly with activation-aware reordering:
+        # the calibration Hessian is overfit when each group contains only a
+        # few columns, so we disable GAR automatically unless the user explicitly
+        # requested it.
+        if self.qcfg._normalize_act_group_aware_for_small_groups():
+            log.warn(
+                f"QuantizeConfig: group_size={self.qcfg.group_size} <= 32; auto-disabling "
+                f"`act_group_aware` because activation-aware reordering overfits the "
+                f"calibration Hessian for small groups. Set `act_group_aware=False` "
+                f"explicitly to silence this warning."
+            )
+
+        # Re-check after the safeguard in case it disabled GAR.
+        if not getattr(self.qcfg, "act_group_aware", False):
+            return
+
         group_size = int(getattr(self.qcfg, "group_size", -1) or -1)
         if group_size <= 0:
             raise ValueError(

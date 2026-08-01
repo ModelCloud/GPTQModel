@@ -821,7 +821,11 @@ Set the `act_group_aware` parameter to `True` and disable the default activation
 quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ```
 
-> **Accuracy note:** GAR is beneficial at `group_size=128`, but at `group_size <= 32` it can overfit the calibration Hessian and hurt downstream task scores. GPT-QModel therefore auto-disables `act_group_aware` when `group_size <= 32` and logs a warning. See [docs/gar.md](docs/gar.md) for the empirical analysis and the task-score table.
+> **Accuracy note:** GAR is beneficial at `group_size=128`, but at `group_size <= 32` it can overfit the
+> calibration Hessian and hurt downstream task scores. GPT-QModel therefore auto-disables
+> `act_group_aware` for `group_size <= 32` when `act_group_aware` is left at its default, and logs a warning.
+> Explicitly setting `act_group_aware=True` overrides the safeguard. See [docs/gar.md](docs/gar.md) for the
+> empirical analysis and the task-score table.
 
 
 ### RTN Embedding-Only Quantization

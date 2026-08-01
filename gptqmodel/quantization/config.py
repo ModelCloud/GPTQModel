@@ -3605,6 +3605,10 @@ class GPTQConfig(PreProcessorConfig):
         act_group_aware_user_value = self.act_group_aware
         super().__post_init__()
 
+        # Preserve the user's explicit choice so quantization-time safeguards can
+        # distinguish "defaulted to True" from "explicitly requested True".
+        self._act_group_aware_user_value = act_group_aware_user_value
+
         self.adjacent_model = _normalize_adjacent_model(self.adjacent_model)
         if self.adjacent_model is not None and self.method != METHOD.GPTQ:
             raise ValueError(
@@ -3636,17 +3640,28 @@ class GPTQConfig(PreProcessorConfig):
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
 
-        # Small group sizes interact badly with activation-aware reordering:
-        # the calibration Hessian is overfit when each group contains only a
-        # few columns, so we disable GAR automatically.
-        if self.act_group_aware and self.group_size is not None and self.group_size <= 32:
-            log.warn(
-                f"QuantizeConfig: group_size={self.group_size} <= 32; auto-disabling "
-                f"`act_group_aware` because activation-aware reordering overfits the "
-                f"calibration Hessian for small groups. Set `act_group_aware=False` "
-                f"explicitly to silence this warning."
-            )
+    def _act_group_aware_is_default(self) -> bool:
+        """Return True when `act_group_aware` was not explicitly set by the user."""
+        return getattr(self, "_act_group_aware_user_value", None) is None
+
+    def _should_disable_act_group_aware_for_small_groups(self) -> bool:
+        """Return True when GAR should be disabled because the group size is small."""
+        return (
+            self._act_group_aware_is_default()
+            and self.act_group_aware
+            and self.group_size is not None
+            and 0 < self.group_size <= 32
+        )
+
+    def _normalize_act_group_aware_for_small_groups(self) -> bool:
+        """Disable GAR for small positive group sizes when not explicitly requested.
+
+        Returns True if the value was changed.
+        """
+        if self._should_disable_act_group_aware_for_small_groups():
             self.act_group_aware = False
+            return True
+        return False
 
     def _normalize_scale_search(self) -> None:
         """Resolve the new strategy selector and the legacy MSE exponent together."""
