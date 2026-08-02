@@ -606,7 +606,7 @@ def create_quant_module(
 
     # GPTQ modules need the checkpoint format to select between the continuous
     # (gptq/gptq_v2) and planar (gptq_p) packed layouts.
-    if issubclass(linear_cls, GPTQQuantLinear) and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
+    if issubclass(linear_cls, GPTQQuantLinear):
         tmp_init_kwargs.setdefault("format", format)
 
     # when loading a quantized model, device is the target passed through the GPT-QModel load path
@@ -1301,6 +1301,25 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
         # have persistent buffers, otherwise we will get OOM
         model.device_tensors = device_tensors
+
+    # The continuous and planar (gptq_p) 3-bit word layouts are not
+    # interchangeable, and a 3-bit module is only planar when its constructor
+    # received `format=gptq_p`. Fail loudly if any construction site dropped
+    # the format instead of silently decoding the wrong layout.
+    if quantize_config is not None:
+        expect_planar3 = resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ_P
+        for name, submodule in model.named_modules():
+            if (
+                isinstance(submodule, GPTQQuantLinear)
+                and submodule.bits == 3
+                and submodule.planar != expect_planar3
+            ):
+                raise ValueError(
+                    f"`{name}`: 3-bit quant module was constructed with planar={submodule.planar} "
+                    f"but the checkpoint format is `{quantize_config.format}`; the continuous and "
+                    f"planar 3-bit layouts are not interchangeable. Pass `format=` when "
+                    "constructing the module."
+                )
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():

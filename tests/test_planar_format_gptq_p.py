@@ -177,6 +177,18 @@ def test_gptq_p_rejects_unsupported_bits():
         )
 
 
+@pytest.mark.parametrize("expect_planar", [True, False])
+def test_post_init_rejects_3bit_layout_format_mismatch(expect_planar: bool):
+    from gptqmodel.utils.model import gptqmodel_post_init
+
+    module_format = FORMAT.GPTQ_V2 if expect_planar else FORMAT.GPTQ_P
+    cfg_format = FORMAT.GPTQ_P if expect_planar else FORMAT.GPTQ_V2
+    model = nn.Sequential(_new_module(3, module_format))
+    cfg = QuantizeConfig(bits=3, format=cfg_format)
+    with pytest.raises(ValueError, match="not interchangeable"):
+        gptqmodel_post_init(model, use_act_order=False, quantize_config=cfg)
+
+
 @pytest.mark.parametrize("bits", [5, 6, 7])
 def test_config_auto_routes_planar_bits_to_gptq_p(bits: int):
     cfg = QuantizeConfig(bits=bits)

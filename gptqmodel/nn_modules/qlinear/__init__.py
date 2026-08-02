@@ -740,8 +740,8 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                  register_buffers_in_features: int = None,
                  register_buffers_out_features: int = None,
                  dtype: Optional[t.dtype] = None,
+                 format: Optional[FORMAT] = None,
                  **kwargs):
-        format = kwargs.pop("format", None)
         super().__init__(
             bits=bits,
             group_size=group_size,
