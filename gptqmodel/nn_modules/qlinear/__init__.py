@@ -896,12 +896,12 @@ class PackableQuantLinear(GPTQQuantLinear):
         ):
             return
 
-        device = self._wf_device()
-
         if self.planar:
             # Planar dequantization unpacks bit planes directly and does not
             # use wf shift buffers.
             return
+
+        device = self._wf_device()
 
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
@@ -1251,12 +1251,19 @@ class PackableQuantLinear(GPTQQuantLinear):
         # Each block writes a disjoint row range of the preallocated qweight and
         # only reads the shared W/scales/zeros tensors, so blocks can run on a
         # thread pool. Threads only help on free-threaded (GIL=0) Python builds;
-        # keep the sequential default and enable the pool only through an
-        # explicit GPTQMODEL_PACK_THREADS opt-in.
-        if env_threads:
-            workers_eff = max(1, min(pack_block_threads, total_blocks))
-        else:
-            workers_eff = 1
+        # keep the sequential default and enable the pool only through the
+        # dedicated GPTQMODEL_PACK_PY_THREADS opt-in (GPTQMODEL_PACK_THREADS
+        # keeps its existing meaning of sizing the native extension only).
+        py_threads_env = os.getenv("GPTQMODEL_PACK_PY_THREADS")
+        workers_eff = 1
+        if py_threads_env:
+            try:
+                workers_eff = max(1, min(int(py_threads_env), total_blocks))
+            except ValueError:
+                log.warning(
+                    "pack_block: invalid GPTQMODEL_PACK_PY_THREADS `%s`; using sequential packing.",
+                    py_threads_env,
+                )
         if workers_eff == 1:
             for i0, i1 in ranges:
                 _process_block(i0, i1)

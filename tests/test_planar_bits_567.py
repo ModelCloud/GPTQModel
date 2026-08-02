@@ -111,7 +111,7 @@ def test_packer_parity_and_threaded_pack(bits: int):
     m_threaded = _new_module(bits)
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.setenv("GPTQMODEL_PACK_THREADS", "4")
+        monkeypatch.setenv("GPTQMODEL_PACK_PY_THREADS", "4")
         m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
     finally:
         monkeypatch.undo()
