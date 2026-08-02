@@ -492,6 +492,7 @@ def _resolve_export_format(method: METHOD, export: Optional[ExportSpec]) -> FORM
         mapping = {
             FORMAT.GPTQ.value: FORMAT.GPTQ,
             FORMAT.GPTQ_V2.value: FORMAT.GPTQ_V2,
+            FORMAT.GPTQ_P.value: FORMAT.GPTQ_P,
             FORMAT.MARLIN.value: FORMAT.MARLIN,
             FORMAT.BITBLAS.value: FORMAT.BITBLAS,
         }

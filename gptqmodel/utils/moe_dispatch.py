@@ -282,6 +282,10 @@ def _try_dequant_gptq_weight(
     pack_dtype_bits = proj.pack_dtype_bits
     if bits not in (2, 3, 4, 8) or pack_dtype_bits != 32:
         return None
+    # Planar (gptq_p) 3-bit words are incompatible with the continuous-layout
+    # Triton decoder; planar 2/4/8 words are bit-identical to continuous.
+    if bits == 3 and getattr(proj, "planar", False):
+        return None
 
     try:
         from gptqmodel.nn_modules.triton_utils.dequant import dequant

@@ -27,6 +27,12 @@ from ..quantization.dtype import (
     dequantize_fp8,
 )
 from ..utils.logger import setup_logger
+from ..utils.planar_packing import (
+    PLANAR_BITS,
+    planar_pack_cols,
+    planar_unpack_cols,
+    planar_unpack_rows,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -714,9 +720,11 @@ def detect_format(model_path: Path, config: dict) -> str:
     raise ValueError("Unable to detect quantization format for model")
 
 
-def unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
-    if bits == 3:
+def unpack_cols(packed: torch.Tensor, bits: int, *, planar: bool = False) -> torch.Tensor:
+    if bits == 3 and not planar:
         return _unpack_cols_3bit(packed)
+    if bits in PLANAR_BITS or (planar and bits == 3):
+        return planar_unpack_cols(packed, bits)
 
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
@@ -729,9 +737,11 @@ def unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
     return result
 
 
-def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype) -> torch.Tensor:
-    if bits == 3:
+def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype, planar: bool = False) -> torch.Tensor:
+    if bits == 3 and not planar:
         return _pack_cols_3bit(values, pack_dtype=pack_dtype)
+    if bits in PLANAR_BITS or (planar and bits == 3):
+        return planar_pack_cols(values, bits, pack_dtype=pack_dtype)
 
     pack_bits = torch.empty((), dtype=pack_dtype).element_size() * 8
     pack_factor = pack_bits // bits
@@ -752,9 +762,11 @@ def pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype) -> to
     return packed
 
 
-def unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
-    if bits == 3:
+def unpack_rows(packed: torch.Tensor, bits: int, *, planar: bool = False) -> torch.Tensor:
+    if bits == 3 and not planar:
         return _unpack_rows_3bit(packed)
+    if bits in PLANAR_BITS or (planar and bits == 3):
+        return planar_unpack_rows(packed, bits)
 
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
@@ -885,22 +897,22 @@ def _uses_gptq_v1_qzeros(config: dict) -> bool:
     return checkpoint_format in {"gptq", "gemm"}
 
 
-def _shift_gptq_qzeros(qzeros: torch.Tensor, bits: int, *, delta: int) -> torch.Tensor:
+def _shift_gptq_qzeros(qzeros: torch.Tensor, bits: int, *, delta: int, planar: bool = False) -> torch.Tensor:
     # GPTQ v1 stores qzeros with a per-field -1 offset. For 3-bit checkpoints,
     # some logical values straddle adjacent packed words, so a packed-word add/sub
     # is not equivalent to shifting each decoded zero-point. Decode the fields,
     # shift them in logical space, then repack into the original storage dtype.
-    zeros = unpack_cols(qzeros, bits)
+    zeros = unpack_cols(qzeros, bits, planar=planar)
     shifted = (zeros + delta) & ((1 << bits) - 1)
-    return pack_cols(shifted, bits, pack_dtype=qzeros.dtype)
+    return pack_cols(shifted, bits, pack_dtype=qzeros.dtype, planar=planar)
 
 
-def _correct_gptq_v1_qzeros(qzeros: torch.Tensor, bits: int) -> torch.Tensor:
-    return _shift_gptq_qzeros(qzeros, bits, delta=1)
+def _correct_gptq_v1_qzeros(qzeros: torch.Tensor, bits: int, *, planar: bool = False) -> torch.Tensor:
+    return _shift_gptq_qzeros(qzeros, bits, delta=1, planar=planar)
 
 
-def _revert_gptq_v1_qzeros_correction(qzeros: torch.Tensor, bits: int) -> torch.Tensor:
-    return _shift_gptq_qzeros(qzeros, bits, delta=-1)
+def _revert_gptq_v1_qzeros_correction(qzeros: torch.Tensor, bits: int, *, planar: bool = False) -> torch.Tensor:
+    return _shift_gptq_qzeros(qzeros, bits, delta=-1, planar=planar)
 
 
 def convert_fp8_shard(
@@ -1355,10 +1367,16 @@ def convert_gptq_file(
         g_idx = buf["g_idx"].to(torch.long)
 
         bits = config.get("bits", 4)
-        if _uses_gptq_v1_qzeros(config):
-            qzeros = _correct_gptq_v1_qzeros(qzeros, bits)
-        weight_int = unpack_rows(qweight, bits)
-        zeros = unpack_cols(qzeros, bits)
+        format_value = str(
+            config.get("checkpoint_format") or config.get("format") or ""
+        ).strip().lower()
+        # 5/6/7-bit only exists planar with v2 zero semantics, so the format
+        # label is not trusted for those widths (it may be missing entirely).
+        planar = format_value == "gptq_p" or bits in PLANAR_BITS
+        if _uses_gptq_v1_qzeros(config) and not planar:
+            qzeros = _correct_gptq_v1_qzeros(qzeros, bits, planar=planar)
+        weight_int = unpack_rows(qweight, bits, planar=planar)
+        zeros = unpack_cols(qzeros, bits, planar=planar)
 
         scales_full = scales.to(torch.float32)[g_idx]
         zeros_full = zeros.to(torch.float32)[g_idx]

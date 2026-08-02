@@ -112,6 +112,9 @@ class FORMAT(str, Enum):
     GPTQ = "gptq"
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
+    # planar (split-plane, word-aligned high-plane) layout; distinct from the
+    # continuous gptq/gptq_v2 layouts. Zeros use v2 semantics on disk.
+    GPTQ_P = "gptq_p"
     GGUF = "gguf"
     FP8 = "fp8"
     BITSANDBYTES = "bitsandbytes"
@@ -661,7 +664,7 @@ def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: 
         raise ValueError(f"QuantizeConfig: unsupported bits specification `{bits}`.")
 
     normalized_width = normalized.bits if isinstance(normalized, GGUFBits) else normalized
-    valid_bit_widths = [1, 2, 3, 4, 5, 6, 8]
+    valid_bit_widths = [1, 2, 3, 4, 5, 6, 7, 8]
     if normalized_width not in valid_bit_widths:
         raise ValueError(f"QuantizeConfig: `bits` must resolve to one of `{valid_bit_widths}`.")
 
@@ -1533,6 +1536,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
+        FORMAT.GPTQ_P,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
@@ -1570,6 +1574,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
 GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
+    FORMAT.GPTQ_P,
     FORMAT.MARLIN,
     FORMAT.BITBLAS,
 )
@@ -1603,6 +1608,7 @@ EXL3_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
+    FORMAT.GPTQ_P,
     FORMAT.GEMM,
     FORMAT.GEMV,
     FORMAT.GEMV_FAST,
@@ -1615,6 +1621,7 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
     FORMAT.GPTQ_V2: METHOD.GPTQ,
+    FORMAT.GPTQ_P: METHOD.GPTQ,
     FORMAT.FP8: METHOD.FP8,
     FORMAT.BITSANDBYTES: METHOD.BITSANDBYTES,
     FORMAT.EXL3: METHOD.EXL3,
@@ -2690,7 +2697,7 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
 
 @dataclass
 class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
-    bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 8]})
+    bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 7, 8]})
 
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
     dynamic: Optional[Dict[str, Dict[str, Union[int, str, bool, GGUFBits]]]] = field(default=None)
@@ -2954,6 +2961,28 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         valid_bit_widths = fields_info[0].metadata["choices"]
         if quant_bits_width(self.bits) not in valid_bit_widths:
             raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
+
+        # 5/6/7-bit GPTQ only exists in the planar (split-plane) layout, which is
+        # a distinct checkpoint format from the continuous gptq/gptq_v2 layouts.
+        # Per-layer dynamic bit overrides count too: one 5/6/7-bit layer makes
+        # the checkpoint planar.
+        planar_only_bits = quant_bits_width(self.bits) in (5, 6, 7)
+        if not planar_only_bits and self.dynamic is not None:
+            planar_only_bits = any(
+                isinstance(layer_dict, dict) and quant_bits_width(layer_dict.get("bits", self.bits)) in (5, 6, 7)
+                for layer, layer_dict in self.dynamic.items()
+                if not layer.startswith('-')
+            )
+        if (
+            self.method == METHOD.GPTQ
+            and format_family in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
+            and planar_only_bits
+        ):
+            log.info(
+                f"QuantizeConfig: 5/6/7-bit layers use the planar layout; auto fix `format` to `{FORMAT.GPTQ_P}`."
+            )
+            self.format = FORMAT.GPTQ_P
+            format_family = self._resolve_checkpoint_format()
 
         if self.dynamic is not None:
             self.dynamic = {
