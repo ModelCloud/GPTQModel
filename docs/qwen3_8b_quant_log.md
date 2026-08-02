@@ -499,7 +499,140 @@ quantizer without it, restore the timer on each clone, and restore it on the
 original quantizer in a `finally` block. This allowed Arm C to finish and should
 be part of the same PR.
 
+## PR #151 calibration-mix run: w4 / g64 / GAR / ACTIVATION scale search (2026-08-01)
+
+A follow-up run at `bits=4`, `group_size=64` using the PR #151 best-score-floor
+calibration mix for Qwen3-8B instead of wikitext2.
+
+- Script: `scripts/quantize_eval_qwen3_8b_pr151_mix.py`
+- Calibration: `dataset/calibration_mix_128k_qwen3_8b/calibration.parquet`
+  (all 153 rows, 127,402 tokens; `messages` column, no subsetting)
+- Config: GPTQ, `bits=4`, `group_size=64`, `desc_act=False`,
+  `act_group_aware=True`, `scale_search=ScaleSearchConfig.ACTIVATION`
+- Hardware: physical GPU 7 (NVIDIA PG506-230, PCI `00000000:E4:00.0`,
+  UUID `GPU-724ea08e`), PyTorch 2.13.0+cu130, Evalution 0.0.10
+- Eval: MARLIN back end for the quantized checkpoint; dense BF16 baseline via
+  the same script with `--dense-baseline`. `gsm8k_platinum_cot` and
+  `arc_challenge` with `chat_template=False`; MMLU tasks capped at
+  `max_rows=1024`. MMLU-history aggregates the
+  `high_school_european_history`, `high_school_us_history`,
+  `high_school_world_history`, and `prehistory` subsets (930 rows).
+
+### Quantized (w4g64) vs quant+embed/lm-head vs dense BF16 baseline
+
+The "quant+embed/lm-head" columns are a second post-quant stage
+(`--quant-embed-lm-head`): the w4g64 checkpoint is reloaded and
+`requantize(embed_quant_mode=QuantizeEmbed.BOTH)` quantizes
+`model.embed_tokens` and `lm_head` with explicit dynamic overrides
+(`sym=True, desc_act=False, act_group_aware=True, scale_search=activation`
+plus the per-variant bits/group via `--embed-bits`/`--embed-group-size`)
+using the same full 153-row calibration mix, then saved and evaluated
+identically. Transformer layers stay w4g64 in all variants.
+
+| Task | Metric | Quant w4g64 | +e/lh w4g64 | +e/lh w4g128 | +e/lh w8g128 | Dense BF16 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| gsm8k_platinum_cot | acc,num | 0.9198 | 0.9132 | 0.9148 | 0.9222 | 0.9198 |
+| arc_challenge | acc | 0.5401 | 0.5290 | 0.5282 | 0.5401 | 0.5512 |
+| arc_challenge | acc_norm | 0.5452 | 0.5350 | 0.5341 | 0.5435 | 0.5580 |
+| mmlu_stem (1024 rows) | acc,ll | 0.7178 | 0.7139 | 0.7178 | 0.7168 | 0.7295 |
+| mmlu_history (930 rows) | acc,ll | 0.8527 | 0.8570 | 0.8559 | 0.8548 | 0.8527 |
+| **Summary (mean of 4 tasks, arc `acc` only)** | — | **0.7576** | **0.7533** | **0.7542** | **0.7585** | **0.7633** |
+| **Summary Δ% vs dense** | — | **-0.90%** | **-1.60%** | **-1.49%** | **-0.81%** | — |
+| Snapshot size (safetensors) | — | 5.9 GB | 4.2 GB | 4.1 GB | 4.7 GB | 16 GB |
+
+Per-task Δ% vs dense:
+
+| Task | Quant w4g64 | +e/lh w4g64 | +e/lh w4g128 | +e/lh w8g128 |
+| --- | ---: | ---: | ---: | ---: |
+| gsm8k_platinum_cot | +0.00% | -0.72% | -0.54% | +0.27% |
+| arc_challenge acc | -2.01% | -4.02% | -4.18% | -2.01% |
+| arc_challenge acc_norm | -2.29% | -4.13% | -4.28% | -2.60% |
+| mmlu_stem | -1.61% | -2.14% | -1.61% | -1.74% |
+| mmlu_history | +0.00% | +0.50% | +0.38% | +0.25% |
+
+Overall the w4g64 checkpoint retains **99.25%** of the dense BF16 score mass
+across the 4 tasks (arc counted once via `acc`; `acc_norm` excluded to avoid
+double-counting arc in the summary). Quantizing embed+lm_head to w4 costs a
+further ~0.6-0.7 pp of average relative score (w4g64 **-1.60%**, w4g128
+**-1.49%** vs dense) with arc taking the largest hit (~-4%). w8g128
+embed/lm_head is nearly free (**-0.81%** vs dense, on par with quant-only)
+while still cutting the snapshot from 5.9 GB to 4.7 GB (w4 variants: 4.1-4.2
+GB, vs 16 GB dense BF16).
+
+Raw summaries:
+
+```python
+# quantized w4g64 (MARLIN)
+{'gsm8k_platinum_cot': {'acc,num': 0.9197684036393714},
+ 'arc_challenge': {'accuracy,loglikelihood': 0.5401023890784983,
+                   'accuracy,loglikelihood_norm': 0.5452218430034129},
+ 'mmlu_stem': {'acc,ll': 0.7177734375, 'acc,ll_avg': 0.7177734375},
+ 'mmlu_history': {'acc,ll': 0.8526881720430107, 'acc,ll_avg': 0.8526881720430107}}
+
+# quantized w4g64 + embed/lm_head w4g64 (MARLIN)
+{'gsm8k_platinum_cot': {'acc,num': 0.913151364764268},
+ 'arc_challenge': {'accuracy,loglikelihood': 0.5290102389078498,
+                   'accuracy,loglikelihood_norm': 0.5349829351535836},
+ 'mmlu_stem': {'acc,ll': 0.7138671875, 'acc,ll_avg': 0.7138671875},
+ 'mmlu_history': {'acc,ll': 0.8569892473118279, 'acc,ll_avg': 0.8569892473118279}}
+
+# quantized w4g64 + embed/lm_head w4g128 (MARLIN)
+{'gsm8k_platinum_cot': {'acc,num': 0.9148056244830438},
+ 'arc_challenge': {'accuracy,loglikelihood': 0.5281569965870307,
+                   'accuracy,loglikelihood_norm': 0.5341296928327645},
+ 'mmlu_stem': {'acc,ll': 0.7177734375, 'acc,ll_avg': 0.7177734375},
+ 'mmlu_history': {'acc,ll': 0.8559139784946237, 'acc,ll_avg': 0.8559139784946237}}
+
+# quantized w4g64 + embed/lm_head w8g128 (MARLIN)
+{'gsm8k_platinum_cot': {'acc,num': 0.9222497932175352},
+ 'arc_challenge': {'accuracy,loglikelihood': 0.5401023890784983,
+                   'accuracy,loglikelihood_norm': 0.5435153583617748},
+ 'mmlu_stem': {'acc,ll': 0.716796875, 'acc,ll_avg': 0.716796875},
+ 'mmlu_history': {'acc,ll': 0.8548387096774194, 'acc,ll_avg': 0.8548387096774194}}
+
+# dense BF16 baseline
+{'gsm8k_platinum_cot': {'acc,num': 0.9197684036393714},
+ 'arc_challenge': {'accuracy,loglikelihood': 0.5511945392491467,
+                   'accuracy,loglikelihood_norm': 0.5580204778156996},
+ 'mmlu_stem': {'acc,ll': 0.7294921875, 'acc,ll_avg': 0.7294921875},
+ 'mmlu_history': {'acc,ll': 0.8526881720430107, 'acc,ll_avg': 0.8526881720430107}}
+```
+
+### Observations
+
+- `gsm8k_platinum_cot` and `mmlu_history` are lossless versus the dense BF16
+  baseline (identical scores to 4 decimal places).
+- `arc_challenge` loses ~2% relative and `mmlu_stem` ~1.6% relative — the
+  overall quality floor holds well for a w4g64 checkpoint.
+- Chat templates hurt this model badly on generation/loglikelihood tasks:
+  `arc_challenge` with `chat_template=True` scored 0.3660 / 0.3874 versus
+  0.5401 / 0.5452 without, and `gsm8k_platinum_cot` collapsed to ~0.23 partial
+  before the template was disabled. The script now forces
+  `chat_template=False` for `gsm8k*` and `arc_challenge`
+  (`NO_CHAT_TEMPLATE_TASKS`).
+- Compared with the g128 sweep above (best `gsm8k` 0.9214, best `mmlu_stem`
+  0.7354), the g64 + PR #151 mix run matches dense on `gsm8k` (0.9198) with
+  `mmlu_stem` at 0.7178.
+
+### Snapshots and artifacts
+
+- Quantized w4g64 checkpoint: `/monster/data/model/qwen3_8b_gptq_w4g64_gar_actss_pr151mix`
+  (eval JSONs inside: `eval_results.json`, `eval_results_dense_bf16.json`,
+  `eval_results_embed_lmhead.json`, `eval_results_embed_lmhead_w4g128.json`,
+  `eval_results_embed_lmhead_w8g128.json`)
+- Quant+embed/lm-head checkpoints:
+  `/monster/data/model/qwen3_8b_gptq_w4g64_gar_actss_pr151mix_embed_lmhead` (w4g64),
+  `/monster/data/model/qwen3_8b_gptq_w4g64_gar_actss_pr151mix_embed_lmhead_w4g128`,
+  `/monster/data/model/qwen3_8b_gptq_w4g64_gar_actss_pr151mix_embed_lmhead_w8g128`
+- Logs: `logs_devin/qwen3_8b_pr151mix_run.log` (quantize + first eval),
+  `logs_devin/qwen3_8b_pr151mix_eval2.log` (no-template eval),
+  `logs_devin/qwen3_8b_dense_baseline.log` (dense BF16),
+  `logs_devin/qwen3_8b_embed_lmhead4.log` (embed/lm-head w4g64, GPU 7),
+  `logs_devin/qwen3_8b_embed_lmhead_w4g128.log` (GPU 7),
+  `logs_devin/qwen3_8b_embed_lmhead_w8g128.log` (GPU 6)
+
 ## Files
 
 - Sweep helper: `tests/models/test_qwen3_8b_default_sweep.py`
+- PR #151 mix quantize+eval script: `scripts/quantize_eval_qwen3_8b_pr151_mix.py`
 - This log: `docs/qwen3_8b_quant_log.md`
