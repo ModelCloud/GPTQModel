@@ -824,19 +824,7 @@ def ModelLoader(cls):
 
         check_versions(cls, cls.require_pkgs)
 
-        def skip(*args, **kwargs):
-            pass
-
-        original_inits = (
-            torch.nn.init.kaiming_uniform_,
-            torch.nn.init.uniform_,
-            torch.nn.init.normal_,
-        )
-        torch.nn.init.kaiming_uniform_ = skip
-        torch.nn.init.uniform_ = skip
-        torch.nn.init.normal_ = skip
-
-        try:
+        with suspend_hf_weight_init():
             # normalize and auto select quantization device is not passed
             if quantize_config.device is None:
                 quantize_config.device = auto_select_device(None, None)
@@ -941,12 +929,6 @@ def ModelLoader(cls):
                 _maybe_print_module_tree(model=model)
 
                 turtle_model = None
-        finally:
-            (
-                torch.nn.init.kaiming_uniform_,
-                torch.nn.init.uniform_,
-                torch.nn.init.normal_,
-            ) = original_inits
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
