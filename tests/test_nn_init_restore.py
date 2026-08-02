@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import json
+
 import pytest
 import torch
 
@@ -46,7 +48,7 @@ def test_nn_init_restored_after_from_pretrained(original_inits):
     assert tensor.abs().sum().item() > 0
 
 
-def test_nn_init_restored_after_from_pretrained_error(original_inits, tmp_path):
+def test_nn_init_restored_after_from_pretrained_error(original_inits, tmp_path, monkeypatch):
     # config-only dir: load enters the monkeypatched region then fails on missing weights
     config = {
         "architectures": ["GPT2LMHeadModel"],
@@ -57,9 +59,19 @@ def test_nn_init_restored_after_from_pretrained_error(original_inits, tmp_path):
         "n_positions": 32,
         "vocab_size": 64,
     }
-    import json
-
     (tmp_path / "config.json").write_text(json.dumps(config))
+
+    from gptqmodel.models.base import BaseQModel
+
+    patched_state = {}
+    original_before_model_load = BaseQModel.before_model_load
+
+    def spy_before_model_load(cls, **kwargs):
+        # runs inside the monkeypatched region; record that the no-op patch is active
+        patched_state["active"] = torch.nn.init.kaiming_uniform_ is not original_inits[0]
+        return original_before_model_load(cls, **kwargs)
+
+    monkeypatch.setattr(BaseQModel, "before_model_load", spy_before_model_load)
 
     with pytest.raises(Exception):
         GPTQModel.load(
@@ -67,5 +79,9 @@ def test_nn_init_restored_after_from_pretrained_error(original_inits, tmp_path):
             quantize_config=QuantizeConfig(bits=4, group_size=128),
             device="cpu",
         )
+
+    # the failure must have occurred after the init functions were patched,
+    # otherwise the restore assertion below would hold vacuously
+    assert patched_state.get("active") is True
 
     assert_inits_restored(original_inits)
