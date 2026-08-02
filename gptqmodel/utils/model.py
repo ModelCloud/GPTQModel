@@ -41,7 +41,7 @@ from ..models._const import (
     EXPERT_INDEX_PLACEHOLDER,
     SUPPORTS_MODULE_TYPES,
 )
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
@@ -604,6 +604,11 @@ def create_quant_module(
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
 
+    # GPTQ modules need the checkpoint format to select between the continuous
+    # (gptq/gptq_v2) and planar (gptq_p) packed layouts.
+    if issubclass(linear_cls, GPTQQuantLinear):
+        tmp_init_kwargs.setdefault("format", format)
+
     # when loading a quantized model, device is the target passed through the GPT-QModel load path
     # check in_features and out_features validate
     _, err = linear_cls.validate(
@@ -764,7 +769,9 @@ def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack
             # GPTQ INT3 spills some zero-point bits across adjacent packed words.
             # Reuse the logical field shift so module conversion matches the
             # safetensor dequant path and the canonical INT3 pack layout.
-            module.qzeros.data.copy_(_correct_gptq_v1_qzeros(module.qzeros.data, bits))
+            module.qzeros.data.copy_(
+                _correct_gptq_v1_qzeros(module.qzeros.data, bits, planar=getattr(module, "planar", False))
+            )
         else:
             # Only int32 packing words are used for GPTQ INT3 in actual checkpoints.
             # Keep the legacy constant-offset path for synthetic smaller word sizes.
@@ -821,8 +828,16 @@ def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack
             module.qzeros.data += 0b0000000100000001
         elif pack_dtype == torch.int8:
             module.qzeros.data += 0b00000001
+    elif bits in (5, 6, 7):
+        if pack_dtype != torch.int32:
+            raise NotImplementedError(
+                f"Planar {bits}-bit GPTQ only supports 32-bit packing words, got pack_dtype={pack_dtype}."
+            )
+        # Planar layouts spread each zero-point across bit planes, so shift the
+        # decoded logical values instead of adding a packed-word constant.
+        module.qzeros.data.copy_(_correct_gptq_v1_qzeros(module.qzeros.data, bits, planar=True))
     else:
-        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+        raise NotImplementedError("Only 2,3,4,5,6,7,8 bits are supported.")
 
     # change format id
     module.qzero_format(format=2)
@@ -897,7 +912,7 @@ def convert_gptq_v2_to_v1_format_module(
         if pack_dtype == torch.int32:
             # Keep INT3 export symmetric with the load-side logical correction.
             module.qzeros.data.copy_(
-                _revert_gptq_v1_qzeros_correction(module.qzeros.data, bits)
+                _revert_gptq_v1_qzeros_correction(module.qzeros.data, bits, planar=getattr(module, "planar", False))
             )
         else:
             module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
@@ -913,8 +928,16 @@ def convert_gptq_v2_to_v1_format_module(
         module.qzeros.data -= 0b00010001000100010001000100010001
     elif bits == 8:
         module.qzeros.data -= 0b00000001000000010000000100000001
+    elif bits in (5, 6, 7):
+        if pack_dtype != torch.int32:
+            raise NotImplementedError(
+                f"Planar {bits}-bit GPTQ only supports 32-bit packing words, got pack_dtype={pack_dtype}."
+            )
+        module.qzeros.data.copy_(
+            _revert_gptq_v1_qzeros_correction(module.qzeros.data, bits, planar=True)
+        )
     else:
-        raise NotImplementedError("Only 2,3,4,8 bits are supported.")
+        raise NotImplementedError("Only 2,3,4,5,6,7,8 bits are supported.")
 
     module.qzero_format(format=1)
 
@@ -1278,6 +1301,25 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
         # have persistent buffers, otherwise we will get OOM
         model.device_tensors = device_tensors
+
+    # The continuous and planar (gptq_p) 3-bit word layouts are not
+    # interchangeable, and a 3-bit module is only planar when its constructor
+    # received `format=gptq_p`. Fail loudly if any construction site dropped
+    # the format instead of silently decoding the wrong layout.
+    if quantize_config is not None:
+        expect_planar3 = resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ_P
+        for name, submodule in model.named_modules():
+            if (
+                isinstance(submodule, GPTQQuantLinear)
+                and submodule.bits == 3
+                and submodule.planar != expect_planar3
+            ):
+                raise ValueError(
+                    f"`{name}`: 3-bit quant module was constructed with planar={submodule.planar} "
+                    f"but the checkpoint format is `{quantize_config.format}`; the continuous and "
+                    f"planar 3-bit layouts are not interchangeable. Pass `format=` when "
+                    "constructing the module."
+                )
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
