@@ -7,6 +7,7 @@
 import math
 import os
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -149,6 +150,7 @@ class TorchLinear(PackableQuantLinear):
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
         register_buffers: bool = True,
+        format: Optional[FORMAT] = None,
         **kwargs,
     ):
         super().__init__(
@@ -164,6 +166,7 @@ class TorchLinear(PackableQuantLinear):
             adapter=adapter,
             register_buffers=register_buffers,
             enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
+            format=format,
             **kwargs)
 
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
@@ -701,6 +704,7 @@ class TorchLinear(PackableQuantLinear):
         return weights
 
     def _dequantize_weight_cached_248(self, num_itr: int = 1) -> torch.Tensor:
+        self._init_wf_unsqueeze_buffers()
         zeros = self._stream_decode_qzeros()
         g_idx_long = self._stream_g_idx_long(target_device=self.qweight.device)
         self._maybe_offload_g_idx_to_cpu()

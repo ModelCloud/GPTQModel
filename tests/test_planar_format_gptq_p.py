@@ -124,7 +124,12 @@ def test_planar_3bit_module_flag_and_packer_parity():
     m_orig.pack_original(linear, scales.clone(), zeros.clone(), g_idx.clone())
 
     m_threaded = _new_module(3, FORMAT.GPTQ_P)
-    m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setenv("GPTQMODEL_PACK_PY_THREADS", "4")
+        m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
+    finally:
+        monkeypatch.undo()
 
     assert torch.equal(m_block.qweight, m_orig.qweight)
     assert torch.equal(m_block.qzeros, m_orig.qzeros)
@@ -175,6 +180,18 @@ def test_gptq_p_rejects_unsupported_bits():
             format=FORMAT.GPTQ_P,
             register_buffers=False,
         )
+
+
+@pytest.mark.parametrize("expect_planar", [True, False])
+def test_post_init_rejects_3bit_layout_format_mismatch(expect_planar: bool):
+    from gptqmodel.utils.model import gptqmodel_post_init
+
+    module_format = FORMAT.GPTQ_V2 if expect_planar else FORMAT.GPTQ_P
+    cfg_format = FORMAT.GPTQ_P if expect_planar else FORMAT.GPTQ_V2
+    model = nn.Sequential(_new_module(3, module_format))
+    cfg = QuantizeConfig(bits=3, format=cfg_format)
+    with pytest.raises(ValueError, match="not interchangeable"):
+        gptqmodel_post_init(model, use_act_order=False, quantize_config=cfg)
 
 
 @pytest.mark.parametrize("bits", [5, 6, 7])
