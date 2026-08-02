@@ -299,7 +299,7 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
             module.online_full_had = True
             module.K = K
             if had_K is not None:
-                module.register_buffer("had_K", had_K, persistent=False)
+                module.set_had_K(had_K)
             online_count += 1
 
     if online_count == 0:

@@ -109,7 +109,12 @@ def test_packer_parity_and_threaded_pack(bits: int):
     m_orig.pack_original(linear, scales.clone(), zeros.clone(), g_idx.clone())
 
     m_threaded = _new_module(bits)
-    m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setenv("GPTQMODEL_PACK_THREADS", "4")
+        m_threaded.pack_block(linear, scales.clone(), zeros.clone(), g_idx.clone(), block_in=32, workers=4)
+    finally:
+        monkeypatch.undo()
 
     assert torch.equal(m_block.qweight, m_orig.qweight)
     assert torch.equal(m_block.qzeros, m_orig.qzeros)

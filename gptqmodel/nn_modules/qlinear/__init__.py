@@ -134,8 +134,9 @@ class BaseQuantLinear(nn.Module):
         self.online_partial_had = False
         self.had_dim = -1
         self.K = 1
-        # Not a registered buffer: accelerate's offload hooks cannot handle
-        # None-valued buffers, and `had_K` stays None unless rotation is used.
+        # Not a registered buffer while None: accelerate's offload hooks cannot
+        # handle None-valued buffers. `set_had_K` promotes it to a real buffer
+        # when rotation assigns a tensor.
         self.had_K = None
 
         validate_args = {
@@ -479,6 +480,27 @@ class BaseQuantLinear(nn.Module):
 
         self.clear_autotune()
         return super().train(mode)
+
+    def set_had_K(self, had_K: Optional[t.Tensor]) -> None:
+        """Assign the rotation Hadamard tensor, registering it as a buffer.
+
+        `had_K` starts life as a plain None attribute (None-valued buffers break
+        accelerate's offload hooks), so a real tensor must be promoted to a
+        registered buffer to follow module device/dtype moves.
+        """
+        if "had_K" in self._buffers:
+            if had_K is None:
+                del self._buffers["had_K"]
+                self.had_K = None
+            else:
+                self._buffers["had_K"] = had_K
+            return
+        if had_K is None:
+            self.had_K = None
+            return
+        if hasattr(self, "had_K"):
+            del self.had_K
+        self.register_buffer("had_K", had_K, persistent=False)
 
     def _apply_rotation_to_input(self, x: t.Tensor) -> t.Tensor:
         """Apply online Hadamard transform to the input for SpinQuant/QuaRot inference."""
@@ -1229,9 +1251,10 @@ class PackableQuantLinear(GPTQQuantLinear):
         # Each block writes a disjoint row range of the preallocated qweight and
         # only reads the shared W/scales/zeros tensors, so blocks can run on a
         # thread pool. Threads only help on free-threaded (GIL=0) Python builds;
-        # default to sequential unless an explicit worker count is requested.
-        if workers is not None and workers > 0:
-            workers_eff = max(1, min(workers, total_blocks))
+        # keep the sequential default and enable the pool only through an
+        # explicit GPTQMODEL_PACK_THREADS opt-in.
+        if env_threads:
+            workers_eff = max(1, min(pack_block_threads, total_blocks))
         else:
             workers_eff = 1
         if workers_eff == 1:
