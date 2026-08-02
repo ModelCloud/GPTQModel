@@ -47,7 +47,9 @@ metadata.
 - No code ever crosses a word boundary; any group of 32 codes decodes
   independently from `bits` words at a fixed offset (desc_act friendly).
 - The packed dimension must be divisible by 32; misaligned shapes are
-  rejected at module construction.
+  rejected at module construction. This includes quantized embeddings and
+  lm_head at planar widths: vocabularies not divisible by 32 are a known
+  limitation (padding support is deferred).
 - `qweight` packs along rows, `qzeros` along columns.
 
 ## Format semantics
