@@ -113,8 +113,8 @@ class _LinearWeightMetadata:
 class TorchLinear(PackableQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
-    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20, FORMAT.GPTQ_P: 20}
+    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -546,6 +546,10 @@ class TorchLinear(PackableQuantLinear):
     def _should_use_streaming(self, x: torch.Tensor) -> bool:
         if not self._streaming_enabled:
             return False
+        # Streaming decode assumes the 2/4/8-bit wf shift-buffer layout; 3-bit
+        # and planar 5/6/7-bit widths use the eager dequant path instead.
+        if self.bits not in (2, 4, 8):
+            return False
         if x.device.type != "cuda":
             return False
         if not HAS_CUDA:
@@ -665,6 +669,9 @@ class TorchLinear(PackableQuantLinear):
             return False
         if self.bits not in (2, 3, 4, 8):
             return False
+        # Planar 3-bit words do not match the continuous Triton decode layout.
+        if self.planar:
+            return False
         if not (self.qweight.is_contiguous() and self.qzeros.is_contiguous() and self.scales.is_contiguous()):
             return False
         # g_idx is stored as int32 tensor; ensure it resides on the same device.
@@ -688,6 +695,7 @@ class TorchLinear(PackableQuantLinear):
         return weights
 
     def _dequantize_weight_cached_248(self, num_itr: int = 1) -> torch.Tensor:
+        self._init_wf_unsqueeze_buffers()
         zeros = self._stream_decode_qzeros()
         g_idx_long = self._stream_g_idx_long(target_device=self.qweight.device)
         self._maybe_offload_g_idx_to_cpu()
@@ -755,12 +763,12 @@ class TorchQuantEmbeddings(TorchLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20, FORMAT.GPTQ_P: 20}
     # Embeddings are selected by module role in create_quant_module(), and must
     # not be discovered as a general backend: their forward contract accepts
     # integer token IDs, not hidden states.
     SUPPORTS_BACKEND_SELECTION = False
-    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

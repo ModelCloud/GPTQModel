@@ -22,6 +22,14 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
+from ...utils.planar_packing import (
+    PLANAR_BITS,
+    PLANAR_FORMAT_BITS,
+    planar_pack_cols,
+    planar_pack_rows,
+    planar_unpack_cols,
+    planar_unpack_rows,
+)
 from ...utils.safe import THREADPOOLCTL
 
 
@@ -126,7 +134,9 @@ class BaseQuantLinear(nn.Module):
         self.online_partial_had = False
         self.had_dim = -1
         self.K = 1
-        self.register_buffer("had_K", None, persistent=False)
+        # Not a registered buffer: accelerate's offload hooks cannot handle
+        # None-valued buffers, and `had_K` stays None unless rotation is used.
+        self.had_K = None
 
         validate_args = {
             "bits": bits,
@@ -709,6 +719,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                  register_buffers_out_features: int = None,
                  dtype: Optional[t.dtype] = None,
                  **kwargs):
+        format = kwargs.pop("format", None)
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -728,6 +739,28 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             **kwargs,
         )
 
+        self.format = format
+        # Planar (split-plane, gptq_p) routing: 5/6/7-bit only exists planar;
+        # 3-bit is planar only under gptq_p. 2/4/8-bit planar words are
+        # bit-identical to the continuous layout, so they keep the fast paths.
+        if format == FORMAT.GPTQ_P and self.bits not in PLANAR_FORMAT_BITS:
+            raise ValueError(
+                f"format={FORMAT.GPTQ_P} supports bits {PLANAR_FORMAT_BITS}, got bits={self.bits}"
+            )
+        self.planar = self.bits in PLANAR_BITS or (format == FORMAT.GPTQ_P and self.bits == 3)
+
+        # Planar packing stores whole 32-code blocks; `_validate` covers the
+        # planar-only widths (5/6/7) but is format-blind, so format-dependent
+        # planar 3-bit must be checked here where the format is known.
+        # NotImplementedError keeps this recoverable for the kernel-selection
+        # loop, which treats it as "unsupported by this kernel".
+        if self.planar:
+            for dim_name, dim in (("in_features", self.in_features), ("out_features", self.out_features)):
+                if dim % 32 != 0:
+                    raise NotImplementedError(
+                        f"planar {self.bits}-bit requires `{dim_name}` divisible by 32, got {dim_name}={dim}."
+                    )
+
         # GPTQ v1/v2 conversions only apply to GPTQ-style qzero storage.
         self._qzeros_format = 1
 
@@ -737,6 +770,36 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
                 register_buffers_in_features=register_buffers_in_features,
                 register_buffers_out_features=register_buffers_out_features,
             )
+
+    @classmethod
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            in_features=in_features,
+            out_features=out_features,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+        if not ok:
+            return ok, err
+
+        # Planar-only widths pack whole 32-code blocks, so the packed
+        # dimensions must be 32-aligned regardless of the class-level
+        # SUPPORTS_*_FEATURES_DIVISIBLE_BY declarations.
+        if bits in PLANAR_BITS:
+            for dim_name, dim in (("in_features", in_features), ("out_features", out_features)):
+                if dim is not None and dim % 32 != 0:
+                    err = f"{cls}: planar {bits}-bit requires `{dim_name}` divisible by 32: actual {dim_name} = `{dim}`."
+                    return False, NotImplementedError(err)
+        return True, None
 
     def _register_gptq_buffers(
         self,
@@ -813,6 +876,11 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         device = self._wf_device()
 
+        if self.planar:
+            # Planar dequantization unpacks bit planes directly and does not
+            # use wf shift buffers.
+            return
+
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
                 device=device)
@@ -854,6 +922,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         return buf
 
     def dequantize_weight(self, num_itr: int = 1):
+        if self.planar:
+            zeros = planar_unpack_cols(self.qzeros, self.bits).reshape(self.scales.shape)
+            weight = planar_unpack_rows(self.qweight, self.bits)
+            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+
         self._init_wf_unsqueeze_buffers()
         wf_zero = getattr(self, "wf_unsqueeze_zero", None)
         wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
@@ -900,6 +973,9 @@ class PackableQuantLinear(GPTQQuantLinear):
             weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
+        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+
+    def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
         if num_itr == 1:
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
         else:
@@ -983,6 +1059,8 @@ class PackableQuantLinear(GPTQQuantLinear):
         self.register_buffer("scales", scales.to(dtype=t.float16))
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
+        elif not hasattr(self, "bias"):
+            self.bias = None
 
         # ---------- constants ----------
         bits = int(self.bits)  # 2,3,4,8
@@ -1008,6 +1086,8 @@ class PackableQuantLinear(GPTQQuantLinear):
                     env_threads,
                     pack_block_threads,
                 )
+
+        planar = self.planar
 
         if not disable_ext and bits in (2, 4, 8):
             try:
@@ -1036,8 +1116,10 @@ class PackableQuantLinear(GPTQQuantLinear):
         if bits in (2, 4, 8):
             pack_factor = word_bits // bits  # 16, 8, 4 respectively
             # If the instance carries a different pack_factor, ignore it for safety.
-        elif bits == 3:
+        elif bits == 3 and not planar:
             pack_factor = None  # sentinel: use the 10-1-10-1-10 scheme
+        elif planar:
+            pack_factor = None  # sentinel: use split-plane packing
         else:
             raise NotImplementedError(f"Unsupported bits={bits}")
 
@@ -1046,8 +1128,8 @@ class PackableQuantLinear(GPTQQuantLinear):
         if OUT_DTYPE != t.int32:
             raise ValueError("pack_block() expects self.pack_dtype == torch.int32 for 32-bit words.")
 
-        # rows = (in // 32) * ({2,4,8} -> bits rows ; 3 -> 3 rows)
-        rows_per_group = (bits if bits != 3 else 3)
+        # rows = (in // 32) * bits for every supported layout
+        rows_per_group = bits
         qweight_rows = (in_features // word_bits) * rows_per_group
         qweight = t.empty((qweight_rows, out_features), dtype=OUT_DTYPE, device="cpu")
 
@@ -1125,11 +1207,13 @@ class PackableQuantLinear(GPTQQuantLinear):
             base_group = (i0 // word_bits)
             for g in range(groups32):
                 sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
-                dst_rows = (base_group + g) * (bits if bits != 3 else 3)
+                dst_rows = (base_group + g) * rows_per_group
                 if bits in (2, 4, 8):
                     _pack_rows_2_4_8(sub, qweight, dst_rows)
-                elif bits == 3:
+                elif bits == 3 and not planar:
                     _pack_rows_3(sub, qweight, dst_rows)
+                elif planar:
+                    qweight[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits)
                 else:
                     raise NotImplementedError(f"Unsupported bits={bits}")
 
@@ -1141,8 +1225,15 @@ class PackableQuantLinear(GPTQQuantLinear):
         ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
         len(ranges)
 
-        # TODO FIX ME...threads safety issue with threaded block work
-        workers_eff = 1 # max(1, min(workers, total_blocks))
+        total_blocks = len(ranges)
+        # Each block writes a disjoint row range of the preallocated qweight and
+        # only reads the shared W/scales/zeros tensors, so blocks can run on a
+        # thread pool. Threads only help on free-threaded (GIL=0) Python builds;
+        # default to sequential unless an explicit worker count is requested.
+        if workers is not None and workers > 0:
+            workers_eff = max(1, min(workers, total_blocks))
+        else:
+            workers_eff = 1
         if workers_eff == 1:
             for i0, i1 in ranges:
                 _process_block(i0, i1)
@@ -1165,7 +1256,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                 base = col * pf
                 for j in range(pf):
                     qzeros_np[:, col] |= zeros_np[:, base + j] << (bits * j)
-        elif bits == 3:
+        elif bits == 3 and not planar:
             i = 0
             col = 0
             while col < qzeros_np.shape[1]:
@@ -1187,6 +1278,12 @@ class PackableQuantLinear(GPTQQuantLinear):
                     qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i) + 2)
                 i += 10
                 col += 1
+        elif planar:
+            qzeros_np = (
+                planar_pack_cols(zeros.to(t.int64), bits)
+                .numpy()
+                .astype(self.pack_np_math_dtype, copy=False)
+            )
         else:
             raise NotImplementedError(f"Unsupported bits={bits}")
 
@@ -1264,12 +1361,12 @@ class PackableQuantLinear(GPTQQuantLinear):
                 .view(1, pack_factor, 1)
                 * bits
             )
-        elif bits == 3:
+        elif bits == 3 or self.planar:
             shifts_pf64 = None
         else:
             raise NotImplementedError(f"Unsupported bits={bits}")
 
-        rows_per_group = (bits if bits != 3 else 3)
+        rows_per_group = bits
         qweight_dev = t.empty(
             (in_features // word_bits * rows_per_group, out_features),
             dtype=self.pack_dtype,
@@ -1326,8 +1423,12 @@ class PackableQuantLinear(GPTQQuantLinear):
                 dst_rows = (base_group + g) * rows_per_group
                 if bits in (2, 4, 8):
                     _pack_rows_2_4_8(sub, qweight_dev, dst_rows)
-                else:
+                elif bits == 3 and not self.planar:
                     _pack_rows_3(sub, qweight_dev, dst_rows)
+                elif self.planar:
+                    qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
+                else:
+                    raise NotImplementedError(f"Unsupported bits={bits}")
 
         zeros_int = zeros_dev.to(dtype=t.int64)
         if bits in (2, 4, 8):
@@ -1345,7 +1446,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             )
             packed = (zeros_view << shifts).sum(dim=-1, dtype=t.int64) & mask_tensor
             qzeros_dev = packed.to(dtype=self.pack_dtype)
-        elif bits == 3:
+        elif bits == 3 and not self.planar:
             groups = zeros_int.shape[1] // word_bits
             qzeros_chunks: List[t.Tensor] = []
             for g in range(groups):
@@ -1353,6 +1454,8 @@ class PackableQuantLinear(GPTQQuantLinear):
                 packed = _pack_rows_3_values(block.T).transpose(0, 1)
                 qzeros_chunks.append(packed.to(dtype=self.pack_dtype))
             qzeros_dev = t.cat(qzeros_chunks, dim=1)
+        elif self.planar:
+            qzeros_dev = planar_pack_cols(zeros_int, bits).to(dtype=self.pack_dtype)
         else:
             raise NotImplementedError(f"Unsupported bits={bits}")
 
@@ -1389,6 +1492,8 @@ class PackableQuantLinear(GPTQQuantLinear):
                 # TODO why clone?
                 # self.bias = linear.bias.clone().to(dtype=t.float16)
                 self.register_buffer("bias", linear.bias.to(dtype=t.float16))
+            elif not hasattr(self, "bias"):
+                self.bias = None
 
             int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T)
             int_weight.clamp_(0, self.maxq)
@@ -1401,7 +1506,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                 for row in range(qweight.shape[0]):
                     for j in range(self.pack_factor):
                         qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
-            elif self.bits == 3:
+            elif self.bits == 3 and not self.planar:
                 i = 0
                 row = 0
                 while row < qweight.shape[0]:
@@ -1423,6 +1528,18 @@ class PackableQuantLinear(GPTQQuantLinear):
                         qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
                     i += 10
                     row += 1
+            elif self.planar:
+                qweight = (
+                    planar_pack_rows(
+                        t.from_numpy(int_weight.astype(np.int64)),
+                        self.bits,
+                        pack_dtype=self.pack_dtype,
+                    )
+                    .numpy()
+                    .astype(self.pack_np_math_dtype, copy=False)
+                )
+            else:
+                raise NotImplementedError(f"Unsupported bits={self.bits}")
 
             # self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
             self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
@@ -1433,7 +1550,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                 for col in range(qzeros.shape[1]):
                     for j in range(self.pack_factor):
                         qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
-            elif self.bits == 3:
+            elif self.bits == 3 and not self.planar:
                 i = 0
                 col = 0
                 while col < qzeros.shape[1]:
@@ -1455,6 +1572,18 @@ class PackableQuantLinear(GPTQQuantLinear):
                         qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
                     i += 10
                     col += 1
+            elif self.planar:
+                qzeros = (
+                    planar_pack_cols(
+                        t.from_numpy(zeros.astype(np.int64)),
+                        self.bits,
+                        pack_dtype=self.pack_dtype,
+                    )
+                    .numpy()
+                    .astype(self.pack_np_math_dtype, copy=False)
+                )
+            else:
+                raise NotImplementedError(f"Unsupported bits={self.bits}")
 
             # self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
             self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))

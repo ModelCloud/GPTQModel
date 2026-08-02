@@ -824,117 +824,111 @@ def ModelLoader(cls):
 
         check_versions(cls, cls.require_pkgs)
 
-        def skip(*args, **kwargs):
-            pass
+        with suspend_hf_weight_init():
+            # normalize and auto select quantization device is not passed
+            if quantize_config.device is None:
+                quantize_config.device = auto_select_device(None, None)
+            else:
+                quantize_config.device = normalize_device(quantize_config.device)
 
-        torch.nn.init.kaiming_uniform_ = skip
-        torch.nn.init.uniform_ = skip
-        torch.nn.init.normal_ = skip
+            if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+                # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
+                dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
 
-        # normalize and auto select quantization device is not passed
-        if quantize_config.device is None:
-            quantize_config.device = auto_select_device(None, None)
-        else:
-            quantize_config.device = normalize_device(quantize_config.device)
+            # enforce some values despite user specified
+            # non-quantized models are always loaded into cpu
+            model_init_kwargs_without_internal["device_map"] = cpu_device_map
+            set_dtype_compat(model_init_kwargs_without_internal, dtype)
+            model_init_kwargs_without_internal["_fast_init"] = cls.require_fast_init
+            #model_init_kwargs["low_cpu_mem_usage"] = True
 
-        if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
-            # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
+            cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=False)
+            from ..utils.hf import build_shell_model
 
-        # enforce some values despite user specified
-        # non-quantized models are always loaded into cpu
-        model_init_kwargs_without_internal["device_map"] = cpu_device_map
-        set_dtype_compat(model_init_kwargs_without_internal, dtype)
-        model_init_kwargs_without_internal["_fast_init"] = cls.require_fast_init
-        #model_init_kwargs["low_cpu_mem_usage"] = True
+            # XIELUActivation will use some weights when activation init, so can't use init_empty_weights
+            if hasattr(config, "hidden_act") and config.hidden_act == "xielu":
+                quantize_config.offload_to_disk = False
 
-        cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=False)
-        from ..utils.hf import build_shell_model
+            # some models need convert moe-experts after model loaded, like GPTOSS and Llama4
+            # so offload_to_disk is not supported for them.
+            if not cls.support_offload_to_disk:
+                quantize_config.offload_to_disk = False
+                log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
 
-        # XIELUActivation will use some weights when activation init, so can't use init_empty_weights
-        if hasattr(config, "hidden_act") and config.hidden_act == "xielu":
-            quantize_config.offload_to_disk = False
+            if quantize_config.offload_to_disk:
+                shell_config = copy.deepcopy(config)
+                try:
+                    model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs_without_internal)
+                except RuntimeError as exc:
+                    if not _is_meta_shell_build_error(exc):
+                        raise
 
-        # some models need convert moe-experts after model loaded, like GPTOSS and Llama4
-        # so offload_to_disk is not supported for them.
-        if not cls.support_offload_to_disk:
-            quantize_config.offload_to_disk = False
-            log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
+                    log.warn(
+                        "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load without turtle_model: %s",
+                        model_local_path,
+                        exc,
+                    )
+                    log.info("Loader: loading model directly to CPU (meta shell unsupported; turtle_model disabled)")
+                    fallback_init_kwargs = model_init_kwargs_without_internal.copy()
+                    fallback_init_kwargs.pop("device_map", None)
+                    fallback_init_kwargs["low_cpu_mem_usage"] = False
+                    model = _hf_loader_from_pretrained_with_dynamic_module_retry(
+                        cls.loader,
+                        model_local_path,
+                        config=config,
+                        **fallback_init_kwargs,
+                        **hf_gguf_load_kwargs,
+                    )
+                    if getattr(model, "config", None) is config:
+                        model.config = copy.deepcopy(config)
+                    _convert_model_with_defuser(cls, model, cleanup_original=False)
+                    model._model_init_kwargs = fallback_init_kwargs
+                    _maybe_print_module_tree(model=model)
+                    turtle_model = None
+                else:
+                    _convert_model_with_defuser(cls, model, cleanup_original=False)
+                    shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
+                    shell_model_init_kwargs.update(hf_gguf_load_kwargs)
+                    model._model_init_kwargs = shell_model_init_kwargs
+                    _maybe_print_module_tree(model=model)
+                    turtle_model = LazyTurtle.maybe_create(
+                        model_local_path=model_local_path,
+                        config=model.config,
+                        model_init_kwargs=shell_model_init_kwargs,
+                        module_tree=copy.deepcopy(getattr(cls, "module_tree", None)),
+                        hf_conversion_map_reversed=copy.deepcopy(
+                            cls.resolve_hf_conversion_map_reversed(target_model=model)
+                        ),
+                        target_model=model,
+                    )
 
-        if quantize_config.offload_to_disk:
-            shell_config = copy.deepcopy(config)
-            try:
-                model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs_without_internal)
-            except RuntimeError as exc:
-                if not _is_meta_shell_build_error(exc):
-                    raise
+                    if turtle_model is None:
+                        raise RuntimeError(
+                            f"Loader: can't open model path `{model_local_path}` for offload_to_disk."
+                        )
 
-                log.warn(
-                    "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load without turtle_model: %s",
-                    model_local_path,
-                    exc,
-                )
-                log.info("Loader: loading model directly to CPU (meta shell unsupported; turtle_model disabled)")
-                fallback_init_kwargs = model_init_kwargs_without_internal.copy()
-                fallback_init_kwargs.pop("device_map", None)
-                fallback_init_kwargs["low_cpu_mem_usage"] = False
+                    log.info(
+                        "Loader: using checkpoint-backed lazy turtle source for `%s`",
+                        model_local_path,
+                    )
+            else:
+                log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
                 model = _hf_loader_from_pretrained_with_dynamic_module_retry(
                     cls.loader,
                     model_local_path,
                     config=config,
-                    **fallback_init_kwargs,
+                    **model_init_kwargs_without_internal,
                     **hf_gguf_load_kwargs,
                 )
                 if getattr(model, "config", None) is config:
                     model.config = copy.deepcopy(config)
                 _convert_model_with_defuser(cls, model, cleanup_original=False)
-                model._model_init_kwargs = fallback_init_kwargs
+                direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
+                direct_model_init_kwargs.update(hf_gguf_load_kwargs)
+                model._model_init_kwargs = direct_model_init_kwargs
                 _maybe_print_module_tree(model=model)
+
                 turtle_model = None
-            else:
-                _convert_model_with_defuser(cls, model, cleanup_original=False)
-                shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
-                shell_model_init_kwargs.update(hf_gguf_load_kwargs)
-                model._model_init_kwargs = shell_model_init_kwargs
-                _maybe_print_module_tree(model=model)
-                turtle_model = LazyTurtle.maybe_create(
-                    model_local_path=model_local_path,
-                    config=model.config,
-                    model_init_kwargs=shell_model_init_kwargs,
-                    module_tree=copy.deepcopy(getattr(cls, "module_tree", None)),
-                    hf_conversion_map_reversed=copy.deepcopy(
-                        cls.resolve_hf_conversion_map_reversed(target_model=model)
-                    ),
-                    target_model=model,
-                )
-
-                if turtle_model is None:
-                    raise RuntimeError(
-                        f"Loader: can't open model path `{model_local_path}` for offload_to_disk."
-                    )
-
-                log.info(
-                    "Loader: using checkpoint-backed lazy turtle source for `%s`",
-                    model_local_path,
-                )
-        else:
-            log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
-            model = _hf_loader_from_pretrained_with_dynamic_module_retry(
-                cls.loader,
-                model_local_path,
-                config=config,
-                **model_init_kwargs_without_internal,
-                **hf_gguf_load_kwargs,
-            )
-            if getattr(model, "config", None) is config:
-                model.config = copy.deepcopy(config)
-            _convert_model_with_defuser(cls, model, cleanup_original=False)
-            direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
-            direct_model_init_kwargs.update(hf_gguf_load_kwargs)
-            model._model_init_kwargs = direct_model_init_kwargs
-            _maybe_print_module_tree(model=model)
-
-            turtle_model = None
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
