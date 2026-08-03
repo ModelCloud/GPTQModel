@@ -149,7 +149,7 @@ def _make_dequant_configs(block_sizes: List[int], num_warps: List[int]):
 
 # Wider space than the continuous dequant's fixed 1024/1-warp: ncu showed that
 # config reaching only ~9% DRAM SOL at ~18% occupancy on A100 (see
-# planar_kernel.md); the planar decode does 2-3 word loads per element, so it
+# pangolin_kernel.md); the planar decode does 2-3 word loads per element, so it
 # needs more in-flight warps per SM to keep the memory system busy.
 _PLANAR_DEQUANT_CONFIGS = _make_dequant_configs([1024, 2048, 4096], [1, 2, 4, 8])
 
@@ -657,7 +657,7 @@ def planar_gemm_kernel(
 # Input rows at or below this threshold route to the fused GEMM; everything
 # else (and the default of 0, i.e. disabled) uses planar_dequant + cuBLAS.
 # On A100 the per-element word gathers keep the fused path behind the dequant
-# + cuBLAS route even at M=1 (see planar_kernel.md benchmarks), so it stays
+# + cuBLAS route even at M=1 (see pangolin_kernel.md benchmarks), so it stays
 # opt-in until the decode is restructured around shared/register word reuse.
 PLANAR_FUSED_MAX_M = int(os.environ.get("GPTQMODEL_PLANAR_FUSED_MAX_M", "0"))
 

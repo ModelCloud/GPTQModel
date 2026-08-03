@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Benchmark planar (gptq_p) GPU kernels vs the Torch planar path and 4-bit Marlin.
+"""Benchmark Pangolin (gptq_p) planar GPU kernels vs the Torch planar path and 4-bit Marlin.
 
 Compares, per (bits, shape, batch):
 - torch-eager : eager planar unpack/dequant + matmul (the pre-kernel fallback)
@@ -18,6 +18,7 @@ Usage (with GPU allocator leasing):
 """
 
 import argparse
+import math
 import statistics
 import subprocess
 import sys
@@ -73,7 +74,7 @@ def build_planar_module(bits: int, in_features: int, out_features: int, group_si
 
     torch.manual_seed(bits)
     maxq = (1 << bits) - 1
-    groups = in_features // group_size
+    groups = math.ceil(in_features / group_size)
     linear = nn.Linear(in_features, out_features, bias=False)
     scales = torch.rand(out_features, groups) * 0.01 + 0.005
     zeros = torch.randint(0, maxq + 1, (out_features, groups)).float()
@@ -112,7 +113,7 @@ def build_marlin_module(in_features: int, out_features: int, group_size: int = 1
         raise RuntimeError(f"marlin unavailable: {err}")
 
     torch.manual_seed(4)
-    groups = in_features // group_size
+    groups = math.ceil(in_features / group_size)
     linear = nn.Linear(in_features, out_features, bias=False)
     scales = torch.rand(out_features, groups) * 0.01 + 0.005
     zeros = torch.full((out_features, groups), 8).float()
@@ -155,9 +156,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
-    parser.add_argument("--shapes", default="default", choices=["default", "laguna"],
-                        help="laguna = Laguna S 2.1 linear shapes (includes non-/32 attn heads)")
+    parser.add_argument("--shapes", default="default",
+                        choices=["default", "laguna", "glm45", "glm45-base", "all"],
+                        help="laguna = Laguna S 2.1, glm45 = GLM-4.5-Air, glm45-base = GLM-4.5, all = union")
     parser.add_argument("--batches", type=int, nargs="*", default=None)
+    parser.add_argument("--bits", type=int, nargs="*", default=None,
+                        help="bits to benchmark (default: 3 5 6 7)")
     parser.add_argument("--skip-fused", action="store_true",
                         help="skip tri-fused (planar_matmul); avoids its long per-shape Triton compiles")
     args = parser.parse_args()
@@ -183,19 +187,62 @@ def main():
     print(f"triton      : {triton.__version__}")
     print(f"dtype       : {args.dtype}, iters={args.iters} (median ms)")
 
+    # Real model shapes (K x N), derived from public HF configs:
+    #   Laguna S 2.1: hidden=2048, dense intermediate=8192, moe/shared=512,
+    #                 heads=48, kv_heads=8, head_dim=128, n_experts=256.
+    #   GLM-4.5-Air:  hidden=4096, dense intermediate=10944, moe=1408,
+    #                 heads=96, kv_heads=8, head_dim=128, n_routed=128.
+    #   GLM-4.5:      hidden=5120, dense intermediate=12288, moe=1536,
+    #                 heads=96, kv_heads=8, head_dim=128, n_routed=160.
+    laguna_shapes = [
+        (2048, 6144),   # q_proj
+        (2048, 1024),   # k_proj / v_proj
+        (6144, 2048),   # o_proj
+        (2048, 8192),   # dense gate / up
+        (8192, 2048),   # dense down
+        (2048, 512),    # moe/shared gate / up
+        (512, 2048),    # moe/shared down
+        (2048, 256),    # router gate
+    ]
+    glm45_air_shapes = [
+        (4096, 12288),  # q_proj
+        (4096, 1024),   # k_proj / v_proj
+        (12288, 4096),  # o_proj
+        (4096, 10944),  # dense gate / up
+        (10944, 4096),  # dense down
+        (4096, 1408),   # moe/shared gate / up
+        (1408, 4096),   # moe/shared down
+        (4096, 128),    # router gate
+    ]
+    glm45_base_shapes = [
+        (5120, 12288),  # q_proj
+        (5120, 1024),   # k_proj / v_proj
+        (12288, 5120),  # o_proj
+        (5120, 12288),  # dense gate / up
+        (12288, 5120),  # dense down
+        (5120, 1536),   # moe/shared gate / up
+        (1536, 5120),   # moe/shared down
+        (5120, 160),    # router gate
+    ]
+
     if args.shapes == "laguna":
-        # Laguna S 2.1 linear shapes (K x N); 3072x48 / 3072x72 exercise
-        # the non-/32 auto-pad path.
-        shapes = [
-            (1024, 3072), (3072, 48), (3072, 72), (3072, 1024), (3072, 6144),
-            (3072, 9216), (3072, 12288), (6144, 3072), (9216, 3072),
-            (12288, 3072), (3072, 256),
-        ]
-        batches = args.batches or [1, 4, 8, 16, 32, 64]
+        shapes = laguna_shapes
+    elif args.shapes == "glm45":
+        shapes = glm45_air_shapes
+    elif args.shapes == "glm45-base":
+        shapes = glm45_base_shapes
+    elif args.shapes == "all":
+        shapes = laguna_shapes + glm45_air_shapes + glm45_base_shapes
     else:
         shapes = [(4096, 4096), (4096, 11008), (11008, 4096)]
-        batches = args.batches or [1, 16, 512, 2048]
-    bits_list = [3, 5, 6, 7]
+
+    if args.batches is not None:
+        batches = args.batches
+    elif args.shapes in ("laguna", "glm45", "glm45-base", "all"):
+        batches = [1, 2, 4, 8, 16, 32]
+    else:
+        batches = [1, 16, 512, 2048]
+    bits_list = args.bits or [3, 5, 6, 7]
 
     marlin_cache = {}
     for shape in shapes:

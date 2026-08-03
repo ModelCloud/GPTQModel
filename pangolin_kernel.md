@@ -1,7 +1,8 @@
-# Planar (gptq_p) GPU kernel log
+# Pangolin (gptq_p) GPU kernel log
 
 Running log of kernel design decisions, forward/backward progress, and all test
-and benchmark results for the planar GPTQ GPU kernels (3/5/6/7-bit).
+and benchmark results for the Pangolin GPTQ GPU kernels (3/5/6/7-bit), which
+implement the planar `gptq_p` weight layout.
 
 ## Hardware / software snapshot
 
@@ -24,7 +25,7 @@ semantics (no +1 bias).
 
 ### Bandwidth-first strategy
 
-The planar decode is purely memory-bound: per 32 codes we read exactly `bits`
+The Pangolin decode is purely memory-bound: per 32 codes we read exactly `bits`
 int32 words (the information-theoretic minimum), and the decode is fixed
 shifts/masks + OR-merge — branch-free and uniform per lane. The priority
 order is therefore:
@@ -529,7 +530,7 @@ Full benchmark with the marlin ceiling (fp16, 50-iter median ms, same box):
 |    7 | 11008 x  4096 | 1 |       0.301 |    0.260 |     0.098 |       0.087 |
 
 (pangolin column from the pre-retune build; the v2 split retune brings the
-11008x4096 rows to 0.067-0.075 ms.) At decode shapes the native planar GEMV
+11008x4096 rows to 0.067-0.075 ms.) At decode shapes the native Pangolin GEMV
 now matches or beats the 4-bit Marlin ceiling at 3/5/6/7 bits — the last
 2-3x gap is closed. M=16+ still routes to tri-dequant + cuBLAS.
 
@@ -1220,3 +1221,138 @@ path that computes the real `split_k` first, then allocates exactly
 cache and sets `cudaFuncSetAttribute`, so the subsequent real launch pays no
 extra driver query. `test_pangolin_gemv_matches_reference` (all 52 cases) and
 the M-sweep benchmark pass after the change.
+
+
+## Round 10: real model-shape sweep (Laguna S 2.1 + GLM-4.5-Air)
+
+Updated `scripts/benchmark_planar_kernels.py` to accept `--shapes
+{laguna,glm45,glm45-base,all}` and `--bits ...` and to use the real projection
+dimensions from the public HuggingFace configs. GLM-4.5-Flash-0731 is not on the
+public Hub, so the GLM-4.5-Air config was used as the GLM-4.5 family proxy; share
+the exact gated repo id and I can swap in its config.
+
+Real shape definitions used:
+- Laguna S 2.1: hidden=2048, dense intermediate=8192, moe/shared=512,
+  heads=48, kv=8, head_dim=128.
+- GLM-4.5-Air: hidden=4096, dense intermediate=10944, moe=1408,
+  heads=96, kv=8, head_dim=128.
+
+Both sweeps run with `--bits 3 --batches 1 2 4 8 16 32 --skip-fused`, fp16,
+50 CUDA-event iterations, on PG506-230 A100-class GPUs.
+
+Laguna S 2.1 (GPU 4, UUID `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`):
+
+| bits |         K x N |     M |  torch-eager |  tri-dequant |  tri-fused |   tri-gemv |   pangolin | marlin-4bit | best-vs-eager |
+|------|---------------|-------|--------------|--------------|------------|------------|------------|-------------|---------------|
+|    3 |  2048 x  6144 |     1 |        1.602 |        0.216 |        n/a |      0.245 |      0.047 |       0.085 |        34.01x |
+|    3 |  2048 x  6144 |     2 |        1.618 |        0.216 |        n/a |      0.242 |      0.047 |       0.084 |        34.35x |
+|    3 |  2048 x  6144 |     4 |        1.608 |        0.211 |        n/a |      0.245 |      0.051 |       0.083 |        31.40x |
+|    3 |  2048 x  6144 |     8 |        1.620 |        0.218 |        n/a |      0.243 |      0.053 |       0.082 |        30.43x |
+|    3 |  2048 x  6144 |    16 |        1.603 |        0.208 |        n/a |      0.297 |      0.075 |       0.082 |        21.45x |
+|    3 |  2048 x  6144 |    32 |        1.606 |        0.206 |        n/a |        n/a |      0.086 |       0.081 |        18.67x |
+|    3 |  2048 x  1024 |     1 |        0.835 |        0.212 |        n/a |      0.246 |      0.046 |       0.082 |        18.11x |
+|    3 |  2048 x  1024 |     2 |        0.809 |        0.222 |        n/a |      0.246 |      0.046 |       0.082 |        17.56x |
+|    3 |  2048 x  1024 |     4 |        0.807 |        0.219 |        n/a |      0.246 |      0.046 |       0.083 |        17.51x |
+|    3 |  2048 x  1024 |     8 |        0.840 |        0.224 |        n/a |      0.246 |      0.046 |       0.083 |        18.23x |
+|    3 |  2048 x  1024 |    16 |        0.840 |        0.224 |        n/a |      0.245 |      0.051 |       0.083 |        16.40x |
+|    3 |  2048 x  1024 |    32 |        0.835 |        0.219 |        n/a |        n/a |      0.100 |       0.083 |         8.32x |
+|    3 |  6144 x  2048 |     1 |        1.625 |        0.217 |        n/a |      0.248 |      0.048 |       0.085 |        34.13x |
+|    3 |  6144 x  2048 |     2 |        1.625 |        0.219 |        n/a |      0.249 |      0.047 |       0.085 |        34.50x |
+|    3 |  6144 x  2048 |     4 |        1.612 |        0.218 |        n/a |      0.250 |      0.054 |       0.086 |        29.70x |
+|    3 |  6144 x  2048 |     8 |        1.614 |        0.220 |        n/a |      0.249 |      0.058 |       0.084 |        27.66x |
+|    3 |  6144 x  2048 |    16 |        1.625 |        0.216 |        n/a |      0.314 |      0.083 |       0.084 |        19.59x |
+|    3 |  6144 x  2048 |    32 |        1.618 |        0.218 |        n/a |        n/a |      0.122 |       0.084 |        13.28x |
+|    3 |  2048 x  8192 |     1 |        1.952 |        0.216 |        n/a |      0.244 |      0.047 |       0.083 |        41.45x |
+|    3 |  2048 x  8192 |     2 |        1.952 |        0.214 |        n/a |      0.246 |      0.047 |       0.083 |        41.45x |
+|    3 |  2048 x  8192 |     4 |        1.951 |        0.213 |        n/a |      0.247 |      0.051 |       0.084 |        38.10x |
+|    3 |  2048 x  8192 |     8 |        1.949 |        0.214 |        n/a |      0.259 |      0.061 |       0.083 |        31.98x |
+|    3 |  2048 x  8192 |    16 |        1.944 |        0.214 |        n/a |      0.334 |      0.087 |       0.083 |        22.33x |
+|    3 |  2048 x  8192 |    32 |        1.948 |        0.213 |        n/a |        n/a |      0.144 |       0.083 |        13.49x |
+|    3 |  8192 x  2048 |     1 |        1.977 |        0.217 |        n/a |      0.246 |      0.046 |       0.083 |        42.90x |
+|    3 |  8192 x  2048 |     2 |        1.961 |        0.223 |        n/a |      0.247 |      0.048 |       0.082 |        40.74x |
+|    3 |  8192 x  2048 |     4 |        1.968 |        0.220 |        n/a |      0.246 |      0.054 |       0.084 |        36.26x |
+|    3 |  8192 x  2048 |     8 |        1.954 |        0.215 |        n/a |      0.284 |      0.068 |       0.092 |        28.91x |
+|    3 |  8192 x  2048 |    16 |        2.000 |        0.241 |        n/a |      0.361 |      0.095 |       0.091 |        21.01x |
+|    3 |  8192 x  2048 |    32 |        1.960 |        0.217 |        n/a |        n/a |      0.145 |       0.084 |        13.48x |
+|    3 |  2048 x   512 |     1 |        0.893 |        0.212 |        n/a |      0.245 |      0.045 |       0.083 |        20.06x |
+|    3 |  2048 x   512 |     2 |        0.821 |        0.218 |        n/a |      0.245 |      0.046 |       0.084 |        17.82x |
+|    3 |  2048 x   512 |     4 |        0.824 |        0.217 |        n/a |      0.246 |      0.047 |       0.084 |        17.50x |
+|    3 |  2048 x   512 |     8 |        0.822 |        0.224 |        n/a |      0.244 |      0.046 |       0.084 |        17.83x |
+|    3 |  2048 x   512 |    16 |        0.815 |        0.222 |        n/a |      0.249 |      0.051 |       0.085 |        15.91x |
+|    3 |  2048 x   512 |    32 |        0.824 |        0.225 |        n/a |        n/a |      0.079 |       0.088 |        10.45x |
+|    3 |   512 x  2048 |     1 |        0.851 |        0.214 |        n/a |      0.250 |      0.048 |       0.085 |        17.69x |
+|    3 |   512 x  2048 |     2 |        0.834 |        0.216 |        n/a |      0.247 |      0.047 |       0.084 |        17.71x |
+|    3 |   512 x  2048 |     4 |        0.834 |        0.213 |        n/a |      0.247 |      0.047 |       0.084 |        17.70x |
+|    3 |   512 x  2048 |     8 |        0.834 |        0.214 |        n/a |      0.246 |      0.047 |       0.085 |        17.70x |
+|    3 |   512 x  2048 |    16 |        0.834 |        0.213 |        n/a |      0.248 |      0.047 |       0.085 |        17.70x |
+|    3 |   512 x  2048 |    32 |        0.844 |        0.226 |        n/a |        n/a |      0.068 |       0.084 |        12.49x |
+|    3 |  2048 x   256 |     1 |        0.822 |        0.212 |        n/a |      0.251 |      0.047 |       0.085 |        17.45x |
+|    3 |  2048 x   256 |     2 |        0.840 |        0.223 |        n/a |      0.253 |      0.047 |       0.086 |        17.83x |
+|    3 |  2048 x   256 |     4 |        0.838 |        0.223 |        n/a |      0.246 |      0.046 |       0.086 |        18.18x |
+|    3 |  2048 x   256 |     8 |        0.824 |        0.228 |        n/a |      0.248 |      0.047 |       0.084 |        17.50x |
+|    3 |  2048 x   256 |    16 |        0.841 |        0.229 |        n/a |      0.246 |      0.051 |       0.086 |        16.42x |
+|    3 |  2048 x   256 |    32 |        0.842 |        0.223 |        n/a |        n/a |      0.080 |       0.088 |        10.54x |
+
+GLM-4.5-Air (GPU 5, UUID `GPU-3a4bf14f-fa28-df88-f6e8-00ef6b13d473`):
+
+| bits |         K x N |     M |  torch-eager |  tri-dequant |  tri-fused |   tri-gemv |   pangolin | marlin-4bit | best-vs-eager |
+|------|---------------|-------|--------------|--------------|------------|------------|------------|-------------|---------------|
+|    3 |  4096 x 12288 |     1 |        4.841 |        0.285 |        n/a |      0.242 |      0.066 |       0.083 |        73.87x |
+|    3 |  4096 x 12288 |     2 |        4.849 |        0.288 |        n/a |      0.244 |      0.072 |       0.082 |        67.65x |
+|    3 |  4096 x 12288 |     4 |        4.831 |        0.284 |        n/a |      0.271 |      0.086 |       0.085 |        56.17x |
+|    3 |  4096 x 12288 |     8 |        4.835 |        0.288 |        n/a |      0.355 |      0.115 |       0.085 |        42.16x |
+|    3 |  4096 x 12288 |    16 |        4.845 |        0.289 |        n/a |      0.495 |      0.152 |       0.085 |        31.97x |
+|    3 |  4096 x 12288 |    32 |        4.855 |        0.290 |        n/a |        n/a |      0.268 |       0.086 |        18.13x |
+|    3 |  4096 x  1024 |     1 |        0.874 |        0.213 |        n/a |      0.237 |      0.046 |       0.080 |        18.98x |
+|    3 |  4096 x  1024 |     2 |        0.872 |        0.214 |        n/a |      0.240 |      0.046 |       0.081 |        18.93x |
+|    3 |  4096 x  1024 |     4 |        0.870 |        0.216 |        n/a |      0.240 |      0.046 |       0.082 |        18.88x |
+|    3 |  4096 x  1024 |     8 |        0.872 |        0.216 |        n/a |      0.239 |      0.047 |       0.081 |        18.52x |
+|    3 |  4096 x  1024 |    16 |        0.874 |        0.212 |        n/a |      0.243 |      0.071 |       0.081 |        12.38x |
+|    3 |  4096 x  1024 |    32 |        0.876 |        0.215 |        n/a |        n/a |      0.109 |       0.084 |         8.07x |
+|    3 | 12288 x  4096 |     1 |        4.893 |        1.860 |        n/a |      0.253 |      0.061 |       0.086 |        79.64x |
+|    3 | 12288 x  4096 |     2 |        4.879 |        0.295 |        n/a |      0.252 |      0.068 |       0.084 |        72.20x |
+|    3 | 12288 x  4096 |     4 |        5.076 |        0.294 |        n/a |      0.276 |      0.079 |       0.084 |        63.97x |
+|    3 | 12288 x  4096 |     8 |        4.888 |        0.292 |        n/a |      0.358 |      0.106 |       0.083 |        45.90x |
+|    3 | 12288 x  4096 |    16 |        4.875 |        0.289 |        n/a |      0.505 |      0.171 |       0.084 |        28.51x |
+|    3 | 12288 x  4096 |    32 |        4.885 |        0.292 |        n/a |        n/a |      0.402 |       0.086 |        16.74x |
+|    3 |  4096 x 10944 |     1 |        4.369 |        0.279 |        n/a |      0.248 |      0.058 |       0.084 |        74.86x |
+|    3 |  4096 x 10944 |     2 |        4.389 |        0.281 |        n/a |      0.244 |      0.065 |       0.082 |        68.04x |
+|    3 |  4096 x 10944 |     4 |        4.360 |        0.282 |        n/a |      0.267 |      0.073 |       0.083 |        59.97x |
+|    3 |  4096 x 10944 |     8 |        4.356 |        0.280 |        n/a |      0.327 |      0.094 |       0.085 |        46.23x |
+|    3 |  4096 x 10944 |    16 |        4.371 |        0.284 |        n/a |      0.451 |      0.151 |       0.084 |        29.04x |
+|    3 |  4096 x 10944 |    32 |        4.364 |        0.285 |        n/a |        n/a |      0.265 |       0.084 |        16.45x |
+|    3 | 10944 x  4096 |     1 |        4.420 |        0.281 |        n/a |      0.244 |      0.056 |       0.130 |        78.48x |
+|    3 | 10944 x  4096 |     2 |        4.402 |        0.278 |        n/a |      0.247 |      0.062 |       0.128 |        71.05x |
+|    3 | 10944 x  4096 |     4 |        4.400 |        0.278 |        n/a |      0.268 |      0.075 |       0.128 |        58.86x |
+|    3 | 10944 x  4096 |     8 |        4.398 |        0.279 |        n/a |      0.342 |      0.103 |       0.127 |        42.52x |
+|    3 | 10944 x  4096 |    16 |        4.403 |        0.276 |        n/a |      0.477 |      0.160 |       0.130 |        27.56x |
+|    3 | 10944 x  4096 |    32 |        4.406 |        0.278 |        n/a |        n/a |      0.361 |       0.130 |        15.88x |
+|    3 |  4096 x  1408 |     1 |        1.063 |        0.212 |        n/a |      0.240 |      0.046 |       0.082 |        23.07x |
+|    3 |  4096 x  1408 |     2 |        1.044 |        0.215 |        n/a |      0.240 |      0.046 |       0.083 |        22.67x |
+|    3 |  4096 x  1408 |     4 |        1.027 |        0.211 |        n/a |      0.240 |      0.045 |       0.083 |        22.78x |
+|    3 |  4096 x  1408 |     8 |        1.036 |        0.210 |        n/a |      0.240 |      0.046 |       0.082 |        22.48x |
+|    3 |  4096 x  1408 |    16 |        1.037 |        0.212 |        n/a |      0.252 |      0.067 |       0.083 |        15.58x |
+|    3 |  4096 x  1408 |    32 |        1.046 |        0.217 |        n/a |        n/a |      0.109 |       0.084 |         9.64x |
+|    3 |  1408 x  4096 |     1 |        1.077 |        0.219 |        n/a |      0.245 |      0.046 |       0.082 |        23.37x |
+|    3 |  1408 x  4096 |     2 |        1.043 |        0.214 |        n/a |      0.248 |      0.047 |       0.083 |        22.14x |
+|    3 |  1408 x  4096 |     4 |        1.058 |        0.215 |        n/a |      0.245 |      0.047 |       0.082 |        22.47x |
+|    3 |  1408 x  4096 |     8 |        1.046 |        0.209 |        n/a |      0.241 |      0.046 |       0.082 |        22.70x |
+|    3 |  1408 x  4096 |    16 |        1.030 |        0.208 |        n/a |      0.254 |      0.058 |       0.081 |        17.64x |
+|    3 |  1408 x  4096 |    32 |        1.026 |        0.207 |        n/a |        n/a |      0.069 |       0.081 |        14.96x |
+|    3 |  4096 x   128 |     1 |        0.851 |        0.217 |        n/a |      0.247 |      0.047 |       0.094 |        18.07x |
+|    3 |  4096 x   128 |     2 |        0.855 |        0.222 |        n/a |      0.244 |      0.046 |       0.103 |        18.56x |
+|    3 |  4096 x   128 |     4 |        0.827 |        0.217 |        n/a |      0.247 |      0.048 |       0.103 |        17.18x |
+|    3 |  4096 x   128 |     8 |        0.861 |        0.219 |        n/a |      0.246 |      0.048 |       0.096 |        17.88x |
+|    3 |  4096 x   128 |    16 |        0.842 |        0.220 |        n/a |      0.248 |      0.055 |       0.102 |        15.22x |
+|    3 |  4096 x   128 |    32 |        0.848 |        0.220 |        n/a |        n/a |      0.086 |       0.114 |         9.86x |
+
+Observations:
+- `pangolin` is the fastest path for every small-M shape in both models,
+  typically 2-4x over `tri-dequant` and 10-80x over `torch-eager`.
+- Wide output projections (q_proj, o_proj, MLP gate/up) show the largest
+  absolute wins because the dense eager dequant cost scales with `N`.
+- M=32 is handled natively for most shapes but latency grows faster than
+  M=1-16; tall `down_proj` layers continue to fall back to `tri-dequant`+cuBLAS
+  in production dispatch when `out_features < in_features`.
+- `test_pangolin_gemv_matches_reference` passed (48 cases) on GPU 4 after the
+  ColsPerLane=4 low-M optimization and the real-shape benchmark changes.

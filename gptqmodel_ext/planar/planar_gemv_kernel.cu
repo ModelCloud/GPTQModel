@@ -163,7 +163,16 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
     const int32_t* qweight_block = qweight + static_cast<int64_t>(blk) * Bits * size_n + n0;
 #pragma unroll
     for (int w = 0; w < Bits; ++w) {
-      if constexpr (ColsPerLane == 2) {
+      if constexpr (ColsPerLane == 4) {
+        // n0 is a multiple of 4 and size_n % 128 == 0, so the quad load is
+        // 16-byte aligned and contiguous in the N dimension.
+        const uint4 quad = *reinterpret_cast<const uint4*>(
+            qweight_block + static_cast<int64_t>(w) * size_n);
+        words[0][w] = quad.x;
+        words[1][w] = quad.y;
+        words[2][w] = quad.z;
+        words[3][w] = quad.w;
+      } else if constexpr (ColsPerLane == 2) {
         // n0 is even and size_n % 64 == 0, so the pair load is 8-byte aligned.
         const uint2 pair = *reinterpret_cast<const uint2*>(
             qweight_block + static_cast<int64_t>(w) * size_n);
@@ -363,8 +372,18 @@ int launch_size_m(
     int sm_count,
     cudaStream_t stream,
     bool dry_run = false) {
-  // Adjacent column pairs load as one 8-byte word when N allows it: fewer,
-  // wider weight loads and one shuffle broadcast feeding two output columns.
+  // For small decode batches the inner loop has few independent FMAs, so
+  // process more columns per lane to increase ILP and amortize the activation
+  // shuffle. Use 16-byte (4-column) loads when the shape allows it; otherwise
+  // fall back to 8-byte pairs or scalar loads. Restrict the 4-column path to
+  // SizeM <= 4 to keep register pressure and dynamic shared memory in check.
+  if constexpr (SizeM <= 4) {
+    if (size_n % (kWarpSize * 4) == 0) {
+      return launch_cols<Scalar, Bits, SizeM, 4>(
+          input, qweight, scales, qzeros, g_idx, output, workspace, counters,
+          size_k, size_n, num_groups, split_cap, sm_count, stream, dry_run);
+    }
+  }
   if (size_n % (kWarpSize * 2) == 0) {
     return launch_cols<Scalar, Bits, SizeM, 2>(
         input, qweight, scales, qzeros, g_idx, output, workspace, counters,
