@@ -29,7 +29,7 @@
 namespace pangolin {
 
 constexpr int kWarpSize = 32;
-constexpr int kBlockN = 32;     // columns per block == one qzeros column block
+constexpr int kBlockN = 32;     // minimum column granularity (one qzeros column block)
 constexpr int kWarpsPerBlock = 8;
 constexpr int kThreads = kWarpsPerBlock * kWarpSize;
 constexpr int kMaxM = 8;        // decode-regime rows handled per launch
@@ -90,14 +90,17 @@ __device__ __forceinline__ int decode_zero(const int32_t* qzeros_block, int r) {
   return code;
 }
 
-// One block owns 32 output columns and a strided set of 32-row k-blocks.
-// Each warp decodes whole k-blocks (`bits` word loads per lane, reused for
-// all 32 codes in registers); warp partials reduce through shared memory and
-// each split-K block writes its partial to its own fp32 workspace slice (no
-// atomics, no zero-init needed). The last block to finish a column block
-// sums the slices and converts to the output dtype in-kernel, so the whole
-// op is a single kernel launch plus one tiny counter memset.
-template <typename Scalar, int Bits, int SizeM>
+// One block owns kWarpSize * ColsPerLane output columns and a strided set of
+// 32-row k-blocks. Each warp decodes whole k-blocks (`bits` packed word loads
+// per owned column, reused for all 32 codes in registers); ColsPerLane == 2
+// loads adjacent column pairs as one 8-byte `uint2` and shares each shuffled
+// activation across both columns, halving shuffle traffic per output. Warp
+// partials reduce through shared memory and each split-K block writes its
+// partial to its own fp32 workspace slice (no atomics, no zero-init needed).
+// The last block to finish a column block sums the slices and converts to the
+// output dtype in-kernel, so the whole op is a single kernel launch plus one
+// tiny counter memset.
+template <typename Scalar, int Bits, int SizeM, int ColsPerLane>
 __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ qweight,
@@ -111,19 +114,23 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
     int size_n,
     int num_groups) {
   using Spec = PlaneSpec<Bits>;
-  __shared__ float partials[kWarpsPerBlock][SizeM][kBlockN];
+  constexpr int kBlockCols = kWarpSize * ColsPerLane;
+  __shared__ float partials[kWarpsPerBlock][SizeM][kBlockCols];
 
   const int lane = threadIdx.x & (kWarpSize - 1);
   const int warp = threadIdx.x >> 5;
   const int column_block = blockIdx.x;
-  const int global_n = column_block * kBlockN + lane;
+  const int n0 = column_block * kBlockCols + lane * ColsPerLane;
   const int num_k_blocks = size_k / 32;
   const int qzeros_stride = (size_n / 32) * Bits;
 
-  float acc[SizeM];
+  float acc[SizeM][ColsPerLane];
 #pragma unroll
   for (int m = 0; m < SizeM; ++m) {
-    acc[m] = 0.0f;
+#pragma unroll
+    for (int c = 0; c < ColsPerLane; ++c) {
+      acc[m][c] = 0.0f;
+    }
   }
 
   for (int blk = blockIdx.y * kWarpsPerBlock + warp; blk < num_k_blocks;
@@ -134,16 +141,33 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
       group += num_groups;
     }
 
-    const float scale = ScalarTraits<Scalar>::to_float(
-        scales[static_cast<int64_t>(group) * size_n + global_n]);
-    const int zero = decode_zero<Bits>(
-        qzeros + static_cast<int64_t>(group) * qzeros_stride + column_block * Bits, lane);
+    // Fold the zero point into the scale so each code costs one FMA:
+    // (code - zero) * scale == code * scale - zero * scale.
+    float scale[ColsPerLane];
+    float zero_scale[ColsPerLane];
+#pragma unroll
+    for (int c = 0; c < ColsPerLane; ++c) {
+      const int n = n0 + c;
+      scale[c] = ScalarTraits<Scalar>::to_float(
+          scales[static_cast<int64_t>(group) * size_n + n]);
+      const int zero = decode_zero<Bits>(
+          qzeros + static_cast<int64_t>(group) * qzeros_stride + (n / 32) * Bits, n % 32);
+      zero_scale[c] = static_cast<float>(zero) * scale[c];
+    }
 
-    uint32_t words[Bits];
-    const int32_t* qweight_block = qweight + static_cast<int64_t>(blk) * Bits * size_n + global_n;
+    uint32_t words[ColsPerLane][Bits];
+    const int32_t* qweight_block = qweight + static_cast<int64_t>(blk) * Bits * size_n + n0;
 #pragma unroll
     for (int w = 0; w < Bits; ++w) {
-      words[w] = static_cast<uint32_t>(qweight_block[static_cast<int64_t>(w) * size_n]);
+      if constexpr (ColsPerLane == 2) {
+        // n0 is even and size_n % 64 == 0, so the pair load is 8-byte aligned.
+        const uint2 pair = *reinterpret_cast<const uint2*>(
+            qweight_block + static_cast<int64_t>(w) * size_n);
+        words[0][w] = pair.x;
+        words[1][w] = pair.y;
+      } else {
+        words[0][w] = static_cast<uint32_t>(qweight_block[static_cast<int64_t>(w) * size_n]);
+      }
     }
 
     // Every lane needs all 32 activations of the block: each lane loads one
@@ -157,23 +181,34 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
 
 #pragma unroll
     for (int k = 0; k < 32; ++k) {
-      int code = plane_code<Spec::kW0>(words, k);
-      code |= plane_code<Spec::kW1>(words + Spec::kW0, k) << Spec::kW0;
-      if constexpr (Spec::kW2 > 0) {
-        code |= plane_code<Spec::kW2>(words + Spec::kW0 + Spec::kW1, k) << (Spec::kW0 + Spec::kW1);
+      float weight[ColsPerLane];
+#pragma unroll
+      for (int c = 0; c < ColsPerLane; ++c) {
+        int code = plane_code<Spec::kW0>(words[c], k);
+        code |= plane_code<Spec::kW1>(words[c] + Spec::kW0, k) << Spec::kW0;
+        if constexpr (Spec::kW2 > 0) {
+          code |= plane_code<Spec::kW2>(words[c] + Spec::kW0 + Spec::kW1, k)
+                  << (Spec::kW0 + Spec::kW1);
+        }
+        weight[c] = __fmaf_rn(static_cast<float>(code), scale[c], -zero_scale[c]);
       }
-      const float weight = static_cast<float>(code - zero) * scale;
 #pragma unroll
       for (int m = 0; m < SizeM; ++m) {
         const float activation = __shfl_sync(0xffffffffu, x_lane[m], k);
-        acc[m] = __fmaf_rn(activation, weight, acc[m]);
+#pragma unroll
+        for (int c = 0; c < ColsPerLane; ++c) {
+          acc[m][c] = __fmaf_rn(activation, weight[c], acc[m][c]);
+        }
       }
     }
   }
 
 #pragma unroll
   for (int m = 0; m < SizeM; ++m) {
-    partials[warp][m][lane] = acc[m];
+#pragma unroll
+    for (int c = 0; c < ColsPerLane; ++c) {
+      partials[warp][m][lane * ColsPerLane + c] = acc[m][c];
+    }
   }
   __syncthreads();
 
@@ -184,12 +219,16 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
   if (gridDim.y == 1) {
 #pragma unroll
     for (int m = 0; m < SizeM; ++m) {
-      float value = partials[0][m][lane];
 #pragma unroll
-      for (int w = 1; w < kWarpsPerBlock; ++w) {
-        value += partials[w][m][lane];
+      for (int c = 0; c < ColsPerLane; ++c) {
+        const int col = lane * ColsPerLane + c;
+        float value = partials[0][m][col];
+#pragma unroll
+        for (int w = 1; w < kWarpsPerBlock; ++w) {
+          value += partials[w][m][col];
+        }
+        output[static_cast<int64_t>(m) * size_n + n0 + c] = ScalarTraits<Scalar>::from_float(value);
       }
-      output[static_cast<int64_t>(m) * size_n + global_n] = ScalarTraits<Scalar>::from_float(value);
     }
     return;
   }
@@ -198,12 +237,16 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
   // so plain stores replace global atomics and no zero-init pass is needed.
 #pragma unroll
   for (int m = 0; m < SizeM; ++m) {
-    float value = partials[0][m][lane];
 #pragma unroll
-    for (int w = 1; w < kWarpsPerBlock; ++w) {
-      value += partials[w][m][lane];
+    for (int c = 0; c < ColsPerLane; ++c) {
+      const int col = lane * ColsPerLane + c;
+      float value = partials[0][m][col];
+#pragma unroll
+      for (int w = 1; w < kWarpsPerBlock; ++w) {
+        value += partials[w][m][col];
+      }
+      workspace[(static_cast<int64_t>(blockIdx.y) * SizeM + m) * size_n + n0 + c] = value;
     }
-    workspace[(static_cast<int64_t>(blockIdx.y) * SizeM + m) * size_n + global_n] = value;
   }
 
   // Last split-K block for this column block sums the slices and converts to
@@ -217,13 +260,57 @@ __global__ __launch_bounds__(kThreads) void planar_gemv_kernel(
   if (is_last) {
 #pragma unroll
     for (int m = 0; m < SizeM; ++m) {
-      float value = 0.0f;
-      for (int y = 0; y < static_cast<int>(gridDim.y); ++y) {
-        value += workspace[(static_cast<int64_t>(y) * SizeM + m) * size_n + global_n];
+#pragma unroll
+      for (int c = 0; c < ColsPerLane; ++c) {
+        float value = 0.0f;
+        for (int y = 0; y < static_cast<int>(gridDim.y); ++y) {
+          value += workspace[(static_cast<int64_t>(y) * SizeM + m) * size_n + n0 + c];
+        }
+        output[static_cast<int64_t>(m) * size_n + n0 + c] = ScalarTraits<Scalar>::from_float(value);
       }
-      output[static_cast<int64_t>(m) * size_n + global_n] = ScalarTraits<Scalar>::from_float(value);
     }
   }
+}
+
+template <typename Scalar, int Bits, int SizeM, int ColsPerLane>
+void launch_cols(
+    const torch::Tensor& input,
+    const torch::Tensor& qweight,
+    const torch::Tensor& scales,
+    const torch::Tensor& qzeros,
+    const torch::Tensor& g_idx,
+    torch::Tensor& output,
+    float* workspace,
+    int* counters,
+    int size_k,
+    int size_n,
+    int num_groups,
+    int split_cap,
+    int sm_count,
+    cudaStream_t stream) {
+  // Size split-K from this instantiation's real occupancy so the grid fills
+  // exactly the resident-block wave (a partial second wave runs alone and
+  // stretches the whole launch).
+  const int column_blocks = size_n / (kWarpSize * ColsPerLane);
+  int blocks_per_sm = 0;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks_per_sm, planar_gemv_kernel<Scalar, Bits, SizeM, ColsPerLane>, kThreads, 0);
+  const int wave_slots = std::max(1, blocks_per_sm) * sm_count;
+  const int wanted = std::max(1, wave_slots / column_blocks);
+  const int split_k = std::min(split_cap, wanted);
+  const dim3 grid(column_blocks, split_k);
+  planar_gemv_kernel<Scalar, Bits, SizeM, ColsPerLane><<<grid, kThreads, 0, stream>>>(
+      reinterpret_cast<const Scalar*>(input.const_data_ptr()),
+      qweight.const_data_ptr<int32_t>(),
+      reinterpret_cast<const Scalar*>(scales.const_data_ptr()),
+      qzeros.const_data_ptr<int32_t>(),
+      g_idx.const_data_ptr<int32_t>(),
+      reinterpret_cast<Scalar*>(output.mutable_data_ptr()),
+      workspace,
+      counters,
+      size_k,
+      size_n,
+      num_groups);
 }
 
 template <typename Scalar, int Bits, int SizeM>
@@ -239,21 +326,20 @@ void launch_size_m(
     int size_k,
     int size_n,
     int num_groups,
-    int split_k,
+    int split_cap,
+    int sm_count,
     cudaStream_t stream) {
-  const dim3 grid(size_n / kBlockN, split_k);
-  planar_gemv_kernel<Scalar, Bits, SizeM><<<grid, kThreads, 0, stream>>>(
-      reinterpret_cast<const Scalar*>(input.const_data_ptr()),
-      qweight.const_data_ptr<int32_t>(),
-      reinterpret_cast<const Scalar*>(scales.const_data_ptr()),
-      qzeros.const_data_ptr<int32_t>(),
-      g_idx.const_data_ptr<int32_t>(),
-      reinterpret_cast<Scalar*>(output.mutable_data_ptr()),
-      workspace,
-      counters,
-      size_k,
-      size_n,
-      num_groups);
+  // Adjacent column pairs load as one 8-byte word when N allows it: fewer,
+  // wider weight loads and one shuffle broadcast feeding two output columns.
+  if (size_n % (kWarpSize * 2) == 0) {
+    launch_cols<Scalar, Bits, SizeM, 2>(
+        input, qweight, scales, qzeros, g_idx, output, workspace, counters,
+        size_k, size_n, num_groups, split_cap, sm_count, stream);
+  } else {
+    launch_cols<Scalar, Bits, SizeM, 1>(
+        input, qweight, scales, qzeros, g_idx, output, workspace, counters,
+        size_k, size_n, num_groups, split_cap, sm_count, stream);
+  }
 }
 
 template <typename Scalar, int Bits>
@@ -270,48 +356,49 @@ void launch_bits(
     int size_k,
     int size_n,
     int num_groups,
-    int split_k,
+    int split_cap,
+    int sm_count,
     cudaStream_t stream) {
   switch (size_m) {
     case 1:
       launch_size_m<Scalar, Bits, 1>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 2:
       launch_size_m<Scalar, Bits, 2>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 3:
       launch_size_m<Scalar, Bits, 3>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 4:
       launch_size_m<Scalar, Bits, 4>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 5:
       launch_size_m<Scalar, Bits, 5>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 6:
       launch_size_m<Scalar, Bits, 6>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 7:
       launch_size_m<Scalar, Bits, 7>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 8:
       launch_size_m<Scalar, Bits, 8>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_k, size_n, num_groups, split_k, stream);
+          size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     default:
       TORCH_CHECK(false, "pangolin gemv supports 1..", kMaxM, " input rows, got ", size_m);
@@ -333,28 +420,29 @@ void launch_scalar(
     int size_k,
     int size_n,
     int num_groups,
-    int split_k,
+    int split_cap,
+    int sm_count,
     cudaStream_t stream) {
   switch (bits) {
     case 3:
       launch_bits<Scalar, 3>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_m, size_k, size_n, num_groups, split_k, stream);
+          size_m, size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 5:
       launch_bits<Scalar, 5>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_m, size_k, size_n, num_groups, split_k, stream);
+          size_m, size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 6:
       launch_bits<Scalar, 6>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_m, size_k, size_n, num_groups, split_k, stream);
+          size_m, size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     case 7:
       launch_bits<Scalar, 7>(
           input, qweight, scales, qzeros, g_idx, output, workspace, counters,
-          size_m, size_k, size_n, num_groups, split_k, stream);
+          size_m, size_k, size_n, num_groups, split_cap, sm_count, stream);
       break;
     default:
       TORCH_CHECK(false, "pangolin gemv supports bits 3/5/6/7, got ", bits);
@@ -417,15 +505,18 @@ torch::Tensor pangolin_gemv_cuda(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
 
-  // Deep split-K supplies SM-level parallelism: N/32 column blocks alone
-  // underfill large devices at decode shapes. Cover ~8 blocks per SM, capped
-  // by available k-blocks per warp-slot.
+  // Deep split-K supplies SM-level parallelism: the column blocks alone
+  // underfill large devices at decode shapes. The exact split is chosen at
+  // launch (per-instantiation occupancy); here only cap it so every warp
+  // still owns whole k-blocks, and size the workspace for the cap.
   const int num_k_blocks = static_cast<int>(size_k / 32);
-  const int column_blocks = static_cast<int>(size_n / pangolin::kBlockN);
-  const int max_split = std::max(1, num_k_blocks / pangolin::kWarpsPerBlock);
-  const int wanted = static_cast<int>(
-      (8L * properties->multiProcessorCount + column_blocks - 1) / column_blocks);
-  const int split_k = std::min(max_split, std::max(1, wanted));
+  // Blocks own 64 columns (2 per lane) when N allows; must match launch_size_m.
+  const int cols_per_block = (size_n % 64 == 0) ? 64 : pangolin::kBlockN;
+  const int column_blocks = static_cast<int>(size_n / cols_per_block);
+  // 64 bounds the transient fp32 workspace; the occupancy-derived split
+  // never usefully exceeds one wave of blocks per column block anyway.
+  const int split_cap = std::min(64, std::max(1, num_k_blocks / pangolin::kWarpsPerBlock));
+  const int sm_count = properties->multiProcessorCount;
 
   auto output = torch::empty({size_m, size_n}, input.options());
 
@@ -436,8 +527,8 @@ torch::Tensor pangolin_gemv_cuda(
   torch::Tensor scratch;
   float* workspace = nullptr;
   int* counters = nullptr;
-  if (split_k > 1) {
-    const int64_t workspace_elems = static_cast<int64_t>(split_k) * size_m * size_n;
+  if (split_cap > 1) {
+    const int64_t workspace_elems = static_cast<int64_t>(split_cap) * size_m * size_n;
     scratch = torch::empty(
         {workspace_elems + column_blocks}, input.options().dtype(at::kFloat));
     workspace = scratch.mutable_data_ptr<float>();
@@ -449,12 +540,12 @@ torch::Tensor pangolin_gemv_cuda(
     pangolin::launch_scalar<half>(
         input, qweight, scales, qzeros, g_idx, output, workspace, counters, bits,
         static_cast<int>(size_m), static_cast<int>(size_k), static_cast<int>(size_n),
-        static_cast<int>(num_groups), split_k, stream);
+        static_cast<int>(num_groups), split_cap, sm_count, stream);
   } else {
     pangolin::launch_scalar<nv_bfloat16>(
         input, qweight, scales, qzeros, g_idx, output, workspace, counters, bits,
         static_cast<int>(size_m), static_cast<int>(size_k), static_cast<int>(size_n),
-        static_cast<int>(num_groups), split_k, stream);
+        static_cast<int>(num_groups), split_cap, sm_count, stream);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 

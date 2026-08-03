@@ -983,3 +983,82 @@ Test results (A100 box, allocator lease):
   test_planar_model_e2e.py: 400/400 passed (ran on GPU).
 - CUDA relayout tests confirm: post_init converts once, Pangolin routes gptq_v2:3, output matches the
   continuous reference, and repeated forwards are stable (no reconversion).
+
+## Round 7 — Pangolin v5: paired-column decode + occupancy-sized split-K (+ review fixes)
+
+Baseline ncu capture of the shipped v4 kernel (allocator lease, A100-class
+PG506-230, cc 8.0, 124 SMs, torch 2.13.0+cu130, fp16, 3-bit 4096x4096 M=1):
+
+```
+ncu --section SpeedOfLight --section SchedulerStats --section Occupancy --section LaunchStats \
+    --launch-skip 5 --launch-count 1 -k regex:planar_gemv \
+    python scripts/profile_pangolin_gemv.py 3 4096 4096 1
+# v4: grid=(128,8) 1024 blocks | 20.32 us | mem SOL 23.3% | DRAM 13.4%
+#     compute 55.8% | achieved occupancy 65.5% | 0.90+partial waves
+```
+
+v5 kernel changes (`gptqmodel_ext/planar/planar_gemv_kernel.cu`):
+
+- **ColsPerLane=2 (paired columns)**: when `N % 64 == 0` each block owns 64
+  columns and every lane owns an adjacent column pair, loading its `bits`
+  qweight words per k-block as one 8-byte `uint2`. Halves the number of
+  weight-load transactions and shares each shuffled activation across two
+  output columns (one `__shfl_sync` now feeds 2 FMAs). Falls back to the v4
+  single-column variant for `N % 64 == 32` (all shapes stay supported).
+- **Zero folded into scale**: `(code - zero) * scale` becomes one
+  `fma(code, scale, -zero*scale)` per code (hoisted per k-block).
+- **Occupancy-sized split-K**: the launch queries
+  `cudaOccupancyMaxActiveBlocksPerMultiprocessor` for the exact template
+  instantiation and floors the split so the grid fills exactly one resident
+  wave (v4 assumed 8 blocks/SM; the fatter v5 blocks are register-limited to
+  fewer, so a fixed assumption spilled into a slow partial second wave).
+  The host caps the split (<=64) only to bound the transient fp32 workspace.
+
+Post-change ncu (same command):
+
+```
+# v5: grid=(64,9) 576 blocks | 18.14 us | DRAM 15.0% | compute 49.2%
+#     achieved occupancy 44.1% | 0.93 waves (wave-aligned, no partial tail)
+```
+
+Kernel-side 20.3 -> 18.1 us (-11%) at the profiled case. End-to-end
+(scripts/benchmark_planar_kernels.py --skip-fused --batches 1 4 8, median
+CUDA-event ms, fp16, 50 iters):
+
+| bits | K x N | M | v4 | v5 |
+|------|-------|---|----|----|
+| 3 | 4096x4096  | 1 | 0.045 | 0.049 |
+| 3 | 4096x11008 | 1 | 0.060 | 0.059 |
+| 3 | 11008x4096 | 1 | 0.059 | 0.057 |
+| 3 | 11008x4096 | 8 | 0.116 | 0.105 |
+| 5 | 4096x4096  | 1 | 0.046 | 0.047 |
+| 5 | 4096x11008 | 8 | 0.114 | 0.098 |
+| 6 | 4096x4096  | 1 | 0.044 | 0.045 |
+| 6 | 4096x11008 | 8 | 0.115 | 0.100 |
+| 7 | 4096x4096  | 1 | 0.045 | 0.045 |
+| 7 | 4096x11008 | 1 | 0.071 | 0.068 |
+| 7 | 4096x11008 | 8 | 0.119 | 0.100 |
+| 7 | 11008x4096 | 1 | 0.070 | 0.068 |
+
+What worked / what didn't:
+- The wins concentrate at M=4/8 and large shapes (-9..-16%), where the halved
+  shuffle count and wider loads matter most; small-shape M=1 is within run
+  noise (the 0.044-0.049 floor there is dominated by host dispatch, since the
+  kernel itself is ~18 us).
+- A first floor-only split_k tweak on the v4 geometry (`wave_slots/columns`
+  instead of ceil) measured no kernel-side change on its own; the occupancy
+  API sizing only pays off combined with the fatter v5 blocks.
+- 36/36 focused Pangolin GPU tests re-passed after each kernel change.
+
+Review fixes landed alongside (from merged PR #160 findings):
+- `convert_to_planar()` no longer keeps permanent CPU clones of the continuous
+  buffers; `_save_to_state_dict` re-derives them lazily via
+  `_repack_continuous_3bit()` (bit-identical round-trip covered by
+  `test_relayout_preserves_continuous_state_dict`).
+- strict `load_state_dict()` on an already-relayouted module resets the
+  planar/relayout flags so the continuous checkpoint reloads cleanly and can
+  relayout again (`test_relayout_then_strict_reload_on_same_module`).
+- `planar_dequant()` rejects `K % 32 != 0` explicitly instead of returning a
+  `torch.empty` tail (`test_planar_dequant_rejects_unaligned_rows`).
+- eager `num_itr` derives from logical `in_features`, not padded
+  `g_idx.shape[0]` (`test_forward_eager_num_itr_stays_one_for_tiny_k`).

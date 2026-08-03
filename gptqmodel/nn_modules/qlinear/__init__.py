@@ -1115,11 +1115,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         weight = weight.to(t.int32)
         zeros = zeros.reshape(self.scales.shape).to(t.int32)
 
-        # The checkpoint format label stays continuous (e.g. gptq_v2), so keep the
-        # original packed buffers for serialization: state_dict/save must emit the
-        # layout the format label describes, not the runtime planar relayout.
-        self._checkpoint_qweight = self.qweight.detach().cpu().clone()
-        self._checkpoint_qzeros = self.qzeros.detach().cpu().clone()
+        # The checkpoint format label stays continuous (e.g. gptq_v2), so
+        # serialization must emit the continuous layout. The continuous buffers
+        # are re-derived on demand at save time (see `_save_to_state_dict`)
+        # instead of holding a permanent host-side copy of every layer.
+        self._continuous_relayout = True
 
         # Replace the buffers outright: mutating `.data` of tensors created
         # under inference_mode trips version-counter checks later.
@@ -1132,15 +1132,55 @@ class PackableQuantLinear(GPTQQuantLinear):
         self.planar = True
         return True
 
+    def _repack_continuous_3bit(self) -> Tuple[t.Tensor, t.Tensor]:
+        """Re-derive the continuous 3-bit packed buffers from the planar runtime layout.
+
+        Continuous 3-bit rows use the same 10|1|10|1|10 word pattern as columns,
+        so row packing is column packing of the transposed code matrix.
+        """
+        from ...utils.model_dequant import _pack_cols_3bit
+
+        codes = planar_unpack_rows(self.qweight.detach().cpu(), self.bits)
+        zeros = planar_unpack_cols(self.qzeros.detach().cpu(), self.bits)
+        qweight = _pack_cols_3bit(codes.t().contiguous(), pack_dtype=self.pack_dtype).t().contiguous()
+        qzeros = _pack_cols_3bit(zeros, pack_dtype=self.pack_dtype)
+        return qweight, qzeros
+
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
         # After a runtime planar relayout the format label still describes the
-        # continuous layout; serialize the preserved continuous buffers.
-        if getattr(self, "_checkpoint_qweight", None) is not None:
+        # continuous layout; re-derive the continuous buffers on demand so no
+        # permanent host-side duplicate of the packed weights is kept.
+        if getattr(self, "_continuous_relayout", False):
+            qweight, qzeros = self._repack_continuous_3bit()
             if prefix + "qweight" in destination:
-                destination[prefix + "qweight"] = self._checkpoint_qweight
+                destination[prefix + "qweight"] = qweight
             if prefix + "qzeros" in destination:
-                destination[prefix + "qzeros"] = self._checkpoint_qzeros
+                destination[prefix + "qzeros"] = qzeros
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # A runtime planar relayout leaves the live buffers planar-shaped while
+        # checkpoints stay continuous; reset to continuous-shaped buffers so a
+        # strict reload copies cleanly. post_init/convert_to_planar can relayout
+        # again afterwards.
+        if getattr(self, "_continuous_relayout", False):
+            incoming_qweight = state_dict.get(prefix + "qweight")
+            incoming_qzeros = state_dict.get(prefix + "qzeros")
+            if incoming_qweight is not None and incoming_qzeros is not None:
+                # Continuous and planar 3-bit share packed shapes, so the copy
+                # itself always succeeds; recreate the buffers only if a layout
+                # ever diverges in shape.
+                if tuple(incoming_qweight.shape) != tuple(self.qweight.shape):
+                    self.qweight = t.empty(
+                        tuple(incoming_qweight.shape), dtype=self.qweight.dtype, device=self.qweight.device
+                    )
+                if tuple(incoming_qzeros.shape) != tuple(self.qzeros.shape):
+                    self.qzeros = t.empty(
+                        tuple(incoming_qzeros.shape), dtype=self.qzeros.dtype, device=self.qzeros.device
+                    )
+                self.planar = False
+                self._continuous_relayout = False
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
         if num_itr == 1:

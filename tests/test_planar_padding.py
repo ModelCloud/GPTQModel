@@ -134,6 +134,20 @@ def test_forward_pad_slice_matches_dense(bits: int, shape, batch: int):
 
 
 @pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
+def test_forward_eager_num_itr_stays_one_for_tiny_k(bits: int):
+    """in_features < 32 pads g_idx to 32 rows; num_itr must derive from the
+    logical K so the eager path never enters the multi-iteration dequant."""
+    module = _packed_module(bits, in_features=16, out_features=64, group_size=16, sym=(bits == 3))
+    assert module.padded_in_features == 32
+
+    x = torch.randn(3, 16, dtype=torch.float16) * 0.5
+    out = module._forward_eager(x, (3, module.out_features))
+    assert out.shape == (3, 64)
+    ref = _dense_reference(module, x)
+    assert torch.allclose(out.float(), ref.float(), atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
 @pytest.mark.parametrize("shape", _PAD_SHAPES)
 @pytest.mark.skipif(not _CUDA, reason="CUDA unavailable")
 def test_forward_pad_slice_matches_dense_gpu(bits: int, shape):

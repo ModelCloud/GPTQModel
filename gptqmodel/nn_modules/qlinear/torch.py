@@ -337,7 +337,9 @@ class TorchLinear(PackableQuantLinear):
         return out
 
     def _forward_eager(self, x: torch.Tensor, out_shape):
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
+        # Use the logical K: planar auto-padding grows g_idx to
+        # padded_in_features, which must not push num_itr above 1.
+        num_itr = self.in_features // x.shape[-1]
         weights = self._consume_prefetched_weights(x.dtype, device=x.device)
         if weights is None:
             weights = self.dequantize_weight(num_itr=num_itr)

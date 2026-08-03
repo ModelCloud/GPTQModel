@@ -342,6 +342,11 @@ def planar_dequant(dtype, qweight, scales, qzeros, g_idx, bits: int) -> torch.Te
     num_groups = scales.shape[0]
     out_features = scales.shape[1]
     in_features = g_idx.shape[0]
+    # The planar layout stores whole 32-code blocks; the block kernel covers
+    # exactly in_features // 32 blocks, so unaligned rows would stay
+    # uninitialized in the `torch.empty` output.
+    if in_features % 32 != 0:
+        raise ValueError(f"planar_dequant requires in_features divisible by 32, got {in_features}.")
 
     out = torch.empty((in_features, out_features), device=qweight.device, dtype=dtype)
 

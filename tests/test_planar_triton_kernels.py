@@ -128,6 +128,21 @@ def test_planar_dequant_uneven_group_size(bits: int):
 
 
 @pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
+def test_planar_dequant_rejects_unaligned_rows(bits: int):
+    # The block kernel covers exactly in_features // 32 blocks; unaligned rows
+    # would silently stay uninitialized, so the contract is explicit.
+    from gptqmodel.nn_modules.triton_utils.planar import planar_dequant
+
+    module = _packed_module(bits)
+    _to_cuda(module)
+    g_idx_unaligned = module.g_idx[:-8]
+    with pytest.raises(ValueError, match="divisible by 32"):
+        planar_dequant(
+            torch.float16, module.qweight, module.scales, module.qzeros, g_idx_unaligned, module.bits
+        )
+
+
+@pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("batch", [1, 8, 33, 128])
 def test_planar_matmul_matches_reference(bits: int, dtype: torch.dtype, batch: int):

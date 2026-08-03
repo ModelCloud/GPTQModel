@@ -241,6 +241,37 @@ class TestConvertToPlanar:
         x = torch.randn(4, 256, dtype=torch.float16) * 0.5
         assert torch.allclose(reloaded(x).float(), module(x).float(), atol=1e-3, rtol=1e-3)
 
+    def test_relayout_keeps_no_host_copies(self):
+        # The continuous buffers are re-derived lazily at save time; the
+        # relayout must not pin a permanent host-side duplicate per layer.
+        module = _make_continuous_module()
+        assert module.convert_to_planar()
+        assert getattr(module, "_checkpoint_qweight", None) is None
+        assert getattr(module, "_checkpoint_qzeros", None) is None
+        assert module._continuous_relayout
+
+    def test_relayout_then_strict_reload_on_same_module(self):
+        # A strict load_state_dict on an already-relayouted module must accept
+        # continuous-shaped tensors (buffers reset before the copy).
+        module = _make_continuous_module()
+        state = {k: v.clone() for k, v in module.state_dict().items()}
+        ref = module.dequantize_weight().clone()
+
+        assert module.convert_to_planar()
+        assert module.planar
+        # inference_mode: the fixture packs under inference_mode, so in-place
+        # buffer copies are only legal inside it.
+        with torch.inference_mode():
+            module.load_state_dict(state)
+        assert not module.planar
+        assert not module._continuous_relayout
+        assert torch.equal(module.dequantize_weight(), ref)
+
+        # The reloaded continuous module can relayout again.
+        assert module.convert_to_planar()
+        assert module.planar
+        assert torch.equal(module.dequantize_weight(), ref)
+
     def test_relayout_is_idempotent(self):
         module = _make_continuous_module()
         assert module.convert_to_planar()
