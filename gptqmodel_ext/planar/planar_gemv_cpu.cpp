@@ -135,7 +135,7 @@ inline bool cpu_supports_avx512_core() {
     return false;
   }
   return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
-         __builtin_cpu_supports("avx512vl");
+         __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512bf16");
 }
 
 // AVX2 256-bit vector helpers.
@@ -188,55 +188,85 @@ __attribute__((target("avx2,fma"))) inline void store_f_256(float* p, __m256 a) 
 }
 
 // AVX-512 512-bit vector helpers.
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512i load_i_512(const void* p) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i load_i_512(const void* p) {
   return _mm512_loadu_si512(p);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512 load_f_512(const float* p) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512 load_f_512(const float* p) {
   return _mm512_loadu_ps(p);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512i set1_i_512(int v) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i set1_i_512(int v) {
   return _mm512_set1_epi32(v);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512 set1_f_512(float v) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512 set1_f_512(float v) {
   return _mm512_set1_ps(v);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512i srlv_512(__m512i a, __m512i b) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i srlv_512(__m512i a, __m512i b) {
   return _mm512_srlv_epi32(a, b);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512i slli_512(__m512i a, int imm) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i slli_512(__m512i a, int imm) {
   return _mm512_slli_epi32(a, imm);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512i and_512(__m512i a, __m512i b) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i and_512(__m512i a, __m512i b) {
   return _mm512_and_si512(a, b);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512i or_512(__m512i a, __m512i b) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i or_512(__m512i a, __m512i b) {
   return _mm512_or_si512(a, b);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512 cvt_i_f_512(__m512i a) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512 cvt_i_f_512(__m512i a) {
   return _mm512_cvtepi32_ps(a);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512 fmsub_512(__m512 a, __m512 b, __m512 c) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512 fmsub_512(__m512 a, __m512 b, __m512 c) {
   return _mm512_fmsub_ps(a, b, c);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline __m512 fmadd_512(__m512 a, __m512 b, __m512 c) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512 fmadd_512(__m512 a, __m512 b, __m512 c) {
   return _mm512_fmadd_ps(a, b, c);
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline void store_f_512(float* p, __m512 a) {
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline void store_f_512(float* p, __m512 a) {
   _mm512_storeu_ps(p, a);
 }
 
-#define DEFINE_GEMV_KERNEL(suffix, target_features, LOAD_I, LOAD_F, SET1_I, SET1_F, SRLV, SLLI, AND, OR, CVT, FMSUB, FMADD, STORE_F, INT_T, FLOAT_T, VLEN) \
+__attribute__((target("avx2,fma"))) inline __m256i srli_256(__m256i a, int imm) {
+  return _mm256_srli_epi32(a, imm);
+}
+
+__attribute__((target("avx2,fma"))) inline __m256 add_f_256(__m256 a, __m256 b) {
+  return _mm256_add_ps(a, b);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512i srli_512(__m512i a, int imm) {
+  return _mm512_srli_epi32(a, imm);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma"))) inline __m512 add_f_512(__m512 a, __m512 b) {
+  return _mm512_add_ps(a, b);
+}
+
+__attribute__((target("avx2,fma"))) inline void store_bf16_256(at::BFloat16* out, __m256 a) {
+  alignas(64) float tmp[8];
+  _mm256_storeu_ps(tmp, a);
+  uint16_t* out_u16 = reinterpret_cast<uint16_t*>(out);
+  for (int i = 0; i < 8; ++i) {
+    out_u16[i] = static_cast<uint16_t>(at::BFloat16(tmp[i]).x);
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16"))) inline void store_bf16_512(at::BFloat16* out, __m512 a) {
+  __m256bh bh = _mm512_cvtneps_pbh(a);
+  _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), (__m256i)bh);
+}
+
+#define DEFINE_GEMV_KERNEL(suffix, target_features, LOAD_I, LOAD_F, SET1_I, SET1_F, SRLI, SLLI, AND, OR, ADD_F, CVT, FMSUB, FMADD, STORE_BF16, INT_T, FLOAT_T, VLEN) \
   template <int Bits, int SizeM> \
   __attribute__((target(target_features))) \
   void gemv_col_block_##suffix( \
@@ -252,54 +282,89 @@ __attribute__((target("avx512f,avx512bw,avx512vl,fma"))) inline void store_f_512
       int64_t num_groups) { \
     constexpr auto planes = plane_info<Bits>(); \
     const int64_t num_k_blocks = K / 32; \
-    FLOAT_T acc[SizeM]; \
+    /* K-unrolling breaks the FP32 FMA dependency chain for small M. \
+     * For M<=2 we keep 4 partial sums, for M<=4 we keep 2, otherwise 1. */ \
+    constexpr int K_UNROLL = (SizeM <= 2) ? 4 : (SizeM <= 4) ? 2 : 1; \
+    FLOAT_T acc[SizeM][K_UNROLL]; \
     for (int m = 0; m < SizeM; ++m) { \
-      acc[m] = SET1_F(0.0f); \
+      for (int u = 0; u < K_UNROLL; ++u) { \
+        acc[m][u] = SET1_F(0.0f); \
+      } \
     } \
+    int prev_group = -1; \
+    FLOAT_T scale_vec = SET1_F(0.0f); \
+    FLOAT_T zscale_vec = SET1_F(0.0f); \
     for (int64_t kb = 0; kb < num_k_blocks; ++kb) { \
       const int64_t row0 = kb * 32; \
       int group = g_idx[row0]; \
       if (group < 0) { \
         group += static_cast<int>(num_groups); \
       } \
-      const float* scale_ptr = scale_f + static_cast<int64_t>(group) * N + col0; \
-      const float* zscale_ptr = zero_scale_f + static_cast<int64_t>(group) * N + col0; \
-      FLOAT_T scale_vec = LOAD_F(scale_ptr); \
-      FLOAT_T zscale_vec = LOAD_F(zscale_ptr); \
+      if (group != prev_group) { \
+        const float* scale_ptr = scale_f + static_cast<int64_t>(group) * N + col0; \
+        const float* zscale_ptr = zero_scale_f + static_cast<int64_t>(group) * N + col0; \
+        scale_vec = LOAD_F(scale_ptr); \
+        zscale_vec = LOAD_F(zscale_ptr); \
+        prev_group = group; \
+      } \
       INT_T qwords[Bits]; \
       for (int pw = 0; pw < Bits; ++pw) { \
         const int64_t row = static_cast<int64_t>(kb) * Bits + pw; \
         const uint32_t* ptr = reinterpret_cast<const uint32_t*>(qweight) + row * N + col0; \
         qwords[pw] = LOAD_I(ptr); \
       } \
+      if (kb + 1 < num_k_blocks) { \
+        for (int pw = 0; pw < Bits; ++pw) { \
+          const int64_t next_row = static_cast<int64_t>(kb + 1) * Bits + pw; \
+          const uint32_t* next_ptr = reinterpret_cast<const uint32_t*>(qweight) + next_row * N + col0; \
+          _mm_prefetch(reinterpret_cast<const char*>(next_ptr), _MM_HINT_T0); \
+          _mm_prefetch(reinterpret_cast<const char*>(next_ptr + 16), _MM_HINT_T0); \
+        } \
+      } \
+      _Pragma("GCC unroll 32") \
       for (int k = 0; k < 32; ++k) { \
         INT_T code = SET1_I(0); \
-        for (int p = 0; p < 3; ++p) { \
-          const int w = planes[p].w; \
-          if (w == 0) { \
-            break; \
-          } \
+        if constexpr (planes[0].w != 0) { \
+          const int w = planes[0].w; \
+          const int start = planes[0].start; \
+          const int off = planes[0].off; \
           const int pack_factor = 32 / w; \
-          INT_T words = qwords[planes[p].start + k / pack_factor]; \
-          INT_T shift = SET1_I(w * (k % pack_factor)); \
-          INT_T shifted = SRLV(words, shift); \
+          INT_T shifted = SRLI(qwords[start + k / pack_factor], w * (k % pack_factor)); \
           INT_T masked = AND(shifted, SET1_I((1 << w) - 1)); \
-          code = OR(code, SLLI(masked, planes[p].off)); \
+          code = OR(code, SLLI(masked, off)); \
+        } \
+        if constexpr (planes[1].w != 0) { \
+          const int w = planes[1].w; \
+          const int start = planes[1].start; \
+          const int off = planes[1].off; \
+          const int pack_factor = 32 / w; \
+          INT_T shifted = SRLI(qwords[start + k / pack_factor], w * (k % pack_factor)); \
+          INT_T masked = AND(shifted, SET1_I((1 << w) - 1)); \
+          code = OR(code, SLLI(masked, off)); \
+        } \
+        if constexpr (planes[2].w != 0) { \
+          const int w = planes[2].w; \
+          const int start = planes[2].start; \
+          const int off = planes[2].off; \
+          const int pack_factor = 32 / w; \
+          INT_T shifted = SRLI(qwords[start + k / pack_factor], w * (k % pack_factor)); \
+          INT_T masked = AND(shifted, SET1_I((1 << w) - 1)); \
+          code = OR(code, SLLI(masked, off)); \
         } \
         FLOAT_T code_f = CVT(code); \
         FLOAT_T weight = FMSUB(code_f, scale_vec, zscale_vec); \
         for (int m = 0; m < SizeM; ++m) { \
           FLOAT_T xval = SET1_F(x_f[m * K + row0 + k]); \
-          acc[m] = FMADD(xval, weight, acc[m]); \
+          acc[m][k % K_UNROLL] = FMADD(xval, weight, acc[m][k % K_UNROLL]); \
         } \
       } \
     } \
     for (int m = 0; m < SizeM; ++m) { \
-      alignas(64) float tmp[VLEN]; \
-      STORE_F(tmp, acc[m]); \
-      for (int i = 0; i < VLEN; ++i) { \
-        out[static_cast<int64_t>(m) * N + col0 + i] = at::BFloat16(tmp[i]); \
+      FLOAT_T sum = acc[m][0]; \
+      for (int u = 1; u < K_UNROLL; ++u) { \
+        sum = ADD_F(sum, acc[m][u]); \
       } \
+      STORE_BF16(out + static_cast<int64_t>(m) * N + col0, sum); \
     } \
   } \
   template <int Bits, int SizeM> \
@@ -332,33 +397,35 @@ DEFINE_GEMV_KERNEL(
     load_f_256,
     set1_i_256,
     set1_f_256,
-    srlv_256,
+    srli_256,
     slli_256,
     and_256,
     or_256,
+    add_f_256,
     cvt_i_f_256,
     fmsub_256,
     fmadd_256,
-    store_f_256,
+    store_bf16_256,
     __m256i,
     __m256,
     8)
 
 DEFINE_GEMV_KERNEL(
     avx512,
-    "avx512f,avx512bw,avx512vl,fma",
+    "avx512f,avx512bw,avx512vl,avx512bf16,fma",
     load_i_512,
     load_f_512,
     set1_i_512,
     set1_f_512,
-    srlv_512,
+    srli_512,
     slli_512,
     and_512,
     or_512,
+    add_f_512,
     cvt_i_f_512,
     fmsub_512,
     fmadd_512,
-    store_f_512,
+    store_bf16_512,
     __m512i,
     __m512,
     16)
