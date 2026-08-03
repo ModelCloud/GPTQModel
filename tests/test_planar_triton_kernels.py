@@ -269,6 +269,33 @@ def test_pangolin_gemv_matches_reference(bits: int, dtype: torch.dtype, batch: i
 
 
 @pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("batch", [1, 4, 32])
+def test_pangolin_gemv_matches_reference_large_k(bits: int, dtype: torch.dtype, batch: int):
+    """Long-K regression guard: the native kernel must not drift over many k-block accumulations."""
+    if not _pangolin_available():
+        pytest.skip("pangolin native CUDA extension unavailable")
+    from gptqmodel.utils.pangolin import pangolin_gemv
+
+    # Use a realistic hidden size and an output width that fits the vector lanes.
+    module = _packed_module(bits, in_features=4096, out_features=256, group_size=128)
+    ref_w = _reference_dequant(module).to(dtype)
+    _to_cuda(module)
+
+    torch.manual_seed(bits + batch + 123)
+    x = (torch.randn(batch, module.in_features, dtype=dtype) * 0.5).cuda()
+    ref = (x.cpu().float() @ ref_w.float()).to(dtype)
+
+    out = pangolin_gemv(
+        x, module.qweight, module.scales.to(dtype), module.qzeros, module.g_idx, module.bits
+    )
+    assert out.shape == ref.shape
+    assert out.dtype == dtype
+    tol = 2e-2 if dtype == torch.float16 else 1e-1
+    assert torch.allclose(out.cpu().float(), ref.float(), atol=tol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
 def test_pangolin_gemv_sym_metadata(bits: int):
     if not _pangolin_available():
         pytest.skip("pangolin native CUDA extension unavailable")

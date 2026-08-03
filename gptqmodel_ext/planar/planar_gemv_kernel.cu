@@ -27,6 +27,8 @@
 #include <atomic>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
+
 
 namespace pangolin {
 
@@ -41,14 +43,42 @@ struct ScalarTraits;
 
 template <>
 struct ScalarTraits<half> {
+  using Vec2 = __half2;
   static __device__ __forceinline__ float to_float(half value) { return __half2float(value); }
   static __device__ __forceinline__ half from_float(float value) { return __float2half_rn(value); }
+  static __device__ __forceinline__ float low(Vec2 v) { return __low2float(v); }
+  static __device__ __forceinline__ float high(Vec2 v) { return __high2float(v); }
+  static __device__ __forceinline__ Vec2 make2(half v) { return __half2half2(v); }
+  static __device__ __forceinline__ Vec2 make2(half low, half high) { return __halves2half2(low, high); }
+  static __device__ __forceinline__ Vec2 from_floats(float low, float high) { return __floats2half2_rn(low, high); }
+  static __device__ __forceinline__ Vec2 fma2(Vec2 a, Vec2 b, Vec2 c) { return __hfma2(a, b, c); }
+  static __device__ __forceinline__ Vec2 neg2(Vec2 v) { return __hneg2(v); }
+  static __device__ __forceinline__ Vec2 mul2(Vec2 a, Vec2 b) { return __hmul2(a, b); }
+  // Shuffle a 16-bit value through a 32-bit warp shuffle and reinterpret.
+  static __device__ __forceinline__ half shfl(half v, int k) {
+    const unsigned int u = __shfl_sync(0xffffffffu, static_cast<unsigned int>(__half_as_ushort(v)), k);
+    return __ushort_as_half(static_cast<unsigned short>(u));
+  }
 };
 
 template <>
 struct ScalarTraits<nv_bfloat16> {
+  using Vec2 = __nv_bfloat162;
   static __device__ __forceinline__ float to_float(nv_bfloat16 value) { return __bfloat162float(value); }
   static __device__ __forceinline__ nv_bfloat16 from_float(float value) { return __float2bfloat16_rn(value); }
+  static __device__ __forceinline__ float low(Vec2 v) { return __bfloat162float(__low2bfloat16(v)); }
+  static __device__ __forceinline__ float high(Vec2 v) { return __bfloat162float(__high2bfloat16(v)); }
+  static __device__ __forceinline__ Vec2 make2(nv_bfloat16 v) { return __bfloat162bfloat162(v); }
+  static __device__ __forceinline__ Vec2 make2(nv_bfloat16 low, nv_bfloat16 high) { return __halves2bfloat162(low, high); }
+  static __device__ __forceinline__ Vec2 from_floats(float low, float high) { return __floats2bfloat162_rn(low, high); }
+  static __device__ __forceinline__ Vec2 fma2(Vec2 a, Vec2 b, Vec2 c) { return __hfma2(a, b, c); }
+  static __device__ __forceinline__ Vec2 neg2(Vec2 v) { return __hneg2(v); }
+  static __device__ __forceinline__ Vec2 mul2(Vec2 a, Vec2 b) { return __hmul2(a, b); }
+  // Shuffle a 16-bit value through a 32-bit warp shuffle and reinterpret.
+  static __device__ __forceinline__ nv_bfloat16 shfl(nv_bfloat16 v, int k) {
+    const unsigned int u = __shfl_sync(0xffffffffu, static_cast<unsigned int>(__bfloat16_as_ushort(v)), k);
+    return __ushort_as_bfloat16(static_cast<unsigned short>(u));
+  }
 };
 
 // Read-only cache load for bandwidth-bound, read-once planar data.
@@ -85,22 +115,28 @@ __device__ __forceinline__ int plane_code(const uint32_t* words, int k) {
   return static_cast<int>((words[k / kPackFactor] >> (Width * (k % kPackFactor))) & kMask);
 }
 
-// Decode the logical code for lane-column `r` of one qzeros column block.
+// Decode the logical code for lane-column `r` from already-loaded qzero words.
 template <int Bits>
-__device__ __forceinline__ int decode_zero(const int32_t* qzeros_block, int r) {
+__device__ __forceinline__ int decode_zero_from_words(const uint32_t* words, int r) {
   using Spec = PlaneSpec<Bits>;
-  const uint32_t* words_src = reinterpret_cast<const uint32_t*>(qzeros_block);
-  uint32_t words[Bits];
-#pragma unroll
-  for (int i = 0; i < Bits; ++i) {
-    words[i] = ldg(words_src + i);
-  }
   int code = plane_code<Spec::kW0>(words, r);
   code |= plane_code<Spec::kW1>(words + Spec::kW0, r) << Spec::kW0;
   if constexpr (Spec::kW2 > 0) {
     code |= plane_code<Spec::kW2>(words + Spec::kW0 + Spec::kW1, r) << (Spec::kW0 + Spec::kW1);
   }
   return code;
+}
+
+// Decode the logical code for lane-column `r` of one qzeros column block.
+template <int Bits>
+__device__ __forceinline__ int decode_zero(const int32_t* qzeros_block, int r) {
+  const uint32_t* words_src = reinterpret_cast<const uint32_t*>(qzeros_block);
+  uint32_t words[Bits];
+#pragma unroll
+  for (int i = 0; i < Bits; ++i) {
+    words[i] = ldg(words_src + i);
+  }
+  return decode_zero_from_words<Bits>(words, r);
 }
 
 // One block owns kWarpSize * ColsPerLane output columns and a strided set of
@@ -127,6 +163,7 @@ __global__ __launch_bounds__(Warps * kWarpSize) void planar_gemv_kernel(
     int size_n,
     int num_groups) {
   using Spec = PlaneSpec<Bits>;
+  using AccScalar2 = typename ScalarTraits<Scalar>::Vec2;
   constexpr int kBlockCols = kWarpSize * ColsPerLane;
   constexpr int kPartialCols = kBlockCols;
   // Dynamic shared-memory partials sized at launch to allow large SizeM.
@@ -140,14 +177,28 @@ __global__ __launch_bounds__(Warps * kWarpSize) void planar_gemv_kernel(
   const int num_k_blocks = size_k / 32;
   const int qzeros_stride = (size_n / 32) * Bits;
 
-  float acc[SizeM][ColsPerLane];
+  // Use vector half2 accumulation for small-M fp16 decode (the latency-critical
+  // path); for bf16 and for larger M use fp32 weights/products to avoid the
+  // precision drift seen over long K reductions.  The result of each 32-row
+  // k-block is flushed into fp32 shared partials so split-K/warp reductions stay
+  // in full precision.
+  constexpr bool kHalf2FastPath =
+      ColsPerLane == 2 && std::is_same_v<Scalar, half> && SizeM <= 8;
+  using AccArray = typename std::conditional<
+      kHalf2FastPath, AccScalar2[SizeM], float[SizeM][ColsPerLane]>::type;
+  AccArray acc{};
+  if constexpr (kHalf2FastPath) {
 #pragma unroll
-  for (int m = 0; m < SizeM; ++m) {
-#pragma unroll
-    for (int c = 0; c < ColsPerLane; ++c) {
-      acc[m][c] = 0.0f;
+    for (int m = 0; m < SizeM; ++m) {
+      acc[m] = AccScalar2();
     }
   }
+
+  constexpr int kPartialCount = Warps * SizeM * kPartialCols;
+  for (int i = threadIdx.x; i < kPartialCount; i += kThreads) {
+    partials[i] = 0.0f;
+  }
+  __syncthreads();
 
   for (int blk = blockIdx.y * Warps + warp; blk < num_k_blocks;
        blk += gridDim.y * Warps) {
@@ -159,16 +210,40 @@ __global__ __launch_bounds__(Warps * kWarpSize) void planar_gemv_kernel(
 
     // Fold the zero point into the scale so each code costs one FMA:
     // (code - zero) * scale == code * scale - zero * scale.
+    // Load the qzero words once per 32-column block; all columns handled by
+    // this lane live in the same block, and ColsPerLane==2 scale loads can be
+    // issued as a single vector load.
     float scale[ColsPerLane];
-    float zero_scale[ColsPerLane];
+    int zero[ColsPerLane];
+    AccScalar2 scale2;
+    const int32_t* qzeros_base = qzeros + static_cast<int64_t>(group) * qzeros_stride +
+        (n0 / 32) * Bits;
+    uint32_t zero_words[Bits];
 #pragma unroll
-    for (int c = 0; c < ColsPerLane; ++c) {
-      const int n = n0 + c;
-      scale[c] = ScalarTraits<Scalar>::to_float(
-          ldg(scales + static_cast<int64_t>(group) * size_n + n));
-      const int zero = decode_zero<Bits>(
-          qzeros + static_cast<int64_t>(group) * qzeros_stride + (n / 32) * Bits, n % 32);
-      zero_scale[c] = static_cast<float>(zero) * scale[c];
+    for (int i = 0; i < Bits; ++i) {
+      zero_words[i] = ldg(reinterpret_cast<const uint32_t*>(qzeros_base) + i);
+    }
+    if constexpr (ColsPerLane == 2) {
+      scale2 = ldg(
+          reinterpret_cast<const AccScalar2*>(scales + static_cast<int64_t>(group) * size_n + n0));
+      scale[0] = ScalarTraits<Scalar>::low(scale2);
+      scale[1] = ScalarTraits<Scalar>::high(scale2);
+      zero[0] = decode_zero_from_words<Bits>(zero_words, n0 % 32);
+      zero[1] = decode_zero_from_words<Bits>(zero_words, (n0 + 1) % 32);
+    } else if constexpr (ColsPerLane == 4) {
+#pragma unroll
+      for (int c = 0; c < 4; ++c) {
+        scale[c] = ScalarTraits<Scalar>::to_float(
+            ldg(scales + static_cast<int64_t>(group) * size_n + n0 + c));
+        zero[c] = decode_zero_from_words<Bits>(zero_words, (n0 + c) % 32);
+      }
+    } else {
+#pragma unroll
+      for (int c = 0; c < ColsPerLane; ++c) {
+        scale[c] = ScalarTraits<Scalar>::to_float(
+            ldg(scales + static_cast<int64_t>(group) * size_n + n0 + c));
+        zero[c] = decode_zero_from_words<Bits>(zero_words, (n0 + c) % 32);
+      }
     }
 
     uint32_t words[ColsPerLane][Bits];
@@ -199,44 +274,130 @@ __global__ __launch_bounds__(Warps * kWarpSize) void planar_gemv_kernel(
 
     // Every lane needs all 32 activations of the block: each lane loads one
     // (coalesced) and the unrolled loop broadcasts them with warp shuffles.
-    float x_lane[SizeM];
+    // For the vector decode path we keep the activation in the native dtype and
+    // shuffle it as a 16-bit value; the scalar path converts to float once.
+    Scalar x_lane_s[SizeM];
 #pragma unroll
     for (int m = 0; m < SizeM; ++m) {
-      x_lane[m] = ScalarTraits<Scalar>::to_float(
-          ldg(input + static_cast<int64_t>(m) * size_k + row0 + lane));
+      x_lane_s[m] = ldg(input + static_cast<int64_t>(m) * size_k + row0 + lane);
     }
 
+    // Decode/compute weights once and reuse them for all 32 activations.
+    // ColsPerLane==2 keeps the vector qweight/scale loads.  Small-M fp16 uses
+    // a single __hfma2 per pair (decode latency bound), while larger M and all
+    // bf16 fall back to fp32 weights/products so long-K reductions stay within
+    // tolerance.
+    if constexpr (ColsPerLane == 2) {
+      if constexpr (kHalf2FastPath) {
+        const AccScalar2 zero_scale2 = ScalarTraits<Scalar>::mul2(
+            ScalarTraits<Scalar>::from_floats(static_cast<float>(zero[0]),
+                                              static_cast<float>(zero[1])),
+            scale2);
 #pragma unroll
-    for (int k = 0; k < 32; ++k) {
-      float weight[ColsPerLane];
+        for (int k = 0; k < 32; ++k) {
+          int code0 = plane_code<Spec::kW0>(words[0], k);
+          code0 |= plane_code<Spec::kW1>(words[0] + Spec::kW0, k) << Spec::kW0;
+          int code1 = plane_code<Spec::kW0>(words[1], k);
+          code1 |= plane_code<Spec::kW1>(words[1] + Spec::kW0, k) << Spec::kW0;
+          if constexpr (Spec::kW2 > 0) {
+            code0 |= plane_code<Spec::kW2>(words[0] + Spec::kW0 + Spec::kW1, k)
+                    << (Spec::kW0 + Spec::kW1);
+            code1 |= plane_code<Spec::kW2>(words[1] + Spec::kW0 + Spec::kW1, k)
+                    << (Spec::kW0 + Spec::kW1);
+          }
+          const AccScalar2 code2 = ScalarTraits<Scalar>::from_floats(
+              static_cast<float>(code0), static_cast<float>(code1));
+          const AccScalar2 weight2 = ScalarTraits<Scalar>::fma2(
+              code2, scale2, ScalarTraits<Scalar>::neg2(zero_scale2));
 #pragma unroll
-      for (int c = 0; c < ColsPerLane; ++c) {
-        int code = plane_code<Spec::kW0>(words[c], k);
-        code |= plane_code<Spec::kW1>(words[c] + Spec::kW0, k) << Spec::kW0;
-        if constexpr (Spec::kW2 > 0) {
-          code |= plane_code<Spec::kW2>(words[c] + Spec::kW0 + Spec::kW1, k)
-                  << (Spec::kW0 + Spec::kW1);
+          for (int m = 0; m < SizeM; ++m) {
+            const Scalar activation = ScalarTraits<Scalar>::shfl(x_lane_s[m], k);
+            const AccScalar2 act2 = ScalarTraits<Scalar>::make2(activation);
+            acc[m] = ScalarTraits<Scalar>::fma2(act2, weight2, acc[m]);
+          }
         }
-        weight[c] = __fmaf_rn(static_cast<float>(code), scale[c], -zero_scale[c]);
+      } else {
+        const float scale0 = ScalarTraits<Scalar>::low(scale2);
+        const float scale1 = ScalarTraits<Scalar>::high(scale2);
+#pragma unroll
+        for (int k = 0; k < 32; ++k) {
+          int code0 = plane_code<Spec::kW0>(words[0], k);
+          code0 |= plane_code<Spec::kW1>(words[0] + Spec::kW0, k) << Spec::kW0;
+          int code1 = plane_code<Spec::kW0>(words[1], k);
+          code1 |= plane_code<Spec::kW1>(words[1] + Spec::kW0, k) << Spec::kW0;
+          if constexpr (Spec::kW2 > 0) {
+            code0 |= plane_code<Spec::kW2>(words[0] + Spec::kW0 + Spec::kW1, k)
+                    << (Spec::kW0 + Spec::kW1);
+            code1 |= plane_code<Spec::kW2>(words[1] + Spec::kW0 + Spec::kW1, k)
+                    << (Spec::kW0 + Spec::kW1);
+          }
+          const float z0s = static_cast<float>(zero[0]) * scale0;
+          const float z1s = static_cast<float>(zero[1]) * scale1;
+          const float weight0 = __fmaf_rn(static_cast<float>(code0), scale0, -z0s);
+          const float weight1 = __fmaf_rn(static_cast<float>(code1), scale1, -z1s);
+#pragma unroll
+          for (int m = 0; m < SizeM; ++m) {
+            const Scalar activation = ScalarTraits<Scalar>::shfl(x_lane_s[m], k);
+            const float act_f = ScalarTraits<Scalar>::to_float(activation);
+            acc[m][0] = __fmaf_rn(act_f, weight0, acc[m][0]);
+            acc[m][1] = __fmaf_rn(act_f, weight1, acc[m][1]);
+          }
+        }
       }
+    } else {
+      float x_lane[SizeM];
 #pragma unroll
       for (int m = 0; m < SizeM; ++m) {
-        const float activation = __shfl_sync(0xffffffffu, x_lane[m], k);
+        x_lane[m] = ScalarTraits<Scalar>::to_float(x_lane_s[m]);
+      }
+#pragma unroll
+      for (int k = 0; k < 32; ++k) {
+        float weight[ColsPerLane];
 #pragma unroll
         for (int c = 0; c < ColsPerLane; ++c) {
-          acc[m][c] = __fmaf_rn(activation, weight[c], acc[m][c]);
+          int code = plane_code<Spec::kW0>(words[c], k);
+          code |= plane_code<Spec::kW1>(words[c] + Spec::kW0, k) << Spec::kW0;
+          if constexpr (Spec::kW2 > 0) {
+            code |= plane_code<Spec::kW2>(words[c] + Spec::kW0 + Spec::kW1, k)
+                    << (Spec::kW0 + Spec::kW1);
+          }
+          const float z_scale = static_cast<float>(zero[c]) * scale[c];
+          weight[c] = __fmaf_rn(static_cast<float>(code), scale[c], -z_scale);
+        }
+#pragma unroll
+        for (int m = 0; m < SizeM; ++m) {
+          const float activation = __shfl_sync(0xffffffffu, x_lane[m], k);
+#pragma unroll
+          for (int c = 0; c < ColsPerLane; ++c) {
+            acc[m][c] = __fmaf_rn(activation, weight[c], acc[m][c]);
+          }
+        }
+      }
+    }
+
+    // Flush the k-block partial sum into fp32 shared memory and reset the
+    // per-block accumulator so the running total stays in full precision.
+    if constexpr (kHalf2FastPath) {
+#pragma unroll
+      for (int m = 0; m < SizeM; ++m) {
+        partials[((warp * SizeM + m) * kPartialCols) + (lane * 2)] +=
+            ScalarTraits<Scalar>::low(acc[m]);
+        partials[((warp * SizeM + m) * kPartialCols) + (lane * 2 + 1)] +=
+            ScalarTraits<Scalar>::high(acc[m]);
+        acc[m] = AccScalar2();
+      }
+    } else {
+#pragma unroll
+      for (int m = 0; m < SizeM; ++m) {
+#pragma unroll
+        for (int c = 0; c < ColsPerLane; ++c) {
+          partials[((warp * SizeM + m) * kPartialCols) + (lane * ColsPerLane + c)] += acc[m][c];
+          acc[m][c] = 0.0f;
         }
       }
     }
   }
 
-#pragma unroll
-  for (int m = 0; m < SizeM; ++m) {
-#pragma unroll
-    for (int c = 0; c < ColsPerLane; ++c) {
-      partials[((warp * SizeM + m) * kPartialCols) + (lane * ColsPerLane + c)] = acc[m][c];
-    }
-  }
   __syncthreads();
 
   if (warp != 0) {

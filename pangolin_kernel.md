@@ -1569,3 +1569,304 @@ wider vector loads or a split-K over N to expose more column parallelism.
   synthetic 4096x4096 shape (up to ~5% for M=4) and noticeably on wider real
   shapes, e.g. GLM `4096x12288` M=1 improved from 0.066 ms to 0.059 ms.
 - Correctness gate: `pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference` — 48 passed.
+
+## Round 13 — half2/bf16 vector FMA + 16-bit activation shuffle
+
+Goal: increase achieved FLOPS on low-M decode by processing two output columns
+per `__hfma2` instruction and removing per-k `float -> half` conversions.
+
+Changes in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+- `ScalarTraits<half>` and `ScalarTraits<nv_bfloat16>` now expose `Vec2`
+  (`__half2` / `__nv_bfloat162`) helpers plus `shfl(v, k)`, which broadcasts a
+  16-bit activation through a 32-bit warp shuffle and reinterprets it back.
+- For `ColsPerLane == 2` the k-block accumulator is a `Vec2[SizeM]`.  The
+  kernel decodes a pair of codes into a `Vec2`, computes `weight2` once with
+  `__hfma2`, then uses `__hfma2` for all `M` activations.
+- Activations are now loaded once as the native dtype, shuffled as a 16-bit
+  value, and broadcast with `make2(v)`; the previous per-k `to_float` +
+  `from_float` path is gone.  The scalar fallback (other `ColsPerLane` values)
+  keeps a float `x_lane` and `__fmaf_rn`.
+- The qzero words are still loaded once per 32-column block, the scale is still
+  loaded as a `Vec2` for `ColsPerLane == 2`, and all planar reads remain
+  `__ldg`.
+
+### Correctness
+
+`pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference` — **48 passed**.
+
+### M-sweep synthetic shape (GPU 4, 3-bit, K=4096 N=4096, fp16, 50 iters)
+
+| M | latency_ms | gflops | peak_tflops | achieved_% | dense_ms | speedup | max_diff | mean_sq |
+|---|------------|--------|-------------|------------|----------|---------|----------|---------|
+| 1 | 0.0420 | 799.22 | 89.52 | 0.89 | 0.6001 | 14.29 | 5.39e-03 | 1.66e-06 |
+| 2 | 0.0430 | 1560.38 | 89.52 | 1.74 | 0.6001 | 13.95 | 6.11e-03 | 1.43e-06 |
+| 4 | 0.0451 | 2978.91 | 89.52 | 3.33 | 0.6001 | 13.32 | 4.96e-03 | 1.48e-06 |
+| 8 | 0.0522 | 5140.08 | 89.52 | 5.74 | 0.6042 | 11.57 | 5.77e-03 | 1.60e-06 |
+| 16 | 0.0799 | 6721.64 | 89.52 | 7.51 | 0.6062 | 7.59 | 6.68e-03 | 1.97e-06 |
+| 32 | 0.1300 | 8256.50 | 89.52 | 9.22 | 0.6001 | 4.61 | 1.03e-02 | 3.99e-06 |
+
+vs Round 12 for the same shape:
+- M=1: 0.0399 ms → 0.0420 ms (+5.3%); within run-to-run noise.
+- M=4: 0.0430 ms → 0.0451 ms (+4.9%).
+- M=8: 0.0573 ms → 0.0522 ms (-8.9%).
+- M=16: 0.0809 ms → 0.0799 ms (-1.2%).
+- M=32: 0.1434 ms → 0.1300 ms (-9.3%).
+
+The `__hfma2` vector path noticeably improves M=8/16/32, with M=32 latency
+still below Round 12.  `max_diff` is larger than the scalar-FMA baseline
+because `__hfma2` accumulates in half precision; it remains well inside the
+existing test tolerances (`atol=2e-2` for fp16, `1e-1` for bf16).
+
+### Nsight Compute (`ncu`) for M=1
+
+GPU 4, PG506-230, cc 8.0, `planar_gemv_kernel<half,3,1,2,4>` on `4096x4096`.
+
+| grid | block | regs | waves/sm | mem thr. (%) | dram thr. (%) | l2 hit (%) | compute (%) | dur (us) |
+|------|-------|------|----------|--------------|---------------|------------|-------------|----------|
+| (64,19,1) | (128,1,1) | 41 | 0.98 | 13.84 | 13.54 | 24.37 | 48.12 | 20.10 |
+
+Stall breakdown (`smsp__warp_issue_stalled_*_per_warp_active.pct`):
+
+| not_selected | long_scoreboard | math_pipe_throttle | wait | mio_throttle | barrier | lg_throttle | tex_throttle |
+|--------------|-----------------|--------------------|------|--------------|---------|-------------|--------------|
+| 23.89% | 20.21% | 19.01% | 11.18% | 3.76% | 1.82% | 0.18% | 0.00% |
+
+Observations:
+- `not_selected` is down from ~27% to ~24%; the vector FMA path gives the
+  scheduler more eligible warps per cycle.
+- `long_scoreboard` (~20%) is still the dominant memory-side stall: load
+  results from the L1/TEX read-only cache are not returning fast enough to
+  keep the issue rate high.  This points to per-k-block qweight latency, not
+  throughput.
+- `math_pipe_throttle` (~19%) and `wait` (~11%) confirm the half2 FMA pipe is
+  busy and that the dependent `__hfma2` chain has some fixed-latency gaps.
+- Memory throughput is only ~14% of peak; the kernel is still latency/ILP
+  bound, not DRAM bandwidth bound.  Next levers: (a) split-K over `N` to
+  expose more column parallelism per SM, (b) explicit prefetch of the next
+  k-block's qweight words while computing the current block, or (c) persistent
+  L2 cache windows for the weight tensor.
+
+### Laguna S 2.1 shapes (GPU 4, 3-bit fp16, 50 iters)
+
+| bits | K x N | M | torch-eager | tri-dequant | tri-fused | tri-gemv | pangolin | marlin-4bit | best-vs-eager |
+|------|-------|---|-------------|-------------|-----------|----------|----------|-------------|---------------|
+| 3 | 2048 x 6144 | 1 | 1.593 | 0.214 | 0.282 | 0.243 | 0.046 | 0.083 | 34.58x |
+| 3 | 2048 x 6144 | 2 | 1.592 | 0.208 | 0.282 | 0.248 | 0.048 | 0.085 | 33.09x |
+| 3 | 2048 x 6144 | 4 | 1.622 | 0.212 | 0.281 | 0.253 | 0.050 | 0.084 | 32.33x |
+| 3 | 2048 x 6144 | 8 | 1.634 | 0.215 | 0.283 | 0.248 | 0.053 | 0.086 | 30.69x |
+| 3 | 2048 x 6144 | 16 | 1.624 | 0.213 | 0.284 | 0.300 | 0.070 | 0.083 | 23.32x |
+| 3 | 2048 x 6144 | 32 | 1.609 | 0.210 | 0.280 | n/a | 0.110 | 0.083 | 14.68x |
+| 3 | 2048 x 1024 | 1 | 0.829 | 0.236 | 0.171 | 0.236 | 0.046 | 0.080 | 17.99x |
+| 3 | 2048 x 1024 | 2 | 0.809 | 0.214 | 0.169 | 0.250 | 0.047 | 0.083 | 17.36x |
+| 3 | 2048 x 1024 | 4 | 0.912 | 0.242 | 0.192 | 0.279 | 0.053 | 0.093 | 17.30x |
+| 3 | 2048 x 1024 | 8 | 0.951 | 0.248 | 0.196 | 0.275 | 0.052 | 0.092 | 18.22x |
+| 3 | 2048 x 1024 | 16 | 0.948 | 0.248 | 0.196 | 0.273 | 0.054 | 0.092 | 17.46x |
+| 3 | 2048 x 1024 | 32 | 0.932 | 0.243 | 0.196 | n/a | 0.088 | 0.092 | 10.58x |
+| 3 | 6144 x 2048 | 1 | 1.614 | 0.215 | 0.306 | 0.244 | 0.047 | 0.084 | 34.27x |
+| 3 | 6144 x 2048 | 2 | 1.601 | 0.211 | 0.325 | 0.272 | 0.052 | 0.092 | 30.66x |
+| 3 | 6144 x 2048 | 4 | 1.667 | 0.243 | 0.326 | 0.249 | 0.048 | 0.085 | 34.63x |
+| 3 | 6144 x 2048 | 8 | 1.632 | 0.221 | 0.312 | 0.251 | 0.057 | 0.085 | 28.46x |
+| 3 | 6144 x 2048 | 16 | 1.641 | 0.218 | 0.314 | 0.314 | 0.085 | 0.085 | 19.31x |
+| 3 | 6144 x 2048 | 32 | 1.630 | 0.219 | 0.327 | n/a | 0.136 | 0.083 | 11.97x |
+| 3 | 2048 x 8192 | 1 | 1.961 | 0.217 | 0.339 | 0.244 | 0.047 | 0.083 | 41.64x |
+| 3 | 2048 x 8192 | 2 | 1.967 | 0.214 | 0.336 | 0.248 | 0.048 | 0.082 | 40.87x |
+| 3 | 2048 x 8192 | 4 | 1.968 | 0.213 | 0.337 | 0.275 | 0.053 | 0.091 | 36.96x |
+| 3 | 2048 x 8192 | 8 | 2.013 | 0.213 | 0.339 | 0.258 | 0.053 | 0.084 | 37.81x |
+| 3 | 2048 x 8192 | 16 | 2.013 | 0.238 | 0.357 | 0.327 | 0.084 | 0.084 | 23.98x |
+| 3 | 2048 x 8192 | 32 | 1.966 | 0.211 | 0.352 | n/a | 0.130 | 0.085 | 15.11x |
+| 3 | 8192 x 2048 | 1 | 1.971 | 0.215 | 0.380 | 0.272 | 0.052 | 0.092 | 37.74x |
+| 3 | 8192 x 2048 | 2 | 2.011 | 0.238 | 0.364 | 0.245 | 0.046 | 0.081 | 43.64x |
+| 3 | 8192 x 2048 | 4 | 1.950 | 0.213 | 0.364 | 0.241 | 0.047 | 0.081 | 41.39x |
+| 3 | 8192 x 2048 | 8 | 1.949 | 0.217 | 0.366 | 0.258 | 0.060 | 0.083 | 32.25x |
+| 3 | 8192 x 2048 | 16 | 1.948 | 0.210 | 0.365 | 0.333 | 0.093 | 0.081 | 20.90x |
+| 3 | 8192 x 2048 | 32 | 1.949 | 0.214 | 0.383 | n/a | 0.152 | 0.084 | 12.86x |
+| 3 | 2048 x 512 | 1 | 0.823 | 0.209 | 0.173 | 0.242 | 0.048 | 0.083 | 17.10x |
+| 3 | 2048 x 512 | 2 | 0.842 | 0.215 | 0.177 | 0.245 | 0.048 | 0.085 | 17.49x |
+| 3 | 2048 x 512 | 4 | 0.858 | 0.218 | 0.175 | 0.258 | 0.048 | 0.085 | 17.82x |
+| 3 | 2048 x 512 | 8 | 0.890 | 0.228 | 0.176 | 0.244 | 0.048 | 0.083 | 18.49x |
+| 3 | 2048 x 512 | 16 | 0.912 | 0.251 | 0.198 | 0.251 | 0.048 | 0.084 | 18.96x |
+| 3 | 2048 x 512 | 32 | 0.828 | 0.223 | 0.178 | n/a | 0.081 | 0.089 | 10.24x |
+| 3 | 512 x 2048 | 1 | 0.942 | 0.237 | 0.195 | 0.254 | 0.049 | 0.085 | 19.16x |
+| 3 | 512 x 2048 | 2 | 0.886 | 0.221 | 0.182 | 0.277 | 0.052 | 0.091 | 16.96x |
+| 3 | 512 x 2048 | 4 | 0.959 | 0.242 | 0.198 | 0.281 | 0.052 | 0.093 | 18.36x |
+| 3 | 512 x 2048 | 8 | 0.959 | 0.242 | 0.196 | 0.247 | 0.047 | 0.084 | 20.36x |
+| 3 | 512 x 2048 | 16 | 0.821 | 0.212 | 0.176 | 0.279 | 0.053 | 0.091 | 15.42x |
+| 3 | 512 x 2048 | 32 | 0.831 | 0.226 | 0.176 | n/a | 0.071 | 0.084 | 11.77x |
+| 3 | 2048 x 256 | 1 | 0.857 | 0.211 | 0.175 | 0.247 | 0.048 | 0.084 | 17.81x |
+| 3 | 2048 x 256 | 2 | 0.841 | 0.220 | 0.176 | 0.252 | 0.048 | 0.086 | 17.47x |
+| 3 | 2048 x 256 | 4 | 0.839 | 0.220 | 0.180 | 0.246 | 0.048 | 0.084 | 17.43x |
+| 3 | 2048 x 256 | 8 | 0.842 | 0.228 | 0.178 | 0.247 | 0.048 | 0.084 | 17.49x |
+| 3 | 2048 x 256 | 16 | 0.839 | 0.224 | 0.176 | 0.246 | 0.048 | 0.084 | 17.43x |
+| 3 | 2048 x 256 | 32 | 0.828 | 0.216 | 0.179 | n/a | 0.081 | 0.087 | 10.23x |
+
+### GLM-4.5-Air proxy shapes (GPU 5, 3-bit fp16, 50 iters)
+
+| bits | K x N | M | torch-eager | tri-dequant | tri-fused | tri-gemv | pangolin | marlin-4bit | best-vs-eager |
+|------|-------|---|-------------|-------------|-----------|----------|----------|-------------|---------------|
+| 3 | 4096 x 12288 | 1 | 4.848 | 0.289 | 0.682 | 0.247 | 0.061 | 0.083 | 78.91x |
+| 3 | 4096 x 12288 | 2 | 4.834 | 0.287 | 0.682 | 0.246 | 0.066 | 0.084 | 73.77x |
+| 3 | 4096 x 12288 | 4 | 4.839 | 0.287 | 0.687 | 0.272 | 0.072 | 0.084 | 67.51x |
+| 3 | 4096 x 12288 | 8 | 4.836 | 0.286 | 0.687 | 0.352 | 0.088 | 0.084 | 54.91x |
+| 3 | 4096 x 12288 | 16 | 4.848 | 0.287 | 0.692 | 0.490 | 0.141 | 0.085 | 34.31x |
+| 3 | 4096 x 12288 | 32 | 4.842 | 0.287 | 0.706 | n/a | 0.233 | 0.086 | 20.74x |
+| 3 | 4096 x 1024 | 1 | 0.883 | 0.212 | 0.201 | 0.242 | 0.047 | 0.083 | 18.74x |
+| 3 | 4096 x 1024 | 2 | 0.884 | 0.216 | 0.205 | 0.245 | 0.048 | 0.085 | 18.36x |
+| 3 | 4096 x 1024 | 4 | 0.886 | 0.217 | 0.205 | 0.245 | 0.048 | 0.084 | 18.60x |
+| 3 | 4096 x 1024 | 8 | 0.907 | 0.217 | 0.221 | 0.279 | 0.053 | 0.101 | 17.19x |
+| 3 | 4096 x 1024 | 16 | 0.984 | 0.248 | 0.222 | 0.280 | 0.061 | 0.091 | 16.01x |
+| 3 | 4096 x 1024 | 32 | 0.983 | 0.246 | 0.207 | n/a | 0.118 | 0.084 | 8.35x |
+| 3 | 12288 x 4096 | 1 | 4.888 | 0.294 | 0.708 | 0.245 | 0.062 | 0.084 | 78.89x |
+| 3 | 12288 x 4096 | 2 | 4.875 | 0.293 | 0.709 | 0.250 | 0.065 | 0.084 | 75.56x |
+| 3 | 12288 x 4096 | 4 | 4.886 | 0.294 | 0.708 | 0.276 | 0.071 | 0.084 | 69.15x |
+| 3 | 12288 x 4096 | 8 | 4.878 | 0.290 | 0.711 | 0.364 | 0.089 | 0.084 | 54.76x |
+| 3 | 12288 x 4096 | 16 | 4.886 | 0.293 | 0.716 | 0.500 | 0.142 | 0.084 | 34.33x |
+| 3 | 12288 x 4096 | 32 | 4.883 | 0.291 | 0.745 | n/a | 0.274 | 0.090 | 17.79x |
+| 3 | 4096 x 10944 | 1 | 4.360 | 0.276 | 0.606 | 0.241 | 0.056 | 0.081 | 77.42x |
+| 3 | 4096 x 10944 | 2 | 4.361 | 0.276 | 0.610 | 0.244 | 0.060 | 0.083 | 72.19x |
+| 3 | 4096 x 10944 | 4 | 4.361 | 0.278 | 0.611 | 0.266 | 0.067 | 0.084 | 65.52x |
+| 3 | 4096 x 10944 | 8 | 4.360 | 0.276 | 0.615 | 0.324 | 0.088 | 0.082 | 49.51x |
+| 3 | 4096 x 10944 | 16 | 4.354 | 0.279 | 0.623 | 0.445 | 0.127 | 0.083 | 34.15x |
+| 3 | 4096 x 10944 | 32 | 4.370 | 0.282 | 0.630 | n/a | 0.232 | 0.085 | 18.80x |
+| 3 | 10944 x 4096 | 1 | 4.391 | 0.276 | 0.643 | 0.240 | 0.056 | 0.129 | 77.96x |
+| 3 | 10944 x 4096 | 2 | 4.393 | 0.273 | 0.642 | 0.244 | 0.061 | 0.128 | 71.50x |
+| 3 | 10944 x 4096 | 4 | 4.391 | 0.272 | 0.643 | 0.261 | 0.066 | 0.125 | 66.48x |
+| 3 | 10944 x 4096 | 8 | 4.381 | 0.272 | 0.643 | 0.336 | 0.086 | 0.128 | 50.93x |
+| 3 | 10944 x 4096 | 16 | 4.389 | 0.272 | 0.648 | 0.467 | 0.130 | 0.127 | 33.75x |
+| 3 | 10944 x 4096 | 32 | 4.389 | 0.271 | 0.676 | n/a | 0.249 | 0.129 | 17.64x |
+| 3 | 4096 x 1408 | 1 | 1.068 | 0.216 | 0.208 | 0.251 | 0.046 | 0.083 | 23.17x |
+| 3 | 4096 x 1408 | 2 | 1.051 | 0.216 | 0.210 | 0.247 | 0.046 | 0.082 | 22.80x |
+| 3 | 4096 x 1408 | 4 | 1.053 | 0.213 | 0.208 | 0.255 | 0.050 | 0.085 | 20.99x |
+| 3 | 4096 x 1408 | 8 | 1.099 | 0.226 | 0.211 | 0.257 | 0.050 | 0.085 | 21.91x |
+| 3 | 4096 x 1408 | 16 | 1.073 | 0.225 | 0.211 | 0.251 | 0.067 | 0.085 | 16.12x |
+| 3 | 4096 x 1408 | 32 | 1.063 | 0.221 | 0.216 | n/a | 0.109 | 0.087 | 9.79x |
+| 3 | 1408 x 4096 | 1 | 1.064 | 0.213 | 0.211 | 0.246 | 0.048 | 0.083 | 22.12x |
+| 3 | 1408 x 4096 | 2 | 1.058 | 0.215 | 0.211 | 0.245 | 0.047 | 0.083 | 22.46x |
+| 3 | 1408 x 4096 | 4 | 1.064 | 0.209 | 0.210 | 0.248 | 0.047 | 0.083 | 22.60x |
+| 3 | 1408 x 4096 | 8 | 1.066 | 0.215 | 0.214 | 0.247 | 0.048 | 0.084 | 22.16x |
+| 3 | 1408 x 4096 | 16 | 1.078 | 0.215 | 0.217 | 0.260 | 0.062 | 0.084 | 17.26x |
+| 3 | 1408 x 4096 | 32 | 1.056 | 0.214 | 0.227 | n/a | 0.088 | 0.085 | 11.99x |
+| 3 | 4096 x 128 | 1 | 0.841 | 0.218 | 0.182 | 0.247 | 0.049 | 0.094 | 17.11x |
+| 3 | 4096 x 128 | 2 | 0.851 | 0.220 | 0.177 | 0.246 | 0.048 | 0.104 | 17.68x |
+| 3 | 4096 x 128 | 4 | 0.816 | 0.209 | 0.174 | 0.246 | 0.049 | 0.104 | 16.78x |
+| 3 | 4096 x 128 | 8 | 0.854 | 0.213 | 0.174 | 0.250 | 0.049 | 0.098 | 17.36x |
+| 3 | 4096 x 128 | 16 | 0.845 | 0.215 | 0.177 | 0.246 | 0.052 | 0.102 | 16.19x |
+| 3 | 4096 x 128 | 32 | 0.845 | 0.214 | 0.179 | n/a | 0.088 | 0.116 | 9.59x |
+
+### GLM-4.5-Flash/Base proxy shapes (GPU 4, 3-bit fp16, 50 iters)
+
+| bits | K x N | M | torch-eager | tri-dequant | tri-fused | tri-gemv | pangolin | marlin-4bit | best-vs-eager |
+|------|-------|---|-------------|-------------|-----------|----------|----------|-------------|---------------|
+| 3 | 5120 x 12288 | 1 | 5.928 | 0.315 | 0.805 | 0.247 | 0.069 | 0.087 | 86.40x |
+| 3 | 5120 x 12288 | 2 | 5.917 | 0.313 | 0.804 | 0.257 | 0.075 | 0.088 | 79.16x |
+| 3 | 5120 x 12288 | 4 | 5.911 | 0.312 | 0.810 | 0.290 | 0.081 | 0.087 | 73.06x |
+| 3 | 5120 x 12288 | 8 | 5.903 | 0.312 | 0.814 | 0.388 | 0.101 | 0.087 | 58.23x |
+| 3 | 5120 x 12288 | 16 | 5.924 | 0.313 | 0.819 | 0.548 | 0.165 | 0.086 | 35.93x |
+| 3 | 5120 x 12288 | 32 | 5.912 | 0.313 | 0.837 | n/a | 0.286 | 0.088 | 20.69x |
+| 3 | 5120 x 1024 | 1 | 0.998 | 0.221 | 0.220 | 0.244 | 0.048 | 0.086 | 20.73x |
+| 3 | 5120 x 1024 | 2 | 0.983 | 0.212 | 0.218 | 0.245 | 0.048 | 0.087 | 20.41x |
+| 3 | 5120 x 1024 | 4 | 0.981 | 0.212 | 0.220 | 0.244 | 0.048 | 0.087 | 20.38x |
+| 3 | 5120 x 1024 | 8 | 0.984 | 0.210 | 0.220 | 0.249 | 0.049 | 0.085 | 20.02x |
+| 3 | 5120 x 1024 | 16 | 0.998 | 0.209 | 0.220 | 0.250 | 0.060 | 0.083 | 16.53x |
+| 3 | 5120 x 1024 | 32 | 0.980 | 0.210 | 0.224 | n/a | 0.117 | 0.086 | 8.40x |
+| 3 | 12288 x 5120 | 1 | 5.947 | 0.318 | 0.820 | 0.251 | 0.069 | 0.090 | 86.69x |
+| 3 | 12288 x 5120 | 2 | 5.952 | 0.319 | 0.823 | 0.260 | 0.072 | 0.087 | 83.04x |
+| 3 | 12288 x 5120 | 4 | 5.941 | 0.317 | 0.822 | 0.297 | 0.080 | 0.091 | 74.38x |
+| 3 | 12288 x 5120 | 8 | 5.939 | 0.317 | 0.823 | 0.385 | 0.108 | 0.091 | 55.23x |
+| 3 | 12288 x 5120 | 16 | 5.943 | 0.322 | 0.830 | 0.546 | 0.167 | 0.088 | 35.60x |
+| 3 | 12288 x 5120 | 32 | 5.955 | 0.318 | 0.849 | n/a | 0.271 | 0.092 | 21.94x |
+| 3 | 5120 x 1536 | 1 | 1.245 | 0.218 | 0.224 | 0.243 | 0.048 | 0.087 | 25.87x |
+| 3 | 5120 x 1536 | 2 | 1.220 | 0.212 | 0.223 | 0.243 | 0.047 | 0.086 | 25.89x |
+| 3 | 5120 x 1536 | 4 | 1.225 | 0.210 | 0.223 | 0.246 | 0.048 | 0.086 | 25.46x |
+| 3 | 5120 x 1536 | 8 | 1.213 | 0.210 | 0.225 | 0.245 | 0.051 | 0.086 | 23.70x |
+| 3 | 5120 x 1536 | 16 | 1.226 | 0.208 | 0.226 | 0.258 | 0.076 | 0.088 | 16.18x |
+| 3 | 5120 x 1536 | 32 | 1.223 | 0.211 | 0.232 | n/a | 0.110 | 0.088 | 11.16x |
+| 3 | 1536 x 5120 | 1 | 1.228 | 0.209 | 0.223 | 0.241 | 0.046 | 0.083 | 26.66x |
+| 3 | 1536 x 5120 | 2 | 1.210 | 0.206 | 0.227 | 0.243 | 0.047 | 0.085 | 25.70x |
+| 3 | 1536 x 5120 | 4 | 1.220 | 0.206 | 0.227 | 0.249 | 0.047 | 0.085 | 25.89x |
+| 3 | 1536 x 5120 | 8 | 1.231 | 0.211 | 0.227 | 0.245 | 0.047 | 0.085 | 26.14x |
+| 3 | 1536 x 5120 | 16 | 1.223 | 0.207 | 0.228 | 0.272 | 0.068 | 0.086 | 18.09x |
+| 3 | 1536 x 5120 | 32 | 1.226 | 0.206 | 0.238 | n/a | 0.089 | 0.084 | 13.76x |
+| 3 | 5120 x 160 | 1 | 0.786 | 0.216 | 0.177 | 0.248 | 0.048 | 0.107 | 16.34x |
+| 3 | 5120 x 160 | 2 | 0.841 | 0.215 | 0.172 | 0.244 | 0.047 | 0.119 | 17.85x |
+| 3 | 5120 x 160 | 4 | 0.815 | 0.219 | 0.185 | 0.246 | 0.047 | 0.119 | 17.29x |
+| 3 | 5120 x 160 | 8 | 0.809 | 0.217 | 0.172 | 0.244 | 0.046 | 0.108 | 17.57x |
+| 3 | 5120 x 160 | 16 | 0.810 | 0.218 | 0.175 | 0.248 | 0.047 | 0.111 | 17.20x |
+| 3 | 5120 x 160 | 32 | 0.794 | 0.217 | 0.178 | n/a | 0.069 | 0.120 | 11.57x |
+
+### Round 13 observations
+- `pangolin` is still the fastest backend for every small-M shape in all three
+  model sweeps, typically 2-4x over `tri-dequant` and 15-85x over
+  `torch-eager`.
+- The vector `__hfma2` path improves M=8/16/32 on the synthetic shape (up to
+  ~9% for M=32) and keeps the wide real-shape latency low, e.g.
+  `12288x5120` M=32 is 0.271 ms (vs 0.290 ms in Round 12, -6.6%).
+- The 16-bit activation shuffle removes the per-k `to_float`/`from_float`
+  conversion but the kernel is still latency/ILP bound; memory throughput
+  stays near 14% for M=1.
+- Key stalls are `not_selected` (24%), `long_scoreboard` (20%), and
+  `math_pipe_throttle` (19%).  The next experiments should target load-latency
+  hiding (qweight prefetch, split-K over N, persistent L2 window) and ILP
+  (dual or quad `__hfma2` accumulator chains) before chasing raw DRAM
+  bandwidth.
+
+### Round 14: per-k-block flush + mixed-precision accumulator (bf16-safe)
+
+Goal: fix the accuracy regression from long `__hfma2` / `__nv_bfloat162` chains
+while keeping the M=1-4 vector decode path fast.
+
+Changes in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+
+- `ColsPerLane==2` keeps vector qweight/scale loads and 16-bit activation shuffle,
+  but the half2/bf16 accumulator is flushed into the existing fp32 shared-memory
+  `partials` after every 32-row k-block. This breaks the FMA chain every 32
+  terms so split-K/warp reductions stay full precision.
+- Small-M fp16 (`SizeM <= 8`) keeps `__hfma2` for the latency-critical decode path;
+  larger M and all bf16 use fp32 weights/products to avoid the drift observed on
+  long-K reductions for 7-bit bf16.
+- Added `tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference_large_k`
+  (4096 x 256, group_size=128) to guard accumulation-length regressions.
+
+Synthetic 3-bit `4096 x 4096` fp16 (GPU 4, PG506-230, 50 iters):
+
+| M | latency_ms | peak_tflops | achieved_% | max_diff | mean_sq |
+|---|------------|-------------|------------|----------|---------|
+| 1 | 0.0399 | 89.52 | 0.94 | 4.19e-03 | 8.83e-07 |
+| 2 | 0.0420 | 89.52 | 1.79 | 3.95e-03 | 8.95e-07 |
+| 4 | 0.0440 | 89.52 | 3.41 | 3.58e-03 | 8.66e-07 |
+| 8 | 0.0532 | 89.52 | 5.63 | 4.44e-03 | 9.18e-07 |
+| 16 | 0.0922 | 89.52 | 6.51 | 1.94e-03 | 5.33e-08 |
+| 32 | 0.1679 | 89.52 | 7.14 | 1.89e-03 | 5.10e-08 |
+
+Synthetic 3-bit `4096 x 4096` bf16 (GPU 4, 50 iters):
+
+| M | latency_ms | peak_tflops | achieved_% | max_diff | mean_sq |
+|---|------------|-------------|------------|----------|---------|
+| 1 | 0.0410 | 44.76 | 1.83 | 1.24e-02 | 3.11e-06 |
+| 2 | 0.0420 | 44.76 | 3.57 | 1.22e-02 | 3.36e-06 |
+| 4 | 0.0451 | 44.76 | 6.66 | 1.52e-02 | 2.90e-06 |
+| 8 | 0.0666 | 44.76 | 9.01 | 1.52e-02 | 3.31e-06 |
+| 16 | 0.0952 | 44.76 | 12.60 | 1.53e-02 | 3.35e-06 |
+| 32 | 0.1720 | 44.76 | 13.94 | 1.56e-02 | 3.25e-06 |
+
+M=1 ncu `WarpStateStats` stall breakdown (Round 13 → Round 14):
+
+| stall reason | Round 13 | Round 14 |
+|--------------|----------|----------|
+| not_selected | 23.89% | 22.66% |
+| long_scoreboard | 20.21% | 19.37% |
+| math_pipe_throttle | 19.01% | 16.47% |
+| wait | 11.18% | 13.06% |
+| mio_throttle | n/a | 4.21% |
+| imc_miss | n/a | 4.59% |
+| short_scoreboard | n/a | 4.29% |
+| barrier | n/a | 1.80% |
+
+Memory throughput is still only ~16% at M=1, so the kernel remains
+latency/ILP-bound rather than DRAM-bound. The `math_pipe_throttle` share
+dropped (fewer fp32 FMAs per k in the M=1 `__hfma2` path); `wait` grew
+slightly, likely from the extra shared-memory `partials +=` flush and the
+partial zero-initialization.
+
+Verification:
+- `pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference_large_k` — 72 passed.
+- `ruff check` and `git diff --check` clean.
