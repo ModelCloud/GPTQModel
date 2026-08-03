@@ -50,6 +50,44 @@ GPU_IDLE_MEMORY_TOLERANCE_MIB = 16
 QUANT_EXCLUDE_PATTERN = r"-:^model\.layers\.\d+\.self_attn\.g_proj$"
 PROCESS_STARTED_AT_UTC = datetime.now(timezone.utc).isoformat()
 
+
+def endpoint_quantization() -> dict[str, Any] | None:
+    config = json.loads((MODEL / "config.json").read_text())
+    quantization_config = config.get("quantization_config") or {}
+    dynamic = quantization_config.get("dynamic") or {}
+    expected = {
+        "bits": 8,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+    }
+    for prefix in ("model.embed_tokens", "lm_head"):
+        override = dynamic.get(prefix)
+        if not isinstance(override, dict) or any(
+            override.get(key) != value for key, value in expected.items()
+        ):
+            return None
+
+    index_path = MODEL / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    weight_map = index.get("weight_map") or {}
+    for prefix in ("model.embed_tokens", "lm_head"):
+        for suffix in ("qweight", "qzeros", "scales", "g_idx"):
+            if f"{prefix}.{suffix}" not in weight_map:
+                return None
+    return {
+        "bits": 8,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "embedding_runtime": "benchmark-local Triton packed-W8 dequant-on-lookup",
+        "lm_head_runtime": "framework GPTQ-Marlin W8G128",
+    }
+
+
+ENDPOINT_QUANTIZATION = endpoint_quantization()
+USES_QUANTIZED_ENDPOINTS = ENDPOINT_QUANTIZATION is not None
+
 if (
     not BATCH_SIZES
     or any(batch_size <= 0 for batch_size in BATCH_SIZES)
@@ -90,6 +128,18 @@ def package_version(package: str) -> str | None:
         return importlib.metadata.version(package)
     except importlib.metadata.PackageNotFoundError:
         return None
+
+
+def prepend_pythonpath(*paths: Path) -> None:
+    requested = [str(path) for path in paths]
+    existing = [
+        item for item in os.environ.get("PYTHONPATH", "").split(os.pathsep) if item
+    ]
+    merged = list(dict.fromkeys([*requested, *existing]))
+    os.environ["PYTHONPATH"] = os.pathsep.join(merged)
+    for path in reversed(requested):
+        if path not in sys.path:
+            sys.path.insert(0, path)
 
 
 def visible_gpu_target() -> str:
@@ -263,6 +313,8 @@ def load_quantization_override() -> dict[str, Any]:
     dynamic = dict(quantization_config.get("dynamic") or {})
     dynamic[QUANT_EXCLUDE_PATTERN] = {}
     quantization_config["dynamic"] = dynamic
+    if USES_QUANTIZED_ENDPOINTS:
+        quantization_config["lm_head"] = True
     return {"quantization_config": quantization_config}
 
 
@@ -322,12 +374,15 @@ def base_result(
                 "Checkpoint stores self_attn.g_proj as BF16 .weight tensors."
             ),
             "checkpoint_name_compatibility": {
-                "from": ".mlp.shared_experts.",
-                "to": ".mlp.shared_expert.",
-                "reason": (
-                    "Checkpoint uses the plural prefix while both main-branch "
-                    "runtime models use the singular prefix."
-                ),
+                "required": False,
+                "checkpoint_prefix": ".mlp.shared_experts.",
+                "runtime_prefix": ".mlp.shared_experts.",
+            },
+            "endpoints": ENDPOINT_QUANTIZATION
+            or {
+                "bits": 16,
+                "embedding_runtime": "framework dense FP16 embedding",
+                "lm_head_runtime": "framework dense FP16 LM head",
             },
         },
         "runtime": {

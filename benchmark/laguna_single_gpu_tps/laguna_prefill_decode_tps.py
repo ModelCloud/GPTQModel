@@ -241,7 +241,8 @@ def make_result(
             "first generated token belongs to prefill"
         ),
         "decode_metric": (
-            "aggregate generated tokens after the first token / batch decode makespan"
+            "aggregate generated tokens after the first token / maximum per-request "
+            "first-to-last-token decode duration"
         ),
         "output_metric": ("aggregate output tokens / end-to-end wall time"),
         "total_metric": ("aggregate input and output tokens / end-to-end wall time"),
@@ -403,9 +404,9 @@ def run_sglang() -> None:
         "laguna_sglang_runtime_models",
     )
     os.environ.setdefault("SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK", "1")
+    os.environ.setdefault("SGLANG_FORCE_STREAM_INTERVAL", "1")
     sglang_python = str(common.SGLANG_REPO / "python")
-    if sglang_python not in sys.path:
-        sys.path.insert(0, sglang_python)
+    common.prepend_pythonpath(common.BENCHMARK_DIR, Path(sglang_python))
 
     import torch
     import sglang as sgl
@@ -451,6 +452,7 @@ def run_sglang() -> None:
             "chunked_prefill_size_source": "largest_requested_batch_size_times_input_length",
             "disable_overlap_schedule": True,
             "enable_metrics": True,
+            "force_stream_interval": int(os.environ["SGLANG_FORCE_STREAM_INTERVAL"]),
             "mem_fraction_static": SGLANG_MEM_FRACTION_STATIC,
         }
         result["benchmark"].update(
@@ -506,9 +508,7 @@ def run_vllm() -> None:
     target = common.visible_gpu_target()
     preflight = common.strict_idle_gate(target)
 
-    vllm_repo = str(common.VLLM_REPO)
-    if vllm_repo not in sys.path:
-        sys.path.insert(0, vllm_repo)
+    common.prepend_pythonpath(common.BENCHMARK_DIR, common.VLLM_REPO)
 
     import torch
     import vllm
