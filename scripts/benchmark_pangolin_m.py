@@ -48,7 +48,23 @@ def bench(fn, warmup=10, iters=50):
     return statistics.median(times)
 
 
-def _env_banner():
+def _theoretical_peak_tflops(dtype_name: str, prop) -> float:
+    """Non-tensor FP16/BF16 peak TFLOPS for the current device.
+
+    The kernel accumulates in FP32 for numerical stability, but the output
+    dtype caps the meaningful peak at the FP16/BF16 CUDA-core rate.
+    """
+    clock_ghz = prop.clock_rate / 1_000_000.0  # clock_rate is in kHz
+    sm_count = prop.multi_processor_count
+    # Ampere sm_80: FP32 = 64 FMA/SM/clk, FP16 = 4x FP32, BF16 = 2x FP32.
+    if prop.major >= 8:
+        fma_per_clock = 256 if dtype_name == "float16" else 128
+    else:
+        fma_per_clock = 64
+    return (sm_count * clock_ghz * fma_per_clock * 2.0) / 1000.0
+
+
+def _env_banner(dtype_name: str):
     import torch
 
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -57,8 +73,10 @@ def _env_banner():
     name = torch.cuda.get_device_name(dev_idx)
     cc = f"{prop.major}.{prop.minor}"
     mem_gib = prop.total_memory / 2**30
+    peak_tflops = _theoretical_peak_tflops(dtype_name, prop)
     print("=" * 70)
     print(f"device       : {name} (cc {cc}, {prop.multi_processor_count} SMs, {mem_gib:.1f} GiB)")
+    print(f"peak (dtype) : {peak_tflops:.2f} TFLOPS ({dtype_name})")
     print(f"visible GPU  : {visible}")
     print(f"torch        : {torch.__version__}")
     print(f"torch.cuda   : {torch.version.cuda}")
@@ -93,14 +111,16 @@ def main():
     scales = (torch.rand(groups, n, dtype=dtype) * 0.01 + 0.005).to(dev)
     g_idx = (torch.arange(k, dtype=torch.int32) // group_size).to(dev)
 
-    _env_banner()
+    _env_banner(dtype_name)
+    peak_tflops = _theoretical_peak_tflops(dtype_name, torch.cuda.get_device_properties(torch.cuda.current_device()))
     print(f"shape        : K={k} N={n} bits={bits} dtype={dtype_name} PANGOLIN_MAX_M={PANGOLIN_MAX_M} iters=50")
     header = (
-        f"{'M':>4} | {'latency_ms':>12} | {'gflops':>10} | {'dense_ms':>10} | "
-        f"{'speedup':>8} | {'max_diff':>10} | {'mean_sq':>10}"
+        f"{'M':>4} | {'latency_ms':>12} | {'gflops':>10} | {'peak_tflops':>12} | "
+        f"{'achieved_%':>11} | {'dense_ms':>10} | {'speedup':>8} | "
+        f"{'max_diff':>10} | {'mean_sq':>10}"
     )
     print(header)
-    print("-" * 78)
+    print("-" * 95)
     for m in (1, 2, 4, 8, 16, 32):
         x = (torch.randn(m, k, dtype=dtype) * 0.5).to(dev)
         try:
@@ -126,10 +146,11 @@ def main():
                 dense_ms = bench(dense_fn)
             diff = (out.float() - ref).abs()
             gflops = (2.0 * m * k * n) / (ms * 1e6)
+            achieved_pct = (gflops / (peak_tflops * 1000.0)) * 100.0
             speedup = dense_ms / ms
             print(
-                f"{m:>4} | {ms:12.4f} | {gflops:10.2f} | {dense_ms:10.4f} | {speedup:8.2f} | "
-                f"{diff.max().item():10.4e} | {diff.pow(2).mean().item():10.4e}"
+                f"{m:>4} | {ms:12.4f} | {gflops:10.2f} | {peak_tflops:12.2f} | {achieved_pct:11.2f} | "
+                f"{dense_ms:10.4f} | {speedup:8.2f} | {diff.max().item():10.4e} | {diff.pow(2).mean().item():10.4e}"
             )
         except Exception as exc:
             print(f"{m:>4} | FAILED: {exc}")

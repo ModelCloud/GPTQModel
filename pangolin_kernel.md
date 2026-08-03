@@ -1356,3 +1356,114 @@ Observations:
   in production dispatch when `out_features < in_features`.
 - `test_pangolin_gemv_matches_reference` passed (48 cases) on GPU 4 after the
   ColsPerLane=4 low-M optimization and the real-shape benchmark changes.
+
+## Round 11 — Shape-aware `Warps` selection for low-M decode
+
+Goal: keep the M=1-8 decode gains from `ColsPerLane=2` (Round 10) and raise
+achieved FLOPS / bandwidth on tall layers by choosing the number of warps per
+block at runtime based on `SizeM` and the `K / N` ratio.
+
+Change in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+- `planar_gemv_kernel` and `launch_cols` are now templated on `Warps`.
+- `launch_size_m` defaults to `Warps=4` for `SizeM < 32` and `Warps=8` for `SizeM == 32`.
+- For `SizeM < 32` on *tall* layers (`size_k >= 4 * size_n`), it switches to
+  `Warps=8`. This increases per-block parallelism and reduces per-warp work
+  when there are many K-blocks and few output columns, without hurting the
+  wider/square shapes where 4-warps gives more blocks per SM.
+- `kWarpsPerBlock` namespace constant remains `4` and is used only for the
+  `split_cap` ceiling in `planar_gemv.cpp`; the per-shape `Warps` value is
+  computed through the dry-run occupancy path.
+
+### M-sweep synthetic shape (GPU 4, 3-bit, K=4096 N=4096, fp16, 50 iters)
+
+| M | latency_ms | gflops | peak_tflops | achieved_% | dense_ms | speedup | max_diff | mean_sq |
+|---|------------|--------|-------------|------------|----------|---------|----------|---------|
+| 1 | 0.0410 | 819.20 | 89.52 | 0.92 | 0.6011 | 14.68 | 1.47e-03 | 4.81e-08 |
+| 2 | 0.0420 | 1598.44 | 89.52 | 1.79 | 0.6001 | 14.29 | 1.57e-03 | 5.32e-08 |
+| 4 | 0.0451 | 2978.91 | 89.52 | 3.33 | 0.6001 | 13.32 | 1.49e-03 | 4.44e-08 |
+| 8 | 0.0604 | 4443.12 | 89.52 | 4.96 | 0.6031 | 9.98 | 1.87e-03 | 5.18e-08 |
+| 16 | 0.0840 | 6393.76 | 89.52 | 7.14 | 0.6052 | 7.21 | 1.94e-03 | 5.33e-08 |
+| 32 | 0.1464 | 7332.70 | 89.52 | 8.19 | 0.5990 | 4.09 | 1.89e-03 | 5.10e-08 |
+
+### Nsight Compute (`ncu --section SpeedOfLight,LaunchStats,Occupancy`)
+
+GPU 4, PG506-230, cc 8.0, 3-bit `planar_gemv_kernel<half,3,SizeM,2>` on `4096x4096`.
+
+| M | grid (blocks) | regs | waves/sm | theor. occ. (%) | achieved occ. (%) | mem thr. (%) | dram thr. (%) | compute (%) | dur (us) |
+|---|---------------|------|----------|-----------------|-------------------|--------------|---------------|-------------|----------|
+| 1 | 1216 | 47 | 0.98 | 62.50 | 45.88 | 15.43 | 14.60 | 47.67 | 18.66 |
+| 4 | 1088 | 55 | 0.97 | 56.25 | 36.44 | 31.97 | 9.97 | 47.73 | 27.55 |
+| 16 | 576 | 96 | 0.93 | 31.25 | 17.00 | 37.70 | 3.37 | 38.73 | 83.49 |
+| 32 | 64 | 219 | 0.52 | 12.50 | 12.04 | 38.66 | 1.87 | 39.41 | 152.16 |
+
+The low-M (M=1) memory throughput is still only ~15 %, so there is still room to
+saturate the memory pipe; the next levers are wider vector loads / smaller
+partial reduction or split-K over N. M=4 already doubles memory throughput with
+only a small latency increase, showing the kernel scales well once each warp has
+enough independent FMA work.
+
+## Laguna S 2.1 selected shapes (GPU 4, 3-bit fp16)
+
+| K x N | M | torch-eager | tri-dequant | tri-gemv | pangolin | best-vs-eager |
+|-------|---|-------------|-------------|----------|----------|---------------|
+| 2048 x  6144 | 1 | 1.580 | 0.211 | 0.244 | 0.048 | 32.83x |
+| 2048 x  6144 | 4 | 1.588 | 0.207 | 0.241 | 0.047 | 33.72x |
+| 2048 x  6144 | 16 | 1.593 | 0.208 | 0.296 | 0.077 | 20.75x |
+| 2048 x  6144 | 32 | 1.589 | 0.207 | n/a | 0.085 | 18.70x |
+| 2048 x  1024 | 1 | 0.767 | 0.207 | 0.241 | 0.047 | 16.46x |
+| 2048 x  1024 | 4 | 0.783 | 0.215 | 0.242 | 0.046 | 16.99x |
+| 2048 x  1024 | 16 | 0.783 | 0.218 | 0.242 | 0.055 | 14.16x |
+| 2048 x  1024 | 32 | 0.784 | 0.216 | n/a | 0.100 | 7.81x |
+| 6144 x  2048 | 1 | 1.583 | 0.208 | 0.236 | 0.045 | 35.14x |
+| 6144 x  2048 | 4 | 1.584 | 0.207 | 0.238 | 0.046 | 34.38x |
+| 6144 x  2048 | 16 | 1.587 | 0.207 | 0.310 | 0.082 | 19.37x |
+| 6144 x  2048 | 32 | 1.577 | 0.212 | n/a | 0.120 | 13.17x |
+| 2048 x  8192 | 1 | 1.934 | 0.210 | 0.242 | 0.046 | 42.45x |
+| 2048 x  8192 | 4 | 1.927 | 0.209 | 0.242 | 0.047 | 40.90x |
+| 2048 x  8192 | 16 | 1.938 | 0.205 | 0.330 | 0.087 | 22.26x |
+| 2048 x  8192 | 32 | 1.940 | 0.209 | n/a | 0.144 | 13.44x |
+| 8192 x  2048 | 1 | 1.944 | 0.211 | 0.239 | 0.045 | 43.15x |
+| 8192 x  2048 | 4 | 1.942 | 0.215 | 0.241 | 0.051 | 37.93x |
+| 8192 x  2048 | 16 | 1.944 | 0.214 | 0.337 | 0.093 | 20.86x |
+| 8192 x  2048 | 32 | 1.939 | 0.213 | n/a | 0.145 | 13.39x |
+
+## GLM-4.5-Air proxy selected shapes (GPU 5, 3-bit fp16)
+
+| K x N | M | torch-eager | tri-dequant | tri-gemv | pangolin | best-vs-eager |
+|-------|---|-------------|-------------|----------|----------|---------------|
+| 4096 x 12288 | 1 | 4.849 | 0.288 | 0.244 | 0.059 | 81.71x |
+| 4096 x 12288 | 4 | 4.835 | 0.287 | 0.275 | 0.077 | 62.95x |
+| 4096 x 12288 | 16 | 4.830 | 0.291 | 0.501 | 0.160 | 30.23x |
+| 4096 x 12288 | 32 | 4.875 | 0.286 | n/a | 0.268 | 18.20x |
+| 12288 x  4096 | 1 | 4.901 | 0.288 | 0.234 | 0.056 | 87.02x |
+| 12288 x  4096 | 4 | 4.865 | 0.290 | 0.273 | 0.075 | 65.08x |
+| 12288 x  4096 | 16 | 4.869 | 0.287 | 0.494 | 0.154 | 31.70x |
+| 12288 x  4096 | 32 | 4.856 | 0.284 | n/a | 0.399 | 17.09x |
+| 4096 x 10944 | 1 | 4.366 | 0.277 | 0.244 | 0.054 | 80.45x |
+| 4096 x 10944 | 4 | 4.363 | 0.276 | 0.262 | 0.074 | 59.17x |
+| 4096 x 10944 | 16 | 4.347 | 0.278 | 0.442 | 0.154 | 28.30x |
+| 4096 x 10944 | 32 | 4.339 | 0.277 | n/a | 0.264 | 16.42x |
+| 10944 x  4096 | 1 | 4.374 | 0.278 | 0.238 | 0.054 | 80.59x |
+| 10944 x  4096 | 4 | 4.373 | 0.274 | 0.264 | 0.072 | 61.01x |
+| 10944 x  4096 | 16 | 4.391 | 0.274 | 0.469 | 0.145 | 30.20x |
+| 10944 x  4096 | 32 | 4.377 | 0.273 | n/a | 0.365 | 16.01x |
+| 4096 x  1408 | 1 | 1.028 | 0.211 | 0.242 | 0.046 | 22.55x |
+| 4096 x  1408 | 4 | 1.037 | 0.211 | 0.240 | 0.045 | 23.01x |
+| 4096 x  1408 | 16 | 1.032 | 0.210 | 0.243 | 0.070 | 14.71x |
+| 4096 x  1408 | 32 | 1.039 | 0.211 | n/a | 0.109 | 9.57x |
+| 1408 x  4096 | 1 | 1.030 | 0.209 | 0.239 | 0.047 | 21.86x |
+| 1408 x  4096 | 4 | 1.035 | 0.211 | 0.243 | 0.046 | 22.47x |
+| 1408 x  4096 | 16 | 1.027 | 0.207 | 0.258 | 0.061 | 16.71x |
+| 1408 x  4096 | 32 | 1.030 | 0.209 | n/a | 0.069 | 15.01x |
+
+### Round 11 observations
+- `pangolin` remains the fastest path for every small-M shape in both real
+  model sweeps, typically 2-4x over `tri-dequant` and 10-80x over `torch-eager`.
+- Tall down-proj shapes (`8192 x 2048`, `12288 x 4096`, `10944 x 4096`) are no
+  longer slower than the Round-10 `Warps=8` baseline; the shape-aware `Warps=8`
+  branch recovers that parallelism while square/wide shapes keep the `Warps=4`
+  occupancy advantage.
+- M=32 is still handled natively and is fastest for square/wide layers; for
+  tall `down_proj` layers the `PangolinQuantLinear` dispatch continues to fall
+  back to `planar_dequant` + cuBLAS (`tri-dequant` + matmul).
+- Correctness gate: `pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference` — 48 passed.
