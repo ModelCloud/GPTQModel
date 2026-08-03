@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
-from importlib import import_module
-from dataclasses import dataclass
 import threading
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from importlib import import_module
+from typing import TYPE_CHECKING
 
 from .utils.logger import setup_logger
+
 
 if TYPE_CHECKING:
     from .utils.cpp import TorchOpsJitExtension
@@ -124,6 +126,13 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.pangolin", "_PANGOLIN_TORCH_OPS_EXTENSION"),
         supported=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_supported")(),
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_runtime_error")(),
+    ),
+    _ExtensionSpec(
+        name="pangolin_cpu",
+        aliases=("planar_gemv_cpu",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.pangolin", "_PANGOLIN_CPU_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_cpu_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_cpu_runtime_error")(),
     ),
     _ExtensionSpec(
         name="marlin_lora",

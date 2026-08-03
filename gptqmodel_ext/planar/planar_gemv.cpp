@@ -16,7 +16,7 @@ torch::Tensor pangolin_gemv_cuda(
     torch::Tensor g_idx,
     int64_t bits);
 
-TORCH_LIBRARY(gptqmodel_pangolin, m) {
+TORCH_LIBRARY_FRAGMENT(gptqmodel_pangolin, m) {
   m.def("gemv(Tensor input, Tensor qweight, Tensor scales, Tensor qzeros, Tensor g_idx, int bits) -> Tensor");
 }
 

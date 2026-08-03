@@ -254,8 +254,10 @@ class TritonV2Linear(TorchLinear):
         JIT extension. Otherwise the module keeps the continuous layout and
         the existing continuous 3-bit paths.
         """
-        from ...utils.pangolin import ensure_pangolin_runtime_available
-        from ..triton_utils.planar import _g_idx_block_uniform
+        from ...utils.pangolin import (
+            _g_idx_block_uniform,
+            ensure_pangolin_runtime_available,
+        )
 
         if _PANGOLIN_DISABLED:
             return False
@@ -399,10 +401,10 @@ class TritonV2Linear(TorchLinear):
         JIT extension built. Returns None (Triton fallback) when any
         condition fails.
         """
-        from ..triton_utils.planar import _g_idx_block_uniform
         from ...utils.pangolin import (
             PANGOLIN_MAX_M,
             PANGOLIN_SUPPORTED_M,
+            _g_idx_block_uniform,
             ensure_pangolin_runtime_available,
             pangolin_gemv,
         )

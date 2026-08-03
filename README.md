@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/03/2026 7.3.1 `main`: ⚡ Added AVX-512/AVX2 host-CPU Pangolin planar GEMV kernel for 3/5/6/7-bit `gptq_p` inference; see `pangolin_kernel_cpu.md` for design and benchmarks.
 * 07/27/2026 7.3.1 `main`: ✨ Added `nanbeige` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `Intern S2 PreView` model support
 * 07/22/2026 7.3.1 `main`: ✨ Added Poolside `Laguna S 2.1` model support

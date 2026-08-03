@@ -26,10 +26,10 @@ import os
 from typing import List
 
 import torch
-import torch.utils.weak
 import triton
 import triton.language as tl
 
+from ...utils.pangolin import _g_idx_block_uniform
 from ...utils.torch import HAS_XPU
 
 
@@ -683,17 +683,6 @@ def _zeros_dense(qzeros, num_groups: int, out_features: int, bits: int, w0: int,
     return zeros_dense
 
 
-_G_IDX_BLOCK_UNIFORM_CACHE = torch.utils.weak.WeakTensorKeyDictionary()
-
-
-def _g_idx_block_uniform(g_idx: torch.Tensor) -> bool:
-    """True when every 32-row block maps to a single group (checked once per g_idx tensor)."""
-    cached = _G_IDX_BLOCK_UNIFORM_CACHE.get(g_idx)
-    if cached is None:
-        blocks = g_idx.reshape(-1, 32)
-        cached = bool((blocks == blocks[:, :1]).all().item())
-        _G_IDX_BLOCK_UNIFORM_CACHE[g_idx] = cached
-    return cached
 
 
 def planar_gemv(x: torch.Tensor, qweight, scales, qzeros, g_idx, bits: int) -> torch.Tensor:
