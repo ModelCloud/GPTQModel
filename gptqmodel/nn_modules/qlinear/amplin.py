@@ -20,7 +20,7 @@ from ...utils.amplin import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import PackableQuantLinear
+from . import FormatSupport, PackableQuantLinear
 
 
 log = setup_logger()
@@ -39,8 +39,10 @@ class AmplinLinear(PackableQuantLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_AMPLIN, BACKEND.AMPLIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=0, bits=(4,)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=0, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [128]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]

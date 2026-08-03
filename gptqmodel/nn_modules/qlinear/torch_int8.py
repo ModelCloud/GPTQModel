@@ -13,7 +13,7 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, FormatSupport, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 
@@ -88,8 +88,10 @@ class TorchInt8Linear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}
-    SUPPORTS_BITS = [2, 4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=0, bits=(2, 4, 8)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=0, bits=(2, 4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

@@ -12,6 +12,7 @@ from torch import nn
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
@@ -26,8 +27,10 @@ from .bitblas import (
 class AWQBitBlasKernel(BitblasBaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_BITBLAS]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 0, FORMAT.BITBLAS: 30}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=0, bits=(4,)),
+        FORMAT.BITBLAS: FormatSupport(priority=30, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False, True]
     SUPPORTS_SYM = [False, True]

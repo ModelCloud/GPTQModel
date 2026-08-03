@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from .gguf import GGUFTorchLinear
@@ -569,8 +570,9 @@ def _get_ggml_bridge() -> _GGMLBridge:
 class GGUFCppKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CPU]
     SUPPORTS_METHODS = [METHOD.GGUF]
-    SUPPORTS_FORMATS = {FORMAT.GGUF: 25}
-    SUPPORTS_BITS = [4, 5, 6, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GGUF: FormatSupport(priority=25, bits=(4, 5, 6, 8)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -661,8 +663,9 @@ class GGUFCppKernel(GGUFTorchLinear):
 class GGUFCudaKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CUDA]
     SUPPORTS_METHODS = [METHOD.GGUF]
-    SUPPORTS_FORMATS = {FORMAT.GGUF: 35}
-    SUPPORTS_BITS = [4, 5, 6, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GGUF: FormatSupport(priority=35, bits=(4, 5, 6, 8)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True

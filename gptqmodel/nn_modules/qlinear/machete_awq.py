@@ -10,7 +10,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -75,8 +75,10 @@ def _replace_registered_tensor(
 class AwqMacheteLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_MACHETE]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 100, FORMAT.MARLIN: 100}
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=100, bits=(4, 8)),
+        FORMAT.MARLIN: FormatSupport(priority=100, bits=(4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]  # AWQ kernels do not reorder activations
     SUPPORTS_SYM = [True, False]

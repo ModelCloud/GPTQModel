@@ -20,7 +20,7 @@ from ...quantization.config import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import WeightOnlyQuantLinear
+from . import FormatSupport, WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
 
 
@@ -109,8 +109,9 @@ def _buffer_spec_4bit(
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.BITSANDBYTES]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
-    SUPPORTS_FORMATS = {FORMAT.BITSANDBYTES: 40}
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.BITSANDBYTES: FormatSupport(priority=40, bits=(4, 8)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False

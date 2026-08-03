@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import os
 from functools import lru_cache
 from typing import Optional, Tuple
 
@@ -9,6 +10,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -54,8 +56,16 @@ def _validate_g_idx_bounds(
 class TritonV2Linear(TorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TRITON]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 40, FORMAT.GPTQ_V2: 40}
-    SUPPORTS_BITS = [2, 3, 4, 8]
+    # Continuous gptq/gptq_v2 words decode at 2/3/4/8-bit. gptq_p is planar at
+    # 3/5/6/7-bit and reuses the continuous word layout at 2/4/8-bit.
+    # Continuous gptq_v2 3-bit additionally relayouts to planar once at
+    # post_init (convert_to_planar) so the native Pangolin GEMV can serve
+    # gptq_v2:3 checkpoints.
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=40, bits=(2, 3, 4, 8)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=40, bits=(2, 3, 4, 8)),
+        FORMAT.GPTQ_P: FormatSupport(priority=40, bits=(2, 3, 4, 5, 6, 7, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -165,7 +175,7 @@ class TritonV2Linear(TorchLinear):
         if not valid:
             return valid, error
 
-        if args.get("bits") == 3:
+        if args.get("bits") == 3 and args.get("format") != FORMAT.GPTQ_P:
             in_features = args.get("in_features")
             out_features = args.get("out_features")
             group_size = args.get("group_size", 128)
@@ -209,7 +219,15 @@ class TritonV2Linear(TorchLinear):
         _validate_g_idx_bounds(
             self.g_idx, self.scales, layer_name=type(self).__name__
         )
-        if self.bits == 3:
+        # Continuous gptq_v2 3-bit: relayout once to the planar layout when the
+        # native Pangolin GEMV can serve it, so gptq_v2:3 checkpoints route
+        # through the planar kernels instead of the continuous fused path.
+        if self.bits == 3 and not self.planar:
+            self._maybe_convert_continuous_3bit_to_planar()
+
+        # The continuous 3-bit fused path checks below do not apply to planar
+        # (gptq_p) modules, which decode through the planar Triton kernels.
+        if self.bits == 3 and not self.planar:
             from ..triton_utils.three_bit import unpack_3bit
 
             expected_g_idx = torch.arange(
@@ -228,6 +246,29 @@ class TritonV2Linear(TorchLinear):
                     f"{type(self).__name__}: 3-bit symmetric GPTQ inference requires every zero point to equal 4."
                 )
 
+    def _maybe_convert_continuous_3bit_to_planar(self) -> bool:
+        """Relayout continuous gptq_v2 3-bit buffers to planar when Pangolin can run.
+
+        Runtime-only conversion: requires the packed buffers on a compute
+        capability >= 8.0 CUDA device, block-uniform g_idx, and the Pangolin
+        JIT extension. Otherwise the module keeps the continuous layout and
+        the existing continuous 3-bit paths.
+        """
+        from ...utils.pangolin import ensure_pangolin_runtime_available
+        from ..triton_utils.planar import _g_idx_block_uniform
+
+        if _PANGOLIN_DISABLED:
+            return False
+        if not self.qweight.is_cuda:
+            return False
+        if torch.cuda.get_device_capability(self.qweight.device) < (8, 0):
+            return False
+        if not _g_idx_block_uniform(self.g_idx):
+            return False
+        if not ensure_pangolin_runtime_available():
+            return False
+        return self.convert_to_planar()
+
     def forward(self, x):
         from ..triton_utils.dequant import QuantLinearFunction
 
@@ -236,7 +277,12 @@ class TritonV2Linear(TorchLinear):
 
         x = self._apply_rotation_to_input(x)
 
-        if self.bits == 3 and not self.training:
+        if self.planar and not self.training:
+            planar_out = self._forward_planar_triton(x)
+            if planar_out is not None:
+                return planar_out
+
+        if self.bits == 3 and not self.planar and not self.training:
             from ..triton_utils.three_bit import LAYOUT_GPTQ, matmul_3bit
 
             capability = torch.cuda.get_device_capability(self.qweight.device)
@@ -284,6 +330,108 @@ class TritonV2Linear(TorchLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out.to(dtype=x.dtype)
+
+    def _forward_planar_triton(self, x):
+        from ..triton_utils.planar import (
+            PLANAR_FUSED_MAX_M,
+            PLANAR_GEMV_MAX_M,
+            PLANAR_TRITON_BITS,
+            planar_dequant,
+            planar_gemv,
+            planar_matmul,
+        )
+
+        if self.bits not in PLANAR_TRITON_BITS:
+            return None
+
+        out_shape = x.shape[:-1] + (self.out_features,)
+        x_flat = x.reshape(-1, x.shape[-1])
+
+        # Parent modules (e.g. unused MoE experts) may call with zero rows.
+        # https://github.com/ModelCloud/GPTQModel/issues/1361
+        if x_flat.shape[0] == 0:
+            return torch.empty(out_shape, dtype=x.dtype, device=x.device)
+
+        # Packed planar buffers are padded to /32 once at pack/load; pad the
+        # activation K to match and slice the output back to logical N.
+        if self.padded_in_features != self.in_features:
+            x_flat = torch.nn.functional.pad(x_flat, (0, self.padded_in_features - self.in_features))
+
+        pangolin_out = self._forward_pangolin(x_flat)
+        if pangolin_out is not None:
+            out = pangolin_out
+        elif x_flat.shape[0] <= PLANAR_GEMV_MAX_M:
+            # Decode-shape inputs: fused GEMV reads only the packed words on
+            # the weight side and skips the dense fp16 weight buffer entirely.
+            out = planar_gemv(
+                x_flat, self.qweight, self.scales, self.qzeros, self.g_idx, self.bits
+            )
+        elif x_flat.shape[0] <= PLANAR_FUSED_MAX_M:
+            # Decode-shape inputs: fused dequant+matmul reads the packed words
+            # once instead of round-tripping a dense fp16 weight through DRAM.
+            out = planar_matmul(
+                x_flat, self.qweight, self.scales, self.qzeros, self.g_idx, self.bits
+            )
+        else:
+            weights = planar_dequant(
+                x.dtype, self.qweight, self.scales, self.qzeros, self.g_idx, self.bits
+            )
+            out = torch.matmul(x_flat, weights)
+
+        if out.shape[-1] != self.out_features:
+            out = out[:, : self.out_features]
+        out = out.reshape(out_shape)
+
+        if self.bias is not None:
+            out.add_(self.bias)
+
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
+
+        return out.to(dtype=x.dtype)
+
+    def _forward_pangolin(self, x_flat):
+        """Native CUDA register-decode GEMV for decode-shape planar inputs.
+
+        Requirements: 1 <= M <= PANGOLIN_MAX_M, fp16/bf16 input with matching
+        scales dtype, contiguous packed buffers, block-uniform g_idx, and the
+        tensors resident on a compute capability >= 8.0 CUDA device with the
+        JIT extension built. Returns None (Triton fallback) when any
+        condition fails.
+        """
+        from ..triton_utils.planar import _g_idx_block_uniform
+        from ...utils.pangolin import (
+            PANGOLIN_MAX_M,
+            ensure_pangolin_runtime_available,
+            pangolin_gemv,
+        )
+
+        if _PANGOLIN_DISABLED:
+            return None
+        if x_flat.shape[0] < 1 or x_flat.shape[0] > PANGOLIN_MAX_M:
+            return None
+        if not x_flat.is_cuda:
+            return None
+        if x_flat.dtype not in (torch.float16, torch.bfloat16) or self.scales.dtype != x_flat.dtype:
+            return None
+        if not (
+            self.qweight.is_contiguous()
+            and self.qzeros.is_contiguous()
+            and self.scales.is_contiguous()
+            and self.g_idx.is_contiguous()
+        ):
+            return None
+        if torch.cuda.get_device_capability(x_flat.device) < (8, 0):
+            return None
+        if not ensure_pangolin_runtime_available():
+            return None
+        if not _g_idx_block_uniform(self.g_idx):
+            return None
+        return pangolin_gemv(x_flat, self.qweight, self.scales, self.qzeros, self.g_idx, self.bits)
+
+
+# Kill switch for the native planar GEMV; the Triton paths remain the fallback.
+_PANGOLIN_DISABLED = os.environ.get("GPTQMODEL_PANGOLIN_DISABLE", "0") == "1"
 
 
 __all__ = ["TritonV2Linear"]

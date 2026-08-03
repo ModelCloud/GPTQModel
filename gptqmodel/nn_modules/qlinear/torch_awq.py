@@ -12,7 +12,7 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import AWQuantLinear
+from . import AWQuantLinear, FormatSupport
 from .pack_block_ext import pack_awq_cpu
 
 
@@ -22,8 +22,9 @@ log = setup_logger()
 class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=10, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

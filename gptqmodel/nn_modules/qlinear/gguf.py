@@ -28,7 +28,7 @@ from ...quantization.config import (
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import WeightOnlyQuantLinear
+from . import FormatSupport, WeightOnlyQuantLinear
 from .komodo import (
     _assert_fp16_inference_input,
     _native_int4_enabled,
@@ -774,8 +774,9 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
 class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
-    SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
-    SUPPORTS_BITS = [1, 2, 4, 5, 6, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GGUF: FormatSupport(priority=15, bits=(1, 2, 4, 5, 6, 8)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True

@@ -24,7 +24,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import GPTQQuantLinear
+from ...nn_modules.qlinear import FormatSupport, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -85,8 +85,11 @@ def _should_use_packed_prefill(x: torch.Tensor, min_rows: int) -> bool:
 class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.GPTQ_V2: 90, FORMAT.MARLIN: 90}
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=90, bits=(4, 8)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=90, bits=(4, 8)),
+        FORMAT.MARLIN: FormatSupport(priority=90, bits=(4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]
@@ -137,6 +140,7 @@ class MarlinLinear(GPTQQuantLinear):
         device: Optional[DEVICE] = None,
         trainable: Optional[bool] = None,
         adapter: Optional[Adapter] = None,
+        format: Optional[FORMAT] = None,
     ) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
@@ -151,6 +155,7 @@ class MarlinLinear(GPTQQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            format=format,
         )
         if not ok:
             return ok, err

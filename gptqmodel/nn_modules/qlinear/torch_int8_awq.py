@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
@@ -29,8 +29,9 @@ class TorchInt8AwqLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.AWQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 0}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=0, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

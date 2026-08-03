@@ -16,6 +16,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -47,8 +48,9 @@ class ParoLinear(AwqKomodoLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_CUDA]
     SUPPORTS_METHODS = [METHOD.PARO]
-    SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 55}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.PAROQUANT: FormatSupport(priority=55, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]

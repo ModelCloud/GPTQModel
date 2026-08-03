@@ -9,6 +9,7 @@ import torch
 
 from ...adapter.adapter import Adapter
 from ...models._const import DEVICE
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm, reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
@@ -442,8 +443,10 @@ class KomodoLinear(_KomodoNativePlanMixin, TorchLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_KOMODO]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 35, FORMAT.GPTQ_V2: 35}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=35, bits=(4,)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=35, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = TorchLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = TorchLinear.SUPPORTS_SYM
@@ -1017,8 +1020,9 @@ class AwqKomodoLinear(_KomodoNativePlanMixin, AwqTorchLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_KOMODO]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 35}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=35, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = AwqTorchLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = AwqTorchLinear.SUPPORTS_SYM

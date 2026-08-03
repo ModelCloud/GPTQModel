@@ -7,7 +7,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
@@ -27,8 +27,9 @@ log = setup_logger()
 class AwqExllamaV2Linear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 80}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=80, bits=(4,)),
+    }
     # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
     # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]

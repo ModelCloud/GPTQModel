@@ -16,7 +16,7 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, FormatSupport, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -30,6 +30,15 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     triton_dequant = None
     _TRITON_DEQUANT_AVAILABLE = False
+
+try:
+    from ..triton_utils.planar import PLANAR_TRITON_BITS, planar_dequant as triton_planar_dequant
+
+    _TRITON_PLANAR_DEQUANT_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    PLANAR_TRITON_BITS = ()
+    triton_planar_dequant = None
+    _TRITON_PLANAR_DEQUANT_AVAILABLE = False
 
 
 log = setup_logger()
@@ -115,8 +124,13 @@ class _LinearWeightMetadata:
 class TorchLinear(PackableQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20, FORMAT.GPTQ_P: 20}
-    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
+    # Continuous gptq/gptq_v2 words decode at 2/3/4/8-bit. gptq_p is planar at
+    # 3/5/6/7-bit and reuses the continuous word layout at 2/4/8-bit.
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=20, bits=(2, 3, 4, 8)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=20, bits=(2, 3, 4, 8)),
+        FORMAT.GPTQ_P: FormatSupport(priority=20, bits=(2, 3, 4, 5, 6, 7, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -301,9 +315,6 @@ class TorchLinear(PackableQuantLinear):
         return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
-        # if x.size(-1) != self.padded_infeatures:
-        #     x = F.pad(x, (0, self.padded_infeatures - self.in_features))
-
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         out = self._forward(x, out_shape)
@@ -313,7 +324,8 @@ class TorchLinear(PackableQuantLinear):
         x = self._apply_rotation_to_input(x)
         cached = self._maybe_get_cached_weights(x)
         if cached is not None:
-            out = torch.matmul(x, cached).reshape(out_shape)
+            out = torch.matmul(x, cached)
+            out = out.reshape(out_shape)
             if self.bias is not None:
                 out.add_(self.bias)
         elif self._should_use_streaming(x):
@@ -335,7 +347,8 @@ class TorchLinear(PackableQuantLinear):
             # needs both operands on the same device and dtype.
             weights = weights.to(device=x.device, dtype=x.dtype)
         self._update_cached_weights(weights)
-        out = torch.matmul(x, weights).reshape(out_shape)
+        out = torch.matmul(x, weights)
+        out = out.reshape(out_shape)
         if self.bias is not None:
             bias = self.bias
             if bias.device != out.device or bias.dtype != out.dtype:
@@ -668,18 +681,18 @@ class TorchLinear(PackableQuantLinear):
         self.scales = None
 
     def _can_use_triton_dequant(self) -> bool:
-        if not _TRITON_DEQUANT_AVAILABLE:
-            return False
         if self.training:
             return False
         if self.qweight is None or self.qzeros is None or self.scales is None or self.g_idx is None:
             return False
         if self.qweight.device.type != "cuda":
             return False
-        if self.bits not in (2, 3, 4, 8):
-            return False
-        # Planar 3-bit words do not match the continuous Triton decode layout.
         if self.planar:
+            # Planar words do not match the continuous Triton decode layout;
+            # they route to the planar Triton dequant kernel instead.
+            if not _TRITON_PLANAR_DEQUANT_AVAILABLE or self.bits not in PLANAR_TRITON_BITS:
+                return False
+        elif not _TRITON_DEQUANT_AVAILABLE or self.bits not in (2, 3, 4, 8):
             return False
         if not (self.qweight.is_contiguous() and self.qzeros.is_contiguous() and self.scales.is_contiguous()):
             return False
@@ -691,6 +704,18 @@ class TorchLinear(PackableQuantLinear):
     def _dequantize_weight_triton(self) -> torch.Tensor:
         # Use the Triton helper to decode weights directly on device.
         dtype = self.scales.dtype
+        if self.planar:
+            weights = triton_planar_dequant(
+                dtype,
+                self.qweight,
+                self.scales,
+                self.qzeros,
+                self.g_idx,
+                self.bits,
+            )
+            # Packed planar buffers are stored /32-padded; every consumer sees
+            # the logical [in_features, out_features] weight matrix.
+            return weights[: self.in_features, : self.out_features]
         weights = triton_dequant(
             dtype,
             self.qweight,
@@ -750,7 +775,8 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, TorchLinear):
             # Create a new Linear layer with dequantized weights
             new_module = nn.Linear(module.in_features, module.out_features)
-            new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
+            weight = module.dequantize_weight()
+            new_module.weight = nn.Parameter(weight.T.detach().to("cpu", torch.float16))
             new_module.bias = torch.nn.Parameter(module.bias)
 
             # Replace the module in the model
@@ -774,12 +800,15 @@ class TorchQuantEmbeddings(TorchLinear):
     SUPPORTS_ADAPTERS = []
     SUPPORTS_BACKENDS = [BACKEND.TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20, FORMAT.GPTQ_P: 20}
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=20, bits=(2, 3, 4, 8)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=20, bits=(2, 3, 4, 8)),
+        FORMAT.GPTQ_P: FormatSupport(priority=20, bits=(2, 3, 4, 5, 6, 7, 8)),
+    }
     # Embeddings are selected by module role in create_quant_module(), and must
     # not be discovered as a general backend: their forward contract accepts
     # integer token IDs, not hidden states.
     SUPPORTS_BACKEND_SELECTION = False
-    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

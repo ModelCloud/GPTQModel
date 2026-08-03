@@ -8,7 +8,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import torch as t  # conflict with torch.py
@@ -33,7 +33,22 @@ from ...utils.planar_packing import (
 from ...utils.safe import THREADPOOLCTL
 
 
+def _ceil_multiple(value: int, divisor: int) -> int:
+    return ((value + divisor - 1) // divisor) * divisor
+
+
 log = setup_logger()
+
+
+class FormatSupport(NamedTuple):
+    """Per-format kernel capability: auto-select priority and supported bit widths.
+
+    Declared through ``SUPPORTS_FORMAT_BIT_MAP`` so a kernel can support different
+    bit widths per format (e.g. planar gptq_p 3/5/6/7 vs continuous gptq_v2 2/3/4/8).
+    """
+
+    priority: int
+    bits: Tuple[int, ...]
 
 
 # Packed quantized weights are unpacked through shift operations in several
@@ -75,6 +90,10 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_METHODS: List[METHOD] = None
     SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None
+    # Combined declaration: FORMAT -> FormatSupport(priority, bits). When set on a
+    # subclass, SUPPORTS_FORMATS (priorities) and SUPPORTS_BITS (union of bits)
+    # are derived automatically and bit validation becomes format-aware.
+    SUPPORTS_FORMAT_BIT_MAP: Dict[FORMAT, FormatSupport] = None
     SUPPORTS_SHARDS: bool = None
     SUPPORTS_TRAINING: bool = None
 
@@ -94,6 +113,21 @@ class BaseQuantLinear(nn.Module):
 
     REQUIRES_FORMAT_V2: bool = False
     AUTOTUNE: bool = False
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        fbm = cls.__dict__.get("SUPPORTS_FORMAT_BIT_MAP")
+        if fbm:
+            cls.SUPPORTS_FORMATS = {fmt: fs.priority for fmt, fs in fbm.items()}
+            cls.SUPPORTS_BITS = sorted({b for fs in fbm.values() for b in fs.bits})
+
+    @classmethod
+    def supported_bits(cls, format: Optional[FORMAT] = None) -> Tuple[int, ...]:
+        """Bits supported for `format`; the union across formats when `format` is None/unknown."""
+        fbm = cls.SUPPORTS_FORMAT_BIT_MAP
+        if fbm and format is not None and format in fbm:
+            return tuple(fbm[format].bits)
+        return tuple(cls.SUPPORTS_BITS)
 
     def __init__(self,
                  bits: int,
@@ -281,6 +315,7 @@ class BaseQuantLinear(nn.Module):
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
             adapter:Optional[Adapter]=None,
+            format: Optional[FORMAT] = None,
     ) -> Tuple[
         bool, Optional[Exception]]:
         ok_once, exp_once = cls.cached_validate_once()
@@ -289,7 +324,8 @@ class BaseQuantLinear(nn.Module):
 
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
+                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter,
+                             format=format)
 
     @classmethod
     # internal method and should not be overriden
@@ -373,28 +409,30 @@ class BaseQuantLinear(nn.Module):
         *,
         bits: int,
         dynamic: Optional[dict],
+        format: Optional[FORMAT] = None,
     ) -> Tuple[bool, Optional[Exception]]:
         if dynamic is None:
             return True, None
 
+        supported = cls.supported_bits(format)
         dynamic_bits = {}
         for pattern, pattern_dict in dynamic.items():
             if not isinstance(pattern_dict, dict):
                 continue
             dynamic_bits[pattern] = pattern_dict.get("bits", bits)
-        if len(cls.SUPPORTS_BITS) == 1:
+        if len(supported) == 1:
             unsupported_dynamic_bits = {
                 layer: dynamic_bits_value
                 for layer, dynamic_bits_value in dynamic_bits.items()
                 if dynamic_bits_value != bits
             }
             if unsupported_dynamic_bits:
-                err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTS_BITS}` bits"
+                err = f"{cls} not supported dynamic_bits, only support `{list(supported)}` bits"
                 return False, NotImplementedError(err)
         else:
             for layer, dynamic_bits_value in dynamic_bits.items():
-                if dynamic_bits_value not in cls.SUPPORTS_BITS:
-                    err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual dynamic_bits = `{dynamic_bits_value}` for layer `{layer}`"
+                if dynamic_bits_value not in supported:
+                    err = f"{cls} only supports `{list(supported)}` bits: actual dynamic_bits = `{dynamic_bits_value}` for layer `{layer}`"
                     return False, NotImplementedError(err)
         return True, None
 
@@ -419,7 +457,8 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None,
+                  format: Optional[FORMAT] = None) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate_shared(
             pack_dtype=pack_dtype,
             dtype=dtype,
@@ -430,11 +469,13 @@ class BaseQuantLinear(nn.Module):
         if not ok:
             return ok, err
 
-        if bits not in cls.SUPPORTS_BITS:
-            err = f"{cls} only supports `{cls.SUPPORTS_BITS}` bits: actual bits = `{bits}`"
+        supported = cls.supported_bits(format)
+        if bits not in supported:
+            fmt_note = f" for format `{format}`" if format is not None else ""
+            err = f"{cls} only supports `{list(supported)}` bits{fmt_note}: actual bits = `{bits}`"
             return False, NotImplementedError(err)
 
-        ok, err = cls._validate_dynamic_bits(bits=bits, dynamic=dynamic)
+        ok, err = cls._validate_dynamic_bits(bits=bits, dynamic=dynamic, format=format)
         if not ok:
             return ok, err
 
@@ -581,6 +622,9 @@ class GroupedQuantLinear(BaseQuantLinear):
                 "desc_act": desc_act,
                 "sym": sym,
                 "pack_dtype": pack_dtype,
+                # planar 3-bit (gptq_p) and continuous 3-bit share a bit width,
+                # so constructor-time validation must be format-aware.
+                "format": kwargs.get("format"),
             },
             **kwargs,
         )
@@ -595,7 +639,8 @@ class GroupedQuantLinear(BaseQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None,
+                  format: Optional[FORMAT] = None) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,
@@ -609,6 +654,7 @@ class GroupedQuantLinear(BaseQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            format=format,
         )
         if not ok:
             return ok, err
@@ -763,6 +809,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             register_buffers_in_features=register_buffers_in_features,
             register_buffers_out_features=register_buffers_out_features,
             dtype=dtype,
+            format=format,
             **kwargs,
         )
 
@@ -776,17 +823,23 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             )
         self.planar = self.bits in PLANAR_BITS or (format == FORMAT.GPTQ_P and self.bits == 3)
 
-        # Planar packing stores whole 32-code blocks; `_validate` covers the
-        # planar-only widths (5/6/7) but is format-blind, so format-dependent
-        # planar 3-bit must be checked here where the format is known.
-        # NotImplementedError keeps this recoverable for the kernel-selection
-        # loop, which treats it as "unsupported by this kernel".
+        # Planar packing stores whole 32-code blocks. Logical dimensions that
+        # are not /32 are padded once at pack time (K rows and N columns of
+        # zeros), so the packed buffers and every planar kernel always see
+        # 32-aligned shapes; forward pads the activation K and slices the
+        # output back to the logical `out_features`. K padding under desc_act
+        # would reorder padded rows into real groups, so it stays unsupported.
+        self.padded_in_features = self.in_features
+        self.padded_out_features = self.out_features
         if self.planar:
-            for dim_name, dim in (("in_features", self.in_features), ("out_features", self.out_features)):
-                if dim % 32 != 0:
+            if self.in_features % 32 != 0:
+                if self.desc_act:
                     raise NotImplementedError(
-                        f"planar {self.bits}-bit requires `{dim_name}` divisible by 32, got {dim_name}={dim}."
+                        f"planar {self.bits}-bit with desc_act requires `in_features` divisible by 32, "
+                        f"got in_features={self.in_features}."
                     )
+                self.padded_in_features = _ceil_multiple(self.in_features, 32)
+            self.padded_out_features = _ceil_multiple(self.out_features, 32)
 
         # GPTQ v1/v2 conversions only apply to GPTQ-style qzero storage.
         self._qzeros_format = 1
@@ -800,7 +853,26 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None,
+                  format: Optional[FORMAT] = None) -> Tuple[bool, Optional[Exception]]:
+        # Planar (split-plane) layouts pack whole 32-code blocks. Modules with
+        # non-/32 logical dimensions are auto-padded once at pack/load time, so
+        # validate the padded dimensions against the class-level
+        # SUPPORTS_*_FEATURES_DIVISIBLE_BY declarations. K padding under
+        # desc_act would reorder padded rows into real groups, so reject it.
+        planar = bits in PLANAR_BITS or (bits == 3 and format == FORMAT.GPTQ_P)
+        if planar:
+            if in_features is not None and in_features % 32 != 0:
+                if desc_act:
+                    err = (
+                        f"{cls}: planar {bits}-bit with desc_act requires `in_features` divisible by 32: "
+                        f"actual in_features = `{in_features}`."
+                    )
+                    return False, NotImplementedError(err)
+                in_features = _ceil_multiple(in_features, 32)
+            if out_features is not None and out_features % 32 != 0:
+                out_features = _ceil_multiple(out_features, 32)
+
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,
@@ -814,18 +886,11 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            format=format,
         )
         if not ok:
             return ok, err
 
-        # Planar-only widths pack whole 32-code blocks, so the packed
-        # dimensions must be 32-aligned regardless of the class-level
-        # SUPPORTS_*_FEATURES_DIVISIBLE_BY declarations.
-        if bits in PLANAR_BITS:
-            for dim_name, dim in (("in_features", in_features), ("out_features", out_features)):
-                if dim is not None and dim % 32 != 0:
-                    err = f"{cls}: planar {bits}-bit requires `{dim_name}` divisible by 32: actual {dim_name} = `{dim}`."
-                    return False, NotImplementedError(err)
         return True, None
 
     def _register_gptq_buffers(
@@ -837,6 +902,15 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
     ) -> None:
         in_features = self.in_features if register_buffers_in_features is None else register_buffers_in_features
         out_features = self.out_features if register_buffers_out_features is None else register_buffers_out_features
+        bias_features = out_features
+        # Group count always follows the logical K; padded K rows join the
+        # last real group (their codes equal that group's zero point).
+        num_groups = math.ceil(in_features / self.group_size)
+        if self.planar:
+            # Packed planar buffers are stored 32-aligned; bias stays logical
+            # and is added after the forward output is sliced back to it.
+            in_features = _ceil_multiple(in_features, 32)
+            out_features = _ceil_multiple(out_features, 32)
 
         self.register_buffer(
             "qweight",
@@ -846,7 +920,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
             "qzeros",
             t.zeros(
                 (
-                    math.ceil(in_features / self.group_size),
+                    num_groups,
                     math.ceil(out_features * self.bits / self.pack_dtype_bits),
                 ),
                 dtype=self.pack_dtype,
@@ -855,16 +929,16 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         self.register_buffer(
             "scales",
             t.zeros(
-                (math.ceil(in_features / self.group_size), out_features),
+                (num_groups, out_features),
                 dtype=t.float16,
             ),
         )
         self.register_buffer(
             "g_idx",
-            t.tensor([i // self.group_size for i in range(in_features)], dtype=t.int32),
+            t.tensor([min(i // self.group_size, num_groups - 1) for i in range(in_features)], dtype=t.int32),
         )
         if bias:
-            self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
+            self.register_buffer("bias", t.zeros(bias_features, dtype=t.float16))
         else:
             self.bias = None
 
@@ -952,8 +1026,21 @@ class PackableQuantLinear(GPTQQuantLinear):
         if self.planar:
             zeros = planar_unpack_cols(self.qzeros, self.bits).reshape(self.scales.shape)
             weight = planar_unpack_rows(self.qweight, self.bits)
-            return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+            weights = self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+            # Packed planar buffers are stored /32-padded; every consumer sees
+            # the logical [in_features, out_features] weight matrix.
+            return weights[: self.in_features, : self.out_features]
 
+        weight, zeros = self._unpack_continuous_codes()
+
+        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+
+    def _unpack_continuous_codes(self) -> Tuple[t.Tensor, t.Tensor]:
+        """Decode continuous GPTQ packed buffers into integer weight/zero codes.
+
+        Returns ``(weight, zeros)`` where ``weight`` is ``[in_features, out_features]``
+        and ``zeros`` matches ``scales.shape``.
+        """
         self._init_wf_unsqueeze_buffers()
         wf_zero = getattr(self, "wf_unsqueeze_zero", None)
         wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
@@ -1000,7 +1087,60 @@ class PackableQuantLinear(GPTQQuantLinear):
             weight = t.cat([weight[:, 0, :11], weight[:, 1, 1:12], weight[:, 2, 1:11]], dim=1)
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
-        return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
+        return weight, zeros
+
+    def convert_to_planar(self) -> bool:
+        """One-time in-place relayout of continuous GPTQ packed buffers to the planar layout.
+
+        Runtime-only conversion (the checkpoint keeps its continuous layout on disk):
+        after conversion the module decodes through the planar kernels, which lets the
+        native Pangolin GEMV serve continuous ``gptq_v2`` 3-bit checkpoints. Returns
+        True when the module is planar after the call.
+        """
+        if self.planar:
+            return True
+        # 2/4/8-bit continuous words are already kernel-friendly; only the
+        # split-plane 3-bit layout benefits from the planar relayout.
+        if self.bits != 3:
+            return False
+        if self.pack_dtype_bits != 32:
+            return False
+        if self.in_features % 32 != 0 or self.out_features % 32 != 0:
+            return False
+        # Planar zeros use v2 semantics (no +1 bias); require v2 buffers.
+        if self.qzero_format() != 2:
+            return False
+
+        weight, zeros = self._unpack_continuous_codes()
+        weight = weight.to(t.int32)
+        zeros = zeros.reshape(self.scales.shape).to(t.int32)
+
+        # The checkpoint format label stays continuous (e.g. gptq_v2), so keep the
+        # original packed buffers for serialization: state_dict/save must emit the
+        # layout the format label describes, not the runtime planar relayout.
+        self._checkpoint_qweight = self.qweight.detach().cpu().clone()
+        self._checkpoint_qzeros = self.qzeros.detach().cpu().clone()
+
+        # Replace the buffers outright: mutating `.data` of tensors created
+        # under inference_mode trips version-counter checks later.
+        self.qweight = planar_pack_rows(weight, self.bits).to(
+            dtype=self.pack_dtype, device=self.qweight.device
+        ).contiguous()
+        self.qzeros = planar_pack_cols(zeros, self.bits).to(
+            dtype=self.pack_dtype, device=self.qzeros.device
+        ).contiguous()
+        self.planar = True
+        return True
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        # After a runtime planar relayout the format label still describes the
+        # continuous layout; serialize the preserved continuous buffers.
+        if getattr(self, "_checkpoint_qweight", None) is not None:
+            if prefix + "qweight" in destination:
+                destination[prefix + "qweight"] = self._checkpoint_qweight
+            if prefix + "qzeros" in destination:
+                destination[prefix + "qzeros"] = self._checkpoint_qzeros
 
     def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
         if num_itr == 1:
@@ -1069,6 +1209,23 @@ class PackableQuantLinear(GPTQQuantLinear):
             W = W.T
         W = W.to("cpu", copy=False)
         out_features, in_features = W.shape
+
+        # ---------- planar auto-pad (once, at pack time) ----------
+        # Planar packing stores whole 32-code blocks, so non-/32 logical
+        # dimensions are padded here: weight rows/columns with zeros, scales
+        # with a neutral 1.0, zero points with 0, and g_idx with the last real
+        # group. Padded weight rows quantize to that group's zero point, so
+        # padded K/N contribute exactly zero to the output.
+        if self.planar and (self.padded_in_features != in_features or self.padded_out_features != out_features):
+            pad_in = self.padded_in_features - in_features
+            pad_out = self.padded_out_features - out_features
+            W = t.nn.functional.pad(W, (0, pad_in, 0, pad_out))
+            if pad_out:
+                scales = t.cat([scales, scales.new_ones(pad_out, scales.shape[1])], dim=0)
+                zeros = t.cat([zeros, zeros.new_zeros(pad_out, zeros.shape[1])], dim=0)
+            if pad_in:
+                g_idx = t.cat([g_idx, g_idx.new_full((pad_in,), int(g_idx[-1]))])
+            out_features, in_features = W.shape
 
         # ---------- g_idx buffer ----------
         if g_idx.numel() != in_features:
@@ -1350,6 +1507,22 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         if g_idx is None:
             raise ValueError("pack_gpu requires non-null g_idx")
+
+        # ---------- planar auto-pad (once, at pack time) ----------
+        # Mirrors pack_block: pad weight rows/columns with zeros, scales with
+        # a neutral 1.0, zero points with 0, and g_idx with the last real
+        # group so packed planar buffers are always 32-aligned.
+        if self.planar and (self.padded_in_features != in_features or self.padded_out_features != out_features):
+            pad_in = self.padded_in_features - in_features
+            pad_out = self.padded_out_features - out_features
+            weight = t.nn.functional.pad(weight, (0, pad_in, 0, pad_out))
+            if pad_out:
+                scales = t.cat([scales, scales.new_ones(pad_out, scales.shape[1])], dim=0)
+                zeros = t.cat([zeros, zeros.new_zeros(pad_out, zeros.shape[1])], dim=0)
+            if pad_in:
+                g_idx = t.cat([g_idx.to("cpu"), g_idx.new_full((pad_in,), int(g_idx[-1]), device="cpu")])
+            out_features, in_features = weight.shape
+
         if g_idx.numel() != in_features:
             raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
 

@@ -25,7 +25,7 @@ from ...quantization.dtype import (
     device_supports_native_fp8,
 )
 from ...utils.backend import BACKEND
-from . import WeightOnlyQuantLinear
+from . import FormatSupport, WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
 
 
@@ -115,8 +115,9 @@ def quantize_fp8_weight(
 class TorchFP8Linear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
-    SUPPORTS_FORMATS = {FORMAT.FP8: 15}
-    SUPPORTS_BITS = [8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.FP8: FormatSupport(priority=15, bits=(8,)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False

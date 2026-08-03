@@ -17,7 +17,7 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import AWQuantLinear
+from . import AWQuantLinear, FormatSupport
 from .torch_aten_kernel import TorchAtenLinear, _cpu_int4pack_zero_offsets, _has_local_int4pack_cpu_ops
 from .torch_fused import pack_scales_and_zeros
 
@@ -32,9 +32,10 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_ATEN]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 110}
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=110, bits=tuple(TorchAtenLinear.SUPPORTS_BITS)),
+    }
 
-    SUPPORTS_BITS = TorchAtenLinear.SUPPORTS_BITS
     SUPPORTS_GROUP_SIZE = TorchAtenLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = TorchAtenLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = TorchAtenLinear.SUPPORTS_SYM

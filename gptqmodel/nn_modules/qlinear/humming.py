@@ -9,7 +9,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear, GPTQQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -115,8 +115,9 @@ class _HummingLinearBase:
 class HummingGptqLinear(_HummingLinearBase, GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_HUMMING]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 85}
-    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=85, bits=(2, 3, 4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True, False]
@@ -199,6 +200,7 @@ class HummingGptqLinear(_HummingLinearBase, GPTQQuantLinear):
         device: Optional[DEVICE] = None,
         trainable: Optional[bool] = None,
         adapter: Optional[Adapter] = None,
+        format: Optional[FORMAT] = None,
     ) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
@@ -213,6 +215,7 @@ class HummingGptqLinear(_HummingLinearBase, GPTQQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            format=format,
         )
         if not ok:
             return ok, err
@@ -255,8 +258,9 @@ class HummingGptqLinear(_HummingLinearBase, GPTQQuantLinear):
 class HummingAwqLinear(_HummingLinearBase, AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_HUMMING]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 85}
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=85, bits=(4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True, False]
@@ -339,6 +343,7 @@ class HummingAwqLinear(_HummingLinearBase, AWQuantLinear):
         device: Optional[DEVICE] = None,
         trainable: Optional[bool] = None,
         adapter: Optional[Adapter] = None,
+        format: Optional[FORMAT] = None,
     ) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
@@ -353,6 +358,7 @@ class HummingAwqLinear(_HummingLinearBase, AWQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            format=format,
         )
         if not ok:
             return ok, err

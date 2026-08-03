@@ -10,7 +10,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
@@ -89,8 +89,9 @@ class AwqGemmTritonFn(torch.autograd.Function):
 class AwqGEMMTritonLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM_TRITON]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
-    SUPPORTS_BITS = [3, 4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=50, bits=(3, 4)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 96, 128, 192, 256, 384, 512]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

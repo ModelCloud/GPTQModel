@@ -18,7 +18,7 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.mxfp4_cpu import dequantize_mxfp4, load_mxfp4_cpu_kernel, quantize_mxfp4
-from . import WeightOnlyQuantLinear
+from . import FormatSupport, WeightOnlyQuantLinear
 
 
 log = setup_logger()
@@ -36,8 +36,9 @@ def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
 class Mxfp4CpuLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.MXFP4_CPU]
     SUPPORTS_METHODS = [METHOD.MXFP4]
-    SUPPORTS_FORMATS = {FORMAT.MXFP4: 15}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.MXFP4: FormatSupport(priority=15, bits=(4,)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False

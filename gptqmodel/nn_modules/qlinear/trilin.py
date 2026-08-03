@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import torch
 
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from .gemm_awq_triton import AwqGEMMTritonLinear
@@ -156,8 +157,10 @@ class _TrilinLinearMixin:
 class TrilinLinear(_TrilinLinearMixin, TritonV2Linear):
     SUPPORTS_BACKENDS = [BACKEND.TRILIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 60, FORMAT.GPTQ_V2: 60}
-    SUPPORTS_BITS = [3]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=60, bits=(3,)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=60, bits=(3,)),
+    }
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 96, 128, 192, 256, 384, 512, 1024]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]
@@ -183,8 +186,9 @@ class TrilinLinear(_TrilinLinearMixin, TritonV2Linear):
 class AwqTrilinLinear(_TrilinLinearMixin, AwqGEMMTritonLinear):
     SUPPORTS_BACKENDS = [BACKEND.TRILIN]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 60}
-    SUPPORTS_BITS = [3]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=60, bits=(3,)),
+    }
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 96, 128, 192, 256, 384, 512]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]

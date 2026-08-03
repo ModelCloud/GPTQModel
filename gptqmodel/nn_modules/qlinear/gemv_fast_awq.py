@@ -9,7 +9,7 @@ from typing import Optional
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.awq import (
     awq_fast_gemm_forward_prefill,
@@ -66,8 +66,9 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
 class AwqGEMVFastLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV_FAST]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 30}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMV_FAST: FormatSupport(priority=30, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -297,8 +298,9 @@ class AwqGEMVFastLinear(AWQuantLinear):
 class LLMAwqLinear(AwqGEMVFastLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV_FAST]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 100}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.LLM_AWQ: FormatSupport(priority=100, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

@@ -18,7 +18,7 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
-from . import AWQuantLinear
+from . import AWQuantLinear, FormatSupport
 from .torch_fused import Int4PackedOp, TorchFusedLinear, pack_scales_and_zeros
 
 
@@ -32,10 +32,11 @@ class TorchFusedAwqLinear(AWQuantLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=20, bits=tuple(TorchFusedLinear.SUPPORTS_BITS)),
+    }
 
     # inherit from torch fused
-    SUPPORTS_BITS = TorchFusedLinear.SUPPORTS_BITS
     SUPPORTS_GROUP_SIZE = TorchFusedLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = TorchFusedLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = TorchFusedLinear.SUPPORTS_SYM

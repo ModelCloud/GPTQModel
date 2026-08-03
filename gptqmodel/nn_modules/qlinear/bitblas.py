@@ -17,7 +17,7 @@ from packaging import version
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, GroupedQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, FormatSupport, GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
 from ...utils.env import env_flag
@@ -495,6 +495,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         device: Optional[DEVICE] = None,
         trainable: Optional[bool] = None,
         adapter: Optional[Adapter] = None,
+        format: Optional[FORMAT] = None,
     ) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate_kernel_combo(bits=bits, sym=sym, dtype=dtype, dynamic=dynamic)
         if not ok:
@@ -513,6 +514,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             device=device,
             trainable=trainable,
             adapter=adapter,
+            format=format,
         )
 
     def _validate_parameters(self, in_features: int, out_features: int) -> None:
@@ -743,8 +745,11 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 # destination module only needs grouped quantization state, not GPTQ qzero-format state.
 class BitblasLinear(BitblasBaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_BITBLAS]
-    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
-    SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.BITBLAS: FormatSupport(priority=30, bits=tuple(BITBLAS_SUPPORTED_BITS)),
+        FORMAT.GPTQ: FormatSupport(priority=30, bits=tuple(BITBLAS_SUPPORTED_BITS)),
+        FORMAT.GPTQ_V2: FormatSupport(priority=30, bits=tuple(BITBLAS_SUPPORTED_BITS)),
+    }
     SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
     # BitBLAS' public matmul API does not expose GPTQ activation-order metadata (`g_idx` /
     # permutation tensors). Keep desc_act disabled until upstream adds a supported act-order path.

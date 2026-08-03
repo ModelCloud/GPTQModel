@@ -9,6 +9,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.python import has_gil_disabled
@@ -1596,8 +1597,9 @@ def fused_q6_k_matmul(
 class GGUFTritonKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
-    SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
-    SUPPORTS_BITS = [1, 2, 4, 5, 6]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GGUF: FormatSupport(priority=45, bits=(1, 2, 4, 5, 6)),
+    }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True

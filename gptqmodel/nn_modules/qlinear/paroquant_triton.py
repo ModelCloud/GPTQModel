@@ -38,6 +38,7 @@ from ...quantization.paroquant.modules.triton.gemm import (
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.paroquant import build_paroquant_rotation_lookup
+from . import FormatSupport
 from .paroquant import ParoLinear
 
 
@@ -70,8 +71,10 @@ class ParoQuantTritonLinear(ParoLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_TRITON]
     SUPPORTS_METHODS = ParoLinear.SUPPORTS_METHODS
-    SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 0}
-    SUPPORTS_BITS = ParoLinear.SUPPORTS_BITS
+    # Priority 0 keeps format support but opts out of auto-selection.
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.PAROQUANT: FormatSupport(priority=0, bits=tuple(ParoLinear.SUPPORTS_BITS)),
+    }
     SUPPORTS_GROUP_SIZE = ParoLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = ParoLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = ParoLinear.SUPPORTS_SYM

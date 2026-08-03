@@ -764,6 +764,7 @@ def create_quant_module(
         out_features=out_features,
         device=DEVICE(device) if isinstance(device, str) else device,
         adapter=adapter, # TODO FIX ME..need to pass Lora if loaded
+        format=format,
     )
     if err is not None:
         raise err

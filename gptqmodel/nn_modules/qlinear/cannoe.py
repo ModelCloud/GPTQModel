@@ -1092,8 +1092,10 @@ class CannoeLinear(_CannoePlanMixin, KomodoLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_CANNOE]
     SUPPORTS_METHODS = KomodoLinear.SUPPORTS_METHODS
-    SUPPORTS_FORMATS = {fmt: 0 for fmt in KomodoLinear.SUPPORTS_FORMATS}
-    SUPPORTS_BITS = KomodoLinear.SUPPORTS_BITS
+    # Priority 0 keeps format support but opts out of auto-selection.
+    SUPPORTS_FORMAT_BIT_MAP = {
+        fmt: fs._replace(priority=0) for fmt, fs in KomodoLinear.SUPPORTS_FORMAT_BIT_MAP.items()
+    }
     SUPPORTS_GROUP_SIZE = KomodoLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = KomodoLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = KomodoLinear.SUPPORTS_SYM
@@ -1712,8 +1714,10 @@ class AwqCannoeLinear(_CannoePlanMixin, AwqKomodoLinear):
 
     SUPPORTS_BACKENDS = [BACKEND.AWQ_CANNOE]
     SUPPORTS_METHODS = AwqKomodoLinear.SUPPORTS_METHODS
-    SUPPORTS_FORMATS = {fmt: 0 for fmt in AwqKomodoLinear.SUPPORTS_FORMATS}
-    SUPPORTS_BITS = AwqKomodoLinear.SUPPORTS_BITS
+    # Priority 0 keeps format support but opts out of auto-selection.
+    SUPPORTS_FORMAT_BIT_MAP = {
+        fmt: fs._replace(priority=0) for fmt, fs in AwqKomodoLinear.SUPPORTS_FORMAT_BIT_MAP.items()
+    }
     SUPPORTS_GROUP_SIZE = AwqKomodoLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = AwqKomodoLinear.SUPPORTS_DESC_ACT
     SUPPORTS_SYM = AwqKomodoLinear.SUPPORTS_SYM

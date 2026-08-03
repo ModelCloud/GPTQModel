@@ -13,7 +13,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
-from ...nn_modules.qlinear import GroupedQuantLinear
+from ...nn_modules.qlinear import FormatSupport, GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -68,8 +68,9 @@ def mul(
 class QQQLinear(GroupedQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
-    SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.QQQ: FormatSupport(priority=100, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]
@@ -444,8 +445,9 @@ class QQQLinear(GroupedQuantLinear):
 class QQQTorchLinear(QQQLinear):
     SUPPORTS_BACKENDS = [BACKEND.QQQ_TORCH]
     SUPPORTS_METHODS = [METHOD.QQQ]
-    SUPPORTS_FORMATS = {FORMAT.QQQ: 90}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.QQQ: FormatSupport(priority=90, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]

@@ -569,6 +569,7 @@ def select_quant_linear(
                         device=device,
                         trainable=trainable,
                         adapter=adapter,
+                        format=format,
                     )
                     if validated:
                         break
@@ -584,6 +585,7 @@ def select_quant_linear(
                     device=device,
                     trainable=trainable,
                     adapter=adapter,
+                    format=format,
                 )
             if not validated:
                 last_err = contract_err
@@ -627,6 +629,7 @@ def select_quant_linear(
         dynamic=dynamic,
         device=device,
         trainable=trainable,
+        format=format,
     )
 
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")

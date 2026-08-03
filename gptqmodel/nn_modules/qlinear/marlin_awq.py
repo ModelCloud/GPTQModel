@@ -12,7 +12,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -39,8 +39,10 @@ log = setup_logger()
 class AwqMarlinLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 90, FORMAT.MARLIN: 90}
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=90, bits=(4, 8)),
+        FORMAT.MARLIN: FormatSupport(priority=90, bits=(4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
