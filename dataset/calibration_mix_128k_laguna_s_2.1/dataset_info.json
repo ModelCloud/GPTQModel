@@ -1,0 +1,82 @@
+{
+  "cumulative_gain": 1558303.819771,
+  "final_score": 37088.165825,
+  "greedy_ranking": [
+    {
+      "conditional_gain": 1543530.201048,
+      "dataset": "wiki_zh_01",
+      "score_after": 51861.784548,
+      "step": 1,
+      "total_tokens": 27484
+    },
+    {
+      "conditional_gain": 14773.618723,
+      "dataset": "tulu_00",
+      "score_after": 37088.165825,
+      "step": 2,
+      "total_tokens": 59075
+    }
+  ],
+  "id": "calibration_mix_128k_laguna_s_2.1",
+  "model": "/monster/data/model/Laguna-S-2.1-PER-LAYER",
+  "name": "128K-token calibration mix for poolside/Laguna-S-2.1 (best-score floor)",
+  "reference": {
+    "modules": 288,
+    "name": "reference",
+    "total_tokens": 47729
+  },
+  "score_start": 1595391.985596,
+  "selection_mode": "gain_per_token",
+  "sources": [
+    {
+      "dataset": "lemon07r/bartowski-imatrix-v5-semantic",
+      "shards": []
+    },
+    {
+      "config": "LLM",
+      "dataset": "neuralmagic/calibration",
+      "shards": []
+    },
+    {
+      "dataset": "ise-uiuc/Magicoder-OSS-Instruct-75K",
+      "shards": []
+    },
+    {
+      "dataset": "nvidia/OpenMathInstruct-2",
+      "shards": []
+    },
+    {
+      "dataset": "wikimedia/wikipedia",
+      "shards": [
+        "wiki_zh_01"
+      ]
+    },
+    {
+      "dataset": "emozilla/pg19",
+      "shards": []
+    },
+    {
+      "dataset": "allenai/tulu-3-sft-mixture",
+      "shards": [
+        "tulu_00"
+      ]
+    },
+    {
+      "config": "sample-10BT",
+      "dataset": "HuggingFaceFW/fineweb-edu",
+      "shards": []
+    }
+  ],
+  "target_tokens_floor": 131072,
+  "timings_seconds": {
+    "complementarity": 69.402963,
+    "fallback": 1.833205,
+    "greedy": 56.776509,
+    "load": 65.455913,
+    "scan": 6563.005805,
+    "standalone_scores": 26.1252,
+    "total": 6788.295201
+  },
+  "total_examples": 41,
+  "total_tokens": 59075
+}

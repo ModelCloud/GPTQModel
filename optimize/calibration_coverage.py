@@ -147,7 +147,6 @@ def _preflight_physical_gpu(
         if sample_index + 1 < idle_samples:
             time.sleep(idle_interval_seconds)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = target_uuid
     final = accepted_samples[-1]
     print(
         f"[preflight] Accepted physical GPU {physical_index}: {target['name']} "
@@ -158,6 +157,17 @@ def _preflight_physical_gpu(
         f"allow_busy={allow_busy}"
     )
     return target
+
+
+def _preflight_physical_gpus(spec: str, allow_busy: bool = False) -> list[dict[str, object]]:
+    """Preflight one or more comma-separated physical GPU indices and set CUDA_VISIBLE_DEVICES."""
+
+    indices = [int(part) for part in spec.split(",") if part.strip() != ""]
+    if not indices:
+        raise ValueError(f"Invalid --physical-gpu value: {spec!r}")
+    targets = [_preflight_physical_gpu(index, allow_busy=allow_busy) for index in indices]
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(t["uuid"]) for t in targets)
+    return targets
 
 
 def _cpu_supports_fp16() -> bool:
@@ -331,7 +341,10 @@ def _parse_args() -> argparse.Namespace:
         help="Held-out reference prompt set (same formats as --dataset).",
     )
     parser.add_argument("--output-dir", required=True, help="Directory for coverage report and JSON.")
-    parser.add_argument("--physical-gpu", type=int, help="Physical nvidia-smi GPU index to use.")
+    parser.add_argument(
+        "--physical-gpu",
+        help="Physical nvidia-smi GPU index to use, or a comma-separated list for multi-GPU sharding.",
+    )
     parser.add_argument("--allow-busy-gpu", action="store_true", help="Skip strict idle/exclusivity gate.")
     parser.add_argument("--max-samples", type=int, default=0, help="Max rows per dataset (0 = full).")
     parser.add_argument("--concat-size", type=int, default=2048, help="Max tokens per forward chunk.")
@@ -394,7 +407,74 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Wrap raw text samples as a user message and apply the tokenizer chat template.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--moe-expert-coverage",
+        action="store_true",
+        help=(
+            "Profile MoE routing: hook fused expert modules to record per-expert routed-token "
+            "counts and per-expert input Hessian diagonals, and fold expert coverage into the score."
+        ),
+    )
+    parser.add_argument(
+        "--moe-router-coverage-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Weight of the expert-coverage penalty: score is multiplied by "
+            "(1 + weight * uncovered_routed_mass). Only used with --moe-expert-coverage."
+        ),
+    )
+    parser.add_argument(
+        "--moe-expert-min-tokens",
+        type=int,
+        default=16,
+        help="An expert counts as covered when at least this many tokens were routed to it.",
+    )
+    parser.add_argument(
+        "--moe-expert-diag",
+        action="store_true",
+        help="Also accumulate per-expert Hessian diagonals (diagnostic-only; large compute/memory cost).",
+    )
+    parser.add_argument(
+        "--target-moe-expert-tokens",
+        type=int,
+        default=None,
+        help=(
+            "MoE routing floor: minimum routed tokens every reference-active expert should "
+            "receive from the selected mix. A soft target: selection keeps adding shards "
+            "while gains stay positive and warns if the floor is unmet. Requires "
+            "--moe-expert-coverage; with --moe-routing-bypass every expert receives all "
+            "dense tokens so this floor is redundant and is ignored."
+        ),
+    )
+    parser.add_argument(
+        "--moe-routing-bypass",
+        action="store_true",
+        help=(
+            "Bypass top-k routing during coverage: set every router's top_k to num_experts so "
+            "all experts receive every token's activations. Increases expert compute by "
+            "num_experts/top_k."
+        ),
+    )
+    parser.add_argument(
+        "--defuse-experts",
+        action="store_true",
+        help=(
+            "Run Defuser convert_model() to split fused expert tensors into per-expert "
+            "gate/up/down nn.Linear modules so the standard hooks profile each expert "
+            "individually. Memory-heavy on large MoE models (experts x layers x 3 modules)."
+        ),
+    )
+    args = parser.parse_args()
+    if args.moe_routing_bypass and args.target_moe_expert_tokens is not None:
+        # With bypass every expert receives the full dense stream, so the MoE
+        # floor is identical to --target-tokens; keep a single source of truth.
+        print(
+            "[warn] --target-moe-expert-tokens ignored: --moe-routing-bypass makes it "
+            "equivalent to --target-tokens"
+        )
+        args.target_moe_expert_tokens = None
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -509,12 +589,19 @@ class ModuleProfile:
 
 @dataclass
 class DatasetProfile:
-    """Profile keyed by (dataset, target module). Groups share accumulators for same-input modules."""
+    """Profile keyed by (dataset, target module). Groups share accumulators for same-input modules.
+
+    ``expert_counts``/``expert_diag`` hold optional MoE routing statistics keyed by the fused
+    experts-module name: routed-token counts ``[num_experts]`` and per-expert input Hessian
+    diagonals ``[num_experts, hidden]``.
+    """
 
     name: str
     groups: dict[str, ActivationAccumulator] = field(default_factory=dict)
     modules: dict[str, ModuleProfile] = field(default_factory=dict)
     total_tokens: int = 0
+    expert_counts: dict[str, torch.Tensor] = field(default_factory=dict)
+    expert_diag: dict[str, torch.Tensor] = field(default_factory=dict)
 
     @classmethod
     def from_groups(cls, name: str, groups: list[TargetGroup], max_samples: int) -> DatasetProfile:
@@ -572,6 +659,24 @@ class DatasetProfile:
                 mod.columns,
                 new.groups[mod.group_id],
             )
+        a_counts = getattr(self, "expert_counts", {}) or {}
+        b_counts = getattr(other, "expert_counts", {}) or {}
+        for key in set(a_counts) | set(b_counts):
+            a = a_counts.get(key)
+            b = b_counts.get(key)
+            if a is not None and b is not None:
+                new.expert_counts[key] = a + b
+            else:
+                new.expert_counts[key] = (a if a is not None else b).clone()
+        a_diag = getattr(self, "expert_diag", {}) or {}
+        b_diag = getattr(other, "expert_diag", {}) or {}
+        for key in set(a_diag) | set(b_diag):
+            a = a_diag.get(key)
+            b = b_diag.get(key)
+            if a is not None and b is not None:
+                new.expert_diag[key] = a + b
+            else:
+                new.expert_diag[key] = (a if a is not None else b).clone()
         return new
 
 
@@ -759,6 +864,187 @@ def register_hooks(groups: list[TargetGroup], context: ScanContext) -> list:
 
 
 # ---------------------------------------------------------------------------
+# MoE routing coverage: fused expert modules, routers, bypass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MoEExpertTarget:
+    name: str
+    num_experts: int
+    module: object
+
+
+def find_moe_expert_modules(model: object) -> list[MoEExpertTarget]:
+    """Find fused MoE expert modules: an integer ``num_experts`` attribute plus a 3D weight."""
+
+    targets: list[MoEExpertTarget] = []
+    for name, module in model.named_modules():
+        num_experts = getattr(module, "num_experts", None)
+        if not isinstance(num_experts, int) or num_experts <= 1:
+            continue
+        if not any(p.dim() == 3 for p in module.parameters(recurse=False)):
+            continue
+        targets.append(MoEExpertTarget(name, num_experts, module))
+    return sorted(targets, key=lambda t: t.name)
+
+
+def find_moe_routers(model: object) -> list[tuple[str, object]]:
+    """Find top-k router modules: integer ``top_k`` and ``num_experts`` attributes, no fused 3D weights."""
+
+    routers: list[tuple[str, object]] = []
+    for name, module in model.named_modules():
+        if not isinstance(getattr(module, "top_k", None), int):
+            continue
+        if not isinstance(getattr(module, "num_experts", None), int):
+            continue
+        if any(p.dim() == 3 for p in module.parameters(recurse=False)):
+            continue
+        routers.append((name, module))
+    return sorted(routers, key=lambda item: item[0])
+
+
+def apply_moe_routing_bypass(routers: list[tuple[str, object]]) -> list[tuple[object, int]]:
+    """Set every router's ``top_k`` to ``num_experts`` so all experts see every token."""
+
+    originals: list[tuple[object, int]] = []
+    for name, module in routers:
+        original = int(module.top_k)
+        module.top_k = int(module.num_experts)
+        originals.append((module, original))
+        print(f"[moe] routing bypass: {name} top_k {original} -> {module.top_k}")
+    return originals
+
+
+def _update_expert_stats(
+    profile: DatasetProfile,
+    name: str,
+    num_experts: int,
+    hidden: torch.Tensor,
+    idx: torch.Tensor,
+) -> None:
+    import torch
+
+    flat = hidden.reshape(-1, hidden.shape[-1]).float()
+    tokens = flat.shape[0]
+    if tokens == 0 or idx.numel() == 0 or idx.numel() % tokens != 0:
+        return
+    sel = idx.reshape(tokens, -1).long()
+
+    counts = torch.bincount(sel.reshape(-1), minlength=num_experts).cpu()
+    prev = profile.expert_counts.get(name)
+    profile.expert_counts[name] = counts if prev is None else prev + counts
+
+    if not MOE_EXPERT_DIAG_ENABLED:
+        return
+    xsq = flat.pow(2)
+    diag = torch.zeros(num_experts, flat.shape[-1], dtype=torch.float32, device=flat.device)
+    for k in range(sel.shape[-1]):
+        diag.index_add_(0, sel[:, k], xsq)
+    diag = diag.cpu()
+    prev_diag = profile.expert_diag.get(name)
+    profile.expert_diag[name] = diag if prev_diag is None else prev_diag + diag
+
+
+def register_moe_hooks(targets: list[MoEExpertTarget], context: ScanContext) -> list:
+    """Hook fused expert modules: capture the routed-token indices and shared hidden-state input."""
+
+    import torch
+
+    handles = []
+    for target in targets:
+        def make_hook(name: str, num_experts: int):
+            def hook(module: object, args: tuple, kwargs: dict, _ctx: ScanContext = context) -> None:
+                profile = _ctx.active_profile
+                if profile is None:
+                    return
+                tensors = list(args) + list(kwargs.values())
+                # Fused 3D weights are [num_experts, in, out] or [num_experts, out, in];
+                # accept either inner dim as the hidden width to validate against.
+                hidden_dims = {
+                    int(d)
+                    for p in module.parameters(recurse=False)
+                    if p.dim() == 3
+                    for d in p.shape[1:]
+                }
+                hidden = next(
+                    (
+                        t for t in tensors
+                        if torch.is_tensor(t) and t.is_floating_point() and t.shape[-1] in hidden_dims
+                    ),
+                    None,
+                )
+                idx = next(
+                    (
+                        t for t in tensors
+                        if torch.is_tensor(t) and t.dtype in (torch.int32, torch.int64)
+                    ),
+                    None,
+                )
+                if hidden is None or idx is None:
+                    return
+                _update_expert_stats(profile, name, num_experts, hidden, idx)
+            return hook
+
+        handles.append(
+            target.module.register_forward_pre_hook(
+                make_hook(target.name, target.num_experts), with_kwargs=True
+            )
+        )
+    return handles
+
+
+# Read-only during scoring; set once in main() before any score() call.
+MOE_ROUTER_COVERAGE_WEIGHT = 0.0
+MOE_EXPERT_MIN_TOKENS = 16
+# Opt-in: per-expert Hessian diagonals are diagnostic-only and expensive to accumulate.
+MOE_EXPERT_DIAG_ENABLED = False
+
+
+def moe_uncovered_mass(profile: DatasetProfile, ref: DatasetProfile) -> float | None:
+    """Reference routed mass landing on experts the candidate leaves uncovered, averaged over MoE layers."""
+
+    import torch
+
+    ref_counts = getattr(ref, "expert_counts", None)
+    if not ref_counts:
+        return None
+    cand_counts = getattr(profile, "expert_counts", {}) or {}
+    fractions: list[float] = []
+    for name, rc in ref_counts.items():
+        total = float(rc.sum())
+        if total <= 0:
+            continue
+        active = rc > 0
+        cc = cand_counts.get(name)
+        covered = (cc >= MOE_EXPERT_MIN_TOKENS) if cc is not None else torch.zeros_like(active)
+        mass = rc.float() / total
+        fractions.append(float(mass[active & ~covered].sum()))
+    if not fractions:
+        return None
+    return sum(fractions) / len(fractions)
+
+
+def moe_min_expert_tokens(profile: DatasetProfile, ref: DatasetProfile) -> int | None:
+    """Minimum routed tokens any reference-active expert received, across all MoE layers."""
+
+    ref_counts = getattr(ref, "expert_counts", None)
+    if not ref_counts:
+        return None
+    cand = getattr(profile, "expert_counts", {}) or {}
+    mins: list[int] = []
+    for name, rc in ref_counts.items():
+        active = rc > 0
+        if int(active.sum()) == 0:
+            continue
+        cc = cand.get(name)
+        if cc is None:
+            return 0
+        mins.append(int(cc[active].min()))
+    return min(mins) if mins else None
+
+
+# ---------------------------------------------------------------------------
 # Scan, score, merge, greedy
 # ---------------------------------------------------------------------------
 
@@ -777,6 +1063,24 @@ def scan_dataset(
 
     import torch
 
+    start = time.perf_counter()
+    last_log = start
+    chunk_count = 0
+
+    def _telemetry(rows_done: int) -> str:
+        elapsed = time.perf_counter() - start
+        tok_s = profile.total_tokens / elapsed if elapsed > 0 else 0.0
+        msg = (
+            f"[scan] {profile.name}: rows={rows_done}/{len(samples)} chunks={chunk_count} "
+            f"tokens={profile.total_tokens} elapsed={elapsed:.0f}s tok/s={tok_s:.0f}"
+        )
+        expert_counts = getattr(profile, "expert_counts", None)
+        if expert_counts:
+            covered = sum(int((c > 0).sum()) for c in expert_counts.values())
+            total = sum(c.numel() for c in expert_counts.values())
+            msg += f" experts_hit={covered}/{total}"
+        return msg
+
     for row_idx, sample in enumerate(samples):
         chunks = _tokenize_sample(tokenizer, sample, concat_size, min_length, apply_chat_template)
         for chunk in chunks:
@@ -789,10 +1093,13 @@ def scan_dataset(
                     attention_mask=attention_mask,
                     use_cache=False,
                 )
+            chunk_count += 1
             del input_ids, attention_mask
-        if (row_idx + 1) % 50 == 0:
-            print(f"[scan] {profile.name}: processed {row_idx + 1} rows, {profile.total_tokens} tokens")
-    print(f"[scan] {profile.name}: done, {profile.total_tokens} total tokens")
+            now = time.perf_counter()
+            if now - last_log >= 30.0:
+                print(_telemetry(row_idx + 1), flush=True)
+                last_log = now
+    print(f"{_telemetry(len(samples))} done", flush=True)
 
 
 def _prepare_scale_search_importance(diag: torch.Tensor) -> torch.Tensor:
@@ -836,6 +1143,10 @@ def score(profile: DatasetProfile, ref: DatasetProfile) -> float:
         gap = torch.relu(ref_p99 - calib_p99) / denom
         gap = torch.where(ref_p99 > 0, gap, torch.zeros_like(gap))
         total += float((importance * gap).sum())
+    if MOE_ROUTER_COVERAGE_WEIGHT > 0:
+        uncovered = moe_uncovered_mass(profile, ref)
+        if uncovered is not None:
+            total *= 1.0 + MOE_ROUTER_COVERAGE_WEIGHT * uncovered
     return total
 
 
@@ -857,6 +1168,19 @@ def _greedy_worker(
     return name, s, candidate.total_tokens
 
 
+def _moe_floor_met(
+    profile: DatasetProfile,
+    ref: DatasetProfile,
+    target_moe_expert_tokens: int | None,
+) -> bool:
+    if target_moe_expert_tokens is None:
+        return True
+    current = moe_min_expert_tokens(profile, ref)
+    if current is None:
+        return True
+    return current >= target_moe_expert_tokens
+
+
 def greedy_select(
     profiles: dict[str, DatasetProfile],
     ref: DatasetProfile,
@@ -866,6 +1190,7 @@ def greedy_select(
     target_gain: float | None = None,
     target_tokens: int | None = None,
     target_tokens_mode: str = "gain",
+    target_moe_expert_tokens: int | None = None,
 ) -> tuple[DatasetProfile, list[dict[str, object]], float, float, list[str]]:
     """Greedily add the dataset with the largest conditional gain.
 
@@ -906,6 +1231,9 @@ def greedy_select(
 
     def _target_tokens_met(total: int) -> bool:
         return target_tokens is None or total >= target_tokens
+
+    def _moe_met(profile: DatasetProfile) -> bool:
+        return _moe_floor_met(profile, ref, target_moe_expert_tokens)
 
     cumulative_gain = 0.0
     while remaining:
@@ -952,23 +1280,21 @@ def greedy_select(
         if best_name is None:
             break
 
-        # If no remaining candidate improves the score, the search is finished.
+        floors_unmet = not _target_tokens_met(selected.total_tokens) or not _moe_met(selected)
+
+        # Never add negative-gain (redundant) data just to satisfy a floor: the
+        # floors are soft targets and an unmet floor is reported as a warning.
         if best_gain <= 0:
             if target_gain is not None and cumulative_gain < target_gain:
                 warnings.append(
                     f"Target cumulative gain floor {target_gain} not reached "
                     f"(reached {cumulative_gain:.6f}); all remaining datasets are redundant."
                 )
-            if target_tokens is not None and selected.total_tokens < target_tokens:
-                warnings.append(
-                    f"Target token floor {target_tokens} not reached "
-                    f"(reached {selected.total_tokens}); all remaining datasets are redundant."
-                )
             break
 
         gain_met = _target_gain_met(cumulative_gain + best_gain)
         tokens_met = _target_tokens_met(selected.total_tokens + best_tokens)
-        if gain_met and tokens_met and best_gain <= min_gain:
+        if gain_met and tokens_met and best_gain <= min_gain and not floors_unmet:
             break
 
         selected = selected.merge(profiles[best_name])
@@ -981,6 +1307,20 @@ def greedy_select(
             "total_tokens": selected.total_tokens,
         })
         remaining.remove(best_name)
+
+    if target_tokens is not None and selected.total_tokens < target_tokens:
+        warnings.append(
+            f"Target token floor {target_tokens} not reached "
+            f"(reached {selected.total_tokens}); remaining datasets are redundant "
+            "(negative conditional gain) and are never added just to fill the floor."
+        )
+    if target_moe_expert_tokens is not None and not _moe_met(selected):
+        reached = moe_min_expert_tokens(selected, ref)
+        warnings.append(
+            f"MoE expert-token floor {target_moe_expert_tokens} not reached "
+            f"(min routed tokens per reference-active expert: {reached}); remaining "
+            "datasets are redundant. Consider --moe-routing-bypass or a larger pool."
+        )
 
     return selected, order, current_score, cumulative_gain, warnings
 
@@ -1267,8 +1607,9 @@ def main() -> int:
     start_time = time.perf_counter()
     timings: dict[str, float] = {}
 
+    gpu_targets: list[dict[str, object]] = []
     if args.physical_gpu is not None:
-        _preflight_physical_gpu(
+        gpu_targets = _preflight_physical_gpus(
             args.physical_gpu,
             allow_busy=args.allow_busy_gpu,
         )
@@ -1276,7 +1617,17 @@ def main() -> int:
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    torch.set_num_threads(min(16, os.cpu_count() or 1))
+    load_workers = int(os.environ.get("COVERAGE_LOAD_WORKERS", "32"))
+    if load_workers > 0:
+        try:
+            from transformers import core_model_loading
+
+            core_model_loading.GLOBAL_WORKERS = max(core_model_loading.GLOBAL_WORKERS, load_workers)
+            print(f"[load] checkpoint I/O workers = {core_model_loading.GLOBAL_WORKERS}")
+        except (ImportError, AttributeError):
+            pass
+
+    torch.set_num_threads(min(32, os.cpu_count() or 1))
     torch.set_num_interop_threads(1)
 
     if args.physical_gpu is not None:
@@ -1303,15 +1654,28 @@ def main() -> int:
         "low_cpu_mem_usage": True,
         "trust_remote_code": args.trust_remote_code,
     }
+    multi_gpu = len(gpu_targets) > 1
     if device.type == "cpu":
         # Load directly on CPU and avoid a second copy during .to(device).
         model_kwargs["device_map"] = "cpu"
+    elif multi_gpu:
+        # Shard across all visible GPUs; hooks accumulate on CPU so placement is transparent.
+        model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
-    print(f"[load] Moving model to {device} ...")
-    model = model.to(device)
+    if multi_gpu:
+        print(f"[load] Model sharded across {len(gpu_targets)} GPUs via device_map=auto")
+    else:
+        print(f"[load] Moving model to {device} ...")
+        model = model.to(device)
     model.eval()
     gc.collect()
     timings["load"] = time.perf_counter() - start_time
+
+    if args.defuse_experts:
+        from defuser import convert_model
+
+        converted = convert_model(model)
+        print(f"[moe] Defuser convert_model() -> {converted}")
 
     target_groups = find_target_groups(model)
     module_count = sum(len(g.members) for g in target_groups)
@@ -1324,6 +1688,30 @@ def main() -> int:
 
     context = ScanContext()
     handles = register_hooks(target_groups, context)
+
+    moe_expert_targets: list[MoEExpertTarget] = []
+    moe_routers: list[tuple[str, object]] = []
+    if args.moe_expert_coverage or args.moe_routing_bypass:
+        moe_expert_targets = find_moe_expert_modules(model)
+        moe_routers = find_moe_routers(model)
+        print(
+            f"[moe] Found {len(moe_expert_targets)} fused expert modules and "
+            f"{len(moe_routers)} routers"
+        )
+    if args.moe_routing_bypass:
+        if moe_routers:
+            apply_moe_routing_bypass(moe_routers)
+        else:
+            print("[warn] --moe-routing-bypass set but no top-k routers found")
+    if args.moe_expert_coverage:
+        if moe_expert_targets:
+            handles.extend(register_moe_hooks(moe_expert_targets, context))
+            global MOE_ROUTER_COVERAGE_WEIGHT, MOE_EXPERT_MIN_TOKENS, MOE_EXPERT_DIAG_ENABLED
+            MOE_ROUTER_COVERAGE_WEIGHT = args.moe_router_coverage_weight
+            MOE_EXPERT_MIN_TOKENS = args.moe_expert_min_tokens
+            MOE_EXPERT_DIAG_ENABLED = args.moe_expert_diag
+        else:
+            print("[warn] --moe-expert-coverage set but no fused expert modules found")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1427,6 +1815,7 @@ def main() -> int:
         target_gain=args.target_gain,
         target_tokens=args.target_tokens,
         target_tokens_mode=args.target_tokens_mode,
+        target_moe_expert_tokens=args.target_moe_expert_tokens,
     )
     for w in warnings:
         print(f"[warn] {w}")
@@ -1483,6 +1872,12 @@ def main() -> int:
         "target_tokens": args.target_tokens,
         "target_tokens_mode": args.target_tokens_mode,
         "greedy_threads": args.greedy_threads,
+        "target_moe_expert_tokens": args.target_moe_expert_tokens,
+        "moe_expert_coverage": args.moe_expert_coverage,
+        "moe_router_coverage_weight": args.moe_router_coverage_weight,
+        "moe_expert_min_tokens": args.moe_expert_min_tokens,
+        "moe_routing_bypass": args.moe_routing_bypass,
+        "defuse_experts": args.defuse_experts,
     }
 
     report = _build_report(
@@ -1500,6 +1895,29 @@ def main() -> int:
         timings,
         warnings,
     )
+
+    if args.moe_expert_coverage and moe_expert_targets:
+        ref_active = {
+            name: int((counts > 0).sum())
+            for name, counts in (getattr(ref, "expert_counts", {}) or {}).items()
+        }
+        report["moe"] = {
+            "expert_modules": len(moe_expert_targets),
+            "num_experts": {t.name: t.num_experts for t in moe_expert_targets},
+            "routing_bypass": args.moe_routing_bypass,
+            "router_coverage_weight": args.moe_router_coverage_weight,
+            "expert_min_tokens": args.moe_expert_min_tokens,
+            "reference_active_experts": ref_active,
+            "target_moe_expert_tokens": args.target_moe_expert_tokens,
+            "per_dataset_uncovered_routed_mass": {
+                name: moe_uncovered_mass(p, ref) for name, p in profiles.items()
+            },
+            "per_dataset_min_expert_tokens": {
+                name: moe_min_expert_tokens(p, ref) for name, p in profiles.items()
+            },
+            "selected_uncovered_routed_mass": moe_uncovered_mass(selected, ref),
+            "selected_min_expert_tokens": moe_min_expert_tokens(selected, ref),
+        }
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "coverage_report.json").write_text(

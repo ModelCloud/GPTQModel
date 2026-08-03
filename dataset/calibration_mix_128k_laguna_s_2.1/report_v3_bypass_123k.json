@@ -1,0 +1,437 @@
+{
+  "complementarity": [
+    {
+      "conditional_gain": 1539866.757639,
+      "name": "wiki_zh_00",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": 17220.243905,
+      "name": "nm_llm_01",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": -2060.641667,
+      "name": "nm_llm_03",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": 358.444426,
+      "name": "wiki_ru_00",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": -701.807521,
+      "name": "code_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -808.007515,
+      "name": "nm_llm_02",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1097.771501,
+      "name": "code_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1140.239103,
+      "name": "math_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1162.388789,
+      "name": "nm_llm_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1575.529197,
+      "name": "imatrix_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1695.688441,
+      "name": "math_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2001.230064,
+      "name": "imatrix_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -4183.466297,
+      "name": "pg19_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -4432.993317,
+      "name": "pg19_00",
+      "verdict": "redundant"
+    }
+  ],
+  "config": {
+    "apply_chat_template": false,
+    "concat_size": 1024,
+    "datasets": [
+      "_shards/code_00.parquet:code_00",
+      "_shards/code_01.parquet:code_01",
+      "_shards/imatrix_00.parquet:imatrix_00",
+      "_shards/imatrix_01.parquet:imatrix_01",
+      "_shards/math_00.parquet:math_00",
+      "_shards/math_01.parquet:math_01",
+      "_shards/nm_llm_00.parquet:nm_llm_00",
+      "_shards/nm_llm_01.parquet:nm_llm_01",
+      "_shards/nm_llm_02.parquet:nm_llm_02",
+      "_shards/nm_llm_03.parquet:nm_llm_03",
+      "_shards/pg19_00.parquet:pg19_00",
+      "_shards/pg19_01.parquet:pg19_01",
+      "_shards/wiki_ru_00.parquet:wiki_ru_00",
+      "_shards/wiki_zh_00.parquet:wiki_zh_00"
+    ],
+    "defuse_experts": false,
+    "device": "cuda:0",
+    "fallback_threshold": "0.5%",
+    "greedy_threads": 32,
+    "max_samples": 0,
+    "min_conditional_gain": 0.0,
+    "min_length": 10,
+    "model": "/monster/data/model/Laguna-S-2.1-PER-LAYER",
+    "moe_expert_coverage": true,
+    "moe_expert_min_tokens": 16,
+    "moe_router_coverage_weight": 1.0,
+    "moe_routing_bypass": true,
+    "reference": "_shards/reference.parquet:reference",
+    "sketch_samples": 128,
+    "target_gain": null,
+    "target_moe_expert_tokens": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "torch_dtype": "bfloat16"
+  },
+  "fallback": {
+    "per_dataset": {
+      "code_00": [],
+      "code_01": [],
+      "imatrix_00": [],
+      "imatrix_01": [],
+      "math_00": [],
+      "math_01": [],
+      "nm_llm_00": [],
+      "nm_llm_01": [],
+      "nm_llm_02": [],
+      "nm_llm_03": [],
+      "pg19_00": [],
+      "pg19_01": [],
+      "wiki_ru_00": [],
+      "wiki_zh_00": []
+    },
+    "selected_mix": [],
+    "threshold_setting": "0.5%"
+  },
+  "greedy_ranking": [
+    {
+      "conditional_gain": 1539866.757639,
+      "dataset": "wiki_zh_00",
+      "score_after": 55525.253225,
+      "step": 1,
+      "total_tokens": 29673
+    },
+    {
+      "conditional_gain": 17220.243905,
+      "dataset": "nm_llm_01",
+      "score_after": 38305.00932,
+      "step": 2,
+      "total_tokens": 60580
+    },
+    {
+      "conditional_gain": -2060.641667,
+      "dataset": "nm_llm_03",
+      "score_after": 40365.650988,
+      "step": 3,
+      "total_tokens": 91322
+    },
+    {
+      "conditional_gain": 358.444426,
+      "dataset": "wiki_ru_00",
+      "score_after": 40007.206562,
+      "step": 4,
+      "total_tokens": 123355
+    }
+  ],
+  "markdown": "# Calibration coverage report\n\n## Reference\n- model: /monster/data/model/Laguna-S-2.1-PER-LAYER\n- reference: reference (25073 tokens, 288 modules)\n- target tokens (floor): 131072 (selection mode: gain_per_token)\n\n## Warnings\n\n- Target token floor 131072 not reached (reached 123355); candidate pool exhausted.\n\n## Per-dataset standalone scores\n\n| dataset | tokens | standalone score | fallback modules |\n|---------|--------|------------------|------------------|\n| code_00 | 31927 | 63922.719685 | 0 |\n| code_01 | 32624 | 64904.809555 | 0 |\n| imatrix_00 | 31645 | 55151.408611 | 0 |\n| imatrix_01 | 31743 | 57773.551585 | 0 |\n| math_00 | 31032 | 71246.201236 | 0 |\n| math_01 | 30971 | 73694.941248 | 0 |\n| nm_llm_00 | 31041 | 60643.006071 | 0 |\n| nm_llm_01 | 30907 | 54950.310311 | 0 |\n| nm_llm_02 | 30314 | 60060.981293 | 0 |\n| nm_llm_03 | 30742 | 57382.699413 | 0 |\n| pg19_00 | 32187 | 68115.737663 | 0 |\n| pg19_01 | 31359 | 68013.177292 | 0 |\n| wiki_ru_00 | 32033 | 63267.586426 | 0 |\n| wiki_zh_00 | 29673 | 55525.253225 | 0 |\n\n## Greedy ranking (ranked by conditional gain)\n\n| step | dataset | conditional gain | score after | tokens |\n|------|---------|------------------|-------------|--------|\n| 1 | wiki_zh_00 | 1539866.757639 | 55525.253225 | 29673 |\n| 2 | nm_llm_01 | 17220.243905 | 38305.009320 | 60580 |\n| 3 | nm_llm_03 | -2060.641667 | 40365.650988 | 91322 |\n| 4 | wiki_ru_00 | 358.444426 | 40007.206562 | 123355 |\n\n## Selected mix: wiki_zh_00 -> nm_llm_01 -> nm_llm_03 -> wiki_ru_00\n- score at start: 1595392.010864\n- final score: 40007.206562\n- cumulative gain: 1555384.804302\n- total tokens: 123355\n- fallback modules: 0\n\n## Complementarity vs selected mix\n\n| dataset | conditional gain | verdict |\n|---------|------------------|---------|\n| wiki_zh_00 | 1539866.757639 | selected |\n| nm_llm_01 | 17220.243905 | selected |\n| nm_llm_03 | -2060.641667 | selected |\n| wiki_ru_00 | 358.444426 | selected |\n| code_00 | -701.807521 | redundant |\n| nm_llm_02 | -808.007515 | redundant |\n| code_01 | -1097.771501 | redundant |\n| math_00 | -1140.239103 | redundant |\n| nm_llm_00 | -1162.388789 | redundant |\n| imatrix_01 | -1575.529197 | redundant |\n| math_01 | -1695.688441 | redundant |\n| imatrix_00 | -2001.230064 | redundant |\n| pg19_01 | -4183.466297 | redundant |\n| pg19_00 | -4432.993317 | redundant |\n\n## Timing\n\n| stage | seconds |\n|-------|---------|\n| load | 68.778 |\n| scan | 3991.996 |\n| standalone_scores | 17.357 |\n| greedy | 71.088 |\n| fallback | 1.757 |\n| complementarity | 34.636 |\n| total | 4190.545 |\n\n## How to read this report\n\n*Score* is the importance-weighted tail under-coverage versus the held-out reference. For every target module and input channel we compute:\n\n- ``importance = diag / mean(diag)`` (with NaNs clamped to 0) from the reference Hessian diagonal.\n- ``gap = relu(ref_p99 - calib_p99) / ref_p99`` per channel.\n- ``score = sum(importance * gap)`` over all modules/channels.\n\nA lower score is better. A score of ``0`` means the calibration data covers every reference tail. A high score means important reference channels are not seen in the calibration set.\n\n*Standalone score* is ``score(dataset, ref)`` for each dataset alone.\n\n*Conditional gain* for a dataset is ``score(mix_before, ref) - score(mix_before + dataset, ref)``: how much adding that dataset to the current mix reduces the score. Positive values are complementary; zero or negative values are redundant. The greedy ranking always selects the next dataset by this gain. *Targets are floors, not ceilings*: once ``--target-gain`` or ``--target-tokens`` is reached, the search continues as long as the next conditional gain remains positive. The cumulative gain is ``score_start - score_final`` for the selected mix.",
+  "moe": {
+    "expert_min_tokens": 16,
+    "expert_modules": 47,
+    "num_experts": {
+      "model.layers.1.mlp.experts": 256,
+      "model.layers.10.mlp.experts": 256,
+      "model.layers.11.mlp.experts": 256,
+      "model.layers.12.mlp.experts": 256,
+      "model.layers.13.mlp.experts": 256,
+      "model.layers.14.mlp.experts": 256,
+      "model.layers.15.mlp.experts": 256,
+      "model.layers.16.mlp.experts": 256,
+      "model.layers.17.mlp.experts": 256,
+      "model.layers.18.mlp.experts": 256,
+      "model.layers.19.mlp.experts": 256,
+      "model.layers.2.mlp.experts": 256,
+      "model.layers.20.mlp.experts": 256,
+      "model.layers.21.mlp.experts": 256,
+      "model.layers.22.mlp.experts": 256,
+      "model.layers.23.mlp.experts": 256,
+      "model.layers.24.mlp.experts": 256,
+      "model.layers.25.mlp.experts": 256,
+      "model.layers.26.mlp.experts": 256,
+      "model.layers.27.mlp.experts": 256,
+      "model.layers.28.mlp.experts": 256,
+      "model.layers.29.mlp.experts": 256,
+      "model.layers.3.mlp.experts": 256,
+      "model.layers.30.mlp.experts": 256,
+      "model.layers.31.mlp.experts": 256,
+      "model.layers.32.mlp.experts": 256,
+      "model.layers.33.mlp.experts": 256,
+      "model.layers.34.mlp.experts": 256,
+      "model.layers.35.mlp.experts": 256,
+      "model.layers.36.mlp.experts": 256,
+      "model.layers.37.mlp.experts": 256,
+      "model.layers.38.mlp.experts": 256,
+      "model.layers.39.mlp.experts": 256,
+      "model.layers.4.mlp.experts": 256,
+      "model.layers.40.mlp.experts": 256,
+      "model.layers.41.mlp.experts": 256,
+      "model.layers.42.mlp.experts": 256,
+      "model.layers.43.mlp.experts": 256,
+      "model.layers.44.mlp.experts": 256,
+      "model.layers.45.mlp.experts": 256,
+      "model.layers.46.mlp.experts": 256,
+      "model.layers.47.mlp.experts": 256,
+      "model.layers.5.mlp.experts": 256,
+      "model.layers.6.mlp.experts": 256,
+      "model.layers.7.mlp.experts": 256,
+      "model.layers.8.mlp.experts": 256,
+      "model.layers.9.mlp.experts": 256
+    },
+    "per_dataset_min_expert_tokens": {
+      "code_00": 31927,
+      "code_01": 32624,
+      "imatrix_00": 31645,
+      "imatrix_01": 31743,
+      "math_00": 31032,
+      "math_01": 30971,
+      "nm_llm_00": 31041,
+      "nm_llm_01": 30907,
+      "nm_llm_02": 30314,
+      "nm_llm_03": 30742,
+      "pg19_00": 32187,
+      "pg19_01": 31359,
+      "wiki_ru_00": 32033,
+      "wiki_zh_00": 29673
+    },
+    "per_dataset_uncovered_routed_mass": {
+      "code_00": 0.0,
+      "code_01": 0.0,
+      "imatrix_00": 0.0,
+      "imatrix_01": 0.0,
+      "math_00": 0.0,
+      "math_01": 0.0,
+      "nm_llm_00": 0.0,
+      "nm_llm_01": 0.0,
+      "nm_llm_02": 0.0,
+      "nm_llm_03": 0.0,
+      "pg19_00": 0.0,
+      "pg19_01": 0.0,
+      "wiki_ru_00": 0.0,
+      "wiki_zh_00": 0.0
+    },
+    "reference_active_experts": {
+      "model.layers.1.mlp.experts": 256,
+      "model.layers.10.mlp.experts": 256,
+      "model.layers.11.mlp.experts": 256,
+      "model.layers.12.mlp.experts": 256,
+      "model.layers.13.mlp.experts": 256,
+      "model.layers.14.mlp.experts": 256,
+      "model.layers.15.mlp.experts": 256,
+      "model.layers.16.mlp.experts": 256,
+      "model.layers.17.mlp.experts": 256,
+      "model.layers.18.mlp.experts": 256,
+      "model.layers.19.mlp.experts": 256,
+      "model.layers.2.mlp.experts": 256,
+      "model.layers.20.mlp.experts": 256,
+      "model.layers.21.mlp.experts": 256,
+      "model.layers.22.mlp.experts": 256,
+      "model.layers.23.mlp.experts": 256,
+      "model.layers.24.mlp.experts": 256,
+      "model.layers.25.mlp.experts": 256,
+      "model.layers.26.mlp.experts": 256,
+      "model.layers.27.mlp.experts": 256,
+      "model.layers.28.mlp.experts": 256,
+      "model.layers.29.mlp.experts": 256,
+      "model.layers.3.mlp.experts": 256,
+      "model.layers.30.mlp.experts": 256,
+      "model.layers.31.mlp.experts": 256,
+      "model.layers.32.mlp.experts": 256,
+      "model.layers.33.mlp.experts": 256,
+      "model.layers.34.mlp.experts": 256,
+      "model.layers.35.mlp.experts": 256,
+      "model.layers.36.mlp.experts": 256,
+      "model.layers.37.mlp.experts": 256,
+      "model.layers.38.mlp.experts": 256,
+      "model.layers.39.mlp.experts": 256,
+      "model.layers.4.mlp.experts": 256,
+      "model.layers.40.mlp.experts": 256,
+      "model.layers.41.mlp.experts": 256,
+      "model.layers.42.mlp.experts": 256,
+      "model.layers.43.mlp.experts": 256,
+      "model.layers.44.mlp.experts": 256,
+      "model.layers.45.mlp.experts": 256,
+      "model.layers.46.mlp.experts": 256,
+      "model.layers.47.mlp.experts": 256,
+      "model.layers.5.mlp.experts": 256,
+      "model.layers.6.mlp.experts": 256,
+      "model.layers.7.mlp.experts": 256,
+      "model.layers.8.mlp.experts": 256,
+      "model.layers.9.mlp.experts": 256
+    },
+    "router_coverage_weight": 1.0,
+    "routing_bypass": true,
+    "selected_min_expert_tokens": 123355,
+    "selected_uncovered_routed_mass": 0.0,
+    "target_moe_expert_tokens": null
+  },
+  "per_dataset": [
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "code_00",
+      "standalone_score": 63922.719685,
+      "total_tokens": 31927
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "code_01",
+      "standalone_score": 64904.809555,
+      "total_tokens": 32624
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "imatrix_00",
+      "standalone_score": 55151.408611,
+      "total_tokens": 31645
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "imatrix_01",
+      "standalone_score": 57773.551585,
+      "total_tokens": 31743
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "math_00",
+      "standalone_score": 71246.201236,
+      "total_tokens": 31032
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "math_01",
+      "standalone_score": 73694.941248,
+      "total_tokens": 30971
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_00",
+      "standalone_score": 60643.006071,
+      "total_tokens": 31041
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_01",
+      "standalone_score": 54950.310311,
+      "total_tokens": 30907
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_02",
+      "standalone_score": 60060.981293,
+      "total_tokens": 30314
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_03",
+      "standalone_score": 57382.699413,
+      "total_tokens": 30742
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "pg19_00",
+      "standalone_score": 68115.737663,
+      "total_tokens": 32187
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "pg19_01",
+      "standalone_score": 68013.177292,
+      "total_tokens": 31359
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_ru_00",
+      "standalone_score": 63267.586426,
+      "total_tokens": 32033
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_zh_00",
+      "standalone_score": 55525.253225,
+      "total_tokens": 29673
+    }
+  ],
+  "reference": {
+    "modules": 288,
+    "name": "reference",
+    "total_tokens": 25073
+  },
+  "selected_mix": {
+    "cumulative_gain": 1555384.804302,
+    "datasets": [
+      "wiki_zh_00",
+      "nm_llm_01",
+      "nm_llm_03",
+      "wiki_ru_00"
+    ],
+    "fallback_count": 0,
+    "fallback_modules": [],
+    "score": 40007.206562,
+    "score_start": 1595392.010864,
+    "target_gain": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "total_tokens": 123355
+  },
+  "timings": {
+    "complementarity": 34.635608,
+    "fallback": 1.75702,
+    "greedy": 71.087742,
+    "load": 68.777897,
+    "scan": 3991.995903,
+    "standalone_scores": 17.357059,
+    "total": 4190.545395
+  },
+  "warnings": [
+    "Target token floor 131072 not reached (reached 123355); candidate pool exhausted."
+  ]
+}

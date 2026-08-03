@@ -1,0 +1,565 @@
+{
+  "complementarity": [
+    {
+      "conditional_gain": 1543530.201048,
+      "name": "wiki_zh_01",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": 14773.618723,
+      "name": "tulu_00",
+      "verdict": "selected"
+    },
+    {
+      "conditional_gain": -722.233227,
+      "name": "tulu_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1257.286274,
+      "name": "nm_llm_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1294.524002,
+      "name": "nm_llm_03",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1604.536331,
+      "name": "nm_llm_02",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -1994.638828,
+      "name": "wiki_zh_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2052.014339,
+      "name": "nm_llm_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2090.329945,
+      "name": "math_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2156.598251,
+      "name": "math_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2271.75993,
+      "name": "wiki_ko_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2386.220295,
+      "name": "wiki_ja_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2468.509151,
+      "name": "code_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2502.151497,
+      "name": "code_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2779.920673,
+      "name": "imatrix_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -2923.257854,
+      "name": "fineweb_edu_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -3395.275551,
+      "name": "fineweb_edu_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -3572.951889,
+      "name": "imatrix_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -3917.164322,
+      "name": "wiki_de_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -4315.049408,
+      "name": "wiki_ru_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -4878.569813,
+      "name": "pg19_00",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -5176.034939,
+      "name": "pg19_01",
+      "verdict": "redundant"
+    },
+    {
+      "conditional_gain": -5438.532784,
+      "name": "wiki_ar_00",
+      "verdict": "redundant"
+    }
+  ],
+  "config": {
+    "apply_chat_template": false,
+    "concat_size": 1024,
+    "datasets": [
+      "_shards/code_00.parquet:code_00",
+      "_shards/code_01.parquet:code_01",
+      "_shards/fineweb_edu_00.parquet:fineweb_edu_00",
+      "_shards/fineweb_edu_01.parquet:fineweb_edu_01",
+      "_shards/imatrix_00.parquet:imatrix_00",
+      "_shards/imatrix_01.parquet:imatrix_01",
+      "_shards/math_00.parquet:math_00",
+      "_shards/math_01.parquet:math_01",
+      "_shards/nm_llm_00.parquet:nm_llm_00",
+      "_shards/nm_llm_01.parquet:nm_llm_01",
+      "_shards/nm_llm_02.parquet:nm_llm_02",
+      "_shards/nm_llm_03.parquet:nm_llm_03",
+      "_shards/pg19_00.parquet:pg19_00",
+      "_shards/pg19_01.parquet:pg19_01",
+      "_shards/tulu_00.parquet:tulu_00",
+      "_shards/tulu_01.parquet:tulu_01",
+      "_shards/wiki_ar_00.parquet:wiki_ar_00",
+      "_shards/wiki_de_00.parquet:wiki_de_00",
+      "_shards/wiki_ja_00.parquet:wiki_ja_00",
+      "_shards/wiki_ko_00.parquet:wiki_ko_00",
+      "_shards/wiki_ru_00.parquet:wiki_ru_00",
+      "_shards/wiki_zh_00.parquet:wiki_zh_00",
+      "_shards/wiki_zh_01.parquet:wiki_zh_01"
+    ],
+    "defuse_experts": false,
+    "device": "cuda:0",
+    "fallback_threshold": "0.5%",
+    "greedy_threads": 32,
+    "max_samples": 0,
+    "min_conditional_gain": 0.0,
+    "min_length": 10,
+    "model": "/monster/data/model/Laguna-S-2.1-PER-LAYER",
+    "moe_expert_coverage": true,
+    "moe_expert_min_tokens": 16,
+    "moe_router_coverage_weight": 1.0,
+    "moe_routing_bypass": true,
+    "reference": "_shards/reference.parquet:reference",
+    "sketch_samples": 128,
+    "target_gain": null,
+    "target_moe_expert_tokens": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "torch_dtype": "bfloat16"
+  },
+  "fallback": {
+    "per_dataset": {
+      "code_00": [],
+      "code_01": [],
+      "fineweb_edu_00": [],
+      "fineweb_edu_01": [],
+      "imatrix_00": [],
+      "imatrix_01": [],
+      "math_00": [],
+      "math_01": [],
+      "nm_llm_00": [],
+      "nm_llm_01": [],
+      "nm_llm_02": [],
+      "nm_llm_03": [],
+      "pg19_00": [],
+      "pg19_01": [],
+      "tulu_00": [],
+      "tulu_01": [],
+      "wiki_ar_00": [],
+      "wiki_de_00": [],
+      "wiki_ja_00": [],
+      "wiki_ko_00": [],
+      "wiki_ru_00": [],
+      "wiki_zh_00": [],
+      "wiki_zh_01": []
+    },
+    "selected_mix": [],
+    "threshold_setting": "0.5%"
+  },
+  "greedy_ranking": [
+    {
+      "conditional_gain": 1543530.201048,
+      "dataset": "wiki_zh_01",
+      "score_after": 51861.784548,
+      "step": 1,
+      "total_tokens": 27484
+    },
+    {
+      "conditional_gain": 14773.618723,
+      "dataset": "tulu_00",
+      "score_after": 37088.165825,
+      "step": 2,
+      "total_tokens": 59075
+    }
+  ],
+  "markdown": "# Calibration coverage report\n\n## Reference\n- model: /monster/data/model/Laguna-S-2.1-PER-LAYER\n- reference: reference (47729 tokens, 288 modules)\n- target tokens (floor): 131072 (selection mode: gain_per_token)\n\n## Warnings\n\n- Target token floor 131072 not reached (reached 59075); remaining datasets are redundant (negative conditional gain) and are never added just to fill the floor.\n\n## Per-dataset standalone scores\n\n| dataset | tokens | standalone score | fallback modules |\n|---------|--------|------------------|------------------|\n| code_00 | 31927 | 69835.480560 | 0 |\n| code_01 | 31812 | 70344.477931 | 0 |\n| fineweb_edu_00 | 32306 | 58904.444817 | 0 |\n| fineweb_edu_01 | 31524 | 58045.433754 | 0 |\n| imatrix_00 | 31645 | 57254.144539 | 0 |\n| imatrix_01 | 31743 | 60239.109657 | 0 |\n| math_00 | 31032 | 77665.642102 | 0 |\n| math_01 | 30971 | 80357.497384 | 0 |\n| nm_llm_00 | 31041 | 67243.397675 | 0 |\n| nm_llm_01 | 30907 | 60062.274799 | 0 |\n| nm_llm_02 | 30314 | 65715.336983 | 0 |\n| nm_llm_03 | 30742 | 62589.566788 | 0 |\n| pg19_00 | 32187 | 67083.086174 | 0 |\n| pg19_01 | 31359 | 66674.540268 | 0 |\n| tulu_00 | 31591 | 43018.083450 | 0 |\n| tulu_01 | 31381 | 46151.055458 | 0 |\n| wiki_ar_00 | 31422 | 65120.590733 | 0 |\n| wiki_de_00 | 31528 | 70195.678476 | 0 |\n| wiki_ja_00 | 27622 | 52347.902958 | 0 |\n| wiki_ko_00 | 31339 | 50622.954884 | 0 |\n| wiki_ru_00 | 32033 | 57174.881462 | 0 |\n| wiki_zh_00 | 29673 | 49433.121931 | 0 |\n| wiki_zh_01 | 27484 | 51861.784548 | 0 |\n\n## Greedy ranking (ranked by conditional gain)\n\n| step | dataset | conditional gain | score after | tokens |\n|------|---------|------------------|-------------|--------|\n| 1 | wiki_zh_01 | 1543530.201048 | 51861.784548 | 27484 |\n| 2 | tulu_00 | 14773.618723 | 37088.165825 | 59075 |\n\n## Selected mix: wiki_zh_01 -> tulu_00\n- score at start: 1595391.985596\n- final score: 37088.165825\n- cumulative gain: 1558303.819771\n- total tokens: 59075\n- fallback modules: 0\n\n## Complementarity vs selected mix\n\n| dataset | conditional gain | verdict |\n|---------|------------------|---------|\n| wiki_zh_01 | 1543530.201048 | selected |\n| tulu_00 | 14773.618723 | selected |\n| tulu_01 | -722.233227 | redundant |\n| nm_llm_01 | -1257.286274 | redundant |\n| nm_llm_03 | -1294.524002 | redundant |\n| nm_llm_02 | -1604.536331 | redundant |\n| wiki_zh_00 | -1994.638828 | redundant |\n| nm_llm_00 | -2052.014339 | redundant |\n| math_00 | -2090.329945 | redundant |\n| math_01 | -2156.598251 | redundant |\n| wiki_ko_00 | -2271.759930 | redundant |\n| wiki_ja_00 | -2386.220295 | redundant |\n| code_01 | -2468.509151 | redundant |\n| code_00 | -2502.151497 | redundant |\n| imatrix_01 | -2779.920673 | redundant |\n| fineweb_edu_01 | -2923.257854 | redundant |\n| fineweb_edu_00 | -3395.275551 | redundant |\n| imatrix_00 | -3572.951889 | redundant |\n| wiki_de_00 | -3917.164322 | redundant |\n| wiki_ru_00 | -4315.049408 | redundant |\n| pg19_00 | -4878.569813 | redundant |\n| pg19_01 | -5176.034939 | redundant |\n| wiki_ar_00 | -5438.532784 | redundant |\n\n## Timing\n\n| stage | seconds |\n|-------|---------|\n| load | 65.456 |\n| scan | 6563.006 |\n| standalone_scores | 26.125 |\n| greedy | 56.777 |\n| fallback | 1.833 |\n| complementarity | 69.403 |\n| total | 6788.295 |\n\n## How to read this report\n\n*Score* is the importance-weighted tail under-coverage versus the held-out reference. For every target module and input channel we compute:\n\n- ``importance = diag / mean(diag)`` (with NaNs clamped to 0) from the reference Hessian diagonal.\n- ``gap = relu(ref_p99 - calib_p99) / ref_p99`` per channel.\n- ``score = sum(importance * gap)`` over all modules/channels.\n\nA lower score is better. A score of ``0`` means the calibration data covers every reference tail. A high score means important reference channels are not seen in the calibration set.\n\n*Standalone score* is ``score(dataset, ref)`` for each dataset alone.\n\n*Conditional gain* for a dataset is ``score(mix_before, ref) - score(mix_before + dataset, ref)``: how much adding that dataset to the current mix reduces the score. Positive values are complementary; zero or negative values are redundant. The greedy ranking always selects the next dataset by this gain. *Targets are floors, not ceilings*: once ``--target-gain`` or ``--target-tokens`` is reached, the search continues as long as the next conditional gain remains positive. The cumulative gain is ``score_start - score_final`` for the selected mix.",
+  "moe": {
+    "expert_min_tokens": 16,
+    "expert_modules": 47,
+    "num_experts": {
+      "model.layers.1.mlp.experts": 256,
+      "model.layers.10.mlp.experts": 256,
+      "model.layers.11.mlp.experts": 256,
+      "model.layers.12.mlp.experts": 256,
+      "model.layers.13.mlp.experts": 256,
+      "model.layers.14.mlp.experts": 256,
+      "model.layers.15.mlp.experts": 256,
+      "model.layers.16.mlp.experts": 256,
+      "model.layers.17.mlp.experts": 256,
+      "model.layers.18.mlp.experts": 256,
+      "model.layers.19.mlp.experts": 256,
+      "model.layers.2.mlp.experts": 256,
+      "model.layers.20.mlp.experts": 256,
+      "model.layers.21.mlp.experts": 256,
+      "model.layers.22.mlp.experts": 256,
+      "model.layers.23.mlp.experts": 256,
+      "model.layers.24.mlp.experts": 256,
+      "model.layers.25.mlp.experts": 256,
+      "model.layers.26.mlp.experts": 256,
+      "model.layers.27.mlp.experts": 256,
+      "model.layers.28.mlp.experts": 256,
+      "model.layers.29.mlp.experts": 256,
+      "model.layers.3.mlp.experts": 256,
+      "model.layers.30.mlp.experts": 256,
+      "model.layers.31.mlp.experts": 256,
+      "model.layers.32.mlp.experts": 256,
+      "model.layers.33.mlp.experts": 256,
+      "model.layers.34.mlp.experts": 256,
+      "model.layers.35.mlp.experts": 256,
+      "model.layers.36.mlp.experts": 256,
+      "model.layers.37.mlp.experts": 256,
+      "model.layers.38.mlp.experts": 256,
+      "model.layers.39.mlp.experts": 256,
+      "model.layers.4.mlp.experts": 256,
+      "model.layers.40.mlp.experts": 256,
+      "model.layers.41.mlp.experts": 256,
+      "model.layers.42.mlp.experts": 256,
+      "model.layers.43.mlp.experts": 256,
+      "model.layers.44.mlp.experts": 256,
+      "model.layers.45.mlp.experts": 256,
+      "model.layers.46.mlp.experts": 256,
+      "model.layers.47.mlp.experts": 256,
+      "model.layers.5.mlp.experts": 256,
+      "model.layers.6.mlp.experts": 256,
+      "model.layers.7.mlp.experts": 256,
+      "model.layers.8.mlp.experts": 256,
+      "model.layers.9.mlp.experts": 256
+    },
+    "per_dataset_min_expert_tokens": {
+      "code_00": 31927,
+      "code_01": 31812,
+      "fineweb_edu_00": 32306,
+      "fineweb_edu_01": 31524,
+      "imatrix_00": 31645,
+      "imatrix_01": 31743,
+      "math_00": 31032,
+      "math_01": 30971,
+      "nm_llm_00": 31041,
+      "nm_llm_01": 30907,
+      "nm_llm_02": 30314,
+      "nm_llm_03": 30742,
+      "pg19_00": 32187,
+      "pg19_01": 31359,
+      "tulu_00": 31591,
+      "tulu_01": 31381,
+      "wiki_ar_00": 31422,
+      "wiki_de_00": 31528,
+      "wiki_ja_00": 27622,
+      "wiki_ko_00": 31339,
+      "wiki_ru_00": 32033,
+      "wiki_zh_00": 29673,
+      "wiki_zh_01": 27484
+    },
+    "per_dataset_uncovered_routed_mass": {
+      "code_00": 0.0,
+      "code_01": 0.0,
+      "fineweb_edu_00": 0.0,
+      "fineweb_edu_01": 0.0,
+      "imatrix_00": 0.0,
+      "imatrix_01": 0.0,
+      "math_00": 0.0,
+      "math_01": 0.0,
+      "nm_llm_00": 0.0,
+      "nm_llm_01": 0.0,
+      "nm_llm_02": 0.0,
+      "nm_llm_03": 0.0,
+      "pg19_00": 0.0,
+      "pg19_01": 0.0,
+      "tulu_00": 0.0,
+      "tulu_01": 0.0,
+      "wiki_ar_00": 0.0,
+      "wiki_de_00": 0.0,
+      "wiki_ja_00": 0.0,
+      "wiki_ko_00": 0.0,
+      "wiki_ru_00": 0.0,
+      "wiki_zh_00": 0.0,
+      "wiki_zh_01": 0.0
+    },
+    "reference_active_experts": {
+      "model.layers.1.mlp.experts": 256,
+      "model.layers.10.mlp.experts": 256,
+      "model.layers.11.mlp.experts": 256,
+      "model.layers.12.mlp.experts": 256,
+      "model.layers.13.mlp.experts": 256,
+      "model.layers.14.mlp.experts": 256,
+      "model.layers.15.mlp.experts": 256,
+      "model.layers.16.mlp.experts": 256,
+      "model.layers.17.mlp.experts": 256,
+      "model.layers.18.mlp.experts": 256,
+      "model.layers.19.mlp.experts": 256,
+      "model.layers.2.mlp.experts": 256,
+      "model.layers.20.mlp.experts": 256,
+      "model.layers.21.mlp.experts": 256,
+      "model.layers.22.mlp.experts": 256,
+      "model.layers.23.mlp.experts": 256,
+      "model.layers.24.mlp.experts": 256,
+      "model.layers.25.mlp.experts": 256,
+      "model.layers.26.mlp.experts": 256,
+      "model.layers.27.mlp.experts": 256,
+      "model.layers.28.mlp.experts": 256,
+      "model.layers.29.mlp.experts": 256,
+      "model.layers.3.mlp.experts": 256,
+      "model.layers.30.mlp.experts": 256,
+      "model.layers.31.mlp.experts": 256,
+      "model.layers.32.mlp.experts": 256,
+      "model.layers.33.mlp.experts": 256,
+      "model.layers.34.mlp.experts": 256,
+      "model.layers.35.mlp.experts": 256,
+      "model.layers.36.mlp.experts": 256,
+      "model.layers.37.mlp.experts": 256,
+      "model.layers.38.mlp.experts": 256,
+      "model.layers.39.mlp.experts": 256,
+      "model.layers.4.mlp.experts": 256,
+      "model.layers.40.mlp.experts": 256,
+      "model.layers.41.mlp.experts": 256,
+      "model.layers.42.mlp.experts": 256,
+      "model.layers.43.mlp.experts": 256,
+      "model.layers.44.mlp.experts": 256,
+      "model.layers.45.mlp.experts": 256,
+      "model.layers.46.mlp.experts": 256,
+      "model.layers.47.mlp.experts": 256,
+      "model.layers.5.mlp.experts": 256,
+      "model.layers.6.mlp.experts": 256,
+      "model.layers.7.mlp.experts": 256,
+      "model.layers.8.mlp.experts": 256,
+      "model.layers.9.mlp.experts": 256
+    },
+    "router_coverage_weight": 1.0,
+    "routing_bypass": true,
+    "selected_min_expert_tokens": 59075,
+    "selected_uncovered_routed_mass": 0.0,
+    "target_moe_expert_tokens": null
+  },
+  "per_dataset": [
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "code_00",
+      "standalone_score": 69835.48056,
+      "total_tokens": 31927
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "code_01",
+      "standalone_score": 70344.477931,
+      "total_tokens": 31812
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "fineweb_edu_00",
+      "standalone_score": 58904.444817,
+      "total_tokens": 32306
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "fineweb_edu_01",
+      "standalone_score": 58045.433754,
+      "total_tokens": 31524
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "imatrix_00",
+      "standalone_score": 57254.144539,
+      "total_tokens": 31645
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "imatrix_01",
+      "standalone_score": 60239.109657,
+      "total_tokens": 31743
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "math_00",
+      "standalone_score": 77665.642102,
+      "total_tokens": 31032
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "math_01",
+      "standalone_score": 80357.497384,
+      "total_tokens": 30971
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_00",
+      "standalone_score": 67243.397675,
+      "total_tokens": 31041
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_01",
+      "standalone_score": 60062.274799,
+      "total_tokens": 30907
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_02",
+      "standalone_score": 65715.336983,
+      "total_tokens": 30314
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "nm_llm_03",
+      "standalone_score": 62589.566788,
+      "total_tokens": 30742
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "pg19_00",
+      "standalone_score": 67083.086174,
+      "total_tokens": 32187
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "pg19_01",
+      "standalone_score": 66674.540268,
+      "total_tokens": 31359
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "tulu_00",
+      "standalone_score": 43018.08345,
+      "total_tokens": 31591
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "tulu_01",
+      "standalone_score": 46151.055458,
+      "total_tokens": 31381
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_ar_00",
+      "standalone_score": 65120.590733,
+      "total_tokens": 31422
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_de_00",
+      "standalone_score": 70195.678476,
+      "total_tokens": 31528
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_ja_00",
+      "standalone_score": 52347.902958,
+      "total_tokens": 27622
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_ko_00",
+      "standalone_score": 50622.954884,
+      "total_tokens": 31339
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_ru_00",
+      "standalone_score": 57174.881462,
+      "total_tokens": 32033
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_zh_00",
+      "standalone_score": 49433.121931,
+      "total_tokens": 29673
+    },
+    {
+      "fallback_count": 0,
+      "fallback_modules": [],
+      "name": "wiki_zh_01",
+      "standalone_score": 51861.784548,
+      "total_tokens": 27484
+    }
+  ],
+  "reference": {
+    "modules": 288,
+    "name": "reference",
+    "total_tokens": 47729
+  },
+  "selected_mix": {
+    "cumulative_gain": 1558303.819771,
+    "datasets": [
+      "wiki_zh_01",
+      "tulu_00"
+    ],
+    "fallback_count": 0,
+    "fallback_modules": [],
+    "score": 37088.165825,
+    "score_start": 1595391.985596,
+    "target_gain": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "total_tokens": 59075
+  },
+  "timings": {
+    "complementarity": 69.402963,
+    "fallback": 1.833205,
+    "greedy": 56.776509,
+    "load": 65.455913,
+    "scan": 6563.005805,
+    "standalone_scores": 26.1252,
+    "total": 6788.295201
+  },
+  "warnings": [
+    "Target token floor 131072 not reached (reached 59075); remaining datasets are redundant (negative conditional gain) and are never added just to fill the floor."
+  ]
+}

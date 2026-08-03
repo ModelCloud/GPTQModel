@@ -117,6 +117,36 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
+class _QuantizedCheckpointSource:
+    """Minimal shard-map source over an on-disk quantized checkpoint.
+
+    Provides the `_weight_map`/`model_local_path` interface the embedding
+    replacement save path expects when no LazyTurtle model is available
+    (e.g. models loaded via `from_quantized`).
+    """
+
+    def __init__(self, model_local_path: str):
+        self.model_local_path = model_local_path
+        index_path = os.path.join(model_local_path, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                index = json.load(f)
+            weight_map = index.get("weight_map", {})
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError(f"Checkpoint index at `{index_path}` has an empty or invalid `weight_map`.")
+            self._weight_map = {str(k): str(v) for k, v in weight_map.items()}
+        else:
+            single_shard = os.path.join(model_local_path, "model.safetensors")
+            if not os.path.exists(single_shard):
+                raise FileNotFoundError(
+                    f"No `model.safetensors.index.json` or `model.safetensors` found under `{model_local_path}`."
+                )
+            from safetensors import safe_open
+
+            with safe_open(single_shard, framework="pt", device="cpu") as handler:
+                self._weight_map = {name: "model.safetensors" for name in handler.keys()}
+
+
 class _ClassPropertyDescriptor:
     def __init__(self, fget, fset=None):
         self.fget = fget
@@ -1227,7 +1257,7 @@ class BaseQModel(nn.Module):
         if embed_quant_config is None:
             raise ValueError("`requantize()` requires `embed_quant_config` or `embed_quant_mode`.")
 
-        return self.quantize(
+        result = self.quantize(
             calibration=calibration,
             calibration_concat_size=calibration_concat_size,
             calibration_sort=calibration_sort,
@@ -1241,6 +1271,33 @@ class BaseQModel(nn.Module):
             embed_quant_config=embed_quant_config,
             validation_calibration=validation_calibration,
         )
+
+        # Requantize only touches the embedding/lm_head modules. The live model tree
+        # of a loaded quantized checkpoint is an inference structure (kernel-repacked
+        # qweights, defused/fused MoE expert modules) that is not round-trip safe to
+        # serialize, so save() must stream the source checkpoint shards and rewrite
+        # only the shards containing the requantized embedding modules.
+        prefixes: set = set(getattr(self, "_embedding_replacement_prefixes", set()))
+        mode = embed_quant_config.embed_quant_mode
+        if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+            name = self.get_input_embeddings_name()
+            if name:
+                prefixes.add(name)
+        if mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+            name = self.get_output_embeddings_name() or self.lm_head
+            if name:
+                prefixes.add(name)
+        self._embedding_replacement_prefixes = prefixes
+
+        if getattr(self, "load_quantized_model", False) and prefixes:
+            if self.turtle_model is None:
+                # Kept off `turtle_model` so shell materialization paths that expect a
+                # LazyTurtle never see this shard-map-only stub; the embedding-only
+                # save path resolves it as a fallback checkpoint source.
+                self._embedding_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
+            self._model_free_weight_only_embeddings_only = True
+
+        return result
 
 
     def _resolve_layer_scope_indices(

@@ -1125,15 +1125,18 @@ def ModelWriter(cls):
 
         if not embedding_replacement_prefixes:
             raise ValueError("Embedding-only save requires quantized embedding replacement prefixes.")
+        checkpoint_source = self.turtle_model
+        if checkpoint_source is None:
+            checkpoint_source = getattr(self, "_embedding_replacement_source", None)
         if (
-            self.turtle_model is None
-            or not hasattr(self.turtle_model, "_weight_map")
-            or not hasattr(self.turtle_model, "model_local_path")
+            checkpoint_source is None
+            or not hasattr(checkpoint_source, "_weight_map")
+            or not hasattr(checkpoint_source, "model_local_path")
         ):
             raise ValueError("Embedding-only save requires a LazyTurtle checkpoint source.")
 
         copied_files = _copy_missing_checkpoint_files(
-            self.turtle_model.model_local_path,
+            checkpoint_source.model_local_path,
             save_dir,
         )
         if copied_files:
@@ -1147,7 +1150,7 @@ def ModelWriter(cls):
         model_save_name = "model.safetensors"
         rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names = _save_embedding_replacement_safetensors(
             self.model,
-            self.turtle_model,
+            checkpoint_source,
             embedding_replacement_prefixes,
             save_dir=save_dir,
             metadata=metadata_dict,
