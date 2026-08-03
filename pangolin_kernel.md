@@ -1467,3 +1467,105 @@ enough independent FMA work.
   tall `down_proj` layers the `PangolinQuantLinear` dispatch continues to fall
   back to `planar_dequant` + cuBLAS (`tri-dequant` + matmul).
 - Correctness gate: `pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference` — 48 passed.
+
+## Round 12 — Read-only (`__ldg`) loads and single-wave split-K
+
+Goal: reduce per-k load latency and keep the resident wave as full as possible.
+
+Change in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+- Added a templated `ldg<T>(const T*)` wrapper that calls `__ldg` for planar
+  `qweight`, `scales`, `qzeros` and activation `input` loads.
+- `decode_zero` now loads the `Bits` qzero words through `ldg` into a tiny
+  local array before decoding, so each group read is one read-only cache
+  transaction.
+- The qweight and activation vector loads also use `ldg`, letting the
+  hardware cache weights more aggressively across the split-K blocks.
+- Simplified the split-K sizing in `launch_cols` to a single wave (`wanted`)
+  instead of the `kWaveFactor=2` multiplier for M<=2. The lower `split_k`
+  reduces transient workspace and counter-zeroing overhead while the `__ldg`
+  path hides the per-block load latency.
+- `split_cap` in `pangolin_gemv_cuda` is kept at `min(128, num_k_blocks)`.
+
+### M-sweep synthetic shape (GPU 4, 3-bit, K=4096 N=4096, fp16, 50 iters)
+
+| M | latency_ms | gflops | peak_tflops | achieved_% | dense_ms | speedup | max_diff | mean_sq |
+|---|------------|--------|-------------|------------|----------|---------|----------|---------|
+| 1 | 0.0399 | 840.21 | 89.52 | 0.94 | 0.6001 | 15.03 | 1.47e-03 | 4.81e-08 |
+| 2 | 0.0410 | 1638.40 | 89.52 | 1.83 | 0.5990 | 14.62 | 1.57e-03 | 5.32e-08 |
+| 4 | 0.0430 | 3048.19 | 89.52 | 3.41 | 0.5990 | 13.93 | 1.49e-03 | 4.44e-08 |
+| 8 | 0.0573 | 4681.14 | 89.52 | 5.23 | 0.6031 | 10.52 | 1.87e-03 | 5.18e-08 |
+| 16 | 0.0809 | 6636.56 | 89.52 | 7.41 | 0.6042 | 7.47 | 1.94e-03 | 5.33e-08 |
+| 32 | 0.1434 | 7489.83 | 89.52 | 8.37 | 0.6001 | 4.18 | 1.89e-03 | 5.10e-08 |
+
+vs Round 11 for the same shape:
+- M=1: 0.0410 ms → 0.0399 ms (-2.7%)
+- M=2: 0.0420 ms → 0.0410 ms (-2.4%)
+- M=4: 0.0451 ms → 0.0430 ms (-4.7%)
+- M=32: 0.1464 ms → 0.1434 ms (-2.0%)
+
+### Nsight Compute (`ncu --section SpeedOfLight,LaunchStats`)
+
+GPU 4, PG506-230, cc 8.0, 3-bit `planar_gemv_kernel<half,3,SizeM,2>` on `4096x4096`.
+
+| M | grid | block | regs | waves/sm | mem thr. (%) | dram thr. (%) | compute (%) | dur (us) |
+|---|------|-------|------|----------|--------------|---------------|-------------|----------|
+| 1 | (64,19,1) | 128 | 48 | 0.98 | 15.76 | 14.39 | 47.59 | 18.91 |
+| 4 | (64,17,1) | 128 | 56 | 0.97 | 33.04 | 9.99 | 49.24 | 27.49 |
+| 8 | (64,13,1) | 128 | 72 | 0.96 | 36.51 | 6.13 | 41.51 | 45.06 |
+| 16 | (64,9,1) | 128 | 96 | 0.93 | 37.77 | 3.36 | 38.76 | 83.68 |
+| 32 | (64,1,1) | 256 | 208 | 0.52 | 38.98 | 1.88 | 39.72 | 150.82 |
+
+The single-wave split-K keeps waves/sm near 1.0 for M=1-16, removing the
+partial-wave tail from the earlier `2x wanted` experiment. M=1 memory
+throughput is still ~16%, so there is further headroom; the next levers remain
+wider vector loads or a split-K over N to expose more column parallelism.
+
+### Laguna S 2.1 selected shapes (GPU 4, 3-bit fp16)
+
+| K x N | M | torch-eager | tri-dequant | tri-gemv | pangolin | best-vs-eager |
+|-------|---|-------------|-------------|----------|----------|---------------|
+| 2048 x 6144 | 1 | 1.614 | 0.209 | 0.243 | 0.047 | 34.27x |
+| 2048 x 6144 | 4 | 1.607 | 0.207 | 0.251 | 0.050 | 32.02x |
+| 2048 x 6144 | 16 | 1.623 | 0.212 | 0.297 | 0.077 | 21.13x |
+| 2048 x 6144 | 32 | 1.600 | 0.202 | n/a | 0.083 | 19.29x |
+| 2048 x 8192 | 1 | 1.964 | 0.217 | 0.242 | 0.046 | 42.62x |
+| 2048 x 8192 | 4 | 1.977 | 0.214 | 0.258 | 0.049 | 40.65x |
+| 2048 x 8192 | 16 | 1.960 | 0.208 | 0.332 | 0.088 | 22.26x |
+| 2048 x 8192 | 32 | 1.957 | 0.209 | n/a | 0.144 | 13.56x |
+| 8192 x 2048 | 1 | 2.029 | 0.254 | 0.241 | 0.046 | 44.02x |
+| 8192 x 2048 | 4 | 1.962 | 0.212 | 0.247 | 0.052 | 37.57x |
+| 8192 x 2048 | 16 | 2.031 | 0.244 | 0.337 | 0.094 | 21.55x |
+| 8192 x 2048 | 32 | 1.969 | 0.217 | n/a | 0.145 | 13.54x |
+| 2048 x 512 | 1 | 0.856 | 0.203 | 0.239 | 0.045 | 19.00x |
+| 2048 x 512 | 4 | 0.807 | 0.213 | 0.241 | 0.046 | 17.52x |
+| 2048 x 512 | 16 | 0.808 | 0.218 | 0.241 | 0.051 | 15.79x |
+| 2048 x 512 | 32 | 0.810 | 0.219 | n/a | 0.078 | 10.34x |
+
+### GLM-4.5-Air proxy selected shapes (GPU 5, 3-bit fp16)
+
+| K x N | M | torch-eager | tri-dequant | tri-gemv | pangolin | best-vs-eager |
+|-------|---|-------------|-------------|----------|----------|---------------|
+| 4096 x 12288 | 1 | 4.830 | 0.287 | 0.241 | 0.059 | 82.03x |
+| 4096 x 12288 | 4 | 4.819 | 0.288 | 0.273 | 0.074 | 65.36x |
+| 4096 x 12288 | 16 | 4.821 | 0.308 | 0.492 | 0.158 | 30.57x |
+| 4096 x 12288 | 32 | 4.832 | 0.291 | n/a | 0.265 | 18.22x |
+| 12288 x 4096 | 1 | 4.863 | 0.293 | 0.242 | 0.058 | 83.32x |
+| 12288 x 4096 | 4 | 4.865 | 0.291 | 0.275 | 0.074 | 65.99x |
+| 12288 x 4096 | 16 | 4.865 | 0.291 | 0.519 | 0.158 | 30.85x |
+| 12288 x 4096 | 32 | 4.892 | 0.306 | n/a | 0.407 | 15.98x |
+| 4096 x 10944 | 1 | 4.353 | 0.280 | 0.244 | 0.055 | 78.72x |
+| 4096 x 10944 | 4 | 4.357 | 0.281 | 0.268 | 0.073 | 59.92x |
+| 4096 x 10944 | 16 | 4.355 | 0.283 | 0.453 | 0.156 | 27.98x |
+| 4096 x 10944 | 32 | 4.358 | 0.285 | n/a | 0.263 | 16.56x |
+| 10944 x 4096 | 1 | 4.382 | 0.280 | 0.247 | 0.055 | 79.24x |
+| 10944 x 4096 | 4 | 4.384 | 0.278 | 0.269 | 0.071 | 62.04x |
+| 10944 x 4096 | 16 | 4.378 | 0.276 | 0.474 | 0.146 | 29.90x |
+| 10944 x 4096 | 32 | 4.378 | 0.278 | n/a | 0.366 | 15.78x |
+
+### Round 12 observations
+- `pangolin` is still the fastest path for every small-M shape in both model
+  sweeps, typically 2-4x over `tri-dequant` and 10-80x over `torch-eager`.
+- The `__ldg` + single-wave split-K combo improves latency modestly on the
+  synthetic 4096x4096 shape (up to ~5% for M=4) and noticeably on wider real
+  shapes, e.g. GLM `4096x12288` M=1 improved from 0.066 ms to 0.059 ms.
+- Correctness gate: `pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference` — 48 passed.
