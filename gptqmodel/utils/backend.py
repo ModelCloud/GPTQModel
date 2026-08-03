@@ -28,6 +28,7 @@ class BACKEND(str, Enum):
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     GPTQ_HUMMING = "gptq_humming"  # InclusionAI Humming JIT kernel for GPTQ
+    GPTQ_PANGOLIN = "gptq_pangolin"  # native CUDA planar GEMV kernel
 
     # MXFP4 CPU kernel
     MXFP4_CPU = "mxfp4_cpu"
@@ -96,6 +97,7 @@ class BACKEND(str, Enum):
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"
     HUMMING = "humming"
+    PANGOLIN = "pangolin"
     PARO = "paroquant"
 
 
@@ -120,6 +122,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.CANNOE: BACKEND.GPTQ_CANNOE,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
         BACKEND.HUMMING: BACKEND.GPTQ_HUMMING,
+        BACKEND.PANGOLIN: BACKEND.GPTQ_PANGOLIN,
     },
     "awq": {
         BACKEND.GEMM: BACKEND.AWQ_GEMM,

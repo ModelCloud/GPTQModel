@@ -1011,7 +1011,7 @@ class ModelTest(unittest.TestCase):
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.PAROQUANT:
             compare_backends = (self.LOAD_BACKEND,)
-        elif format_family == FORMAT.GPTQ:
+        elif format_family in (FORMAT.GPTQ, FORMAT.GPTQ_P):
             if self.LOAD_BACKEND == BACKEND.MARLIN:
                 compare_backends = (BACKEND.MARLIN,)
             else:

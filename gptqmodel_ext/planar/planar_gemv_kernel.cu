@@ -23,6 +23,8 @@
 #include <torch/types.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 
@@ -292,9 +294,24 @@ void launch_cols(
   // exactly the resident-block wave (a partial second wave runs alone and
   // stretches the whole launch).
   const int column_blocks = size_n / (kWarpSize * ColsPerLane);
+  // Occupancy is fixed per (instantiation, device); cache it so the decode
+  // path does not pay a driver query on every launch.
+  constexpr int kMaxDevices = 64;
+  static std::array<std::atomic<int>, kMaxDevices> occupancy_cache{};
+  int device = 0;
+  cudaGetDevice(&device);
   int blocks_per_sm = 0;
-  cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-      &blocks_per_sm, planar_gemv_kernel<Scalar, Bits, SizeM, ColsPerLane>, kThreads, 0);
+  if (device >= 0 && device < kMaxDevices) {
+    blocks_per_sm = occupancy_cache[static_cast<size_t>(device)].load(std::memory_order_relaxed);
+  }
+  if (blocks_per_sm == 0) {
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &blocks_per_sm, planar_gemv_kernel<Scalar, Bits, SizeM, ColsPerLane>, kThreads, 0);
+    blocks_per_sm = std::max(1, blocks_per_sm);
+    if (device >= 0 && device < kMaxDevices) {
+      occupancy_cache[static_cast<size_t>(device)].store(blocks_per_sm, std::memory_order_relaxed);
+    }
+  }
   const int wave_slots = std::max(1, blocks_per_sm) * sm_count;
   const int wanted = std::max(1, wave_slots / column_blocks);
   const int split_k = std::min(split_cap, wanted);

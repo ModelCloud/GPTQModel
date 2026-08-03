@@ -1181,6 +1181,20 @@ class PackableQuantLinear(GPTQQuantLinear):
                 self.planar = False
                 self._continuous_relayout = False
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        # The copy replaces buffer contents in place, so caches keyed to the
+        # previous contents (dequant weight cache, g_idx block-uniformity
+        # verdict) must not survive the reload.
+        clear_cache = getattr(self, "clear_weight_cache", None)
+        if callable(clear_cache):
+            clear_cache()
+        g_idx = getattr(self, "g_idx", None)
+        if g_idx is not None:
+            try:
+                from ..triton_utils.planar import _G_IDX_BLOCK_UNIFORM_CACHE
+            except ImportError:  # triton not installed; no uniformity cache exists
+                pass
+            else:
+                _G_IDX_BLOCK_UNIFORM_CACHE.pop(g_idx, None)
 
     def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
         if num_itr == 1:
