@@ -167,7 +167,7 @@ def main():
     import torch
 
     from gptqmodel.nn_modules.triton_utils.planar import planar_dequant, planar_gemv, planar_matmul
-    from gptqmodel.utils.pangolin import PANGOLIN_MAX_M, ensure_pangolin_runtime_available, pangolin_gemv
+    from gptqmodel.utils.pangolin import PANGOLIN_SUPPORTED_M, ensure_pangolin_runtime_available, pangolin_gemv
 
     pangolin_ok = ensure_pangolin_runtime_available()
     if not pangolin_ok:
@@ -262,7 +262,7 @@ def main():
                     gemv_ms = None
                     gemv_str = "       n/a"
 
-                if pangolin_ok and m <= PANGOLIN_MAX_M:
+                if pangolin_ok and m in PANGOLIN_SUPPORTED_M:
                     pangolin_ms, _ = bench_gpu(native_gemv, iters=args.iters)
                     pangolin_str = f"{pangolin_ms:10.3f}"
                 else:

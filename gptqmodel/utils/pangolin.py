@@ -34,7 +34,8 @@ _PANGOLIN_NAMESPACE = "gptqmodel_pangolin"
 _PANGOLIN_REQUIRED_CUDA_HEADERS = ("cuda_runtime_api.h",)
 
 PANGOLIN_BITS = (3, 5, 6, 7)
-PANGOLIN_MAX_M = 8
+PANGOLIN_MAX_M = 32
+PANGOLIN_SUPPORTED_M = (1, 2, 3, 4, 5, 6, 7, 8, 16, 32)
 
 
 def _pangolin_root() -> Path:

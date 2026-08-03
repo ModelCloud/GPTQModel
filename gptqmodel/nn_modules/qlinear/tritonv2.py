@@ -393,7 +393,7 @@ class TritonV2Linear(TorchLinear):
     def _forward_pangolin(self, x_flat):
         """Native CUDA register-decode GEMV for decode-shape planar inputs.
 
-        Requirements: 1 <= M <= PANGOLIN_MAX_M, fp16/bf16 input with matching
+        Requirements: M in PANGOLIN_SUPPORTED_M, fp16/bf16 input with matching
         scales dtype, contiguous packed buffers, block-uniform g_idx, and the
         tensors resident on a compute capability >= 8.0 CUDA device with the
         JIT extension built. Returns None (Triton fallback) when any
@@ -402,6 +402,7 @@ class TritonV2Linear(TorchLinear):
         from ..triton_utils.planar import _g_idx_block_uniform
         from ...utils.pangolin import (
             PANGOLIN_MAX_M,
+            PANGOLIN_SUPPORTED_M,
             ensure_pangolin_runtime_available,
             pangolin_gemv,
         )
@@ -409,6 +410,13 @@ class TritonV2Linear(TorchLinear):
         if _PANGOLIN_DISABLED:
             return None
         if x_flat.shape[0] < 1 or x_flat.shape[0] > PANGOLIN_MAX_M:
+            return None
+        if x_flat.shape[0] not in PANGOLIN_SUPPORTED_M:
+            return None
+        # M=32 is register/occupancy-limited; on tall layers (out_features < in_features)
+        # the planar_dequant + cuBLAS fallback is faster. Route M=32 to native only when
+        # there are enough output columns to occupy the device.
+        if x_flat.shape[0] == 32 and self.out_features < self.in_features:
             return None
         if not x_flat.is_cuda:
             return None

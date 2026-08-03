@@ -245,7 +245,7 @@ def _pangolin_available() -> bool:
 
 @pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("batch", [1, 2, 4])
+@pytest.mark.parametrize("batch", [1, 2, 4, 8, 16, 32])
 def test_pangolin_gemv_matches_reference(bits: int, dtype: torch.dtype, batch: int):
     if not _pangolin_available():
         pytest.skip("pangolin native CUDA extension unavailable")

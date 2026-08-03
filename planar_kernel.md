@@ -1062,3 +1062,161 @@ Review fixes landed alongside (from merged PR #160 findings):
   `torch.empty` tail (`test_planar_dequant_rejects_unaligned_rows`).
 - eager `num_itr` derives from logical `in_features`, not padded
   `g_idx.shape[0]` (`test_forward_eager_num_itr_stays_one_for_tiny_k`).
+
+## Round 8 — M=16/32 native decode, dynamic shared memory, and dispatch guard
+
+Goal: extend the native CUDA `planar_gemv` kernel to the decode batch sizes
+M=16 and M=32, keep correctness against the dense reference, and make bandwidth
+utilization scale with the larger batch.
+
+Changes (`gptqmodel_ext/planar/planar_gemv_kernel.cu`):
+- Bumped `kMaxM` from `8` to `32` and added `SizeM = 16` and `SizeM = 32`
+  template instantiations.
+- Converted the per-warp partials from a static
+  `__shared__ float partials[kWarpsPerBlock][SizeM][kBlockCols]` to
+  `extern __shared__ float partials[]` sized at launch as
+  `kWarpsPerBlock * SizeM * kBlockCols * sizeof(float)`. This is required
+  because `SizeM=32` exceeds the default 48 KiB static shared-memory limit.
+- `cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, ...)`
+  is called before `cudaOccupancyMaxActiveBlocksPerMultiprocessor` for each
+  instantiation.
+- Sized the split-K counter array for the minimum `kBlockN=32` column
+  granularity so the `ColsPerLane=1/2` fallback paths have enough counters.
+
+Dispatch guard:
+- `gptqmodel/utils/pangolin.py`: added
+  `PANGOLIN_SUPPORTED_M = (1,2,3,4,5,6,7,8,16,32)`.
+- `gptqmodel/nn_modules/qlinear/tritonv2.py`: `_forward_pangolin` now returns
+  `None` for unsupported M and lets `TritonV2Linear` fall back to the Triton
+  continuous path.
+- `scripts/benchmark_planar_kernels.py`: uses `PANGOLIN_SUPPORTED_M` instead
+  of the old `M <= 16` hard gate.
+
+Benchmark script added:
+- `scripts/benchmark_pangolin_m.py`: M-sweep vs dense reference with preflight
+  idle check, CUDA-event timing, and dense dequant comparison.
+- `scripts/parse_ncu.py`: tiny CSV extractor for `ncu --csv` report files.
+
+Performance results (A100-class PG506-230, cc 8.0, 124 SMs, torch 2.13.0+cu130,
+fp16, 3-bit 4096x4096, group_size=128):
+
+| M | latency (ms) | max abs diff | mean sq diff |
+|---|--------------|--------------|--------------|
+| 1 | 0.0440 | 1.47e-03 | 4.81e-08 |
+| 2 | 0.0466 | 1.57e-03 | 5.32e-08 |
+| 4 | 0.0502 | 1.49e-03 | 4.44e-08 |
+| 8 | 0.0625 | 1.87e-03 | 5.18e-08 |
+| 16 | 0.0870 | 1.94e-03 | 5.33e-08 |
+| 32 | 0.1521 | 1.89e-03 | 5.10e-08 |
+
+Nsight Compute metrics (`planar_gemv_kernel<half,3,SizeM,2>`):
+
+| M | grid | block | Duration (us) | Memory Throughput | DRAM Throughput | L2 Hit Rate | Compute (SM) Throughput | Achieved Active Warps/SM |
+|---|------|-------|---------------|-------------------|-----------------|-------------|--------------------------|--------------------------|
+| 1 | (64,9,1) | 256 | 17.95 | 15.36% | 15.18% | 20.59% | 49.18% | 28.28 |
+| 2 | (64,9,1) | 256 | 20.96 | 22.85% | 13.02% | 26.20% | 49.81% | 27.57 |
+| 4 | (64,7,1) | 256 | 31.68 | 26.93% | 8.66% | 32.39% | 40.96% | 20.57 |
+| 8 | (64,7,1) | 256 | 48.06 | 33.90% | 5.75% | 45.23% | 38.85% | 17.83 |
+| 16 | (64,3,1) | 256 | 83.52 | 36.33% | 3.36% | 57.05% | 38.02% | 9.04 |
+| 32 | (64,1,1) | 256 | 150.85 | 38.76% | 1.88% | 63.97% | 39.52% | 7.76 |
+
+Interpretation:
+- The kernel is compute/decode-bound at small M; total memory throughput is
+  low (~15% at M=1) because most cycles are spent on bit-plane decode and
+  per-code FMAs.
+- As M grows, each loaded weight word is reused across more rows. DRAM traffic
+  falls from ~15% of peak at M=1 to ~2% at M=32, while L2 hit rate climbs to
+  ~64%. Total memory throughput rises to ~39% because the same weight bytes are
+  now served from L2 for most of the 32 rows.
+- Compute (SM) throughput stays near 40-50% across the sweep; the kernel is not
+  purely memory-bound, but the bandwidth trend is exactly the intended decode
+  scaling: less redundant DRAM traffic and higher effective memory utilization
+  with larger batch.
+
+Validation:
+- `ruff check` clean on changed Python files.
+- `pytest -q tests/kernels/test_selection.py tests/kernels/test_qlinear_hierarchy.py
+  tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference
+  tests/test_planar_triton_kernels.py::test_pangolin_gemv_sym_metadata` passed.
+
+### Delta vs pre-commit (performance numbers)
+
+`scripts/benchmark_planar_kernels.py` on `main` (pre Round 8) vs the PR
+branch, 3-bit `4096 x 4096`, fp16, 50 CUDA-event iterations, median ms:
+
+| M | pre-commit (`main`) | post-commit (PR) | delta | note |
+|---|---------------------|------------------|-------|------|
+| 1 | 0.045 | 0.047 | +4.4% | native path already existed; within run-to-run noise |
+| 2 | 0.044 | 0.046 | +4.5% | same |
+| 4 | 0.049 | 0.050 | +2.0% | same |
+| 8 | 0.062 | 0.063 | +1.6% | same |
+| 16 | 0.331 (tri-gemv) / 0.217 (tri-dequant) | 0.086 | -74% / -60% | **new native M=16; 3.8x vs tri-gemv, 2.5x vs tri-dequant** |
+| 32 | 0.209 (tri-dequant) | 0.154 | -26% | **new native M=32; 1.36x vs tri-dequant** |
+
+The M=1-8 native path is effectively unchanged (the dynamic-shared-memory and
+validation-only edits add <5% in this end-to-end harness and are within
+measurement noise). The M=16/32 rows are the real delta: before the PR they
+were not supported by the native kernel and routed through Triton `planar_gemv`
+or `planar_dequant`+cuBLAS.
+
+Direct kernel micro-benchmark (`scripts/benchmark_pangolin_m.py`, `4096x4096`,
+3-bit, fp16), after moving `cudaFuncSetAttribute` behind the occupancy cache:
+
+| M | latency (ms) | max abs diff | mean sq diff |
+|---|--------------|--------------|--------------|
+| 1 | 0.0410 | 1.47e-03 | 4.81e-08 |
+| 2 | 0.0420 | 1.57e-03 | 5.32e-08 |
+| 4 | 0.0471 | 1.49e-03 | 4.44e-08 |
+| 8 | 0.0594 | 1.87e-03 | 5.18e-08 |
+| 16 | 0.0860 | 1.94e-03 | 5.33e-08 |
+| 32 | 0.1505 | 1.89e-03 | 5.10e-08 |
+
+Broader M=16/32 speedup vs the pre-commit fallback across shapes
+(`scripts/benchmark_planar_kernels.py --skip-fused`, 50 iters, median ms,
+`pangolin` column vs the faster of `tri-gemv`/`tri-dequant`):
+
+| bits | K x N | M | fallback (ms) | pangolin (ms) | speedup |
+|------|-------|---|---------------|---------------|---------|
+| 3 | 4096 x 4096 | 16 | 0.213 (tri-dequant) | 0.086 | 2.47x |
+| 3 | 4096 x 4096 | 32 | 0.206 (tri-dequant) | 0.154 | 1.34x |
+| 3 | 4096 x 11008 | 16 | 0.271 (tri-dequant) | 0.156 | 1.74x |
+| 3 | 4096 x 11008 | 32 | 0.276 (tri-dequant) | 0.270 | 1.02x |
+| 3 | 11008 x 4096 | 16 | 0.274 (tri-dequant) | 0.157 | 1.74x |
+| 3 | 11008 x 4096 | 32 | 0.272 (tri-dequant) | 0.371 | 0.73x |
+
+M=16 is a clear win across all measured shapes. M=32 wins for square / wide-N
+layers but is slower than `planar_dequant`+cuBLAS for the tall 11008x4096 case,
+where the dequant cost is amortized over 32 rows and the native kernel is
+register/occupancy-limited (only one 256-thread block per SM with 219 regs).
+
+To avoid the regression in production dispatch, `_forward_pangolin` now routes
+`M=32` to the native kernel only on wide / square layers (`out_features >= in_features`);
+tall down-projection shapes fall back to the Triton `planar_dequant` + `torch.matmul`
+path. `PANGOLIN_SUPPORTED_M` still contains 32 so unit tests and explicit
+`pangolin_gemv` calls can exercise it, while `TritonV2Linear` will not use it on
+layers where it loses.
+
+Updated `scripts/benchmark_pangolin_m.py` now prints an environment banner and
+per-M throughput and speedup against the dense dequant + matmul baseline
+(3-bit `4096 x 4096`, fp16, after the `cudaFuncSetAttribute` cache fix):
+
+| M | latency (ms) | gflops | dense_ms | speedup | max abs diff | mean sq diff |
+|---|--------------|--------|----------|---------|--------------|--------------|
+| 1 | 0.0410 | 819.20 | 0.6006 | 14.66x | 1.47e-03 | 4.81e-08 |
+| 2 | 0.0420 | 1598.44 | 0.5990 | 14.27x | 1.57e-03 | 5.32e-08 |
+| 4 | 0.0471 | 2849.39 | 0.5996 | 12.73x | 1.49e-03 | 4.44e-08 |
+| 8 | 0.0594 | 4519.72 | 0.6042 | 10.17x | 1.87e-03 | 5.18e-08 |
+| 16 | 0.0860 | 6241.52 | 0.6042 | 7.02x | 1.94e-03 | 5.33e-08 |
+| 32 | 0.1516 | 7084.97 | 0.6001 | 3.96x | 1.89e-03 | 5.10e-08 |
+
+### Split-K workspace sizing
+
+Review flagged that the split-K fp32 workspace was allocated for the *cap*
+(`split_cap` up to 64) rather than the actual `split_k` chosen by occupancy,
+which for M=32 could reserve up to ~34 MiB per call even when only one slice
+was needed. Added a `dry_run` pass through the same `launch_scalar` dispatch
+path that computes the real `split_k` first, then allocates exactly
+`split_k * M * N` floats. The dry run also warms the per-device occupancy
+cache and sets `cudaFuncSetAttribute`, so the subsequent real launch pays no
+extra driver query. `test_pangolin_gemv_matches_reference` (all 52 cases) and
+the M-sweep benchmark pass after the change.
