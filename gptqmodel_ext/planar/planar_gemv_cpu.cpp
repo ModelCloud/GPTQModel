@@ -266,6 +266,114 @@ __attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16"))) inline void stor
   _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), (__m256i)bh);
 }
 
+#if PLANAR_GEMV_CPU_X86
+
+// Pre-computed shift vectors for extracting w-bit fields from a 32-bit packed
+// word when decoding zero points.  Only the AVX-512 (16-lane) path is shown;
+// the scalar/AVX2 paths keep the existing decode_zero_code helper.
+alignas(64) static const int32_t k_zero_shift_w4_512[16] = {
+    0, 4, 8, 12, 16, 20, 24, 28, 0, 4, 8, 12, 16, 20, 24, 28};
+alignas(64) static const int32_t k_zero_shift_w2_512[16] = {
+    0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
+alignas(64) static const int32_t k_zero_shift_w1_0_512[16] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+alignas(64) static const int32_t k_zero_shift_w1_16_512[16] = {
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
+
+template <int Bits>
+__attribute__((target("avx512f,avx512bw,avx512vl")))
+inline __m512i decode_zero_code_vec_512(
+    const int32_t* qzeros,
+    int group,
+    int64_t col0,
+    int64_t N,
+    int num_groups,
+    int64_t qzeros_stride) {
+  if (group < 0) {
+    group += num_groups;
+  }
+  const int cb = static_cast<int>(col0 / 32);
+  const int pos0 = static_cast<int>(col0 % 32);
+  const int32_t* base = qzeros + static_cast<int64_t>(group) * qzeros_stride + static_cast<int64_t>(cb) * Bits;
+  constexpr auto planes = plane_info<Bits>();
+  __m512i code = _mm512_setzero_si512();
+  for (int p = 0; p < 3; ++p) {
+    const int w = planes[p].w;
+    if (w == 0) {
+      break;
+    }
+    const int pack_factor = 32 / w;
+    const int word_offset = pos0 / pack_factor;
+    const int32_t* word_ptr = base + planes[p].start + word_offset;
+    __m512i word_vec;
+    if (w == 4) {
+      // 16 columns span two packed words; broadcast each word to its 8 lanes and blend.
+      const __m512i word0 = _mm512_set1_epi32(word_ptr[0]);
+      const __m512i word1 = _mm512_set1_epi32(word_ptr[1]);
+      word_vec = _mm512_mask_mov_epi32(word0, static_cast<__mmask16>(0xFF00), word1);
+    } else {
+      word_vec = _mm512_set1_epi32(word_ptr[0]);
+    }
+    __m512i shift_vec;
+    if (w == 4) {
+      shift_vec = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(k_zero_shift_w4_512));
+    } else if (w == 2) {
+      shift_vec = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(k_zero_shift_w2_512));
+    } else {
+      shift_vec = (pos0 == 0)
+          ? _mm512_loadu_si512(reinterpret_cast<const __m512i*>(k_zero_shift_w1_0_512))
+          : _mm512_loadu_si512(reinterpret_cast<const __m512i*>(k_zero_shift_w1_16_512));
+    }
+    const __m512i mask = _mm512_set1_epi32((1 << w) - 1);
+    const __m512i part = _mm512_and_si512(_mm512_srlv_epi32(word_vec, shift_vec), mask);
+    const __m512i off_vec = _mm512_set1_epi32(planes[p].off);
+    code = _mm512_or_si512(code, _mm512_sllv_epi32(part, off_vec));
+  }
+  return code;
+}
+
+template <int Bits>
+__attribute__((target("avx512f,avx512bw,avx512vl"), noinline))
+static void write_zero_scale_block_avx512(
+    const int32_t* qzeros_ptr,
+    const float* scale_f,
+    float* zero_scale_f,
+    int group,
+    int64_t col0,
+    int64_t N,
+    int num_groups,
+    int64_t qzeros_stride) {
+  const __m512i zcode = decode_zero_code_vec_512<Bits>(
+      qzeros_ptr, group, col0, N, num_groups, qzeros_stride);
+  const __m512 zcode_f = _mm512_cvtepi32_ps(zcode);
+  const __m512 scale_vec = _mm512_loadu_ps(scale_f + static_cast<int64_t>(group) * N + col0);
+  const __m512 zscale = _mm512_mul_ps(zcode_f, scale_vec);
+  _mm512_storeu_ps(zero_scale_f + static_cast<int64_t>(group) * N + col0, zscale);
+}
+
+template <int Bits>
+static void compute_zero_scale_avx512(
+    const int32_t* qzeros_ptr,
+    const float* scale_f,
+    float* zero_scale_f,
+    int64_t N,
+    int num_groups,
+    int64_t qzeros_stride) {
+  const int64_t num_blocks = N / 16;
+  const int64_t grain = std::max<int64_t>(1, num_groups * num_blocks / at::get_num_threads());
+  at::parallel_for(0, num_groups * num_blocks, grain, [&](int64_t begin, int64_t end) {
+    for (int64_t idx = begin; idx < end; ++idx) {
+      const int group = static_cast<int>(idx / num_blocks);
+      const int block = static_cast<int>(idx % num_blocks);
+      const int64_t col0 = static_cast<int64_t>(block) * 16;
+      write_zero_scale_block_avx512<Bits>(
+          qzeros_ptr, scale_f, zero_scale_f, group, col0, N, num_groups, qzeros_stride);
+    }
+  });
+}
+
+#endif  // PLANAR_GEMV_CPU_X86
+
 #define DEFINE_GEMV_KERNEL(suffix, target_features, LOAD_I, LOAD_F, SET1_I, SET1_F, SRLI, SLLI, AND, OR, ADD_F, CVT, FMSUB, FMADD, STORE_BF16, INT_T, FLOAT_T, VLEN) \
   template <int Bits, int SizeM> \
   __attribute__((target(target_features))) \
@@ -379,7 +487,10 @@ __attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16"))) inline void stor
       int64_t K, \
       int64_t N, \
       int64_t num_groups) { \
-    /* No tail: N % 32 == 0 is checked by pangolin_gemv_cpu and VLEN divides 32. */ \
+    /* No tail: N % 32 == 0 is checked by pangolin_gemv_cpu and VLEN divides 32. \
+     * Spread column-chunks across available threads; for tiny N each thread \
+     * gets one chunk and for large N the chunk count amortizes the OpenMP \
+     * wake cost. */ \
     const int64_t col_chunks = N / VLEN; \
     const int64_t grain = std::max<int64_t>(1, col_chunks / at::get_num_threads()); \
     at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) { \
@@ -660,51 +771,72 @@ torch::Tensor pangolin_gemv_cpu(
   const int64_t qzeros_stride = (N / 32) * bits;
 
   // Pre-compute zero * scale for every (group, column) so the hot loop only
-  // loads two float vectors per k-block.
-  at::parallel_for(
-      0,
-      num_groups * N,
-      std::max<int64_t>(1, num_groups * N / at::get_num_threads()),
-      [&](int64_t begin, int64_t end) {
-        switch (bits) {
-          case 3:
-            for (int64_t idx = begin; idx < end; ++idx) {
-              const int64_t g = idx / N;
-              const int64_t n = idx % N;
-              const int z = decode_zero_code<3>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
-              const float s = scale_f[idx];
-              zero_scale_f[idx] = static_cast<float>(z) * s;
-            }
-            break;
-          case 5:
-            for (int64_t idx = begin; idx < end; ++idx) {
-              const int64_t g = idx / N;
-              const int64_t n = idx % N;
-              const int z = decode_zero_code<5>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
-              const float s = scale_f[idx];
-              zero_scale_f[idx] = static_cast<float>(z) * s;
-            }
-            break;
-          case 6:
-            for (int64_t idx = begin; idx < end; ++idx) {
-              const int64_t g = idx / N;
-              const int64_t n = idx % N;
-              const int z = decode_zero_code<6>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
-              const float s = scale_f[idx];
-              zero_scale_f[idx] = static_cast<float>(z) * s;
-            }
-            break;
-          case 7:
-            for (int64_t idx = begin; idx < end; ++idx) {
-              const int64_t g = idx / N;
-              const int64_t n = idx % N;
-              const int z = decode_zero_code<7>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
-              const float s = scale_f[idx];
-              zero_scale_f[idx] = static_cast<float>(z) * s;
-            }
-            break;
-        }
-      });
+  // loads two float vectors per k-block.  Use a vectorized AVX-512 path when
+  // available; otherwise fall back to the scalar decoder.
+#if PLANAR_GEMV_CPU_X86
+  if (cpu_supports_avx512_core()) {
+    switch (bits) {
+      case 3:
+        compute_zero_scale_avx512<3>(qzeros_ptr, scale_f, zero_scale_f, N, static_cast<int>(num_groups), qzeros_stride);
+        break;
+      case 5:
+        compute_zero_scale_avx512<5>(qzeros_ptr, scale_f, zero_scale_f, N, static_cast<int>(num_groups), qzeros_stride);
+        break;
+      case 6:
+        compute_zero_scale_avx512<6>(qzeros_ptr, scale_f, zero_scale_f, N, static_cast<int>(num_groups), qzeros_stride);
+        break;
+      case 7:
+        compute_zero_scale_avx512<7>(qzeros_ptr, scale_f, zero_scale_f, N, static_cast<int>(num_groups), qzeros_stride);
+        break;
+    }
+  } else
+#endif
+  {
+    at::parallel_for(
+        0,
+        num_groups * N,
+        std::max<int64_t>(1, num_groups * N / at::get_num_threads()),
+        [&](int64_t begin, int64_t end) {
+          switch (bits) {
+            case 3:
+              for (int64_t idx = begin; idx < end; ++idx) {
+                const int64_t g = idx / N;
+                const int64_t n = idx % N;
+                const int z = decode_zero_code<3>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
+                const float s = scale_f[idx];
+                zero_scale_f[idx] = static_cast<float>(z) * s;
+              }
+              break;
+            case 5:
+              for (int64_t idx = begin; idx < end; ++idx) {
+                const int64_t g = idx / N;
+                const int64_t n = idx % N;
+                const int z = decode_zero_code<5>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
+                const float s = scale_f[idx];
+                zero_scale_f[idx] = static_cast<float>(z) * s;
+              }
+              break;
+            case 6:
+              for (int64_t idx = begin; idx < end; ++idx) {
+                const int64_t g = idx / N;
+                const int64_t n = idx % N;
+                const int z = decode_zero_code<6>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
+                const float s = scale_f[idx];
+                zero_scale_f[idx] = static_cast<float>(z) * s;
+              }
+              break;
+            case 7:
+              for (int64_t idx = begin; idx < end; ++idx) {
+                const int64_t g = idx / N;
+                const int64_t n = idx % N;
+                const int z = decode_zero_code<7>(qzeros_ptr, static_cast<int>(g), static_cast<int>(n), static_cast<int>(num_groups), N, qzeros_stride);
+                const float s = scale_f[idx];
+                zero_scale_f[idx] = static_cast<float>(z) * s;
+              }
+              break;
+          }
+        });
+  }
 
   auto output = torch::empty({M, N}, at::TensorOptions().dtype(at::kBFloat16).device(input.device()));
   at::BFloat16* out_ptr = output.data_ptr<at::BFloat16>();
