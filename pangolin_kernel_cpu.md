@@ -3008,3 +3008,40 @@ decode.  Likely causes: each weight is now 2 bytes instead of 1 byte, the
 per-K-block activation quantization adds fixed overhead, and the dense VNNI
 inner loop is memory-bandwidth limited on this host.  The int16 VNNI code was
 reverted; the pre-expanded uint8 path remains the current best M=1 micro-kernel.
+
+## Optimization pass 22 (2026-08-04): reduce M=1 K-unroll to avoid ZMM spills
+
+The M=1 path kept 32 independent FP32 partial sums in flight (`K_UNROLL=32`).
+While this fully hides FMA latency, 32 ZMM accumulators plus the decoded qword
+registers and scale/zero vectors exceeds the AVX-512 ZMM budget on realistic
+shapes and causes stack spills.  Lowering `K_UNROLL` for `SizeM == 1` from 32
+to 16 trades a small amount of latency-hiding depth for much lower register
+pressure, which measurably improves large-N M=1 latency and removes the
+worst-case 0.5-1 ms outliers seen on `laguna` shapes such as `2048x6144` and
+`2048x8192`.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `ruff check gptqmodel/utils/pangolin.py --config format/ruff.toml` passed.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed with speedups 332x-390x.
+
+A/B (`K_UNROLL=32` baseline vs `K_UNROLL=16`) on `laguna` M=1 sweep
+(threads=8):
+
+| set | bits | kernel ratio | speedup ratio |
+|-----|------|-------------:|--------------:|
+| laguna | 3 | 3.324x | 1.336x |
+| laguna | 5 | 1.136x | 0.969x |
+| laguna | 6 | 0.851x | 0.825x |
+| laguna | 7 | 1.688x | 0.617x |
+| all | all | 1.526x | 0.901x |
+
+The `kernel ratio` (previous kernel ms / current kernel ms) is the reliable
+signal; `K_UNROLL=16` is 1.53x faster geomean and 3.3x faster for 3-bit,
+largely by removing the large-N M=1 latency outliers.  Bits 5/6 are within
+run-to-run noise, and the `speedup ratio` column is noisier because the dense
+`dequant+matmul` reference time varies between runs.  The M>1 K_UNROLL
+schedule is unchanged.

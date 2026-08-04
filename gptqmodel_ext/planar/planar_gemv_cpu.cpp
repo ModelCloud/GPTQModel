@@ -406,7 +406,10 @@ static void compute_zero_scale_avx512(
 template <int Bits, int SizeM>
 constexpr int k_unroll_for() {
   if constexpr (SizeM == 1) {
-    return 32;
+    // 32 independent partials fully hide FMA latency but can spill ZMMs; 16 is a
+    // middle ground that still covers the ~4-6 cycle FMA latency window while
+    // leaving registers for the decoded qwords and scale vectors.
+    return 16;
   } else if constexpr (SizeM <= 2) {
     return (Bits <= 6) ? 8 : 4;
   } else if constexpr (SizeM <= 4) {
@@ -463,7 +466,9 @@ constexpr int k_unroll_for() {
         prev_group = group; \
       } \
       /* qweight is pre-packed as [N/16, num_k_blocks, Bits, 16] so the Bits \
-       * 32-bit words for a fixed col_block are contiguous across all K-blocks. */ \
+       * 32-bit words for a fixed col_block are contiguous across all K-blocks. \
+       * Load all Bits qwords once per K-block and reuse them across the 32 K \
+       * values to avoid re-reading the same cache lines 32 times. */ \
       const int64_t num_k_blocks = K / 32; \
       const int64_t chunk = col0 / 16; \
       const int lane = static_cast<int>(col0 % 16); \
