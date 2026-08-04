@@ -245,7 +245,6 @@ def _swordfish_static_runtime_error() -> str:
         f"Swordfish kernel only supports Blackwell variants "
         f"({supported}); found compute capability {major}.{minor}."
     )
-    return ""
 
 
 def _validate_swordfish_device_support() -> bool:
