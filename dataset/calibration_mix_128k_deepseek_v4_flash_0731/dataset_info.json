@@ -1,0 +1,161 @@
+{
+  "column": "messages",
+  "cumulative_gain": 3331542.962455099,
+  "fallback_count": 0,
+  "final_score": 105001.02733925465,
+  "greedy_ranking": [
+    {
+      "conditional_gain": 3275307.056139,
+      "dataset": "wiki_zh_01.txt",
+      "score_after": 161236.933655,
+      "step": 1,
+      "total_tokens": 16512
+    },
+    {
+      "conditional_gain": 46785.880506,
+      "dataset": "tulu_01.txt",
+      "score_after": 114451.053149,
+      "step": 2,
+      "total_tokens": 40868
+    },
+    {
+      "conditional_gain": 2932.924444,
+      "dataset": "nm_llm_03.txt",
+      "score_after": 111518.128705,
+      "step": 3,
+      "total_tokens": 68244
+    },
+    {
+      "conditional_gain": 1308.267212,
+      "dataset": "wiki_ar_00.txt",
+      "score_after": 110209.861493,
+      "step": 4,
+      "total_tokens": 86453
+    },
+    {
+      "conditional_gain": 1331.910471,
+      "dataset": "wiki_ja_00.txt",
+      "score_after": 108877.951022,
+      "step": 5,
+      "total_tokens": 105710
+    },
+    {
+      "conditional_gain": 2104.008342,
+      "dataset": "nm_llm_01.txt",
+      "score_after": 106773.94268,
+      "step": 6,
+      "total_tokens": 133129
+    },
+    {
+      "conditional_gain": 723.325548,
+      "dataset": "wiki_ko_00.txt",
+      "score_after": 106050.617133,
+      "step": 7,
+      "total_tokens": 157773
+    },
+    {
+      "conditional_gain": 1049.589793,
+      "dataset": "tulu_00.txt",
+      "score_after": 105001.027339,
+      "step": 8,
+      "total_tokens": 181705
+    }
+  ],
+  "id": "calibration_mix_128k_deepseek_v4_flash_0731",
+  "model": "/monster/data/model/DeepSeek-V4-Flash-0731-BF16-Defused",
+  "name": "128K-token calibration mix for deepseek-ai/DeepSeek-V4-Flash-0731 (best-score floor)",
+  "notes": "Coverage scan used fused DeepSeek-V4 MLA/MoE module profiling on GPUs 6/7 with 6 layers per GPU. MoE expert-token floor (16) was not reached; complementarity was computed without expert routing coverage.",
+  "reference": {
+    "modules": 446,
+    "name": "ref:reference.txt",
+    "total_tokens": 36889
+  },
+  "score_start": 3436543.989794,
+  "selected_datasets": [
+    "wiki_zh_01.txt",
+    "tulu_01.txt",
+    "nm_llm_03.txt",
+    "wiki_ar_00.txt",
+    "wiki_ja_00.txt",
+    "nm_llm_01.txt",
+    "wiki_ko_00.txt",
+    "tulu_00.txt"
+  ],
+  "selection_mode": "gain_per_token",
+  "sources": [
+    {
+      "dataset": "ise-uiuc/Magicoder-OSS-Instruct-75K",
+      "shards": [
+        "code_00.txt",
+        "code_01.txt"
+      ]
+    },
+    {
+      "dataset": "HuggingFaceFW/fineweb-edu",
+      "shards": [
+        "fineweb_edu_00.txt",
+        "fineweb_edu_01.txt"
+      ]
+    },
+    {
+      "dataset": "lemon07r/bartowski-imatrix-v5-semantic",
+      "shards": [
+        "imatrix_00.txt",
+        "imatrix_01.txt"
+      ]
+    },
+    {
+      "dataset": "nvidia/OpenMathInstruct-2",
+      "shards": [
+        "math_00.txt",
+        "math_01.txt"
+      ]
+    },
+    {
+      "dataset": "neuralmagic/calibration",
+      "shards": [
+        "nm_llm_00.txt",
+        "nm_llm_01.txt",
+        "nm_llm_02.txt",
+        "nm_llm_03.txt"
+      ]
+    },
+    {
+      "dataset": "emozilla/pg19",
+      "shards": [
+        "pg19_00.txt",
+        "pg19_01.txt"
+      ]
+    },
+    {
+      "dataset": "allenai/tulu-3-sft-mixture",
+      "shards": [
+        "tulu_00.txt",
+        "tulu_01.txt"
+      ]
+    },
+    {
+      "dataset": "wikimedia/wikipedia",
+      "shards": [
+        "wiki_ar_00.txt",
+        "wiki_de_00.txt",
+        "wiki_ja_00.txt",
+        "wiki_ko_00.txt",
+        "wiki_ru_00.txt",
+        "wiki_zh_00.txt",
+        "wiki_zh_01.txt"
+      ]
+    }
+  ],
+  "target_tokens_floor": 131072,
+  "timings_seconds": {
+    "complementarity": 89.914228,
+    "fallback": 3.000949,
+    "greedy": 449.247851,
+    "scan": 28631.882526,
+    "standalone_scores": 43.144456,
+    "total": 29217.190009
+  },
+  "total_examples": 185,
+  "total_tokens": 181705
+}

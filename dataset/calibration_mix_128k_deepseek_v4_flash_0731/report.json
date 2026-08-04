@@ -1,0 +1,609 @@
+{
+  "config": {
+    "model": "/tmp/dsv4_bf16",
+    "datasets": [
+      "/tmp/dsv4_coverage_datasets/code_00.txt",
+      "/tmp/dsv4_coverage_datasets/code_01.txt",
+      "/tmp/dsv4_coverage_datasets/fineweb_edu_00.txt",
+      "/tmp/dsv4_coverage_datasets/fineweb_edu_01.txt",
+      "/tmp/dsv4_coverage_datasets/imatrix_00.txt",
+      "/tmp/dsv4_coverage_datasets/imatrix_01.txt",
+      "/tmp/dsv4_coverage_datasets/math_00.txt",
+      "/tmp/dsv4_coverage_datasets/math_01.txt",
+      "/tmp/dsv4_coverage_datasets/nm_llm_00.txt",
+      "/tmp/dsv4_coverage_datasets/nm_llm_01.txt",
+      "/tmp/dsv4_coverage_datasets/nm_llm_02.txt",
+      "/tmp/dsv4_coverage_datasets/nm_llm_03.txt",
+      "/tmp/dsv4_coverage_datasets/pg19_00.txt",
+      "/tmp/dsv4_coverage_datasets/pg19_01.txt",
+      "/tmp/dsv4_coverage_datasets/tulu_00.txt",
+      "/tmp/dsv4_coverage_datasets/tulu_01.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_ar_00.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_de_00.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_ja_00.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_ko_00.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_ru_00.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_zh_00.txt",
+      "/tmp/dsv4_coverage_datasets/wiki_zh_01.txt"
+    ],
+    "reference": "/tmp/dsv4_coverage_datasets/reference.txt",
+    "max_samples": 0,
+    "concat_size": 512,
+    "min_length": 10,
+    "sketch_samples": 64,
+    "min_conditional_gain": 0.0,
+    "fallback_threshold": "0.5%",
+    "torch_dtype": "bfloat16",
+    "device": [
+      "cuda:0",
+      "cuda:1"
+    ],
+    "apply_chat_template": false,
+    "target_gain": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token",
+    "greedy_threads": 0,
+    "target_moe_expert_tokens": 16,
+    "moe_expert_coverage": true,
+    "moe_routing_bypass": false,
+    "moe_router_coverage_weight": 1.0,
+    "moe_expert_min_tokens": 16,
+    "moe_expert_diag": false,
+    "fused": true,
+    "layers_per_gpu": 6
+  },
+  "reference": {
+    "name": "ref:reference.txt",
+    "total_tokens": 36889,
+    "modules": 446
+  },
+  "per_dataset": [
+    {
+      "name": "code_00.txt",
+      "standalone_score": 149239.21896,
+      "total_tokens": 29345,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "code_01.txt",
+      "standalone_score": 156479.349559,
+      "total_tokens": 28561,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "fineweb_edu_00.txt",
+      "standalone_score": 150348.625603,
+      "total_tokens": 29347,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "fineweb_edu_01.txt",
+      "standalone_score": 148256.969495,
+      "total_tokens": 28646,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "imatrix_00.txt",
+      "standalone_score": 140341.897161,
+      "total_tokens": 27900,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "imatrix_01.txt",
+      "standalone_score": 142751.366266,
+      "total_tokens": 27921,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "math_00.txt",
+      "standalone_score": 179624.737646,
+      "total_tokens": 27368,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "math_01.txt",
+      "standalone_score": 180380.024154,
+      "total_tokens": 27533,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "nm_llm_00.txt",
+      "standalone_score": 145921.676674,
+      "total_tokens": 27513,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "nm_llm_01.txt",
+      "standalone_score": 147355.298112,
+      "total_tokens": 27419,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "nm_llm_02.txt",
+      "standalone_score": 148403.235477,
+      "total_tokens": 27181,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "nm_llm_03.txt",
+      "standalone_score": 146782.082343,
+      "total_tokens": 27376,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "pg19_00.txt",
+      "standalone_score": 156479.914124,
+      "total_tokens": 27979,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "pg19_01.txt",
+      "standalone_score": 165488.533307,
+      "total_tokens": 27488,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "tulu_00.txt",
+      "standalone_score": 125337.533416,
+      "total_tokens": 23932,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "tulu_01.txt",
+      "standalone_score": 126272.544781,
+      "total_tokens": 24356,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_ar_00.txt",
+      "standalone_score": 189610.506712,
+      "total_tokens": 18209,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_de_00.txt",
+      "standalone_score": 169143.791934,
+      "total_tokens": 23393,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_ja_00.txt",
+      "standalone_score": 168181.715397,
+      "total_tokens": 19257,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_ko_00.txt",
+      "standalone_score": 170764.914478,
+      "total_tokens": 24644,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_ru_00.txt",
+      "standalone_score": 166167.355558,
+      "total_tokens": 20483,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_zh_00.txt",
+      "standalone_score": 165697.261403,
+      "total_tokens": 18642,
+      "fallback_modules": [],
+      "fallback_count": 0
+    },
+    {
+      "name": "wiki_zh_01.txt",
+      "standalone_score": 161236.933655,
+      "total_tokens": 16512,
+      "fallback_modules": [],
+      "fallback_count": 0
+    }
+  ],
+  "greedy_ranking": [
+    {
+      "step": 1,
+      "dataset": "wiki_zh_01.txt",
+      "conditional_gain": 3275307.056139,
+      "score_after": 161236.933655,
+      "total_tokens": 16512
+    },
+    {
+      "step": 2,
+      "dataset": "tulu_01.txt",
+      "conditional_gain": 46785.880506,
+      "score_after": 114451.053149,
+      "total_tokens": 40868
+    },
+    {
+      "step": 3,
+      "dataset": "nm_llm_03.txt",
+      "conditional_gain": 2932.924444,
+      "score_after": 111518.128705,
+      "total_tokens": 68244
+    },
+    {
+      "step": 4,
+      "dataset": "wiki_ar_00.txt",
+      "conditional_gain": 1308.267212,
+      "score_after": 110209.861493,
+      "total_tokens": 86453
+    },
+    {
+      "step": 5,
+      "dataset": "wiki_ja_00.txt",
+      "conditional_gain": 1331.910471,
+      "score_after": 108877.951022,
+      "total_tokens": 105710
+    },
+    {
+      "step": 6,
+      "dataset": "nm_llm_01.txt",
+      "conditional_gain": 2104.008342,
+      "score_after": 106773.94268,
+      "total_tokens": 133129
+    },
+    {
+      "step": 7,
+      "dataset": "wiki_ko_00.txt",
+      "conditional_gain": 723.325548,
+      "score_after": 106050.617133,
+      "total_tokens": 157773
+    },
+    {
+      "step": 8,
+      "dataset": "tulu_00.txt",
+      "conditional_gain": 1049.589793,
+      "score_after": 105001.027339,
+      "total_tokens": 181705
+    }
+  ],
+  "selected_mix": {
+    "datasets": [
+      "wiki_zh_01.txt",
+      "tulu_01.txt",
+      "nm_llm_03.txt",
+      "wiki_ar_00.txt",
+      "wiki_ja_00.txt",
+      "nm_llm_01.txt",
+      "wiki_ko_00.txt",
+      "tulu_00.txt"
+    ],
+    "score_start": 3436543.989794,
+    "score": 105001.027339,
+    "cumulative_gain": 3331542.962455,
+    "total_tokens": 181705,
+    "fallback_modules": [],
+    "fallback_count": 0,
+    "target_gain": null,
+    "target_tokens": 131072,
+    "target_tokens_mode": "gain_per_token"
+  },
+  "complementarity": [
+    {
+      "name": "wiki_zh_01.txt",
+      "conditional_gain": 3275307.056139,
+      "verdict": "selected"
+    },
+    {
+      "name": "tulu_01.txt",
+      "conditional_gain": 46785.880506,
+      "verdict": "selected"
+    },
+    {
+      "name": "nm_llm_03.txt",
+      "conditional_gain": 2932.924444,
+      "verdict": "selected"
+    },
+    {
+      "name": "wiki_ar_00.txt",
+      "conditional_gain": 1308.267212,
+      "verdict": "selected"
+    },
+    {
+      "name": "wiki_ja_00.txt",
+      "conditional_gain": 1331.910471,
+      "verdict": "selected"
+    },
+    {
+      "name": "nm_llm_01.txt",
+      "conditional_gain": 2104.008342,
+      "verdict": "selected"
+    },
+    {
+      "name": "wiki_ko_00.txt",
+      "conditional_gain": 723.325548,
+      "verdict": "selected"
+    },
+    {
+      "name": "tulu_00.txt",
+      "conditional_gain": 1049.589793,
+      "verdict": "selected"
+    },
+    {
+      "name": "wiki_zh_00.txt",
+      "conditional_gain": -1290.396118,
+      "verdict": "redundant"
+    },
+    {
+      "name": "imatrix_01.txt",
+      "conditional_gain": -1301.350645,
+      "verdict": "redundant"
+    },
+    {
+      "name": "wiki_de_00.txt",
+      "conditional_gain": -1318.192245,
+      "verdict": "redundant"
+    },
+    {
+      "name": "nm_llm_02.txt",
+      "conditional_gain": -1402.035633,
+      "verdict": "redundant"
+    },
+    {
+      "name": "nm_llm_00.txt",
+      "conditional_gain": -1581.493079,
+      "verdict": "redundant"
+    },
+    {
+      "name": "fineweb_edu_00.txt",
+      "conditional_gain": -1770.69806,
+      "verdict": "redundant"
+    },
+    {
+      "name": "imatrix_00.txt",
+      "conditional_gain": -1777.267422,
+      "verdict": "redundant"
+    },
+    {
+      "name": "pg19_00.txt",
+      "conditional_gain": -1837.276552,
+      "verdict": "redundant"
+    },
+    {
+      "name": "code_00.txt",
+      "conditional_gain": -1987.093154,
+      "verdict": "redundant"
+    },
+    {
+      "name": "fineweb_edu_01.txt",
+      "conditional_gain": -2174.82793,
+      "verdict": "redundant"
+    },
+    {
+      "name": "code_01.txt",
+      "conditional_gain": -2244.751189,
+      "verdict": "redundant"
+    },
+    {
+      "name": "math_00.txt",
+      "conditional_gain": -2652.840978,
+      "verdict": "redundant"
+    },
+    {
+      "name": "math_01.txt",
+      "conditional_gain": -2753.994505,
+      "verdict": "redundant"
+    },
+    {
+      "name": "wiki_ru_00.txt",
+      "conditional_gain": -2898.887616,
+      "verdict": "redundant"
+    },
+    {
+      "name": "pg19_01.txt",
+      "conditional_gain": -2963.597633,
+      "verdict": "redundant"
+    }
+  ],
+  "warnings": [
+    "MoE expert-token floor 16 not reached (min routed tokens per reference-active expert: 0); remaining datasets are redundant. Consider --moe-routing-bypass or a larger pool."
+  ],
+  "fallback": {
+    "threshold_setting": "0.5%",
+    "selected_mix": [],
+    "per_dataset": {
+      "code_00.txt": [],
+      "code_01.txt": [],
+      "fineweb_edu_00.txt": [],
+      "fineweb_edu_01.txt": [],
+      "imatrix_00.txt": [],
+      "imatrix_01.txt": [],
+      "math_00.txt": [],
+      "math_01.txt": [],
+      "nm_llm_00.txt": [],
+      "nm_llm_01.txt": [],
+      "nm_llm_02.txt": [],
+      "nm_llm_03.txt": [],
+      "pg19_00.txt": [],
+      "pg19_01.txt": [],
+      "tulu_00.txt": [],
+      "tulu_01.txt": [],
+      "wiki_ar_00.txt": [],
+      "wiki_de_00.txt": [],
+      "wiki_ja_00.txt": [],
+      "wiki_ko_00.txt": [],
+      "wiki_ru_00.txt": [],
+      "wiki_zh_00.txt": [],
+      "wiki_zh_01.txt": []
+    }
+  },
+  "timings": {
+    "scan": 28631.882526,
+    "standalone_scores": 43.144456,
+    "greedy": 449.247851,
+    "fallback": 3.000949,
+    "complementarity": 89.914228,
+    "total": 29217.190009
+  },
+  "markdown": "# Calibration coverage report\n\n## Reference\n- model: /tmp/dsv4_bf16\n- reference: ref:reference.txt (36889 tokens, 446 modules)\n- target tokens (floor): 131072 (selection mode: gain_per_token)\n\n## Warnings\n\n- MoE expert-token floor 16 not reached (min routed tokens per reference-active expert: 0); remaining datasets are redundant. Consider --moe-routing-bypass or a larger pool.\n\n## Per-dataset standalone scores\n\n| dataset | tokens | standalone score | fallback modules |\n|---------|--------|------------------|------------------|\n| code_00.txt | 29345 | 149239.218960 | 0 |\n| code_01.txt | 28561 | 156479.349559 | 0 |\n| fineweb_edu_00.txt | 29347 | 150348.625603 | 0 |\n| fineweb_edu_01.txt | 28646 | 148256.969495 | 0 |\n| imatrix_00.txt | 27900 | 140341.897161 | 0 |\n| imatrix_01.txt | 27921 | 142751.366266 | 0 |\n| math_00.txt | 27368 | 179624.737646 | 0 |\n| math_01.txt | 27533 | 180380.024154 | 0 |\n| nm_llm_00.txt | 27513 | 145921.676674 | 0 |\n| nm_llm_01.txt | 27419 | 147355.298112 | 0 |\n| nm_llm_02.txt | 27181 | 148403.235477 | 0 |\n| nm_llm_03.txt | 27376 | 146782.082343 | 0 |\n| pg19_00.txt | 27979 | 156479.914124 | 0 |\n| pg19_01.txt | 27488 | 165488.533307 | 0 |\n| tulu_00.txt | 23932 | 125337.533416 | 0 |\n| tulu_01.txt | 24356 | 126272.544781 | 0 |\n| wiki_ar_00.txt | 18209 | 189610.506712 | 0 |\n| wiki_de_00.txt | 23393 | 169143.791934 | 0 |\n| wiki_ja_00.txt | 19257 | 168181.715397 | 0 |\n| wiki_ko_00.txt | 24644 | 170764.914478 | 0 |\n| wiki_ru_00.txt | 20483 | 166167.355558 | 0 |\n| wiki_zh_00.txt | 18642 | 165697.261403 | 0 |\n| wiki_zh_01.txt | 16512 | 161236.933655 | 0 |\n\n## Greedy ranking (ranked by conditional gain)\n\n| step | dataset | conditional gain | score after | tokens |\n|------|---------|------------------|-------------|--------|\n| 1 | wiki_zh_01.txt | 3275307.056139 | 161236.933655 | 16512 |\n| 2 | tulu_01.txt | 46785.880506 | 114451.053149 | 40868 |\n| 3 | nm_llm_03.txt | 2932.924444 | 111518.128705 | 68244 |\n| 4 | wiki_ar_00.txt | 1308.267212 | 110209.861493 | 86453 |\n| 5 | wiki_ja_00.txt | 1331.910471 | 108877.951022 | 105710 |\n| 6 | nm_llm_01.txt | 2104.008342 | 106773.942680 | 133129 |\n| 7 | wiki_ko_00.txt | 723.325548 | 106050.617133 | 157773 |\n| 8 | tulu_00.txt | 1049.589793 | 105001.027339 | 181705 |\n\n## Selected mix: wiki_zh_01.txt -> tulu_01.txt -> nm_llm_03.txt -> wiki_ar_00.txt -> wiki_ja_00.txt -> nm_llm_01.txt -> wiki_ko_00.txt -> tulu_00.txt\n- score at start: 3436543.989794\n- final score: 105001.027339\n- cumulative gain: 3331542.962455\n- total tokens: 181705\n- fallback modules: 0\n\n## Complementarity vs selected mix\n\n| dataset | conditional gain | verdict |\n|---------|------------------|---------|\n| wiki_zh_01.txt | 3275307.056139 | selected |\n| tulu_01.txt | 46785.880506 | selected |\n| nm_llm_03.txt | 2932.924444 | selected |\n| wiki_ar_00.txt | 1308.267212 | selected |\n| wiki_ja_00.txt | 1331.910471 | selected |\n| nm_llm_01.txt | 2104.008342 | selected |\n| wiki_ko_00.txt | 723.325548 | selected |\n| tulu_00.txt | 1049.589793 | selected |\n| wiki_zh_00.txt | -1290.396118 | redundant |\n| imatrix_01.txt | -1301.350645 | redundant |\n| wiki_de_00.txt | -1318.192245 | redundant |\n| nm_llm_02.txt | -1402.035633 | redundant |\n| nm_llm_00.txt | -1581.493079 | redundant |\n| fineweb_edu_00.txt | -1770.698060 | redundant |\n| imatrix_00.txt | -1777.267422 | redundant |\n| pg19_00.txt | -1837.276552 | redundant |\n| code_00.txt | -1987.093154 | redundant |\n| fineweb_edu_01.txt | -2174.827930 | redundant |\n| code_01.txt | -2244.751189 | redundant |\n| math_00.txt | -2652.840978 | redundant |\n| math_01.txt | -2753.994505 | redundant |\n| wiki_ru_00.txt | -2898.887616 | redundant |\n| pg19_01.txt | -2963.597633 | redundant |\n\n## Timing\n\n| stage | seconds |\n|-------|---------|\n| scan | 28631.883 |\n| standalone_scores | 43.144 |\n| greedy | 449.248 |\n| fallback | 3.001 |\n| complementarity | 89.914 |\n| total | 29217.190 |\n\n## How to read this report\n\n*Score* is the importance-weighted tail under-coverage versus the held-out reference. For every target module and input channel we compute:\n\n- ``importance = diag / mean(diag)`` (with NaNs clamped to 0) from the reference Hessian diagonal.\n- ``gap = relu(ref_p99 - calib_p99) / ref_p99`` per channel.\n- ``score = sum(importance * gap)`` over all modules/channels.\n\nA lower score is better. A score of ``0`` means the calibration data covers every reference tail. A high score means important reference channels are not seen in the calibration set.\n\n*Standalone score* is ``score(dataset, ref)`` for each dataset alone.\n\n*Conditional gain* for a dataset is ``score(mix_before, ref) - score(mix_before + dataset, ref)``: how much adding that dataset to the current mix reduces the score. Positive values are complementary; zero or negative values are redundant. The greedy ranking always selects the next dataset by this gain. *Targets are floors, not ceilings*: once ``--target-gain`` or ``--target-tokens`` is reached, the search continues as long as the next conditional gain remains positive. The cumulative gain is ``score_start - score_final`` for the selected mix.",
+  "moe": {
+    "expert_modules": 43,
+    "num_experts": {
+      "model.layers.0.mlp.experts": 256,
+      "model.layers.1.mlp.experts": 256,
+      "model.layers.10.mlp.experts": 256,
+      "model.layers.11.mlp.experts": 256,
+      "model.layers.12.mlp.experts": 256,
+      "model.layers.13.mlp.experts": 256,
+      "model.layers.14.mlp.experts": 256,
+      "model.layers.15.mlp.experts": 256,
+      "model.layers.16.mlp.experts": 256,
+      "model.layers.17.mlp.experts": 256,
+      "model.layers.18.mlp.experts": 256,
+      "model.layers.19.mlp.experts": 256,
+      "model.layers.2.mlp.experts": 256,
+      "model.layers.20.mlp.experts": 256,
+      "model.layers.21.mlp.experts": 256,
+      "model.layers.22.mlp.experts": 256,
+      "model.layers.23.mlp.experts": 256,
+      "model.layers.24.mlp.experts": 256,
+      "model.layers.25.mlp.experts": 256,
+      "model.layers.26.mlp.experts": 256,
+      "model.layers.27.mlp.experts": 256,
+      "model.layers.28.mlp.experts": 256,
+      "model.layers.29.mlp.experts": 256,
+      "model.layers.3.mlp.experts": 256,
+      "model.layers.30.mlp.experts": 256,
+      "model.layers.31.mlp.experts": 256,
+      "model.layers.32.mlp.experts": 256,
+      "model.layers.33.mlp.experts": 256,
+      "model.layers.34.mlp.experts": 256,
+      "model.layers.35.mlp.experts": 256,
+      "model.layers.36.mlp.experts": 256,
+      "model.layers.37.mlp.experts": 256,
+      "model.layers.38.mlp.experts": 256,
+      "model.layers.39.mlp.experts": 256,
+      "model.layers.4.mlp.experts": 256,
+      "model.layers.40.mlp.experts": 256,
+      "model.layers.41.mlp.experts": 256,
+      "model.layers.42.mlp.experts": 256,
+      "model.layers.5.mlp.experts": 256,
+      "model.layers.6.mlp.experts": 256,
+      "model.layers.7.mlp.experts": 256,
+      "model.layers.8.mlp.experts": 256,
+      "model.layers.9.mlp.experts": 256
+    },
+    "routing_bypass": false,
+    "router_coverage_weight": 1.0,
+    "expert_min_tokens": 16,
+    "target_moe_expert_tokens": 16,
+    "reference_active_experts": {
+      "model.layers.0.mlp.experts": 256,
+      "model.layers.1.mlp.experts": 256,
+      "model.layers.2.mlp.experts": 256,
+      "model.layers.3.mlp.experts": 256,
+      "model.layers.4.mlp.experts": 256,
+      "model.layers.5.mlp.experts": 256,
+      "model.layers.6.mlp.experts": 256,
+      "model.layers.7.mlp.experts": 256,
+      "model.layers.8.mlp.experts": 256,
+      "model.layers.9.mlp.experts": 256,
+      "model.layers.10.mlp.experts": 256,
+      "model.layers.11.mlp.experts": 256,
+      "model.layers.12.mlp.experts": 252,
+      "model.layers.13.mlp.experts": 254,
+      "model.layers.14.mlp.experts": 252,
+      "model.layers.15.mlp.experts": 252,
+      "model.layers.16.mlp.experts": 251,
+      "model.layers.17.mlp.experts": 234,
+      "model.layers.18.mlp.experts": 242,
+      "model.layers.19.mlp.experts": 254,
+      "model.layers.20.mlp.experts": 240,
+      "model.layers.21.mlp.experts": 221,
+      "model.layers.22.mlp.experts": 230,
+      "model.layers.23.mlp.experts": 241,
+      "model.layers.24.mlp.experts": 252,
+      "model.layers.25.mlp.experts": 244,
+      "model.layers.26.mlp.experts": 249,
+      "model.layers.27.mlp.experts": 249,
+      "model.layers.28.mlp.experts": 251,
+      "model.layers.29.mlp.experts": 248,
+      "model.layers.30.mlp.experts": 249,
+      "model.layers.31.mlp.experts": 247,
+      "model.layers.32.mlp.experts": 251,
+      "model.layers.33.mlp.experts": 247,
+      "model.layers.34.mlp.experts": 250,
+      "model.layers.35.mlp.experts": 244,
+      "model.layers.36.mlp.experts": 227,
+      "model.layers.37.mlp.experts": 242,
+      "model.layers.38.mlp.experts": 242,
+      "model.layers.39.mlp.experts": 243,
+      "model.layers.40.mlp.experts": 245,
+      "model.layers.41.mlp.experts": 245,
+      "model.layers.42.mlp.experts": 251
+    },
+    "per_dataset_uncovered_routed_mass": {
+      "code_00.txt": 0.018152929620470767,
+      "code_01.txt": 0.023102830348233152,
+      "fineweb_edu_00.txt": 0.01165648630473676,
+      "fineweb_edu_01.txt": 0.008141541834595764,
+      "imatrix_00.txt": 0.005683927928086717,
+      "imatrix_01.txt": 0.006628097161558608,
+      "math_00.txt": 0.02303831684294828,
+      "math_01.txt": 0.02255740614477978,
+      "nm_llm_00.txt": 0.00996988464071047,
+      "nm_llm_01.txt": 0.010174983553317658,
+      "nm_llm_02.txt": 0.010209026519035878,
+      "nm_llm_03.txt": 0.010014960049586586,
+      "pg19_00.txt": 0.015293313428586306,
+      "pg19_01.txt": 0.016903423151911,
+      "tulu_00.txt": 0.004523837620793127,
+      "tulu_01.txt": 0.005490386880241161,
+      "wiki_ar_00.txt": 0.029192963474278532,
+      "wiki_de_00.txt": 0.016346441506039956,
+      "wiki_ja_00.txt": 0.019819672999167166,
+      "wiki_ko_00.txt": 0.011931772993574308,
+      "wiki_ru_00.txt": 0.01893129640497094,
+      "wiki_zh_00.txt": 0.017830991673521524,
+      "wiki_zh_01.txt": 0.01721727095414386
+    },
+    "per_dataset_min_expert_tokens": {
+      "code_00.txt": 0,
+      "code_01.txt": 0,
+      "fineweb_edu_00.txt": 0,
+      "fineweb_edu_01.txt": 0,
+      "imatrix_00.txt": 0,
+      "imatrix_01.txt": 0,
+      "math_00.txt": 0,
+      "math_01.txt": 0,
+      "nm_llm_00.txt": 0,
+      "nm_llm_01.txt": 0,
+      "nm_llm_02.txt": 0,
+      "nm_llm_03.txt": 0,
+      "pg19_00.txt": 0,
+      "pg19_01.txt": 0,
+      "tulu_00.txt": 0,
+      "tulu_01.txt": 0,
+      "wiki_ar_00.txt": 0,
+      "wiki_de_00.txt": 0,
+      "wiki_ja_00.txt": 0,
+      "wiki_ko_00.txt": 0,
+      "wiki_ru_00.txt": 0,
+      "wiki_zh_00.txt": 0,
+      "wiki_zh_01.txt": 0
+    },
+    "selected_uncovered_routed_mass": 0.00011169061487402528,
+    "selected_min_expert_tokens": 0
+  }
+}

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.request import urlretrieve
 
+
 if TYPE_CHECKING:
     import torch
 
@@ -482,9 +483,14 @@ def _parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 TARGET_SUFFIXES = {
+    "q_a_proj": "qa",
+    "q_b_proj": "qb",
     "q_proj": "q",
     "k_proj": "k",
+    "kv_proj": "kv",
     "v_proj": "v",
+    "o_b_proj": "ob",
+    "o_proj": "o",
     "gate_proj": "gate",
     "up_proj": "up",
     "down_proj": "down",

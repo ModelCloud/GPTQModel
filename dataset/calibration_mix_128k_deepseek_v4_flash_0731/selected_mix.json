@@ -1,0 +1,17 @@
+{
+  "datasets": [
+    "wiki_zh_01.txt",
+    "tulu_01.txt",
+    "nm_llm_03.txt",
+    "wiki_ar_00.txt",
+    "wiki_ja_00.txt",
+    "nm_llm_01.txt",
+    "wiki_ko_00.txt",
+    "tulu_00.txt"
+  ],
+  "score_start": 3436543.989794,
+  "score": 105001.02733925465,
+  "cumulative_gain": 3331542.962455099,
+  "total_tokens": 181705,
+  "fallback_count": 0
+}
