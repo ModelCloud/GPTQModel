@@ -400,7 +400,7 @@ class AwqSwordfishLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SYM = [False]
+    SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
@@ -418,7 +418,8 @@ class AwqSwordfishLinear(AWQuantLinear):
     QUANT_TYPE = "awq_swordfish"
 
     TYPE_MAP = {
-        4: scalar_types.uint4,
+        (4, True): scalar_types.uint4b8,
+        (4, False): scalar_types.uint4,
     }
 
     def __init__(
@@ -435,8 +436,8 @@ class AwqSwordfishLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
-        if bits not in self.TYPE_MAP:
-            raise ValueError(f"Unsupported num_bits = {bits}. Supported: {list(self.TYPE_MAP.keys())}")
+        if (bits, sym) not in self.TYPE_MAP:
+            raise ValueError(f"Unsupported quantization config: bits={bits}, sym={sym}")
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
 
@@ -500,8 +501,8 @@ class AwqSwordfishLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        self.weight_type = self.TYPE_MAP[self.bits]
-        self.has_zero_points = True
+        self.weight_type = self.TYPE_MAP[(self.bits, self.sym)]
+        self.has_zero_points = not self.sym
 
         self.register_buffer("input_perm", torch.empty(0, dtype=torch.int32))
 
@@ -526,14 +527,13 @@ class AwqSwordfishLinear(AWQuantLinear):
 
         bits = args.get("bits")
         sym = args.get("sym", True)
-        if bits not in cls.TYPE_MAP:
-            return False, ValueError(f"AwqSwordfishLinear does not support bits={bits}")
-        if sym:
-            return False, ValueError("AwqSwordfishLinear requires sym=False for AWQ zero points")
-
-        quant_type = cls.TYPE_MAP[bits]
-        if quant_type not in query_swordfish_supported_quant_types(zero_points=True):
-            return False, ValueError(f"Swordfish does not support AWQ {bits}-bit weights with zero points")
+        quant_type = cls.TYPE_MAP.get((bits, sym))
+        if quant_type is None:
+            return False, ValueError(f"AwqSwordfishLinear does not support bits={bits}, sym={sym}")
+        if quant_type not in query_swordfish_supported_quant_types(zero_points=not sym):
+            return False, ValueError(
+                f"Swordfish does not support AWQ {bits}-bit weights with sym={sym} (zero_points={not sym})"
+            )
 
         group_size = args.get("group_size")
         dtype = args.get("dtype") or torch.float16
@@ -609,21 +609,30 @@ class AwqSwordfishLinear(AWQuantLinear):
         effective_group_size = self.in_features if self.requested_group_size == -1 else self.group_size
         num_groups = self.in_features // effective_group_size
 
-        qzeros_unpacked = _unpack_cols_torch(
-            self.qzeros,
-            self.bits,
-            num_groups,
-            self.out_features,
-        )
-        qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
+        if self.has_zero_points:
+            qzeros_unpacked = _unpack_cols_torch(
+                self.qzeros,
+                self.bits,
+                num_groups,
+                self.out_features,
+            )
+            qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
 
-        half_range = float(1 << (self.bits - 1))
-        qzeros_fp = ((half_range - qzeros_unpacked.to(scales.dtype)) * scales).contiguous()
-        replace_parameter(
-            self,
-            "qzeros",
-            torch.nn.Parameter(qzeros_fp, requires_grad=False),
-        )
+            half_range = float(1 << (self.bits - 1))
+            qzeros_fp = ((half_range - qzeros_unpacked.to(scales.dtype)) * scales).contiguous()
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(qzeros_fp, requires_grad=False),
+            )
+        else:
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(
+                    torch.empty(0, dtype=scales.dtype, device=device), requires_grad=False
+                ),
+            )
 
         self.input_perm = torch.empty(0, dtype=torch.int32, device=device)
 
@@ -651,8 +660,8 @@ class AwqSwordfishLinear(AWQuantLinear):
         if group_scales.dtype != input_2d.dtype:
             group_scales = group_scales.to(dtype=input_2d.dtype)
 
-        group_zeros = self.qzeros
-        if group_zeros.dtype != input_2d.dtype:
+        group_zeros = self.qzeros if self.has_zero_points else None
+        if group_zeros is not None and group_zeros.dtype != input_2d.dtype:
             group_zeros = group_zeros.to(dtype=input_2d.dtype)
 
         kernel_group_size = -1 if self.requested_group_size == -1 else self.group_size
