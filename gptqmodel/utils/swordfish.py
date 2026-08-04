@@ -10,6 +10,7 @@ Swordfish is vendored into gptqmodel_ext/swordfish under the GNU AGPL v3.0+
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -32,8 +33,7 @@ log = setup_logger()
 _SWORDFISH_OPS_NAME = "gptqmodel_swordfish_ops"
 _SWORDFISH_OPS_NAMESPACE = "gptqmodel_swordfish"
 
-_SWORDFISH_MIN_REQUIRED_COMPUTE_CAPABILITY: Tuple[int, int] = (10, 0)
-_SWORDFISH_MAX_SUPPORTED_COMPUTE_CAPABILITY: Tuple[int, int] = (11, 0)
+_SWORDFISH_GENCODE_SM_RE = re.compile(r"code=sm_(\d+)(?:[a-z])?")
 
 _SWORDFISH_ARCH_FLAGS = (
     # Blackwell TMA/tcgen05 features require the "a" (all) architecture suffix.
@@ -177,25 +177,37 @@ def _extension_api():
     return extension_api
 
 
+def _swordfish_supported_compute_capabilities() -> set[Tuple[int, int]]:
+    """Parse _SWORDFISH_ARCH_FLAGS and return the real SMs with native cubins."""
+    caps: set[Tuple[int, int]] = set()
+    for flag in _SWORDFISH_ARCH_FLAGS:
+        for match in _SWORDFISH_GENCODE_SM_RE.finditer(flag):
+            cap = int(match.group(1))
+            caps.add((cap // 10, cap % 10))
+    if not caps:
+        # Fallback in case the gencode format ever changes unexpectedly.
+        caps = {(10, 0), (10, 3), (11, 0)}
+    return caps
+
+
+_SWORDFISH_SUPPORTED_COMPUTE_CAPABILITIES: set[Tuple[int, int]] = (
+    _swordfish_supported_compute_capabilities()
+)
+
+
 def _swordfish_static_runtime_error() -> str:
     if IS_ROCM:
         return "Swordfish kernel is not supported on ROCm."
     if not torch.cuda.is_available():
         return "Swordfish kernel requires CUDA."
     major, minor = torch.cuda.get_device_capability()
-    if major < _SWORDFISH_MIN_REQUIRED_COMPUTE_CAPABILITY[0]:
-        return (
-            f"Swordfish kernel requires Blackwell (sm100+) GPUs; "
-            f"found compute capability {major}.{minor}."
+    if (major, minor) not in _SWORDFISH_SUPPORTED_COMPUTE_CAPABILITIES:
+        supported = ", ".join(
+            f"sm{mj}{mn}" for mj, mn in sorted(_SWORDFISH_SUPPORTED_COMPUTE_CAPABILITIES)
         )
-    if (
-        major > _SWORDFISH_MAX_SUPPORTED_COMPUTE_CAPABILITY[0]
-        or major == _SWORDFISH_MAX_SUPPORTED_COMPUTE_CAPABILITY[0]
-        and minor > _SWORDFISH_MAX_SUPPORTED_COMPUTE_CAPABILITY[1]
-    ):
         return (
-            f"Swordfish kernel currently supports datacenter Blackwell "
-            f"(sm100/sm110) only; found compute capability {major}.{minor}."
+            f"Swordfish kernel only supports native Blackwell variants "
+            f"({supported}); found compute capability {major}.{minor}."
         )
     return ""
 
