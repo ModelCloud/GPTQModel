@@ -611,6 +611,23 @@ class AwqSwordfishLinear(AWQuantLinear):
         effective_group_size = self.in_features if self.requested_group_size == -1 else self.group_size
         num_groups = self.in_features // effective_group_size
 
+        expected_zp = 1 << (self.bits - 1)
+        if self.sym:
+            # Symmetric AWQ checkpoints are consumed without zero points, but
+            # only if the stored zero points are exactly 2^(bits-1).
+            qzeros_unpacked = _unpack_cols_torch(
+                self.qzeros,
+                self.bits,
+                num_groups,
+                self.out_features,
+            )
+            qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
+            if torch.any(qzeros_unpacked != expected_zp):
+                raise ValueError(
+                    f"AwqSwordfishLinear symmetric checkpoint expects all zero points "
+                    f"to be {expected_zp} (2^(bits-1))."
+                )
+
         if self.has_zero_points:
             qzeros_unpacked = _unpack_cols_torch(
                 self.qzeros,
