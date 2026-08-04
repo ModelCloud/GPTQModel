@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
 * 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `Intern S2 PreView` model support

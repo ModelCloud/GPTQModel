@@ -73,6 +73,7 @@ from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.apertus import ApertusQModel  # noqa: E402
+from .definitions.axk2 import AXK2QModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
 from .definitions.bloom import BloomQModel  # noqa: E402
@@ -209,6 +210,7 @@ else:
 
 MODEL_MAP = {
     "apertus": ApertusQModel,
+    "axk2": AXK2QModel,
     "dream": DreamQModel,
     "bloom": BloomQModel,
     "brumby": BrumbyQModel,
