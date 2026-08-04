@@ -10,6 +10,7 @@
 #ifndef __CUDA_ARCH__
 
 #include <cuda_runtime.h>
+#include <functional>
 #include <mutex>
 #include <unordered_map>
 
@@ -38,9 +39,29 @@ inline int cached_device_sm_count(int device_index = -1) {
   return sms;
 }
 
-// Return the per-SM active-block count for `kernel` on `device_index`,
-// caching per device.  The caller must ensure the device guard is set if
-// device_index == -1 (current device).
+struct OccupancyCacheKey {
+  const void* kernel;
+  int device_index;
+  int block_size;
+
+  bool operator==(const OccupancyCacheKey& other) const {
+    return kernel == other.kernel && device_index == other.device_index &&
+           block_size == other.block_size;
+  }
+};
+
+struct OccupancyCacheKeyHash {
+  std::size_t operator()(const OccupancyCacheKey& k) const noexcept {
+    std::size_t h = std::hash<const void*>{}(k.kernel);
+    h ^= std::hash<int>{}(k.device_index) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    h ^= std::hash<int>{}(k.block_size) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return h;
+  }
+};
+
+// Return the per-SM active-block count for `kernel` on `device_index` and
+// `block_size`, caching per (kernel, device, block_size).  The caller must set
+// the CUDA device guard when device_index == -1.
 template <typename Kernel>
 inline int cached_occupancy_for_device(int device_index, Kernel kernel,
                                        int block_size, int fallback) {
@@ -49,10 +70,12 @@ inline int cached_occupancy_for_device(int device_index, Kernel kernel,
   }
 
   static std::mutex mutex;
-  static std::unordered_map<int, int> cache;
+  static std::unordered_map<OccupancyCacheKey, int, OccupancyCacheKeyHash> cache;
   std::lock_guard<std::mutex> lock(mutex);
 
-  auto it = cache.find(device_index);
+  OccupancyCacheKey key{
+      reinterpret_cast<const void*>(kernel), device_index, block_size};
+  auto it = cache.find(key);
   if (it != cache.end()) {
     return it->second;
   }
@@ -61,7 +84,7 @@ inline int cached_occupancy_for_device(int device_index, Kernel kernel,
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &ctas, kernel, block_size, 0);
   if (ctas <= 0) ctas = fallback;
-  cache[device_index] = ctas;
+  cache[key] = ctas;
   return ctas;
 }
 
