@@ -77,7 +77,7 @@ Expected: speedup > 1.00x for bits 3/5/6/7 and thread scaling with 2/4 threads n
   --shapes laguna --bits 3 5 6 7 --batches 1 2 4 8 --threads 8 \
   --output pangolin_cpu_laguna_bench.md
 ```
-Expected: every row reports `speedup` > 1.00x.
+Expected: every row reports `speedup` > 1.00x.  The `--output` argument always writes Markdown-formatted tables regardless of the file extension you choose (e.g. `.json` will still contain Markdown text), so either read it as Markdown or post-process it to JSON if you need JSON.
 
 ## Common pitfalls
 
