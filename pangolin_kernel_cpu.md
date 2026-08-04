@@ -26,10 +26,10 @@ many cores and large caches. The kernel therefore:
    `at::parallel_for`; each thread works on independent column chunks. SIMD
    kernels are kept free of `at::parallel_for` to avoid OpenMP target-attribute
    interaction issues; the parallel wrapper calls targeted per-column functions.
-3. **Wide SIMD to amortize memory latency.** AVX-512 (16 lanes) is used for the
-   decode-dominant decode shapes (`M <= 8`); AVX2 (8 lanes) is the fallback for
-   larger `M` where register pressure would otherwise spill. A scalar fallback
-   covers any remaining shapes.
+3. **Wide SIMD to amortize memory latency.** AVX-512 (16 lanes) is used for
+   all supported batch sizes (`M <= 32`); AVX2 (8 lanes) is the fallback for
+   non-AVX-512 hosts or shapes where `N % 16 != 0`. A scalar fallback covers
+   any remaining shapes.
 4. **Precomputes `zero * scale` per group-column.** This moves the zero-point
    decode out of the hot loop; the inner loop only loads `scale`, `zero_scale`,
    the packed `qweight` words, and the broadcast activation.
@@ -55,12 +55,14 @@ fused with `vfmadd`.
 
 ### Implementation dispatch
 
-- AVX-512 is selected when `N % 16 == 0` and `M <= 8`.
+- AVX-512 is selected when `N % 16 == 0` and `M <= 32`.
 - AVX2 is selected when `N % 8 == 0`.
 - A scalar fallback covers any remaining shapes.
 
-`M = 16` and `M = 32` are routed through AVX2 to avoid the heavy ZMM register
-spills that the AVX-512 current GCC target prologues produce.
+`M = 16` and `M = 32` are now also routed through the AVX-512 kernel. `M = 16`
+has no register-spill issues, while `M = 32` exceeds the 32 ZMM budget and spills;
+nevertheless, measured `laguna` M=32 latency is ~1.5-1.6x lower than the AVX2
+fallback, so the AVX-512 path is kept for all supported `M`.
 
 ### Notes and future work
 
@@ -1885,3 +1887,176 @@ Compared to the pre-vectorized sanity sweep this is a ~1.05-1.25x absolute
 latency improvement and a ~1.2x speedup jump for bits 3/6/7 on the shared test
 host.  `pytest tests/test_pangolin_cpu_kernel.py` passes 160/160 (AVX-512,
 AVX2-only, and scalar fallback paths).
+
+## Optimization pass 5 (2026-08-04): route M=16 and M=32 through AVX-512
+
+The AVX-512 dispatcher was widened from `M <= 8` to `M <= 32`. `M = 16` has no
+register-spill issues and is roughly 2x faster than the AVX2 path. `M = 32`
+exceeds the 32 ZMM budget and spills, but measured `laguna` latency is still
+~1.5-1.6x lower than forcing the AVX2 fallback (see the AVX2 comparison tables
+below), so it is kept on the AVX-512 path.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+# Pangolin CPU GEMV benchmark (bfloat16, threads=8) — laguna M=16 and M=32
+
+## laguna (bits=3, M=16, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 16 | 0.472       | 65.314   | 138.50x |
+| 2048 x 1024  | 16 | 0.111       | 3.001    | 27.03x  |
+| 6144 x 2048  | 16 | 0.478       | 60.876   | 127.33x |
+| 2048 x 8192  | 16 | 0.628       | 84.569   | 134.77x |
+| 8192 x 2048  | 16 | 0.684       | 87.232   | 127.54x |
+| 2048 x 512   | 16 | 0.080       | 1.166    | 14.55x  |
+| 512 x 2048   | 16 | 0.055       | 1.141    | 20.60x  |
+| 2048 x 256   | 16 | 0.053       | 0.655    | 12.34x  |
+
+## laguna (bits=5, M=16, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 16 | 0.491       | 67.804   | 138.13x |
+| 2048 x 1024  | 16 | 0.109       | 3.532    | 32.48x  |
+| 6144 x 2048  | 16 | 0.474       | 60.485   | 127.69x |
+| 2048 x 8192  | 16 | 0.615       | 87.182   | 141.69x |
+| 8192 x 2048  | 16 | 0.684       | 89.286   | 130.58x |
+| 2048 x 512   | 16 | 0.113       | 1.152    | 10.20x  |
+| 512 x 2048   | 16 | 0.057       | 1.093    | 19.27x  |
+| 2048 x 256   | 16 | 0.066       | 0.693    | 10.50x  |
+
+## laguna (bits=6, M=16, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 16 | 0.491       | 62.747   | 127.81x |
+| 2048 x 1024  | 16 | 0.113       | 3.568    | 31.67x  |
+| 6144 x 2048  | 16 | 0.529       | 62.395   | 118.06x |
+| 2048 x 8192  | 16 | 0.650       | 88.185   | 135.66x |
+| 8192 x 2048  | 16 | 0.835       | 88.029   | 105.40x |
+| 2048 x 512   | 16 | 0.069       | 1.082    | 15.60x  |
+| 512 x 2048   | 16 | 0.061       | 1.039    | 16.92x  |
+| 2048 x 256   | 16 | 0.057       | 0.669    | 11.72x  |
+
+## laguna (bits=7, M=16, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 16 | 0.561       | 80.555   | 143.50x |
+| 2048 x 1024  | 16 | 0.120       | 2.902    | 24.24x  |
+| 6144 x 2048  | 16 | 0.594       | 79.924   | 134.64x |
+| 2048 x 8192  | 16 | 0.742       | 114.447  | 154.24x |
+| 8192 x 2048  | 16 | 0.771       | 113.531  | 147.18x |
+| 2048 x 512   | 16 | 0.080       | 1.362    | 17.00x  |
+| 512 x 2048   | 16 | 0.066       | 1.370    | 20.66x  |
+| 2048 x 256   | 16 | 0.080       | 0.830    | 10.32x  |
+
+## laguna (bits=3, M=32, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 32 | 1.918       | 64.686   | 33.72x  |
+| 2048 x 1024  | 32 | 0.352       | 4.331    | 12.32x  |
+| 6144 x 2048  | 32 | 1.959       | 65.630   | 33.50x  |
+| 2048 x 8192  | 32 | 2.516       | 88.011   | 34.98x  |
+| 8192 x 2048  | 32 | 2.568       | 90.999   | 35.43x  |
+| 2048 x 512   | 32 | 0.192       | 1.250    | 6.50x   |
+| 512 x 2048   | 32 | 0.156       | 1.376    | 8.80x   |
+| 2048 x 256   | 32 | 0.117       | 0.661    | 5.65x   |
+
+## laguna (bits=5, M=32, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 32 | 1.953       | 68.449   | 35.04x  |
+| 2048 x 1024  | 32 | 0.367       | 5.913    | 16.13x  |
+| 6144 x 2048  | 32 | 3.959       | 66.551   | 16.81x  |
+| 2048 x 8192  | 32 | 2.607       | 87.807   | 33.68x  |
+| 8192 x 2048  | 32 | 2.706       | 92.475   | 34.17x  |
+| 2048 x 512   | 32 | 0.217       | 1.566    | 7.23x   |
+| 512 x 2048   | 32 | 0.149       | 1.231    | 8.25x   |
+| 2048 x 256   | 32 | 0.199       | 0.795    | 3.99x   |
+
+## laguna (bits=6, M=32, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 32 | 1.978       | 67.004   | 33.87x  |
+| 2048 x 1024  | 32 | 0.398       | 5.599    | 14.06x  |
+| 6144 x 2048  | 32 | 2.057       | 66.252   | 32.21x  |
+| 2048 x 8192  | 32 | 2.659       | 91.431   | 34.38x  |
+| 8192 x 2048  | 32 | 2.706       | 87.282   | 32.25x  |
+| 2048 x 512   | 32 | 0.195       | 1.163    | 5.98x   |
+| 512 x 2048   | 32 | 0.155       | 1.165    | 7.52x   |
+| 2048 x 256   | 32 | 0.122       | 0.727    | 5.94x   |
+
+## laguna (bits=7, M=32, threads=8)
+
+| K x N        | M  | kernel (ms) | ref (ms) | speedup |
+|--------------|----|-------------|----------|---------|
+| 2048 x 6144  | 32 | 1.985       | 85.402   | 43.02x  |
+| 2048 x 1024  | 32 | 0.359       | 4.771    | 13.30x  |
+| 6144 x 2048  | 32 | 2.021       | 85.695   | 42.40x  |
+| 2048 x 8192  | 32 | 2.640       | 117.399  | 44.46x  |
+| 8192 x 2048  | 32 | 2.700       | 116.192  | 43.03x  |
+| 2048 x 512   | 32 | 0.195       | 1.464    | 7.52x   |
+| 512 x 2048   | 32 | 0.154       | 1.439    | 9.34x   |
+| 2048 x 256   | 32 | 0.117       | 0.815    | 6.99x   |
+
+## AVX-512 vs AVX2 fallback for laguna M=32 (threads=8)
+
+Measured with `GPTQMODEL_PANGOLIN_CPU_DISABLE_AVX512=1` to force the AVX2 path.
+
+
+### bits=3, M=32
+
+| K x N        | AVX-512 (ms) | AVX2 (ms) | AVX-512 / AVX2 |
+|--------------|--------------|-----------|----------------|
+| 2048 x 6144 | 1.918 | 3.048 | 1.59x |
+| 2048 x 1024 | 0.352 | 0.512 | 1.45x |
+| 6144 x 2048 | 1.959 | 3.165 | 1.62x |
+| 2048 x 8192 | 2.516 | 4.146 | 1.65x |
+| 8192 x 2048 | 2.568 | 4.421 | 1.72x |
+| 2048 x 512 | 0.192 | 0.394 | 2.05x |
+| 512 x 2048 | 0.156 | 0.234 | 1.50x |
+| 2048 x 256 | 0.117 | 0.162 | 1.38x |
+
+### bits=5, M=32
+
+| K x N        | AVX-512 (ms) | AVX2 (ms) | AVX-512 / AVX2 |
+|--------------|--------------|-----------|----------------|
+| 2048 x 6144 | 1.953 | 2.925 | 1.50x |
+| 2048 x 1024 | 0.367 | 0.532 | 1.45x |
+| 6144 x 2048 | 3.959 | 3.133 | 0.79x |
+| 2048 x 8192 | 2.607 | 3.829 | 1.47x |
+| 8192 x 2048 | 2.706 | 4.667 | 1.72x |
+| 2048 x 512 | 0.217 | 0.288 | 1.33x |
+| 512 x 2048 | 0.149 | 0.244 | 1.64x |
+| 2048 x 256 | 0.199 | 0.164 | 0.82x |
+
+### bits=6, M=32
+
+| K x N        | AVX-512 (ms) | AVX2 (ms) | AVX-512 / AVX2 |
+|--------------|--------------|-----------|----------------|
+| 2048 x 6144 | 1.978 | 3.070 | 1.55x |
+| 2048 x 1024 | 0.398 | 0.535 | 1.34x |
+| 6144 x 2048 | 2.057 | 3.186 | 1.55x |
+| 2048 x 8192 | 2.659 | 3.932 | 1.48x |
+| 8192 x 2048 | 2.706 | 4.462 | 1.65x |
+| 2048 x 512 | 0.195 | 0.298 | 1.53x |
+| 512 x 2048 | 0.155 | 0.246 | 1.59x |
+| 2048 x 256 | 0.122 | 0.161 | 1.32x |
+
+### bits=7, M=32
+
+| K x N        | AVX-512 (ms) | AVX2 (ms) | AVX-512 / AVX2 |
+|--------------|--------------|-----------|----------------|
+| 2048 x 6144 | 1.985 | 3.003 | 1.51x |
+| 2048 x 1024 | 0.359 | 0.540 | 1.50x |
+| 6144 x 2048 | 2.021 | 3.206 | 1.59x |
+| 2048 x 8192 | 2.640 | 4.053 | 1.54x |
+| 8192 x 2048 | 2.700 | 4.568 | 1.69x |
+| 2048 x 512 | 0.195 | 0.288 | 1.48x |
+| 512 x 2048 | 0.154 | 0.243 | 1.58x |
+| 2048 x 256 | 0.117 | 0.167 | 1.43x |
