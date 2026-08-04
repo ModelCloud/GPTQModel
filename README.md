@@ -670,6 +670,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
+* Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 
@@ -783,6 +784,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   author={Frantar, Elias and Castro, Roberto L and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
   journal={arXiv preprint arXiv:2408.11743},
   year={2024}
+}
+
+# Swordfish Kernel
+@misc{alpindale2026swordfish,
+  author = {AlpinDale},
+  title = {Swordfish: A Weight-Quantized {GEMM} Family for {NVIDIA} Blackwell},
+  howpublished = {\url{https://blog.alpindale.net/posts/swordfish/}},
+  year = {2026}
 }
 
 ```
