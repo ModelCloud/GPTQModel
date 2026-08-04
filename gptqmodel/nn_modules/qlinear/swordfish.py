@@ -583,8 +583,14 @@ class AwqSwordfishLinear(AWQuantLinear):
         shifts = torch.arange(
             0, 32, self.bits, dtype=torch.int32, device=qweight_int.device
         )
-        packed = (qweight_int << shifts.view(1, 1, pack_factor, 1)).sum(dim=2, dtype=torch.int32)
-        packed = packed.view(self.in_features // pack_factor, self.out_features).contiguous()
+        # Accumulate in int64 so the shift/sum does not rely on signed int32
+        # overflow, then cast back to the packed int32 bit pattern.
+        packed = (qweight_int.to(torch.int64) << shifts.view(1, 1, pack_factor, 1)).sum(
+            dim=2, dtype=torch.int64
+        )
+        packed = packed.to(torch.int32).view(
+            self.in_features // pack_factor, self.out_features
+        ).contiguous()
 
         prepacked = swordfish_prepack_B(
             packed,
