@@ -425,12 +425,12 @@ constexpr int k_unroll_for() {
   template <int Bits, int SizeM> \
   __attribute__((target(target_features))) \
   void gemv_col_block_##suffix( \
-      const float* x_f, \
-      const int32_t* qweight, \
-      const at::BFloat16* scale_b, \
-      const float* zero_scale_f, \
-      const int32_t* g_idx, \
-      void* out_ptr, \
+      const float* __restrict__ x_f, \
+      const int32_t* __restrict__ qweight, \
+      const at::BFloat16* __restrict__ scale_b, \
+      const float* __restrict__ zero_scale_f, \
+      const int32_t* __restrict__ g_idx, \
+      void* __restrict__ out_ptr, \
       bool out_float, \
       int64_t col0, \
       int64_t K, \
@@ -449,16 +449,19 @@ constexpr int k_unroll_for() {
     } \
     float* out_f = reinterpret_cast<float*>(out_ptr); \
     at::BFloat16* out_b = reinterpret_cast<at::BFloat16*>(out_ptr); \
+    const int64_t num_k_blocks = K / 32; \
+    const int64_t chunk = col0 / 16; \
+    const int lane = static_cast<int>(col0 % 16); \
     int prev_group = -1; \
     FLOAT_T scale_vec = SET1_F(0.0f); \
     FLOAT_T zscale_vec = SET1_F(0.0f); \
     for (int64_t kb = kb_start; kb < kb_end; ++kb) { \
       const int64_t row0 = kb * 32; \
       int group = g_idx[row0]; \
-      if (group < 0) { \
+      if (__builtin_expect(group < 0, 0)) { \
         group += static_cast<int>(num_groups); \
       } \
-      if (group != prev_group) { \
+      if (__builtin_expect(group != prev_group, 0)) { \
         const at::BFloat16* scale_ptr = scale_b + static_cast<int64_t>(group) * N + col0; \
         const float* zscale_ptr = zero_scale_f + static_cast<int64_t>(group) * N + col0; \
         scale_vec = LOAD_SCALE(scale_ptr); \
@@ -469,20 +472,29 @@ constexpr int k_unroll_for() {
        * 32-bit words for a fixed col_block are contiguous across all K-blocks. \
        * Load all Bits qwords once per K-block and reuse them across the 32 K \
        * values to avoid re-reading the same cache lines 32 times. */ \
-      const int64_t num_k_blocks = K / 32; \
-      const int64_t chunk = col0 / 16; \
-      const int lane = static_cast<int>(col0 % 16); \
       const int64_t base_offset = ((chunk * num_k_blocks + kb) * Bits) * 16 + lane; \
       const uint32_t* qbase = reinterpret_cast<const uint32_t*>(qweight) + base_offset; \
       INT_T qwords[Bits]; \
       for (int pw = 0; pw < Bits; ++pw) { \
         qwords[pw] = LOAD_I(qbase + pw * 16); \
       } \
-      if (kb + 1 < kb_end) { \
+      if (__builtin_expect(kb + 1 < kb_end, 1)) { \
         const uint32_t* next_qbase = qbase + Bits * 16; \
         for (int pw = 0; pw < Bits; ++pw) { \
           _mm_prefetch(reinterpret_cast<const char*>(next_qbase + pw * 16), _MM_HINT_T0); \
           _mm_prefetch(reinterpret_cast<const char*>(next_qbase + pw * 16 + 8), _MM_HINT_T0); \
+        } \
+        int next_group = g_idx[(kb + 1) * 32]; \
+        if (__builtin_expect(next_group < 0, 0)) { \
+          next_group += static_cast<int>(num_groups); \
+        } \
+        if (__builtin_expect(next_group != group, 0)) { \
+          _mm_prefetch(reinterpret_cast<const char*>(scale_b + static_cast<int64_t>(next_group) * N + col0), _MM_HINT_T0); \
+          _mm_prefetch(reinterpret_cast<const char*>(zero_scale_f + static_cast<int64_t>(next_group) * N + col0), _MM_HINT_T0); \
+          _mm_prefetch(reinterpret_cast<const char*>(zero_scale_f + static_cast<int64_t>(next_group) * N + col0 + 8), _MM_HINT_T0); \
+        } \
+        for (int m = 0; m < SizeM; ++m) { \
+          _mm_prefetch(reinterpret_cast<const char*>(x_f + static_cast<int64_t>(m) * K + (kb + 1) * 32), _MM_HINT_T0); \
         } \
       } \
       _Pragma("GCC unroll 32") \
@@ -538,12 +550,12 @@ constexpr int k_unroll_for() {
   template <int Bits, int SizeM> \
   __attribute__((target(target_features))) \
   void gemv_kernel_##suffix( \
-      const float* x_f, \
-      const int32_t* qweight, \
-      const at::BFloat16* scale_b, \
-      const float* zero_scale_f, \
-      const int32_t* g_idx, \
-      at::BFloat16* out, \
+      const float* __restrict__ x_f, \
+      const int32_t* __restrict__ qweight, \
+      const at::BFloat16* __restrict__ scale_b, \
+      const float* __restrict__ zero_scale_f, \
+      const int32_t* __restrict__ g_idx, \
+      at::BFloat16* __restrict__ out, \
       int64_t /*M*/, \
       int64_t K, \
       int64_t N, \
@@ -640,12 +652,12 @@ DEFINE_GEMV_KERNEL(
 
 template <int Bits, int SizeM>
 void gemv_kernel_scalar(
-    const float* x_f,
-    const int32_t* qweight,
-    const at::BFloat16* scale_b,
-    const float* zero_scale_f,
-    const int32_t* g_idx,
-    at::BFloat16* out,
+    const float* __restrict__ x_f,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
     int64_t /*M*/,
     int64_t K,
     int64_t N,
@@ -699,12 +711,12 @@ void gemv_kernel_scalar(
 
 template <int Bits, int SizeM>
 void run_gemv(
-    const float* x_f,
-    const int32_t* qweight,
-    const at::BFloat16* scale_b,
-    const float* zero_scale_f,
-    const int32_t* g_idx,
-    at::BFloat16* out,
+    const float* __restrict__ x_f,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
     int64_t M,
     int64_t K,
     int64_t N,
@@ -728,12 +740,12 @@ void run_gemv(
 template <int SizeM>
 static void dispatch_bits(
     int64_t kernel_bits,
-    const float* x_f,
-    const int32_t* qweight,
-    const at::BFloat16* scale_b,
-    const float* zero_scale_f,
-    const int32_t* g_idx,
-    at::BFloat16* out,
+    const float* __restrict__ x_f,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
     int64_t M,
     int64_t K,
     int64_t N,
@@ -763,12 +775,12 @@ static void dispatch_bits(
 static void dispatch_size_m(
     int64_t M,
     int64_t bits,
-    const float* x_f,
-    const int32_t* qweight,
-    const at::BFloat16* scale_b,
-    const float* zero_scale_f,
-    const int32_t* g_idx,
-    at::BFloat16* out,
+    const float* __restrict__ x_f,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
     int64_t K,
     int64_t N,
     int64_t num_groups) {
@@ -884,12 +896,12 @@ torch::Tensor pangolin_gemv_cpu(
   const auto scales_b_tensor = scales.to(at::kBFloat16).contiguous();
   auto zero_scale_f_tensor = at::empty({num_groups, N}, at::TensorOptions().dtype(at::kFloat).device(scales.device()));
 
-  const float* x_f = x_f_tensor.data_ptr<float>();
-  const at::BFloat16* scale_b = scales_b_tensor.data_ptr<at::BFloat16>();
-  float* zero_scale_f = zero_scale_f_tensor.data_ptr<float>();
-  const int32_t* qweight_ptr = qweight.data_ptr<int32_t>();
-  const int32_t* qzeros_ptr = qzeros.data_ptr<int32_t>();
-  const int32_t* g_idx_ptr = g_idx.data_ptr<int32_t>();
+  const float* __restrict__ x_f = x_f_tensor.data_ptr<float>();
+  const at::BFloat16* __restrict__ scale_b = scales_b_tensor.data_ptr<at::BFloat16>();
+  float* __restrict__ zero_scale_f = zero_scale_f_tensor.data_ptr<float>();
+  const int32_t* __restrict__ qweight_ptr = qweight.data_ptr<int32_t>();
+  const int32_t* __restrict__ qzeros_ptr = qzeros.data_ptr<int32_t>();
+  const int32_t* __restrict__ g_idx_ptr = g_idx.data_ptr<int32_t>();
 
   const int64_t qzeros_stride = (N / 32) * bits;
 

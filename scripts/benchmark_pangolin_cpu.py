@@ -110,9 +110,14 @@ def _time_ref(module: TorchLinear, x: torch.Tensor, repeats: int) -> float:
     return time.perf_counter() - start
 
 
+def _tflops(m: int, k: int, n: int, ms_per_iter: float) -> float:
+    """Return TFLOP/s for a matrix multiply with 2*m*k*n FMA ops."""
+    return (2.0 * m * k * n) / (ms_per_iter * 1e9) if ms_per_iter > 0 else float("inf")
+
+
 def _benchmark_shape(
     bits: int, k: int, n: int, m: int, threads: int, dtype: torch.dtype
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, float, float]:
     torch.set_num_threads(threads)
     module = _build_module(bits, k, n)
     module.scales = module.scales.to(dtype)
@@ -127,14 +132,16 @@ def _benchmark_shape(
     speedup = ref_time / kernel_time if kernel_time > 0 else float("inf")
     kernel_ms = kernel_time * 1000.0 / repeats
     ref_ms = ref_time * 1000.0 / repeats
-    return kernel_ms, ref_ms, speedup
+    kernel_tflops = _tflops(m, k, n, kernel_ms)
+    ref_tflops = _tflops(m, k, n, ref_ms)
+    return kernel_ms, ref_ms, speedup, kernel_tflops, ref_tflops
 
 
 def _section(name: str, rows: List[Tuple], bits: int, threads: int) -> str:
     header = f"\n## {name} (bits={bits}, threads={threads})\n"
     table = render_table(
         rows,
-        headers=["K x N", "M", "kernel (ms)", "ref (ms)", "speedup"],
+        headers=["K x N", "M", "kernel (ms)", "ref (ms)", "speedup", "kernel (TFLOPS)", "ref (TFLOPS)"],
         tablefmt="simple",
     )
     return header + "\n" + table + "\n"
@@ -157,15 +164,19 @@ def _sanity_speed_check(bits: int, threads: int, dtype: torch.dtype):
     kernel_time = _time(module, x, bits, repeats)
     ref_time = _time_ref(module, x, repeats)
     speedup = ref_time / kernel_time if kernel_time > 0 else float("inf")
+    kernel_ms = kernel_time * 1000.0 / repeats
+    ref_ms = ref_time * 1000.0 / repeats
+    kernel_tflops = _tflops(M, in_features, out_features, kernel_ms)
+    ref_tflops = _tflops(M, in_features, out_features, ref_ms)
 
     rows = [
-        ("reference (dequant+matmul)", f"{ref_time:.4f}", "1.00x"),
-        ("pangolin_cpu kernel", f"{kernel_time:.4f}", f"{speedup:.2f}x"),
+        ("reference (dequant+matmul)", f"{ref_time:.4f}", "1.00x", f"{ref_tflops:.3f}"),
+        ("pangolin_cpu kernel", f"{kernel_time:.4f}", f"{speedup:.2f}x", f"{kernel_tflops:.3f}"),
     ]
     print(
         render_table(
             rows,
-            headers=["impl", f"time ({repeats} iters)", "speedup"],
+            headers=["impl", f"time ({repeats} iters)", "speedup", "TFLOPS"],
             tablefmt="simple",
         )
     )
@@ -186,15 +197,17 @@ def _sanity_thread_scaling(bits: int, dtype: torch.dtype):
 
     rows = []
     baseline_time = None
-    for threads in (1, 2, 4):
-        torch.set_num_threads(threads)
+    for thread_count in (1, 2, 4):
+        torch.set_num_threads(thread_count)
         t = _time(module, x, bits, repeats)
         if baseline_time is None:
             baseline_time = t
         speedup = baseline_time / t if t > 0 else float("inf")
-        rows.append((threads, f"{t:.4f}", f"{speedup:.2f}x"))
+        ms = t * 1000.0 / repeats
+        tflops = _tflops(1, in_features, out_features, ms)
+        rows.append((thread_count, f"{t:.4f}", f"{speedup:.2f}x", f"{tflops:.3f}"))
 
-    print(render_table(rows, headers=["threads", f"time ({repeats} iters)", "speedup"], tablefmt="simple"))
+    print(render_table(rows, headers=["threads", f"time ({repeats} iters)", "speedup", "TFLOPS"], tablefmt="simple"))
 
     multi_thread_times = [float(r[1]) for r in rows[1:]]
     if min(multi_thread_times) > baseline_time * 1.05:
@@ -242,11 +255,15 @@ def main():
             rows = []
             for k, n in shapes:
                 for m in batches:
-                    kt_ms, rt_ms, sp = _benchmark_shape(bits, k, n, m, threads, dtype)
-                    rows.append((f"{k} x {n}", str(m), f"{kt_ms:.3f}", f"{rt_ms:.3f}", f"{sp:.2f}x"))
+                    kt_ms, rt_ms, sp, kt_tflops, rt_tflops = _benchmark_shape(bits, k, n, m, threads, dtype)
+                    rows.append(
+                        (f"{k} x {n}", str(m), f"{kt_ms:.3f}", f"{rt_ms:.3f}", f"{sp:.2f}x",
+                         f"{kt_tflops:.3f}", f"{rt_tflops:.3f}")
+                    )
                     print(
                         f"[{set_name}] bits={bits} {k}x{n} M={m} "
-                        f"kernel={kt_ms:.3f}ms ref={rt_ms:.3f}ms speedup={sp:.2f}x"
+                        f"kernel={kt_ms:.3f}ms ref={rt_ms:.3f}ms speedup={sp:.2f}x "
+                        f"k_tflops={kt_tflops:.3f} r_tflops={rt_tflops:.3f}"
                     )
             section = _section(set_name, rows, bits, threads)
             md.append(section)

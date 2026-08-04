@@ -21,7 +21,7 @@ def parse(path: str):
         body = sections[i + 2]
         for line in body.splitlines():
             m = re.match(
-                r"^(\d+)\s*x\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)x\s*$",
+                r"^(\d+)\s*x\s*(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)x\s+([\d.]+)\s+([\d.]+)\s*$",
                 line.strip(),
             )
             if m:
@@ -35,6 +35,8 @@ def parse(path: str):
                         float(m.group(4)),
                         float(m.group(5)),
                         float(m.group(6)),
+                        float(m.group(7)),
+                        float(m.group(8)),
                     )
                 )
     return rows
@@ -66,8 +68,8 @@ def main():
     if args.bits is not None:
         keys = [k for k in keys if k[1] == args.bits]
 
-    print("| set | bits | K x N | M | prev ms | curr ms | kernel ratio | speedup ratio |")
-    print("|-----|------|-------|---|--------:|--------:|-------------:|--------------:|")
+    print("| set | bits | K x N | M | prev ms | curr ms | prev TFLOPS | curr TFLOPS | kernel ratio | speedup ratio |")
+    print("|-----|------|-------|---|--------:|--------:|------------:|------------:|-------------:|--------------:|")
     by_set_bits = defaultdict(list)
     for k in keys:
         set_name, bits, K, N, M = k
@@ -75,25 +77,28 @@ def main():
         cr = curr_by_key[k]
         kernel_ratio = pr[5] / cr[5]
         speedup_ratio = cr[7] / pr[7]
-        by_set_bits[(set_name, bits)].append((kernel_ratio, speedup_ratio))
+        tflops_ratio = cr[8] / pr[8]
+        by_set_bits[(set_name, bits)].append((kernel_ratio, speedup_ratio, tflops_ratio))
         print(
             f"| {set_name} | {bits} | {K} x {N} | {M} | "
-            f"{pr[5]:.3f} | {cr[5]:.3f} | {kernel_ratio:.2f}x | {speedup_ratio:.2f}x |"
+            f"{pr[5]:.3f} | {cr[5]:.3f} | {pr[8]:.3f} | {cr[8]:.3f} | {kernel_ratio:.2f}x | {speedup_ratio:.2f}x |"
         )
 
     print()
     print("## Geomean summary")
-    print("| set | bits | kernel ratio | speedup ratio |")
-    print("|-----|------|-------------:|--------------:|")
+    print("| set | bits | kernel ratio | speedup ratio | tflops ratio |")
+    print("|-----|------|-------------:|--------------:|-------------:|")
     for (set_name, bits), ratios in sorted(by_set_bits.items()):
         kr = geomean([r[0] for r in ratios])
         sr = geomean([r[1] for r in ratios])
-        print(f"| {set_name} | {bits} | {kr:.3f}x | {sr:.3f}x |")
+        tr = geomean([r[2] for r in ratios])
+        print(f"| {set_name} | {bits} | {kr:.3f}x | {sr:.3f}x | {tr:.3f}x |")
 
     all_kr = [r[0] for ratios in by_set_bits.values() for r in ratios]
     all_sr = [r[1] for ratios in by_set_bits.values() for r in ratios]
+    all_tr = [r[2] for ratios in by_set_bits.values() for r in ratios]
     if all_kr:
-        print(f"| all | all | {geomean(all_kr):.3f}x | {geomean(all_sr):.3f}x |")
+        print(f"| all | all | {geomean(all_kr):.3f}x | {geomean(all_sr):.3f}x | {geomean(all_tr):.3f}x |")
 
 
 if __name__ == "__main__":

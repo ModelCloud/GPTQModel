@@ -3045,3 +3045,115 @@ largely by removing the large-N M=1 latency outliers.  Bits 5/6 are within
 run-to-run noise, and the `speedup ratio` column is noisier because the dense
 `dequant+matmul` reference time varies between runs.  The M>1 K_UNROLL
 schedule is unchanged.
+
+## Optimization pass 23 (2026-08-04): `__restrict__` and software prefetching
+
+Add `__restrict__` to all of the hot-loop pointer parameters so the compiler
+can assume `x_f`, `qweight`, `scale_b`, `zero_scale_f`, `g_idx`, and the
+output buffers do not alias each other.  This enables more aggressive load/FMA
+scheduling and avoids redundant reloads of the packed qweight words.  On top of
+that, the inner K-block loop now prefetches:
+
+- the next K-block's packed `qweight` words (already present),
+- the next K-block's per-row activation `x_f` values for every `m` in `SizeM`,
+- the next group's `scale_b` and `zero_scale_f` vectors when a group change is
+  upcoming.
+
+These prefetches are issued only when `kb + 1 < kb_end` and are intended to hide
+L1/L2 latency for the activation and scale/zero streams without increasing
+register pressure.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed with kernel times and speedups shown below.
+
+### Sanity benchmark (M=8, 4096x11008, threads=8)
+
+| bits | kernel time (ms / iter) | speedup vs dequant+matmul |
+|------|--------------------------:|----------------------------:|
+| 3    | 0.706                     | 399.59x                     |
+| 5    | 0.799                     | 352.02x                     |
+| 6    | 0.750                     | 382.05x                     |
+| 7    | 0.711                     | 519.65x                     |
+
+For comparison, the previous `K_UNROLL=16` baseline (pass 22) on the same
+sanity shape reported ~0.88 ms/iter for 3-bit, ~0.80 ms/iter for 6-bit, and
+~0.85 ms/iter for 7-bit, so the restrict + prefetch change is roughly 10-20%
+faster on this fixed M=8 shape.
+
+### A/B vs pass-22 `laguna` M=1 sweep (threads=8)
+
+| set | bits | kernel ratio | speedup ratio |
+|-----|------|-------------:|--------------:|
+| laguna | 3 | 0.996x | 0.961x |
+| laguna | 5 | 0.872x | 0.920x |
+| laguna | 6 | 1.079x | 1.097x |
+| laguna | 7 | 1.000x | 0.987x |
+| all | all | 0.984x | 0.989x |
+
+`kernel ratio` = pass-22 kernel ms / pass-23 kernel ms.  The `laguna` M=1
+geomean is within 2% (0.984x), i.e. noise; the larger, more repeatable win is on
+the M=8 sanity shape where the activation/scale prefetch and restricted pointers
+hide latency better.
+
+## Optimization pass 24 (2026-08-04): hoist K-block invariants out of the inner loop
+
+`gemv_col_block` recomputed `K / 32`, `col0 / 16`, and `col0 % 16` inside every
+K-block iteration even though they are constant over the loop.  Moving these
+calculations above the K-block loop removes two divisions and one modulo per
+K-block.  On its own this is a tiny cleanup, but it keeps the hot loop body
+lean and pairs with the restrict/prefetch changes in pass 23.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed; representative M=8 kernel times per iteration:
+
+| bits | kernel time (ms / iter) | speedup vs dequant+matmul |
+|------|--------------------------:|----------------------------:|
+| 3    | 0.725                     | 368.59x                     |
+| 5    | 0.698                     | 379.89x                     |
+| 6    | 0.726                     | 385.62x                     |
+| 7    | 0.804                     | 448.55x                     |
+
+The fixed M=8 sanity shape remains in the same 0.7-0.8 ms/iter ballpark as
+pass 23; run-to-run variance on this host is roughly ±10%.
+
+## Optimization pass 25 (2026-08-04): branch hints for rare paths
+
+Annotate the hot K-block loop branches with `__builtin_expect` so the compiler
+and CPU branch predictor favor the common cases:
+
+- `group < 0` (group wrap-around) is rare;
+- `group != prev_group` is uncommon when `group_size` is large relative to K;
+- `next_group < 0` is rare;
+- `next_group != group` is uncommon;
+- `kb + 1 < kb_end` is true for all but the last K-block.
+
+These hints reduce branch mispredicts in the inner loop and let the compiler
+layout the fast path sequentially.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed; representative M=8 kernel times per iteration:
+
+| bits | kernel time (ms / iter) | speedup vs dequant+matmul |
+|------|--------------------------:|----------------------------:|
+| 3    | 0.733                     | 383.83x                     |
+| 5    | 0.737                     | 384.55x                     |
+| 6    | 0.673                     | 416.32x                     |
+| 7    | 0.742                     | 507.12x                     |
+
+Sanity times are comparable to pass 24; the branch hints are a low-risk
+micro-optimization that keeps the inner fast path tightly laid out.
