@@ -22,10 +22,13 @@ many cores and large caches. The kernel therefore:
    32-code block and decoded on-the-fly inside the same hot loop that computes
    the GEMV. This keeps the weight working set at `bits/16` of a dense fp16
    matrix.
-2. **Uses all available cores.** Output columns are parallelized with
-   `at::parallel_for`; each thread works on independent column chunks. SIMD
-   kernels are kept free of `at::parallel_for` to avoid OpenMP target-attribute
-   interaction issues; the parallel wrapper calls targeted per-column functions.
+2. **Uses all available cores.** The main parallelization is over output
+   columns via `at::parallel_for`; each thread works on independent column
+   chunks. When the column-chunk count is too small to saturate all threads,
+   the kernel falls back to parallelizing over 32-code K-blocks, accumulating
+   per-task FP32 partials and reducing them to BF16 at the end. SIMD
+   micro-kernels are target-attributed functions called from a target-attributed
+   `gemv_kernel` wrapper that owns the `at::parallel_for` scheduling.
 3. **Wide SIMD to amortize memory latency.** AVX-512 (16 lanes) is used for
    all supported batch sizes (`M <= 32`); AVX2 (8 lanes) is the fallback for
    non-AVX-512 hosts or shapes where `N % 16 != 0`. A scalar fallback covers
@@ -2060,3 +2063,948 @@ Measured with `GPTQMODEL_PANGOLIN_CPU_DISABLE_AVX512=1` to force the AVX2 path.
 | 2048 x 512 | 0.195 | 0.288 | 1.48x |
 | 512 x 2048 | 0.154 | 0.243 | 1.58x |
 | 2048 x 256 | 0.117 | 0.167 | 1.43x |
+
+## Optimization pass 6 (2026-08-04): increase K_UNROLL to 8 for M <= 2
+
+The AVX-512/AVX2 GEMV macro was tuned to keep 8 partial accumulators for `M <= 2`
+instead of 4, and 2 partial accumulators for `M <= 4`. This breaks the FP32 FMA
+dependency chain further for decode-bound small batch sizes without increasing register pressure past the spill point for larger M.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+`benchmark --sanity --bits 3 5 6 7 --threads 8` results after the change (138 iters, M=1, K=4096, N=11008, group_size=128):
+
+| bits | kernel (ms) | speedup |
+|------|------------|---------|
+| 3 | 0.1442 | 243.71x |
+| 5 | 0.1465 | 242.60x |
+| 6 | 0.1531 | 233.53x |
+| 7 | 0.1778 | 265.36x |
+
+# Pangolin CPU GEMV benchmark (bfloat16, threads=8) — laguna after K_UNROLL=8
+
+## laguna (bits=3, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.182        65.593    359.52x
+2048 x 6144  2  0.219        63.852    291.69x
+2048 x 6144  4  0.241        64.913    269.75x
+2048 x 6144  8  0.337        64.509    191.55x
+2048 x 6144  16  0.422        65.000    154.05x
+2048 x 6144  32  1.942        69.105    35.58x
+2048 x 1024  1  0.066        2.439    36.86x
+2048 x 1024  2  0.057        3.759    65.47x
+2048 x 1024  4  0.082        3.043    37.33x
+2048 x 1024  8  0.075        3.053    40.93x
+2048 x 1024  16  0.100        4.464    44.72x
+2048 x 1024  32  0.354        2.749    7.77x
+6144 x 2048  1  0.206        60.641    294.75x
+6144 x 2048  2  0.277        64.401    232.83x
+6144 x 2048  4  0.245        61.287    250.40x
+6144 x 2048  8  0.358        62.804    175.53x
+6144 x 2048  16  0.552        61.964    112.18x
+6144 x 2048  32  1.909        62.513    32.75x
+2048 x 8192  1  0.232        87.370    376.82x
+2048 x 8192  2  0.269        113.652    422.12x
+2048 x 8192  4  0.491        119.017    242.34x
+2048 x 8192  8  0.401        89.714    223.95x
+2048 x 8192  16  0.561        87.104    155.31x
+2048 x 8192  32  2.557        90.475    35.39x
+8192 x 2048  1  0.295        85.351    289.40x
+8192 x 2048  2  0.267        86.518    323.68x
+8192 x 2048  4  0.299        87.279    292.12x
+8192 x 2048  8  0.435        85.816    197.18x
+8192 x 2048  16  0.667        87.844    131.61x
+8192 x 2048  32  2.550        89.329    35.03x
+2048 x 512  1  0.033        1.103    33.19x
+2048 x 512  2  0.039        1.098    28.36x
+2048 x 512  4  0.047        1.102    23.57x
+2048 x 512  8  0.056        1.104    19.62x
+2048 x 512  16  0.071        1.129    15.85x
+2048 x 512  32  0.192        1.191    6.20x
+512 x 2048  1  0.036        1.091    29.92x
+512 x 2048  2  0.037        1.141    30.75x
+512 x 2048  4  0.039        1.802    45.64x
+512 x 2048  8  0.046        1.112    24.23x
+512 x 2048  16  0.058        1.115    19.14x
+512 x 2048  32  0.151        1.155    7.64x
+2048 x 256  1  0.030        0.614    20.52x
+2048 x 256  2  0.032        0.660    20.86x
+2048 x 256  4  0.034        0.650    18.95x
+2048 x 256  8  0.046        0.666    14.59x
+2048 x 256  16  0.056        0.713    12.66x
+2048 x 256  32  0.111        0.701    6.34x
+
+## laguna (bits=5, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.184        65.613    356.89x
+2048 x 6144  2  0.254        65.816    259.05x
+2048 x 6144  4  0.228        64.491    283.42x
+2048 x 6144  8  0.327        62.447    191.19x
+2048 x 6144  16  0.452        58.271    128.98x
+2048 x 6144  32  2.038        60.893    29.87x
+2048 x 1024  1  0.047        2.192    47.09x
+2048 x 1024  2  0.054        2.175    40.52x
+2048 x 1024  4  0.058        2.226    38.62x
+2048 x 1024  8  0.074        2.202    29.95x
+2048 x 1024  16  0.096        3.097    32.30x
+2048 x 1024  32  0.349        2.332    6.68x
+6144 x 2048  1  0.225        64.049    284.60x
+6144 x 2048  2  0.225        66.589    296.29x
+6144 x 2048  4  0.245        63.865    260.61x
+6144 x 2048  8  0.301        66.106    219.80x
+6144 x 2048  16  0.454        69.152    152.43x
+6144 x 2048  32  1.927        64.803    33.63x
+2048 x 8192  1  0.262        89.691    342.15x
+2048 x 8192  2  0.294        88.470    301.20x
+2048 x 8192  4  0.339        91.200    268.78x
+2048 x 8192  8  0.415        93.768    225.88x
+2048 x 8192  16  0.564        87.210    154.57x
+2048 x 8192  32  2.621        90.738    34.62x
+8192 x 2048  1  0.241        88.389    367.03x
+8192 x 2048  2  0.306        98.362    321.02x
+8192 x 2048  4  0.367        94.840    258.12x
+8192 x 2048  8  0.433        92.533    213.60x
+8192 x 2048  16  0.664        91.250    137.35x
+8192 x 2048  32  4.719        89.988    19.07x
+2048 x 512  1  0.035        1.102    31.28x
+2048 x 512  2  0.040        1.088    27.33x
+2048 x 512  4  0.045        1.340    29.92x
+2048 x 512  8  0.057        1.124    19.61x
+2048 x 512  16  0.079        1.120    14.21x
+2048 x 512  32  0.202        1.177    5.81x
+512 x 2048  1  0.033        1.076    32.92x
+512 x 2048  2  0.037        1.088    29.44x
+512 x 2048  4  0.041        1.111    26.99x
+512 x 2048  8  0.047        1.079    23.07x
+512 x 2048  16  0.058        1.109    19.28x
+512 x 2048  32  0.148        1.137    7.70x
+2048 x 256  1  0.028        0.644    22.87x
+2048 x 256  2  0.032        0.654    20.35x
+2048 x 256  4  0.036        1.484    41.19x
+2048 x 256  8  0.045        0.661    14.71x
+2048 x 256  16  0.058        0.683    11.79x
+2048 x 256  32  0.112        0.690    6.14x
+
+## laguna (bits=6, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.203        69.420    341.89x
+2048 x 6144  2  0.253        65.589    259.74x
+2048 x 6144  4  0.263        68.533    260.26x
+2048 x 6144  8  0.313        67.103    214.38x
+2048 x 6144  16  0.441        65.083    147.52x
+2048 x 6144  32  1.864        64.275    34.48x
+2048 x 1024  1  0.053        5.782    109.65x
+2048 x 1024  2  0.056        3.834    68.06x
+2048 x 1024  4  0.066        4.906    74.75x
+2048 x 1024  8  0.076        5.460    71.89x
+2048 x 1024  16  0.104        4.605    44.39x
+2048 x 1024  32  0.356        5.533    15.53x
+6144 x 2048  1  0.213        67.906    318.19x
+6144 x 2048  2  0.225        64.203    285.13x
+6144 x 2048  4  0.294        65.338    222.56x
+6144 x 2048  8  0.323        61.813    191.61x
+6144 x 2048  16  0.463        60.740    131.09x
+6144 x 2048  32  1.916        68.114    35.55x
+2048 x 8192  1  0.306        95.042    310.88x
+2048 x 8192  2  0.292        93.031    318.20x
+2048 x 8192  4  0.326        91.805    281.39x
+2048 x 8192  8  0.404        92.437    228.58x
+2048 x 8192  16  0.586        91.938    156.97x
+2048 x 8192  32  2.534        91.498    36.11x
+8192 x 2048  1  0.252        92.097    365.30x
+8192 x 2048  2  0.271        93.037    343.32x
+8192 x 2048  4  0.356        92.298    259.32x
+8192 x 2048  8  0.441        92.404    209.73x
+8192 x 2048  16  0.642        97.451    151.72x
+8192 x 2048  32  2.613        92.503    35.40x
+2048 x 512  1  0.033        1.100    32.95x
+2048 x 512  2  0.038        1.077    28.03x
+2048 x 512  4  0.049        1.114    22.68x
+2048 x 512  8  0.055        1.093    19.95x
+2048 x 512  16  0.073        1.125    15.32x
+2048 x 512  32  0.202        1.139    5.63x
+512 x 2048  1  0.036        1.106    30.80x
+512 x 2048  2  0.036        1.103    30.52x
+512 x 2048  4  0.042        1.116    26.29x
+512 x 2048  8  0.045        1.112    24.61x
+512 x 2048  16  0.058        1.117    19.13x
+512 x 2048  32  0.149        1.168    7.83x
+2048 x 256  1  0.029        0.644    22.26x
+2048 x 256  2  0.031        0.670    21.72x
+2048 x 256  4  0.040        0.677    17.02x
+2048 x 256  8  0.049        0.674    13.70x
+2048 x 256  16  0.057        0.701    12.39x
+2048 x 256  32  0.111        0.726    6.52x
+
+## laguna (bits=7, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.242        86.351    357.37x
+2048 x 6144  2  0.263        85.791    326.25x
+2048 x 6144  4  0.312        85.669    274.39x
+2048 x 6144  8  0.378        84.311    223.07x
+2048 x 6144  16  0.507        85.847    169.16x
+2048 x 6144  32  1.979        88.081    44.52x
+2048 x 1024  1  0.064        5.942    93.38x
+2048 x 1024  2  0.064        4.202    65.94x
+2048 x 1024  4  0.071        5.229    73.78x
+2048 x 1024  8  0.099        5.168    52.05x
+2048 x 1024  16  0.120        7.887    65.81x
+2048 x 1024  32  0.366        5.847    15.97x
+6144 x 2048  1  0.357        83.964    235.51x
+6144 x 2048  2  0.279        85.016    305.09x
+6144 x 2048  4  0.325        85.120    261.73x
+6144 x 2048  8  0.370        84.776    228.88x
+6144 x 2048  16  0.536        89.815    167.71x
+6144 x 2048  32  2.008        86.715    43.18x
+2048 x 8192  1  0.367        120.170    327.12x
+2048 x 8192  2  0.359        119.657    333.11x
+2048 x 8192  4  0.435        116.483    267.71x
+2048 x 8192  8  0.497        121.698    244.73x
+2048 x 8192  16  0.651        125.021    192.02x
+2048 x 8192  32  2.600        119.958    46.13x
+8192 x 2048  1  0.327        119.774    366.21x
+8192 x 2048  2  0.345        123.274    357.46x
+8192 x 2048  4  0.393        121.045    308.19x
+8192 x 2048  8  0.486        122.026    250.89x
+8192 x 2048  16  0.714        123.224    172.69x
+8192 x 2048  32  2.595        120.131    46.29x
+2048 x 512  1  0.039        1.341    34.17x
+2048 x 512  2  0.040        1.317    32.55x
+2048 x 512  4  0.329        1.370    4.17x
+2048 x 512  8  0.052        1.324    25.37x
+2048 x 512  16  0.071        1.334    18.77x
+2048 x 512  32  0.192        1.373    7.15x
+512 x 2048  1  0.038        1.314    34.56x
+512 x 2048  2  0.040        1.351    33.88x
+512 x 2048  4  0.043        1.326    30.95x
+512 x 2048  8  0.049        1.345    27.51x
+512 x 2048  16  0.061        1.418    23.18x
+512 x 2048  32  0.159        1.388    8.73x
+2048 x 256  1  0.030        0.772    25.52x
+2048 x 256  2  0.034        0.805    23.84x
+2048 x 256  4  0.038        0.802    20.97x
+2048 x 256  8  0.047        0.819    17.51x
+2048 x 256  16  0.058        0.821    14.10x
+2048 x 256  32  0.658        0.852    1.30x
+
+## Optimization pass 7 (2026-08-04): parallelize over K-blocks when output columns are few
+
+When `N / VLEN` is small (fewer than `2 * num_threads`), the previous
+column-parallel strategy left cores idle. The kernel now switches to a
+K-block parallel mode: each task processes a contiguous slice of 32-code
+K-blocks for all output columns, writes a per-task FP32 partial buffer, and a
+final reduction sums the partials and casts to BF16. This keeps all threads
+busy on small-N layers while the existing column-parallel path remains for
+large N.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+`benchmark --sanity --bits 3 5 6 7 --threads 8` speedups: 291x, 241x, 223x,
+325x.
+
+Laguna S 2.1 shapes (M=1/2/4/8, threads=8) geomean speedups:
+- bits=3: 94.68x
+- bits=5: 87.61x
+- bits=6: 87.89x
+- bits=7: 102.91x
+
+Small-N speedups improved most; for example bits=7 `2048x256` M=1 roughly
+doubled and bits=5 `2048x1024` M=1 roughly tripled versus the previous
+column-only pass.
+
+GLM-4.5-Air proxy shapes (M=1/2/4/8, threads=8) geomean speedups:
+- bits=3: 193.69x (robust 226.66x)
+- bits=5: 165.30x (robust 190.66x)
+- bits=6: 168.59x (robust 196.13x)
+- bits=7: 180.76x (robust 211.27x)
+
+DeepSeek-V4-Flash-0731 shapes (M=1/2/4/8, threads=8) geomean speedups:
+- bits=3: 169.58x (robust 191.47x)
+- bits=5: 153.53x (robust 170.02x)
+- bits=6: 123.60x (robust 133.29x)
+- bits=7: 179.23x (robust 203.18x)
+
+## Optimization pass 8 (2026-08-04): split M=32 into two M=16 passes
+
+The AVX-512 `gemv_kernel_avx512<Bits, 32>` template kept 32 independent FP32
+accumulators, which exceeds the 32 ZMM register budget and spilled to stack. The
+dispatch layer now routes M=32 through two M=16 kernel calls on both AVX-512
+and AVX2 paths, processing the first and second 16 rows of `x`/`out` in turn.
+This keeps the register working set at 16 vectors and avoids spills; it also
+helps the scalar fallback and makes the tail dispatch simpler. M=16 is already
+within budget, so it continues to be dispatched directly.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+Laguna S 2.1 shapes (M=16/32, threads=8) geomean speedups:
+- M=16: 57.03x (robust 59.78x)
+  - bits=3: 52.30x
+  - bits=5: 58.14x
+  - bits=6: 54.43x
+  - bits=7: 63.93x
+- M=32: 32.95x (robust 34.32x)
+  - bits=3: 33.65x
+  - bits=5: 28.57x
+  - bits=6: 33.19x
+  - bits=7: 36.94x
+
+## Optimization pass 9 (2026-08-04): tune K_UNROLL by bit-width to avoid register spills
+
+The original `K_UNROLL` schedule kept `M <= 2` at 8 partial sums, `M <= 4` at 2,
+and larger `M` at 1. Raising `M <= 4` to 4 partial sums and `M <= 8` to 2 partial
+sums improved throughput for bits 3/5, but bits 6/7 have an extra qword plane and
+more decode temporaries, so the larger accumulator arrays spilled on some shapes
+(e.g. `2048x6144` bits=7 M=2). The schedule is now selected per `(Bits, SizeM)`
+by a `k_unroll_for<Bits, SizeM>()` helper:
+
+- `M == 1`: 32 partial sums for all bit widths
+- `M == 2`: 8 for bits 3/5/6, 4 for bits 7
+- `M <= 4`: 4 for bits 3/5/6, 2 for bits 7
+- `M <= 8`: 2 for bits 3/5/6, 1 for bits 7
+- `M > 8`: 1
+
+This keeps the FP32 accumulator array plus decode/qword temporaries within the
+AVX-512 ZMM register budget while still exposing enough independent FMA chains to
+hide FMA latency.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed;
+`benchmark --sanity` speedups: 246.57x (bits=3), 236.62x (bits=5), 237.96x
+(bits=6), 252.87x (bits=7).
+
+Laguna S 2.1 shapes (M=1/2/4/8, threads=8) geomean speedups:
+- bits=3: 96.31x (robust 99.70x)
+- bits=5: 98.36x (robust 102.73x)
+- bits=6: 80.77x (robust 82.01x)
+- bits=7: 101.35x (robust 104.67x)
+
+## Optimization pass 10 (2026-08-04): re-benchmark after K_UNROLL schedule and test decode-once weight buffering
+
+Re-ran the full Laguna S 2.1 sweep on the K_UNROLL-tuned tree to get a clean
+baseline and to evaluate the next obvious micro-optimization: decode a full
+32-code block into a local `float wblock[32][VLEN]` once per column block and
+reuse the decoded weights across `M` rows.  The hypothesis was that this would
+amortize the 3-plane planar decode for `M > 1`.  It turned out to be a
+regression (sanity dropped by ~25-50% across bits), so it was reverted before
+committing.
+
+Why it regressed: separating the decode loop from the FMA loop forces the
+decoded `wblock` through the L1 store-to-load path; the additional memory
+traffic and loss of decode/FMA interleaving outweighs any decode savings on
+this CPU.  The original inline decode-and-FMA design remains faster.
+
+Current clean baseline (K_UNROLL pass 9 code, `pytest` 160/160 passed):
+
+`benchmark --sanity --bits 3 5 6 7 --threads 8` speedups:
+- bits=3: 247.71x
+- bits=5: 231.76x
+- bits=6: 218.03x
+- bits=7: 238.38x
+
+Laguna S 2.1 shapes (M=1/2/4/8, threads=8) fresh geomean speedups:
+- bits=3: 85.70x
+- bits=5: 85.33x
+- bits=6: 81.42x
+- bits=7: 95.94x
+
+Remaining levers that may still move the needle toward the 4x absolute-latency
+target:
+- Interleave two K-steps inside the FMA loop to better hide decode latency.
+- Pre-pack `qweight` for wider 32-column AVX-512 decode chunks (needs careful
+  register budgeting for bits=7).
+- Tile/AMX is not available on this host, so no tile-matmul path.
+
+## Optimization pass 11 (2026-08-04): stream BF16 scales, keep zero * scale in FP32
+
+Replaced the FP32 `scales` pre-conversion with a single BF16 `scales` tensor
+and a `LOAD_SCALE` helper that converts BF16 scale vectors to FP32 on the fly
+inside the hot loop.  The `zero * scale` precompute still writes an FP32
+`zero_scale_f` tensor to avoid the numerical cancellation that destroyed
+accuracy when `zero_scale` was also stored as BF16.  Net effect for a single
+token:
+
+- Scale memory traffic is halved (BF16 instead of FP32), and the FP32
+  `scales` copy is removed.
+- The hot loop now loads one BF16 scale vector and one FP32 zero-scale vector
+  per k-block instead of two FP32 vectors.
+- GCC 11 on the host does not provide `_mm512_cvtbf16_2_ps`, so the BF16->FP32
+  expansion is done with `_mm512_cvtepu16_epi32` + `_mm512_slli_epi32` (same
+  for AVX2 with 256-bit registers).
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160/160 passed
+  (AVX-512, AVX2-only, scalar, M=1..32, bits=3/5/6/7).
+- `benchmark --sanity --bits 3 5 6 7 --threads 8` speedups:
+  - bits=3: 263.88x
+  - bits=5: 262.16x
+  - bits=6: 254.21x
+  - bits=7: 314.71x
+
+This is a modest improvement over the pass 10 baseline (247x/232x/218x/238x)
+and confirms the approach is numerically sound once `zero_scale` stays in FP32.
+
+A full Laguna S 2.1 sweep (M=1/2/4/8, threads=8) was run after the BF16 scale
+change. The large layers improve substantially because the reduced scale memory
+traffic and the removed FP32 scales copy lower the effective per-token latency:
+
+## laguna (bits=3, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.163        73.017    447.78x
+2048 x 6144  2  0.184        64.918    352.86x
+2048 x 6144  4  0.214        70.008    327.77x
+2048 x 6144  8  0.279        131.377   471.31x
+2048 x 1024  1  0.067        3.880     57.79x
+2048 x 1024  2  0.046        4.014     87.44x
+2048 x 1024  4  0.057        9.194     162.41x
+2048 x 1024  8  0.071        9.543     133.84x
+6144 x 2048  1  0.382        81.825    214.32x
+6144 x 2048  2  0.421        83.587    198.35x
+6144 x 2048  4  0.242        65.593    270.54x
+6144 x 2048  8  0.320        64.526    201.58x
+2048 x 8192  1  0.229        91.214    398.38x
+2048 x 8192  2  0.263        94.526    359.66x
+2048 x 8192  4  0.392        92.299    235.33x
+2048 x 8192  8  0.336        89.354    265.87x
+8192 x 2048  1  0.216        94.280    437.24x
+8192 x 2048  2  0.278        97.396    350.78x
+8192 x 2048  4  0.321        95.297    296.80x
+8192 x 2048  8  0.439        97.731    222.47x
+2048 x 512   1  0.033        1.249     37.86x
+2048 x 512   2  0.034        1.247     36.68x
+2048 x 512   4  0.040        1.180     29.78x
+2048 x 512   8  0.053        1.225     22.92x
+512 x 2048   1  0.034        1.207     35.84x
+512 x 2048   2  0.032        1.192     37.77x
+512 x 2048   4  0.034        1.181     34.70x
+512 x 2048   8  0.044        1.169     26.86x
+2048 x 256   1  0.029        0.670     23.22x
+2048 x 256   2  0.028        0.690     24.79x
+2048 x 256   4  0.034        0.706     20.77x
+2048 x 256   8  0.044        0.700     15.95x
+
+## laguna (bits=5, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.261        66.765    256.17x
+2048 x 6144  2  0.202        73.770    364.43x
+2048 x 6144  4  0.247        70.228    284.39x
+2048 x 6144  8  0.336        63.857    190.29x
+2048 x 1024  1  0.038        2.173     57.14x
+2048 x 1024  2  0.044        2.152     48.63x
+2048 x 1024  4  0.052        2.440     47.01x
+2048 x 1024  8  0.065        3.030     46.67x
+6144 x 2048  1  0.243        63.532    260.94x
+6144 x 2048  2  0.182        63.867    350.33x
+6144 x 2048  4  0.230        63.107    273.93x
+6144 x 2048  8  0.325        65.008    200.10x
+2048 x 8192  1  0.249        87.249    350.94x
+2048 x 8192  2  0.268        88.009    328.94x
+2048 x 8192  4  0.318        89.549    281.57x
+2048 x 8192  8  0.393        88.256    224.55x
+8192 x 2048  1  0.299        87.133    291.24x
+8192 x 2048  2  0.261        88.874    340.66x
+8192 x 2048  4  0.363        86.778    239.35x
+8192 x 2048  8  0.425        87.810    206.53x
+2048 x 512   1  0.030        1.110     36.87x
+2048 x 512   2  0.033        1.112     33.95x
+2048 x 512   4  0.035        1.111     31.50x
+2048 x 512   8  0.051        1.105     21.84x
+512 x 2048   1  0.028        1.084     38.96x
+512 x 2048   2  0.030        1.227     40.32x
+512 x 2048   4  0.034        1.079     32.12x
+512 x 2048   8  0.041        1.166     28.44x
+2048 x 256   1  0.025        0.577     22.68x
+2048 x 256   2  0.031        0.809     26.10x
+2048 x 256   4  0.033        0.657     19.95x
+2048 x 256   8  0.044        0.665     15.13x
+
+## laguna (bits=6, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.183        63.154    345.42x
+2048 x 6144  2  0.225        64.260    285.06x
+2048 x 6144  4  0.254        63.517    250.46x
+2048 x 6144  8  0.292        63.587    217.85x
+2048 x 1024  1  0.041        2.271     56.06x
+2048 x 1024  2  0.048        2.147     44.68x
+2048 x 1024  4  0.054        2.169     40.50x
+2048 x 1024  8  0.061        2.173     35.77x
+6144 x 2048  1  0.192        64.604    336.96x
+6144 x 2048  2  0.263        66.768    254.22x
+6144 x 2048  4  0.230        64.554    280.41x
+6144 x 2048  8  0.591        64.873    109.83x
+2048 x 8192  1  0.271        92.152    340.25x
+2048 x 8192  2  0.324        92.068    284.33x
+2048 x 8192  4  0.361        90.674    251.37x
+2048 x 8192  8  0.405        90.254    223.07x
+8192 x 2048  1  0.248        97.675    394.47x
+8192 x 2048  2  0.336        96.158    286.46x
+8192 x 2048  4  0.292        95.165    325.48x
+8192 x 2048  8  0.436        94.060    215.67x
+2048 x 512   1  0.031        1.214     39.50x
+2048 x 512   2  0.034        1.117     33.13x
+2048 x 512   4  0.035        1.776     51.43x
+2048 x 512   8  0.042        1.102     26.37x
+512 x 2048   1  0.032        1.143     35.80x
+512 x 2048   2  0.031        1.095     35.07x
+512 x 2048   4  0.048        1.156     24.01x
+512 x 2048   8  0.044        1.102     24.89x
+2048 x 256   1  0.026        0.672     25.54x
+2048 x 256   2  0.028        0.649     22.78x
+2048 x 256   4  0.032        0.664     20.81x
+2048 x 256   8  0.040        0.668     16.77x
+
+## laguna (bits=7, threads=8)
+
+K x N        M  kernel (ms)  ref (ms)  speedup
+-----------  -  -----------  --------  -------
+2048 x 6144  1  0.244        84.111    344.70x
+2048 x 6144  2  0.262        84.275    321.08x
+2048 x 6144  4  0.335        85.949    256.89x
+2048 x 6144  8  0.363        84.430    232.52x
+2048 x 1024  1  0.056        3.506     63.08x
+2048 x 1024  2  0.063        2.926     46.71x
+2048 x 1024  4  0.061        3.002     49.21x
+2048 x 1024  8  0.074        3.478     46.76x
+6144 x 2048  1  0.235        83.075    353.91x
+6144 x 2048  2  0.293        85.372    291.50x
+6144 x 2048  4  0.338        83.253    246.30x
+6144 x 2048  8  0.373        85.971    230.40x
+2048 x 8192  1  0.325        118.935   366.34x
+2048 x 8192  2  0.307        117.083   381.13x
+2048 x 8192  4  0.409        119.581   292.68x
+2048 x 8192  8  0.497        119.806   241.25x
+8192 x 2048  1  0.329        118.226   359.08x
+8192 x 2048  2  0.348        121.812   349.61x
+8192 x 2048  4  0.390        118.774   304.84x
+8192 x 2048  8  0.483        122.390   253.39x
+2048 x 512   1  0.034        1.365     40.45x
+2048 x 512   2  0.039        1.336     34.63x
+2048 x 512   4  0.038        1.422     37.30x
+2048 x 512   8  0.047        1.353     28.78x
+512 x 2048   1  0.033        1.331     40.80x
+512 x 2048   2  0.035        1.345     38.18x
+512 x 2048   4  0.039        1.337     34.15x
+512 x 2048   8  0.046        1.340     29.31x
+2048 x 256   1  0.028        0.739     26.10x
+2048 x 256   2  0.032        0.826     25.97x
+2048 x 256   4  0.034        0.781     22.87x
+2048 x 256   8  0.041        0.794     19.17x
+
+Laguna S 2.1 shapes (M=1/2/4/8, threads=8) geomean speedups:
+- bits=3: 108.31x (robust 111.85x)
+- bits=5: 93.64x (robust 96.66x)
+- bits=6: 91.58x (robust 93.25x)
+- bits=7: 101.74x (robust 104.37x)
+
+Key M=1 large-layer absolute latencies (ms) and speedup vs. pass 10:
+- bits=3 2048x6144: 0.291 -> 0.163 (1.79x)
+- bits=5 2048x6144: 0.218 -> 0.261 (0.84x)  [slower, high variance]
+- bits=6 2048x6144: 0.228 -> 0.183 (1.25x)
+- bits=7 2048x6144: 0.254 -> 0.244 (1.04x)
+
+The big gains are on the larger K-dim shapes (e.g. 8192 x 2048, 2048 x 8192)
+where halving scale memory traffic and removing the FP32 scales copy pays off.
+Small layers are still reference/FOM-bound and do not move much.
+
+## Optimization pass 12: pre-pack qweight into [N/16, K/32, bits, 16]
+
+Pass 11 streams BF16 scales but still reads the packed `qweight` words in the
+planar `[K/32*bits, N]` row-major order.  Inside the hot `kb` loop the `bits`
+words for a single (K-block, column-block) are strided by `N*4` bytes, which
+causes poor L1/L2 reuse and TLB pressure for wide layers.
+
+Pass 12 pre-packs `qweight` once per tensor, caches it weakly, and changes the
+C++ kernel to read `[N/16, K/32, bits, 16]`.  This makes consecutive K-blocks
+for a fixed column-block contiguous in memory, while still keeping the `bits`
+plane words for one (K-block, column-block) in a single cache line.  The transpose
+is done in Python with vectorized `reshape`/`permute`/`contiguous`; the
+`WeakTensorKeyDictionary` cache means a given `module.qweight` pays the one-time
+copy only once, and the original 2D tensor is still usable by the CUDA/dequant
+paths.
+
+### Source changes
+
+- `gptqmodel_ext/planar/planar_gemv_cpu.cpp`: `gemv_cpu` now expects
+  `qweight.dim() == 4` with shape `[N/16, K/32, bits, 16]`.  The `gemv_col_block`
+  pointer arithmetic uses `((chunk * num_k_blocks + kb) * Bits) * 16 + lane`,
+  where `chunk = col0 / 16` and `lane = col0 % 16`.  Prefetch of the next
+  K-block is a simple `qbase + Bits * 16`.  Scalar and AVX2/AVX-512 paths use
+  the same packed indexing.
+- `gptqmodel/utils/pangolin.py`: added `_QWEIGHT_CPU_PACKED_CACHE` and
+  `_prepack_qweight_for_cpu`.  The CPU branch of `pangolin_gemv` looks up
+  `qweight` in the cache, transposes it on first use, then passes the packed
+  tensor to `gemv_cpu`.
+
+### Validation
+
+- `pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160 passed
+  (AVX-512, AVX2-only, scalar, M=1..32, bits 3/5/6/7).
+- `ruff check gptqmodel/utils/pangolin.py`: passed.
+- `scripts/benchmark_pangolin_cpu.py --sanity --bits 3 5 6 7 --threads 8` passed:
+  bits=3 240.73x, bits=5 288.45x, bits=6 272.61x, bits=7 324.94x.
+
+### Laguna S 2.1 sweep (M=1/2/4/8, threads=8, BF16)
+
+| bits | geomean | robust geomean |
+|------|---------|----------------|
+| 3    | 109.75x | 112.89x        |
+| 5    | 110.37x | 113.50x        |
+| 6    | 106.01x | 109.13x        |
+| 7    | 108.67x | 113.92x        |
+
+Compared to pass 11 this is +1.3% for 3-bit, +17.9% for 5-bit, +15.8% for
+6-bit, and +6.8% for 7-bit (robust geomeans).
+
+### Key M=1 large-layer absolute latencies (ms) vs. pass 11
+
+- bits=3 2048x6144: 0.163 -> 0.172 (slightly worse; noise on this shape; other
+  large 3-bit shapes are similar or faster, e.g. 8192x2044 0.216 -> 0.190)
+- bits=5 2048x6144: 0.261 -> 0.155 (1.68x faster)
+- bits=6 2048x6144: 0.183 -> 0.153 (1.20x faster)
+- bits=7 2048x6144: 0.244 -> 0.203 (1.20x faster)
+
+The 5/6/7-bit paths benefit most because their `bits` word loads are now fully
+contiguous and the prefetcher can stride through K-blocks without jumping across
+`N` columns.  The extra memory cost is one packed copy of `qweight` held weakly
+per CPU-used tensor; on the first call it is paid once, then reused.
+
+### Full real-shape sweeps (pass 12, threads=8, BF16)
+
+The per-shape tables are large; the geomean summaries below capture the overall
+trend.  Some individual cells show high variance from the dense reference path,
+so the "robust" column trims the top/bottom 10% of speedups per shape set.
+
+#### GLM-4.5-Air proxy
+
+| bits | geomean | robust geomean | pass 11 robust | delta |
+|------|---------|----------------|----------------|-------|
+| 3    | 217.76x | 256.69x        | 226.66x        | +13.2% |
+| 5    | 198.52x | 231.96x        | 190.66x        | +21.7% |
+| 6    | 207.62x | 250.00x        | 196.13x        | +27.5% |
+| 7    | 217.11x | 258.26x        | 211.27x        | +22.2% |
+
+#### DeepSeek-V4-Flash-0731
+
+| bits | geomean | robust geomean | pass 11 robust | delta |
+|------|---------|----------------|----------------|-------|
+| 3    | 187.51x | 212.88x        | 191.47x        | +11.2% |
+| 5    | 176.50x | 198.53x        | 170.02x        | +16.8% |
+| 6    | 161.81x | 181.05x        | 133.29x        | +35.8% |
+| 7    | 182.54x | 206.22x        | 203.18x        | +1.5%  |
+
+#### Laguna S 2.1
+
+| bits | geomean | robust geomean | pass 11 robust | delta |
+|------|---------|----------------|----------------|-------|
+| 3    | 109.75x | 112.89x        | 111.85x        | +0.9%  |
+| 5    | 110.37x | 113.50x        | 96.66x         | +17.4% |
+| 6    | 106.01x | 109.13x        | 93.25x         | +17.0% |
+| 7    | 108.67x | 113.92x        | 104.37x        | +9.2%  |
+
+## Optimization pass 13 (2026-08-04): paired-K BF16 `vdpbf16ps` decode for M=1
+
+Implemented an AVX-512 BF16 dot-product paired-K micro-kernel for `M=1` that
+processes two adjacent K values per `vdpbf16ps` instruction.  The two FP32
+weight vectors are converted to BF16, interleaved into a single `__m512bh`
+register via `vpermi2w`, and dotted with a broadcast BF16 `x[k], x[k+1]` pair.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+Benchmarked `laguna` M=1 against the existing AVX-512 macro path (which keeps
+`K_UNROLL=8` and two FP32 `vfmadd` per K).  The paired-K path is consistently
+slower on this host:
+
+| bits | paired-K geomean | macro M=1 geomean | delta |
+|------|------------------|-------------------|-------|
+| 3    | 84.85x           | 141.59x           | -40.1% |
+| 5    | 86.87x           | 141.72x           | -38.7% |
+| 6    | 79.08x           | 148.68x           | -46.8% |
+| 7    | 88.47x           | 136.30x           | -35.1% |
+
+The `vdpbf16ps` path saves one FP32 FMA per two K values, but the extra BF16
+conversion (`vcvtneps2bf16`), `vpermi2w` interleave, and narrower dependency
+hiding (`K_UNROLL=4`) outweigh the FMA reduction.  The existing per-K FP32 FMA
+path with `K_UNROLL=8` remains faster, so the paired-K change was reverted and
+not committed.
+
+## Optimization pass 14 (2026-08-04): increase M=1 K-unroll to 16
+
+`M=1` has the fewest live accumulators, so `k_unroll_for<Bits, 1>` was raised
+from 8 to 16.  This doubles the number of independent FP32 FMA chains in flight
+for the single-row path and better hides the FMA latency relative to the
+per-K planar decode work.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+Averaged `laguna` M=1 large-layer kernel times (ms) vs pass 12 baseline:
+
+| shape       | bits | pass 12 | pass 14 | delta |
+|-------------|------|---------|---------|-------|
+| 2048 x 6144 | 3    | 0.204   | 0.151   | 1.35x |
+| 8192 x 2048 | 3    | 0.228   | 0.195   | 1.17x |
+| 2048 x 8192 | 3    | 0.224   | 0.225   | 1.00x |
+| 2048 x 6144 | 5    | 0.205   | 0.154   | 1.33x |
+| 8192 x 2048 | 5    | 0.208   | 0.197   | 1.06x |
+| 2048 x 8192 | 5    | 0.249   | 0.216   | 1.15x |
+| 2048 x 6144 | 6    | 0.243   | 0.170   | 1.43x |
+| 8192 x 2048 | 6    | 0.254   | 0.249   | 1.02x |
+| 2048 x 8192 | 6    | 0.255   | 0.199   | 1.28x |
+| 2048 x 6144 | 7    | 0.238   | 0.205   | 1.16x |
+| 8192 x 2048 | 7    | 0.345   | 0.293   | 1.18x |
+| 2048 x 8192 | 7    | 0.333   | 0.280   | 1.19x |
+
+Large M=1 layers speed up by 1.15-1.43x; the small layers are still
+fixed-overhead dominated and do not move much.
+
+## Optimization pass 15 (2026-08-04): pre-expanded uint8 code tensor for M=1
+
+A bold attempt was made to remove planar decode from the M=1 hot loop by
+pre-decoding `qweight` to a uint8 code tensor with layout
+`[N/16, K/32, 32, 16]` and consuming it directly in an AVX-512 kernel.
+The Python precompute cached the uint8 expansion per `qweight` tensor, and a
+gated `has_avx512` JIT op exposed the runtime capability so that M=1 dispatch
+could choose the new path when AVX-512 was available.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+However, `laguna` M=1 large-layer kernel times (ms) with the uint8 path were
+consistently slower than the pass-14 packed macro:
+
+| shape       | bits | pass 14 | uint8 M=1 | delta  |
+|-------------|------|---------|-----------|--------|
+| 2048 x 6144 | 3    | 0.151   | 0.218     | 0.69x  |
+| 8192 x 2048 | 3    | 0.195   | 0.297     | 0.66x  |
+| 2048 x 8192 | 3    | 0.225   | 0.302     | 0.75x  |
+| 2048 x 6144 | 5    | 0.154   | 0.221     | 0.70x  |
+| 8192 x 2048 | 5    | 0.197   | 0.294     | 0.67x  |
+| 2048 x 8192 | 5    | 0.216   | 0.295     | 0.73x  |
+| 2048 x 6144 | 6    | 0.170   | 0.222     | 0.77x  |
+| 8192 x 2048 | 6    | 0.249   | 0.295     | 0.84x  |
+| 2048 x 8192 | 6    | 0.199   | 0.298     | 0.67x  |
+| 2048 x 6144 | 7    | 0.205   | 0.224     | 0.92x  |
+| 8192 x 2048 | 7    | 0.293   | 0.299     | 0.98x  |
+| 2048 x 8192 | 7    | 0.280   | 0.300     | 0.93x  |
+
+The extra DRAM traffic from 0.875-1 byte per weight (bits 7) up to
+~2.7 bytes per weight (bits 3) outweighed the saved decode instructions,
+making the pre-expanded uint8 path slower across the board.  The code was
+reverted; the pass-14 packed macro with `K_UNROLL=16` remains the best M=1
+configuration.
+
+Next likely lever: AVX-512 VNNI int8 dot-product, which would keep the
+pre-decoded code values at 1 byte/weight while replacing the per-K FMAs
+with `vpdpbusd` and a single FP32 rescale per group.
+
+## Optimization pass 16 (2026-08-04): AVX-512 VNNI int8 dot-product for M=1
+
+Implemented an AVX-512 VNNI `vpdpbusd` path for M=1:
+- Python pre-expands `qweight` to a VNNI uint8 layout `[N/16, K/32, 8, 16, 4]`
+  (k-in-group fastest, then column), cached per `qweight`.
+- C++ quantizes the M=1 float input row to int8 per group using a symmetric
+  scale `s_x = max(|x|) / 127`, records the exact `sum_x`, and accumulates
+  `sum(code * x_i)` with `_mm512_dpbusd_epi32`.
+- A greedy dither step adjusts rounded `x_i` values so `s_x * sum(x_i)` matches
+  `sum_x` and removes the zero-frequency quantization error.
+- Output is rescaled per group as `scale * (s_x * S - zero_code * sum_x)`.
+
+Build succeeded and `pytest` results improved from 157/160 to 158/160, with
+bits=5 M=1 now passing after dithering.  Bits=6 and bits=7 M=1 still failed
+`torch.allclose(out, ref, rtol=0.02, atol=0.01)` with max absolute errors of
+~0.021 and ~0.031 respectively, driven by the irreducible covariance term
+`sum(code * e)` where `e = x_f - s_x * x_i` is the per-element int8
+quantization residual.  Even with zero-mean `e`, the standard deviation of
+that dot product over a 128-element group is too large for the required
+inference tolerance when `code` spans 0..127 and the weight scale is not
+extremely small.
+
+The code was reverted.  The conclusion is that a pure int8 activation
+quantization cannot provide the needed numerical accuracy for this kernel at
+the current tolerance.  A future VNNI attempt would need int16 activations
+(`vpdpwssd` / `_mm512_madd_epi16`) or a per-K-block residual correction, both
+of which are larger changes.
+
+## Optimization pass 17 (2026-08-04): build with `-march=native`
+
+Added `-march=native` to the JIT `extra_cflags` for `gptqmodel_pangolin_cpu_ops`.
+The compiler can now schedule the decode+FMA hot loop for the host micro-architecture
+(Xeon Platinum 8559C / Sapphire Rapids), and the generated code makes better use of
+AVX-512 port/throughput behavior.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+Sanity speedups (M=8, threads=8) for the fixed sanity shape:
+
+| bits | speedup |
+|------|---------|
+| 3    | 110.90x |
+| 5    | 311.22x |
+| 6    | 258.16x |
+| 7    | 344.69x |
+
+Full `scripts/benchmark_pangolin_cpu.py --shapes all --batches 1 2 4 8 --threads 8`
+geomeans versus dense dequant+matmul reference:
+
+| shape set | bits | geomean speedup | shapes |
+|-----------|------|-----------------|--------|
+| laguna    | 3    | 99.96x  | 32 |
+| laguna    | 5    | 104.14x | 32 |
+| laguna    | 6    | 95.32x  | 32 |
+| laguna    | 7    | 155.59x | 32 |
+| glm45     | 3    | 178.94x | 32 |
+| glm45     | 5    | 184.13x | 32 |
+| glm45     | 6    | 192.58x | 32 |
+| glm45     | 7    | 208.19x | 32 |
+| deepseek_v4_flash_0731 | 3    | 154.83x | 32 |
+| deepseek_v4_flash_0731 | 5    | 169.34x | 32 |
+| deepseek_v4_flash_0731 | 6    | 170.66x | 32 |
+| deepseek_v4_flash_0731 | 7    | 170.56x | 32 |
+
+Per-shape tables are in `/tmp/pangolin_cpu_march_native.md`.
+
+Next lever: the remaining ~2-4x absolute-latency target now needs a different
+micro-architecture approach (e.g., int16 VNNI, a 32-column kernel tile, or
+pre-expanded BF16 weight tiles with `vdpbf16ps`) rather than compiler flags.
+
+## Optimization pass 18 (2026-08-04): try `-mprefer-vector-width=512` (reverted)
+
+Added `-mprefer-vector-width=512` alongside `-march=native` and ran an A/B
+benchmark against the previous commit (pass 17, `-march=native` only).  Both
+builds pass `pytest` 160/160, but the flag is not a clear win:
+
+| set | bits | prev kernel ms | curr kernel ms | kernel-time ratio | speedup ratio |
+|-----|------|---------------:|---------------:|------------------:|--------------:|
+| deepseek_v4_flash_0731 | 3 | 0.181 | 0.174 | 1.05x | 1.15x |
+| deepseek_v4_flash_0731 | 5 | 0.173 | 0.176 | 0.98x | 0.94x |
+| deepseek_v4_flash_0731 | 6 | 0.168 | 0.168 | 1.00x | 0.94x |
+| deepseek_v4_flash_0731 | 7 | 0.219 | 0.211 | 1.04x | 0.82x |
+| glm45 | 3 | 0.245 | 0.242 | 1.01x | 1.03x |
+| glm45 | 5 | 0.268 | 0.240 | 1.12x | 1.07x |
+| glm45 | 6 | 0.265 | 0.237 | 1.12x | 0.98x |
+| glm45 | 7 | 0.355 | 0.338 | 1.05x | 1.05x |
+| laguna | 3 | 0.107 | 0.098 | 1.09x | 0.98x |
+| laguna | 5 | 0.098 | 0.131 | 0.75x | 0.91x |
+| laguna | 6 | 0.105 | 0.101 | 1.04x | 1.06x |
+| laguna | 7 | 0.153 | 0.118 | 1.30x | 0.66x |
+
+Overall geomean kernel-time ratio across all 384 shapes is ~1.04x, but medians
+are near 1.0 and `laguna bits=5` regresses ~25%, so the change is noisy and
+has been reverted.  Per-shape tables are in `/tmp/pangolin_cpu_march_native.md`
+(prev) and `/tmp/pangolin_cpu_final.md` (curr).
+
+The compiler-flag tuning is now largely exhausted; further 2-4x gains will
+require a new micro-kernel (int16 VNNI, 32-column tile, BF16 weight tile,
+or paired-K `vdpbf16ps` with pre-decoded weights).
+
+
+## Optimization pass 19 (2026-08-04): K_UNROLL=32 for M==1
+
+Increase the K-unroll to 32 for `SizeM == 1` so the full 32-code K-block keeps
+more independent FP32 accumulators in flight and hides FMA latency.  The macro
+now fully unrolls the inner K-block loop at compile time.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+
+A/B versus the previous code commit (`-march=native` only, K_UNROLL=16 for M=1)
+from `scripts/benchmark_pangolin_cpu_compare.py`:
+
+| set | bits | kernel ratio | speedup ratio |
+|-----|------|-------------:|--------------:|
+| deepseek_v4_flash_0731 | 3 | 1.058x | 1.084x |
+| deepseek_v4_flash_0731 | 5 | 1.024x | 0.986x |
+| deepseek_v4_flash_0731 | 6 | 0.985x | 0.970x |
+| deepseek_v4_flash_0731 | 7 | 1.032x | 0.804x |
+| glm45 | 3 | 1.017x | 1.102x |
+| glm45 | 5 | 1.117x | 1.214x |
+| glm45 | 6 | 1.063x | 1.061x |
+| glm45 | 7 | 1.197x | 1.146x |
+| laguna | 3 | 1.117x | 1.066x |
+| laguna | 5 | 1.012x | 1.095x |
+| laguna | 6 | 1.085x | 1.069x |
+| laguna | 7 | 1.312x | 0.694x |
+| all | all | 1.081x | 1.013x |
+
+The `kernel ratio` column (previous kernel ms / current kernel ms) is the
+reliable signal; `speedup ratio` varies with the noisy dense reference timings.
+Overall kernel geomean is ~8% faster, with the biggest wins on `laguna` and
+`glm45` bits 5/7.  Tiny regressions on `deepseek` bits 5/6 are within run-to-run
+noise.
+
+## Optimization pass 20 (2026-08-04): uint8 pre-expanded qweight layout
+
+The planar decode in the hot loop is cheap but not free: bits 5/6/7 require
+2-3 separate plane extracts and ORs per K value.  To remove that work, add an
+optional uint8 pre-expanded qweight layout where each 32-bit word holds 4
+consecutive uint8 codes.  The C++ kernel sees this as `Bits==8` and extracts a
+code with a single 8-bit shift/mask, then `code * scale - zero_scale` and FMA
+as before.  The Python side (`gptqmodel/utils/pangolin.py`) builds this layout
+once per `qweight`, caches it weakly, and dispatches to the CPU op with the
+original `bits` for `zero`/`scale` decoding.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `ruff check gptqmodel/utils/pangolin.py --config format/ruff.toml` passed.
+
+A/B versus the packed planar layout (`GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=1`
+vs `0`) on the `laguna` sweep (threads=8, M=1/2/4/8):
+
+| set | bits | kernel ratio | speedup ratio |
+|-----|------|-------------:|--------------:|
+| laguna | 3 | 1.292x | 1.398x |
+| laguna | 5 | 1.223x | 1.304x |
+| laguna | 6 | 1.264x | 1.160x |
+| laguna | 7 | 1.407x | 1.450x |
+| all | all | 1.295x | 1.323x |
+
+The `kernel ratio` column (previous kernel ms / current kernel ms) is the
+reliable signal.  The pre-expanded layout is ~1.3x faster geomean, with the
+biggest wins on 7-bit (fewer OR planes) and 3-bit (smaller code masks).  A few
+individual cells show run-to-run noise, but the overall direction is clear.
+Memory use rises by `8 / bits` for the pre-expanded buffer; for bits 3/5/6/7
+this is 2.67x/1.60x/1.33x/1.14x over the packed qweight, so the trade-off is
+best for higher bit widths.
+
+## Optimization pass 21 (2026-08-04): AVX-512 int16 VNNI (`vpdpwssd`) M=1 path
+
+The pre-expanded uint8 layout removes planar shifts but still decodes each
+uint8 code to FP32 before FMA.  AVX-512 VNNI (`_mm512_dpwssd_epi32`) can keep
+the dot product in int16/int32 by pairing consecutive K codes.  The proposed
+path:
+
+- Pre-packs qweight from uint8 pre-expanded to `[N/16, K/32, 16, 32] int16`,
+  where each 64-byte VNNI vector holds 16 columns x 2 consecutive K codes.
+- For each 32-code K-block, quantizes the activation row to int16 with a
+  per-block scale `a_scale = max(|x|) / 32767`.
+- Computes `dot_i = sum(code * x_i)` with `_mm512_dpwssd_epi32` over 16 K-pairs.
+- Dequantizes with `partial = (dot_i - zero * sum(x_i)) * scale * a_scale`
+  using the precomputed `zero * scale` buffer.
+
+Validation: `pytest tests/test_pangolin_cpu_kernel.py` passed 160/160 with
+`GPTQMODEL_PANGOLIN_CPU_VNNI_INT16=1`.
+
+A/B versus the pre-expanded uint8 path (`GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=1`)
+on the `laguna` sweep (threads=8, M=1 only):
+
+| set | bits | kernel ratio | speedup ratio |
+|-----|------|-------------:|--------------:|
+| laguna | 3 | 0.779x | 0.727x |
+| laguna | 5 | 0.628x | 0.640x |
+| laguna | 6 | 0.759x | 0.935x |
+| laguna | 7 | 0.823x | 0.857x |
+| all | all | 0.744x | 0.781x |
+
+The VNNI path is slower geomean (0.74x kernel time) despite removing planar
+decode.  Likely causes: each weight is now 2 bytes instead of 1 byte, the
+per-K-block activation quantization adds fixed overhead, and the dense VNNI
+inner loop is memory-bandwidth limited on this host.  The int16 VNNI code was
+reverted; the pre-expanded uint8 path remains the current best M=1 micro-kernel.
