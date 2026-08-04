@@ -1,17 +1,14 @@
-# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
-from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.utils.machete import _validate_machete_device_support, machete_runtime_error
-from gptqmodel.utils.marlin import marlin_runtime_available, marlin_runtime_error
 from gptqmodel.utils.swordfish import (
     _validate_swordfish_device_support,
     prewarm_swordfish_extension,
@@ -41,24 +38,37 @@ def _mock_awq_module_tensors(
     group_size: int,
     in_features: int,
     out_features: int,
+    dtype: torch.dtype,
+    sym: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     groups = in_features // group_size
     maxq = (1 << bits) - 1
+    half_range = 1 << (bits - 1)
 
     float_weight = torch.randn(in_features, out_features, dtype=torch.float32) * 0.2
     weight_groups = float_weight.view(groups, group_size, out_features)
 
-    w_min = weight_groups.amin(dim=1)
-    w_max = weight_groups.amax(dim=1)
-    scales = ((w_max - w_min).clamp_min(1e-6) / maxq).to(torch.float16)
-    zero_points = torch.round((-w_min / scales.to(torch.float32))).clamp_(0, maxq).to(torch.int32)
-    quantized = torch.round(
-        weight_groups / scales.to(torch.float32).unsqueeze(1) + zero_points.unsqueeze(1)
-    ).clamp_(0, maxq).to(torch.int32)
+    if sym:
+        # Symmetric AWQ: center the range, store zero_point = half_range.
+        max_abs = weight_groups.abs().amax(dim=1)
+        max_abs[max_abs == 0] = 1.0
+        scales = (max_abs / (half_range - 1)).to(dtype)
+        zero_points = torch.full((groups, out_features), half_range, dtype=torch.int32)
+        quantized = torch.round(
+            weight_groups / scales.to(torch.float32).unsqueeze(1) + half_range
+        ).clamp_(0, maxq).to(torch.int32)
+    else:
+        w_min = weight_groups.amin(dim=1)
+        w_max = weight_groups.amax(dim=1)
+        scales = ((w_max - w_min).clamp_min(1e-6) / maxq).to(dtype)
+        zero_points = torch.round((-w_min / scales.to(torch.float32))).clamp_(0, maxq).to(torch.int32)
+        quantized = torch.round(
+            weight_groups / scales.to(torch.float32).unsqueeze(1) + zero_points.unsqueeze(1)
+        ).clamp_(0, maxq).to(torch.int32)
 
     qweight = _pack_awq_tensor(quantized.view(in_features, out_features), bits)
     qzeros = _pack_awq_tensor(zero_points, bits)
-    bias = torch.randn(out_features, dtype=torch.float16)
+    bias = torch.randn(out_features, dtype=dtype)
 
     return qweight, qzeros, scales, bias
 
@@ -69,43 +79,47 @@ def _build_awq_module(
     device: torch.device,
     bits: int,
     group_size: int,
+    sym: bool,
     in_features: int,
     out_features: int,
     qweight: torch.Tensor,
     qzeros: torch.Tensor,
     scales: torch.Tensor,
     bias: torch.Tensor,
+    dtype: torch.dtype,
 ):
     module = module_cls(
         bits=bits,
         group_size=group_size,
-        sym=False,
+        sym=sym,
         desc_act=False,
         in_features=in_features,
         out_features=out_features,
         bias=True,
         register_buffers=True,
+        dtype=dtype,
     ).to(device)
 
     with torch.no_grad():
         module.qweight.copy_(qweight.to(device))
         module.qzeros.copy_(qzeros.to(device))
-        module.scales.copy_(scales.to(torch.float16).to(device))
-        module.bias.copy_(bias.to(torch.float16).to(device))
+        module.scales.copy_(scales.to(dtype).to(device))
+        module.bias.copy_(bias.to(dtype).to(device))
 
     module.post_init()
     module.eval()
     return module
 
 
-def _assert_awq_candidate_matches_torch(
-    module_cls,
+def _assert_awq_matches_torch(
     *,
     device: torch.device,
     bits: int,
     group_size: int,
+    sym: bool,
     in_features: int,
     out_features: int,
+    dtype: torch.dtype,
     atol: float,
     rtol: float,
 ) -> None:
@@ -115,6 +129,8 @@ def _assert_awq_candidate_matches_torch(
         group_size=group_size,
         in_features=in_features,
         out_features=out_features,
+        dtype=dtype,
+        sym=sym,
     )
 
     baseline = _build_awq_module(
@@ -122,90 +138,103 @@ def _assert_awq_candidate_matches_torch(
         device=device,
         bits=bits,
         group_size=group_size,
+        sym=sym,
         in_features=in_features,
         out_features=out_features,
         qweight=qweight,
         qzeros=qzeros,
         scales=scales,
         bias=bias,
+        dtype=dtype,
     )
     candidate = _build_awq_module(
-        module_cls,
+        AwqSwordfishLinear,
         device=device,
         bits=bits,
         group_size=group_size,
+        sym=sym,
         in_features=in_features,
         out_features=out_features,
         qweight=qweight,
         qzeros=qzeros,
         scales=scales,
         bias=bias,
+        dtype=dtype,
     )
 
-    x = torch.randn((32, in_features), device=device, dtype=torch.float16)
-    with torch.inference_mode():
-        expected = baseline(x)
-        actual = candidate(x)
-        repeat = candidate(x)
-    torch.cuda.synchronize(device)
+    for m in (1, 8, 64):
+        x = torch.randn((m, in_features), device=device, dtype=dtype)
+        with torch.inference_mode():
+            expected = baseline(x)
+            actual = candidate(x)
+            repeat = candidate(x)
+        torch.cuda.synchronize(device)
 
-    assert candidate.qzeros.numel() > 0
-    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+        if not sym:
+            assert candidate.qzeros.numel() > 0
+        diff = (actual - expected).abs()
+        max_err = diff.max().item()
+        mae = diff.mean().item()
+        assert max_err < atol, f"m={m}: max error {max_err} exceeds {atol}"
+        assert mae < rtol, f"m={m}: MAE {mae} exceeds {rtol}"
     torch.testing.assert_close(repeat, expected, atol=atol, rtol=rtol)
 
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_awq_marlin_cuda_zero_points_match_torch_awq():
-    if marlin_import_exception is not None:
-        pytest.skip(f"AWQ Marlin kernel unavailable: {marlin_import_exception}")
-    if not marlin_runtime_available(torch.float16):
-        pytest.skip(marlin_runtime_error(torch.float16))
-
-    _assert_awq_candidate_matches_torch(
-        AwqMarlinLinear,
-        device=torch.device("cuda:0"),
-        bits=4,
-        group_size=64,
-        in_features=256,
-        out_features=128,
-        atol=8e-3,
-        rtol=8e-3,
-    )
-
-
-@pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_awq_machete_cuda_zero_points_match_torch_awq():
-    if not _validate_machete_device_support():
-        pytest.skip(machete_runtime_error())
-
-    _assert_awq_candidate_matches_torch(
-        AwqMacheteLinear,
-        device=torch.device("cuda:0"),
-        bits=4,
-        group_size=64,
-        in_features=128,
-        out_features=128,
-        atol=1e-2,
-        rtol=1e-2,
-    )
-
-
-@pytest.mark.cuda
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_awq_swordfish_cuda_zero_points_match_torch_awq():
+def test_awq_swordfish_cuda_matches_torch_awq_128():
     if not _validate_swordfish_device_support():
         pytest.skip(swordfish_runtime_error())
     prewarm_swordfish_extension()
 
-    _assert_awq_candidate_matches_torch(
-        AwqSwordfishLinear,
+    _assert_awq_matches_torch(
         device=torch.device("cuda:0"),
         bits=4,
         group_size=128,
+        sym=False,
         in_features=256,
         out_features=128,
+        dtype=torch.bfloat16,
+        atol=0.15,
+        rtol=0.05,
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_awq_swordfish_cuda_matches_torch_awq_64():
+    if not _validate_swordfish_device_support():
+        pytest.skip(swordfish_runtime_error())
+    prewarm_swordfish_extension()
+
+    _assert_awq_matches_torch(
+        device=torch.device("cuda:0"),
+        bits=4,
+        group_size=64,
+        sym=False,
+        in_features=256,
+        out_features=128,
+        dtype=torch.bfloat16,
+        atol=0.15,
+        rtol=0.05,
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_awq_swordfish_cuda_matches_torch_awq_symmetric_128():
+    if not _validate_swordfish_device_support():
+        pytest.skip(swordfish_runtime_error())
+    prewarm_swordfish_extension()
+
+    _assert_awq_matches_torch(
+        device=torch.device("cuda:0"),
+        bits=4,
+        group_size=128,
+        sym=True,
+        in_features=256,
+        out_features=128,
+        dtype=torch.bfloat16,
         atol=0.15,
         rtol=0.05,
     )

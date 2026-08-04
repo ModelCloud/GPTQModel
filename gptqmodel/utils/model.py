@@ -406,6 +406,7 @@ def make_quant(
     device: DEVICE = None,
     from_quantized: bool = False,
     dtype: Optional[torch.dtype] = None,
+    is_sharded: bool = False,
 ) -> Type[BaseQuantLinear]:
 
     bits = qcfg.runtime_bits
@@ -444,6 +445,7 @@ def make_quant(
         dtype=dtype,
         multi_select=True,
         adapter=extension,
+        is_sharded=is_sharded,
     )
 
     log.info(f"Kernel: candidates -> `[{', '.join(cls.__name__ for cls in quant_linear_candidates)}]`")
