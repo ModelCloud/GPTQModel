@@ -66,6 +66,7 @@ from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
+from ..utils.swordfish import _validate_swordfish_device_support
 from ..utils.model import (
     auto_dtype,
     convert_gptq_v1_to_v2_format,
@@ -1422,6 +1423,7 @@ def ModelLoader(cls):
                     lm_head_name=cls.lm_head,
                     device=device,
                     dtype=dtype,
+                    is_sharded=is_sharded,
                 )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
@@ -1713,6 +1715,16 @@ def ModelLoader(cls):
             if backend == BACKEND.AWQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("AWQ Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 
+        if backend in [BACKEND.GPTQ_SWORDFISH, BACKEND.AWQ_SWORDFISH, BACKEND.SWORDFISH]:
+            if is_sharded:
+                raise ValueError(
+                    "Format: The loading of sharded checkpoints with Swordfish is currently not supported."
+                )
+            if not _validate_swordfish_device_support():
+                from ..utils.swordfish import swordfish_runtime_error
+                raise ValueError(f"Kernel: {swordfish_runtime_error()}")
+            if dtype not in (torch.float16, torch.bfloat16):
+                raise ValueError("Swordfish kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
             from ..utils.bitblas import prepare_model_for_bitblas_load
@@ -1774,6 +1786,7 @@ def ModelLoader(cls):
                 quant_method=export_quant_method,
                 device=device,
                 pack_dtype=qcfg.pack_dtype,
+                is_sharded=is_sharded,
             )
 
         # == step4: set seqlen == #

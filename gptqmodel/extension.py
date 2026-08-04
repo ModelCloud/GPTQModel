@@ -96,6 +96,13 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.marlin", "_MARLIN_BF16_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
+        name="swordfish",
+        aliases=("gptq_swordfish", "awq_swordfish"),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.swordfish", "_SWORDFISH_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.swordfish", "_validate_swordfish_device_support")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.swordfish", "swordfish_runtime_error")(),
+    ),
+    _ExtensionSpec(
         name="paroquant",
         aliases=("paroquant_rotation",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.paroquant", "_PAROQUANT_ROTATION_EXTENSION"),

@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `Intern S2 PreView` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `inkling_mm_model` model support
@@ -808,3 +809,7 @@ from gptqmodel import TritonPatch
 # Fix Triton crashing under nogil/free-threading Python 3.13+ where the kernel cache storage in Triton is not thread-safe
 TritonPatch.apply()
 ```
+
+## License
+
+GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kernel sources vendored under `gptqmodel_ext/swordfish/` are licensed under the AGPL-3.0-or-later license and are only compiled/linked at runtime via JIT. A copy of the Swordfish license is included in `gptqmodel_ext/swordfish/licenses/LICENSE` and `licenses/SWORDFISH`.
