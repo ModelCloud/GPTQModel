@@ -79,6 +79,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None
     SUPPORTS_SHARDS: bool = None
+    SUPPORTS_SHARDED_LOAD: bool = True
     SUPPORTS_TRAINING: bool = None
 
     # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference

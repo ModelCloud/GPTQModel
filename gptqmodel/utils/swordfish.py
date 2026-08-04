@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -33,13 +33,15 @@ log = setup_logger()
 _SWORDFISH_OPS_NAME = "gptqmodel_swordfish_ops"
 _SWORDFISH_OPS_NAMESPACE = "gptqmodel_swordfish"
 
-_SWORDFISH_GENCODE_SM_RE = re.compile(r"code=sm_(\d+)(?:[a-z])?")
+_SWORDFISH_GENCODE_SM_RE = re.compile(r"code=sm_(\d+)([a-z]?)")
+_SWORDFISH_GENCODE_PTX_RE = re.compile(r"code=compute_(\d+)([a-z]?)")
 
 _SWORDFISH_ARCH_FLAGS = (
     # Blackwell TMA/tcgen05 features require the "a" (all) architecture suffix.
     # The B300 in this environment reports compute capability 10.3 (sm_103a).
     # Emit native cubins for the common Blackwell datacenter variants plus a
-    # forward-compatible PTX fallback.
+    # same-architecture PTX fallback.  The 'a' suffix is architecture-specific,
+    # so PTX from compute_103a only JITs to sm_103a, not to future chips.
     "-gencode=arch=compute_100a,code=sm_100a",
     "-gencode=arch=compute_103a,code=sm_103a",
     "-gencode=arch=compute_110a,code=sm_110a",
@@ -177,22 +179,49 @@ def _extension_api():
     return extension_api
 
 
-def _swordfish_supported_compute_capabilities() -> set[Tuple[int, int]]:
-    """Parse _SWORDFISH_ARCH_FLAGS and return the real SMs with native cubins."""
-    caps: set[Tuple[int, int]] = set()
+def _swordfish_supported_compute_capabilities() -> Tuple[
+    set[Tuple[int, int]], Dict[int, int], set[Tuple[int, int]]
+]:
+    """Parse _SWORDFISH_ARCH_FLAGS and return the supported capability sets.
+
+    Returns:
+        exact_caps: native cubin targets (`code=sm_*`) plus architecture-specific
+            PTX targets (`code=compute_*` with an 'a' suffix).
+        ptx_forward_min_minor: mapping from major version to the minimum minor
+            for forward-compatible (non-'a') PTX targets, if any.
+        ptx_exact_caps: architecture-specific PTX targets that only JIT to the
+            exact matching compute capability.
+    """
+    exact_caps: set[Tuple[int, int]] = set()
+    ptx_forward_min_minor: Dict[int, int] = {}
+    ptx_exact_caps: set[Tuple[int, int]] = set()
     for flag in _SWORDFISH_ARCH_FLAGS:
         for match in _SWORDFISH_GENCODE_SM_RE.finditer(flag):
             cap = int(match.group(1))
-            caps.add((cap // 10, cap % 10))
-    if not caps:
+            exact_caps.add((cap // 10, cap % 10))
+        for match in _SWORDFISH_GENCODE_PTX_RE.finditer(flag):
+            cap = int(match.group(1))
+            suffix = match.group(2)
+            major, minor = cap // 10, cap % 10
+            if suffix:
+                # Architecture-specific PTX (e.g. compute_103a) only JITs to the
+                # exact matching sm.
+                ptx_exact_caps.add((major, minor))
+            else:
+                # Forward-compatible PTX covers same-major devices with a minor
+                # greater than or equal to the PTX target minor.
+                prev = ptx_forward_min_minor.get(major)
+                if prev is None or minor < prev:
+                    ptx_forward_min_minor[major] = minor
+    if not exact_caps and not ptx_forward_min_minor and not ptx_exact_caps:
         # Fallback in case the gencode format ever changes unexpectedly.
-        caps = {(10, 0), (10, 3), (11, 0)}
-    return caps
+        exact_caps = {(10, 0), (10, 3), (11, 0)}
+    return exact_caps, ptx_forward_min_minor, ptx_exact_caps
 
 
-_SWORDFISH_SUPPORTED_COMPUTE_CAPABILITIES: set[Tuple[int, int]] = (
-    _swordfish_supported_compute_capabilities()
-)
+_SWORDFISH_SUPPORTED_CAPABILITIES: Tuple[
+    set[Tuple[int, int]], Dict[int, int], set[Tuple[int, int]]
+] = _swordfish_supported_compute_capabilities()
 
 
 def _swordfish_static_runtime_error() -> str:
@@ -201,15 +230,21 @@ def _swordfish_static_runtime_error() -> str:
     if not torch.cuda.is_available():
         return "Swordfish kernel requires CUDA."
     major, minor = torch.cuda.get_device_capability()
-    if (major, minor) not in _SWORDFISH_SUPPORTED_COMPUTE_CAPABILITIES:
-        supported = ", ".join(
-            f"sm{mj}{mn}" for mj, mn in sorted(_SWORDFISH_SUPPORTED_COMPUTE_CAPABILITIES)
-        )
-        return (
-            f"Swordfish kernel only supports native Blackwell variants "
-            f"({supported}); found compute capability {major}.{minor}."
-        )
-    return ""
+    exact_caps, ptx_forward, ptx_exact = _SWORDFISH_SUPPORTED_CAPABILITIES
+    if (
+        (major, minor) in exact_caps
+        or (major, minor) in ptx_exact
+        or (major in ptx_forward and minor >= ptx_forward[major])
+    ):
+        return ""
+    supported = ", ".join(
+        f"sm{mj}{mn}"
+        for mj, mn in sorted(exact_caps | ptx_exact)
+    )
+    return (
+        f"Swordfish kernel only supports Blackwell variants "
+        f"({supported}); found compute capability {major}.{minor}."
+    )
 
 
 def _validate_swordfish_device_support() -> bool:

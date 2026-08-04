@@ -554,7 +554,8 @@ def select_quant_linear(
                 if os.environ.get("DEBUG"):
                     log.info(f"skip {k} for unsupported device `{device}`")
                 continue
-            if is_sharded and not cls.SUPPORTS_SHARDS:
+            supports_sharded_load = getattr(cls, "SUPPORTS_SHARDED_LOAD", cls.SUPPORTS_SHARDS)
+            if is_sharded and not supports_sharded_load:
                 if os.environ.get("DEBUG"):
                     log.info(f"skip {k} because sharded checkpoints are not supported")
                 continue
@@ -622,7 +623,8 @@ def select_quant_linear(
     # Handle the case where backend is not AUTO.
     qlinear = get_kernel_for_backend(backend, quant_method, format)
 
-    if is_sharded and not qlinear.SUPPORTS_SHARDS:
+    supports_sharded_load = getattr(qlinear, "SUPPORTS_SHARDED_LOAD", qlinear.SUPPORTS_SHARDS)
+    if is_sharded and not supports_sharded_load:
         raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")
 
     validate, err = qlinear.validate(

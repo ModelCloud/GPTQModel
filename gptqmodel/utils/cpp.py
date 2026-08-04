@@ -77,14 +77,14 @@ def _log_cache_clear_callsite(*, reason: str, target_path: str | Path) -> None:
 
 
 def _nvcc_path() -> Optional[str]:
-    path = shutil.which("nvcc")
-    if path:
-        return path
     # Prefer the CUDA toolkit that PyTorch will use for compilation.
     if CUDA_HOME:
         candidate = os.path.join(CUDA_HOME, "bin", "nvcc")
         if os.path.isfile(candidate):
             return candidate
+    path = shutil.which("nvcc")
+    if path:
+        return path
     for env in ("CUDA_HOME", "CUDAHOME"):
         home = os.environ.get(env)
         if home:

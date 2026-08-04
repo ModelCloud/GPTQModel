@@ -44,6 +44,7 @@ class SwordfishLinear(GPTQQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = False
+    SUPPORTS_SHARDED_LOAD = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
@@ -402,6 +403,7 @@ class AwqSwordfishLinear(AWQuantLinear):
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = False
+    SUPPORTS_SHARDED_LOAD = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
@@ -581,8 +583,14 @@ class AwqSwordfishLinear(AWQuantLinear):
         shifts = torch.arange(
             0, 32, self.bits, dtype=torch.int32, device=qweight_int.device
         )
-        packed = (qweight_int << shifts.view(1, 1, pack_factor, 1)).sum(dim=2, dtype=torch.int32)
-        packed = packed.view(self.in_features // pack_factor, self.out_features).contiguous()
+        # Accumulate in int64 so the shift/sum does not rely on signed int32
+        # overflow, then cast back to the packed int32 bit pattern.
+        packed = (qweight_int.to(torch.int64) << shifts.view(1, 1, pack_factor, 1)).sum(
+            dim=2, dtype=torch.int64
+        )
+        packed = packed.to(torch.int32).view(
+            self.in_features // pack_factor, self.out_features
+        ).contiguous()
 
         prepacked = swordfish_prepack_B(
             packed,
@@ -608,6 +616,23 @@ class AwqSwordfishLinear(AWQuantLinear):
 
         effective_group_size = self.in_features if self.requested_group_size == -1 else self.group_size
         num_groups = self.in_features // effective_group_size
+
+        expected_zp = 1 << (self.bits - 1)
+        if self.sym:
+            # Symmetric AWQ checkpoints are consumed without zero points, but
+            # only if the stored zero points are exactly 2^(bits-1).
+            qzeros_unpacked = _unpack_cols_torch(
+                self.qzeros,
+                self.bits,
+                num_groups,
+                self.out_features,
+            )
+            qzeros_unpacked = _undo_awq_interleave(qzeros_unpacked, self.bits)
+            if torch.any(qzeros_unpacked != expected_zp):
+                raise ValueError(
+                    f"AwqSwordfishLinear symmetric checkpoint expects all zero points "
+                    f"to be {expected_zp} (2^(bits-1))."
+                )
 
         if self.has_zero_points:
             qzeros_unpacked = _unpack_cols_torch(
