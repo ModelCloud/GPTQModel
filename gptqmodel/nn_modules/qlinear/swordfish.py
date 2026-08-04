@@ -44,6 +44,7 @@ class SwordfishLinear(GPTQQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = False
+    SUPPORTS_SHARDED_LOAD = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
@@ -402,6 +403,7 @@ class AwqSwordfishLinear(AWQuantLinear):
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = False
+    SUPPORTS_SHARDED_LOAD = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]

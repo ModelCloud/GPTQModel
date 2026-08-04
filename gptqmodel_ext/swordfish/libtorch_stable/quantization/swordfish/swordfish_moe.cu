@@ -28,6 +28,7 @@
 
 #include "libtorch_stable/torch_utils.h"
 #include "swordfish_decode.cuh"
+#include "swordfish_device_utils.cuh"
 
 namespace swordfish {
 
@@ -307,10 +308,10 @@ void launch_moe(const void* a, const int32_t* b, const void* s, void* c,
                 const int32_t* sorted_ids, const int32_t* expert_ids,
                 const int32_t* num_post_padded, const float* topk_w, int top_k,
                 bool mul_topk, int total_tokens, int max_blocks, int block_size,
-                int k, int n, int group_size, cudaStream_t stream) {
+                int k, int n, int group_size, cudaStream_t stream,
+                int device_index) {
   using scalar_t = typename marlin::MarlinScalarType<type_id>::scalar_t;
-  int sms = 0;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
+  const int sms = cached_device_sm_count(device_index);
   constexpr int kUnitK = W8 ? 16 : 32;
   launch_zero_c<scalar_t>(c, total_tokens, n, stream);
   // Host-side upper bound on work keeps tiny batches from launching idle
@@ -328,13 +329,9 @@ void launch_moe(const void* a, const int32_t* b, const void* s, void* c,
   if (block_size == 32) {
     // 32-token blocks fuse two m16 tiles per weight fetch, amortizing the
     // dequant for batched shapes.
-    static int ctas_per_sm2 = 0;
-    if (ctas_per_sm2 == 0) {
-      cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-          &ctas_per_sm2, swordfish_decode_moe_kernel<type_id, W8, 2>,
-          kDecodeThreads, 0);
-      if (ctas_per_sm2 <= 0) ctas_per_sm2 = 2;
-    }
+    const int ctas_per_sm2 = cached_occupancy_for_device(
+        device_index, swordfish_decode_moe_kernel<type_id, W8, 2>,
+        kDecodeThreads, 2);
     swordfish_decode_moe_kernel<type_id, W8, 2>
         <<<grid(ctas_per_sm2), kDecodeThreads, 0, stream>>>(
             reinterpret_cast<const scalar_t*>(a), b,
@@ -344,13 +341,8 @@ void launch_moe(const void* a, const int32_t* b, const void* s, void* c,
             group_size);
     return;
   }
-  static int ctas_per_sm = 0;
-  if (ctas_per_sm == 0) {
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm, swordfish_decode_moe_kernel<type_id, W8>, kDecodeThreads,
-        0);
-    if (ctas_per_sm <= 0) ctas_per_sm = 2;
-  }
+  const int ctas_per_sm = cached_occupancy_for_device(
+      device_index, swordfish_decode_moe_kernel<type_id, W8>, kDecodeThreads, 2);
   swordfish_decode_moe_kernel<type_id, W8>
       <<<grid(ctas_per_sm), kDecodeThreads, 0, stream>>>(
           reinterpret_cast<const scalar_t*>(a), b,
@@ -454,13 +446,13 @@ torch::stable::Tensor swordfish_moe_mm(
           a.const_data_ptr(), b_ptr, group_scales.const_data_ptr(),
           c.mutable_data_ptr(), sid_ptr, eid_ptr, npp_ptr, tw_ptr, int(top_k),
           mul_topk_weights, int(total_tokens), max_blocks, int(moe_block_size),
-          int(size_k), int(size_n), int(group_size), stream);
+          int(size_k), int(size_n), int(group_size), stream, device_index);
     } else {
       launch_moe<aphrodite::kFloat16.id(), false>(
           a.const_data_ptr(), b_ptr, group_scales.const_data_ptr(),
           c.mutable_data_ptr(), sid_ptr, eid_ptr, npp_ptr, tw_ptr, int(top_k),
           mul_topk_weights, int(total_tokens), max_blocks, int(moe_block_size),
-          int(size_k), int(size_n), int(group_size), stream);
+          int(size_k), int(size_n), int(group_size), stream, device_index);
     }
   } else {
     if (w8) {
@@ -468,13 +460,13 @@ torch::stable::Tensor swordfish_moe_mm(
           a.const_data_ptr(), b_ptr, group_scales.const_data_ptr(),
           c.mutable_data_ptr(), sid_ptr, eid_ptr, npp_ptr, tw_ptr, int(top_k),
           mul_topk_weights, int(total_tokens), max_blocks, int(moe_block_size),
-          int(size_k), int(size_n), int(group_size), stream);
+          int(size_k), int(size_n), int(group_size), stream, device_index);
     } else {
       launch_moe<aphrodite::kBFloat16.id(), false>(
           a.const_data_ptr(), b_ptr, group_scales.const_data_ptr(),
           c.mutable_data_ptr(), sid_ptr, eid_ptr, npp_ptr, tw_ptr, int(top_k),
           mul_topk_weights, int(total_tokens), max_blocks, int(moe_block_size),
-          int(size_k), int(size_n), int(group_size), stream);
+          int(size_k), int(size_n), int(group_size), stream, device_index);
     }
   }
 

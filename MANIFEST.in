@@ -7,7 +7,8 @@ recursive-include gptqmodel_ext/cutlass_extensions *.h *.hpp *.cuh *.cu *.cpp *.
 recursive-include gptqmodel_ext/paroquant *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp LICENSE
-recursive-include gptqmodel_ext/swordfish *.h *.hpp *.cuh *.cu *.cpp *.py
+recursive-include gptqmodel_ext/cannoe *.h *.hpp *.cpp *.json *.md
+recursive-include gptqmodel_ext/swordfish *.h *.hpp *.cuh *.cu *.cpp *.py LICENSE
 include gptqmodel_ext/swordfish/licenses/LICENSE
 recursive-include gptqmodel/exllamav3/util/hadamard_data *.txt
 include licenses/*

@@ -24,6 +24,7 @@
 #include "libtorch_stable/ops.h"
 #include "libtorch_stable/torch_utils.h"
 #include "swordfish_decode.cuh"
+#include "swordfish_device_utils.cuh"
 
 namespace swordfish {
 
@@ -48,7 +49,7 @@ namespace {
 // the compiled graph. Here the true runtime M decides on every call and on
 // every captured CUDA graph.
 inline bool use_prefill(int64_t m, torch::headeronly::ScalarType a_st, bool w8,
-                        int64_t group_size, int64_t k, int64_t n) {
+                        int64_t group_size, int64_t k, int64_t n, int sms) {
   if (a_st != torch::headeronly::ScalarType::BFloat16 &&
       a_st != torch::headeronly::ScalarType::Half) {
     return false;
@@ -61,11 +62,6 @@ inline bool use_prefill(int64_t m, torch::headeronly::ScalarType a_st, bool w8,
   // The prefill grid launches about n/128 CTAs per M tile. When that fills
   // the machine the tcgen05 path wins from M 48 up; when it underfills
   // (many SMs, narrow N), the Stream-K decode window carries [17, 96).
-  static int sms = 0;
-  if (sms == 0) {
-    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
-    if (sms <= 0) sms = 1;
-  }
   const bool prefill_fills = n / 128 >= sms;
   // The four-tile decode window carries [48, 56) even at wide N; the
   // tcgen05 wave only pulls ahead of it from 56 rows up. K-heavy narrow-N
@@ -113,35 +109,20 @@ inline bool force_deterministic() {
   return v;
 }
 
-inline int cached_sm_count() {
-  static int sms = 0;
-  if (sms == 0) {
-    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
-    if (sms <= 0) sms = 1;
-  }
-  return sms;
-}
 
 template <aphrodite::ScalarTypeId type_id, int T, bool HAS_ZP, bool W8 = false,
           bool CTA_QUAD = false>
 void launch_decode_streamk_t(const void* a, const int32_t* b, const void* s,
                              const void* z, void* c, int m, int k, int n,
-                             int group_size, cudaStream_t stream,
+                             int group_size, cudaStream_t stream, int sms,
                              bool c_zeroed = false) {
   using scalar_t = typename marlin::MarlinScalarType<type_id>::scalar_t;
   constexpr int kStagesT =
       T == 1 ? kStages : (T == 2 ? (W8 ? 5 : 4) : (T == 3 ? 3 : (W8 ? 4 : 2)));
   constexpr int kUnitK = W8 ? 16 : 32;
-  static int ctas_per_sm = 0;
-  if (ctas_per_sm == 0) {
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm,
-        swordfish_decode_streamk_kernel<type_id, T, HAS_ZP, W8, CTA_QUAD>,
-        kDecodeThreads, 0);
-    if (ctas_per_sm <= 0) ctas_per_sm = 2;
-  }
-  int sms = 0;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
+  const int ctas_per_sm = cached_occupancy_for_device(
+      -1, swordfish_decode_streamk_kernel<type_id, T, HAS_ZP, W8, CTA_QUAD>,
+      kDecodeThreads, 2);
   const int m_tiles = (m + 15) / 16;
   const int m_groups = (m_tiles + T - 1) / T;
   const int nb = n / (CTA_QUAD ? kBlockN * kDecodeWarps : kBlockN);
@@ -175,19 +156,14 @@ void launch_decode_streamk_t(const void* a, const int32_t* b, const void* s,
 template <aphrodite::ScalarTypeId type_id, int T, bool HAS_ZP, bool W8 = false>
 void launch_decode_atomic_t(const void* a, const int32_t* b, const void* s,
                             const void* z, void* c, int m, int k, int n,
-                            int group_size, cudaStream_t stream,
+                            int group_size, cudaStream_t stream, int sms,
                             bool c_zeroed = false) {
   using scalar_t = typename marlin::MarlinScalarType<type_id>::scalar_t;
   constexpr int kStagesT = T == 1 ? kStages : (T == 2 ? 4 : 3);
-  static int ctas_per_sm = 0;  // per (type, T) instantiation
-  if (ctas_per_sm == 0) {
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &ctas_per_sm, swordfish_decode_kernel<type_id, true, T, HAS_ZP, W8>,
-        kDecodeThreads, 0);
-    if (ctas_per_sm <= 0) ctas_per_sm = 4;
-  }
-  int sms = 0;
-  cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
+  // per (type, T) instantiation
+  const int ctas_per_sm = cached_occupancy_for_device(
+      -1, swordfish_decode_kernel<type_id, true, T, HAS_ZP, W8>,
+      kDecodeThreads, 4);
   const int m_ctas = (m + 16 * T - 1) / (16 * T);
   const int nb = n / kBlockN;
   const int num_pairs = k / (W8 ? 16 : 32);
@@ -223,24 +199,24 @@ void launch_decode_atomic_t(const void* a, const int32_t* b, const void* s,
 template <aphrodite::ScalarTypeId type_id, bool HAS_ZP, bool W8 = false>
 void launch_decode_atomic(int T, const void* a, const int32_t* b, const void* s,
                           const void* z, void* c, int m, int k, int n,
-                          int group_size, cudaStream_t stream,
+                          int group_size, cudaStream_t stream, int sms,
                           bool c_zeroed = false) {
   if (T == 1) {
     launch_decode_atomic_t<type_id, 1, HAS_ZP, W8>(
-        a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+        a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
   } else if (T == 2) {
     launch_decode_atomic_t<type_id, 2, HAS_ZP, W8>(
-        a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+        a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
   } else {
     launch_decode_atomic_t<type_id, 3, HAS_ZP, W8>(
-        a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+        a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
   }
 }
 
 template <aphrodite::ScalarTypeId type_id, bool HAS_ZP, bool W8 = false>
 void launch_decode(const void* a, const int32_t* b, const void* s,
                    const void* z, void* c, int m, int k, int n, int group_size,
-                   cudaStream_t stream, bool c_zeroed = false) {
+                   cudaStream_t stream, int sms, bool c_zeroed = false) {
   using scalar_t = typename marlin::MarlinScalarType<type_id>::scalar_t;
   if (force_deterministic()) {
     dim3 grid((m + 15) / 16, n / kBlockN);
@@ -253,49 +229,50 @@ void launch_decode(const void* a, const int32_t* b, const void* s,
   } else if (m <= 16) {
     // Tuned single-tile path with in-kernel C zeroing and heuristic split-K.
     launch_decode_atomic<type_id, HAS_ZP, W8>(1, a, b, s, z, c, m, k, n,
-                                              group_size, stream, c_zeroed);
+                                              group_size, stream, sms,
+                                              c_zeroed);
   } else if (m <= 127) {
     // Window dispatch. When columns alone fill the machine the fused atomic
     // grid (in-kernel zeroing, no memset) is already balanced; otherwise
     // Stream-K hands each warp a contiguous flat range of (fused tile,
     // column, pair) work and the atomic epilogue merges segments, removing
     // split-K heuristics and wave quantization.
-    const bool wide_n = n / kBlockN >= 4 * cached_sm_count();
+    const bool wide_n = n / kBlockN >= 4 * sms;
     // On many-SM parts the whole [17, 48] band belongs to the fused atomic
     // grid at any width: its CTA shares one weight stream across four
     // warps, where Stream-K's warp-private B and A staging pays for itself
     // only when the machine is small enough for warps to get long claims.
     // Few-SM parts keep Stream-K outside wide N (measured 0.73-0.96 of
     // marlin the other way around on 20 SMs).
-    const bool band_atomic = cached_sm_count() >= 100 && m <= 48;
+    const bool band_atomic = sms >= 100 && m <= 48;
     if (band_atomic || (wide_n && m <= 47)) {
       launch_decode_atomic<type_id, HAS_ZP, W8>(m <= 32 ? 2 : 3, a, b, s, z, c,
-                                                m, k, n, group_size, stream,
+                                                m, k, n, group_size, stream, sms,
                                                 c_zeroed);
     } else if (m <= 48 && n % (4 * kBlockN) == 0) {
       // Few-SM band: CTA-granular claims over n256 column quads.
       if (m <= 32) {
         launch_decode_streamk_t<type_id, 2, HAS_ZP, W8, true>(
-            a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+            a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
       } else {
         launch_decode_streamk_t<type_id, 3, HAS_ZP, W8, true>(
-            a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+            a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
       }
     } else if (m <= 32) {
       launch_decode_streamk_t<type_id, 2, HAS_ZP, W8>(
-          a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+          a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
     } else if (m <= 48) {
       launch_decode_streamk_t<type_id, 3, HAS_ZP, W8>(
-          a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+          a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
     } else if (m <= 64) {
       // Four-tile fusion amortizes the dequant across the whole band; the
       // m-shared CTA it replaces dequantized the same weights once per warp
       // and issued 2.7x the instructions for it.
       launch_decode_streamk_t<type_id, 4, HAS_ZP, W8>(
-          a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+          a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
     } else {
       launch_decode_streamk_t<type_id, 3, HAS_ZP, W8>(
-          a, b, s, z, c, m, k, n, group_size, stream, c_zeroed);
+          a, b, s, z, c, m, k, n, group_size, stream, sms, c_zeroed);
     }
   } else {
     dim3 grid((m + 15) / 16, n / kBlockN);
@@ -378,17 +355,21 @@ torch::stable::Tensor swordfish_mm(
 
   const int64_t size_m = a.size(0);
 
+  // Bind to the tensor's device and query its SM count once; all
+  // launch-tier heuristics use this device rather than assuming device 0.
+  const int32_t device_index = a.get_device_index();
+  torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  const int sms = cached_device_sm_count(device_index);
+  const cudaStream_t stream = get_current_cuda_stream(device_index);
+
   // Activations are expected to be in the group-sorted order produced by
   // swordfish_prepack_B (or explicitly permuted by the caller); the runtime
   // GEMM no longer consumes an explicit permutation tensor.
   const bool has_perm = false;
 
   if (size_m >=
-          dense_tier_min_m(cached_sm_count(), w8, size_k, size_n, has_perm) &&
+          dense_tier_min_m(sms, w8, size_k, size_n, has_perm) &&
       !force_deterministic()) {
-    const int32_t device_index = a.get_device_index();
-    torch::stable::accelerator::DeviceGuard device_guard(device_index);
-    const cudaStream_t stream = get_current_cuda_stream(device_index);
     torch::stable::Tensor c =
         torch::stable::empty({size_m, size_n}, a_st, std::nullopt, a.device());
     torch::stable::Tensor w_dense =
@@ -410,17 +391,13 @@ torch::stable::Tensor swordfish_mm(
   // The fused paths consume group-sorted K. Activations are already
   // group-sorted by the caller, so no extra permute is needed here.
   const bool will_prefill =
-      use_prefill(size_m, a_st, w8, tier_group, size_k, size_n);
+      use_prefill(size_m, a_st, w8, tier_group, size_k, size_n, sms);
   const bool prep_perm = false;
 
   if (will_prefill) {
     return swordfish_prefill_mm(a, b_packed, group_scales, group_zps,
                                 num_bits, tier_group, size_k, size_n);
   }
-
-  const int32_t device_index = a.get_device_index();
-  torch::stable::accelerator::DeviceGuard device_guard(device_index);
-  const cudaStream_t stream = get_current_cuda_stream(device_index);
 
   torch::stable::Tensor c =
       torch::stable::empty({size_m, size_n}, a_st, std::nullopt, a.device());
@@ -437,29 +414,29 @@ torch::stable::Tensor swordfish_mm(
     if (has_zp) {
       launch_decode<aphrodite::kFloat16.id(), true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, prep_perm);
+          stream, sms, prep_perm);
     } else if (w8) {
       launch_decode<aphrodite::kFloat16.id(), false, true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, prep_perm);
+          stream, sms, prep_perm);
     } else {
       launch_decode<aphrodite::kFloat16.id(), false>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, prep_perm);
+          stream, sms, prep_perm);
     }
   } else {
     if (has_zp) {
       launch_decode<aphrodite::kBFloat16.id(), true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, prep_perm);
+          stream, sms, prep_perm);
     } else if (w8) {
       launch_decode<aphrodite::kBFloat16.id(), false, true>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, prep_perm);
+          stream, sms, prep_perm);
     } else {
       launch_decode<aphrodite::kBFloat16.id(), false>(
           a_ptr, b_ptr, s_ptr, z_ptr, c_ptr, size_m, size_k, size_n, group_size,
-          stream, prep_perm);
+          stream, sms, prep_perm);
     }
   }
 
