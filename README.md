@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
 * 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 08/03/2026 7.3.1 `main`: ⚡ Added AVX-512/AVX2 host-CPU Pangolin planar GEMV kernel for 3/5/6/7-bit `gptq_p` inference; see `pangolin_kernel_cpu.md` for design and benchmarks.
 * 07/27/2026 7.3.1 `main`: ✨ Added `nanbeige` model support
