@@ -23,6 +23,7 @@ Use this skill when you need to verify the `gptqmodel_ext/planar/planar_gemv_cpu
 | `GPTQMODEL_PANGOLIN_CPU_FORCE_REBUILD=1` | Delete the cached `pangolin_cpu` JIT build and recompile `planar_gemv_cpu.cpp`. |
 | `GPTQMODEL_PANGOLIN_CPU_DISABLE_AVX512=1` | Force runtime dispatch away from AVX-512 (falls back to AVX2 or scalar). |
 | `GPTQMODEL_PANGOLIN_CPU_DISABLE_AVX2=1` | Force runtime dispatch away from AVX2 (falls back to scalar). |
+| `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0` | Use the original packed `qweight` layout (`[N/16, K/32, bits, 16]`) instead of the uint8 pre-expanded layout (`[N/16, K/32, 8, 16]`). Run pytest with this set to verify the non-preexpanded path. |
 | `GPTQMODEL_EXT_VERBOSE=1` | Show `torch.utils.cpp_extension` compile progress and build directory. |
 
 ## Pre-test compile check
@@ -62,6 +63,12 @@ Use the repo's own `format/ruff.toml` config and include the files touched by CP
 /home/ubuntu/.pyenv/versions/3.12.8/bin/pytest -q tests/test_pangolin_cpu_kernel.py --no-header
 ```
 Expected: `160 passed` (4 bits × 10 supported M values × 4 fallback-disable modes).
+
+To also exercise the non-preexpanded `qweight` layout (if the current code supports `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT`):
+```bash
+GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0 \
+/home/ubuntu/.pyenv/versions/3.12.8/bin/pytest -q tests/test_pangolin_cpu_kernel.py --no-header
+```
 
 ### Sanity benchmark
 ```bash
