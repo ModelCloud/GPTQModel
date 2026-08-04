@@ -439,8 +439,9 @@ def _machete_static_runtime_error() -> str:
     if capability != _MACHETE_REQUIRED_COMPUTE_CAPABILITY:
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         return (
-            "Machete kernel currently supports Hopper-class SM90 GPUs only; "
-            f"found `{props.name}` with compute capability {capability[0]}.{capability[1]}."
+            "Machete kernel is Hopper-only (SM90); its generated CUTLASS kernels "
+            f"target arch::Sm90 and have no Blackwell image. Found `{props.name}` with "
+            f"compute capability {capability[0]}.{capability[1]}."
         )
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     shared_memory_per_block_optin = getattr(

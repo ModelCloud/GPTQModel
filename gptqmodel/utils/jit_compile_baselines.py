@@ -25,6 +25,7 @@ JIT_COMPILE_BASELINE_SECONDS: dict[str, float] = {
     "gptqmodel_pack_block_cpu": 31.096,
     "gptqmodel_paroquant_rotation": 78.430,
     "gptqmodel_qqq_ops": 82.492,
+    "gptqmodel_swordfish_ops": 180.000,
 }
 
 

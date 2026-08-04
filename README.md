@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 08/03/2026 7.3.1 `main`: ⚡ Added AVX-512/AVX2 host-CPU Pangolin planar GEMV kernel for 3/5/6/7-bit `gptq_p` inference; see `pangolin_kernel_cpu.md` for design and benchmarks.
 * 07/27/2026 7.3.1 `main`: ✨ Added `nanbeige` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `Intern S2 PreView` model support
@@ -1176,3 +1177,7 @@ Sessions that do not look like Devin ids (not starting with `devin-`) are ignore
 python -m pytest tests/test_gpu_allocator.py -q
 PYTHON_GIL=0 python -m pytest tests/test_gpu_allocator.py -q
 ```
+
+## License
+
+GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kernel sources vendored under `gptqmodel_ext/swordfish/` are licensed under the AGPL-3.0-or-later license and are only compiled/linked at runtime via JIT. A copy of the Swordfish license is included in `gptqmodel_ext/swordfish/licenses/LICENSE` and `licenses/SWORDFISH`.

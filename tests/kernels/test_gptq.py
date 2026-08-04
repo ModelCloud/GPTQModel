@@ -19,6 +19,7 @@ from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.utils.logger import render_table
@@ -27,6 +28,10 @@ from gptqmodel.utils.machete import (
     machete_runtime_error,
 )
 from gptqmodel.utils.model import find_modules
+from gptqmodel.utils.swordfish import (
+    swordfish_runtime_available,
+    swordfish_runtime_error,
+)
 
 
 log = LogBar.shared()
@@ -74,6 +79,7 @@ class TestKernelOutput(unittest.TestCase):
     target_qliner_map = {
         BACKEND.TORCH: TorchLinear,
         BACKEND.MACHETE: MacheteLinear,
+        BACKEND.SWORDFISH: SwordfishLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2Linear,
         BACKEND.TRITON: TritonV2Linear,
         BACKEND.BITBLAS: BitblasLinear,
@@ -308,6 +314,10 @@ class TestKernelOutput(unittest.TestCase):
             if not machete_runtime_available():
                 self.skipTest(f"Machete kernel unavailable: {machete_runtime_error()}")
 
+        if backend == BACKEND.SWORDFISH:
+            if not swordfish_runtime_available():
+                self.skipTest(f"Swordfish kernel unavailable: {swordfish_runtime_error()}")
+
     # Updated CUDA kernel tolerances below were re-baselined from full
     # torch-vs-kernel validation on H200.
     float16_cases = [
@@ -315,6 +325,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.float16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MACHETE, torch.float16, 0.0010),
+        (BACKEND.SWORDFISH, torch.float16, 0.0030),
         (BACKEND.MARLIN, torch.float16, 0.0010),
     ]
     if _bitblas_supports_gptq_case(torch.float16):
@@ -344,6 +355,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0080),
         (BACKEND.MACHETE, torch.bfloat16, 0.0080),
+        (BACKEND.SWORDFISH, torch.bfloat16, 0.0060),
         (BACKEND.MARLIN, torch.bfloat16, 0.0080),
     ]
     if _bitblas_supports_gptq_case(torch.bfloat16):
@@ -373,6 +385,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.float16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MACHETE, torch.float16, 0.0010),
+        (BACKEND.SWORDFISH, torch.float16, 0.0060),
         (BACKEND.MARLIN, torch.float16, 0.0020),
     ]
     if _bitblas_supports_gptq_case(torch.float16):
@@ -401,6 +414,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0160),
         (BACKEND.MACHETE, torch.bfloat16, 0.0080),
+        (BACKEND.SWORDFISH, torch.bfloat16, 0.0080),
         (BACKEND.MARLIN, torch.bfloat16, 0.0080),
     ]
     if _bitblas_supports_gptq_case(torch.bfloat16):

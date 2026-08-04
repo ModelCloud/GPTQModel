@@ -20,6 +20,7 @@ class BACKEND(str, Enum):
     BITSANDBYTES = "bitsandbytes"  # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
+    GPTQ_SWORDFISH = "gptq_swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_AMPLIN = "gptq_amplin"  # Amplin dynamic Ampere micro-kernel dispatcher
     AMPLIN = "amplin"  # alias for GPTQ_AMPLIN
@@ -51,6 +52,7 @@ class BACKEND(str, Enum):
     AWQ_MARLIN = "awq_marlin"
     AWQ_KOMODO = "awq_komodo"  # Ascend NPU fused-style cached int4 kernel
     AWQ_CANNOE = "awq_cannoe"  # Ascend CANN kernel experiment
+    AWQ_SWORDFISH = "awq_swordfish"
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
     AWQ_HUMMING = "awq_humming"  # InclusionAI Humming JIT kernel for AWQ
 
@@ -84,6 +86,7 @@ class BACKEND(str, Enum):
     EXLLAMA_V2 = "exllama_v2"
     EXLLAMA_V3 = "exllama_v3"
     MACHETE = "machete"
+    SWORDFISH = "swordfish"
     MARLIN = "marlin"
     KOMODO = "komodo"
     CANNOE = "cannoe"
@@ -116,6 +119,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.TRITON: BACKEND.GPTQ_TRITON,
         BACKEND.EXLLAMA_V2: BACKEND.GPTQ_EXLLAMA_V2,
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
+        BACKEND.SWORDFISH: BACKEND.GPTQ_SWORDFISH,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
         BACKEND.AMPLIN: BACKEND.GPTQ_AMPLIN,
         BACKEND.KOMODO: BACKEND.GPTQ_KOMODO,
@@ -141,6 +145,7 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.MARLIN: BACKEND.AWQ_MARLIN,
         BACKEND.KOMODO: BACKEND.AWQ_KOMODO,
         BACKEND.CANNOE: BACKEND.AWQ_CANNOE,
+        BACKEND.SWORDFISH: BACKEND.AWQ_SWORDFISH,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
         BACKEND.HUMMING: BACKEND.AWQ_HUMMING,
     },

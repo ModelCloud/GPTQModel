@@ -508,6 +508,7 @@ def select_quant_linear(
         dtype: Optional[torch.dtype] = None,
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
+        is_sharded: bool = False,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
     if isinstance(format, str):
         format = FORMAT(format.lower())
@@ -552,6 +553,11 @@ def select_quant_linear(
             if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None and device not in cls.SUPPORTS_DEVICES:
                 if os.environ.get("DEBUG"):
                     log.info(f"skip {k} for unsupported device `{device}`")
+                continue
+            supports_sharded_load = getattr(cls, "SUPPORTS_SHARDED_LOAD", cls.SUPPORTS_SHARDS)
+            if is_sharded and not supports_sharded_load:
+                if os.environ.get("DEBUG"):
+                    log.info(f"skip {k} because sharded checkpoints are not supported")
                 continue
 
             validated = False
@@ -618,6 +624,10 @@ def select_quant_linear(
 
     # Handle the case where backend is not AUTO.
     qlinear = get_kernel_for_backend(backend, quant_method, format)
+
+    supports_sharded_load = getattr(qlinear, "SUPPORTS_SHARDED_LOAD", qlinear.SUPPORTS_SHARDS)
+    if is_sharded and not supports_sharded_load:
+        raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")
 
     validate, err = qlinear.validate(
         bits=bits,

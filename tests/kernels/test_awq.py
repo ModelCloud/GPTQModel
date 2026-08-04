@@ -26,6 +26,7 @@ from gptqmodel.nn_modules.qlinear.marlin_awq import (
     AwqMarlinLinear,
     marlin_import_exception,
 )
+from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 from gptqmodel.utils.logger import render_table
@@ -43,6 +44,10 @@ except Exception as exc:  # pragma: no cover - triton import may fail in CI
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from gptqmodel.utils.exllamav2 import ScratchSpace
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_runtime_error
+from gptqmodel.utils.swordfish import (
+    _validate_swordfish_device_support,
+    swordfish_runtime_error,
+)
 
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -88,6 +93,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.float16, 0.004),
         (BACKEND.MACHETE, torch.float16, 0.006),
         (BACKEND.MARLIN, torch.float16, AWQ_MARLIN_FP16_ATOL),
+        (BACKEND.SWORDFISH, torch.float16, 0.15),
         (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
         # (BACKEND.MARLIN, torch.bfloat16, AWQ_MARLIN_BF16_ATOL),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
@@ -106,6 +112,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             cls.backend_skip_reason[BACKEND.TRITON] = "CUDA is required for AWQ Triton backend."
             cls.backend_skip_reason[BACKEND.MACHETE] = "CUDA is required for AWQ Machete kernel."
             cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
+            cls.backend_skip_reason[BACKEND.SWORDFISH] = "CUDA is required for AWQ Swordfish kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V2] = "CUDA is required for ExLlama v2 AWQ kernel."
         elif not _validate_machete_device_support():
             cls.backend_skip_reason[BACKEND.MACHETE] = machete_runtime_error()
@@ -117,6 +124,9 @@ class TestAwqKernelOutput(unittest.TestCase):
             cls.backend_skip_reason[BACKEND.TRITON] = (
                 f"AWQ Triton kernel unavailable: {awq_triton_import_exception}"
             )
+
+        if cls.cuda_available and not _validate_swordfish_device_support():
+            cls.backend_skip_reason[BACKEND.SWORDFISH] = swordfish_runtime_error()
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -190,6 +200,16 @@ class TestAwqKernelOutput(unittest.TestCase):
             if cls.cuda_available
             else None
         )
+
+        try:
+            cls.modules[BACKEND.SWORDFISH] = (
+                cls._build_swordfish_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if BACKEND.SWORDFISH not in cls.backend_skip_reason
+                else None
+            )
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.SWORDFISH] = f"AWQ Swordfish kernel unavailable: {exc}"
+            cls.modules[BACKEND.SWORDFISH] = None
 
         try:
             cls.modules[BACKEND.TORCH_FUSED_AWQ] = cls._build_torch_fused_awq_module(
@@ -402,6 +422,36 @@ class TestAwqKernelOutput(unittest.TestCase):
             in_features=cls.in_features,
             out_features=cls.out_features,
             bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
+
+        module.qweight.data.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
+        module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
+        module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
+    def _build_swordfish_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> Optional[AwqSwordfishLinear]:
+        module = AwqSwordfishLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=False,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            dtype=torch.float16,
             adapter=None,
             register_buffers=True,
         ).to(cls.device)

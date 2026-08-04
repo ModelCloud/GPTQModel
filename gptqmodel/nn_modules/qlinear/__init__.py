@@ -95,6 +95,7 @@ class BaseQuantLinear(nn.Module):
     # are derived automatically and bit validation becomes format-aware.
     SUPPORTS_FORMAT_BIT_MAP: Dict[FORMAT, FormatSupport] = None
     SUPPORTS_SHARDS: bool = None
+    SUPPORTS_SHARDED_LOAD: bool = True
     SUPPORTS_TRAINING: bool = None
 
     # IPEX kernel will use Torch for training only and switches back to IPEX for eval/inference
