@@ -82,6 +82,7 @@ class StageInputsCapture:
         calibration_data: Iterable[Dict[str, torch.Tensor]],
         use_cache: bool,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
+        layer_names: Optional[List[str]] = None,
     ) -> InputCache:
         """Runs a short forward over calibration data and caches first-layer inputs."""
 
@@ -95,10 +96,31 @@ class StageInputsCapture:
         layer_label = None
         if layers:
             first_layer = layers[0]
-            layer_label = getattr(first_layer, "full_name", None)
-            if layer_label is None:
+            # `LazyTurtle` resolves checkpoint keys by prefixing `module_path` to
+            # relative tensor names (e.g. `model.layers.0` + `.mlp.gate.tid2eid`).
+            # The caller-supplied dotted path is the single source of truth. An
+            # explicit `full_name` attribute is a legacy fallback; if it disagrees
+            # with the caller-supplied name, warn so the mismatch is not silent.
+            full_name = getattr(first_layer, "full_name", None)
+            if layer_names and layer_names[0]:
+                layer_label = layer_names[0]
+                if full_name and full_name != layer_label:
+                    self.logger.warn(
+                        f"cache_inputs: using caller-supplied layer_name {layer_label!r} "
+                        f"instead of layer.full_name {full_name!r} for materialization"
+                    )
+            elif full_name:
+                layer_label = full_name
+            if not layer_label:
+                # Fallback: discover the dotted path from the model tree. This keeps
+                # `LazyTurtle` materialization correct when callers do not pass names.
+                for name, mod in self.gptq_model.model.named_modules():
+                    if mod is first_layer:
+                        layer_label = name
+                        break
+            if not layer_label:
                 layer_label = getattr(getattr(first_layer, "__class__", None), "__name__", None)
-            if layer_label is None:
+            if not layer_label:
                 layer_label = type(first_layer).__name__
             capture_source = f"cache_inputs:{layer_label}"
         else:

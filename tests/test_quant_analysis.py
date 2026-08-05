@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -151,3 +152,41 @@ def test_analysis_group_stats_fast_path_matches_loop_math():
     assert fast["rel_rmse"] == pytest.approx(expected_rel_rmse)
     assert fast["small_value_fraction"] == total_small / weight.numel()
     assert fast["bad_block_fraction"] == total_bad_blocks / total_blocks
+
+
+def test_analysis_processor_uses_layers_prefix_without_double_index():
+    """`layers_prefix` must be the parent prefix (`model.layers`), not a full layer path.
+
+    The processor appends `layer_index.module_name` itself, so passing
+    `model.layers.0` would produce doubled indices like `model.layers.0.0.clean`.
+    """
+
+    qcfg = GPTQConfig(
+        bits=4,
+        group_size=4,
+        preprocessors=[AnalysisConfig(top_k=4, emit_markdown=False, emit_json=False)],
+    )
+    processor = AnalysisProcessor(qcfg=qcfg, tokenizer=None)
+    layers = [_TinyLayer(), _TinyLayer()]
+
+    captured = []
+
+    def _fake_analyze(module, *, layer_index, module_name, full_name):
+        captured.append(full_name)
+        return {"layer": layer_index, "name": module_name}
+
+    with patch.object(processor, "_analyze_module", side_effect=_fake_analyze), \
+            patch.object(processor, "_build_reports"), \
+            patch.object(processor, "_emit_reports"):
+        processor.analyze_model(
+            layers=layers,
+            layer_modules=[["clean", "outlier"]],
+            layers_prefix="model.layers",
+        )
+
+    assert "model.layers.0.clean" in captured
+    assert "model.layers.0.outlier" in captured
+    assert "model.layers.1.clean" in captured
+    assert "model.layers.1.outlier" in captured
+    assert "model.layers.0.0.clean" not in captured
+    assert "model.layers.1.1.clean" not in captured

@@ -33,7 +33,6 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear
-from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     METHOD,
     QuantizeEmbed,
@@ -1487,7 +1486,7 @@ class ModuleLooper():
 
         return pre_hook
 
-    def cache_inputs(self, layers, calibration_data, use_cache):
+    def cache_inputs(self, layers, calibration_data, use_cache, layer_names=None):
         """Capture and cache per-layer calibration inputs for later replay."""
 
         capture_stage = StageInputsCapture(self, logger=log)
@@ -1496,6 +1495,7 @@ class ModuleLooper():
             calibration_data=calibration_data,
             use_cache=use_cache,
             embed_quant_mode=self.embed_quant_mode,
+            layer_names=layer_names,
         )
 
     def loop(self, fallback=None, **kwargs):
@@ -1567,6 +1567,19 @@ class ModuleLooper():
             self.gptq_model.model,
             self.gptq_model.extract_layers_node(),
         )
+        # `layer_names` are full dotted layer paths (e.g. `model.layers.0`).
+        # Analysis/reporting code constructs `full_name` as
+        # `f"{layers_prefix}.{layer_index}.{module_name}"`, so it needs the
+        # parent prefix (`model.layers`) rather than the first layer path.
+        #
+        # Edge cases:
+        # - If `get_layers_with_prefixes` resolves to a single non-ModuleList module,
+        #   `layer_names[0]` is the full module path and `rsplit('.', 1)[0]` strips a
+        #   real path component; such architectures should be handled explicitly.
+        # - Models with multiple layer stacks flatten all stacks into one list. We
+        #   derive the prefix only from the first stack, so names in other stacks
+        #   may still be off; this is a pre-existing limitation, not introduced here.
+        layer_prefix = layer_names[0].rsplit(".", 1)[0] if layer_names else None
         region_timer = getattr(self.gptq_model, "quant_region_timer", None)
 
         for p_index, processor in enumerate(self.processors):
@@ -1586,6 +1599,7 @@ class ModuleLooper():
                 continue
 
             input_cache = self.cache_inputs(layers=layers,
+                                            layer_names=layer_names,
                                             calibration_data=processor.calibration_dataset,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
@@ -1616,7 +1630,7 @@ class ModuleLooper():
         self._run_pre_quantize_analysis(
             layers=layers,
             layer_modules=layer_modules,
-            layers_prefix=layer_names[0], # TODO `layer_names` may contain multiple `layer_prefix` entries
+            layers_prefix=layer_prefix,
         )
 
         if self.gptq_model.quantize_config.offload_to_disk:
@@ -1830,34 +1844,10 @@ class ModuleLooper():
                 subset[name].state["capture_only"] = True
 
             named_module = subset[name]
-
-            # Every wrapped module needs its tree flags before any early exit,
-            # so downstream planning (MoE isolation, down-proj detection, etc.)
-            # can inspect `full` even for already-quantized modules.
             named_module.state.setdefault(
                 "module_tree_flags",
                 get_module_tree_flags(name),
             )
-
-            # Already-quantized modules (e.g. from a partial checkpoint) must not
-            # be preprocessed again; they are passed through for forward only.
-            if isinstance(named_module.module, BaseQuantLinear):
-                # Fill in the metadata that NamedModule usually derives from nn.Linear
-                # so downstream planning helpers see a consistent shape/dtype.
-                named_module.state.setdefault("in_features", named_module.module.in_features)
-                named_module.state.setdefault("out_features", named_module.module.out_features)
-                float_buffer = next(
-                    (
-                        b for b in named_module.module.buffers()
-                        if b.is_floating_point() or b.is_complex()
-                    ),
-                    None,
-                )
-                named_module.module_dtype = (
-                    float_buffer.dtype if float_buffer is not None else torch.float16
-                )
-                skipped_modules.append(name)
-                continue
 
             preprocess_start = time.perf_counter()
             if isinstance(processor, GPTQProcessor):
