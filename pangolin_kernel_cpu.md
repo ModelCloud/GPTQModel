@@ -3317,6 +3317,64 @@ still well below the 2 TFLOPS target.
 | 512 x 2048 | 32 | 0.083 | 1.399 | 16.76x | 0.804 | 0.048 |
 | 2048 x 256 | 32 | 0.088 | 0.817 | 9.27x | 0.381 | 0.041 |
 
-Peak observed: **1.185 TFLOPS** at `2048 x 8192`, M=32.  The next pass targets
-the 2 TFLOPS ceiling with a 32-column AVX-512 micro-tile or a K-block-tiled
-BF16 dot-product path.
+Peak observed: **1.185 TFLOPS** at `2048 x 8192`, M=32.
+
+## Optimization pass 31 (2026-08-05): 2x16-column AVX-512 micro-tile for M <= 2
+
+Add a second AVX-512 micro-kernel that processes two adjacent 16-column chunks
+per K-block, reusing one `x` broadcast for both chunks.  The doubled accumulator
+budget is capped at 16 `__m512` values by a custom `K_UNROLL` schedule, so the
+path is only dispatched for `SizeM <= 2` and `N % 32 == 0`.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+### A/B vs previous commit (`laguna` M=1, threads=8)
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.008x | 0.990x | 1.002x |
+| laguna | 5 | 1.053x | 1.074x | 1.054x |
+| laguna | 6 | 1.069x | 1.107x | 1.070x |
+| laguna | 7 | 1.022x | 1.045x | 1.026x |
+| all | all | 1.038x | 1.053x | 1.038x |
+
+M=1 geomean kernel time improves by **3.8%**; M=2 also benefits from the
+reduced activation broadcasts.
+
+## Optimization pass 32 (2026-08-05): extend tile2 dispatch to M <= 4
+
+The 2x16-column AVX-512 tile now dispatches for `SizeM <= 4` when `N % 32 == 0`.
+`k_unroll_tile2_for()` was updated to keep 16 `__m512` accumulators:
+`SizeM == 1` uses K_UNROLL=8, `SizeM == 2` uses K_UNROLL=4, and `SizeM <= 4`
+uses K_UNROLL=2.  This widens the amortization of activation broadcasts while
+still avoiding ZMM spills in register-budget checks.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `PREEXPAND_QWEIGHT=0`).
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed.
+
+### A/B vs main (`laguna` M=4, bits=7, threads=8)
+
+| K x N | M | main kernel (ms) | tile2 kernel (ms) | kernel ratio | TFLOPS ratio |
+|-------|---|-----------------:|------------------:|-------------:|-------------:|
+| 2048 x 6144 | 4 | 0.138 | 0.140 | 0.99x | 0.99x |
+| 2048 x 1024 | 4 | 0.045 | 0.045 | 1.00x | 1.00x |
+| 6144 x 2048 | 4 | 0.145 | 0.146 | 0.99x | 0.99x |
+| 2048 x 8192 | 4 | 0.208 | 0.192 | **1.08x** | **1.08x** |
+| 8192 x 2048 | 4 | 0.232 | 0.200 | **1.16x** | **1.16x** |
+| 2048 x 512 | 4 | 0.034 | 0.036 | 0.94x | 0.94x |
+| 512 x 2048 | 4 | 0.033 | 0.031 | 1.06x | 1.06x |
+| 2048 x 256 | 4 | 0.029 | 0.031 | 0.94x | 0.94x |
+
+The large `K x N` M=4 shapes improve by 8–16% while small shapes are neutral to
+slightly slower.  The 2 TFLOPS ceiling remains the target for further
+micro-kernel work (wider column tiles, K-pair BF16 dot-product, or paired-K
+prepacked layouts).
