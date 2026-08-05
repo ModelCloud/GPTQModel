@@ -48,7 +48,7 @@ def _log_hessian_verbose() -> bool:
     periodically, which provides aggregate stall isolation without per-module
     line noise.
     """
-    return env_flag("DEBUG") or env_flag("GPTQMODEL_LOG_HESSIAN")
+    return env_flag("GPTQMODEL_LOG_HESSIAN")
 
 
 lock = threading.Lock()
@@ -848,7 +848,7 @@ class GPTQ:
     def hessian_inverse(self, H: torch.Tensor):
         timer = getattr(self, "region_timer", None)
         timer_cm = (
-            timer.measure("hessian_inverse", source=self.name)
+            timer.measure("hessian_inverse")
             if timer is not None
             else contextlib.nullcontext()
         )

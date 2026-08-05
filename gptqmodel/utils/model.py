@@ -1188,9 +1188,18 @@ def pack_model(
     if has_gil_disabled():
         from device_smi import Device
         cpu = Device("cpu")
-        max_packers = min(8, max(2, cpu.count * cpu.cores))
+        default_max_packers = min(8, max(2, cpu.count * cpu.cores))
     else:
-        max_packers = 1 # due to gil, there is no point packing with more than 1 thread
+        default_max_packers = 1 # due to gil, there is no point packing with more than 1 thread
+
+    env_max_packers = os.getenv("GPTQMODEL_MAX_PACKERS")
+    if env_max_packers is not None:
+        try:
+            max_packers = max(1, int(env_max_packers))
+        except ValueError:
+            max_packers = default_max_packers
+    else:
+        max_packers = default_max_packers
 
     with ctx(ThreadPoolExecutor(max_workers=max_packers), log.pb(names).manual()) as (executor, pb):
         def wrapper(name):
