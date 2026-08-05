@@ -1389,7 +1389,7 @@ class ModuleLooper():
 
         return pre_hook
 
-    def cache_inputs(self, layers, calibration_data, use_cache):
+    def cache_inputs(self, layers, calibration_data, use_cache, layer_names=None):
         """Capture and cache per-layer calibration inputs for later replay."""
 
         capture_stage = StageInputsCapture(self, logger=log)
@@ -1397,6 +1397,7 @@ class ModuleLooper():
             layers=layers,
             calibration_data=calibration_data,
             use_cache=use_cache,
+            layer_names=layer_names,
         )
 
     def loop(self, fallback=None, **kwargs):
@@ -1458,6 +1459,7 @@ class ModuleLooper():
                 continue
 
             input_cache = self.cache_inputs(layers=layers,
+                                            layer_names=layer_names,
                                             calibration_data=processor.calibration_dataset,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)

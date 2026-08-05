@@ -3038,6 +3038,7 @@ def alias_from_turtle_for_submodule(
     target_submodule: torch.nn.Module,
     device: torch.device,
     non_blocking: bool = False,
+    module_path: Optional[str] = None,
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
     assert device not in [None, torch.device("meta")]
@@ -3051,6 +3052,7 @@ def alias_from_turtle_for_submodule(
         target_submodule=target_submodule,
         device=device,
         non_blocking=non_blocking,
+        module_path=module_path,
     )
 
 

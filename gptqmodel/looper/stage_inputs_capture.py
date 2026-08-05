@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
 
@@ -57,6 +57,7 @@ class StageInputsCapture:
         layers: Sequence[torch.nn.Module],
         calibration_data: Iterable[Dict[str, torch.Tensor]],
         use_cache: bool,
+        layer_names: Optional[List[str]] = None,
     ) -> InputCache:
         """Runs a short forward over calibration data and caches first-layer inputs."""
 
@@ -69,10 +70,30 @@ class StageInputsCapture:
         layer_label = None
         if layers:
             first_layer = layers[0]
-            layer_label = getattr(first_layer, "full_name", None)
-            if layer_label is None:
+            # The caller-supplied dotted path is the single source of truth for
+            # materializing the first layer from a lazy checkpoint source. An
+            # explicit `full_name` attribute is a legacy fallback; warn if the two
+            # disagree so the override is not silent.
+            full_name = getattr(first_layer, "full_name", None)
+            if layer_names and layer_names[0]:
+                layer_label = layer_names[0]
+                if full_name and full_name != layer_label:
+                    self.logger.warn(
+                        f"cache_inputs: using caller-supplied layer_name {layer_label!r} "
+                        f"instead of layer.full_name {full_name!r} for materialization"
+                    )
+            elif full_name:
+                layer_label = full_name
+            if not layer_label:
+                # Fallback: discover the dotted path from the model tree when the
+                # caller does not supply names.
+                for name, mod in self.gptq_model.model.named_modules():
+                    if mod is first_layer:
+                        layer_label = name
+                        break
+            if not layer_label:
                 layer_label = getattr(getattr(first_layer, "__class__", None), "__name__", None)
-            if layer_label is None:
+            if not layer_label:
                 layer_label = type(first_layer).__name__
             capture_source = f"cache_inputs:{layer_label}"
         else:
@@ -98,6 +119,7 @@ class StageInputsCapture:
         layers[0] = self.gptq_model.shell_module_materialize(
             target_submodule=layers[0],
             device=CPU,
+            module_path=layer_label,
         )
         cur_layer_device = CPU
 
@@ -205,6 +227,7 @@ class StageInputsCapture:
             self.gptq_model.shell_module_materialize(
                 target_submodule=module,
                 device=cur_layer_device,
+                module_path=module_name,
             )
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
