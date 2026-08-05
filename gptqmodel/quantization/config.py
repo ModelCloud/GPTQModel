@@ -1363,6 +1363,170 @@ class HessianConfig:
 
 
 @dataclass
+class DampConfig:
+    """Static Hessian damping configuration.
+
+    Static damping uses a single percdamp value: ``min == max`` and ``step`` is
+    the increment used for Cholesky failure recovery. The same type serves as
+    the base for :class:`AdaptiveDampingConfig`.
+    """
+
+    min: float = field(default=0.05)
+    max: float = field(default=0.05)
+    step: float = field(default=0.01)
+
+    def __post_init__(self):
+        if not (0 < self.min < 1):
+            raise ValueError("DampConfig: `min` must be between 0 and 1.")
+        if not (0 < self.max < 1):
+            raise ValueError("DampConfig: `max` must be between 0 and 1.")
+        if self.max < self.min:
+            raise ValueError("DampConfig: `max` must be greater than or equal to `min`.")
+        if not (0 <= self.step < 1):
+            raise ValueError("DampConfig: `step` must be between 0 and 1.")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "min": self.min,
+            "max": self.max,
+            "step": self.step,
+        }
+
+
+@dataclass
+class AdaptiveDampingConfig(DampConfig):
+    """Adaptive Hessian damping controls for GPTQ (v4.2 online feedback).
+
+    Damping is anchored at ``base_percdamp`` (the empirically strong GPTQ 0.05
+    baseline), scaled by a per-module factor, a compressed spectral ratio, and
+    an optional online residual-feedback factor applied to the GPTQ error update:
+
+        r = lambda_spectral / mean(diag(H))
+        spectral_factor = r ** spectral_alpha
+        size_factor = (group_size / 128) ** group_size_prior_beta
+        feedback = (L_target / L_g) ** group_error_gamma
+        error_scale = clamp(feedback / size_factor, group_error_scale_min, group_error_scale_max)
+        err = (W - Q) / Hinv_ii * error_scale
+
+    When ``group_error_use_hessian_weighting`` is true, ``L_g`` is computed as
+    ``sum(H_ii * raw_err_i^2)``; otherwise it is ``sum(raw_err_i^2)``.  The
+    ``raw_err`` is the unscaled GPTQ residual (``err / error_scale``) so the
+    feedback EMA is not coupled to the size prior or the applied feedback scale.
+
+    ``lambda_spectral`` is estimated with ``method`` (``power_iteration``,
+    ``lanczos`` or ``diagonal``).  The group error ``L_g`` is the squared norm of
+    the actual GPTQ residual ``err`` accumulated over a quantization group; the
+    target ``L_target`` is an EMA of previous group losses.  No
+    pre-quantization estimate or Hessian rebuild is used.
+    """
+
+    enabled: bool = field(default=True)
+    base_percdamp: float = field(default=0.05)
+    module_prior_enabled: bool = field(default=True)
+    module_factors: Dict[str, float] = field(
+        default_factory=lambda: {
+            "q": 1.0,
+            "k": 1.0,
+            "v": 1.0,
+            "o": 1.0,
+            "gate": 1.1,
+            "up": 1.1,
+            "down": 0.9,
+        }
+    )
+    method: str = field(default="power_iteration")
+    eigen_iterations: int = field(default=10)
+    spectral_alpha: float = field(default=0.25)
+    min: float = field(default=0.02)
+    max: float = field(default=0.08)
+    step: float = field(default=0.01)
+    group_error_enabled: bool = field(default=False)
+    group_error_gamma: float = field(default=0.1)
+    group_error_ema_decay: float = field(default=0.9)
+    group_error_factor_min: float = field(default=0.9)
+    group_error_factor_max: float = field(default=1.1)
+    online_feedback_enabled: bool = field(default=True)
+    group_error_scale_min: float = field(default=0.8)
+    group_error_scale_max: float = field(default=1.2)
+    group_error_use_hessian_weighting: bool = field(default=True)
+    group_error_measure_raw_residual: bool = field(default=True)
+    group_size_prior_enabled: bool = field(default=False)
+    group_size_prior_beta: float = field(default=0.25)
+    group_size_prior_reference: int = field(default=128)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.enabled = bool(self.enabled)
+        self.module_prior_enabled = bool(self.module_prior_enabled)
+        if not (0 < self.base_percdamp < 1):
+            raise ValueError("AdaptiveDampingConfig: `base_percdamp` must be between 0 and 1.")
+        if not (0 < self.spectral_alpha):
+            raise ValueError("AdaptiveDampingConfig: `spectral_alpha` must be positive.")
+        if not isinstance(self.eigen_iterations, int) or self.eigen_iterations <= 0:
+            raise ValueError("AdaptiveDampingConfig: `eigen_iterations` must be a positive integer.")
+        if self.method not in {"power_iteration", "diagonal", "lanczos"}:
+            raise ValueError(
+                "AdaptiveDampingConfig: `method` must be one of {'power_iteration', 'diagonal', 'lanczos'}."
+            )
+        if not isinstance(self.module_factors, dict):
+            raise ValueError("AdaptiveDampingConfig: `module_factors` must be a dict.")
+        for k, v in self.module_factors.items():
+            if not isinstance(k, str) or not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(
+                    "AdaptiveDampingConfig: `module_factors` must map module short names to positive floats."
+                )
+        self.online_feedback_enabled = bool(self.online_feedback_enabled)
+        self.group_error_enabled = bool(self.group_error_enabled)
+        self.group_size_prior_enabled = bool(self.group_size_prior_enabled)
+        if self.group_error_gamma <= 0:
+            raise ValueError("AdaptiveDampingConfig: `group_error_gamma` must be positive.")
+        if not (0 < self.group_error_ema_decay < 1):
+            raise ValueError("AdaptiveDampingConfig: `group_error_ema_decay` must be between 0 and 1.")
+        if self.group_size_prior_beta < 0:
+            raise ValueError("AdaptiveDampingConfig: `group_size_prior_beta` must be non-negative.")
+        if self.group_size_prior_reference <= 0:
+            raise ValueError("AdaptiveDampingConfig: `group_size_prior_reference` must be positive.")
+        if not (0 < self.group_error_factor_min < self.group_error_factor_max):
+            raise ValueError(
+                "AdaptiveDampingConfig: `group_error_factor_min` must be positive and less than `group_error_factor_max`."
+            )
+        if not (0 < self.group_error_scale_min < self.group_error_scale_max):
+            raise ValueError(
+                "AdaptiveDampingConfig: `group_error_scale_min` must be positive and less than `group_error_scale_max`."
+            )
+        self.group_error_use_hessian_weighting = bool(self.group_error_use_hessian_weighting)
+        self.group_error_measure_raw_residual = bool(self.group_error_measure_raw_residual)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = super().to_dict()
+        d.update(
+            {
+                "enabled": self.enabled,
+                "base_percdamp": self.base_percdamp,
+                "module_prior_enabled": self.module_prior_enabled,
+                "module_factors": dict(self.module_factors),
+                "method": self.method,
+                "eigen_iterations": self.eigen_iterations,
+                "spectral_alpha": self.spectral_alpha,
+                "group_error_enabled": self.group_error_enabled,
+                "group_error_gamma": self.group_error_gamma,
+                "group_error_ema_decay": self.group_error_ema_decay,
+                "group_error_factor_min": self.group_error_factor_min,
+                "group_error_factor_max": self.group_error_factor_max,
+                "online_feedback_enabled": self.online_feedback_enabled,
+                "group_error_scale_min": self.group_error_scale_min,
+                "group_error_scale_max": self.group_error_scale_max,
+                "group_error_use_hessian_weighting": self.group_error_use_hessian_weighting,
+                "group_error_measure_raw_residual": self.group_error_measure_raw_residual,
+                "group_size_prior_enabled": self.group_size_prior_enabled,
+                "group_size_prior_beta": self.group_size_prior_beta,
+                "group_size_prior_reference": self.group_size_prior_reference,
+            }
+        )
+        return d
+
+
+@dataclass
 class GPTAQConfig:
     alpha: float = field(default=0.25)
     device: Union[str, torch.device] = field(default="auto")
@@ -2236,6 +2400,78 @@ def _normalize_foem(foem: Optional[Union[FOEMConfig, Dict[str, Any]]]) -> Option
     if not isinstance(foem, FOEMConfig):
         raise ValueError("QuantizeConfig: `foem` must be a FOEMConfig, dict, or None.")
     return foem
+
+
+def _normalize_damp(
+    damp: Optional[Union[DampConfig, AdaptiveDampingConfig, Dict[str, Any]]]
+) -> Union[DampConfig, AdaptiveDampingConfig]:
+    if damp is None:
+        return AdaptiveDampingConfig()
+    if isinstance(damp, (DampConfig, AdaptiveDampingConfig)):
+        return damp
+    if isinstance(damp, dict):
+        payload = dict(damp)
+        # Backward-compatible aliases.
+        if "min_percdamp" in payload and "min" not in payload:
+            payload["min"] = payload.pop("min_percdamp")
+        if "max_percdamp" in payload and "max" not in payload:
+            payload["max"] = payload.pop("max_percdamp")
+        if "estimation_method" in payload and "method" not in payload:
+            payload["method"] = payload.pop("estimation_method")
+        # Flatten nested v3 config groups.
+        if "spectral" in payload and isinstance(payload["spectral"], dict):
+            spectral = payload.pop("spectral")
+            payload.setdefault("method", spectral.get("estimator", "power_iteration"))
+            payload.setdefault("eigen_iterations", spectral.get("iterations", 10))
+            payload.setdefault("spectral_alpha", spectral.get("alpha", 0.25))
+        if "clamp" in payload and isinstance(payload["clamp"], dict):
+            clamp = payload.pop("clamp")
+            payload.setdefault("min", clamp.get("min"))
+            payload.setdefault("max", clamp.get("max"))
+        if "module_prior" in payload and isinstance(payload["module_prior"], dict):
+            mp = payload.pop("module_prior")
+            payload.setdefault("module_prior_enabled", mp.get("enabled", True))
+        if "group" in payload and isinstance(payload["group"], dict):
+            g = payload.pop("group")
+            payload.setdefault("group_error_enabled", g.get("error_enabled", g.get("enabled", False)))
+            payload.setdefault("group_error_gamma", g.get("error_gamma", g.get("gamma", 0.1)))
+            payload.setdefault("group_size_prior_enabled", g.get("size_prior_enabled", False))
+            payload.setdefault("group_size_prior_beta", g.get("size_prior_beta", 0.25))
+        # Deprecated keys no longer have a field; drop them to avoid dataclass errors.
+        payload.pop("target_condition", None)
+        adaptive_keys = {
+            "enabled",
+            "base_percdamp",
+            "module_prior_enabled",
+            "module_factors",
+            "method",
+            "eigen_iterations",
+            "spectral_alpha",
+            "group_error_enabled",
+            "group_error_gamma",
+            "group_error_ema_decay",
+            "group_error_factor_min",
+            "group_error_factor_max",
+            "online_feedback_enabled",
+            "group_error_scale_min",
+            "group_error_scale_max",
+            "group_error_use_hessian_weighting",
+            "group_error_measure_raw_residual",
+            "group_size_prior_enabled",
+            "group_size_prior_beta",
+            "group_size_prior_reference",
+        }
+        if any(k in payload for k in adaptive_keys):
+            return AdaptiveDampingConfig(**payload)
+        return DampConfig(**payload)
+    raise ValueError("QuantizeConfig: `damp` must be a DampConfig, AdaptiveDampingConfig, dict, or None.")
+
+
+def _normalize_adaptive_damping(
+    adaptive_damping: Optional[Union[AdaptiveDampingConfig, Dict[str, Any]]]
+) -> Union[DampConfig, AdaptiveDampingConfig]:
+    """Backward-compatible alias for :func:`_normalize_damp`."""
+    return _normalize_damp(adaptive_damping)
 
 
 def _normalize_fused_forward_config(
@@ -3376,6 +3612,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "quantization_diagnostics": "quantization_diagnostics",
             "fused_forward": "fused_forward",
             "native_kernel_replay": "native_kernel_replay",
+            "adaptive_damping": "adaptive_damping",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3628,6 +3865,15 @@ class GPTQConfig(PreProcessorConfig):
         metadata={"help": "Skip heavy computations for fast model loading validation"},
     )
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
+    adaptive_damping: Optional[Union[DampConfig, AdaptiveDampingConfig, Dict[str, Any]]] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Hessian damping configuration. Defaults to adaptive damping; pass a DampConfig or "
+                "AdaptiveDampingConfig(enabled=False) for static behavior."
+            )
+        },
+    )
     # Experimental quantization-time AdjacentExact policy. Checkpoints retain
     # the policy for reproducibility and optional future requantization.
     adjacent_model: Optional[Any] = field(
@@ -3666,17 +3912,21 @@ class GPTQConfig(PreProcessorConfig):
     def __post_init__(self):
         desc_act_user_value = self.desc_act
         act_group_aware_user_value = self.act_group_aware
+        adaptive_damping_user_value = self.adaptive_damping
         super().__post_init__()
 
         # Preserve the user's explicit choice so quantization-time safeguards can
         # distinguish "defaulted to True" from "explicitly requested True".
         self._act_group_aware_user_value = act_group_aware_user_value
+        self._adaptive_damping_user_value = adaptive_damping_user_value
 
         self.adjacent_model = _normalize_adjacent_model(self.adjacent_model)
         if self.adjacent_model is not None and self.method != METHOD.GPTQ:
             raise ValueError(
                 "QuantizeConfig: `adjacent_model` currently supports `method=\"gptq\"` only."
             )
+        raw_damp_percent = self.damp_percent
+        raw_damp_auto_increment = self.damp_auto_increment
         if self.damp_percent is None:
             self.damp_percent = _default_damp_percent(self.method)
         if self.damp_auto_increment is None:
@@ -3686,7 +3936,42 @@ class GPTQConfig(PreProcessorConfig):
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
 
+        # Store the original fixed damping values before they are overwritten by the
+        # adaptive damp config. These are the empirical floor used when adaptive
+        # damping is enabled and the static value when it is disabled.
+        self._damp_percent_user_value = self.damp_percent
+        self._damp_auto_increment_user_value = self.damp_auto_increment
+
         self.hessian = _normalize_hessian(self.hessian)
+        self.adaptive_damping = _normalize_adaptive_damping(self.adaptive_damping)
+
+        # Synchronize the adaptive baseline and step with the legacy scalar values
+        # when the user did not explicitly override them in `adaptive_damping`.
+        if isinstance(self.adaptive_damping, AdaptiveDampingConfig):
+            user_adaptive = self._adaptive_damping_user_value
+            user_set_base = isinstance(user_adaptive, dict) and "base_percdamp" in user_adaptive
+            user_set_base = user_set_base or isinstance(user_adaptive, AdaptiveDampingConfig)
+            if not user_set_base:
+                self.adaptive_damping.base_percdamp = (
+                    raw_damp_percent if raw_damp_percent is not None else self._damp_percent_user_value
+                )
+
+            user_set_step = isinstance(user_adaptive, dict) and "step" in user_adaptive
+            user_set_step = user_set_step or isinstance(user_adaptive, AdaptiveDampingConfig)
+            if not user_set_step:
+                self.adaptive_damping.step = (
+                    raw_damp_auto_increment
+                    if raw_damp_auto_increment is not None
+                    else self._damp_auto_increment_user_value
+                )
+
+        # Keep legacy scalar fields in sync with the canonical damp config.
+        if isinstance(self.adaptive_damping, AdaptiveDampingConfig) and self.adaptive_damping.enabled:
+            self.damp_percent = self.adaptive_damping.base_percdamp
+            self.damp_auto_increment = self.adaptive_damping.step
+        else:
+            self.damp_percent = self.damp.min
+            self.damp_auto_increment = self.damp.step
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
         self.quantization_diagnostics = normalize_quantization_diagnostics_mode(
@@ -3702,6 +3987,27 @@ class GPTQConfig(PreProcessorConfig):
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
+
+    @property
+    def damp(self) -> Union[DampConfig, AdaptiveDampingConfig]:
+        """Return the resolved damping configuration.
+
+        When an enabled :class:`AdaptiveDampingConfig` is configured it is
+        returned directly. When a disabled :class:`AdaptiveDampingConfig` or no
+        explicit config is set, a static :class:`DampConfig` is derived from the
+        legacy ``damp_percent``/``damp_auto_increment`` fields.
+        """
+        cfg = self.adaptive_damping
+        if isinstance(cfg, AdaptiveDampingConfig):
+            if cfg.enabled:
+                return cfg
+            # Disabled adaptive -> static damping at the user-configured fixed percdamp.
+            fixed_damp = getattr(self, "_damp_percent_user_value", self.damp_percent)
+            return DampConfig(min=fixed_damp, max=fixed_damp, step=cfg.step)
+        if isinstance(cfg, DampConfig):
+            return cfg
+        fixed_damp = getattr(self, "_damp_percent_user_value", self.damp_percent)
+        return DampConfig(min=fixed_damp, max=fixed_damp, step=self.damp_auto_increment)
 
     def _act_group_aware_is_default(self) -> bool:
         """Return True when `act_group_aware` was not explicitly set by the user."""
@@ -3864,6 +4170,8 @@ class GPTQConfig(PreProcessorConfig):
             "chunk_bytes": self.hessian.chunk_bytes,
             "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
         }
+        if self.adaptive_damping is not None:
+            meta_payload["adaptive_damping"] = self.adaptive_damping.to_dict()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym
@@ -4184,6 +4492,20 @@ class QQQConfig(GPTQConfig):
 
     def default_desc_act(self) -> bool:
         return True
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # QQQ's tuned default damp_percent is much lower than GPTQ's; use a
+        # static DampConfig unless the user explicitly requested adaptive damping.
+        if getattr(self, "_adaptive_damping_user_value", None) is None:
+            fixed_damp = getattr(self, "_damp_percent_user_value", self.damp_percent)
+            fixed_step = getattr(self, "_damp_auto_increment_user_value", self.damp_auto_increment)
+            self.adaptive_damping = DampConfig(
+                min=fixed_damp,
+                max=fixed_damp,
+                step=fixed_step,
+            )
 
 
 @dataclass

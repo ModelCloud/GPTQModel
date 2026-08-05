@@ -123,13 +123,6 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from tests.eval import (  # noqa: E402
-    evaluate,
-    format_eval_result_table,
-    get_eval_task_results,
-    resolve_eval_metric_alias,
-)
-
 from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
 from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
@@ -154,6 +147,12 @@ from gptqmodel.quantization.config import (  # noqa: E402
 from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import (  # noqa: E402
+    evaluate,
+    format_eval_result_table,
+    get_eval_task_results,
+    resolve_eval_metric_alias,
+)
 
 
 RAND_SEED = 898
@@ -220,6 +219,7 @@ class ModelTest(unittest.TestCase):
     FALLBACK = Fallback()
     EORA = None
     DAMP_PERCENT = 0.05
+    ADAPTIVE_DAMPING = None
     MSE = 0.0
     SCALE_SEARCH = None
     DYNAMIC = None
@@ -1538,6 +1538,7 @@ class ModelTest(unittest.TestCase):
             moe_vram_strategy=self.MOE_VRAM_STRATEGY,
             moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
             damp_percent=self.DAMP_PERCENT,
+            adaptive_damping=self.ADAPTIVE_DAMPING,
             mse=self.MSE,
             scale_search=self.SCALE_SEARCH,
             dynamic=self.DYNAMIC,

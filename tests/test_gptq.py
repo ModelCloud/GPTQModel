@@ -112,7 +112,7 @@ def test_gptq_cpu_hessian_fallback_returns_quantized_weights_to_original_cuda_de
 
         calls["cpu"] += 1
         identity = torch.eye(hessian.shape[0], dtype=torch.float32, device=hessian.device)
-        return identity, self.qcfg.damp_percent
+        return identity, self.qcfg.damp.min
 
     monkeypatch.setattr(GPTQ, "hessian_inverse", _patched_hessian_inverse)
     log_messages = []

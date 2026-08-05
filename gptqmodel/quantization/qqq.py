@@ -509,7 +509,7 @@ class QQQ:
 
         self.materialize_hessian()
 
-        percdamp = self.qcfg.damp_percent
+        percdamp = self.qcfg.damp.min
         groupsize = self.qcfg.group_size
         actorder = self.qcfg.desc_act
         static_groups = self.qcfg.static_groups

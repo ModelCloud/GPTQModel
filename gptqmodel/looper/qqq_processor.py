@@ -16,7 +16,7 @@ from ..models._const import DEVICE
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
-from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import METHOD, AdaptiveDampingConfig, DampConfig, QuantizeConfig, resolve_quant_format
 from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
@@ -97,7 +97,24 @@ class QQQProcessor(LoopProcessor):
             act_group_aware_override = self.qcfg.dynamic_get(module.full_name, "act_group_aware", None)
             if act_group_aware_override is not None:
                 qcfg_clone.act_group_aware = act_group_aware_override
-            qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
+            damp_percent_override = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
+            if damp_percent_override is not None:
+                cfg = qcfg_clone.adaptive_damping
+                if isinstance(cfg, AdaptiveDampingConfig):
+                    cfg.base_percdamp = damp_percent_override
+                    cfg.min = max(cfg.min, damp_percent_override)
+                    cfg.max = max(cfg.max, damp_percent_override)
+                elif isinstance(cfg, DampConfig):
+                    cfg.min = damp_percent_override
+                    cfg.max = damp_percent_override
+                else:
+                    qcfg_clone.adaptive_damping = DampConfig(
+                        min=damp_percent_override,
+                        max=damp_percent_override,
+                        step=qcfg_clone.damp_auto_increment,
+                    )
+                qcfg_clone.damp_percent = damp_percent_override
+                qcfg_clone._damp_percent_user_value = damp_percent_override
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
             qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)

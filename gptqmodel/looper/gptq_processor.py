@@ -20,6 +20,7 @@ from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..utils.backend import BACKEND
 from ..utils.importer import select_quant_linear
 from ..utils.marlin import replace_parameter
+from ..quantization.config import AdaptiveDampingConfig
 from ..utils.model import create_quant_module, pack_module, recurse_getattr, recurse_setattr
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
@@ -36,6 +37,7 @@ from ..nn_modules.fused_group_forward import FusedGroupForward
 from ..quantization import FOEM, GPTAQ, GPTQ
 from ..quantization.config import (
     METHOD,
+    DampConfig,
     FOEMConfig,
     GPTAQConfig,
     HessianConfig,
@@ -147,7 +149,24 @@ def clone_gptq_config_for_module(
         if act_group_aware_override is not None:
             qcfg_clone.act_group_aware = act_group_aware_override
             qcfg_clone._act_group_aware_user_value = act_group_aware_override
-        qcfg_clone.damp_percent = dynamic_overrides.get("damp_percent", qcfg_clone.damp_percent)
+        damp_percent_override = dynamic_overrides.get("damp_percent")
+        if damp_percent_override is not None:
+            cfg = qcfg_clone.adaptive_damping
+            if isinstance(cfg, AdaptiveDampingConfig):
+                cfg.base_percdamp = damp_percent_override
+                cfg.min = max(cfg.min, damp_percent_override)
+                cfg.max = max(cfg.max, damp_percent_override)
+            elif isinstance(cfg, DampConfig):
+                cfg.min = damp_percent_override
+                cfg.max = damp_percent_override
+            else:
+                qcfg_clone.adaptive_damping = DampConfig(
+                    min=damp_percent_override,
+                    max=damp_percent_override,
+                    step=qcfg_clone.damp_auto_increment,
+                )
+            qcfg_clone.damp_percent = damp_percent_override
+            qcfg_clone._damp_percent_user_value = damp_percent_override
         qcfg_clone.static_groups = dynamic_overrides.get("static_groups", qcfg_clone.static_groups)
         fallback_override = dynamic_overrides.get("fallback", None)
         if fallback_override is not None:
@@ -360,8 +379,8 @@ class GPTQProcessor(LoopProcessor):
         """Return the quantization fields that must match to share Hessian inverse."""
 
         return (
-            float(qcfg.damp_percent),
-            float(qcfg.damp_auto_increment),
+            float(qcfg.damp.min),
+            float(qcfg.damp.step),
             int(qcfg.group_size),
             bool(qcfg.desc_act),
             bool(qcfg.act_group_aware),

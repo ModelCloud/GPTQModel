@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+import zlib
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -21,7 +22,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..quantization.config import FallbackStrategy, ScaleSearchConfig, SmoothMSE
+from ..quantization.config import AdaptiveDampingConfig, DampConfig, FallbackStrategy, ScaleSearchConfig, SmoothMSE
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
@@ -391,7 +392,9 @@ class GPTQ:
 
     def mock_hessian_inverse(self, H: torch.Tensor):
         """Mock hessian inverse for fast testing"""
-        damp = self.qcfg.damp_percent
+        # Use the anchor/base damping, not the clamp floor, so adaptive and
+        # static configs behave consistently.
+        damp = getattr(self.qcfg.damp, "base_percdamp", self.qcfg.damp.min)
         # Return identity matrix instead of complex inversion
         identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
@@ -1314,6 +1317,7 @@ class GPTQ:
         self.qcfg.group_size = group_size
         self.qcfg.damp_percent = percdamp
         self.qcfg.damp_auto_increment = damp_auto_increment
+        self.qcfg.adaptive_damping = DampConfig(min=percdamp, max=percdamp, step=damp_auto_increment)
         self.qcfg.desc_act = actorder
         if act_group_aware is not None:
             self.qcfg.act_group_aware = act_group_aware
@@ -1323,44 +1327,361 @@ class GPTQ:
         self.module.weight.data = Q
         return scale, zero, g_idx, duration, avg_loss, damp_percent
 
-    def _shared_hessian_inverse_cache_key(self, H: torch.Tensor):
-        """Return an inverse-cache key when this task uses a shared Hessian tensor."""
+    def _shared_hessian_inverse_cache_key(
+        self,
+        H: torch.Tensor,
+        damp: Optional[float] = None,
+    ):
+        """Return an inverse-cache key when this task uses a shared Hessian tensor.
+
+        The resolved damping value is included in the key so modules that share
+        the same Hessian but resolve to different adaptive damping factors do not
+        reuse each other's inverses.
+        """
 
         key = self._shared_hessian_inverse_key
         if key is None:
             return None
-        return key, str(torch.device(H.device)), str(H.dtype), tuple(H.shape)
+        cache_key: Tuple[object, ...] = (
+            key,
+            str(torch.device(H.device)),
+            str(H.dtype),
+            tuple(H.shape),
+        )
+        if damp is not None:
+            cache_key = cache_key + (float(damp),)
+        return cache_key
 
     def _release_shared_hessian_inverse_cache_entry(self, cache, cache_key) -> None:
-        """Drop a shared inverse cache entry after its last group consumer."""
+        """Drop a shared inverse cache entry after its last group consumer.
+
+        Reference counts are tracked per shared-Hessian group (``base_key``), while
+        cache entries are keyed by the full cache key including resolved damping.
+        This lets different consumers of the same Hessian cache distinct damped
+        inverses while still releasing the group refcount correctly.
+        """
 
         ref_counts = self._shared_hessian_inverse_ref_counts
         if cache is None or cache_key is None or ref_counts is None:
             return
 
         base_key = self._shared_hessian_inverse_key
-        remaining = ref_counts.get(cache_key)
-        if remaining is None and base_key is not None:
-            remaining = ref_counts.pop(base_key, None)
+        if base_key is None:
+            return
+
+        remaining = ref_counts.get(base_key)
         if remaining is None:
             return
 
         remaining -= 1
         if remaining <= 0:
-            ref_counts.pop(cache_key, None)
-            cache.pop(cache_key, None)
+            ref_counts.pop(base_key, None)
+            # Drop all cache entries keyed from this shared-Hessian group, not
+            # just the one released by the final consumer, in case distinct
+            # damping keys were populated by different group members.
+            for k in list(cache.keys()):
+                if k[0] == base_key:
+                    cache.pop(k, None)
         else:
-            ref_counts[cache_key] = remaining
+            ref_counts[base_key] = remaining
+
+    @staticmethod
+    def _stable_probe_seed(name: str, dim: int) -> int:
+        """Return a deterministic seed for eigenvalue probe vectors.
+
+        The seed is derived from the module name and Hessian dimension so power
+        iteration is reproducible without consuming the global RNG state.
+        """
+        seed = 0
+        for ch in name or "":
+            seed = (seed * 31 + ord(ch)) & 0xFFFFFFFF
+        return (seed + dim) & 0xFFFFFFFF
+
+    @staticmethod
+    def _stable_key_seed(key: Tuple[object, ...]) -> int:
+        """Return a deterministic 32-bit seed from a shared Hessian inverse key."""
+
+        seed = zlib.adler32(repr(key).encode()) & 0xFFFFFFFF
+        return seed if seed != 0 else 1
+
+    @staticmethod
+    def _lambda_max_kernel(H: torch.Tensor, v0: torch.Tensor, n_iter: int):
+        """Pure-tensor power iteration for the largest eigenvalue only."""
+
+        v = v0 / torch.linalg.norm(v0)
+        for _ in range(n_iter):
+            v = H @ v
+            v = v / torch.linalg.norm(v)
+        return v @ (H @ v)
+
+    @classmethod
+    def _compiled_lambda_max_kernel(cls):
+        if getattr(cls, "_lambda_max_kernel_compiled", None) is None:
+            cls._lambda_max_kernel_compiled = torch_compile(
+                cls._lambda_max_kernel,
+                backend="inductor",
+                fullgraph=False,
+            )
+        return cls._lambda_max_kernel_compiled
+
+    @staticmethod
+    def _lanczos_eigen_max(H: torch.Tensor, n_iter: int):
+        """Fast Lanczos estimate of the largest eigenvalue of ``H`` via ``torch.lobpcg``."""
+
+        A = H.contiguous()
+        largest_vals, _ = torch.lobpcg(A, k=1, largest=True, niter=n_iter)
+        return largest_vals[0]
 
     @torch.inference_mode()
-    def hessian_inverse(self, H: torch.Tensor):
-        """Return the GPTQ inverse/Cholesky result, sharing it for same-input groups."""
+    def _estimate_hessian_eigen_spectrum(
+        self,
+        H: torch.Tensor,
+        method: str,
+        n_iter: int,
+        effective_diag: Optional[torch.Tensor] = None,
+    ):
+        """Estimate the largest eigenvalue of ``H``.
+
+        Only ``lambda_max`` is returned; ``lambda_min`` is treated as 0 in the
+        damping formula, giving the safe upper bound ``lambda >= lambda_max / (K-1)``.
+        Probe vectors are drawn from a module-local generator so estimates are
+        deterministic and do not perturb the global RNG stream. The power iteration
+        loop is compiled when ``torch.compile`` is available to reduce kernel-launch
+        overhead.
+
+        For ``method="diagonal"``, ``effective_diag`` (the diagonal of the matrix
+        actually being factorized, including any applied floor) is used as a fast
+        lower-bound proxy for ``lambda_max``. This is cheap but can under-damp
+        highly ill-conditioned layers because ``max(diag(H))`` is only a lower bound
+        on the true largest eigenvalue.
+        """
+
+        d = H.shape[0]
+        if d <= 1:
+            return None, None
+
+        if method == "diagonal":
+            diag = effective_diag if effective_diag is not None else H.diagonal()
+            return diag.max().item(), 0.0
+
+        if method == "lanczos":
+            if n_iter <= 0:
+                return None, None
+            lambda_max_t = self._lanczos_eigen_max(H, n_iter)
+            return lambda_max_t.item(), 0.0
+
+        # method == "power_iteration" (default)
+        if n_iter <= 0:
+            return None, None
+
+        # When the Hessian is shared across a group (q/k/v, gate/up, etc.), seed
+        # from the shared inverse key so every consumer resolves the same damping
+        # value and the shared inverse cache remains valid. Otherwise fall back to
+        # a per-module seed.
+        shared_key = getattr(self, "_shared_hessian_inverse_key", None)
+        if shared_key is not None:
+            seed = self._stable_key_seed(shared_key)
+        else:
+            seed = self._stable_probe_seed(self.name, d)
+
+        gen = torch.Generator(device=H.device).manual_seed(seed)
+        v0 = torch.randn(d, generator=gen, dtype=H.dtype, device=H.device)
+        lambda_max_t = self._compiled_lambda_max_kernel()(H, v0, n_iter)
+        return lambda_max_t.item(), 0.0
+
+    def _module_damp_factor(self, damp_cfg: AdaptiveDampingConfig) -> float:
+        """Return the per-module scaling factor from the model's module-tree flags.
+
+        The first matching role flag in ``module_factors`` is used (e.g. ``q``,
+        ``k``, ``v``, ``o``, ``gate``, ``up``, ``down``). If no module-tree
+        flags are available, fall back to the raw module-name suffix.
+        """
+
+        if not damp_cfg.module_prior_enabled:
+            return 1.0
+
+        known = set(damp_cfg.module_factors.keys())
+        flags = frozenset()
+        if self._named_module is not None:
+            flags = self._named_module.state.get("module_tree_flags", frozenset())
+        matched = known & flags
+        if matched:
+            return damp_cfg.module_factors[sorted(matched)[0]]
+
+        short_name = self.name.split(".")[-1] if self.name else ""
+        return damp_cfg.module_factors.get(short_name, 1.0)
+
+    def _resolve_initial_damp(
+        self,
+        H: torch.Tensor,
+        current_diag: torch.Tensor,
+        mean: torch.Tensor,
+        lambda_spectral: Optional[float] = None,
+    ):
+        """Choose the initial GPTQ damping fraction (hybrid v3).
+
+        ``current_diag`` is the diagonal of the effective Hessian (including any
+        applied positive-definiteness floor) and ``mean`` is its mean. The
+        damping is anchored at ``base_percdamp`` and scaled by a module-type
+        factor and a compressed spectral ratio:
+
+            r = lambda_spectral / mean(current_diag)
+            damp = base_percdamp * module_factor * r ** spectral_alpha
+
+        For ``method="diagonal"`` the eigenvalue estimate is also taken from
+        ``current_diag`` so the proxy is consistent with the denominator. The
+        result is clamped to ``damp_cfg.min`` / ``damp_cfg.max``.  When adaptive
+        damping is disabled or unavailable, the static ``damp_cfg.min`` is
+        returned.
+
+        If ``lambda_spectral`` is provided, the eigenvalue estimation is skipped.
+        Callers can hoist the (potentially expensive) power-iteration/Lanczos
+        estimate outside of retry loops and reuse it across attempts.
+        """
+
+        damp_cfg = self.qcfg.damp
+        if not isinstance(damp_cfg, AdaptiveDampingConfig) or not damp_cfg.enabled:
+            return damp_cfg.min
+        if H is None or H.ndim != 2:
+            return damp_cfg.base_percdamp
+
+        # Skip adaptive logic on devices where matmul timing is untested.
+        if H.device.type == "npu":
+            return damp_cfg.base_percdamp
+
+        mean_val = mean.item()
+        if not math.isfinite(mean_val) or mean_val <= 0:
+            return damp_cfg.base_percdamp
+
+        if lambda_spectral is None:
+            lambda_spectral, _ = self._estimate_hessian_eigen_spectrum(
+                H, damp_cfg.method, damp_cfg.eigen_iterations, effective_diag=current_diag
+            )
+        if lambda_spectral is None or not math.isfinite(lambda_spectral):
+            return damp_cfg.base_percdamp
+
+        module_factor = self._module_damp_factor(damp_cfg)
+        spectral_ratio = lambda_spectral / mean_val
+        spectral_factor = spectral_ratio ** damp_cfg.spectral_alpha
+
+        damp = damp_cfg.base_percdamp * module_factor * spectral_factor
+        # The configured `min`/`max` bound the final value, and the user-supplied
+        # baseline (`base_percdamp`) is always respected as a ceiling so explicit
+        # high `damp_percent` values are never silently lowered by `max_percdamp`.
+        clamp_min = damp_cfg.min
+        clamp_max = max(damp_cfg.max, damp_cfg.base_percdamp)
+        damp = max(clamp_min, min(damp, clamp_max))
+
+        if not (0 < damp < 1):
+            return damp_cfg.base_percdamp
+
+        log.info(
+            f"Quantization: Module `{self.name}` -> Adaptive damping selected "
+            f"`damp_percent={damp:.6f}` (base={damp_cfg.base_percdamp:.4f}, "
+            f"module_factor={module_factor:.2f}, spectral_ratio={spectral_ratio:.4e}, "
+            f"spectral_factor={spectral_factor:.4f})."
+        )
+        return damp
+
+    @staticmethod
+    def _update_group_feedback(
+        L_g: float,
+        feedback_target: Optional[float],
+        ema_decay: float,
+        gamma: float,
+        factor_min: float,
+        factor_max: float,
+    ) -> Tuple[float, float]:
+        """Update the EMA target and feedback scale from a group loss.
+
+        Returns ``(new_feedback_target, adaptive_feedback)``.  A group loss
+        larger than the EMA target yields ``adaptive_feedback < 1.0`` (smaller
+        error update, i.e. more damping), while a smaller loss yields a value
+        above ``1.0``.
+        """
+        if feedback_target is None:
+            return L_g, 1.0
+        if L_g == 0 or feedback_target == 0:
+            return feedback_target, 1.0
+        if not math.isfinite(L_g):
+            return feedback_target, factor_min
+        feedback_target = ema_decay * feedback_target + (1 - ema_decay) * L_g
+        adaptive_feedback = (feedback_target / L_g) ** gamma
+        adaptive_feedback = max(factor_min, min(factor_max, adaptive_feedback))
+        return feedback_target, adaptive_feedback
+
+    @staticmethod
+    def _compute_group_loss(
+        err_slice: torch.Tensor,
+        h_diag_slice: Optional[torch.Tensor],
+        use_hessian_weighting: bool,
+    ) -> float:
+        """Return the scalar group loss ``L_g`` used by the online feedback controller."""
+        if h_diag_slice is not None and use_hessian_weighting:
+            return float(torch.sum(h_diag_slice * (err_slice ** 2)).item())
+        return float(torch.sum(err_slice ** 2).item())
+
+    @staticmethod
+    def _group_error_scale(
+        adaptive_feedback: float,
+        size_factor: float,
+        scale_min: float = 0.8,
+        scale_max: float = 1.2,
+    ) -> float:
+        """Return the per-column error scale for a quantization group.
+
+        The size prior is applied as a divisor so that larger groups receive
+        a smaller error update (more damping) and smaller groups receive a
+        larger error update, matching the v4.2 design. The final scale is
+        clamped to [scale_min, scale_max] to avoid accidentally large updates.
+        """
+        scale = adaptive_feedback / size_factor
+        return max(scale_min, min(scale, scale_max))
+
+    @torch.inference_mode()
+    def hessian_inverse(
+        self,
+        H: torch.Tensor,
+    ):
+        """Return the GPTQ inverse/Cholesky result."""
+
+        # Resolve the initial damping before the cache lookup so the cache key can
+        # distinguish consumers of the same shared Hessian that resolve to different
+        # adaptive damping values. The expensive eigen estimate is hoisted out of
+        # the floor-attempt loop and reused by ``_compute_hessian_inverse_uncached``.
+        initial_damp = None
+        lambda_spectral = None
+        cache_damp = self.qcfg.damp.min
+        if H is not None and H.ndim == 2 and torch.isfinite(H).all():
+            damp_cfg = self.qcfg.damp
+            orig_diag = H.diagonal().clone()
+            mean = orig_diag.mean()
+            mean_val = mean.item()
+            if (
+                math.isfinite(mean_val)
+                and mean_val > 0
+                and isinstance(damp_cfg, AdaptiveDampingConfig)
+                and damp_cfg.enabled
+                and H.device.type != "npu"
+            ):
+                # Power iteration and Lanczos see the same unmodified H across
+                # floor attempts, so the eigen estimate can be computed once.
+                # The diagonal method is cheap and reads the floored diagonal, so
+                # it is left to be recomputed per attempt.
+                if damp_cfg.method in ("power_iteration", "lanczos"):
+                    lambda_spectral, _ = self._estimate_hessian_eigen_spectrum(
+                        H, damp_cfg.method, damp_cfg.eigen_iterations, effective_diag=orig_diag
+                    )
+                initial_damp = self._resolve_initial_damp(H, orig_diag, mean, lambda_spectral=lambda_spectral)
+                cache_damp = initial_damp
 
         cache = self._shared_hessian_inverse_cache
         cache_lock = self._shared_hessian_inverse_lock
-        cache_key = self._shared_hessian_inverse_cache_key(H)
+        cache_key = self._shared_hessian_inverse_cache_key(H, damp=cache_damp)
         if cache is None or cache_lock is None or cache_key is None:
-            return self._compute_hessian_inverse_uncached(H)
+            return self._compute_hessian_inverse_uncached(
+                H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
+            )
 
         with cache_lock:
             cached = cache.get(cache_key)
@@ -1374,14 +1695,21 @@ class GPTQ:
             if stats is not None:
                 stats["inverse_misses"] = int(stats.get("inverse_misses", 0)) + 1
 
-            result = self._compute_hessian_inverse_uncached(H)
+            result = self._compute_hessian_inverse_uncached(
+                H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
+            )
             if result[0] is not None:
                 cache[cache_key] = result
             self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
             return result
 
     @torch.inference_mode()
-    def _compute_hessian_inverse_uncached(self, H: torch.Tensor):
+    def _compute_hessian_inverse_uncached(
+        self,
+        H: torch.Tensor,
+        initial_damp: Optional[float] = None,
+        lambda_spectral: Optional[float] = None,
+    ):
         # A Hessian with non-finite entries can only produce a non-finite inverse.
         # Bail out early so the caller can fall back instead of propagating NaN/Inf.
         if not torch.isfinite(H).all():
@@ -1393,6 +1721,7 @@ class GPTQ:
 
         # Keep the original Hessian untouched; only a clone's diagonal is modified.
         orig_diag = H.diagonal().clone()
+        d = orig_diag.numel()
 
         # When a block is numerically singular, pure damping can stall at 1.0.
         # Prepare a tiny diagonal floor (relative to the largest entry) that we
@@ -1403,9 +1732,25 @@ class GPTQ:
         finite_nonzero = torch.isfinite(base_abs_max) & (base_abs_max != 0)
         base_abs_max = torch.where(finite_nonzero, base_abs_max, base_abs_max.new_ones(()) * 1.0)
         floor_base = base_abs_max * 1e-6
+        damp_cfg = self.qcfg.damp
         max_floor_attempts = 6
-        used_damp = self.qcfg.damp_percent
+        used_damp = damp_cfg.min
         last_error = None
+
+        # The expensive eigen-spectrum estimate only depends on the unmodified H,
+        # so compute it once and reuse it across floor attempts. For the cheap
+        # diagonal method the estimate is derived from the floored diagonal and
+        # will be recomputed per attempt.
+        if (
+            lambda_spectral is None
+            and isinstance(damp_cfg, AdaptiveDampingConfig)
+            and damp_cfg.enabled
+            and H.device.type != "npu"
+            and damp_cfg.method in ("power_iteration", "lanczos")
+        ):
+            lambda_spectral, _ = self._estimate_hessian_eigen_spectrum(
+                H, damp_cfg.method, damp_cfg.eigen_iterations, effective_diag=orig_diag
+            )
 
         attempt = 0
         while attempt <= max_floor_attempts:
@@ -1426,15 +1771,19 @@ class GPTQ:
                     )
 
             mean = current_diag.mean()
-            damp = self.qcfg.damp_percent
+            if attempt == 0 and initial_damp is not None:
+                damp_scalar = initial_damp
+            else:
+                damp_scalar = self._resolve_initial_damp(H, current_diag, mean, lambda_spectral=lambda_spectral)
+            damp_per_col = torch.full((d,), damp_scalar, device=H.device, dtype=torch.float32)
 
             damp_recovery_started = False
             recovery_initial_damp = None
             recovery_last_damp = None
 
-            while 0 < damp < 1:
+            while (damp_per_col > 0).all().item() and (damp_per_col < 1).all().item():
                 # Build the diagonal adjustment for this damping attempt.
-                diag_delta = (current_diag - orig_diag) + damp * mean
+                diag_delta = (current_diag - orig_diag) + damp_per_col * mean
 
                 if H.device.type == "npu":
                     # NPU uses a dedicated eager path until a compiled equivalent is validated.
@@ -1448,11 +1797,11 @@ class GPTQ:
                             and (Hinv_result.diagonal() > 0).all().item()
                         )
                         if is_valid:
-                            used_damp = damp
+                            used_damp = float(damp_per_col.mean().item())
                             if damp_recovery_started:
                                 log.warn(
                                     f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                    f"`damp_percent={damp:.5f}` "
+                                    f"`damp_percent={used_damp:.5f}` "
                                     f"(started at {recovery_initial_damp:.5f})."
                                 )
                             return Hinv_result, used_damp
@@ -1462,20 +1811,20 @@ class GPTQ:
                         )
                     except torch._C._LinAlgError as e:
                         last_error = e
-                        if self.qcfg.damp_auto_increment != 0:
+                        if damp_cfg.step != 0:
                             if not damp_recovery_started:
                                 damp_recovery_started = True
-                                recovery_initial_damp = damp
+                                recovery_initial_damp = float(damp_per_col.mean().item())
                                 log.warn(
                                     f"Quantization: Module `{self.name}` -> Starting damp recovery at "
-                                    f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
+                                    f"`damp_percent={recovery_initial_damp:.5f}`, increment step `{damp_cfg.step:.5f}`."
                                 )
-                            damp += self.qcfg.damp_auto_increment
-                            recovery_last_damp = damp
+                            damp_per_col = damp_per_col + damp_cfg.step
+                            recovery_last_damp = float(damp_per_col.mean().item())
                         else:
                             log.warn(
                                 f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with "
-                                f"`damp_percent={damp:.5f}` and no auto increment configured."
+                                f"`damp_percent={float(damp_per_col.mean().item()):.5f}` and no auto increment configured."
                             )
                             break
                     continue
@@ -1497,11 +1846,11 @@ class GPTQ:
                         and (Hinv_result.diagonal() > 0).all().item()
                     )
                     if is_valid:
-                        used_damp = damp
+                        used_damp = float(damp_per_col.mean().item())
                         if damp_recovery_started:
                             log.warn(
                                 f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                f"`damp_percent={damp:.5f}` "
+                                f"`damp_percent={used_damp:.5f}` "
                                 f"(started at {recovery_initial_damp:.5f})."
                             )
                         return Hinv_result, used_damp
@@ -1509,25 +1858,25 @@ class GPTQ:
                     # inverse. Treat it as a Cholesky failure and continue damping.
                     success = H.new_tensor(False, dtype=torch.bool)
 
-                if self.qcfg.damp_auto_increment != 0:
+                if damp_cfg.step != 0:
                     if not damp_recovery_started:
                         damp_recovery_started = True
-                        recovery_initial_damp = damp
+                        recovery_initial_damp = float(damp_per_col.mean().item())
                         log.warn(
                             f"Quantization: Module `{self.name}` -> Starting damp recovery at "
-                            f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
+                            f"`damp_percent={recovery_initial_damp:.5f}`, increment step `{damp_cfg.step:.5f}`."
                         )
-                    damp += self.qcfg.damp_auto_increment
-                    recovery_last_damp = damp
+                    damp_per_col = damp_per_col + damp_cfg.step
+                    recovery_last_damp = float(damp_per_col.mean().item())
                 else:
                     log.warn(
                         f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with "
-                        f"`damp_percent={damp:.5f}` and no auto increment configured."
+                        f"`damp_percent={float(damp_per_col.mean().item()):.5f}` and no auto increment configured."
                     )
                     break
 
             if damp_recovery_started:
-                final_damp = recovery_last_damp if recovery_last_damp is not None else damp
+                final_damp = recovery_last_damp if recovery_last_damp is not None else float(damp_per_col.mean().item())
                 log.warn(
                     f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching "
                     f"`damp_percent={final_damp:.5f}`."
@@ -1537,7 +1886,7 @@ class GPTQ:
 
         log.error(
             f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite "
-            f"after diagonal floor attempts. Last `damp_percent` tried = {damp:.5f}."
+            f"after diagonal floor attempts. Last `damp_percent` tried = {float(damp_per_col.mean().item()):.5f}."
         )
         if last_error is not None:
             log.debug(f"Hessian failure detail: {last_error}")
@@ -1555,7 +1904,9 @@ class GPTQ:
         This keeps the behavior aligned with dense-path damping, without building VxV.
         """
         assert h_diag.dim() == 1, "Embedding Hessian diagonal must be a 1D vector."
-        damp = self.qcfg.damp_percent
+        # Use the anchor/base damping, not the clamp floor, so adaptive and
+        # static configs behave consistently.
+        damp = getattr(self.qcfg.damp, "base_percdamp", self.qcfg.damp.min)
         mean = torch.mean(h_diag)
         # Apply a small floor to stabilize inverse for rare/unseen tokens
         abs_max = max(h_diag.max().item(), 1.0)
@@ -2003,6 +2354,16 @@ class GPTQ:
                 if not uses_group_params:
                     self.quantizer.find_params(W, weight=True, hessian=self.H)
 
+        damp_cfg = self.qcfg.damp
+        use_online_group_damping = (
+            use_hessian
+            and not self.qcfg.mock_quantization
+            and isinstance(damp_cfg, AdaptiveDampingConfig)
+            and damp_cfg.enabled
+            and damp_cfg.online_feedback_enabled
+            and self.qcfg.group_size > 0
+            and (damp_cfg.group_error_enabled or damp_cfg.group_size_prior_enabled)
+        )
         if use_hessian:
             try:
                 Hinv, damp = self.hessian_inverse(self.H)
@@ -2057,10 +2418,16 @@ class GPTQ:
                 return group_scale_search_hessians[group_start // self.qcfg.group_size]
             return None
 
+        group_loss_hessian_diag = None
+
         if Hinv is not None:
             # The dense Hessian is only needed to build Hinv. Drop it before
             # allocating the full output buffer and block scratch tensors so
             # peak GPTQ memory does not hold H and Hinv at the same time.
+            # Capture the diagonal here, after all desc_act/act_group_aware
+            # permutations, so it aligns with the reordered GPTQ workspace.
+            if use_online_group_damping:
+                group_loss_hessian_diag = self.H.diagonal().float().clone()
             del self.H
             self.H = None
 
@@ -2184,20 +2551,63 @@ class GPTQ:
                 # Align RTN fallback work chunks to group boundaries to avoid
                 # redundant quantizer reconfiguration across partial groups.
                 effective_block = self.qcfg.group_size
+            if use_online_group_damping and self.qcfg.group_size and self.qcfg.group_size > 0:
+                # Online group feedback works one group at a time so the
+                # per-group error scale can be applied to the GPTQ residual.
+                effective_block = self.qcfg.group_size
 
+            if use_online_group_damping:
+                group_error_ema_decay = damp_cfg.group_error_ema_decay
+                group_error_gamma = damp_cfg.group_error_gamma
+                group_error_factor_min = damp_cfg.group_error_factor_min
+                group_error_factor_max = damp_cfg.group_error_factor_max
+                adaptive_feedback = 1.0
+                feedback_target = None
+                current_group_start = -1
+                current_group_end = -1
+                current_group_error_scale = 1.0
             for i1 in range(0, self.columns, effective_block):
                 i2 = min(i1 + effective_block, self.columns)
                 count = i2 - i1
 
-                W1 = W[:, i1:i2].clone()
+                W1 = W[:, i1:i2].clone().float()
                 # Q1 and Err1 are column-complete scratch buffers. Avoid
                 # zero-filling them because no element is read before it is
-                # assigned by the quantization loop below.
+                # assigned by the quantization loop below.  Use FP32 so
+                # per-column updates keep the same precision as the fused
+                # Triton kernel.
                 Q1 = torch.empty_like(W1)
                 Err1 = torch.empty_like(W1) if Hinv is not None else None
 
                 if Hinv is not None:
-                    Hinv1 = Hinv[i1:i2, i1:i2]
+                    Hinv1 = Hinv[i1:i2, i1:i2].clone().contiguous()
+                    if use_online_group_damping:
+                        group_start = i1
+                        group_end = i2
+                        actual = count
+                        if damp_cfg.group_size_prior_enabled:
+                            size_factor = (
+                                actual / damp_cfg.group_size_prior_reference
+                            ) ** damp_cfg.group_size_prior_beta
+                        else:
+                            size_factor = 1.0
+                        current_group_start = group_start
+                        current_group_end = group_end
+                        # v4.2: scale the GPTQ residual update, not the Hessian
+                        # inverse.  Larger groups are damped more by dividing the
+                        # error scale by the size prior; high group loss reduces
+                        # the scale via the inverted feedback exponent.
+                        current_group_error_scale = self._group_error_scale(
+                            adaptive_feedback,
+                            size_factor,
+                            damp_cfg.group_error_scale_min,
+                            damp_cfg.group_error_scale_max,
+                        )
+                        # Online feedback assumes the block is a single group
+                        # so the group start/end boundaries are well-defined.
+                        assert count <= self.qcfg.group_size, (
+                            "Online group feedback requires block size <= group size"
+                        )
 
                 group_size = self.qcfg.group_size
                 batched_scale = batched_zero = None
@@ -2254,6 +2664,7 @@ class GPTQ:
                     and not self.qcfg.static_groups
                     and count % group_size == 0
                     and batched_group_count == count // group_size
+                    and not use_online_group_damping
                 ):
                     try:
                         maxq_value = (
@@ -2289,7 +2700,8 @@ class GPTQ:
                 # the eager per-column torch.addr loop is slow on CPU.
                 cpu_block_done = False
                 if (
-                    os.environ.get("GPTQMODEL_BLOCK_CPU", "1") != "0"
+                    not use_online_group_damping
+                    and os.environ.get("GPTQMODEL_BLOCK_CPU", "1") != "0"
                     and not triton_block_done
                     and gptq_block_cpu is not None
                     and Hinv is not None
@@ -2476,10 +2888,63 @@ class GPTQ:
                         if Hinv is not None:
                             diff = w - q
                             err1 = diff / d
+                            if use_online_group_damping:
+                                err1.mul_(current_group_error_scale)
                             W1[:, i:] = torch.addr(W1[:, i:], err1, Hinv1[i, i:], alpha=-1.0)
                             Err1[:, i] = err1
 
-                Q[:, i1:i2] = Q1
+                        if (
+                            use_online_group_damping
+                            and damp_cfg.group_error_enabled
+                            and (i1 + i + 1) == current_group_end
+                        ):
+                            # v4.2/v4.3: measure the unscaled GPTQ residual for
+                            # this group and update the EMA target for the next
+                            # group.  Using the raw residual (before the size
+                            # prior and feedback scale are applied) decouples the
+                            # feedback controller from its own output.
+                            local_group_start = max(current_group_start - i1, 0)
+                            local_group_end = current_group_end - i1
+                            err_slice = Err1[:, local_group_start:local_group_end].float()
+                            if damp_cfg.group_error_measure_raw_residual:
+                                err_slice = err_slice / current_group_error_scale
+                            h_diag_slice = None
+                            if group_loss_hessian_diag is not None:
+                                h_diag_slice = group_loss_hessian_diag[
+                                    current_group_start:current_group_end
+                                ].to(err_slice.device)
+                            L_g = self._compute_group_loss(
+                                err_slice,
+                                h_diag_slice,
+                                damp_cfg.group_error_use_hessian_weighting,
+                            )
+                            logged_size_factor = size_factor
+                            logged_error_scale = current_group_error_scale
+                            group_id = i1 // group_size
+                            num_groups = (self.columns + group_size - 1) // group_size
+                            feedback_target, adaptive_feedback = self._update_group_feedback(
+                                L_g,
+                                feedback_target,
+                                group_error_ema_decay,
+                                group_error_gamma,
+                                group_error_factor_min,
+                                group_error_factor_max,
+                            )
+                            log.info(
+                                "Quantization: Module `%s` -> group %d/%d "
+                                "loss=%.6f ema_target=%.6f next_feedback=%.4f "
+                                "size_factor=%.4f error_scale=%.4f",
+                                self.name,
+                                group_id,
+                                num_groups,
+                                L_g,
+                                feedback_target,
+                                adaptive_feedback,
+                                logged_size_factor,
+                                logged_error_scale,
+                            )
+
+                Q[:, i1:i2] = Q1.to(W.dtype)
                 if Hinv is not None:
                     # Recompute the block loss from Err1 instead of per-column
                     # scalar add_ calls; this avoids thousands of tiny syncs.
