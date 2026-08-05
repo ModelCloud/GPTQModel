@@ -10,6 +10,7 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
+import gptqmodel
 from gptqmodel import _build_device_thread_pool
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
@@ -25,13 +26,24 @@ class TestQuantTelemetry(unittest.TestCase):
         with patch.dict(os.environ, {"GPTQMODEL_TEST_FLAG": "0"}, clear=False):
             self.assertFalse(env_flag("GPTQMODEL_TEST_FLAG"))
 
-    def test_device_thread_pool_cpu_workers_capped(self):
+    def test_device_thread_pool_cpu_workers_capped_on_free_threading(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            _build_device_thread_pool()
+            with patch.object(gptqmodel, "has_gil_disabled", return_value=True):
+                _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
         cpu = workers["cpu"]
         self.assertGreaterEqual(cpu, 2)
         self.assertLessEqual(cpu, 8)
+        self.assertEqual(workers["model_loader:cpu"], 2)
+
+    def test_device_thread_pool_cpu_workers_keep_historical_default_on_gil(self):
+        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
+            with patch.object(gptqmodel, "has_gil_disabled", return_value=False):
+                _build_device_thread_pool()
+        workers = mock_init.call_args.kwargs["workers"]
+        cpu = workers["cpu"]
+        self.assertGreaterEqual(cpu, 1)
+        self.assertLessEqual(cpu, 12)
         self.assertEqual(workers["model_loader:cpu"], 2)
 
     def test_log_time_block_is_silent_by_default(self):
