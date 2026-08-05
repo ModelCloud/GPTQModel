@@ -3672,3 +3672,120 @@ The geomean is **1.12x** faster on the kernel itself.  The per-shape table has
 run-to-run variance; the single-chunk path consistently removes the worst
 large-M latency outliers and is the safer default for M=5..8.  The 2 TFLOPS
 target still needs a more efficient BF16 dot-product path or a wider tile.
+
+## Optimization pass 40 (2026-08-05): AVX-512 VNNI int16 dot-product for M<=4
+
+This pass adds an experimental `vpdpwssd` VNNI path.  The qweight is pre-packed
+on the CPU side as signed `int8 = code - zero` in the same `[N/16, K/32, 8, 16]`
+layout as the uint8 pre-expanded path, but each byte is already centered so the
+kernel only needs to sign-extend it.  The activation is quantized per group to
+`int16` on-the-fly (`x_i16 = round(x / sx)`, `sx = max / 32767`).  For each
+32-code K-block the kernel processes 16 consecutive pairs of K values with
+`vpermb` to gather the pair and `cvtepi8_epi16` to sign-extend, then one
+`vpdpwssd` per M row accumulates `x0*w0 + x1*w1` for 16 output columns at once.
+
+Dispatch and gating:
+- Only enabled when `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI=1`.
+- Python prepacks the signed int8 layout only for `M <= 4` and only when the
+  host reports `avx512_vnni` (matching the C++ `cpu_supports_avx512_vnni` probe).
+- The C++ dispatch is `M <= 4`; larger M falls back to the FP32 FMA tile.
+- The `_cpu_has_avx512_vnni()` probe accepts both `avx512vnni` and
+  `avx512_vnni` `/proc/cpuinfo` flag spellings.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 (default and
+  `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI=1`).
+- `ruff check` and `git diff --check` clean.
+- `laguna` M=1/2/4/8 sweep (threads=8, bits 3/5/6/7) A/B vs `origin/main`
+  with VNNI enabled:
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.133x | 1.145x | 1.133x |
+| laguna | 5 | 1.155x | 1.096x | 1.156x |
+| laguna | 6 | 1.129x | 1.157x | 1.124x |
+| laguna | 7 | 1.277x | 1.183x | 1.278x |
+| all | all | 1.172x | 1.145x | 1.171x |
+
+The VNNI geomean is **1.17x** faster on the kernel itself and **1.28x** for
+bits=7.  Highlights include `2048 x 8192` bits=7 M=2 at **0.507 TFLOPS**
+(vs 0.220 TFLOPS baseline) and `8192 x 2048` bits=7 M=4 at **0.684 TFLOPS**
+(vs 0.229 TFLOPS baseline, though the baseline run had an outlier).  The path
+is still gated behind an env flag because it is an experiment; the 2 TFLOPS
+target will likely require pairing VNNI with a wider column tile or a more
+aggressive K-pair unroll.
+
+## Optimization pass 41 (2026-08-05): VNNI quad K-pair decode
+
+The initial VNNI path decoded two consecutive K values at a time (one pair per
+`vpermb`), iterating 16 pairs for each 32-code K-block.  Because the qweight
+pre-expanded layout stores 4 K rows per 32-bit int32 word, a single `vpermb` can
+gather and interleave all four K values for 16 output columns.  Two
+`cvtepi8_epi16` sign-extensions (low and high halves of the permute result)
+then produce two int16 weight vectors, and two chained `vpdpwssd` calls consume
+the two activation pairs.  This halves the number of `vpermb` gathers per K-block
+without increasing the number of arithmetic instructions per K value.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 (default and
+  `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI=1`).
+- `ruff check` and `git diff --check` clean.
+- A/B vs pass 40 (pair decode) on `laguna` M=1/2/4/8 (threads=8, bits 3/5/6/7,
+  VNNI enabled):
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.035x | 1.020x | 1.036x |
+| laguna | 5 | 1.073x | 1.010x | 1.072x |
+| laguna | 6 | 1.078x | 1.047x | 1.082x |
+| laguna | 7 | 1.058x | 1.203x | 1.055x |
+| all | all | 1.061x | 1.068x | 1.061x |
+
+The quad decode gives a **1.06x** geomean kernel improvement on top of pass 40.
+Combined against `origin/main`, the VNNI path is now **1.24x** faster on the
+kernel geomean and **1.35x** for bits=7:
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.173x | 1.168x | 1.174x |
+| laguna | 5 | 1.239x | 1.107x | 1.239x |
+| laguna | 6 | 1.217x | 1.212x | 1.216x |
+| laguna | 7 | 1.351x | 1.423x | 1.349x |
+| all | all | 1.243x | 1.222x | 1.243x |
+
+Highlights include `2048 x 8192` bits=7 M=1 at **0.298 TFLOPS**, M=2 at
+**0.567 TFLOPS**, and M=4 at **0.857 TFLOPS**.  The default (non-VNNI) M=8 path
+still reaches ~1 TFLOPS, so the 2 TFLOPS target will likely require extending
+the VNNI micro-kernel to M=5..8 with a single-chunk register layout, or a
+denser weight packing scheme.
+
+## Optimization pass 42 (2026-08-05): make AVX-512 VNNI the default for M <= 4
+
+The VNNI path was gated behind `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI=1` because
+Python and the C++ kernel had to agree on whether the prepacked qweight was
+uint8 `code` (generic FP32 path) or signed int8 `(code - zero)` (VNNI path).
+This commit removes that env flag and makes VNNI automatic for `M <= 4` on
+VNNI-capable x86 CPUs.  The agreement is now explicit: Python computes a
+`use_vnni` flag from `M`, `_cpu_has_avx512_vnni()`, and the disable envs, passes
+it to `_prepack_qweight_for_cpu` (signed prepack) and to the C++ op.  The C++
+kernel schema adds `bool use_vnni`; the VNNI micro-kernel is entered only when
+the flag is true.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 (default, AVX2,
+  and scalar fallback paths).
+- `ruff check` and `git diff --check` clean.
+- `benchmark --sanity --threads 8 --bits 3 5 6 7` passed.
+- A/B vs `origin/main` on `laguna` M=1/2/4/8 (threads=8):
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.196x | 1.282x | 1.198x |
+| laguna | 5 | 1.147x | 1.111x | 1.148x |
+| laguna | 6 | 1.199x | 1.370x | 1.195x |
+| laguna | 7 | 1.343x | 1.528x | 1.343x |
+| all | all | 1.219x | 1.314x | 1.219x |
+
+The VNNI default gives a **1.22x** kernel geomean and **1.31x** speedup geomean
+over `origin/main`, with bits=7 up to **1.34x** / **1.53x**.  It can be disabled
+with `GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI=1` or by disabling AVX-512 entirely.

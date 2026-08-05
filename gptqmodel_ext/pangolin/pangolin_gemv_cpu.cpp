@@ -25,7 +25,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
@@ -148,6 +150,13 @@ inline bool cpu_supports_avx512_core() {
 
 inline bool cpu_supports_avx512_vbmi() {
   return cpu_supports_avx512_core() && __builtin_cpu_supports("avx512vbmi");
+}
+
+inline bool cpu_supports_avx512_vnni() {
+  if (env_flag_enabled("GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI")) {
+    return false;
+  }
+  return cpu_supports_avx512_vbmi() && __builtin_cpu_supports("avx512vnni");
 }
 
 // AVX2 256-bit vector helpers.
@@ -1321,6 +1330,297 @@ void gemv_kernel_avx512_tile2_bits8_dpbf16(
   }
 }
 
+
+static void quantize_x_to_int16(
+    const float* __restrict__ x_f,
+    int M,
+    int64_t K,
+    const int32_t* __restrict__ g_idx,
+    int num_groups,
+    int16_t* __restrict__ x_i16,
+    float* __restrict__ x_sx) {
+  std::vector<int> group_start(num_groups, static_cast<int>(K));
+  std::vector<int> group_end(num_groups, 0);
+  const int num_k_blocks = static_cast<int>(K / 32);
+  for (int kb = 0; kb < num_k_blocks; ++kb) {
+    const int row0 = kb * 32;
+    int group = g_idx[row0];
+    if (group < 0) {
+      group += num_groups;
+    }
+    group_end[group] = row0 + 32;
+    group_start[group] = std::min(group_start[group], row0);
+  }
+  at::parallel_for(0, static_cast<int64_t>(M) * num_groups, 1, [&](int64_t begin, int64_t end) {
+    for (int64_t idx = begin; idx < end; ++idx) {
+      const int m = static_cast<int>(idx / num_groups);
+      const int g = static_cast<int>(idx % num_groups);
+      const int gs = group_start[g];
+      const int ge = group_end[g];
+      if (gs >= ge) {
+        x_sx[static_cast<int64_t>(m) * num_groups + g] = 1.0f;
+        continue;
+      }
+      float max_abs = 0.0f;
+      for (int k = gs; k < ge; ++k) {
+        const float v = std::abs(x_f[static_cast<int64_t>(m) * K + k]);
+        if (v > max_abs) {
+          max_abs = v;
+        }
+      }
+      const float sx = (max_abs > 0.0f) ? (max_abs / 32767.0f) : 1.0f;
+      x_sx[static_cast<int64_t>(m) * num_groups + g] = sx;
+      for (int k = gs; k < ge; ++k) {
+        const float val = x_f[static_cast<int64_t>(m) * K + k] / sx;
+        x_i16[static_cast<int64_t>(m) * K + k] = static_cast<int16_t>(std::nearbyintf(val));
+      }
+    }
+  });
+}
+
+// Decode four consecutive K values from one pre-expanded int8 qweight word
+// into two 32-lane int16 vectors ready for VPDPBWSSD.  The qweight bytes are
+// already (code - zero) in signed int8 form, so only one vpermb gather and two
+// sign-extensions are needed for the whole word (4 K rows x 16 columns).
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+inline void decode_bits8_quad_vnni(__m512i qword, __m512i* out01, __m512i* out23) {
+  // Output byte order: [w0_0,w1_0, w0_1,w1_1, ..., w0_15,w1_15,
+  //                    w2_0,w3_0, w2_1,w3_1, ..., w2_15,w3_15].
+  // Source indices 0..63 are the 16 int32 words (4 bytes each) of qword.
+  alignas(64) static const uint8_t idx_quad[64] = {
+      0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29,
+      32, 33, 36, 37, 40, 41, 44, 45, 48, 49, 52, 53, 56, 57, 60, 61,
+      2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23, 26, 27, 30, 31,
+      34, 35, 38, 39, 42, 43, 46, 47, 50, 51, 54, 55, 58, 59, 62, 63};
+  const __m512i idx = _mm512_load_si512(idx_quad);
+  const __m512i perm = _mm512_permutexvar_epi8(idx, qword);
+  *out01 = _mm512_cvtepi8_epi16(_mm512_castsi512_si256(perm));
+  const __m512i perm_high = _mm512_shuffle_i64x2(perm, perm, 0x0E);
+  *out23 = _mm512_cvtepi8_epi16(_mm512_castsi512_si256(perm_high));
+}
+
+template <int Bits, int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_col_block_avx512_vnni(
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    void* __restrict__ out_ptr,
+    bool out_float,
+    int64_t col0,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int64_t kb_start,
+    int64_t kb_end) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t chunk0 = col0 / 16;
+  __m512i acc_i32[2][SizeM];
+  __m512 acc_fp32[2][SizeM];
+  for (int t = 0; t < 2; ++t) {
+    for (int m = 0; m < SizeM; ++m) {
+      acc_i32[t][m] = _mm512_set1_epi32(0);
+      acc_fp32[t][m] = _mm512_set1_ps(0.0f);
+    }
+  }
+  float* out_f = reinterpret_cast<float*>(out_ptr);
+  at::BFloat16* out_b = reinterpret_cast<at::BFloat16*>(out_ptr);
+  int prev_group = -1;
+  __m512 scale_vec[2] = {_mm512_set1_ps(0.0f), _mm512_set1_ps(0.0f)};
+  for (int64_t kb = kb_start; kb < kb_end; ++kb) {
+    const int64_t row0 = kb * 32;
+    int group = g_idx[row0];
+    if (__builtin_expect(group < 0, 0)) {
+      group += static_cast<int>(num_groups);
+    }
+    if (__builtin_expect(group != prev_group, 0)) {
+      if (__builtin_expect(prev_group != -1, 1)) {
+        for (int t = 0; t < 2; ++t) {
+          for (int m = 0; m < SizeM; ++m) {
+            const __m512 sx_ps = _mm512_set1_ps(x_sx[static_cast<int64_t>(m) * num_groups + prev_group]);
+            const __m512 combined_scale = _mm512_mul_ps(scale_vec[t], sx_ps);
+            const __m512 dot_f = _mm512_cvtepi32_ps(acc_i32[t][m]);
+            acc_fp32[t][m] = _mm512_fmadd_ps(dot_f, combined_scale, acc_fp32[t][m]);
+            acc_i32[t][m] = _mm512_set1_epi32(0);
+          }
+        }
+      }
+      for (int t = 0; t < 2; ++t) {
+        const int64_t chunk = chunk0 + t;
+        const at::BFloat16* scale_ptr = scale_b + static_cast<int64_t>(group) * N + chunk * 16;
+        scale_vec[t] = load_scale_512(scale_ptr);
+      }
+      prev_group = group;
+    }
+    const uint32_t* qbase[2];
+    for (int t = 0; t < 2; ++t) {
+      const int64_t chunk = chunk0 + t;
+      const int64_t base_offset = ((chunk * num_k_blocks + kb) * 8) * 16;
+      qbase[t] = reinterpret_cast<const uint32_t*>(qweight) + base_offset;
+    }
+    if (__builtin_expect(kb + 1 < kb_end, 1)) {
+      for (int t = 0; t < 2; ++t) {
+        const int64_t chunk = chunk0 + t;
+        const int64_t base_offset = ((chunk * num_k_blocks + kb + 1) * 8) * 16;
+        const uint32_t* next_qbase = reinterpret_cast<const uint32_t*>(qweight) + base_offset;
+        _mm_prefetch(reinterpret_cast<const char*>(next_qbase), _MM_HINT_T0);
+        _mm_prefetch(reinterpret_cast<const char*>(next_qbase + 8), _MM_HINT_T0);
+      }
+      int next_group = g_idx[(kb + 1) * 32];
+      if (__builtin_expect(next_group < 0, 0)) {
+        next_group += static_cast<int>(num_groups);
+      }
+      if (__builtin_expect(next_group != group, 0)) {
+        for (int t = 0; t < 2; ++t) {
+          const int64_t chunk = chunk0 + t;
+          _mm_prefetch(
+              reinterpret_cast<const char*>(scale_b + static_cast<int64_t>(next_group) * N + chunk * 16),
+              _MM_HINT_T0);
+        }
+      }
+    }
+    for (int word_idx = 0; word_idx < 8; ++word_idx) {
+      __m512i w01[2], w23[2];
+      for (int t = 0; t < 2; ++t) {
+        decode_bits8_quad_vnni(
+            load_i_512(qbase[t] + static_cast<int64_t>(word_idx) * 16), &w01[t], &w23[t]);
+      }
+      const int64_t k0 = row0 + static_cast<int64_t>(word_idx) * 4;
+      for (int m = 0; m < SizeM; ++m) {
+        int16_t vals[4];
+        std::memcpy(vals, x_i16 + static_cast<int64_t>(m) * K + k0, sizeof(vals));
+        const uint32_t pair01 =
+            static_cast<uint32_t>(static_cast<uint16_t>(vals[0])) |
+            (static_cast<uint32_t>(static_cast<uint16_t>(vals[1])) << 16);
+        const uint32_t pair23 =
+            static_cast<uint32_t>(static_cast<uint16_t>(vals[2])) |
+            (static_cast<uint32_t>(static_cast<uint16_t>(vals[3])) << 16);
+        const __m512i a01 = _mm512_set1_epi32(pair01);
+        const __m512i a23 = _mm512_set1_epi32(pair23);
+        for (int t = 0; t < 2; ++t) {
+          acc_i32[t][m] = _mm512_dpwssd_epi32(
+              _mm512_dpwssd_epi32(acc_i32[t][m], a01, w01[t]), a23, w23[t]);
+        }
+      }
+    }
+  }
+  if (prev_group != -1) {
+    for (int t = 0; t < 2; ++t) {
+      for (int m = 0; m < SizeM; ++m) {
+        const __m512 sx_ps = _mm512_set1_ps(x_sx[static_cast<int64_t>(m) * num_groups + prev_group]);
+        const __m512 combined_scale = _mm512_mul_ps(scale_vec[t], sx_ps);
+        const __m512 dot_f = _mm512_cvtepi32_ps(acc_i32[t][m]);
+        acc_fp32[t][m] = _mm512_fmadd_ps(dot_f, combined_scale, acc_fp32[t][m]);
+      }
+    }
+  }
+  for (int t = 0; t < 2; ++t) {
+    for (int m = 0; m < SizeM; ++m) {
+      const int64_t out_col = col0 + static_cast<int64_t>(t) * 16;
+      if (out_float) {
+        store_f_avx512(out_f + static_cast<int64_t>(m) * N + out_col, acc_fp32[t][m]);
+      } else {
+        store_bf16_512(out_b + static_cast<int64_t>(m) * N + out_col, acc_fp32[t][m]);
+      }
+    }
+  }
+}
+
+template <int Bits, int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_kernel_avx512_vnni(
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t /*M*/,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t col_chunks = N / 32;
+  const int num_threads = at::get_num_threads();
+  const bool k_parallel = (col_chunks < num_threads * 2) && (num_k_blocks > 1);
+  if (k_parallel) {
+    const size_t partial_per_task = static_cast<size_t>(SizeM) * N;
+    const int64_t k_grain = std::max<int64_t>(1, num_k_blocks / num_threads);
+    const int64_t num_tasks = (num_k_blocks + k_grain - 1) / k_grain;
+    std::vector<float> partial(static_cast<size_t>(num_tasks) * partial_per_task, 0.0f);
+    std::atomic<int64_t> task_counter{0};
+    at::parallel_for(0, num_k_blocks, k_grain, [&](int64_t kb_begin, int64_t kb_end) {
+      const int64_t task_id = task_counter.fetch_add(1);
+      float* p_out = partial.data() + task_id * partial_per_task;
+      for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+        gemv_col_block_avx512_vnni<Bits, SizeM>(
+            x_i16, x_sx, qweight, scale_b, g_idx, p_out, true,
+            col_block * 32, K, N, num_groups, kb_begin, kb_end);
+      }
+    });
+    for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+      const int64_t col0 = col_block * 32;
+      for (int t = 0; t < 2; ++t) {
+        const int64_t out_col = col0 + t * 16;
+        for (int m = 0; m < SizeM; ++m) {
+          __m512 sum = _mm512_set1_ps(0.0f);
+          for (int64_t task_id = 0; task_id < num_tasks; ++task_id) {
+            const float* p = partial.data() + task_id * partial_per_task +
+                             static_cast<int64_t>(m) * N + out_col;
+            sum = _mm512_add_ps(sum, load_f_512(p));
+          }
+          store_bf16_512(out + static_cast<int64_t>(m) * N + out_col, sum);
+        }
+      }
+    }
+  } else {
+    const int64_t grain = std::max<int64_t>(1, col_chunks / num_threads);
+    at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t col_block = begin; col_block < end; ++col_block) {
+        gemv_col_block_avx512_vnni<Bits, SizeM>(
+            x_i16, x_sx, qweight, scale_b, g_idx, out, false,
+            col_block * 32, K, N, num_groups, 0, num_k_blocks);
+      }
+    });
+  }
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_kernel_avx512_vnni_dispatch_bits(
+    int64_t bits,
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t M,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  switch (bits) {
+    case 3:
+      gemv_kernel_avx512_vnni<3, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+    case 5:
+      gemv_kernel_avx512_vnni<5, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+    case 6:
+      gemv_kernel_avx512_vnni<6, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+    case 7:
+      gemv_kernel_avx512_vnni<7, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+  }
+}
+
 #endif  // PLANAR_GEMV_CPU_X86
 
 template <int Bits, int SizeM>
@@ -1537,7 +1837,8 @@ torch::Tensor pangolin_gemv_cpu(
     torch::Tensor scales,
     torch::Tensor qzeros,
     torch::Tensor g_idx,
-    int64_t bits) {
+    int64_t bits,
+    bool use_vnni) {
   TORCH_CHECK(input.device().is_cpu(), "pangolin_gemv_cpu input must be CPU");
   TORCH_CHECK(
       qweight.device().is_cpu() && scales.device().is_cpu() && qzeros.device().is_cpu() && g_idx.device().is_cpu(),
@@ -1715,6 +2016,46 @@ torch::Tensor pangolin_gemv_cpu(
         return output;
     }
   }
+
+#if PLANAR_GEMV_CPU_X86
+  // AVX-512 VNNI int16 dot-product path for the pre-expanded int8 qweight layout.
+  // Each VPDPBWSSD instruction accumulates two int16 products per lane, giving
+  // 64 FLOPs/instruction vs 32 for the FP32 FMA tile2 path.  The activation
+  // is quantized to int16 per group on-the-fly and the qweight bytes are
+  // pre-packed on the CPU side as (code - zero) signed int8 values.  This is
+  // the default path for M <= 4 when the CPU supports AVX-512 VNNI; the caller
+  // explicitly opts in via `use_vnni` so the Python dispatcher and the kernel
+  // always agree on whether the qweight is signed int8 or uint8 code.
+  if (kernel_bits == 8 && cpu_supports_avx512_vnni() && N % 32 == 0 && M <= 4 && use_vnni) {
+    std::vector<int16_t> x_i16(static_cast<size_t>(M) * K);
+    std::vector<float> x_sx(static_cast<size_t>(M) * num_groups);
+    quantize_x_to_int16(
+        x_f, static_cast<int>(M), K, g_idx_ptr, static_cast<int>(num_groups), x_i16.data(), x_sx.data());
+    switch (M) {
+      case 1:
+        gemv_kernel_avx512_vnni_dispatch_bits<1>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 2:
+        gemv_kernel_avx512_vnni_dispatch_bits<2>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 3:
+        gemv_kernel_avx512_vnni_dispatch_bits<3>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 4:
+        gemv_kernel_avx512_vnni_dispatch_bits<4>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+    }
+  }
+#endif
+
 #endif
 
   dispatch_size_m(M, kernel_bits, x_f, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, K, N, num_groups);
@@ -1726,7 +2067,7 @@ torch::Tensor pangolin_gemv_cpu(
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_pangolin, m) {
   m.def(
-      "gemv_cpu(Tensor input, Tensor qweight, Tensor scales, Tensor qzeros, Tensor g_idx, int bits) -> Tensor");
+      "gemv_cpu(Tensor input, Tensor qweight, Tensor scales, Tensor qzeros, Tensor g_idx, int bits, bool use_vnni) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_pangolin, CPU, m) {
