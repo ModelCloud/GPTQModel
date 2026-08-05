@@ -75,6 +75,22 @@ from .torch import HAS_CUDA, torch_empty_cache
 log = setup_logger()
 _REQUIRES_VERSION_RE = pcre.compile(r"(<=|>=|==|<|>)\s*([\d\.]+)")
 
+def _get_max_pack_threads() -> int:
+    """Default cap for per-module packing threads; non-positive or non-integer env falls back to 8."""
+    raw = os.environ.get("GPTQMODEL_MAX_PACK_THREADS")
+    if raw is None:
+        return 8
+    try:
+        v = int(raw)
+    except (ValueError, TypeError):
+        return 8
+    return v if v > 0 else 8
+
+
+# Cap per-module packing threads so the outer ThreadPoolExecutor threads do not
+# each spawn an unbounded OpenMP team under free-threading.
+_MAX_PACK_THREADS = _get_max_pack_threads()
+
 
 _DTYPE_SAFE_MAP = {
     torch.float32: ("F32", 4),
@@ -1438,6 +1454,9 @@ def pack_module(
     if quantize_config is not None:
         pack_impl = getattr(quantize_config, "pack_impl", "original") or "original"
         pack_threads = getattr(quantize_config, "pack_threads", None)
+        if pack_threads is not None and pack_threads > 0:
+            # Preserve None/0/negative as auto-select; cap only explicit positive values.
+            pack_threads = min(int(pack_threads), _MAX_PACK_THREADS)
         cfg_device = getattr(quantize_config, "device", None)
         if isinstance(cfg_device, DEVICE):
             target_device = cfg_device.to_torch_device()
@@ -1652,7 +1671,7 @@ def pack_model(
     if has_gil_disabled():
         from device_smi import Device
         cpu = Device("cpu")
-        max_packers = cpu.count * cpu.cores
+        max_packers = min(8, max(2, cpu.count * cpu.cores))
     else:
         max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 

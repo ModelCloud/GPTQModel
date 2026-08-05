@@ -24,6 +24,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..quantization.config import AdaptiveClippingConfig, AdaptiveDampingConfig, DampConfig, FallbackStrategy, ScaleSearchConfig, SmoothMSE
 from ..utils.device import get_device
+from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils import gte_python_3_14, has_gil_disabled
 from ..utils.torch import TORCH_GTE_214, TORCH_GTE_28, torch_compile, torch_sync
@@ -53,6 +54,15 @@ _USE_GPTQ_TRITON_BLOCK = os.environ.get("GPTQMODEL_TRITON_BLOCK", "1") != "0"
 
 
 log = setup_logger()
+
+def _log_hessian_verbose() -> bool:
+    """Verbose per-module hessian-inverse markers are opt-in.
+
+    The QuantizationRegionTimer measurement is always recorded and flushed
+    periodically, which provides aggregate stall isolation without per-module
+    line noise.
+    """
+    return env_flag("DEBUG") or env_flag("GPTQMODEL_LOG_HESSIAN")
 
 lock = threading.Lock()
 
@@ -1676,33 +1686,49 @@ class GPTQ:
                 initial_damp = self._resolve_initial_damp(H, orig_diag, mean, lambda_spectral=lambda_spectral)
                 cache_damp = initial_damp
 
-        cache = self._shared_hessian_inverse_cache
-        cache_lock = self._shared_hessian_inverse_lock
-        cache_key = self._shared_hessian_inverse_cache_key(H, damp=cache_damp)
-        if cache is None or cache_lock is None or cache_key is None:
-            return self._compute_hessian_inverse_uncached(
-                H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
-            )
+        timer = getattr(self, "region_timer", None)
+        timer_cm = (
+            timer.measure("hessian_inverse", source=self.name)
+            if timer is not None
+            else contextlib.nullcontext()
+        )
+        with timer_cm:
+            cache = self._shared_hessian_inverse_cache
+            cache_lock = self._shared_hessian_inverse_lock
+            cache_key = self._shared_hessian_inverse_cache_key(H, damp=cache_damp)
+            if cache is None or cache_lock is None or cache_key is None:
+                if _log_hessian_verbose():
+                    log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
+                result = self._compute_hessian_inverse_uncached(
+                    H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
+                )
+                if _log_hessian_verbose():
+                    log.info(f"GPTQ: hessian_inverse end {self.name}")
+                return result
 
-        with cache_lock:
-            cached = cache.get(cache_key)
-            stats = self._shared_hessian_stats
-            if cached is not None:
+            with cache_lock:
+                cached = cache.get(cache_key)
+                stats = self._shared_hessian_stats
+                if cached is not None:
+                    if stats is not None:
+                        stats["inverse_hits"] = int(stats.get("inverse_hits", 0)) + 1
+                    self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
+                    return cached
+
                 if stats is not None:
-                    stats["inverse_hits"] = int(stats.get("inverse_hits", 0)) + 1
+                    stats["inverse_misses"] = int(stats.get("inverse_misses", 0)) + 1
+
+                if _log_hessian_verbose():
+                    log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
+                result = self._compute_hessian_inverse_uncached(
+                    H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
+                )
+                if _log_hessian_verbose():
+                    log.info(f"GPTQ: hessian_inverse end {self.name}")
+                if result[0] is not None:
+                    cache[cache_key] = result
                 self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
-                return cached
-
-            if stats is not None:
-                stats["inverse_misses"] = int(stats.get("inverse_misses", 0)) + 1
-
-            result = self._compute_hessian_inverse_uncached(
-                H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
-            )
-            if result[0] is not None:
-                cache[cache_key] = result
-            self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
-            return result
+                return result
 
     @torch.inference_mode()
     def _compute_hessian_inverse_uncached(
