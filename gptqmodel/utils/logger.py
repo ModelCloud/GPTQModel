@@ -24,10 +24,11 @@ _ANSI_ESCAPE_RE = pcre.compile(r"\x1b\[[0-9;]*m")
 def _log_times_enabled() -> bool:
     """Check env at call time so flags can be toggled without restarting.
 
-    Per-module timing is intentionally opt-in; QuantizationRegionTimer
-    aggregates are always recorded and flushed periodically.
+    Per-module timing is intentionally opt-in via GPTQMODEL_LOG_TIMES;
+    QuantizationRegionTimer aggregates are always recorded and flushed
+    periodically.
     """
-    return env_flag("DEBUG") or env_flag("GPTQMODEL_LOG_TIMES")
+    return env_flag("GPTQMODEL_LOG_TIMES")
 
 
 class _SilentProgress:

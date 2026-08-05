@@ -46,10 +46,15 @@ class TestQuantTelemetry(unittest.TestCase):
         self.assertEqual(workers["model_loader:cpu"], 2)
 
     def test_log_time_block_is_silent_by_default(self):
-        logger = setup_logger()
-        with patch.object(logger, "info") as mock_info:
-            with log_time_block("silent", logger=logger, module_name="m"):
-                pass
+        with patch.dict(
+            os.environ,
+            {"DEBUG": "0", "GPTQMODEL_LOG_TIMES": "0"},
+            clear=False,
+        ):
+            logger = setup_logger()
+            with patch.object(logger, "info") as mock_info:
+                with log_time_block("silent", logger=logger, module_name="m"):
+                    pass
         mock_info.assert_not_called()
 
     def test_log_time_block_emits_when_env_flag_set(self):

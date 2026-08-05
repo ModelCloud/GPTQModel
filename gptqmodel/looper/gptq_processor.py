@@ -168,9 +168,9 @@ class GPTQProcessor(LoopProcessor):
         region_timer = kwargs.get("region_timer", None)
 
         if qcfg_clone.gptaq is not None:
-            tmp = GPTAQ(module=module, qcfg=qcfg_clone)
+            tmp = GPTAQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         elif qcfg_clone.foem is not None:
-            tmp = FOEM(module=module, qcfg=qcfg_clone)
+            tmp = FOEM(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback

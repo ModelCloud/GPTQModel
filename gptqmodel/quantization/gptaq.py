@@ -23,10 +23,10 @@ from .gptq import GPTQ
 
 
 class GPTAQ(GPTQ):
-    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig] = None):
+    def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
         from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
 
-        super().__init__(module, qcfg)
+        super().__init__(module, qcfg, region_timer=region_timer)
 
         self.H = None
         self.dXXT = None
