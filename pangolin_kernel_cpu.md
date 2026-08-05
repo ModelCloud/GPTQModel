@@ -3789,3 +3789,6 @@ Validation:
 The VNNI default gives a **1.22x** kernel geomean and **1.31x** speedup geomean
 over `origin/main`, with bits=7 up to **1.34x** / **1.53x**.  It can be disabled
 with `GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI=1` or by disabling AVX-512 entirely.
+
+A full `--shapes all` benchmark snapshot for this commit is saved in
+`benchmark/pangolin_cpu_full_snapshot.md`.
