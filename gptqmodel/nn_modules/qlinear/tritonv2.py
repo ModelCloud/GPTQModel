@@ -255,8 +255,8 @@ class TritonV2Linear(TorchLinear):
         the existing continuous 3-bit paths.
         """
         from ...utils.pangolin import (
-            _g_idx_block_uniform,
             ensure_pangolin_runtime_available,
+            g_idx_block_uniform,
         )
 
         if _PANGOLIN_DISABLED:
@@ -265,7 +265,7 @@ class TritonV2Linear(TorchLinear):
             return False
         if torch.cuda.get_device_capability(self.qweight.device) < (8, 0):
             return False
-        if not _g_idx_block_uniform(self.g_idx):
+        if not g_idx_block_uniform(self.g_idx):
             return False
         if not ensure_pangolin_runtime_available():
             return False
@@ -404,8 +404,8 @@ class TritonV2Linear(TorchLinear):
         from ...utils.pangolin import (
             PANGOLIN_MAX_M,
             PANGOLIN_SUPPORTED_M,
-            _g_idx_block_uniform,
             ensure_pangolin_runtime_available,
+            g_idx_block_uniform,
             pangolin_gemv,
         )
 
@@ -435,7 +435,7 @@ class TritonV2Linear(TorchLinear):
             return None
         if not ensure_pangolin_runtime_available():
             return None
-        if not _g_idx_block_uniform(self.g_idx):
+        if not g_idx_block_uniform(self.g_idx):
             return None
         return pangolin_gemv(x_flat, self.qweight, self.scales, self.qzeros, self.g_idx, self.bits)
 

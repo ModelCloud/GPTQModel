@@ -29,7 +29,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ...utils.pangolin import _g_idx_block_uniform
+from ...utils.pangolin import g_idx_block_uniform
 from ...utils.torch import HAS_XPU
 
 
@@ -723,7 +723,7 @@ def planar_gemv(x: torch.Tensor, qweight, scales, qzeros, g_idx, bits: int) -> t
             W1=w1,
             W2=w2,
             BLOCK_M=block_m,
-            GROUP_UNIFORM=_g_idx_block_uniform(g_idx),
+            GROUP_UNIFORM=g_idx_block_uniform(g_idx),
         )
     return out.to(x.dtype)
 

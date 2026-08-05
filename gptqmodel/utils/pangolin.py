@@ -324,7 +324,7 @@ def _prepack_qweight_for_cpu(qweight: torch.Tensor, bits: int, preexpand: bool =
     return packed
 
 
-def _g_idx_block_uniform(g_idx: torch.Tensor) -> bool:
+def g_idx_block_uniform(g_idx: torch.Tensor) -> bool:
     """True when every 32-row block maps to a single group (cached per g_idx tensor)."""
     if g_idx.numel() % 32 != 0:
         return False
@@ -334,6 +334,9 @@ def _g_idx_block_uniform(g_idx: torch.Tensor) -> bool:
         cached = bool((blocks == blocks[:, :1]).all().item())
         _G_IDX_BLOCK_UNIFORM_CACHE[g_idx] = cached
     return cached
+
+
+_g_idx_block_uniform = g_idx_block_uniform
 
 
 def pangolin_gemv(
@@ -360,7 +363,7 @@ def pangolin_gemv(
         raise RuntimeError(
             f"Pangolin CPU kernel requires K and g_idx length divisible by 32, got K={K}"
         )
-    if not _g_idx_block_uniform(g_idx):
+    if not g_idx_block_uniform(g_idx):
         raise RuntimeError("Pangolin CPU kernel requires g_idx to be uniform across 32-row blocks")
     preexpand_env = os.environ.get("GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT")
     if preexpand_env is not None:
@@ -369,3 +372,20 @@ def pangolin_gemv(
         preexpand = _should_preexpand_qweight(qweight, bits)
     qweight_packed = _prepack_qweight_for_cpu(qweight, bits, preexpand=preexpand)
     return _gemv_cpu_op()(x, qweight_packed, scales, qzeros, g_idx, bits).to(x.dtype)
+
+
+__all__ = [
+    "PANGOLIN_BITS",
+    "PANGOLIN_MAX_M",
+    "PANGOLIN_SUPPORTED_M",
+    "ensure_pangolin_cpu_runtime_available",
+    "ensure_pangolin_runtime_available",
+    "g_idx_block_uniform",
+    "pangolin_cpu_runtime_available",
+    "pangolin_cpu_runtime_error",
+    "pangolin_cpu_supported",
+    "pangolin_gemv",
+    "pangolin_runtime_available",
+    "pangolin_runtime_error",
+    "pangolin_supported",
+]

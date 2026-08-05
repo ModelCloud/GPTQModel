@@ -11,6 +11,7 @@ import pytest
 import gptqmodel
 import gptqmodel.exllamav3.ext as exllamav3_ext
 import gptqmodel.extension as extension_api
+import gptqmodel.nn_modules.triton_utils.planar as planar_utils
 import gptqmodel.utils.amplin as amplin_utils
 import gptqmodel.utils.adjacent_exact as adjacent_exact_utils
 import gptqmodel.utils.awq as awq_utils
@@ -22,8 +23,10 @@ import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.marlin_lora as marlin_lora_utils
 import gptqmodel.utils.paroquant as paroquant_utils
+import gptqmodel.utils.pangolin as pangolin_utils
 import gptqmodel.utils.qqq as qqq_utils
 import gptqmodel.utils.trilin as trilin_utils
+import gptqmodel_ext.planar as planar_api
 
 
 class _FakeExtension:
@@ -128,6 +131,30 @@ def _install_fake_extensions(monkeypatch):
 
 def test_package_root_exports_extension_module():
     assert gptqmodel.extension is extension_api
+
+
+def test_planar_external_api_proxies_shared_implementation():
+    api = planar_api.PangolinAPI()
+
+    assert planar_api.__all__ == ["PangolinAPI"]
+    assert api.bits == pangolin_utils.PANGOLIN_BITS
+    assert api.max_m == pangolin_utils.PANGOLIN_MAX_M
+    assert api.supported_m == pangolin_utils.PANGOLIN_SUPPORTED_M
+    assert api.planar_fused_max_m == planar_utils.PLANAR_FUSED_MAX_M
+    assert api.planar_gemv_max_m == planar_utils.PLANAR_GEMV_MAX_M
+    assert api.supported is pangolin_utils.pangolin_supported
+    assert api.runtime_available is pangolin_utils.pangolin_runtime_available
+    assert api.ensure_runtime_available is pangolin_utils.ensure_pangolin_runtime_available
+    assert api.runtime_error is pangolin_utils.pangolin_runtime_error
+    assert api.cpu_supported is pangolin_utils.pangolin_cpu_supported
+    assert api.cpu_runtime_available is pangolin_utils.pangolin_cpu_runtime_available
+    assert api.ensure_cpu_runtime_available is pangolin_utils.ensure_pangolin_cpu_runtime_available
+    assert api.cpu_runtime_error is pangolin_utils.pangolin_cpu_runtime_error
+    assert api.g_idx_block_uniform is pangolin_utils.g_idx_block_uniform
+    assert api.gemv is pangolin_utils.pangolin_gemv
+    assert api.dequant is planar_utils.planar_dequant
+    assert api.planar_gemv is planar_utils.planar_gemv
+    assert api.planar_matmul is planar_utils.planar_matmul
 
 
 def test_load_adjacent_exact_cuda_alias_builds_solver_extension(monkeypatch):

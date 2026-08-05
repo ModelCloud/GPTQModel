@@ -7,6 +7,7 @@ recursive-include gptqmodel_ext/cutlass_extensions *.h *.hpp *.cuh *.cu *.cpp *.
 recursive-include gptqmodel_ext/paroquant *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/grasshopper *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/planar *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/adjacent_exact *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/hadamard *.h *.cuh *.cu *.cpp LICENSE
 recursive-include gptqmodel_ext/cannoe *.h *.hpp *.cpp *.json *.md
