@@ -3495,3 +3495,34 @@ Validation:
 
 Geomean TFLOPS ratio for M=8: **1.93x**.  M=8 now peaks at **1.017 TFLOPS**,
 a solid jump toward the 2 TFLOPS target.
+
+## Optimization pass 36 (2026-08-05): bit-aware K-unroll for the 2x16-column AVX-512 tile
+
+The 2x16-column tile's K-unroll schedule previously depended only on `SizeM`.
+Because the tile loads `2*Bits` qword vectors per K-block, high bit widths
+consume more ZMM registers and leave less room for accumulators.  This pass
+makes `k_unroll_tile2_for` depend on both `Bits` and `SizeM`, lowering the
+unroll factor for `Bits >= 7` while keeping the larger factors for `Bits <= 6`.
+The goal is to reduce ZMM spills for `bits=7`/`bits=8` (pre-expanded) layouts
+and keep the instruction-level parallelism for the smaller packed bit widths.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `ruff check` and `git diff --check` clean.
+- `laguna` M=1/2/4/8 sweep (threads=8, bits 3/5/6/7) geomean kernel-time
+  improvement over `origin/main`:
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.012x | 1.045x | 1.010x |
+| laguna | 5 | 1.006x | 0.958x | 1.007x |
+| laguna | 6 | 1.026x | 0.827x | 1.023x |
+| laguna | 7 | 1.003x | 0.931x | 1.003x |
+| all | all | 1.012x | 0.937x | 1.011x |
+
+The `speedup ratio` column is noisy because the dense `matmul` reference time
+varies between runs; the `kernel ratio` and `tflops ratio` columns compare the
+Pangolin CPU kernel execution time directly and show a consistent 1-2% geomean
+improvement, with `bits=6` gaining up to 2.6% and small `K x N` shapes for
+`bits=3` improving up to 9-17%.

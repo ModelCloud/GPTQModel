@@ -422,16 +422,34 @@ constexpr int k_unroll_for() {
 }
 
 // K-unroll for the 2x16-column AVX-512 tile.  The tile doubles the number of
-// accumulators, so keep the total at 16 ZMMs or below to leave registers for
-// qwords, scale/zero vectors and temporaries.
-template <int SizeM>
+// accumulators and loads 2*Bits qword vectors per K-block, so the unroll must
+// shrink as Bits grows to stay inside the ZMM budget.
+template <int Bits, int SizeM>
 constexpr int k_unroll_tile2_for() {
   if constexpr (SizeM == 1) {
-    return 8;
+    if constexpr (Bits <= 4) {
+      return 8;
+    } else if constexpr (Bits <= 6) {
+      return 8;
+    } else {
+      return 4;
+    }
   } else if constexpr (SizeM == 2) {
-    return 4;
+    if constexpr (Bits <= 4) {
+      return 4;
+    } else if constexpr (Bits <= 6) {
+      return 4;
+    } else {
+      return 2;
+    }
   } else if constexpr (SizeM <= 4) {
-    return 2;
+    if constexpr (Bits <= 4) {
+      return 2;
+    } else if constexpr (Bits <= 6) {
+      return 2;
+    } else {
+      return 1;
+    }
   } else {
     return 1;
   }
@@ -686,7 +704,7 @@ void gemv_col_block_avx512_tile2(
     int64_t kb_start,
     int64_t kb_end) {
   constexpr auto planes = plane_info<Bits>();
-  constexpr int K_UNROLL = k_unroll_tile2_for<SizeM>();
+  constexpr int K_UNROLL = k_unroll_tile2_for<Bits, SizeM>();
   __m512 acc[2][SizeM][K_UNROLL];
   for (int t = 0; t < 2; ++t) {
     for (int m = 0; m < SizeM; ++m) {
