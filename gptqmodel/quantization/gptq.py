@@ -1592,10 +1592,10 @@ class GPTQ:
         factor_min: float,
         factor_max: float,
     ) -> Tuple[float, float]:
-        """Update the EMA target and feedback scale from a group loss.
+        """Update the EMA target and error-update scale from a group loss.
 
-        Returns ``(new_feedback_target, adaptive_feedback)``.  A group loss
-        larger than the EMA target yields ``adaptive_feedback < 1.0`` (smaller
+        Returns ``(new_feedback_target, error_update_scale)``.  A group loss
+        larger than the EMA target yields ``error_update_scale < 1.0`` (smaller
         error update, i.e. more damping), while a smaller loss yields a value
         above ``1.0``.
         """
@@ -1606,9 +1606,9 @@ class GPTQ:
         if not math.isfinite(L_g):
             return feedback_target, factor_min
         feedback_target = ema_decay * feedback_target + (1 - ema_decay) * L_g
-        adaptive_feedback = (feedback_target / L_g) ** gamma
-        adaptive_feedback = max(factor_min, min(factor_max, adaptive_feedback))
-        return feedback_target, adaptive_feedback
+        error_update_scale = (feedback_target / L_g) ** gamma
+        error_update_scale = max(factor_min, min(factor_max, error_update_scale))
+        return feedback_target, error_update_scale
 
     @staticmethod
     def _compute_group_loss(
@@ -1623,7 +1623,7 @@ class GPTQ:
 
     @staticmethod
     def _group_error_scale(
-        adaptive_feedback: float,
+        error_update_scale: float,
         size_factor: float,
         scale_min: float = 0.8,
         scale_max: float = 1.2,
@@ -1635,7 +1635,7 @@ class GPTQ:
         larger error update, matching the v4.2 design. The final scale is
         clamped to [scale_min, scale_max] to avoid accidentally large updates.
         """
-        scale = adaptive_feedback / size_factor
+        scale = error_update_scale / size_factor
         return max(scale_min, min(scale, scale_max))
 
     @torch.inference_mode()
@@ -2362,7 +2362,6 @@ class GPTQ:
             and damp_cfg.enabled
             and damp_cfg.online_feedback_enabled
             and self.qcfg.group_size > 0
-            and (damp_cfg.group_error_enabled or damp_cfg.group_size_prior_enabled)
         )
         if use_hessian:
             try:
@@ -2547,21 +2546,23 @@ class GPTQ:
         else:
             # Original heavy loop for normal quantization
             effective_block = blocksize
-            if Hinv is None and self.qcfg.group_size and self.qcfg.group_size > 0:
-                # Align RTN fallback work chunks to group boundaries to avoid
-                # redundant quantizer reconfiguration across partial groups.
-                effective_block = self.qcfg.group_size
+            if self.qcfg.group_size and self.qcfg.group_size > 0:
+                # Keep work chunks within a single quantization group. For RTN
+                # fallback this avoids redundant quantizer reconfiguration; for
+                # online group feedback it ensures per-group error scales apply
+                # to a well-defined column range without growing the loop size
+                # when the configured block size is larger than the group size.
+                effective_block = min(blocksize, self.qcfg.group_size)
             if use_online_group_damping and self.qcfg.group_size and self.qcfg.group_size > 0:
-                # Online group feedback works one group at a time so the
-                # per-group error scale can be applied to the GPTQ residual.
-                effective_block = self.qcfg.group_size
+                # Online group feedback must process within group boundaries.
+                effective_block = min(blocksize, self.qcfg.group_size)
 
             if use_online_group_damping:
                 group_error_ema_decay = damp_cfg.group_error_ema_decay
                 group_error_gamma = damp_cfg.group_error_gamma
                 group_error_factor_min = damp_cfg.group_error_factor_min
                 group_error_factor_max = damp_cfg.group_error_factor_max
-                adaptive_feedback = 1.0
+                error_update_scale = 1.0
                 feedback_target = None
                 current_group_start = -1
                 current_group_end = -1
@@ -2598,7 +2599,7 @@ class GPTQ:
                         # error scale by the size prior; high group loss reduces
                         # the scale via the inverted feedback exponent.
                         current_group_error_scale = self._group_error_scale(
-                            adaptive_feedback,
+                            error_update_scale,
                             size_factor,
                             damp_cfg.group_error_scale_min,
                             damp_cfg.group_error_scale_max,
@@ -2922,7 +2923,7 @@ class GPTQ:
                             logged_error_scale = current_group_error_scale
                             group_id = i1 // group_size
                             num_groups = (self.columns + group_size - 1) // group_size
-                            feedback_target, adaptive_feedback = self._update_group_feedback(
+                            feedback_target, error_update_scale = self._update_group_feedback(
                                 L_g,
                                 feedback_target,
                                 group_error_ema_decay,
@@ -2932,14 +2933,14 @@ class GPTQ:
                             )
                             log.info(
                                 "Quantization: Module `%s` -> group %d/%d "
-                                "loss=%.6f ema_target=%.6f next_feedback=%.4f "
+                                "loss=%.6f ema_target=%.6f next_error_update_scale=%.4f "
                                 "size_factor=%.4f error_scale=%.4f",
                                 self.name,
                                 group_id,
                                 num_groups,
                                 L_g,
                                 feedback_target,
-                                adaptive_feedback,
+                                error_update_scale,
                                 logged_size_factor,
                                 logged_error_scale,
                             )

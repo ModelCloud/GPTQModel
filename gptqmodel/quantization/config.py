@@ -1440,7 +1440,7 @@ class AdaptiveDampingConfig(DampConfig):
     min: float = field(default=0.02)
     max: float = field(default=0.08)
     step: float = field(default=0.01)
-    group_error_enabled: bool = field(default=False)
+    group_error_enabled: bool = field(default=True)
     group_error_gamma: float = field(default=0.1)
     group_error_ema_decay: float = field(default=0.9)
     group_error_factor_min: float = field(default=0.9)
@@ -1450,7 +1450,7 @@ class AdaptiveDampingConfig(DampConfig):
     group_error_scale_max: float = field(default=1.2)
     group_error_use_hessian_weighting: bool = field(default=True)
     group_error_measure_raw_residual: bool = field(default=True)
-    group_size_prior_enabled: bool = field(default=False)
+    group_size_prior_enabled: bool = field(default=True)
     group_size_prior_beta: float = field(default=0.25)
     group_size_prior_reference: int = field(default=128)
 
