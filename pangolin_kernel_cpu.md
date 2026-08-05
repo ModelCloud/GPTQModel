@@ -3634,3 +3634,41 @@ and reaching **~1 TFLOPS**.  The `8192 x 2048` M=2 outlier is run-to-run
 noise; the same shape at M=1 and M=8 is consistent.  The 2 TFLOPS target
 remains the next milestone and will likely require an efficient `vdpbf16ps`
 path or a wider tile to amortize decode.
+
+## Optimization pass 39 (2026-08-05): route SizeM 5-8 through the single-chunk AVX-512 tile
+
+The generic 2x16-column AVX-512 tile pre-loads `2 * Bits` packed qword
+vectors per K-block.  For `SizeM >= 5` this exceeds the AVX-512 ZMM register
+budget and the compiler spills accumulators or qword registers to the stack,
+creating large latency outliers (e.g. `8192 x 2048` M=8 taking >3 ms in some
+runs).  The single-chunk `gemv_kernel_avx512` path uses only `Bits` qword
+vectors and can keep `SizeM * K_UNROLL` accumulators in registers, so it is a
+better fit for M=5..8 even though it processes half as many columns per
+K-block.
+
+`run_gemv` now dispatches:
+- `SizeM <= 2` and `kernel_bits == 8` -> VBMI `vpermb` fast-decode tile2.
+- `SizeM <= 4` -> generic 2x16 FP32 FMA tile2.
+- `SizeM <= 8` -> single-chunk `gemv_kernel_avx512` with `N % 16 == 0`.
+- `SizeM <= 16` -> single-chunk `gemv_kernel_avx512` (existing).
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed; bits=7 M=8 reached **1.072 TFLOPS**.
+- `laguna` M=1/2/4/8 sweep (threads=8, bits 3/5/6/7) A/B vs `origin/main`:
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.146x | 1.170x | 1.146x |
+| laguna | 5 | 1.262x | 1.098x | 1.264x |
+| laguna | 6 | 1.049x | 0.950x | 1.051x |
+| laguna | 7 | 1.026x | 1.062x | 1.028x |
+| all | all | 1.117x | 1.067x | 1.119x |
+
+The geomean is **1.12x** faster on the kernel itself.  The per-shape table has
+run-to-run variance; the single-chunk path consistently removes the worst
+large-M latency outliers and is the safer default for M=5..8.  The 2 TFLOPS
+target still needs a more efficient BF16 dot-product path or a wider tile.

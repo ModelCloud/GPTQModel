@@ -1406,8 +1406,15 @@ void run_gemv(
       return;
     }
   }
-  if (cpu_supports_avx512_core() && N % 32 == 0 && SizeM <= 8) {
+  // 2x16 tile uses 2*Bits preloaded qwords plus two output accumulators per M;
+  // for SizeM >= 5 the ZMM budget starts to spill.  Keep the tile for the
+  // smallest batches and fall back to the single-chunk AVX-512 path for M=5..8.
+  if (cpu_supports_avx512_core() && N % 32 == 0 && SizeM <= 4) {
     gemv_kernel_avx512_tile2<Bits, SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
+    return;
+  }
+  if (cpu_supports_avx512_core() && N % 16 == 0 && SizeM <= 8) {
+    gemv_kernel_avx512<Bits, SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
     return;
   }
   // AVX-512 is used for all supported M whenever the feature set and N are
