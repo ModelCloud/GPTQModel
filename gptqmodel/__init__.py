@@ -167,6 +167,23 @@ from .utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 _DEVICE_THREAD_POOL = None
 
 
+def _default_cpu_workers() -> int:
+    """Return the default CPU worker count, respecting an explicit env override."""
+
+    env_workers = os.getenv("GPTQMODEL_CPU_WORKERS")
+    if env_workers is not None:
+        try:
+            return max(1, int(env_workers))
+        except ValueError:
+            pass
+
+    # Cap CPU workers to avoid OpenMP team explosion under free-threading.
+    # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
+    if has_gil_disabled():
+        return min(8, max(2, (os.cpu_count() or 1) // 16))
+    return min(12, max(1, ((os.cpu_count() or 1) + 1) // 2))
+
+
 def _build_device_thread_pool():
     return DeviceThreadPool(
         inference_mode=True,
@@ -181,13 +198,7 @@ def _build_device_thread_pool():
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
-            # Cap CPU workers to avoid OpenMP team explosion under free-threading.
-            # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
-            "cpu": (
-                min(8, max(2, (os.cpu_count() or 1) // 16))
-                if has_gil_disabled()
-                else min(12, max(1, (os.cpu_count() or 1) + 1 // 2))
-            ),
+            "cpu": _default_cpu_workers(),
             "model_loader:cpu": 2,
         },
         empty_cache_every_n=512,

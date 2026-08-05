@@ -45,6 +45,24 @@ class TestQuantTelemetry(unittest.TestCase):
         self.assertLessEqual(cpu, 12)
         self.assertEqual(workers["model_loader:cpu"], 2)
 
+    def test_device_thread_pool_cpu_workers_env_override(self):
+        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
+            with patch.dict(os.environ, {"GPTQMODEL_CPU_WORKERS": "4"}, clear=False):
+                with patch("gptqmodel.has_gil_disabled", return_value=True):
+                    _build_device_thread_pool()
+        workers = mock_init.call_args.kwargs["workers"]
+        self.assertEqual(workers["cpu"], 4)
+        self.assertEqual(workers["model_loader:cpu"], 2)
+
+    def test_device_thread_pool_cpu_workers_env_override_invalid_ignored(self):
+        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
+            with patch.dict(os.environ, {"GPTQMODEL_CPU_WORKERS": "not-a-number"}, clear=False):
+                with patch("gptqmodel.has_gil_disabled", return_value=True):
+                    _build_device_thread_pool()
+        workers = mock_init.call_args.kwargs["workers"]
+        self.assertGreaterEqual(workers["cpu"], 2)
+        self.assertLessEqual(workers["cpu"], 8)
+
     def test_log_time_block_is_silent_by_default(self):
         with patch.dict(
             os.environ,
@@ -79,5 +97,27 @@ class TestQuantTelemetry(unittest.TestCase):
 
         stats = timer.snapshot()["hessian_inverse"]
         self.assertEqual(stats["count"], 1)
-        self.assertEqual(stats["source"], "test.linear")
+        # hessian_inverse is an aggregate region across modules; do not pin the source to one module.
+        self.assertIsNone(stats["source"])
         self.assertGreater(stats["total"], 0.0)
+
+    def test_hessian_inverse_verbose_gated_by_env(self):
+        module = nn.Linear(4, 4, bias=False, dtype=torch.float64)
+        H = torch.eye(4, dtype=torch.float64) * 2
+        qcfg = QuantizeConfig(bits=4, group_size=4, damp_percent=0.01)
+        timer = QuantizationRegionTimer()
+        gptq = GPTQ(module, qcfg=qcfg, region_timer=timer)
+        gptq.name = "test.linear"
+
+        from gptqmodel.quantization import gptq as gptq_mod
+
+        with patch.dict(os.environ, {"GPTQMODEL_LOG_HESSIAN": "0"}, clear=False):
+            with patch.object(gptq_mod.log, "info") as mock_info:
+                gptq.hessian_inverse(H)
+        mock_info.assert_not_called()
+
+        with patch.dict(os.environ, {"GPTQMODEL_LOG_HESSIAN": "1"}, clear=False):
+            with patch.object(gptq_mod.log, "info") as mock_info:
+                gptq.hessian_inverse(H)
+        self.assertTrue(any("hessian_inverse begin" in call[0][0] for call in mock_info.call_args_list if call[0]))
+        self.assertTrue(any("hessian_inverse end" in call[0][0] for call in mock_info.call_args_list if call[0]))
