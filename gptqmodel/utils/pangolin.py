@@ -446,7 +446,9 @@ def pangolin_gemv(
     requires BF16 input and returns BF16 output (with FP32 accumulation).
 
     On VNNI-capable x86 CPUs the CPU kernel uses an int16 dot-product micro-kernel
-    for M <= 4.  It can be disabled with ``GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI=1``.
+    for M <= 8.  M == 16 and M == 32 are sliced into M == 8 VNNI chunks in Python
+    to keep the accumulator set in ZMM registers.  It can be disabled with
+    ``GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI=1``.
     """
     if not x.is_contiguous():
         x = x.contiguous()
@@ -476,12 +478,24 @@ def pangolin_gemv(
     disable_vnni = os.environ.get("GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI")
     avx512_disabled = disable_avx512 is not None and disable_avx512.lower() in ("1", "true", "on")
     vnni_disabled = disable_vnni is not None and disable_vnni.lower() in ("1", "true", "on")
-    use_vnni = M <= 4 and _cpu_has_avx512_vnni() and not avx512_disabled and not vnni_disabled
-    if use_vnni:
+    has_vnni = _cpu_has_avx512_vnni() and not avx512_disabled and not vnni_disabled
+    use_vnni = M <= 8 and has_vnni
+    # For M == 16 or 32 we slice the batch into M=8 VNNI calls to avoid ZMM
+    # register spills while still using the VNNI dot-product path.
+    use_vnni_prepack = (M <= 8 or M in (16, 32)) and has_vnni
+    if use_vnni_prepack:
         preexpand = True
     qweight_packed = _prepack_qweight_for_cpu(
-        qweight, qzeros, g_idx, bits, preexpand=preexpand, vnni=use_vnni
+        qweight, qzeros, g_idx, bits, preexpand=preexpand, vnni=use_vnni_prepack
     )
+    if M in (16, 32) and has_vnni:
+        out_chunks: list[torch.Tensor] = []
+        for start in range(0, M, 8):
+            chunk = x[start : start + 8]
+            out_chunks.append(
+                _gemv_cpu_op()(chunk, qweight_packed, scales, qzeros, g_idx, bits, True)
+            )
+        return torch.cat(out_chunks, dim=0).to(x.dtype)
     return _gemv_cpu_op()(x, qweight_packed, scales, qzeros, g_idx, bits, use_vnni).to(x.dtype)
 
 

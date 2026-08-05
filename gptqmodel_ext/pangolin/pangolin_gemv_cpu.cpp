@@ -1621,6 +1621,198 @@ void gemv_kernel_avx512_vnni_dispatch_bits(
   }
 }
 
+template <int Bits, int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_col_block_avx512_vnni_single(
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    void* __restrict__ out_ptr,
+    bool out_float,
+    int64_t col0,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int64_t kb_start,
+    int64_t kb_end) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t chunk = col0 / 16;
+  __m512i acc_i32[SizeM];
+  __m512 acc_fp32[SizeM];
+  for (int m = 0; m < SizeM; ++m) {
+    acc_i32[m] = _mm512_set1_epi32(0);
+    acc_fp32[m] = _mm512_set1_ps(0.0f);
+  }
+  float* out_f = reinterpret_cast<float*>(out_ptr);
+  at::BFloat16* out_b = reinterpret_cast<at::BFloat16*>(out_ptr);
+  int prev_group = -1;
+  __m512 scale_vec = _mm512_set1_ps(0.0f);
+  for (int64_t kb = kb_start; kb < kb_end; ++kb) {
+    const int64_t row0 = kb * 32;
+    int group = g_idx[row0];
+    if (__builtin_expect(group < 0, 0)) {
+      group += static_cast<int>(num_groups);
+    }
+    if (__builtin_expect(group != prev_group, 0)) {
+      if (__builtin_expect(prev_group != -1, 1)) {
+        for (int m = 0; m < SizeM; ++m) {
+          const __m512 sx_ps = _mm512_set1_ps(x_sx[static_cast<int64_t>(m) * num_groups + prev_group]);
+          const __m512 combined_scale = _mm512_mul_ps(scale_vec, sx_ps);
+          const __m512 dot_f = _mm512_cvtepi32_ps(acc_i32[m]);
+          acc_fp32[m] = _mm512_fmadd_ps(dot_f, combined_scale, acc_fp32[m]);
+          acc_i32[m] = _mm512_set1_epi32(0);
+        }
+      }
+      scale_vec = load_scale_512(scale_b + static_cast<int64_t>(group) * N + col0);
+      prev_group = group;
+    }
+    const uint32_t* qbase = reinterpret_cast<const uint32_t*>(qweight) + ((chunk * num_k_blocks + kb) * 8) * 16;
+    if (__builtin_expect(kb + 1 < kb_end, 1)) {
+      const uint32_t* next_qbase =
+          reinterpret_cast<const uint32_t*>(qweight) + ((chunk * num_k_blocks + kb + 1) * 8) * 16;
+      _mm_prefetch(reinterpret_cast<const char*>(next_qbase), _MM_HINT_T0);
+      _mm_prefetch(reinterpret_cast<const char*>(next_qbase + 8), _MM_HINT_T0);
+      int next_group = g_idx[(kb + 1) * 32];
+      if (__builtin_expect(next_group < 0, 0)) {
+        next_group += static_cast<int>(num_groups);
+      }
+      if (__builtin_expect(next_group != group, 0)) {
+        _mm_prefetch(
+            reinterpret_cast<const char*>(scale_b + static_cast<int64_t>(next_group) * N + col0),
+            _MM_HINT_T0);
+      }
+      for (int m = 0; m < SizeM; ++m) {
+        _mm_prefetch(reinterpret_cast<const char*>(x_i16 + static_cast<int64_t>(m) * K + (kb + 1) * 32), _MM_HINT_T0);
+      }
+    }
+    for (int word_idx = 0; word_idx < 8; ++word_idx) {
+      __m512i w01, w23;
+      decode_bits8_quad_vnni(load_i_512(qbase + static_cast<int64_t>(word_idx) * 16), &w01, &w23);
+      const int64_t k0 = row0 + static_cast<int64_t>(word_idx) * 4;
+      for (int m = 0; m < SizeM; ++m) {
+        int16_t vals[4];
+        std::memcpy(vals, x_i16 + static_cast<int64_t>(m) * K + k0, sizeof(vals));
+        const uint32_t pair01 =
+            static_cast<uint32_t>(static_cast<uint16_t>(vals[0])) |
+            (static_cast<uint32_t>(static_cast<uint16_t>(vals[1])) << 16);
+        const uint32_t pair23 =
+            static_cast<uint32_t>(static_cast<uint16_t>(vals[2])) |
+            (static_cast<uint32_t>(static_cast<uint16_t>(vals[3])) << 16);
+        const __m512i a01 = _mm512_set1_epi32(pair01);
+        const __m512i a23 = _mm512_set1_epi32(pair23);
+        acc_i32[m] = _mm512_dpwssd_epi32(
+            _mm512_dpwssd_epi32(acc_i32[m], a01, w01), a23, w23);
+      }
+    }
+  }
+  if (prev_group != -1) {
+    for (int m = 0; m < SizeM; ++m) {
+      const __m512 sx_ps = _mm512_set1_ps(x_sx[static_cast<int64_t>(m) * num_groups + prev_group]);
+      const __m512 combined_scale = _mm512_mul_ps(scale_vec, sx_ps);
+      const __m512 dot_f = _mm512_cvtepi32_ps(acc_i32[m]);
+      acc_fp32[m] = _mm512_fmadd_ps(dot_f, combined_scale, acc_fp32[m]);
+    }
+  }
+  for (int m = 0; m < SizeM; ++m) {
+    if (out_float) {
+      store_f_avx512(out_f + static_cast<int64_t>(m) * N + col0, acc_fp32[m]);
+    } else {
+      store_bf16_512(out_b + static_cast<int64_t>(m) * N + col0, acc_fp32[m]);
+    }
+  }
+}
+
+template <int Bits, int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_kernel_avx512_vnni_single(
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t /*M*/,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t col_chunks = N / 16;
+  const int num_threads = at::get_num_threads();
+  const bool k_parallel = (col_chunks < num_threads * 2) && (num_k_blocks > 1);
+  if (k_parallel) {
+    const size_t partial_per_task = static_cast<size_t>(SizeM) * N;
+    const int64_t k_grain = std::max<int64_t>(1, num_k_blocks / num_threads);
+    const int64_t num_tasks = (num_k_blocks + k_grain - 1) / k_grain;
+    std::vector<float> partial(static_cast<size_t>(num_tasks) * partial_per_task, 0.0f);
+    std::atomic<int64_t> task_counter{0};
+    at::parallel_for(0, num_k_blocks, k_grain, [&](int64_t kb_begin, int64_t kb_end) {
+      const int64_t task_id = task_counter.fetch_add(1);
+      float* p_out = partial.data() + task_id * partial_per_task;
+      for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+        gemv_col_block_avx512_vnni_single<Bits, SizeM>(
+            x_i16, x_sx, qweight, scale_b, g_idx, p_out, true,
+            col_block * 16, K, N, num_groups, kb_begin, kb_end);
+      }
+    });
+    for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+      const int64_t col0 = col_block * 16;
+      for (int m = 0; m < SizeM; ++m) {
+        __m512 sum = _mm512_set1_ps(0.0f);
+        for (int64_t task_id = 0; task_id < num_tasks; ++task_id) {
+          const float* p = partial.data() + task_id * partial_per_task + static_cast<int64_t>(m) * N + col0;
+          sum = _mm512_add_ps(sum, load_f_512(p));
+        }
+        store_bf16_512(out + static_cast<int64_t>(m) * N + col0, sum);
+      }
+    }
+  } else {
+    const int64_t grain = std::max<int64_t>(1, col_chunks / num_threads);
+    at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t col_block = begin; col_block < end; ++col_block) {
+        gemv_col_block_avx512_vnni_single<Bits, SizeM>(
+            x_i16, x_sx, qweight, scale_b, g_idx, out, false,
+            col_block * 16, K, N, num_groups, 0, num_k_blocks);
+      }
+    });
+  }
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_kernel_avx512_vnni_single_dispatch_bits(
+    int64_t bits,
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t M,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  switch (bits) {
+    case 3:
+      gemv_kernel_avx512_vnni_single<3, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+    case 5:
+      gemv_kernel_avx512_vnni_single<5, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+    case 6:
+      gemv_kernel_avx512_vnni_single<6, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+    case 7:
+      gemv_kernel_avx512_vnni_single<7, SizeM>(
+          x_i16, x_sx, qweight, scale_b, g_idx, out, M, K, N, num_groups);
+      break;
+  }
+}
+
 #endif  // PLANAR_GEMV_CPU_X86
 
 template <int Bits, int SizeM>
@@ -2023,10 +2215,10 @@ torch::Tensor pangolin_gemv_cpu(
   // 64 FLOPs/instruction vs 32 for the FP32 FMA tile2 path.  The activation
   // is quantized to int16 per group on-the-fly and the qweight bytes are
   // pre-packed on the CPU side as (code - zero) signed int8 values.  This is
-  // the default path for M <= 4 when the CPU supports AVX-512 VNNI; the caller
+  // the default path for M <= 8 when the CPU supports AVX-512 VNNI; the caller
   // explicitly opts in via `use_vnni` so the Python dispatcher and the kernel
   // always agree on whether the qweight is signed int8 or uint8 code.
-  if (kernel_bits == 8 && cpu_supports_avx512_vnni() && N % 32 == 0 && M <= 4 && use_vnni) {
+  if (kernel_bits == 8 && cpu_supports_avx512_vnni() && N % 32 == 0 && M <= 8 && use_vnni) {
     std::vector<int16_t> x_i16(static_cast<size_t>(M) * K);
     std::vector<float> x_sx(static_cast<size_t>(M) * num_groups);
     quantize_x_to_int16(
@@ -2049,6 +2241,26 @@ torch::Tensor pangolin_gemv_cpu(
         return output;
       case 4:
         gemv_kernel_avx512_vnni_dispatch_bits<4>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 5:
+        gemv_kernel_avx512_vnni_single_dispatch_bits<5>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 6:
+        gemv_kernel_avx512_vnni_single_dispatch_bits<6>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 7:
+        gemv_kernel_avx512_vnni_single_dispatch_bits<7>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+            M, K, N, num_groups);
+        return output;
+      case 8:
+        gemv_kernel_avx512_vnni_single_dispatch_bits<8>(
             bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
             M, K, N, num_groups);
         return output;

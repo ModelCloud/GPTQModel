@@ -3792,3 +3792,72 @@ with `GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI=1` or by disabling AVX-512 entirely.
 
 A full `--shapes all` benchmark snapshot for this commit is saved in
 `benchmark/pangolin_cpu_full_snapshot.md`.
+
+## Optimization pass 43 (2026-08-05): VNNI int16 single-chunk micro-kernel for M = 5..8
+
+The AVX-512 VNNI path was previously limited to `M <= 4` because the two-column
+(`2x16`) tile keeps `2 * SizeM` int32 and `2 * SizeM` FP32 ZMM accumulators in
+register; for `SizeM == 8` that alone consumes 32 ZMMs and spills.  This commit
+adds a single-column (`1x16`) VNNI micro-kernel that processes one 16-column
+chunk at a time, so only `SizeM` int32 and `SizeM` FP32 accumulators are live.
+Python now enables VNNI for `M <= 8`, and the C++ dispatcher routes `M = 1..4`
+to the existing `2x16` tile and `M = 5..8` to the new `1x16` tile.  The new path
+uses the same pre-expanded signed-int8 qweight layout and per-group int16
+activation quantization as the existing VNNI path.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 (default, AVX2,
+  and scalar fallback paths).
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+A/B vs `origin/main` on `laguna` M=1/2/4/8 (threads=8), selected large shapes:
+
+| set | bits | K x N | M | prev ms | curr ms | prev TFLOPS | curr TFLOPS | kernel ratio |
+|-----|------|-------|---|--------:|--------:|------------:|------------:|-------------:|
+| laguna | 7 | 2048 x 8192 | 4 | 0.221 | 0.178 | 0.607 | 0.754 | 1.24x |
+| laguna | 7 | 2048 x 8192 | 8 | 0.486 | 0.298 | 0.552 | 0.899 | 1.63x |
+| laguna | 7 | 8192 x 2048 | 4 | 0.216 | 0.180 | 0.621 | 0.745 | 1.20x |
+| laguna | 7 | 8192 x 2048 | 8 | 0.503 | 0.315 | 0.534 | 0.852 | 1.60x |
+
+The single-chunk VNNI tile improves the large-M, wide-N shapes by up to 1.6x
+and pushes `laguna` bits=7 M=8 over 0.85 TFLOPS.  Smaller shapes and M=1..4 stay
+within run-to-run variance; the 2x16 VNNI path is unchanged for those sizes.
+
+## Optimization pass 44 (2026-08-05): slice M=16/32 into M=8 VNNI chunks in Python
+
+The VNNI kernels are fastest at M <= 8 because the accumulator set fits in
+ZMM registers.  For M == 16 and M == 32 the C++ kernel falls back to the generic
+2x16 FP32 tile, which is significantly slower than the VNNI dot-product path.
+This commit keeps the existing C++ micro-kernels unchanged and splits the batch
+in Python: when `M` is 16 or 32 and the CPU supports AVX-512 VNNI, `pangolin_gemv`
+prepacks qweight once with the signed-int8 VNNI layout and calls the `M=8`
+VNNI kernel for each 8-row slice, concatenating the results.  This reuses the
+prepacked cache and avoids the ZMM spills that prevented a native M=16/32 VNNI
+tile.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 (default, AVX2,
+  and scalar fallback paths).
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+`laguna` bits=7 M=16/32 focused results (threads=8):
+
+| K x N | M | kernel (ms) | kernel (TFLOPS) |
+|-------|---|------------:|----------------:|
+| 2048 x 6144 | 16 | 0.501 | 0.803 |
+| 2048 x 6144 | 32 | 0.918 | 0.877 |
+| 2048 x 8192 | 16 | 0.598 | 0.897 |
+| 2048 x 8192 | 32 | 1.689 | 0.636 |
+| 8192 x 2048 | 16 | 1.109 | 0.484 |
+| 8192 x 2048 | 32 | 1.444 | 0.744 |
+| 6144 x 2048 | 16 | 0.493 | 0.817 |
+| 6144 x 2048 | 32 | 1.025 | 0.786 |
+
+M=16/32 now reaches ~0.8-0.9 TFLOPS on the larger shapes, matching the M=8
+VNNI tile, and the M=8 path is unchanged.  The 2 TFLOPS target still requires a
+more efficient inner product (e.g. `vpdpbusd`, packed-planar VNNI, or wider
+column tiles) on top of this dispatch.
