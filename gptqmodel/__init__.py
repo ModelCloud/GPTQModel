@@ -181,7 +181,7 @@ def _default_cpu_workers() -> int:
     # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
     if has_gil_disabled():
         return min(8, max(2, (os.cpu_count() or 1) // 16))
-    return min(12, max(1, (os.cpu_count() or 1) + 1 // 2))
+    return min(12, max(1, ((os.cpu_count() or 1) + 1) // 2))
 
 
 def _build_device_thread_pool():
