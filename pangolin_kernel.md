@@ -430,12 +430,12 @@ Full benchmark rerun with tri-gemv column (fp16, 50-iter median ms, NVIDIA PG506
 |    7 | 11008 x  4096 |   512 |        6.158 |        0.417 |      9.737 |        n/a |       0.265 |        14.76x |
 |    7 | 11008 x  4096 |  2048 |        6.661 |        0.916 |     37.948 |        n/a |       0.903 |         7.27x |
 
-## Round 4: native CUDA register-decode GEMV ("pangolin", `gptqmodel_ext/planar/`)
+## Round 4: native CUDA register-decode GEMV ("pangolin", `gptqmodel_ext/pangolin/`)
 
 Goal: close the launch/scheduling overhead gap the Triton GEMV could not —
 a Marlin-style native CUDA kernel with register-level plane decode.
 
-Design (`planar_gemv_kernel.cu`, JIT-built via `TorchOpsJitExtension` as
+Design (`pangolin_gemv_kernel.cu`, JIT-built via `TorchOpsJitExtension` as
 `gptqmodel.utils.pangolin`, torch library namespace `gptqmodel_pangolin`):
 
 - One warp per 32-column block per K-chunk; each lane owns one output column.
@@ -992,13 +992,13 @@ PG506-230, cc 8.0, 124 SMs, torch 2.13.0+cu130, fp16, 3-bit 4096x4096 M=1):
 
 ```
 ncu --section SpeedOfLight --section SchedulerStats --section Occupancy --section LaunchStats \
-    --launch-skip 5 --launch-count 1 -k regex:planar_gemv \
+    --launch-skip 5 --launch-count 1 -k regex:pangolin_gemv \
     python scripts/profile_pangolin_gemv.py 3 4096 4096 1
 # v4: grid=(128,8) 1024 blocks | 20.32 us | mem SOL 23.3% | DRAM 13.4%
 #     compute 55.8% | achieved occupancy 65.5% | 0.90+partial waves
 ```
 
-v5 kernel changes (`gptqmodel_ext/planar/planar_gemv_kernel.cu`):
+v5 kernel changes (`gptqmodel_ext/pangolin/pangolin_gemv_kernel.cu`):
 
 - **ColsPerLane=2 (paired columns)**: when `N % 64 == 0` each block owns 64
   columns and every lane owns an adjacent column pair, loading its `bits`
@@ -1066,11 +1066,11 @@ Review fixes landed alongside (from merged PR #160 findings):
 
 ## Round 8 — M=16/32 native decode, dynamic shared memory, and dispatch guard
 
-Goal: extend the native CUDA `planar_gemv` kernel to the decode batch sizes
+Goal: extend the native CUDA `pangolin_gemv` kernel to the decode batch sizes
 M=16 and M=32, keep correctness against the dense reference, and make bandwidth
 utilization scale with the larger batch.
 
-Changes (`gptqmodel_ext/planar/planar_gemv_kernel.cu`):
+Changes (`gptqmodel_ext/pangolin/pangolin_gemv_kernel.cu`):
 - Bumped `kMaxM` from `8` to `32` and added `SizeM = 16` and `SizeM = 32`
   template instantiations.
 - Converted the per-warp partials from a static
@@ -1110,7 +1110,7 @@ fp16, 3-bit 4096x4096, group_size=128):
 | 16 | 0.0870 | 1.94e-03 | 5.33e-08 |
 | 32 | 0.1521 | 1.89e-03 | 5.10e-08 |
 
-Nsight Compute metrics (`planar_gemv_kernel<half,3,SizeM,2>`):
+Nsight Compute metrics (`pangolin_gemv_kernel<half,3,SizeM,2>`):
 
 | M | grid | block | Duration (us) | Memory Throughput | DRAM Throughput | L2 Hit Rate | Compute (SM) Throughput | Achieved Active Warps/SM |
 |---|------|-------|---------------|-------------------|-----------------|-------------|--------------------------|--------------------------|
@@ -1363,15 +1363,15 @@ Goal: keep the M=1-8 decode gains from `ColsPerLane=2` (Round 10) and raise
 achieved FLOPS / bandwidth on tall layers by choosing the number of warps per
 block at runtime based on `SizeM` and the `K / N` ratio.
 
-Change in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
-- `planar_gemv_kernel` and `launch_cols` are now templated on `Warps`.
+Change in `gptqmodel_ext/pangolin/pangolin_gemv_kernel.cu`:
+- `pangolin_gemv_kernel` and `launch_cols` are now templated on `Warps`.
 - `launch_size_m` defaults to `Warps=4` for `SizeM < 32` and `Warps=8` for `SizeM == 32`.
 - For `SizeM < 32` on *tall* layers (`size_k >= 4 * size_n`), it switches to
   `Warps=8`. This increases per-block parallelism and reduces per-warp work
   when there are many K-blocks and few output columns, without hurting the
   wider/square shapes where 4-warps gives more blocks per SM.
 - `kWarpsPerBlock` namespace constant remains `4` and is used only for the
-  `split_cap` ceiling in `planar_gemv.cpp`; the per-shape `Warps` value is
+  `split_cap` ceiling in `pangolin_gemv.cpp`; the per-shape `Warps` value is
   computed through the dry-run occupancy path.
 
 ### M-sweep synthetic shape (GPU 4, 3-bit, K=4096 N=4096, fp16, 50 iters)
@@ -1387,7 +1387,7 @@ Change in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
 
 ### Nsight Compute (`ncu --section SpeedOfLight,LaunchStats,Occupancy`)
 
-GPU 4, PG506-230, cc 8.0, 3-bit `planar_gemv_kernel<half,3,SizeM,2>` on `4096x4096`.
+GPU 4, PG506-230, cc 8.0, 3-bit `pangolin_gemv_kernel<half,3,SizeM,2>` on `4096x4096`.
 
 | M | grid (blocks) | regs | waves/sm | theor. occ. (%) | achieved occ. (%) | mem thr. (%) | dram thr. (%) | compute (%) | dur (us) |
 |---|---------------|------|----------|-----------------|-------------------|--------------|---------------|-------------|----------|
@@ -1472,7 +1472,7 @@ enough independent FMA work.
 
 Goal: reduce per-k load latency and keep the resident wave as full as possible.
 
-Change in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+Change in `gptqmodel_ext/pangolin/pangolin_gemv_kernel.cu`:
 - Added a templated `ldg<T>(const T*)` wrapper that calls `__ldg` for planar
   `qweight`, `scales`, `qzeros` and activation `input` loads.
 - `decode_zero` now loads the `Bits` qzero words through `ldg` into a tiny
@@ -1505,7 +1505,7 @@ vs Round 11 for the same shape:
 
 ### Nsight Compute (`ncu --section SpeedOfLight,LaunchStats`)
 
-GPU 4, PG506-230, cc 8.0, 3-bit `planar_gemv_kernel<half,3,SizeM,2>` on `4096x4096`.
+GPU 4, PG506-230, cc 8.0, 3-bit `pangolin_gemv_kernel<half,3,SizeM,2>` on `4096x4096`.
 
 | M | grid | block | regs | waves/sm | mem thr. (%) | dram thr. (%) | compute (%) | dur (us) |
 |---|------|-------|------|----------|--------------|---------------|-------------|----------|
@@ -1575,7 +1575,7 @@ wider vector loads or a split-K over N to expose more column parallelism.
 Goal: increase achieved FLOPS on low-M decode by processing two output columns
 per `__hfma2` instruction and removing per-k `float -> half` conversions.
 
-Changes in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+Changes in `gptqmodel_ext/pangolin/pangolin_gemv_kernel.cu`:
 - `ScalarTraits<half>` and `ScalarTraits<nv_bfloat16>` now expose `Vec2`
   (`__half2` / `__nv_bfloat162`) helpers plus `shfl(v, k)`, which broadcasts a
   16-bit activation through a 32-bit warp shuffle and reinterprets it back.
@@ -1619,7 +1619,7 @@ existing test tolerances (`atol=2e-2` for fp16, `1e-1` for bf16).
 
 ### Nsight Compute (`ncu`) for M=1
 
-GPU 4, PG506-230, cc 8.0, `planar_gemv_kernel<half,3,1,2,4>` on `4096x4096`.
+GPU 4, PG506-230, cc 8.0, `pangolin_gemv_kernel<half,3,1,2,4>` on `4096x4096`.
 
 | grid | block | regs | waves/sm | mem thr. (%) | dram thr. (%) | l2 hit (%) | compute (%) | dur (us) |
 |------|-------|------|----------|--------------|---------------|------------|-------------|----------|
@@ -1814,7 +1814,7 @@ Observations:
 Goal: fix the accuracy regression from long `__hfma2` / `__nv_bfloat162` chains
 while keeping the M=1-4 vector decode path fast.
 
-Changes in `gptqmodel_ext/planar/planar_gemv_kernel.cu`:
+Changes in `gptqmodel_ext/pangolin/pangolin_gemv_kernel.cu`:
 
 - `ColsPerLane==2` keeps vector qweight/scale loads and 16-bit activation shuffle,
   but the half2/bf16 accumulator is flushed into the existing fp32 shared-memory

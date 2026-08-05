@@ -122,14 +122,14 @@ _EXTENSION_SPECS = (
     ),
     _ExtensionSpec(
         name="pangolin",
-        aliases=("planar_gemv",),
+        aliases=("pangolin_gemv",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.pangolin", "_PANGOLIN_TORCH_OPS_EXTENSION"),
         supported=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_supported")(),
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_runtime_error")(),
     ),
     _ExtensionSpec(
         name="pangolin_cpu",
-        aliases=("planar_gemv_cpu",),
+        aliases=("pangolin_gemv_cpu",),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.pangolin", "_PANGOLIN_CPU_TORCH_OPS_EXTENSION"),
         supported=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_cpu_supported")(),
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.pangolin", "pangolin_cpu_runtime_error")(),

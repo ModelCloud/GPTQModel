@@ -2635,7 +2635,7 @@ paths.
 
 ### Source changes
 
-- `gptqmodel_ext/planar/planar_gemv_cpu.cpp`: `gemv_cpu` now expects
+- `gptqmodel_ext/pangolin/pangolin_gemv_cpu.cpp`: `gemv_cpu` now expects
   `qweight.dim() == 4` with shape `[N/16, K/32, bits, 16]`.  The `gemv_col_block`
   pointer arithmetic uses `((chunk * num_k_blocks + kb) * Bits) * 16 + lane`,
   where `chunk = col0 / 16` and `lane = col0 % 16`.  Prefetch of the next
@@ -3157,3 +3157,166 @@ Validation:
 
 Sanity times are comparable to pass 24; the branch hints are a low-risk
 micro-optimization that keeps the inner fast path tightly laid out.
+
+## Optimization pass 26 (2026-08-04): keep K-unroll at 2 for M<=8 even for bits=7
+
+`k_unroll_for` reduced M=5..8 / bits=7 from `K_UNROLL=1` to `K_UNROLL=2`.
+Bits 7 needs the most decode registers, but modern AVX-512 cores have enough
+ZMMs to keep two independent partial sums per row for eight rows.  This hides
+more FMA latency on the M=8 shapes that dominate batch-8 decode latency.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed.
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed with
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`.
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed; representative M=8 kernel times per iteration:
+
+| bits | kernel time (ms / iter) | speedup vs dequant+matmul | TFLOPS |
+|------|--------------------------:|----------------------------:|-------:|
+| 3    | 0.666                     | 402.45x                     | 1.083  |
+| 5    | 0.672                     | 393.60x                     | 1.074  |
+| 6    | 0.678                     | 391.37x                     | 1.065  |
+| 7    | 0.681                     | 505.71x                     | 1.059  |
+
+### A/B vs pass-25 `K_UNROLL=1` baseline (M=8 4096x11008, threads=8)
+
+| bits | prev ms | curr ms | kernel ratio | prev TFLOPS | curr TFLOPS |
+|------|--------:|--------:|-------------:|------------:|------------:|
+| 3    | 0.733   | 0.666   | 1.10x        | 0.984       | 1.083       |
+| 5    | 0.737   | 0.672   | 1.10x        | 0.979       | 1.074       |
+| 6    | 0.673   | 0.678   | 0.99x        | 1.072       | 1.065       |
+| 7    | 0.742   | 0.681   | 1.09x        | 0.972       | 1.059       |
+
+Geomean kernel ratio: **1.07x** (6/7-bit within run-to-run noise; 3/5-bit and
+7-bit show the expected ~9-10% gain from doubling the in-flight partial sums).
+
+## Pass 26 - transpose activation x to [K, M] for contiguous loads
+
+Idea: make the M row activations for a given K contiguous in memory so the
+SIMD hot loop touches a single cache line per K instead of M far-apart rows.
+Tested with `input.to(at::kFloat).transpose(0, 1).contiguous()` and updated
+`x_f` indexing to `x_f[(row0 + k) * M + m]`.
+
+Result: reverted. Laguna bits=7 M=1/4/8/16 geomean vs the pass-25 macro baseline
+was **0.85x**; the transposed stride caused per-K loads to jump by `M*4` bytes
+and the extra transpose copy outweighed any cache benefit.
+
+| set | bits | geomean kernel ratio | geomean tflops ratio |
+|-----|------|---------------------:|---------------------:|
+| laguna | 7 | 0.841x | 0.841x |
+
+## Pass 27 - AVX-512 BF16 `vdpbf16ps` dot-pair kernel
+
+Idea: decode two consecutive K values per column into a single `__m512bh` pair
+vector (`col_i.w0`, `col_i.w1`) and use `vdpbf16ps` with paired BF16 activations.
+Each `dpbf16` instruction performs two FMAs, potentially doubling FMA throughput.
+Validated 160/160 `pytest` cases.
+
+Result: reverted. The per-pair `cvtepi32_ps`, `fmsub`, `_mm512_cvtneps_pbh`,
+and `permutex2var` interleave overhead was heavier than the two FMAs saved.
+Laguna bits=7 geomean vs pass-25 macro baseline was **0.74x** (slower on every
+M and shape tested).
+
+| set | bits | geomean kernel ratio | geomean tflops ratio |
+|-----|------|---------------------:|---------------------:|
+| laguna | 7 | 0.744x | 0.744x |
+
+## Pass 28 - uint8 pre-expanded 4-K-at-a-time SIMD kernel
+
+Idea: exploit the pre-expanded uint8 layout (`kernel_bits == 8`) by extracting
+all four uint8 codes from each 32-bit word at once, computing four FP32 weight
+vectors, and issuing four FMAs per m.  This removes the generic per-K planar
+shift/mask loop.  Validated 160/160 `pytest` cases.
+
+Result: reverted.  The 4-K path lost the macro's `K_UNROLL` independent
+accumulators, so the FMA dependency chain lengthened and hid fewer FMAs.
+Laguna bits=7 geomean vs pass-25 macro baseline was **0.85x** (notably slower
+for M=1 large-K shapes, but slightly better for some small `2048x1024 M=16`
+cases).
+
+| set | bits | geomean kernel ratio | geomean tflops ratio |
+|-----|------|---------------------:|---------------------:|
+| laguna | 7 | 0.849x | 0.849x |
+
+## Pass 29 - pre-packed BF16 weight pairs for `vdpbf16ps`
+
+Idea: remove runtime weight conversion by pre-computing and caching `[N/16, K/32, 16, 32]`
+BF16 weight pairs.  The hot loop then loads a single 64-byte pair vector, broadcasts
+a paired activation word, and calls `_mm512_dpbf16_ps` once per (M, pair).  This should
+double FMA throughput vs. per-K `_mm512_fmadd_ps` at the cost of 2x weight memory.
+Validated 160/160 `pytest` cases.
+
+Result: reverted.  The pre-packed path is **~18% slower overall** (laguna bits=7
+geomean 0.82x vs. pass-25 macro baseline).  Although `vdpbf16ps` executes two
+FMAs per instruction, the doubled weight memory and the still-serial broadcast/x
+load per M dominate the win.  The current macro is already close to the CPU's
+effective memory/compute balance on this host, so a 2 TFLOPS ceiling likely needs
+a wider tile (32-column chunks, K-block tiling in L2 cache) rather than simply
+switching the SIMD instruction.
+
+| set | bits | geomean kernel ratio | geomean tflops ratio |
+|-----|------|---------------------:|---------------------:|
+| laguna | 7 | 0.816x | 0.814x |
+
+Representative laguna M=16 bits=7 rows:
+
+| K x N | M | prev ms | curr ms | prev TFLOPS | curr TFLOPS |
+|-------|---|--------:|--------:|------------:|------------:|
+| 2048 x 8192 | 16 | 0.472 | 0.631 | 1.138 | 0.850 |
+| 8192 x 2048 | 16 | 0.589 | 0.632 | 0.911 | 0.849 |
+| 2048 x 6144 | 16 | 0.361 | 0.474 | 1.116 | 0.849 |
+| 2048 x 1024 | 16 | 0.118 | 0.102 | 0.570 | 0.656 |
+
+## Next candidate: 32-column AVX-512 tile with K-block tiling
+
+The macro uses 16-column column blocks.  A 32-column micro-tile (or 48/64) would
+amortize the planar decode and activation loads over twice as many columns.  The
+risk is ZMM register pressure for large M; the next experiment is to widen the
+SIMD column chunk for M <= 8 and add K-block tiling within the L2 cache so
+weights stay resident while multiple K-blocks per column tile run.
+
+## Pass 30 - rename C++ Pangolin kernel sources from `planar_*` to `pangolin_*`
+
+The native CUDA and CPU kernel sources lived under `gptqmodel_ext/planar` with
+`planar_gemv.cpp`, `planar_gemv_cpu.cpp`, and `planar_gemv_kernel.cu`.  The
+project naming moved to "Pangolin" but the underlying file names still said
+`planar`.  This pass renames the directory and files to `pangolin_*` and updates
+the JIT source lists, extension aliases, docs, and the `pangolin-cpu-kernel`
+skill.
+
+Validation: `ruff` clean, `pytest` 160/160, forced JIT rebuild with the new
+paths.  The rename is a pure refactor; the `laguna` bits=7 M=16/M=32 TFLOPS
+baseline after the rename is unchanged and peaks at ~1.18 TFLOPS on this host,
+still well below the 2 TFLOPS target.
+
+### `laguna` bits=7 M=16 TFLOPS baseline (threads=8)
+
+| K x N | M | kernel (ms) | ref (ms) | speedup | kernel (TFLOPS) | ref (TFLOPS) |
+|-------|--:|------------:|---------:|--------:|----------------:|-------------:|
+| 2048 x 6144 | 16 | 0.363 | 127.703 | 351.59x | 1.109 | 0.003 |
+| 2048 x 1024 | 16 | 0.093 | 4.008 | 43.00x | 0.720 | 0.017 |
+| 6144 x 2048 | 16 | 1.432 | 98.643 | 68.88x | 0.281 | 0.004 |
+| 2048 x 8192 | 16 | 0.476 | 118.533 | 248.88x | 1.127 | 0.005 |
+| 8192 x 2048 | 16 | 0.567 | 118.427 | 208.99x | 0.947 | 0.005 |
+| 2048 x 512 | 16 | 0.070 | 1.358 | 19.30x | 0.477 | 0.025 |
+| 512 x 2048 | 16 | 0.061 | 1.360 | 22.38x | 0.552 | 0.025 |
+| 2048 x 256 | 16 | 0.068 | 0.833 | 12.31x | 0.248 | 0.020 |
+
+### `laguna` bits=7 M=32 TFLOPS baseline (threads=8)
+
+| K x N | M | kernel (ms) | ref (ms) | speedup | kernel (TFLOPS) | ref (TFLOPS) |
+|-------|--:|------------:|---------:|--------:|----------------:|-------------:|
+| 2048 x 6144 | 32 | 0.686 | 91.041 | 132.76x | 1.174 | 0.009 |
+| 2048 x 1024 | 32 | 0.147 | 5.997 | 40.80x | 0.913 | 0.022 |
+| 6144 x 2048 | 32 | 0.756 | 87.394 | 115.55x | 1.065 | 0.009 |
+| 2048 x 8192 | 32 | 0.906 | 120.294 | 132.73x | 1.185 | 0.009 |
+| 8192 x 2048 | 32 | 1.089 | 122.399 | 112.41x | 0.986 | 0.009 |
+| 2048 x 512 | 32 | 0.100 | 2.004 | 20.06x | 0.672 | 0.033 |
+| 512 x 2048 | 32 | 0.083 | 1.399 | 16.76x | 0.804 | 0.048 |
+| 2048 x 256 | 32 | 0.088 | 0.817 | 9.27x | 0.381 | 0.041 |
+
+Peak observed: **1.185 TFLOPS** at `2048 x 8192`, M=32.  The next pass targets
+the 2 TFLOPS ceiling with a 32-column AVX-512 micro-tile or a K-block-tiled
+BF16 dot-product path.

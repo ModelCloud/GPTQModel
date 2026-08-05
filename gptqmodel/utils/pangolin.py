@@ -41,19 +41,19 @@ PANGOLIN_SUPPORTED_M = (1, 2, 3, 4, 5, 6, 7, 8, 16, 32)
 
 
 def _pangolin_root() -> Path:
-    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "planar"
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "pangolin"
 
 
 def _pangolin_sources() -> list[str]:
     root = _pangolin_root()
     return [
-        str(root / "planar_gemv.cpp"),
-        str(root / "planar_gemv_kernel.cu"),
+        str(root / "pangolin_gemv.cpp"),
+        str(root / "pangolin_gemv_kernel.cu"),
     ]
 
 
 def _pangolin_cpu_sources() -> list[str]:
-    return [str(_pangolin_root() / "planar_gemv_cpu.cpp")]
+    return [str(_pangolin_root() / "pangolin_gemv_cpu.cpp")]
 
 
 def _pangolin_cpu_supported() -> bool:

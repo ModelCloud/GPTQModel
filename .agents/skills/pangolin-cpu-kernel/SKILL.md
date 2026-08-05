@@ -1,11 +1,11 @@
 ---
 name: pangolin-cpu-kernel
-description: Re-validate the CPU Pangolin planar GEMV kernel for gptq_p 3/5/6/7-bit on x86-64. Covers forced JIT rebuild, fallback-disable flags, pytest correctness, and sanity/throughput benchmarks.
+description: Re-validate the CPU Pangolin GEMV kernel for gptq_p 3/5/6/7-bit on x86-64. Covers forced JIT rebuild, fallback-disable flags, pytest correctness, and sanity/throughput benchmarks.
 ---
 
-# Testing the CPU Pangolin planar GEMV kernel
+# Testing the CPU Pangolin GEMV kernel
 
-Use this skill when you need to verify the `gptqmodel_ext/planar/planar_gemv_cpu.cpp` JIT kernel or its Python wrappers.
+Use this skill when you need to verify the `gptqmodel_ext/pangolin/pangolin_gemv_cpu.cpp` JIT kernel or its Python wrappers.
 
 ## Environment
 
@@ -20,7 +20,7 @@ Use this skill when you need to verify the `gptqmodel_ext/planar/planar_gemv_cpu
 
 | Variable | Effect |
 | --- | --- |
-| `GPTQMODEL_PANGOLIN_CPU_FORCE_REBUILD=1` | Delete the cached `pangolin_cpu` JIT build and recompile `planar_gemv_cpu.cpp`. |
+| `GPTQMODEL_PANGOLIN_CPU_FORCE_REBUILD=1` | Delete the cached `pangolin_cpu` JIT build and recompile `pangolin_gemv_cpu.cpp`. |
 | `GPTQMODEL_PANGOLIN_CPU_DISABLE_AVX512=1` | Force runtime dispatch away from AVX-512 (falls back to AVX2 or scalar). |
 | `GPTQMODEL_PANGOLIN_CPU_DISABLE_AVX2=1` | Force runtime dispatch away from AVX2 (falls back to scalar). |
 | `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0` | Use the original packed `qweight` layout (`[N/16, K/32, bits, 16]`) instead of the uint8 pre-expanded layout (`[N/16, K/32, 8, 16]`). Run pytest with this set to verify the non-preexpanded path. |

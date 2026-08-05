@@ -150,7 +150,7 @@ __device__ __forceinline__ int decode_zero(const int32_t* qzeros_block, int r) {
 // output dtype in-kernel, so the whole op is a single kernel launch plus one
 // tiny counter memset.
 template <typename Scalar, int Bits, int SizeM, int ColsPerLane, int Warps>
-__global__ __launch_bounds__(Warps * kWarpSize) void planar_gemv_kernel(
+__global__ __launch_bounds__(Warps * kWarpSize) void pangolin_gemv_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ qweight,
     const Scalar* __restrict__ scales,
@@ -486,7 +486,7 @@ int launch_cols(
   // occupancy/launch when it exceeds the default 48 KiB per block.
   constexpr int kPartialBytes =
       Warps * SizeM * (kWarpSize * ColsPerLane) * sizeof(float);
-  auto kernel = planar_gemv_kernel<Scalar, Bits, SizeM, ColsPerLane, Warps>;
+  auto kernel = pangolin_gemv_kernel<Scalar, Bits, SizeM, ColsPerLane, Warps>;
   // Occupancy is fixed per (instantiation, device); cache it so the decode
   // path does not pay a driver query on every launch. The shared-memory
   // attribute is set inside the same cache miss because it is a per-function,

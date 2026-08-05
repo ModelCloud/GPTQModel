@@ -127,7 +127,7 @@ inline int decode_zero_code(
 #if PLANAR_GEMV_CPU_X86
 
 __attribute__((constructor))
-static void planar_gemv_cpu_init_features() {
+static void pangolin_gemv_cpu_init_features() {
   __builtin_cpu_init();
 }
 
@@ -415,7 +415,7 @@ constexpr int k_unroll_for() {
   } else if constexpr (SizeM <= 4) {
     return (Bits <= 6) ? 4 : 2;
   } else if constexpr (SizeM <= 8) {
-    return (Bits <= 6) ? 2 : 1;
+    return 2;
   } else {
     return 1;
   }
