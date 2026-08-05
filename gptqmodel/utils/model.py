@@ -32,7 +32,6 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (
@@ -671,7 +670,7 @@ def create_quant_layer(
     if any(isinstance(module, candidate) for candidate in linear_candidates):
         return type(module)
 
-    selected_counts = {candidate: 0 for candidate in linear_candidates}
+    selected_counts = dict.fromkeys(linear_candidates, 0)
     selected_counts[TorchQuantEmbeddings] = 0
     for name, submodule in module.named_modules():
         # skip non-quantized modules
@@ -1189,7 +1188,7 @@ def pack_model(
     if has_gil_disabled():
         from device_smi import Device
         cpu = Device("cpu")
-        max_packers = cpu.count * cpu.cores
+        max_packers = min(8, max(2, cpu.count * cpu.cores))
     else:
         max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 

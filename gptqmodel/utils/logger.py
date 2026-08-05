@@ -15,8 +15,19 @@ from typing import Any, Dict, Iterator, Optional, Sequence
 import pcre
 from logbar import LogBar
 
+from .env import env_flag
+
 
 _ANSI_ESCAPE_RE = pcre.compile(r"\x1b\[[0-9;]*m")
+
+
+def _log_times_enabled() -> bool:
+    """Check env at call time so flags can be toggled without restarting.
+
+    Per-module timing is intentionally opt-in; QuantizationRegionTimer
+    aggregates are always recorded and flushed periodically.
+    """
+    return env_flag("DEBUG") or env_flag("GPTQMODEL_LOG_TIMES")
 
 
 class _SilentProgress:
@@ -390,5 +401,7 @@ def log_time_block(
     try:
         yield
     finally:
-        time.perf_counter() - start
-        #logger.info(f"[time] {label} took {duration:.3f}s")
+        if _log_times_enabled():
+            duration = time.perf_counter() - start
+            label = f"{block_name} ({module_name})" if module_name else block_name
+            logger.info(f"[time] {label} took {duration:.3f}s")

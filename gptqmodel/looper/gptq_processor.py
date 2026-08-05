@@ -165,12 +165,14 @@ class GPTQProcessor(LoopProcessor):
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
 
+        region_timer = kwargs.get("region_timer", None)
+
         if qcfg_clone.gptaq is not None:
             tmp = GPTAQ(module=module, qcfg=qcfg_clone)
         elif qcfg_clone.foem is not None:
             tmp = FOEM(module=module, qcfg=qcfg_clone)
         else:
-            tmp = GPTQ(module=module, qcfg=qcfg_clone)
+            tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback
             tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
