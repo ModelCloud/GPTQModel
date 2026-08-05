@@ -16,12 +16,6 @@ from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, Ex
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU, DEVICE
-from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
-from ..utils.backend import BACKEND
-from ..utils.importer import select_quant_linear
-from ..utils.marlin import replace_parameter
-from ..quantization.config import AdaptiveDampingConfig
-from ..utils.model import create_quant_module, pack_module, recurse_getattr, recurse_setattr
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -34,9 +28,11 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.fused_group_forward import FusedGroupForward
+from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FOEM, GPTAQ, GPTQ
 from ..quantization.config import (
     METHOD,
+    AdaptiveDampingConfig,
     DampConfig,
     FOEMConfig,
     GPTAQConfig,
@@ -58,9 +54,13 @@ from ..quantization.diagnostics import (
     sample_reconstructed_quant_codes,
     summarize_quant_code_fingerprints,
 )
+from ..utils.backend import BACKEND
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
+from ..utils.importer import select_quant_linear
 from ..utils.logger import log_time_block, setup_logger
+from ..utils.marlin import replace_parameter
+from ..utils.model import create_quant_module, pack_module, recurse_getattr, recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
@@ -350,9 +350,9 @@ class GPTQProcessor(LoopProcessor):
         region_timer = kwargs.get("region_timer", None)
 
         if qcfg_clone.gptaq is not None:
-            tmp = GPTAQ(module=module, qcfg=qcfg_clone)
+            tmp = GPTAQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         elif qcfg_clone.foem is not None:
-            tmp = FOEM(module=module, qcfg=qcfg_clone)
+            tmp = FOEM(module=module, qcfg=qcfg_clone, region_timer=region_timer)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone, region_timer=region_timer)
             tmp.fallback = qcfg_clone.fallback

@@ -22,12 +22,19 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..quantization.config import AdaptiveClippingConfig, AdaptiveDampingConfig, DampConfig, FallbackStrategy, ScaleSearchConfig, SmoothMSE
+from ..quantization.config import (
+    AdaptiveClippingConfig,
+    AdaptiveDampingConfig,
+    DampConfig,
+    FallbackStrategy,
+    ScaleSearchConfig,
+    SmoothMSE,
+)
+from ..utils import gte_python_3_14, has_gil_disabled
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
-from ..utils import gte_python_3_14, has_gil_disabled
-from ..utils.torch import TORCH_GTE_214, TORCH_GTE_28, torch_compile, torch_sync
+from ..utils.torch import TORCH_GTE_28, TORCH_GTE_214, torch_compile, torch_sync
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -62,7 +69,7 @@ def _log_hessian_verbose() -> bool:
     periodically, which provides aggregate stall isolation without per-module
     line noise.
     """
-    return env_flag("DEBUG") or env_flag("GPTQMODEL_LOG_HESSIAN")
+    return env_flag("GPTQMODEL_LOG_HESSIAN")
 
 lock = threading.Lock()
 
@@ -1688,7 +1695,7 @@ class GPTQ:
 
         timer = getattr(self, "region_timer", None)
         timer_cm = (
-            timer.measure("hessian_inverse", source=self.name)
+            timer.measure("hessian_inverse")
             if timer is not None
             else contextlib.nullcontext()
         )

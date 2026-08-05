@@ -152,6 +152,7 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
 
 
+from .utils import has_gil_disabled
 from .utils.env import env_flag
 from .utils.logger import setup_logger
 from .utils.modelscope import ensure_modelscope_available
@@ -164,6 +165,23 @@ from .utils.threadx import DeviceThreadPool, WarmUpCtx, WarmupTask
 
 
 _DEVICE_THREAD_POOL = None
+
+
+def _default_cpu_workers() -> int:
+    """Return the default CPU worker count, respecting an explicit env override."""
+
+    env_workers = os.getenv("GPTQMODEL_CPU_WORKERS")
+    if env_workers is not None:
+        try:
+            return max(1, int(env_workers))
+        except ValueError:
+            pass
+
+    # Cap CPU workers to avoid OpenMP team explosion under free-threading.
+    # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
+    if has_gil_disabled():
+        return min(8, max(2, (os.cpu_count() or 1) // 16))
+    return min(12, max(1, ((os.cpu_count() or 1) + 1) // 2))
 
 
 def _build_device_thread_pool():
@@ -180,8 +198,7 @@ def _build_device_thread_pool():
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
-            # Cap CPU workers to avoid OpenMP team explosion under free-threading.
-            "cpu": min(8, max(2, (os.cpu_count() or 1) // 16)),
+            "cpu": _default_cpu_workers(),
             "model_loader:cpu": 2,
         },
         empty_cache_every_n=512,
