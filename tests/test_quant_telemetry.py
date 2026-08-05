@@ -10,7 +10,6 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
-import gptqmodel
 from gptqmodel import _build_device_thread_pool
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
@@ -28,7 +27,7 @@ class TestQuantTelemetry(unittest.TestCase):
 
     def test_device_thread_pool_cpu_workers_capped_on_free_threading(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch.object(gptqmodel, "has_gil_disabled", return_value=True):
+            with patch("gptqmodel.has_gil_disabled", return_value=True):
                 _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
         cpu = workers["cpu"]
@@ -38,7 +37,7 @@ class TestQuantTelemetry(unittest.TestCase):
 
     def test_device_thread_pool_cpu_workers_keep_historical_default_on_gil(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch.object(gptqmodel, "has_gil_disabled", return_value=False):
+            with patch("gptqmodel.has_gil_disabled", return_value=False):
                 _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
         cpu = workers["cpu"]
