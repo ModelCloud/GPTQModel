@@ -3425,3 +3425,41 @@ Peak observed: **0.449 TFLOPS** at `2048 x 6144`, M=8 (bits=5).  This is
 ~1.8x faster than the previous M=8 macro path and a solid step toward the
 2 TFLOPS target; the next levers are extending the dpbf16 path to larger M
 and/or widening the column tile.
+
+## Optimization pass 34 (2026-08-05): prefer the 2x16-column tile for M <= 4
+
+The BF16 dot-pair path is fast for M=8, but for M<=4 the 2x16-column FP32 FMA
+tile is faster on this host (it avoids the FP32->BF16 weight conversion and
+`vdpbf16ps` latency in the tight loop).  Reorder dispatch so the 2x16 tile is
+tried first when `N % 32 == 0 && SizeM <= 4`, and the dpbf16 path is used for
+the remaining `Bits == 8` cases.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `git diff --check` clean.
+- `ruff check` clean on changed Python paths.
+
+### `laguna` M=4 / M=8 bits=7 TFLOPS after pass 34 (threads=8)
+
+| K x N | M | kernel (ms) | ref (ms) | speedup | kernel (TFLOPS) | ref (TFLOPS) |
+|-------|--:|------------:|---------:|--------:|----------------:|-------------:|
+| 2048 x 6144 | 4 | 0.139 | 84.841 | 608.39x | 0.722 | 0.001 |
+| 2048 x 1024 | 4 | 0.044 | 3.816 | 86.12x | 0.379 | 0.004 |
+| 6144 x 2048 | 4 | 0.166 | 78.621 | 474.98x | 0.608 | 0.001 |
+| 2048 x 8192 | 4 | 0.186 | 114.711 | 616.84x | 0.722 | 0.001 |
+| 8192 x 2048 | 4 | 0.215 | 116.251 | 540.52x | 0.624 | 0.001 |
+| 2048 x 512 | 4 | 0.035 | 1.371 | 39.51x | 0.242 | 0.006 |
+| 512 x 2048 | 4 | 0.031 | 1.375 | 45.01x | 0.275 | 0.006 |
+| 2048 x 256 | 4 | 0.029 | 0.796 | 27.37x | 0.144 | 0.005 |
+| 2048 x 6144 | 8 | 0.451 | 85.231 | 189.10x | 0.447 | 0.002 |
+| 2048 x 1024 | 8 | 0.097 | 4.243 | 43.63x | 0.345 | 0.008 |
+| 6144 x 2048 | 8 | 0.476 | 80.990 | 170.14x | 0.423 | 0.002 |
+| 2048 x 8192 | 8 | 0.617 | 116.635 | 189.17x | 0.435 | 0.002 |
+| 8192 x 2048 | 8 | 0.640 | 121.360 | 189.62x | 0.419 | 0.002 |
+| 2048 x 512 | 8 | 0.060 | 1.337 | 22.12x | 0.278 | 0.013 |
+| 512 x 2048 | 8 | 0.060 | 1.306 | 21.87x | 0.281 | 0.013 |
+| 2048 x 256 | 8 | 0.045 | 0.778 | 17.35x | 0.187 | 0.011 |
+
+M=4 now peaks at **0.722 TFLOPS**, matching the tile2 path and avoiding the
+~0.3 TFLOPS regression that the K-pair BF16 path showed for small batches.

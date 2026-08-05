@@ -1101,6 +1101,13 @@ void run_gemv(
     int64_t N,
     int64_t num_groups) {
 #if PLANAR_GEMV_CPU_X86
+  // 2x16-column AVX-512 tile fits in the ZMM budget for very small batch sizes
+  // and roughly halves the activation broadcast work compared to the single-
+  // chunk path.  Try it before the K-pair BF16 path for M<=4, N%32 shapes.
+  if (cpu_supports_avx512_core() && N % 32 == 0 && SizeM <= 4) {
+    gemv_kernel_avx512_tile2<Bits, SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
+    return;
+  }
   // Pre-expanded uint8 path: use AVX-512 BF16 dot products to process two K
   // values at once.  This is the fastest known compute path, but it only works
   // on the uint8 pre-expanded layout (Bits == 8) and for small batch sizes
@@ -1110,13 +1117,6 @@ void run_gemv(
       gemv_kernel_avx512_dpbf16<SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
       return;
     }
-  }
-  // 2x16-column AVX-512 tile fits in the ZMM budget for small batch sizes and
-  // roughly halves the activation broadcast work compared to the single-chunk
-  // path.
-  if (cpu_supports_avx512_core() && N % 32 == 0 && SizeM <= 4) {
-    gemv_kernel_avx512_tile2<Bits, SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
-    return;
   }
   // AVX-512 is used for all supported M whenever the feature set and N are
   // compatible. M=32 is split into two M=16 passes in dispatch_size_m, so
