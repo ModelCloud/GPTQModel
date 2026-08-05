@@ -2648,6 +2648,7 @@ class BaseQModel(nn.Module):
             non_blocking: bool = False,
             role: str = "default",
             named_module: Optional["NamedModule"] = None,
+            module_path: Optional[str] = None,
     ) -> torch.nn.Module:
         with self._turtle_lock:
             if role == "quant_source" and named_module is not None:
@@ -2709,6 +2710,7 @@ class BaseQModel(nn.Module):
                     turtle_model=turtle_model,
                     target_submodule=target_submodule,
                     device=device,
+                    module_path=module_path,
                 )
 
             if role == "forward" and named_module is not None:
