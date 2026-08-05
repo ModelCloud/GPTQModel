@@ -3378,3 +3378,50 @@ The large `K x N` M=4 shapes improve by 8–16% while small shapes are neutral t
 slightly slower.  The 2 TFLOPS ceiling remains the target for further
 micro-kernel work (wider column tiles, K-pair BF16 dot-product, or paired-K
 prepacked layouts).
+
+## Optimization pass 33 (2026-08-05): BF16 `vdpbf16ps` K-pair kernel with precomputed activation BF16
+
+Add an AVX-512 BF16 dot-product micro-kernel for the pre-expanded uint8 path
+(`Bits == 8`).  It processes K in pairs: each `vdpbf16ps` computes
+`acc[i] += x[k]*w[k,i] + x[k+1]*w[k+1,i]` for 16 output columns.  The activation
+is converted from FP32 to BF16 once per GEMV call and stored as `(x0, x1)`
+32-bit words, so the hot loop loads `x_pair` with a single broadcast instead of
+scalar `c10::BFloat16` conversion per K-pair.  Weights are interleaved per dword
+with `_mm512_permutex2var_epi16` so the `vdpbf16ps` operands match.
+
+Dispatch remains `Bits == 8`, `N % 16 == 0`, `SizeM <= 8`.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`
+  passed.
+
+### A/B vs `origin/main` (`laguna` M=8, threads=8)
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.747x | 1.787x | 1.746x |
+| laguna | 5 | 1.808x | 2.053x | 1.809x |
+| laguna | 6 | 1.788x | 1.910x | 1.791x |
+| laguna | 7 | 1.783x | 1.776x | 1.779x |
+| all | all | 1.781x | 1.878x | 1.781x |
+
+### `laguna` M=8 TFLOPS peak after pass 33 (threads=8)
+
+| K x N | M | kernel (ms) | ref (ms) | speedup | kernel (TFLOPS) | ref (TFLOPS) |
+|-------|--:|------------:|---------:|--------:|----------------:|-------------:|
+| 2048 x 6144 | 8 | 0.451 | 86.506 | 191.94x | 0.447 | 0.002 |
+| 2048 x 1024 | 8 | 0.093 | 4.968 | 53.30x | 0.360 | 0.007 |
+| 6144 x 2048 | 8 | 0.477 | 79.124 | 165.99x | 0.422 | 0.003 |
+| 2048 x 8192 | 8 | 0.608 | 114.511 | 188.36x | 0.442 | 0.002 |
+| 8192 x 2048 | 8 | 0.641 | 122.185 | 190.54x | 0.419 | 0.002 |
+| 2048 x 512 | 8 | 0.062 | 1.368 | 21.94x | 0.269 | 0.012 |
+| 512 x 2048 | 8 | 0.056 | 1.347 | 23.89x | 0.297 | 0.012 |
+| 2048 x 256 | 8 | 0.043 | 0.778 | 18.30x | 0.197 | 0.011 |
+
+Peak observed: **0.449 TFLOPS** at `2048 x 6144`, M=8 (bits=5).  This is
+~1.8x faster than the previous M=8 macro path and a solid step toward the
+2 TFLOPS target; the next levers are extending the dpbf16 path to larger M
+and/or widening the column tile.

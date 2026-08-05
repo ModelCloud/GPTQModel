@@ -421,6 +421,32 @@ constexpr int k_unroll_for() {
   }
 }
 
+// Pack two FP32 activations into a BF16 pair broadcast across 16 32-bit lanes.
+// Each dword holds (x0, x1) in its low/high 16 bits; this is the src2 layout
+// that VDPBF16PS expects when computing x0*w0 + x1*w1 per output lane.
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma")))
+inline __m512bh make_x_pair(float x0_f, float x1_f) {
+  const uint16_t x0 = static_cast<c10::BFloat16>(x0_f).x;
+  const uint16_t x1 = static_cast<c10::BFloat16>(x1_f).x;
+  const uint32_t bits = (static_cast<uint32_t>(x1) << 16) | static_cast<uint32_t>(x0);
+  return (__m512bh)_mm512_set1_epi32(static_cast<int32_t>(bits));
+}
+
+// Interleave two FP32 16-lane weight vectors into a BF16 src1 vector for
+// VDPBF16PS: output element 2*i is w0[i], element 2*i+1 is w1[i], so each
+// output lane i computes x0*w0[i] + x1*w1[i].
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma")))
+inline __m512bh make_weight_pair(__m512 w0, __m512 w1) {
+  __m256bh w0_b = _mm512_cvtneps_pbh(w0);
+  __m256bh w1_b = _mm512_cvtneps_pbh(w1);
+  __m512i a = _mm512_zextsi256_si512((__m256i)w0_b);
+  __m512i b = _mm512_zextsi256_si512((__m256i)w1_b);
+  const __m512i idx = _mm512_set_epi16(
+      47, 15, 46, 14, 45, 13, 44, 12, 43, 11, 42, 10, 41, 9, 40, 8,
+      39, 7, 38, 6, 37, 5, 36, 4, 35, 3, 34, 2, 33, 1, 32, 0);
+  return (__m512bh)_mm512_permutex2var_epi16(a, idx, b);
+}
+
 // K-unroll for the 2x16-column AVX-512 tile.  The tile doubles the number of
 // accumulators, so keep the total at 16 ZMMs or below to leave registers for
 // qwords, scale/zero vectors and temporaries.
@@ -435,6 +461,137 @@ constexpr int k_unroll_tile2_for() {
   } else {
     return 1;
   }
+}
+
+// AVX-512 BF16 dot-product kernel for the pre-expanded uint8 layout (Bits==8).
+// It processes K in pairs using vdpbf16ps, accumulating x[k]*w[k] + x[k+1]*w[k+1]
+// for 16 output columns per instruction.  This halves the FMA instruction count
+// relative to the FP32 FMA path for small M and is intended to push large-M
+// shapes closer to the 2 TFLOPS ceiling.  SizeM is limited to 8 because the
+// kernel keeps 16 weight-pair ZMMs in registers plus SizeM accumulators and x
+// pairs (32 ZMMs total for SizeM==8).
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma")))
+void gemv_col_block_avx512_dpbf16(
+    const uint16_t* __restrict__ x_b,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t col0,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int64_t kb_start,
+    int64_t kb_end) {
+  __m512 acc[SizeM];
+  for (int m = 0; m < SizeM; ++m) {
+    acc[m] = _mm512_setzero_ps();
+  }
+
+  const int64_t num_k_blocks = K / 32;
+  const int64_t chunk = col0 / 16;
+  const int lane = static_cast<int>(col0 % 16);
+  int prev_group = -1;
+  __m512 scale_vec = _mm512_setzero_ps();
+  __m512 zscale_vec = _mm512_setzero_ps();
+
+  for (int64_t kb = kb_start; kb < kb_end; ++kb) {
+    const int64_t row0 = kb * 32;
+    int group = g_idx[row0];
+    if (__builtin_expect(group < 0, 0)) {
+      group += static_cast<int>(num_groups);
+    }
+    if (__builtin_expect(group != prev_group, 0)) {
+      const at::BFloat16* scale_ptr = scale_b + static_cast<int64_t>(group) * N + col0;
+      const float* zscale_ptr = zero_scale_f + static_cast<int64_t>(group) * N + col0;
+      scale_vec = load_scale_512(scale_ptr);
+      zscale_vec = load_f_512(zscale_ptr);
+      prev_group = group;
+    }
+
+    // Load the 8 packed 32-bit words for this K-block / col-block.
+    // Each word stores 4 uint8 codes (one per K value) for 16 columns.
+    const int64_t base_offset = ((chunk * num_k_blocks + kb) * 8) * 16 + lane;
+    const uint32_t* qbase = reinterpret_cast<const uint32_t*>(qweight) + base_offset;
+    __m512i qwords[8];
+    for (int pw = 0; pw < 8; ++pw) {
+      qwords[pw] = load_i_512(qbase + pw * 16);
+    }
+
+    for (int p = 0; p < 16; ++p) {
+      const int word_idx = p / 2;
+      const int byte0 = (p % 2) * 2;
+      const int byte1 = byte0 + 1;
+      const int shift0 = byte0 * 8;
+      const int shift1 = byte1 * 8;
+      const __m512i mask0 = _mm512_set1_epi32(0xFF << shift0);
+      const __m512i mask1 = _mm512_set1_epi32(0xFF << shift1);
+
+      const __m512i word = qwords[word_idx];
+      const __m512i code0_i = _mm512_srli_epi32(_mm512_and_si512(word, mask0), shift0);
+      const __m512i code1_i = _mm512_srli_epi32(_mm512_and_si512(word, mask1), shift1);
+
+      const __m512 code0_f = _mm512_cvtepu32_ps(code0_i);
+      const __m512 code1_f = _mm512_cvtepu32_ps(code1_i);
+      const __m512 weight0 = _mm512_fmsub_ps(code0_f, scale_vec, zscale_vec);
+      const __m512 weight1 = _mm512_fmsub_ps(code1_f, scale_vec, zscale_vec);
+      const __m512bh weight_pair = make_weight_pair(weight0, weight1);
+
+      for (int m = 0; m < SizeM; ++m) {
+        const uint16_t* pair_ptr = x_b + static_cast<int64_t>(m) * K + row0 + p * 2;
+        const uint32_t pair_bits = *reinterpret_cast<const uint32_t*>(pair_ptr);
+        const __m512bh x_pair = (__m512bh)_mm512_set1_epi32(static_cast<int32_t>(pair_bits));
+        acc[m] = _mm512_dpbf16_ps(acc[m], x_pair, weight_pair);
+      }
+    }
+  }
+
+  for (int m = 0; m < SizeM; ++m) {
+    store_bf16_512(out + static_cast<int64_t>(m) * N + col0, acc[m]);
+  }
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,fma")))
+void gemv_kernel_avx512_dpbf16(
+    const float* __restrict__ x_f,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t /*M*/,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  // Pre-convert the M x K FP32 activation tile to BF16 once.  Each pair of
+  // consecutive K values is laid out as a 32-bit word (low K, high K) so the
+  // hot loop can load x_pairs with a single broadcast instead of scalar
+  // float-to-bf16 conversion.
+  std::vector<uint16_t> x_b_storage(static_cast<size_t>(SizeM) * K);
+  uint16_t* __restrict__ x_b = x_b_storage.data();
+  for (int m = 0; m < SizeM; ++m) {
+    const float* src = x_f + static_cast<int64_t>(m) * K;
+    uint16_t* dst = x_b + static_cast<int64_t>(m) * K;
+    for (int64_t k = 0; k < K; k += 16) {
+      __m512 v = _mm512_loadu_ps(src + k);
+      __m256bh b = _mm512_cvtneps_pbh(v);
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + k), (__m256i)b);
+    }
+  }
+
+  const int64_t num_k_blocks = K / 32;
+  const int64_t col_chunks = N / 16;
+  const int num_threads = at::get_num_threads();
+  const int64_t grain = std::max<int64_t>(1, col_chunks / num_threads);
+  at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) {
+    for (int64_t col_block = begin; col_block < end; ++col_block) {
+      gemv_col_block_avx512_dpbf16<SizeM>(
+          x_b, qweight, scale_b, zero_scale_f, g_idx, out, col_block * 16, K, N, num_groups, 0, num_k_blocks);
+    }
+  });
 }
 
 #define DEFINE_GEMV_KERNEL(suffix, target_features, LOAD_I, LOAD_F, LOAD_SCALE, SET1_I, SET1_F, SRLI, SLLI, AND, OR, ADD_F, CVT, FMSUB, FMADD, STORE_BF16, INT_T, FLOAT_T, VLEN) \
@@ -944,6 +1101,16 @@ void run_gemv(
     int64_t N,
     int64_t num_groups) {
 #if PLANAR_GEMV_CPU_X86
+  // Pre-expanded uint8 path: use AVX-512 BF16 dot products to process two K
+  // values at once.  This is the fastest known compute path, but it only works
+  // on the uint8 pre-expanded layout (Bits == 8) and for small batch sizes
+  // that fit in the ZMM register file.
+  if constexpr (Bits == 8) {
+    if (cpu_supports_avx512_core() && N % 16 == 0 && SizeM <= 8) {
+      gemv_kernel_avx512_dpbf16<SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
+      return;
+    }
+  }
   // 2x16-column AVX-512 tile fits in the ZMM budget for small batch sizes and
   // roughly halves the activation broadcast work compared to the single-chunk
   // path.
