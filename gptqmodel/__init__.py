@@ -152,6 +152,7 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
         hub_kernels._gptqmodel_local_causal_conv1d_kernel = True
 
 
+from .utils import has_gil_disabled
 from .utils.env import env_flag
 from .utils.logger import setup_logger
 from .utils.modelscope import ensure_modelscope_available
@@ -180,7 +181,13 @@ def _build_device_thread_pool():
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
-            "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)),  # count + 1, fixed pool size > 1 check when count=3
+            # Cap CPU workers to avoid OpenMP team explosion under free-threading.
+            # On GIL builds keep the historical default; only free-threading needs the aggressive cap.
+            "cpu": (
+                min(8, max(2, (os.cpu_count() or 1) // 16))
+                if has_gil_disabled()
+                else min(12, max(1, (os.cpu_count() or 1) + 1 // 2))
+            ),
             "model_loader:cpu": 2,
         },
         empty_cache_every_n=512,

@@ -1623,6 +1623,8 @@ class ModuleLooper():
     def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
         """Build the named-module subset a processor will quantize for one layer."""
 
+        region_timer = getattr(self.gptq_model, "quant_region_timer", None)
+
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
         for n in names:
@@ -1664,7 +1666,7 @@ class ModuleLooper():
                 subset[name].state["capture_only"] = True
 
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], fallback=fallback)
+                processor.preprocess(subset[name], fallback=fallback, region_timer=region_timer)
             else:
                 processor.preprocess(subset[name])
             # some modules are skipped
