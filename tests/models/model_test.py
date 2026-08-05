@@ -220,6 +220,7 @@ class ModelTest(unittest.TestCase):
     EORA = None
     DAMP_PERCENT = 0.05
     ADAPTIVE_DAMPING = None
+    ADAPTIVE_CLIPPING = None
     MSE = 0.0
     SCALE_SEARCH = None
     DYNAMIC = None
@@ -1539,6 +1540,7 @@ class ModelTest(unittest.TestCase):
             moe_vram_strategy_devices=self.MOE_VRAM_STRATEGY_DEVICES,
             damp_percent=self.DAMP_PERCENT,
             adaptive_damping=self.ADAPTIVE_DAMPING,
+            adaptive_clipping=self.ADAPTIVE_CLIPPING,
             mse=self.MSE,
             scale_search=self.SCALE_SEARCH,
             dynamic=self.DYNAMIC,

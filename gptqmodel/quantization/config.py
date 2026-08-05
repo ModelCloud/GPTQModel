@@ -158,6 +158,13 @@ class ScaleSearchConfig(str, Enum):
     MARLIN_ACTIVATION = "marlin_activation"
 
 
+class AdaptiveClippingMetric(str, Enum):
+    """Loss objective used by adaptive weight clipping search."""
+
+    MSE = "mse"
+    HESSIAN_DIAG = "hessian_diag"
+
+
 # Keep the quality-oriented default explicit while distinguishing an omitted
 # selector from the public ``None`` opt-out and the legacy ``mse`` API.
 _DEFAULT_SCALE_SEARCH = ScaleSearchConfig.ACTIVATION
@@ -1527,6 +1534,46 @@ class AdaptiveDampingConfig(DampConfig):
 
 
 @dataclass
+class AdaptiveClippingConfig:
+    """Adaptive weight-clipping search for GPTQ (v1).
+
+    Searches a per-group clipping threshold before scale/zero selection so that
+    outlier weights do not dominate the quantization range. The selected scale
+    and zero are then used by the normal GPTQ quantizer and are independent of
+    the adaptive damping feedback controller.
+    """
+
+    enabled: bool = field(default=True)
+    metric: Union[str, AdaptiveClippingMetric] = field(default=AdaptiveClippingMetric.HESSIAN_DIAG)
+    per_group: bool = field(default=True)
+    candidates: Tuple[float, ...] = field(default=(0.99, 0.995, 0.999, 1.0))
+
+    def __post_init__(self):
+        self.enabled = bool(self.enabled)
+        if isinstance(self.metric, AdaptiveClippingMetric):
+            self.metric = self.metric.value
+        if self.metric not in {AdaptiveClippingMetric.MSE.value, AdaptiveClippingMetric.HESSIAN_DIAG.value}:
+            raise ValueError("AdaptiveClippingConfig: `metric` must be one of {'mse', 'hessian_diag'}.")
+        self.per_group = bool(self.per_group)
+        if not isinstance(self.candidates, (list, tuple)) or len(self.candidates) == 0:
+            raise ValueError("AdaptiveClippingConfig: `candidates` must be a non-empty list or tuple of floats in (0, 1].")
+        normalized = []
+        for c in self.candidates:
+            if not isinstance(c, (int, float)) or not (0 < c <= 1.0):
+                raise ValueError("AdaptiveClippingConfig: each candidate must be in (0, 1].")
+            normalized.append(float(c))
+        self.candidates = tuple(normalized)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "metric": self.metric,
+            "per_group": self.per_group,
+            "candidates": list(self.candidates),
+        }
+
+
+@dataclass
 class GPTAQConfig:
     alpha: float = field(default=0.25)
     device: Union[str, torch.device] = field(default="auto")
@@ -2472,6 +2519,18 @@ def _normalize_adaptive_damping(
 ) -> Union[DampConfig, AdaptiveDampingConfig]:
     """Backward-compatible alias for :func:`_normalize_damp`."""
     return _normalize_damp(adaptive_damping)
+
+
+def _normalize_adaptive_clipping(
+    adaptive_clipping: Optional[Union["AdaptiveClippingConfig", Dict[str, Any]]]
+) -> Optional["AdaptiveClippingConfig"]:
+    if adaptive_clipping is None:
+        return None
+    if isinstance(adaptive_clipping, AdaptiveClippingConfig):
+        return adaptive_clipping
+    if isinstance(adaptive_clipping, dict):
+        return AdaptiveClippingConfig(**adaptive_clipping)
+    raise ValueError("QuantizeConfig: `adaptive_clipping` must be an AdaptiveClippingConfig, dict, or None.")
 
 
 def _normalize_fused_forward_config(
@@ -3613,6 +3672,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "fused_forward": "fused_forward",
             "native_kernel_replay": "native_kernel_replay",
             "adaptive_damping": "adaptive_damping",
+            "adaptive_clipping": "adaptive_clipping",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -3874,6 +3934,15 @@ class GPTQConfig(PreProcessorConfig):
             )
         },
     )
+    adaptive_clipping: Optional[Union[AdaptiveClippingConfig, Dict[str, Any]]] = field(
+        default_factory=AdaptiveClippingConfig,
+        metadata={
+            "help": (
+                "Adaptive weight-clipping search. Enabled by default with per-group Hessian-weighted "
+                "range search; pass AdaptiveClippingConfig(enabled=False) or None to disable."
+            )
+        },
+    )
     # Experimental quantization-time AdjacentExact policy. Checkpoints retain
     # the policy for reproducibility and optional future requantization.
     adjacent_model: Optional[Any] = field(
@@ -3944,6 +4013,7 @@ class GPTQConfig(PreProcessorConfig):
 
         self.hessian = _normalize_hessian(self.hessian)
         self.adaptive_damping = _normalize_adaptive_damping(self.adaptive_damping)
+        self.adaptive_clipping = _normalize_adaptive_clipping(self.adaptive_clipping)
 
         # Synchronize the adaptive baseline and step with the legacy scalar values
         # when the user did not explicitly override them in `adaptive_damping`.
@@ -4172,6 +4242,8 @@ class GPTQConfig(PreProcessorConfig):
         }
         if self.adaptive_damping is not None:
             meta_payload["adaptive_damping"] = self.adaptive_damping.to_dict()
+        if self.adaptive_clipping is not None:
+            meta_payload["adaptive_clipping"] = self.adaptive_clipping.to_dict()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym

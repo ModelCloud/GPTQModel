@@ -22,10 +22,11 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..quantization.config import AdaptiveDampingConfig, DampConfig, FallbackStrategy, ScaleSearchConfig, SmoothMSE
+from ..quantization.config import AdaptiveClippingConfig, AdaptiveDampingConfig, DampConfig, FallbackStrategy, ScaleSearchConfig, SmoothMSE
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
+from ..utils import gte_python_3_14, has_gil_disabled
+from ..utils.torch import TORCH_GTE_214, TORCH_GTE_28, torch_compile, torch_sync
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -1411,11 +1412,17 @@ class GPTQ:
     @classmethod
     def _compiled_lambda_max_kernel(cls):
         if getattr(cls, "_lambda_max_kernel_compiled", None) is None:
-            cls._lambda_max_kernel_compiled = torch_compile(
-                cls._lambda_max_kernel,
-                backend="inductor",
-                fullgraph=False,
-            )
+            # Python 3.14 free-threading + torch < 2.14 crashes inside dynamo
+            # for the power-iteration loop; keep this kernel eager until a
+            # stable no-GIL compile is verified.
+            if has_gil_disabled() and gte_python_3_14() and not TORCH_GTE_214:
+                cls._lambda_max_kernel_compiled = cls._lambda_max_kernel
+            else:
+                cls._lambda_max_kernel_compiled = torch_compile(
+                    cls._lambda_max_kernel,
+                    backend="inductor",
+                    fullgraph=False,
+                )
         return cls._lambda_max_kernel_compiled
 
     @staticmethod
@@ -2365,6 +2372,15 @@ class GPTQ:
             and damp_cfg.online_feedback_enabled
             and self.qcfg.group_size > 0
         )
+        clip_cfg = self.qcfg.adaptive_clipping
+        use_adaptive_clipping = (
+            use_hessian
+            and not self.qcfg.mock_quantization
+            and self.qcfg.group_size > 0
+            and isinstance(clip_cfg, AdaptiveClippingConfig)
+            and clip_cfg.enabled
+            and clip_cfg.per_group
+        )
         if use_hessian:
             try:
                 Hinv, damp = self.hessian_inverse(self.H)
@@ -2395,6 +2411,7 @@ class GPTQ:
             Hinv is not None
             and uses_group_params
             and not self.qcfg.static_groups
+            and not use_adaptive_clipping
             and float(getattr(self.qcfg, "mse", 0.0) or 0.0) > 0.0
         ):
             if scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}:
@@ -2412,11 +2429,17 @@ class GPTQ:
                     for start in range(0, self.columns, group_size)
                 )
 
+        clip_hessian_diag = None
+        if use_adaptive_clipping and getattr(clip_cfg, "metric", None) == "hessian_diag":
+            clip_hessian_diag = self.H.diagonal().float().clone()
+
         def group_scale_search_hessian(group_start: int, group_end: int) -> torch.Tensor | None:
             if group_scale_search_diagonal is not None:
                 return group_scale_search_diagonal[group_start:group_end]
             if group_scale_search_hessians is not None:
                 return group_scale_search_hessians[group_start // self.qcfg.group_size]
+            if clip_hessian_diag is not None:
+                return clip_hessian_diag[group_start:group_end]
             return None
 
         group_loss_hessian_diag = None
@@ -2649,6 +2672,10 @@ class GPTQ:
                                     batched_first_global_idx : batched_first_global_idx + batched_group_count
                                 ],
                                 dim=0,
+                            )
+                        elif clip_hessian_diag is not None:
+                            batched_hessian = clip_hessian_diag[i1:batched_last].reshape(
+                                batched_group_count, group_size
                             )
                         batched_scale, batched_zero = self.quantizer.find_params_batched(
                             x_3d, weight=True, hessian=batched_hessian

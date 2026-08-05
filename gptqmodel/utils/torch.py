@@ -25,6 +25,7 @@ from . import gte_python_3_13_3, gte_python_3_14, has_gil_disabled, log_gil_requ
 TORCH_HAS_COMPILE = version.parse(torch.__version__).release >= version.Version('2.6').release
 TORCH_GTE_28 = version.parse(torch.__version__).release >= version.Version('2.8').release
 TORCH_GTE_210 = version.parse(torch.__version__).release >= version.Version('2.10').release
+TORCH_GTE_214 = version.parse(torch.__version__).release >= version.Version('2.14').release
 
 TORCH_HAS_FUSED_OPS = version.parse(torch.__version__).release >= version.Version('2.8').release
 

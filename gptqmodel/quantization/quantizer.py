@@ -12,11 +12,19 @@ import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
-from .config import BaseQuantizeConfig, ScaleSearchConfig, _normalize_quant_bits, resolve_quant_format
 from ._scale_search_triton import (
     _triton_find_params_batched_activation,
     _triton_find_params_batched_hessian_hybrid,
 )
+from .config import (
+    AdaptiveClippingConfig,
+    AdaptiveClippingMetric,
+    BaseQuantizeConfig,
+    ScaleSearchConfig,
+    _normalize_quant_bits,
+    resolve_quant_format,
+)
+
 
 try:
     from ..nn_modules.qlinear.pack_block_ext import find_params_batched_cpu as _find_params_batched_cpu
@@ -24,7 +32,7 @@ except Exception:
     _find_params_batched_cpu = None
 
 from ..utils.backend import BACKEND
-from ..utils.marlin import replace_parameter, marlin_runtime_available
+from ..utils.marlin import marlin_runtime_available, replace_parameter
 
 
 log = setup_logger()
@@ -579,6 +587,149 @@ class Quantizer(nn.Module):
             return q.clamp_(-maxq_f, maxq_f).mul_(scale).sub_(x)
         return q.clamp_(-zero, maxq_f - zero).mul_(scale).sub_(x)
 
+    def adaptive_clip_search(
+        self,
+        x: torch.Tensor,
+        weight: bool = False,
+        *,
+        hessian: torch.Tensor | None = None,
+    ) -> None:
+        """Search a per-row clipping threshold for ``x`` and set ``self.scale`` / ``self.zero``.
+
+        Candidates are relative factors of each row's current ``max(|x|)``.
+        For every candidate the clipped range is used to derive a scale and
+        zero, the original ``x`` is quantized with that scale/zero, and the
+        candidate with the lowest MSE or Hessian-weighted squared error is kept.
+        Candidate tensors are materialized in bounded chunks so a long candidate
+        list does not blow up per-group memory.
+        """
+
+        cfg = self.qcfg.adaptive_clipping
+        if not isinstance(cfg, AdaptiveClippingConfig) or not cfg.enabled or not cfg.per_group:
+            return
+
+        # Sanitize NaN/Inf without forcing a host/device sync (.all()).
+        x = x.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+
+        dev = x.device
+        maxq_value = getattr(self, "_maxq_value", None)
+        if maxq_value is None:
+            maxq_value = int(self.maxq.item())
+
+        # ``find_params`` has already flattened/reshaped ``x`` to [rows, cols].
+        tmp = torch.zeros(x.shape[0], device=dev)
+        xmin = torch.minimum(x.min(1)[0], tmp)
+        xmax = torch.maximum(x.max(1)[0], tmp)
+
+        if self.qcfg.sym:
+            xmax = torch.maximum(torch.abs(xmin), xmax)
+            neg = xmin < 0
+            xmin = torch.where(neg, -xmax, xmin)
+        zero_range = (xmin == 0) & (xmax == 0)
+        xmin = torch.where(zero_range, -torch.ones_like(xmin), xmin)
+        xmax = torch.where(zero_range, torch.ones_like(xmax), xmax)
+        maxabs = torch.maximum(torch.abs(xmin), torch.abs(xmax))
+        maxabs = torch.where(maxabs <= 0, torch.ones_like(maxabs), maxabs)
+
+        candidates = torch.tensor(cfg.candidates, dtype=torch.float32, device=dev)
+        num_candidates = candidates.numel()
+
+        # Use the same candidate-chunk sizing as scale search so large
+        # projection rows do not create unbounded [candidates, rows, cols]
+        # temporary tensors.
+        chunk_size = self._scale_search_candidate_chunk_size(x, num_candidates, ScaleSearchConfig.MSE)
+
+        best_loss = torch.full((x.shape[0],), float("inf"), device=dev)
+        best_scale = None
+        best_zero = None
+
+        h_diag = None
+        if cfg.metric == AdaptiveClippingMetric.HESSIAN_DIAG.value and hessian is not None:
+            if hessian.ndim == 1 and hessian.shape[0] == x.shape[1]:
+                h_diag = hessian
+            elif hessian.ndim == 2 and hessian.shape[0] == hessian.shape[1] == x.shape[1]:
+                h_diag = hessian.diagonal()
+            if h_diag is not None:
+                h_diag = h_diag.detach().to(device=dev, dtype=torch.float32)
+                h_diag = torch.nan_to_num(h_diag, nan=0.0, posinf=0.0, neginf=0.0).clamp_min_(0)
+
+        if cfg.metric == AdaptiveClippingMetric.HESSIAN_DIAG.value and h_diag is None:
+            if not getattr(self, "_adaptive_clip_hessian_diag_fallback_logged", False):
+                hessian_shape = tuple(hessian.shape) if hessian is not None else None
+                log.debug(
+                    f"Quantizer: `adaptive_clipping` metric is `hessian_diag` but no valid Hessian diagonal "
+                    f"was supplied for module `{self.name}` (received shape {hessian_shape}); "
+                    f"falling back to unweighted MSE for the clipping search."
+                )
+                self._adaptive_clip_hessian_diag_fallback_logged = True
+
+        for start in range(0, num_candidates, chunk_size):
+            end = min(start + chunk_size, num_candidates)
+            cand_chunk = candidates[start:end]
+
+            # [chunk, rows]
+            thresholds = cand_chunk.unsqueeze(1) * maxabs.unsqueeze(0)
+            # [chunk, rows, cols]
+            x_clipped = x.unsqueeze(0).clamp(-thresholds.unsqueeze(2), thresholds.unsqueeze(2))
+
+            # Keep zero inside the clipped range so asymmetric zero-points stay
+            # valid and constant groups don't collapse to a zero-width range.
+            xmin_c = x_clipped.min(dim=-1)[0].clamp_max(0)
+            xmax_c = x_clipped.max(dim=-1)[0].clamp_min(0)
+            if self.qcfg.sym:
+                xmax_c = torch.maximum(torch.abs(xmin_c), xmax_c)
+                neg_c = xmin_c < 0
+                xmin_c = torch.where(neg_c, -xmax_c, xmin_c)
+            zero_range_c = (xmin_c == 0) & (xmax_c == 0)
+            xmin_c = torch.where(zero_range_c, -torch.ones_like(xmin_c), xmin_c)
+            xmax_c = torch.where(zero_range_c, torch.ones_like(xmax_c), xmax_c)
+
+            if maxq_value < 0:
+                scale_c = xmax_c
+                zero_c = xmin_c
+            else:
+                if self.requires_groupwise_processing():
+                    scale_c = xmax_c / self.maxq
+                    zero_c = torch.zeros_like(scale_c)
+                else:
+                    scale_c = (xmax_c - xmin_c) / self.maxq
+                    if self.qcfg.sym:
+                        zero_c = torch.full_like(scale_c, (self.maxq + 1) / 2)
+                    else:
+                        zero_c = torch.round(-xmin_c / scale_c)
+
+            # Quantize the *original* weights with each candidate's scale/zero so the
+            # loss is measured against the unclipped signal.
+            q = quantize(
+                x.unsqueeze(0),
+                scale_c.unsqueeze(2),
+                zero_c.unsqueeze(2),
+                maxq_value,
+                self.requires_groupwise_processing(),
+            )
+            error = (x.unsqueeze(0) - q).float()
+
+            if h_diag is not None:
+                loss_chunk = (error ** 2 * h_diag).sum(dim=-1)
+            else:
+                loss_chunk = (error ** 2).sum(dim=-1)
+
+            chunk_best, chunk_idx = loss_chunk.min(dim=0)
+            take = chunk_best < best_loss
+            best_loss = torch.where(take, chunk_best, best_loss)
+
+            chunk_scale = scale_c.gather(0, chunk_idx.unsqueeze(0)).squeeze(0)
+            chunk_zero = zero_c.gather(0, chunk_idx.unsqueeze(0)).squeeze(0)
+            if best_scale is None:
+                best_scale = chunk_scale
+                best_zero = chunk_zero
+            else:
+                best_scale = torch.where(take, chunk_scale, best_scale)
+                best_zero = torch.where(take, chunk_zero, best_zero)
+
+        self.scale = best_scale
+        self.zero = best_zero
+
     def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
         # GPU scale-search algorithms (Triton and otherwise) assume a contiguous
         # [rows, num_groups, group_size] layout. gptq.py passes reshaped column
@@ -609,177 +760,198 @@ class Quantizer(nn.Module):
         else:
             x = x.flatten().unsqueeze(0)
 
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
-
-        if self.qcfg.sym:
-            xmax = torch.maximum(torch.abs(xmin), xmax)
-            tmp = xmin < 0
-            xmin = torch.where(tmp, -xmax, xmin)
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin = torch.where(tmp, -torch.ones_like(xmin), xmin)
-        xmax = torch.where(tmp, torch.ones_like(xmax), xmax)
-
-        if maxq_value < 0:
-            self.scale = xmax
-            self.zero = xmin
+        adaptive_clip_cfg = getattr(self.qcfg, "adaptive_clipping", None)
+        use_adaptive_clip = (
+            weight
+            and self.perchannel
+            and isinstance(adaptive_clip_cfg, AdaptiveClippingConfig)
+            and adaptive_clip_cfg.enabled
+            and adaptive_clip_cfg.per_group
+            and not getattr(self.qcfg, "mock_quantization", False)
+            and self.qcfg.group_size is not None
+            and self.qcfg.group_size > 0
+        )
+        if use_adaptive_clip:
+            mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
+            scale_search_method = getattr(self.qcfg, "scale_search", None)
+            if mse > 0.0 or scale_search_method is not None:
+                log.warn.once(
+                    "Quantizer: `adaptive_clipping` per_group is enabled; the `mse`/`scale_search` "
+                    "range-search path is skipped because adaptive clipping already searches per-group ranges."
+                )
+            self.adaptive_clip_search(x, weight=weight, hessian=hessian)
         else:
-            if self.requires_groupwise_processing():
-                self.scale = xmax / self.maxq
-                self.zero = torch.zeros_like(self.scale)
+            tmp = torch.zeros(x.shape[0], device=dev)
+            xmin = torch.minimum(x.min(1)[0], tmp)
+            xmax = torch.maximum(x.max(1)[0], tmp)
+
+            if self.qcfg.sym:
+                xmax = torch.maximum(torch.abs(xmin), xmax)
+                tmp = xmin < 0
+                xmin = torch.where(tmp, -xmax, xmin)
+            tmp = (xmin == 0) & (xmax == 0)
+            xmin = torch.where(tmp, -torch.ones_like(xmin), xmin)
+            xmax = torch.where(tmp, torch.ones_like(xmax), xmax)
+
+            if maxq_value < 0:
+                self.scale = xmax
+                self.zero = xmin
             else:
-                self.scale = (xmax - xmin) / self.maxq
-                if self.qcfg.sym:
-                    self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
-                else:
-                    self.zero = torch.round(-xmin / self.scale)
-
-        mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
-        method = getattr(self.qcfg, "scale_search", None)
-        if method is None and mse > 0:
-            method = ScaleSearchConfig.MSE
-        elif isinstance(method, str):
-            method = ScaleSearchConfig(method)
-
-        if method is not None and mse > 0.0:
-            timer = getattr(self, "region_timer", None)
-            timer_cm = (
-                timer.measure("scale_search", source=f"find_params {self.name}")
-                if timer is not None
-                else contextlib.nullcontext()
-            )
-            with timer_cm:
-                prepared_hessian = None
-                if method != ScaleSearchConfig.MSE:
-                    prepared_hessian = self._prepare_scale_search_hessian(
-                        hessian,
-                        method=method,
-                        columns=x.shape[1],
-                        device=dev,
-                    )
-                best = torch.full([x.shape[0]], float("inf"), device=dev)
-                candidate_count = int(self.maxshrink * self.grid)
-
-                chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
-                # Vectorize the shrink factors on the device; materializing the
-                # original Python-float list one-by-one can differ by one ULP after
-                # cancellation and alter the serialized scale values.
-                shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
-                shrink = 1.0 - shrink / self.grid
-                # Precompute scale/zero for every candidate once so the chunk loop
-                # only slices views instead of recomputing elementwise ranges.
-                p = shrink.view(-1, 1)
-                xmin_all = p * xmin.unsqueeze(0)
-                xmax_all = p * xmax.unsqueeze(0)
                 if self.requires_groupwise_processing():
-                    scale_all = xmax_all / self.maxq
+                    self.scale = xmax / self.maxq
+                    self.zero = torch.zeros_like(self.scale)
                 else:
-                    scale_all = (xmax_all - xmin_all) / self.maxq
-                if self.qcfg.sym:
-                    zero_all = self.zero.unsqueeze(0).expand_as(scale_all)
-                else:
-                    zero_all = torch.round(-xmin_all / scale_all)
+                    self.scale = (xmax - xmin) / self.maxq
+                    if self.qcfg.sym:
+                        self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+                    else:
+                        self.zero = torch.round(-xmin / self.scale)
 
-                group_size = x.shape[1]
-                x_batch = x.unsqueeze(0)
-                for start in range(0, candidate_count, chunk_size):
-                    end = min(start + chunk_size, candidate_count)
-                    scale1 = scale_all[start:end]
-                    zero1 = zero_all[start:end]
-                    if (
-                        method in MARLIN_SCALE_SEARCH_METHODS
-                        and x.is_cuda
-                        and group_size >= 64
-                    ):
-                        # Per-group K must be at least the Marlin GEMM's minimum
-                        # thread_k tile (64); otherwise the temporary one-group
-                        # MarlinLinear cannot be launched.
-                        from ..nn_modules.qlinear.marlin import MarlinLinear
+            mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
+            method = getattr(self.qcfg, "scale_search", None)
+            if method is None and mse > 0:
+                method = ScaleSearchConfig.MSE
+            elif isinstance(method, str):
+                method = ScaleSearchConfig(method)
 
-                        # Map Marlin sub-objectives to their dense fallback equivalents.
-                        if method == ScaleSearchConfig.MARLIN_MSE:
-                            fallback_method = ScaleSearchConfig.MSE
-                        elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
-                            fallback_method = ScaleSearchConfig.ACTIVATION
-                        else:
-                            fallback_method = ScaleSearchConfig.HESSIAN
+            if method is not None and mse > 0.0:
+                timer = getattr(self, "region_timer", None)
+                timer_cm = (
+                    timer.measure("scale_search", source=f"find_params {self.name}")
+                    if timer is not None
+                    else contextlib.nullcontext()
+                )
+                with timer_cm:
+                    prepared_hessian = None
+                    if method != ScaleSearchConfig.MSE:
+                        prepared_hessian = self._prepare_scale_search_hessian(
+                            hessian,
+                            method=method,
+                            columns=x.shape[1],
+                            device=dev,
+                        )
+                    best = torch.full([x.shape[0]], float("inf"), device=dev)
+                    candidate_count = int(self.maxshrink * self.grid)
 
-                        try:
-                            bits = self._effective_scale_search_bits(maxq_value)
-                            if bits in MarlinLinear.SUPPORTS_BITS and group_size in MarlinLinear.SUPPORTS_GROUP_SIZE:
-                                errors = self._marlin_scale_search_loss(
-                                    x.unsqueeze(1),
+                    chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
+                    # Vectorize the shrink factors on the device; materializing the
+                    # original Python-float list one-by-one can differ by one ULP after
+                    # cancellation and alter the serialized scale values.
+                    shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
+                    shrink = 1.0 - shrink / self.grid
+                    # Precompute scale/zero for every candidate once so the chunk loop
+                    # only slices views instead of recomputing elementwise ranges.
+                    p = shrink.view(-1, 1)
+                    xmin_all = p * xmin.unsqueeze(0)
+                    xmax_all = p * xmax.unsqueeze(0)
+                    if self.requires_groupwise_processing():
+                        scale_all = xmax_all / self.maxq
+                    else:
+                        scale_all = (xmax_all - xmin_all) / self.maxq
+                    if self.qcfg.sym:
+                        zero_all = self.zero.unsqueeze(0).expand_as(scale_all)
+                    else:
+                        zero_all = torch.round(-xmin_all / scale_all)
+
+                    group_size = x.shape[1]
+                    x_batch = x.unsqueeze(0)
+                    for start in range(0, candidate_count, chunk_size):
+                        end = min(start + chunk_size, candidate_count)
+                        scale1 = scale_all[start:end]
+                        zero1 = zero_all[start:end]
+                        if (
+                            method in MARLIN_SCALE_SEARCH_METHODS
+                            and x.is_cuda
+                            and group_size >= 64
+                        ):
+                            # Per-group K must be at least the Marlin GEMM's minimum
+                            # thread_k tile (64); otherwise the temporary one-group
+                            # MarlinLinear cannot be launched.
+                            from ..nn_modules.qlinear.marlin import MarlinLinear
+
+                            # Map Marlin sub-objectives to their dense fallback equivalents.
+                            if method == ScaleSearchConfig.MARLIN_MSE:
+                                fallback_method = ScaleSearchConfig.MSE
+                            elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                                fallback_method = ScaleSearchConfig.ACTIVATION
+                            else:
+                                fallback_method = ScaleSearchConfig.HESSIAN
+
+                            try:
+                                bits = self._effective_scale_search_bits(maxq_value)
+                                if bits in MarlinLinear.SUPPORTS_BITS and group_size in MarlinLinear.SUPPORTS_GROUP_SIZE:
+                                    errors = self._marlin_scale_search_loss(
+                                        x.unsqueeze(1),
+                                        scale1.unsqueeze(2),
+                                        zero1.unsqueeze(2),
+                                        prepared_hessian,
+                                        method=method,
+                                        bits=bits,
+                                        group_size=group_size,
+                                        sym=self.qcfg.sym,
+                                        dtype=x.dtype,
+                                        pack_dtype=getattr(self.qcfg, "pack_dtype", torch.int32),
+                                        maxq_value=maxq_value,
+                                        mse=mse,
+                                    ).squeeze(-1)
+                                else:
+                                    raise RuntimeError(
+                                        f"Marlin scale search unsupported for bits={bits}, group_size={group_size}."
+                                    )
+                            except Exception as exc:
+                                log.warn.once(
+                                    f"Marlin scale search ({method.value}) failed, falling back to "
+                                    f"{fallback_method.value}: {exc}"
+                                )
+                                effective_method = fallback_method
+                                error = self._quantize_scale_search_candidates(
+                                    x_batch,
                                     scale1.unsqueeze(2),
                                     zero1.unsqueeze(2),
-                                    prepared_hessian,
-                                    method=method,
-                                    bits=bits,
-                                    group_size=group_size,
-                                    sym=self.qcfg.sym,
-                                    dtype=x.dtype,
-                                    pack_dtype=getattr(self.qcfg, "pack_dtype", torch.int32),
                                     maxq_value=maxq_value,
-                                    mse=mse,
-                                ).squeeze(-1)
-                            else:
-                                raise RuntimeError(
-                                    f"Marlin scale search unsupported for bits={bits}, group_size={group_size}."
                                 )
-                        except Exception as exc:
-                            log.warn.once(
-                                f"Marlin scale search ({method.value}) failed, falling back to "
-                                f"{fallback_method.value}: {exc}"
-                            )
-                            effective_method = fallback_method
+                                errors = self._scale_search_error(
+                                    error,
+                                    method=effective_method,
+                                    mse=mse,
+                                    hessian=prepared_hessian,
+                                )
+                        else:
                             error = self._quantize_scale_search_candidates(
                                 x_batch,
                                 scale1.unsqueeze(2),
                                 zero1.unsqueeze(2),
                                 maxq_value=maxq_value,
                             )
+                            effective_method = method
+                            if method in MARLIN_SCALE_SEARCH_METHODS:
+                                log.warn.once(
+                                    f"Quantizer: `scale_search='{method.value}'` requires CUDA weights; "
+                                    f"falling back to dense objective."
+                                )
+                                if method == ScaleSearchConfig.MARLIN_MSE:
+                                    effective_method = ScaleSearchConfig.MSE
+                                elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
+                                    effective_method = ScaleSearchConfig.ACTIVATION
+                                else:
+                                    effective_method = ScaleSearchConfig.HESSIAN
                             errors = self._scale_search_error(
                                 error,
                                 method=effective_method,
                                 mse=mse,
                                 hessian=prepared_hessian,
                             )
-                    else:
-                        error = self._quantize_scale_search_candidates(
-                            x_batch,
-                            scale1.unsqueeze(2),
-                            zero1.unsqueeze(2),
-                            maxq_value=maxq_value,
-                        )
-                        effective_method = method
-                        if method in MARLIN_SCALE_SEARCH_METHODS:
-                            log.warn.once(
-                                f"Quantizer: `scale_search='{method.value}'` requires CUDA weights; "
-                                f"falling back to dense objective."
-                            )
-                            if method == ScaleSearchConfig.MARLIN_MSE:
-                                effective_method = ScaleSearchConfig.MSE
-                            elif method == ScaleSearchConfig.MARLIN_ACTIVATION:
-                                effective_method = ScaleSearchConfig.ACTIVATION
-                            else:
-                                effective_method = ScaleSearchConfig.HESSIAN
-                        errors = self._scale_search_error(
-                            error,
-                            method=effective_method,
-                            mse=mse,
-                            hessian=prepared_hessian,
-                        )
-                    # torch.min returns the first index on ties. Combining one
-                    # winner per chunk with a strict comparison across chunks
-                    # exactly preserves the scalar loop's first-candidate rule.
-                    chunk_best, chunk_index = errors.min(dim=0)
-                    gather_index = chunk_index.unsqueeze(0)
-                    chunk_scale = scale1.gather(0, gather_index).squeeze(0)
-                    chunk_zero = zero1.gather(0, gather_index).squeeze(0)
-                    take = chunk_best < best
-                    best = torch.where(take, chunk_best, best)
-                    self.scale = torch.where(take, chunk_scale, self.scale)
-                    self.zero = torch.where(take, chunk_zero, self.zero)
+                        # torch.min returns the first index on ties. Combining one
+                        # winner per chunk with a strict comparison across chunks
+                        # exactly preserves the scalar loop's first-candidate rule.
+                        chunk_best, chunk_index = errors.min(dim=0)
+                        gather_index = chunk_index.unsqueeze(0)
+                        chunk_scale = scale1.gather(0, gather_index).squeeze(0)
+                        chunk_zero = zero1.gather(0, gather_index).squeeze(0)
+                        take = chunk_best < best
+                        best = torch.where(take, chunk_best, best)
+                        self.scale = torch.where(take, chunk_scale, self.scale)
+                        self.zero = torch.where(take, chunk_zero, self.zero)
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -831,6 +1003,36 @@ class Quantizer(nn.Module):
             raise ValueError(f"find_params_batched expects a 3D tensor, got {tuple(x.shape)}.")
         if not (weight and self.perchannel):
             raise ValueError("find_params_batched is only supported for per-channel weight quantization.")
+
+        adaptive_clip_cfg = getattr(self.qcfg, "adaptive_clipping", None)
+        if (
+            isinstance(adaptive_clip_cfg, AdaptiveClippingConfig)
+            and adaptive_clip_cfg.enabled
+            and adaptive_clip_cfg.per_group
+            and not getattr(self.qcfg, "mock_quantization", False)
+        ):
+            # Fallback to per-group find_params so the clipping search is applied.
+            x = x.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+            scale_parts = []
+            zero_parts = []
+            for g in range(x.shape[1]):
+                x_g = x[:, g, :].contiguous()
+                h_g = None
+                if hessian is not None:
+                    if hessian.ndim == 2:
+                        h_g = hessian[g]
+                    elif hessian.ndim == 3:
+                        h_g = hessian[g]
+                self.find_params(x_g, weight=True, hessian=h_g)
+                scale_parts.append(self.scale.view(x_g.shape[0], 1))
+                zero_parts.append(self.zero.view(x_g.shape[0], 1))
+            scale = torch.cat(scale_parts, dim=1)
+            zero = torch.cat(zero_parts, dim=1)
+            # Keep the module buffers consistent with the returned batched tensors
+            # instead of leaving them set to the final group's parameters.
+            self.scale = scale
+            self.zero = zero
+            return scale, zero
 
         dev = x.device
         self.maxq = self.maxq.to(dev)
@@ -1098,6 +1300,8 @@ class Quantizer(nn.Module):
         return scale, zero
 
     def quantize(self, x):
+        if not torch.isfinite(x).all():
+            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         maxq_value = getattr(self, "_maxq_value", None)
         if maxq_value is None:
             maxq_value = int(self.maxq.item())
