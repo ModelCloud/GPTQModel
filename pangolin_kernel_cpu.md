@@ -3526,3 +3526,40 @@ varies between runs; the `kernel ratio` and `tflops ratio` columns compare the
 Pangolin CPU kernel execution time directly and show a consistent 1-2% geomean
 improvement, with `bits=6` gaining up to 2.6% and small `K x N` shapes for
 `bits=3` improving up to 9-17%.
+
+## Optimization pass 37 (2026-08-05): AVX-512 VBMI `vpermb` fast-decode for pre-expanded uint8
+
+The pre-expanded uint8 layout (`kernel_bits == 8`) stores four consecutive
+8-bit codes per 32-bit word.  The generic tile2 path extracts a code with a
+variable `vpsrld` + `vpandd` sequence.  This pass adds a VBMI `vpermb` path that
+gathers the selected byte from each of the 16 words in a 512-bit qword in one
+cross-lane shuffle, then zero-extends and converts to FP32.  The gather indices
+for the four possible byte offsets are pre-computed in a 64-byte aligned static
+array, removing a runtime `vpaddb`.
+
+The VBMI path is dispatched only when `cpu_supports_avx512_vbmi()` is true, the
+weight is the pre-expanded uint8 layout, `N % 32 == 0`, and `SizeM <= 8` so the
+2x16-column tile can be used.  The generic shift/mask decoder remains the
+fallback for older AVX-512 cores and for the packed 3/5/6/7-bit planar layouts.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+- `laguna` M=1/2/4/8 sweep (threads=8, bits 3/5/6/7) A/B vs `origin/main`:
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 3 | 1.017x | 1.064x | 1.016x |
+| laguna | 5 | 1.023x | 0.998x | 1.022x |
+| laguna | 6 | 1.021x | 1.051x | 1.021x |
+| laguna | 7 | 1.002x | 1.007x | 1.001x |
+| all | all | 1.016x | 1.030x | 1.015x |
+
+The `kernel ratio` / `tflops ratio` columns show a ~1.5% geomean improvement on
+the Pangolin CPU kernel itself.  The `speedup ratio` column is noisy because the
+dense `matmul` reference varies between runs.  Gains are largest for `bits=5/6`
+(2–2.5%) and smaller for `bits=7` where the pre-expanded layout already has a
+compact decode path.  This is a small but validated positive step; the 2 TFLOPS
+target still needs a larger micro-kernel change.
