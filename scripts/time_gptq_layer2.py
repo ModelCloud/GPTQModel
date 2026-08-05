@@ -1,17 +1,14 @@
 """Time two GPTQ layer quantizes to separate compile overhead."""
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 
 import torch
 import torch.nn as nn
-import gptqmodel.quantization.gptq as gptq_module
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.utils.torch import torch_compile
 
 
 def make_and_quantize():
@@ -35,17 +32,10 @@ def make_and_quantize():
 
 
 def main():
-    gptq_module._HESSIAN_INVERSE_TRY = torch_compile(
-        gptq_module._hessian_inverse_try_cholesky, backend="inductor", fullgraph=False
-    )
-    gptq_module._HESSIAN_INVERSE_FACTOR = torch_compile(
-        gptq_module._hessian_inverse_factor, backend="inductor", fullgraph=False
-    )
-
     t1 = make_and_quantize()
-    print(f"first quantize (compile incl): {t1:.3f} ms")
+    print(f"first quantize: {t1:.3f} ms")
     t2 = make_and_quantize()
-    print(f"second quantize (cached): {t2:.3f} ms")
+    print(f"second quantize: {t2:.3f} ms")
 
 
 if __name__ == "__main__":

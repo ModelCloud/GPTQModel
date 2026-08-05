@@ -193,12 +193,6 @@ def _hessian_inverse_factor(L: torch.Tensor):
     return torch.linalg.cholesky(torch.cholesky_inverse(L), upper=True)
 
 
-# Compile the heavy Cholesky steps so the dense Hessian inverse path is
-# graph-break free and safe under GIL=0 free-threading.
-_HESSIAN_INVERSE_TRY = torch_compile(_hessian_inverse_try_cholesky, backend="inductor", fullgraph=False)
-_HESSIAN_INVERSE_FACTOR = torch_compile(_hessian_inverse_factor, backend="inductor", fullgraph=False)
-
-
 class GPTQ:
     @staticmethod
     def resolve_module_source(module: nn.Module) -> nn.Module:
@@ -1836,10 +1830,13 @@ class GPTQ:
 
                     Hinv_result, success = hessian_inverse_cholesky_cpu(H, diag_delta)
                 else:
-                    L, success = _HESSIAN_INVERSE_TRY(H, diag_delta)
+                    # Use the eager Cholesky path for damp recovery; torch.compile
+                    # on these ops showed no speedup in micro-benchmarks and can hang
+                    # when the compiled graph raises a RuntimeError and is re-entered.
+                    L, success = _hessian_inverse_try_cholesky(H, diag_delta)
                     if success.item():
                         try:
-                            Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
+                            Hinv_result = _hessian_inverse_factor(L)
                         except RuntimeError as e:
                             Hinv_result = None
                             success = H.new_tensor(False, dtype=torch.bool)

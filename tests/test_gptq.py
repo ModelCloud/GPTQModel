@@ -882,8 +882,8 @@ class TestGPTQProcessorStreaming(ModelTest):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_hessian_inverse_compile_and_eager_match(dtype):
-    """The compiled hessian_inverse helpers must match the same helpers run eagerly."""
+def test_hessian_inverse_correctness(dtype):
+    """hessian_inverse must produce a valid Cholesky factor of the damped Hessian."""
     torch.manual_seed(0)
     n = 128
     H = torch.randn(n, n, dtype=dtype, device="cuda")
@@ -891,31 +891,15 @@ def test_hessian_inverse_compile_and_eager_match(dtype):
     H.diagonal().add_(0.1)
     H_orig = H.clone()
 
-    g_comp = GPTQ(nn.Linear(n, n, bias=False, dtype=dtype, device="cuda"))
-    g_comp.quantizer.configure(perchannel=True, grid=100, maxshrink=0.8, trits=False)
-    Hinv_comp, used_damp_comp = g_comp.hessian_inverse(H_orig.clone())
-
-    # Swap to the uncompiled helpers for a bit-exact eager reference.
-    old_try = gptq_mod._HESSIAN_INVERSE_TRY
-    old_factor = gptq_mod._HESSIAN_INVERSE_FACTOR
-    gptq_mod._HESSIAN_INVERSE_TRY = gptq_mod._hessian_inverse_try_cholesky
-    gptq_mod._HESSIAN_INVERSE_FACTOR = gptq_mod._hessian_inverse_factor
-    try:
-        g_eager = GPTQ(nn.Linear(n, n, bias=False, dtype=dtype, device="cuda"))
-        g_eager.quantizer.configure(perchannel=True, grid=100, maxshrink=0.8, trits=False)
-        Hinv_eager, used_damp_eager = g_eager.hessian_inverse(H_orig.clone())
-    finally:
-        gptq_mod._HESSIAN_INVERSE_TRY = old_try
-        gptq_mod._HESSIAN_INVERSE_FACTOR = old_factor
-
-    torch.testing.assert_close(Hinv_comp, Hinv_eager, atol=1e-5, rtol=1e-5)
-    assert used_damp_comp == used_damp_eager
+    g = GPTQ(nn.Linear(n, n, bias=False, dtype=dtype, device="cuda"))
+    g.quantizer.configure(perchannel=True, grid=100, maxshrink=0.8, trits=False)
+    Hinv, used_damp = g.hessian_inverse(H_orig.clone())
 
     # Orientation sanity: Hinv.T @ Hinv is the inverse of the damped Hessian.
     mean = H_orig.diagonal().mean()
-    c = used_damp_comp * mean
+    c = used_damp * mean
     H_eff = H_orig + torch.eye(n, dtype=dtype, device="cuda") * c
-    identity = Hinv_comp.T @ Hinv_comp @ H_eff
+    identity = Hinv.T @ Hinv @ H_eff
     torch.testing.assert_close(identity, torch.eye(n, dtype=dtype, device="cuda"), atol=1e-4, rtol=1e-4)
 
 
