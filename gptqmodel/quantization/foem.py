@@ -18,7 +18,7 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
+from ..utils.torch import torch_sync
 from .gptq import GPTQ
 
 
@@ -136,9 +136,9 @@ class FOEM(GPTQ):
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        # TODO compilation failure for Torch >= 2.8
-        if not TORCH_GTE_28:
-            self.hessian_inverse = torch_compile(self.hessian_inverse)
+        # Keep `hessian_inverse` eager: torch.compile on this path can deadlock/hang
+        # when a RuntimeError is raised inside the damp-recovery loop and the graph
+        # is re-entered.
 
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()
