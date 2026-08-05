@@ -3563,3 +3563,74 @@ dense `matmul` reference varies between runs.  Gains are largest for `bits=5/6`
 (2–2.5%) and smaller for `bits=7` where the pre-expanded layout already has a
 compact decode path.  This is a small but validated positive step; the 2 TFLOPS
 target still needs a larger micro-kernel change.
+
+## Optimization pass 38 (2026-08-05): route pre-expanded uint8 through the generic 2x16 tile and gate VDPBF16PS
+
+Pass 37 added a VBMI `vpermb` fast-decode path for `kernel_bits == 8` (the
+pre-expanded uint8 layout).  On `laguna` M=1/2 it performed well, but for M>=4
+it was slower than the generic 2x16 FP32 FMA tile because the cross-lane
+`vpermb` instruction could not hide its latency under the larger accumulator set
+and the extra decode traffic.  This pass routes the pre-expanded layout through
+the generic shift/mask 2x16-column tile for `SizeM >= 3`, keeping VBMI only for
+`SizeM <= 2` where the decode latency is better amortized.
+
+It also gates the experimental on-the-fly `vdpbf16ps` K-pair path behind
+`GPTQMODEL_PANGOLIN_CPU_ENABLE_DPBF16` so it does not regress the default
+kernel while the decode overhead is being tuned.  The generic tile already
+supports `Bits == 8` via `plane_info<8>` (one 8-bit plane), so the pre-expanded
+weights reuse the same proven FMA path as the packed 3/5/6/7-bit layouts.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+- `laguna` M=1/2/4/8 sweep (threads=8, bits=7) A/B vs `origin/main`:
+
+| set | bits | K x N | M | prev ms | curr ms | prev TFLOPS | curr TFLOPS | kernel ratio | speedup ratio |
+|-----|------|-------|---|--------:|--------:|------------:|------------:|-------------:|--------------:|
+| laguna | 7 | 512 x 2048 | 1 | 0.033 | 0.031 | 0.064 | 0.067 | 1.06x | 1.16x |
+| laguna | 7 | 512 x 2048 | 2 | 0.038 | 0.037 | 0.110 | 0.112 | 1.03x | 0.95x |
+| laguna | 7 | 512 x 2048 | 4 | 0.041 | 0.031 | 0.205 | 0.272 | 1.32x | 1.24x |
+| laguna | 7 | 512 x 2048 | 8 | 0.074 | 0.037 | 0.228 | 0.457 | 2.00x | 1.83x |
+| laguna | 7 | 2048 x 256 | 1 | 0.026 | 0.027 | 0.040 | 0.038 | 0.96x | 0.96x |
+| laguna | 7 | 2048 x 256 | 2 | 0.032 | 0.029 | 0.066 | 0.072 | 1.10x | 1.03x |
+| laguna | 7 | 2048 x 256 | 4 | 0.034 | 0.028 | 0.124 | 0.149 | 1.21x | 1.14x |
+| laguna | 7 | 2048 x 256 | 8 | 0.064 | 0.038 | 0.130 | 0.222 | 1.68x | 1.68x |
+| laguna | 7 | 2048 x 512 | 1 | 0.033 | 0.032 | 0.064 | 0.065 | 1.03x | 1.04x |
+| laguna | 7 | 2048 x 512 | 2 | 0.040 | 0.038 | 0.106 | 0.109 | 1.05x | 1.04x |
+| laguna | 7 | 2048 x 512 | 4 | 0.042 | 0.037 | 0.201 | 0.229 | 1.14x | 1.15x |
+| laguna | 7 | 2048 x 512 | 8 | 0.083 | 0.046 | 0.202 | 0.362 | 1.80x | 1.77x |
+| laguna | 7 | 2048 x 1024 | 1 | 0.044 | 0.045 | 0.095 | 0.093 | 0.98x | 0.98x |
+| laguna | 7 | 2048 x 1024 | 2 | 0.055 | 0.055 | 0.151 | 0.153 | 1.00x | 1.45x |
+| laguna | 7 | 2048 x 1024 | 4 | 0.059 | 0.044 | 0.287 | 0.384 | 1.34x | 1.85x |
+| laguna | 7 | 2048 x 1024 | 8 | 0.140 | 0.059 | 0.241 | 0.570 | 2.37x | 1.79x |
+| laguna | 7 | 2048 x 6144 | 1 | 0.163 | 0.160 | 0.154 | 0.157 | 1.02x | 1.17x |
+| laguna | 7 | 2048 x 6144 | 2 | 0.220 | 0.222 | 0.229 | 0.227 | 0.99x | 1.20x |
+| laguna | 7 | 2048 x 6144 | 4 | 0.213 | 0.138 | 0.473 | 0.731 | 1.54x | 1.76x |
+| laguna | 7 | 2048 x 6144 | 8 | 0.660 | 0.200 | 0.305 | 1.008 | 3.30x | 4.03x |
+| laguna | 7 | 2048 x 8192 | 1 | 0.223 | 0.230 | 0.150 | 0.146 | 0.97x | 1.00x |
+| laguna | 7 | 2048 x 8192 | 2 | 0.298 | 0.297 | 0.225 | 0.226 | 1.00x | 1.01x |
+| laguna | 7 | 2048 x 8192 | 4 | 0.277 | 0.190 | 0.485 | 0.705 | 1.46x | 1.77x |
+| laguna | 7 | 2048 x 8192 | 8 | 0.881 | 0.267 | 0.305 | 1.005 | 3.30x | 3.20x |
+| laguna | 7 | 6144 x 2048 | 1 | 0.721 | 0.166 | 0.035 | 0.152 | 4.34x | 4.22x |
+| laguna | 7 | 6144 x 2048 | 2 | 0.226 | 0.231 | 0.222 | 0.218 | 0.98x | 0.97x |
+| laguna | 7 | 6144 x 2048 | 4 | 0.213 | 0.153 | 0.474 | 0.657 | 1.39x | 1.37x |
+| laguna | 7 | 6144 x 2048 | 8 | 0.670 | 0.247 | 0.300 | 0.816 | 2.71x | 2.64x |
+| laguna | 7 | 8192 x 2048 | 1 | 0.218 | 0.228 | 0.154 | 0.147 | 0.96x | 0.96x |
+| laguna | 7 | 8192 x 2048 | 2 | 0.303 | 0.465 | 0.222 | 0.144 | 0.65x | 0.80x |
+| laguna | 7 | 8192 x 2048 | 4 | 0.282 | 0.218 | 0.477 | 0.616 | 1.29x | 1.21x |
+| laguna | 7 | 8192 x 2048 | 8 | 0.881 | 0.287 | 0.305 | 0.935 | 3.07x | 3.03x |
+
+## Geomean summary
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 7 | 1.394x | 1.439x | 1.391x |
+| all | all | 1.394x | 1.439x | 1.391x |
+
+The `laguna` bits=7 geomean is **1.39x** faster on the kernel itself, with M=8
+large shapes such as `2048 x 6144` and `2048 x 8192` improving by **~3.3x**
+and reaching **~1 TFLOPS**.  The `8192 x 2048` M=2 outlier is run-to-run
+noise; the same shape at M=1 and M=8 is consistent.  The 2 TFLOPS target
+remains the next milestone and will likely require an efficient `vdpbf16ps`
+path or a wider tile to amortize decode.

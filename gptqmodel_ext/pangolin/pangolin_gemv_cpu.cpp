@@ -1091,6 +1091,236 @@ void gemv_kernel_avx512_tile2_bits8_vbmi(
   }
 }
 
+// On-the-fly BF16 dot-product path for the pre-expanded uint8 layout.  It uses
+// VBMI vpermb to extract two consecutive K-codes from each packed 32-bit word,
+// converts them to BF16, and multiplies them against one BF16 activation pair
+// with a single VDPBF16PS.  This halves the number of vector instructions in the
+// FMA chain compared to the FP32 FMA tile2 path at the cost of more decode work.
+//
+// The layout is the same uint8 pre-expanded layout as the VBMI tile2 path:
+// [N/16, K/32, 8, 16] int32, with four consecutive uint8 codes packed into each
+// 32-bit word.  A K pair (2 consecutive K values) always fits in one word.
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,avx512vbmi,fma")))
+inline __m512bh decode_bits8_pair_vbmi(__m512i qword, int byte0, __m512 scale_f, __m512 zscale_f) {
+  // Gather byte0 from words 0..15 into bytes 0..15 and byte0+1 into bytes 16..31.
+  // byte0 is always 0 or 2 for a pair of consecutive bytes.
+  alignas(64) static const __m512i idx_vec[2] = {
+      _mm512_set_epi64(
+          0,
+          0,
+          0,
+          0,
+          0x3d3935312d292521ULL,
+          0x1d1915110d090501ULL,
+          0x3c3834302c282420ULL,
+          0x1c1814100c080400ULL),
+      _mm512_set_epi64(
+          0,
+          0,
+          0,
+          0,
+          0x3f3b37332f2b2723ULL,
+          0x1f1b17130f0b0703ULL,
+          0x3e3a36322e2a2622ULL,
+          0x1e1a16120e0a0602ULL)};
+  const __m512i perm = _mm512_permutexvar_epi8(idx_vec[byte0 / 2], qword);
+  const __m128i lo = _mm512_castsi512_si128(perm);
+  const __m128i hi = _mm512_extracti32x4_epi32(perm, 1);
+  const __m512 code0_f = _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(lo));
+  const __m512 code1_f = _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(hi));
+  const __m512 w0_f = _mm512_fmsub_ps(code0_f, scale_f, zscale_f);
+  const __m512 w1_f = _mm512_fmsub_ps(code1_f, scale_f, zscale_f);
+  const __m256bh w0_b = _mm512_cvtneps_pbh(w0_f);
+  const __m256bh w1_b = _mm512_cvtneps_pbh(w1_f);
+  const __m512i w0_i = _mm512_zextsi256_si512((__m256i)w0_b);
+  const __m512i w1_i = _mm512_zextsi256_si512((__m256i)w1_b);
+  alignas(64) static const uint16_t interleave_idx[32] = {
+      0,    0x20, 1,    0x21, 2,    0x22, 3,    0x23, 4,    0x24, 5,    0x25, 6,    0x26, 7,    0x27,
+      8,    0x28, 9,    0x29, 10,   0x2a, 11,   0x2b, 12,   0x2c, 13,   0x2d, 14,   0x2e, 15,   0x2f};
+  const __m512i idx = _mm512_load_si512(interleave_idx);
+  return (__m512bh)_mm512_permutex2var_epi16(w0_i, idx, w1_i);
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,avx512vbmi,fma")))
+inline float x_pair_word(const at::BFloat16* x_b, int64_t k0) {
+  const uint32_t word =
+      (static_cast<uint32_t>(x_b[k0 + 1].x) << 16) | static_cast<uint32_t>(x_b[k0].x);
+  float word_f;
+  std::memcpy(&word_f, &word, sizeof(word));
+  return word_f;
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,avx512vbmi,fma")))
+void gemv_col_block_avx512_tile2_bits8_dpbf16(
+    const at::BFloat16* __restrict__ x_b,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    void* __restrict__ out_ptr,
+    bool out_float,
+    int64_t col0,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int64_t kb_start,
+    int64_t kb_end) {
+  constexpr int Bits = 8;
+  __m512 acc[2][SizeM];
+  for (int t = 0; t < 2; ++t) {
+    for (int m = 0; m < SizeM; ++m) {
+      acc[t][m] = _mm512_set1_ps(0.0f);
+    }
+  }
+  float* out_f = reinterpret_cast<float*>(out_ptr);
+  at::BFloat16* out_b = reinterpret_cast<at::BFloat16*>(out_ptr);
+  const int64_t num_k_blocks = K / 32;
+  const int64_t chunk0 = col0 / 16;
+  int prev_group = -1;
+  __m512 scale_vec[2] = {_mm512_set1_ps(0.0f), _mm512_set1_ps(0.0f)};
+  __m512 zscale_vec[2] = {_mm512_set1_ps(0.0f), _mm512_set1_ps(0.0f)};
+  for (int64_t kb = kb_start; kb < kb_end; ++kb) {
+    const int64_t row0 = kb * 32;
+    int group = g_idx[row0];
+    if (__builtin_expect(group < 0, 0)) {
+      group += static_cast<int>(num_groups);
+    }
+    if (__builtin_expect(group != prev_group, 0)) {
+      for (int t = 0; t < 2; ++t) {
+        const int64_t chunk = chunk0 + t;
+        const at::BFloat16* scale_ptr = scale_b + static_cast<int64_t>(group) * N + chunk * 16;
+        const float* zscale_ptr = zero_scale_f + static_cast<int64_t>(group) * N + chunk * 16;
+        scale_vec[t] = load_scale_512(scale_ptr);
+        zscale_vec[t] = load_f_512(zscale_ptr);
+      }
+      prev_group = group;
+    }
+    const uint32_t* qbase[2];
+    for (int t = 0; t < 2; ++t) {
+      const int64_t chunk = chunk0 + t;
+      const int64_t base_offset = ((chunk * num_k_blocks + kb) * Bits) * 16;
+      qbase[t] = reinterpret_cast<const uint32_t*>(qweight) + base_offset;
+    }
+    if (__builtin_expect(kb + 1 < kb_end, 1)) {
+      for (int t = 0; t < 2; ++t) {
+        const int64_t chunk = chunk0 + t;
+        const int64_t base_offset = ((chunk * num_k_blocks + kb + 1) * Bits) * 16;
+        const uint32_t* next_qbase = reinterpret_cast<const uint32_t*>(qweight) + base_offset;
+        for (int pw = 0; pw < Bits; ++pw) {
+          _mm_prefetch(reinterpret_cast<const char*>(next_qbase + pw * 16), _MM_HINT_T0);
+          _mm_prefetch(reinterpret_cast<const char*>(next_qbase + pw * 16 + 8), _MM_HINT_T0);
+        }
+      }
+      int next_group = g_idx[(kb + 1) * 32];
+      if (__builtin_expect(next_group < 0, 0)) {
+        next_group += static_cast<int>(num_groups);
+      }
+      if (__builtin_expect(next_group != group, 0)) {
+        for (int t = 0; t < 2; ++t) {
+          const int64_t chunk = chunk0 + t;
+          _mm_prefetch(
+              reinterpret_cast<const char*>(scale_b + static_cast<int64_t>(next_group) * N + chunk * 16),
+              _MM_HINT_T0);
+          _mm_prefetch(
+              reinterpret_cast<const char*>(zero_scale_f + static_cast<int64_t>(next_group) * N + chunk * 16),
+              _MM_HINT_T0);
+        }
+      }
+      for (int m = 0; m < SizeM; ++m) {
+        _mm_prefetch(reinterpret_cast<const char*>(x_b + static_cast<int64_t>(m) * K + (kb + 1) * 32), _MM_HINT_T0);
+      }
+    }
+    _Pragma("GCC unroll 16")
+    for (int p = 0; p < 16; ++p) {
+      const int word_idx = p / 2;
+      const int byte0 = (p % 2) * 2;
+      __m512bh weight_pair[2];
+      for (int t = 0; t < 2; ++t) {
+        weight_pair[t] = decode_bits8_pair_vbmi(
+            load_i_512(qbase[t] + static_cast<int64_t>(word_idx) * 16), byte0, scale_vec[t], zscale_vec[t]);
+      }
+      const int64_t k0 = row0 + static_cast<int64_t>(p) * 2;
+      for (int m = 0; m < SizeM; ++m) {
+        const float x_word = x_pair_word(x_b + static_cast<int64_t>(m) * K, k0);
+        const __m512bh x_pair = (__m512bh)_mm512_set1_ps(x_word);
+        for (int t = 0; t < 2; ++t) {
+          acc[t][m] = _mm512_dpbf16_ps(acc[t][m], x_pair, weight_pair[t]);
+        }
+      }
+    }
+  }
+  for (int t = 0; t < 2; ++t) {
+    for (int m = 0; m < SizeM; ++m) {
+      const int64_t out_col = col0 + static_cast<int64_t>(t) * 16;
+      if (out_float) {
+        store_f_avx512(out_f + static_cast<int64_t>(m) * N + out_col, acc[t][m]);
+      } else {
+        store_bf16_512(out_b + static_cast<int64_t>(m) * N + out_col, acc[t][m]);
+      }
+    }
+  }
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512bf16,avx512vbmi,fma")))
+void gemv_kernel_avx512_tile2_bits8_dpbf16(
+    const at::BFloat16* __restrict__ x_b,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const float* __restrict__ zero_scale_f,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t /*M*/,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t col_chunks = N / 32;
+  const int num_threads = at::get_num_threads();
+  const bool k_parallel = (col_chunks < num_threads * 2) && (num_k_blocks > 1);
+  if (k_parallel) {
+    const size_t partial_per_task = static_cast<size_t>(SizeM) * N;
+    const int64_t k_grain = std::max<int64_t>(1, num_k_blocks / num_threads);
+    const int64_t num_tasks = (num_k_blocks + k_grain - 1) / k_grain;
+    std::vector<float> partial(static_cast<size_t>(num_tasks) * partial_per_task, 0.0f);
+    std::atomic<int64_t> task_counter{0};
+    at::parallel_for(0, num_k_blocks, k_grain, [&](int64_t kb_begin, int64_t kb_end) {
+      const int64_t task_id = task_counter.fetch_add(1);
+      float* p_out = partial.data() + task_id * partial_per_task;
+      for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+        gemv_col_block_avx512_tile2_bits8_dpbf16<SizeM>(
+            x_b, qweight, scale_b, zero_scale_f, g_idx, p_out, true,
+            col_block * 32, K, N, num_groups, kb_begin, kb_end);
+      }
+    });
+    for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+      const int64_t col0 = col_block * 32;
+      for (int t = 0; t < 2; ++t) {
+        const int64_t out_col = col0 + t * 16;
+        for (int m = 0; m < SizeM; ++m) {
+          __m512 sum = _mm512_set1_ps(0.0f);
+          for (int64_t task_id = 0; task_id < num_tasks; ++task_id) {
+            const float* p = partial.data() + task_id * partial_per_task +
+                             static_cast<int64_t>(m) * N + out_col;
+            sum = add_f_512(sum, load_f_512(p));
+          }
+          store_bf16_512(out + static_cast<int64_t>(m) * N + out_col, sum);
+        }
+      }
+    }
+  } else {
+    const int64_t grain = std::max<int64_t>(1, col_chunks / num_threads);
+    at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t col_block = begin; col_block < end; ++col_block) {
+        gemv_col_block_avx512_tile2_bits8_dpbf16<SizeM>(
+            x_b, qweight, scale_b, zero_scale_f, g_idx, out, false,
+            col_block * 32, K, N, num_groups, 0, num_k_blocks);
+      }
+    });
+  }
+}
+
 #endif  // PLANAR_GEMV_CPU_X86
 
 template <int Bits, int SizeM>
@@ -1168,9 +1398,10 @@ void run_gemv(
   // 2x16-column AVX-512 tile fits in the ZMM budget for small batch sizes and
   // roughly halves the activation broadcast work compared to the single-chunk
   // path.  For the pre-expanded uint8 layout (Bits==8) we have a VBMI vpermb
-  // fast-decode variant that skips the planar shift/mask steps.
+  // fast-decode variant that skips the planar shift/mask steps; keep it for the
+  // smallest batch sizes where the extra decode latency is best amortized.
   if constexpr (Bits == 8) {
-    if (cpu_supports_avx512_vbmi() && N % 32 == 0 && SizeM <= 8) {
+    if (cpu_supports_avx512_vbmi() && N % 32 == 0 && SizeM <= 2) {
       gemv_kernel_avx512_tile2_bits8_vbmi<SizeM>(x_f, qweight, scale_b, zero_scale_f, g_idx, out, M, K, N, num_groups);
       return;
     }
@@ -1433,6 +1664,51 @@ torch::Tensor pangolin_gemv_cpu(
 
   auto output = torch::empty({M, N}, at::TensorOptions().dtype(at::kBFloat16).device(input.device()));
   at::BFloat16* out_ptr = output.data_ptr<at::BFloat16>();
+
+#if PLANAR_GEMV_CPU_X86
+  // On-the-fly VDPBF16PS path for the pre-expanded uint8 layout: each VDPBF16PS
+  // does two FP32 FMAs, doubling compute throughput vs. the FP32 FMA path.
+  // Restricted to M <= 8 to keep the ZMM accumulator set within budget.
+  // Off by default while the decode overhead is being tuned.
+  const at::BFloat16* x_b = input.data_ptr<at::BFloat16>();
+  if (kernel_bits == 8 && cpu_supports_avx512_core() && N % 32 == 0 && M <= 8 &&
+      env_flag_enabled("GPTQMODEL_PANGOLIN_CPU_ENABLE_DPBF16")) {
+    switch (M) {
+      case 1:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<1>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 2:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<2>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 3:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<3>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 4:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<4>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 5:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<5>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 6:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<6>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 7:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<7>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 8:
+        gemv_kernel_avx512_tile2_bits8_dpbf16<8>(
+            x_b, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+    }
+  }
+#endif
 
   dispatch_size_m(M, kernel_bits, x_f, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, K, N, num_groups);
 
