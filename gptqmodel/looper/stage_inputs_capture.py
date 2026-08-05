@@ -75,28 +75,32 @@ class StageInputsCapture:
             # explicit `full_name` attribute is a legacy fallback; warn if the two
             # disagree so the override is not silent.
             full_name = getattr(first_layer, "full_name", None)
+            module_path = None
             if layer_names and layer_names[0]:
-                layer_label = layer_names[0]
-                if full_name and full_name != layer_label:
+                module_path = layer_names[0]
+                if full_name and full_name != module_path:
                     self.logger.warn(
-                        f"cache_inputs: using caller-supplied layer_name {layer_label!r} "
+                        f"cache_inputs: using caller-supplied layer_name {module_path!r} "
                         f"instead of layer.full_name {full_name!r} for materialization"
                     )
             elif full_name:
-                layer_label = full_name
-            if not layer_label:
+                module_path = full_name
+            if not module_path:
                 # Fallback: discover the dotted path from the model tree when the
                 # caller does not supply names.
                 for name, mod in self.gptq_model.model.named_modules():
                     if mod is first_layer:
-                        layer_label = name
+                        module_path = name
                         break
-            if not layer_label:
-                layer_label = getattr(getattr(first_layer, "__class__", None), "__name__", None)
-            if not layer_label:
-                layer_label = type(first_layer).__name__
+
+            # Keep the class-name fallback as a display label only; do not pass it
+            # as a checkpoint module path because it is not a valid dotted prefix.
+            layer_label = module_path or full_name or getattr(
+                getattr(first_layer, "__class__", None), "__name__", None
+            ) or type(first_layer).__name__
             capture_source = f"cache_inputs:{layer_label}"
         else:
+            module_path = None
             capture_source = "cache_inputs"
         start_time = time.perf_counter() if timer else None
 
@@ -119,7 +123,7 @@ class StageInputsCapture:
         layers[0] = self.gptq_model.shell_module_materialize(
             target_submodule=layers[0],
             device=CPU,
-            module_path=layer_label,
+            module_path=module_path,
         )
         cur_layer_device = CPU
 
@@ -215,6 +219,12 @@ class StageInputsCapture:
         # Parameters attached to the shell root must be ready before embedding forward.
         self._materialize_modules_with_direct_meta_tensors(cur_layer_device)
 
+        def _resolve_module_name(mod: torch.nn.Module) -> Optional[str]:
+            for name, m in self.gptq_model.model.named_modules():
+                if m is mod:
+                    return name
+            return None
+
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
@@ -222,12 +232,13 @@ class StageInputsCapture:
             if module is None:
                 continue
 
+            resolved_name = _resolve_module_name(module)
             m_device = get_device(module)
             ori_outside_layer_module_devices[module_name] = CPU if m_device == META else m_device
             self.gptq_model.shell_module_materialize(
                 target_submodule=module,
                 device=cur_layer_device,
-                module_path=module_name,
+                module_path=resolved_name,
             )
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)

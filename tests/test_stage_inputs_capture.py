@@ -93,7 +93,8 @@ class TestStageInputsCapture(unittest.TestCase):
         self.assertEqual(call_kwargs["module_path"], "layers.0")
 
     def test_cache_inputs_falls_back_to_class_name_for_orphan_layer(self):
-        """If the layer cannot be found in the model tree, use its class name."""
+        """If the layer cannot be found in the model tree, the display label falls back to its class name,
+        but the materialization module_path is left unset so the underlying resolver can either find it or fail loudly."""
 
         layer = FakeLayer()
         capture, layers, _, gptq_model = self._make_capture(layer, gptq_model_model=FakeModel())
@@ -107,7 +108,7 @@ class TestStageInputsCapture(unittest.TestCase):
         )
 
         call_kwargs = gptq_model.shell_module_materialize.call_args[1]
-        self.assertEqual(call_kwargs["module_path"], "FakeLayer")
+        self.assertIsNone(call_kwargs["module_path"])
 
     def test_cache_inputs_prefers_full_name_attribute(self):
         """A layer-level `full_name` attribute is respected when `layer_names` is absent."""
