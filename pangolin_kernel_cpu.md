@@ -3463,3 +3463,35 @@ Validation:
 
 M=4 now peaks at **0.722 TFLOPS**, matching the tile2 path and avoiding the
 ~0.3 TFLOPS regression that the K-pair BF16 path showed for small batches.
+
+## Optimization pass 35 (2026-08-05): route M<=8 through the 2x16-column tile and remove the unused BF16 dot-pair path
+
+The 2x16-column AVX-512 tile was extended from `SizeM <= 4` to `SizeM <= 8`.
+This keeps the same planar decoder and FP32 FMA pipeline for M=5..8 and avoids
+the separate pre-expanded BF16 path entirely.  The K-unroll schedule for the
+tile already falls to 1 for `SizeM > 4`, which keeps the accumulator register
+footprint inside the ZMM budget.  The dead `gemv_kernel_avx512_dpbf16`,
+`gemv_col_block_avx512_dpbf16`, and `make_weight_pair`/`make_x_pair` helpers
+were removed.
+
+Validation:
+- `pytest tests/test_pangolin_cpu_kernel.py` 160/160 passed (default and
+  `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0`).
+- `ruff check` and `git diff --check` clean.
+- `benchmark --sanity --threads 8 --bits 3 5 6 7` peaks at **1.106 TFLOPS**.
+
+### `laguna` bits=7 M=8 A/B: previous (`pass 34`) vs current (`pass 35`)
+
+| K x N | M | prev kernel (ms) | prev (TFLOPS) | curr kernel (ms) | curr (TFLOPS) | TFLOPS ratio |
+|-------|--:|-----------------:|--------------:|-----------------:|--------------:|-------------:|
+| 2048 x 6144 | 8 | 0.451 | 0.447 | 0.201 | 1.004 | 2.25x |
+| 2048 x 1024 | 8 | 0.097 | 0.345 | 0.058 | 0.579 | 1.68x |
+| 6144 x 2048 | 8 | 0.476 | 0.423 | 0.209 | 0.964 | 2.28x |
+| 2048 x 8192 | 8 | 0.617 | 0.435 | 0.264 | 1.017 | 2.34x |
+| 8192 x 2048 | 8 | 0.640 | 0.419 | 0.272 | 0.985 | 2.35x |
+| 2048 x 512 | 8 | 0.060 | 0.278 | 0.047 | 0.359 | 1.29x |
+| 512 x 2048 | 8 | 0.060 | 0.281 | 0.037 | 0.454 | 1.62x |
+| 2048 x 256 | 8 | 0.045 | 0.187 | 0.038 | 0.222 | 1.19x |
+
+Geomean TFLOPS ratio for M=8: **1.93x**.  M=8 now peaks at **1.017 TFLOPS**,
+a solid jump toward the 2 TFLOPS target.
