@@ -1838,7 +1838,12 @@ class GPTQ:
                 else:
                     L, success = _HESSIAN_INVERSE_TRY(H, diag_delta)
                     if success.item():
-                        Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
+                        try:
+                            Hinv_result = _HESSIAN_INVERSE_FACTOR(L)
+                        except RuntimeError as e:
+                            Hinv_result = None
+                            success = H.new_tensor(False, dtype=torch.bool)
+                            last_error = e
 
                 if success.item() and Hinv_result is not None:
                     is_valid = (
