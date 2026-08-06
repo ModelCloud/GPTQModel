@@ -11,6 +11,7 @@ import csv
 import json
 import os
 import shutil
+from datetime import datetime, timezone
 from os.path import isfile, join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -42,6 +43,7 @@ from ..quantization.config import (
     META_FIELD_QUANTIZER,
     META_FIELD_SCALE_SEARCH,
     META_FIELD_STATIC_GROUPS,
+    META_FIELD_TIMESTAMP,
     META_FIELD_TRUE_SEQUENTIAL,
     META_FIELD_URI,
     META_QUANTIZER_GPTQMODEL,
@@ -77,11 +79,16 @@ from ..utils.model import (
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
 from ..utils.torch import torch_empty_cache
-from ..version import __version__
+from ..version import __local_version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 
 
 log = setup_logger()
+
+
+def _current_quantize_timestamp() -> str:
+    """Return the current UTC date/hour/minute as an ISO-like timestamp."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
 PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
@@ -682,7 +689,7 @@ def _update_embedding_dynamic_config_files(save_dir: str, quantize_config) -> No
 
 
 def _prepare_embedding_save_metadata(quantize_config, meta_quantizer: Optional[str]) -> None:
-    quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+    quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__local_version__}"]
     if meta_quantizer:
         if len(meta_quantizer.split(":")) == 2:
             quantizers.append(meta_quantizer.replace(" ", ""))
@@ -691,6 +698,7 @@ def _prepare_embedding_save_metadata(quantize_config, meta_quantizer: Optional[s
 
     quantize_config.meta_set_versionable(key=META_FIELD_QUANTIZER, value=quantizers)
     quantize_config.meta_set(key=META_FIELD_URI, value=META_VALUE_URI)
+    quantize_config.meta_set(key=META_FIELD_TIMESTAMP, value=_current_quantize_timestamp())
 
 
 def _save_embedding_quantization_configs(model, quantize_config, save_dir: str) -> None:
@@ -1247,7 +1255,7 @@ def ModelWriter(cls):
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
 
-        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__local_version__}"]
         if meta_quantizer:
             if len(meta_quantizer.split(":")) == 2:
                 quantizers.append(meta_quantizer.replace(" ",""))
@@ -1258,6 +1266,11 @@ def ModelWriter(cls):
         self.quantize_config.meta_set_versionable(
             key=META_FIELD_QUANTIZER,
             value=quantizers
+        )
+
+        self.quantize_config.meta_set(
+            key=META_FIELD_TIMESTAMP,
+            value=_current_quantize_timestamp(),
         )
 
 

@@ -99,6 +99,12 @@ META_FIELD_MSE = "mse"
 META_FIELD_SCALE_SEARCH = "scale_search"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
+# timestamp is the date/hour/minute the quantization config was saved
+META_FIELD_TIMESTAMP = "timestamp"
+
+# calibration_paths is the list of dataset source paths used during quantization/requantization
+META_FIELD_CALIBRATION_PATHS = "calibration_paths"
+
 META_FIELD_GPTAQ_ENABLED = "gptaq"
 
 META_FIELD_FOEM_ENABLED = "foem"

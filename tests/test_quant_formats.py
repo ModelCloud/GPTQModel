@@ -21,10 +21,11 @@ from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from gptqmodel.version import __local_version__  # noqa: E402
 
 
 class TestQuantization(ModelTest):
@@ -112,7 +113,7 @@ class TestQuantization(ModelTest):
             assert META_QUANTIZER_GPTQMODEL in [v[0] for v in versionable]
             for producer, _version in versionable:
                 if producer == META_QUANTIZER_GPTQMODEL:
-                    assert _version == __version__
+                    assert _version == __local_version__
 
             del model
             torch_empty_cache()

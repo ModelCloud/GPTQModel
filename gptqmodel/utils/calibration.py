@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import os
 import random
+import re
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
+from ..quantization.config import META_FIELD_CALIBRATION_PATHS
 from .attn_mask import normalize_seq_mask
 from .data import collate_data
 from .logger import setup_logger
@@ -50,6 +52,134 @@ def batched(iterable, batch_size: int, process_func=None):
 
     if batch:
         yield batch
+
+
+# Remote dataset identifiers (https://..., hf://..., s3://..., etc.) that are not arbitrary text.
+_CALIBRATION_URI_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+$")
+
+# Filesystem path heuristics used before we pay for an os.path.exists() syscall.
+_KNOWN_FILE_EXTS = (
+    ".json",
+    ".jsonl",
+    ".parquet",
+    ".csv",
+    ".txt",
+    ".gz",
+    ".zip",
+    ".bin",
+    ".safetensors",
+    ".arrow",
+    ".hf",
+)
+_MAX_PATH_LEN = 4096
+
+
+def _looks_like_path(value: str) -> bool:
+    """Cheap syntactic check: does ``value`` plausibly name a file or directory?"""
+    if value.startswith(("/", "./", "../", "~")) or (len(value) >= 2 and value[1] == ":" and value[0].isalpha()):
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    if any(value.lower().endswith(ext) for ext in _KNOWN_FILE_EXTS):
+        return True
+    return False
+
+
+def _resolve_calibration_path(value: Any) -> Optional[str]:
+    """Return a normalized calibration source string, or None if ``value`` is not a path/URI.
+
+    Existing local filesystem paths are reduced to their basename so that saved
+    model configs do not leak the user's local directory layout or username.
+    """
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > _MAX_PATH_LEN:
+        return None
+    # Calibration text rows almost always contain whitespace; skip the syscall.
+    if re.search(r"\s", value):
+        return None
+    if _CALIBRATION_URI_RE.match(value):
+        return value
+    if not _looks_like_path(value):
+        return None
+
+    try:
+        if os.path.exists(value):
+            return os.path.basename(value.rstrip(os.sep)) or value
+    except (OSError, ValueError):
+        pass
+
+    return None
+
+
+def _is_path_like(value: Any) -> bool:
+    """Return True if ``value`` is an actual filesystem path or a valid dataset URI."""
+    return _resolve_calibration_path(value) is not None
+
+
+def _extract_calibration_paths(calibration_dataset: Any) -> List[str]:
+    """Extract path-like dataset identifiers from the raw calibration input."""
+    if isinstance(calibration_dataset, str):
+        resolved = _resolve_calibration_path(calibration_dataset)
+        return [resolved] if resolved else []
+    if isinstance(calibration_dataset, (list, tuple)):
+        return [r for r in (_resolve_calibration_path(item) for item in calibration_dataset) if r]
+
+    paths: List[str] = []
+    seen: set = set()
+
+    cache_files = getattr(calibration_dataset, "cache_files", None)
+    if cache_files:
+        for cf in cache_files:
+            if isinstance(cf, dict):
+                path = cf.get("filename") or cf.get("path")
+            elif isinstance(cf, str):
+                path = cf
+            else:
+                path = None
+            if path:
+                # Cache paths are absolute and may contain local usernames/dirs;
+                # keep only the filename to avoid leaking local filesystem layout.
+                path = os.path.basename(path)
+                if path and path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+
+    for info_attr in ("info", "_info"):
+        info = getattr(calibration_dataset, info_attr, None)
+        if info is not None:
+            for name_attr in ("dataset_name", "builder_name"):
+                val = getattr(info, name_attr, None)
+                if isinstance(val, str) and val and val not in seen and ("/" in val or _is_path_like(val)):
+                    seen.add(val)
+                    paths.append(val)
+            break
+
+    return paths
+
+
+def _record_calibration_source(qmodel, calibration_dataset: Any) -> None:
+    """Append unique path-like calibration sources to the quantize config meta."""
+    qcfg = getattr(qmodel, "quantize_config", None)
+    if qcfg is None:
+        return
+
+    paths = _extract_calibration_paths(calibration_dataset)
+    if not paths:
+        return
+
+    existing = qcfg.meta_get(META_FIELD_CALIBRATION_PATHS) or []
+    if not isinstance(existing, list):
+        existing = [existing]
+
+    merged = existing[:]
+    for path in paths:
+        if path not in merged:
+            merged.append(path)
+    qcfg.meta_set(META_FIELD_CALIBRATION_PATHS, merged)
 
 
 def prepare_calibration_dataset(
@@ -93,6 +223,8 @@ def prepare_calibration_dataset(
 
     if len(raw_examples) == 0:
         raise ValueError("Quantize: calibration dataset is empty.")
+
+    _record_calibration_source(qmodel, calibration_dataset)
 
     message_examples = 0
     message_template_name = None
