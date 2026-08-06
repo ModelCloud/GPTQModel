@@ -2459,7 +2459,11 @@ def _normalize_damp(
     damp: Optional[Union[DampConfig, AdaptiveDampingConfig, Dict[str, Any]]]
 ) -> Union[DampConfig, AdaptiveDampingConfig]:
     if damp is None:
-        return AdaptiveDampingConfig()
+        # Preserve the established GPTQ numerical contract unless adaptive
+        # damping is explicitly requested. Adaptive damping changes both the
+        # Hessian factor and sequential residual updates, so enabling it through
+        # an omitted option silently changes the quantized checkpoint.
+        return DampConfig()
     if isinstance(damp, (DampConfig, AdaptiveDampingConfig)):
         return damp
     if isinstance(damp, dict):
@@ -3935,17 +3939,17 @@ class GPTQConfig(PreProcessorConfig):
         default=None,
         metadata={
             "help": (
-                "Hessian damping configuration. Defaults to adaptive damping; pass a DampConfig or "
-                "AdaptiveDampingConfig(enabled=False) for static behavior."
+                "Hessian damping configuration. Defaults to static damping; pass an enabled "
+                "AdaptiveDampingConfig to opt in to adaptive behavior."
             )
         },
     )
     adaptive_clipping: Optional[Union[AdaptiveClippingConfig, Dict[str, Any]]] = field(
-        default_factory=AdaptiveClippingConfig,
+        default=None,
         metadata={
             "help": (
-                "Adaptive weight-clipping search. Enabled by default with per-group Hessian-weighted "
-                "range search; pass AdaptiveClippingConfig(enabled=False) or None to disable."
+                "Optional adaptive weight-clipping search. Pass an enabled AdaptiveClippingConfig to opt in; "
+                "the default keeps the configured mse/scale_search path."
             )
         },
     )
@@ -4040,6 +4044,15 @@ class GPTQConfig(PreProcessorConfig):
                     if raw_damp_auto_increment is not None
                     else self._damp_auto_increment_user_value
                 )
+        else:
+            # Legacy scalar options remain authoritative for the default static
+            # damping path. Keep the normalized config synchronized so callers
+            # that still pass these fields retain their exact prior behavior.
+            if raw_damp_percent is not None:
+                self.adaptive_damping.min = raw_damp_percent
+                self.adaptive_damping.max = raw_damp_percent
+            if raw_damp_auto_increment is not None:
+                self.adaptive_damping.step = raw_damp_auto_increment
 
         # Keep legacy scalar fields in sync with the canonical damp config.
         if isinstance(self.adaptive_damping, AdaptiveDampingConfig) and self.adaptive_damping.enabled:

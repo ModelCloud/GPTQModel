@@ -44,6 +44,7 @@ from ..quantization.config import (
 from ..quantization.diagnostics import (
     QuantizationDiagnosticsMode,
     analyze_group_index,
+    analyze_output_error,
     analyze_quantization_losses,
     analyze_reconstruction_error,
     analyze_scale_channels,
@@ -257,9 +258,10 @@ class GPTQProcessor(LoopProcessor):
         self._scale_channel_diagnostics = []
         self._reconstruction_diagnostics = []
         self._code_fingerprint_diagnostics = []
+        self._output_error_diagnostics = []
         log.info(
             "Quantization diagnostics: mode=%s; auto=module-loss summary, "
-            "channel=scale-channel scan plus sampled code-lifecycle fingerprints",
+            "channel=scale-channel scan, bounded output replay, and sampled code-lifecycle fingerprints",
             self.quantization_diagnostics_mode.value,
         )
         # Preserve per-sample keep-mask semantics when batch quantization uses
@@ -362,6 +364,22 @@ class GPTQProcessor(LoopProcessor):
             perchannel=True,
         )
         self.tasks[module.name] = tmp
+
+    def _capture_output_error_inputs(self, task: GPTQ, inp: torch.Tensor, *, maximum_rows: int = 128) -> None:
+        """Retain a bounded CPU activation sample for channel-mode post-quant replay."""
+
+        if self.quantization_diagnostics_mode != QuantizationDiagnosticsMode.CHANNEL:
+            return
+        existing = getattr(task, "_diagnostic_output_inputs", None)
+        existing_rows = int(existing.shape[0]) if existing is not None else 0
+        if existing_rows >= maximum_rows or isinstance(task.module, nn.Embedding):
+            return
+        _, reshaped, _ = task._reshape_input(inp)
+        take = min(maximum_rows - existing_rows, int(reshaped.shape[0]))
+        if take <= 0:
+            return
+        sample = reshaped[:take].detach().to(device=CPU, dtype=torch.float32, copy=True)
+        task._diagnostic_output_inputs = sample if existing is None else torch.cat((existing, sample), dim=0)
 
     @staticmethod
     def _hessian_config_signature(qcfg: QuantizeConfig) -> Tuple[object, ...]:
@@ -639,6 +657,7 @@ class GPTQProcessor(LoopProcessor):
     ) -> None:
         """Record a GPTQ batch, reusing same-input Hessian work when possible."""
 
+        self._capture_output_error_inputs(task, inp)
         if not self._enable_shared_hessian_cache:
             task.add_batch(inp, out, batch_index=batch_index)
             return
@@ -1090,6 +1109,19 @@ class GPTQProcessor(LoopProcessor):
             with self.lock:
                 self._reconstruction_diagnostics.append(reconstruction_summary)
 
+            diagnostic_inputs = getattr(g, "_diagnostic_output_inputs", None)
+            if diagnostic_inputs is not None:
+                output_error_summary = analyze_output_error(
+                    diagnostic_inputs,
+                    module.weight.data,
+                    wq,
+                    bias=getattr(module, "bias", None),
+                )
+                output_error_summary.update(record_identity)
+                with self.lock:
+                    self._output_error_diagnostics.append(output_error_summary)
+                del g._diagnostic_output_inputs
+
             scale_channel_summary = analyze_scale_channels(q_scales)
             scale_channel_summary.update(record_identity)
             scale_channel_summary["group_index"] = analyze_group_index(
@@ -1435,7 +1467,7 @@ class GPTQProcessor(LoopProcessor):
                 include_capture_only=False,
             )
             diagnostics = {
-                "schema": "gptqmodel-quantization-diagnostics-v2",
+                "schema": "gptqmodel-quantization-diagnostics-v3",
                 "stage": "during_quantization",
                 "evidence_status": "observed",
                 "mode": self.quantization_diagnostics_mode.value,
@@ -1501,6 +1533,43 @@ class GPTQProcessor(LoopProcessor):
                     "records": reconstruction_records,
                     "top": reconstruction_records[:5],
                 }
+                output_error_records = sorted(
+                    self._output_error_diagnostics,
+                    key=lambda item: float(item.get("softmax_kld_mean") or -1.0),
+                    reverse=True,
+                )
+                output_sample_count = sum(int(item.get("sample_count", 0)) for item in output_error_records)
+                diagnostics["output_error"] = {
+                    "module_count": len(output_error_records),
+                    "sample_count": output_sample_count,
+                    "mean_module_absolute_error": (
+                        sum(float(item["mean_absolute_error"]) for item in output_error_records)
+                        / len(output_error_records)
+                        if output_error_records
+                        else None
+                    ),
+                    "mean_module_softmax_kld": (
+                        sum(float(item["softmax_kld_mean"]) for item in output_error_records)
+                        / len(output_error_records)
+                        if output_error_records
+                        else None
+                    ),
+                    "records": output_error_records,
+                    "top": output_error_records[:5],
+                }
+                if output_error_records:
+                    worst_output = output_error_records[0]
+                    log.info(
+                        "Post-quant output error: layer=%s module=%s samples=%d mean_abs=%.6g "
+                        "relative_l2=%.6g softmax_kld_mean=%.6g top1_agreement=%.2f%%",
+                        worst_output[PROCESS_LOG_LAYER],
+                        worst_output[PROCESS_LOG_MODULE],
+                        worst_output["sample_count"],
+                        worst_output["mean_absolute_error"],
+                        worst_output["relative_l2_error"],
+                        worst_output["softmax_kld_mean"],
+                        100.0 * worst_output["top1_agreement"],
+                    )
                 channel_records = sorted(
                     self._scale_channel_diagnostics,
                     key=lambda item: float(item.get("max_scale") or -1.0),

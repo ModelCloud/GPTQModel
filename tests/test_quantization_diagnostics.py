@@ -9,6 +9,7 @@ from gptqmodel.quantization.diagnostics import (
     QUANTIZATION_DIAGNOSTICS_ENV,
     QuantizationDiagnosticsMode,
     analyze_group_index,
+    analyze_output_error,
     analyze_quantization_losses,
     analyze_reconstruction_error,
     analyze_scale_channels,
@@ -137,6 +138,21 @@ def test_reconstruction_error_localizes_actual_tensor_axes_in_bounded_chunks():
     assert summary["top_input_features"][0]["input_feature"] == 0
 
 
+def test_output_error_reports_kld_and_mean_error_on_identical_inputs():
+    inputs = torch.tensor([[1.0, -1.0], [0.5, 2.0]], dtype=torch.float32)
+    source = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+    reconstructed = torch.tensor([[1.0, 0.25], [0.0, 1.0]], dtype=torch.float32)
+
+    summary = analyze_output_error(inputs, source, reconstructed)
+
+    assert summary["available"] is True
+    assert summary["sample_count"] == 2
+    assert summary["mean_absolute_error"] == pytest.approx(0.1875)
+    assert summary["rmse"] > summary["mean_absolute_error"]
+    assert summary["softmax_kld_mean"] > 0
+    assert 0 <= summary["top1_agreement"] <= 1
+
+
 def test_during_quantization_markdown_is_human_readable_and_zero_based():
     reconstruction = analyze_reconstruction_error(
         torch.tensor([[1.0, -1.0], [2.0, -2.0]]),
@@ -187,6 +203,25 @@ def test_during_quantization_markdown_is_human_readable_and_zero_based():
             },
             "loss": loss,
             "reconstruction": {"module_count": 1, "records": [reconstruction]},
+            "output_error": {
+                "module_count": 1,
+                "sample_count": 8,
+                "mean_module_absolute_error": 0.01,
+                "mean_module_softmax_kld": 0.003,
+                "records": [
+                    {
+                        "layer": 0,
+                        "module": "self_attn.q_proj",
+                        "full_name": "model.layers.0.self_attn.q_proj",
+                        "sample_count": 8,
+                        "mean_absolute_error": 0.01,
+                        "relative_l2_error": 0.02,
+                        "softmax_kld_mean": 0.003,
+                        "softmax_kld_p95": 0.005,
+                        "top1_agreement": 0.875,
+                    }
+                ],
+            },
             "scale_channels": {"module_count": 0, "records": []},
             "code_fingerprints": {
                 "module_count": 0,
@@ -199,6 +234,9 @@ def test_during_quantization_markdown_is_human_readable_and_zero_based():
 
     assert "# During-quantization error analysis" in markdown
     assert "## Canonical GPTQ reconstruction error" in markdown
+    assert "## Post-quantization output error" in markdown
+    assert "Mean KLD" in markdown
+    assert "Mean module output MAE" in markdown
     assert "## Localized reconstruction rows and input features" in markdown
     assert "## Logical-code lifecycle" in markdown
     assert "## GPTQModel definition-group recommendations" in markdown

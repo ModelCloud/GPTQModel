@@ -328,6 +328,63 @@ def analyze_group_index(
     }
 
 
+def analyze_output_error(
+    inputs: torch.Tensor,
+    source_weight: torch.Tensor,
+    reconstructed_weight: torch.Tensor,
+    *,
+    bias: torch.Tensor | None = None,
+) -> dict[str, Any]:
+    """Measure dense-to-reconstructed output drift on identical captured inputs.
+
+    KLD is computed after a FP32 softmax over the final output dimension. It is
+    token-distribution KLD for an LM head and a bounded sensitivity diagnostic
+    for hidden projections; callers must not present the latter as perplexity.
+    """
+
+    if inputs.ndim != 2 or source_weight.ndim != 2 or source_weight.shape != reconstructed_weight.shape:
+        return {"available": False, "reason": "inputs and equal-shape two-dimensional weights are required"}
+    if inputs.shape[1] != source_weight.shape[1] or inputs.numel() == 0:
+        return {"available": False, "reason": "captured input width must match weight input features"}
+
+    device = source_weight.device
+    compute_dtype = source_weight.dtype
+    sample = inputs.to(device=device, dtype=compute_dtype)
+    source_output = torch.nn.functional.linear(sample, source_weight, bias).float()
+    reconstructed_output = torch.nn.functional.linear(
+        sample,
+        reconstructed_weight.to(device=device, dtype=compute_dtype),
+        bias,
+    ).float()
+    difference = reconstructed_output - source_output
+    absolute = difference.abs()
+    source_norm = torch.linalg.vector_norm(source_output)
+    error_norm = torch.linalg.vector_norm(difference)
+    eps = torch.finfo(torch.float32).eps
+
+    source_log_prob = torch.log_softmax(source_output, dim=-1)
+    reconstructed_log_prob = torch.log_softmax(reconstructed_output, dim=-1)
+    kld = torch.sum(source_log_prob.exp() * (source_log_prob - reconstructed_log_prob), dim=-1)
+    result = {
+        "available": True,
+        "sample_count": int(sample.shape[0]),
+        "output_width": int(source_output.shape[-1]),
+        "mean_absolute_error": float(absolute.mean().item()),
+        "mean_signed_error": float(difference.mean().item()),
+        "rmse": float(difference.square().mean().sqrt().item()),
+        "relative_l2_error": float((error_norm / source_norm.clamp_min(eps)).item()),
+        "softmax_kld_mean": float(kld.mean().item()),
+        "softmax_kld_median": float(kld.median().item()),
+        "softmax_kld_p95": float(torch.quantile(kld, 0.95).item()),
+        "softmax_kld_max": float(kld.max().item()),
+        "top1_agreement": float(
+            (source_output.argmax(dim=-1) == reconstructed_output.argmax(dim=-1)).float().mean().item()
+        ),
+    }
+    del sample, source_output, reconstructed_output, difference, absolute, kld
+    return result
+
+
 def analyze_reconstruction_error(
     source: torch.Tensor,
     reconstructed: torch.Tensor,
@@ -935,6 +992,7 @@ def render_quantization_diagnostics_markdown(diagnostics: Mapping[str, Any]) -> 
     mode = str(diagnostics.get("mode", "unknown"))
     loss = diagnostics.get("loss") or {}
     reconstruction = diagnostics.get("reconstruction") or {}
+    output_error = diagnostics.get("output_error") or {}
     scale_channels = diagnostics.get("scale_channels") or {}
     fingerprints = diagnostics.get("code_fingerprints") or {}
     config = diagnostics.get("quantization_config") or {}
@@ -955,6 +1013,10 @@ def render_quantization_diagnostics_markdown(diagnostics: Mapping[str, Any]) -> 
                 ["Loss records", loss.get("module_count", 0)],
                 ["Severe loss concentration", bool(loss.get("severe_concentration", False))],
                 ["Reconstruction records", reconstruction.get("module_count", 0)],
+                ["Post-quant output-error records", output_error.get("module_count", 0)],
+                ["Post-quant sampled activation rows", output_error.get("sample_count", 0)],
+                ["Mean module output MAE", _format_number(output_error.get("mean_module_absolute_error"))],
+                ["Mean module softmax KLD", _format_number(output_error.get("mean_module_softmax_kld"))],
                 ["Scale/channel records", scale_channels.get("module_count", 0)],
                 ["Code-fingerprint records", fingerprints.get("module_count", 0)],
                 ["Pre-pack sampled code mismatches", fingerprints.get("prepack_mismatch_count", 0)],
@@ -1057,6 +1119,36 @@ def render_quantization_diagnostics_markdown(diagnostics: Mapping[str, Any]) -> 
         lines.append(
             "Reconstruction diagnostics were not collected. Use `quantization_diagnostics=\"channel\"` "
             "for an investigation run."
+        )
+
+    output_error_records = output_error.get("records") or []
+    lines.extend(["", "## Post-quantization output error", ""])
+    lines.append(
+        "Metrics replay the same bounded calibration inputs through dense and reconstructed GPTQ weights. "
+        "Softmax KLD is token-distribution KLD only for an LM head; for hidden projections it is a sensitivity signal."
+    )
+    lines.append("")
+    if output_error_records:
+        lines.extend(
+            _markdown_table(
+                ["Module", "Samples", "Mean abs. error", "Relative L2", "Mean KLD", "P95 KLD", "Top-1"],
+                [
+                    [
+                        _display_module(record),
+                        record.get("sample_count", 0),
+                        _format_number(record.get("mean_absolute_error")),
+                        _format_percent(record.get("relative_l2_error")),
+                        _format_number(record.get("softmax_kld_mean")),
+                        _format_number(record.get("softmax_kld_p95")),
+                        _format_percent(record.get("top1_agreement")),
+                    ]
+                    for record in output_error_records[:40]
+                ],
+            )
+        )
+    else:
+        lines.append(
+            "Output-error telemetry was not collected. Use `quantization_diagnostics=\"channel\"` for an investigation run."
         )
 
     lines.extend(["", "## Localized reconstruction rows and input features", ""])

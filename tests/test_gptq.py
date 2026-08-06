@@ -231,6 +231,29 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
         GPTQ(layer, qcfg=qcfg)
 
 
+@pytest.mark.parametrize(
+    ("hessian_inverse_available", "use_online_group_damping", "expected"),
+    [
+        (True, False, 128),
+        (False, False, 64),
+        (True, True, 64),
+    ],
+)
+def test_gptq_effective_blocksize_preserves_legacy_update_order(
+    hessian_inverse_available,
+    use_online_group_damping,
+    expected,
+):
+    """Static GPTQ must not inherit the group-local partition used by adaptive feedback."""
+
+    assert GPTQ._resolve_effective_blocksize(
+        128,
+        64,
+        hessian_inverse_available=hessian_inverse_available,
+        use_online_group_damping=use_online_group_damping,
+    ) == expected
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize(
     ("method", "expected_hessian_shape"),

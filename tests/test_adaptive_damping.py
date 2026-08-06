@@ -19,18 +19,14 @@ def _make_spd_matrix(d: int, device) -> torch.Tensor:
     return H @ H.t()
 
 
-def test_adaptive_damping_default_enabled():
+def test_adaptive_damping_is_opt_in():
     cfg = QuantizeConfig(method="gptq")
-    assert isinstance(cfg.adaptive_damping, AdaptiveDampingConfig)
-    assert cfg.adaptive_damping.enabled is True
-    assert cfg.adaptive_damping.base_percdamp == 0.05
-    assert cfg.adaptive_damping.min == 0.02
-    assert cfg.adaptive_damping.max == 0.08
-    assert cfg.adaptive_damping.eigen_iterations == 10
-    assert cfg.adaptive_damping.method == "power_iteration"
-    assert cfg.adaptive_damping.spectral_alpha == 0.25
-    assert cfg.damp.min == 0.02
-    assert isinstance(cfg.damp, AdaptiveDampingConfig)
+    assert isinstance(cfg.adaptive_damping, DampConfig)
+    assert cfg.adaptive_damping.min == 0.05
+    assert cfg.adaptive_damping.max == 0.05
+    assert cfg.adaptive_damping.step == 0.01
+    assert cfg.adaptive_clipping is None
+    assert cfg.damp is cfg.adaptive_damping
 
 
 def test_adaptive_damping_config_round_trip():
@@ -745,9 +741,9 @@ def test_adaptive_damping_dict_routes_ema_decay_to_adaptive_config():
 
 
 def test_adaptive_damping_damp_auto_increment_sync():
-    """Legacy `damp_auto_increment` is propagated into AdaptiveDampingConfig.step."""
+    """Legacy `damp_auto_increment` is propagated into the default static damping config."""
     cfg = QuantizeConfig(method="gptq", damp_auto_increment=0.007)
-    assert isinstance(cfg.adaptive_damping, AdaptiveDampingConfig)
+    assert isinstance(cfg.adaptive_damping, DampConfig)
     assert cfg.adaptive_damping.step == pytest.approx(0.007)
     assert cfg.damp_auto_increment == pytest.approx(0.007)
 

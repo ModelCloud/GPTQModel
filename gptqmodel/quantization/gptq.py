@@ -213,6 +213,23 @@ def _hessian_inverse_factor(L: torch.Tensor):
 
 class GPTQ:
     @staticmethod
+    def _resolve_effective_blocksize(
+        blocksize: int,
+        group_size: int,
+        *,
+        hessian_inverse_available: bool,
+        use_online_group_damping: bool,
+    ) -> int:
+        """Preserve legacy GPTQ update order unless group-local work requires otherwise."""
+
+        effective_block = blocksize
+        if not hessian_inverse_available and group_size > 0:
+            effective_block = group_size
+        if use_online_group_damping and group_size > 0:
+            effective_block = min(blocksize, group_size)
+        return effective_block
+
+    @staticmethod
     def resolve_module_source(module: nn.Module) -> nn.Module:
         """Resolve the dense module view GPTQ should quantize for one wrapper."""
 
@@ -2603,17 +2620,16 @@ class GPTQ:
                 Q[:, i1:i2] = Q1
         else:
             # Original heavy loop for normal quantization
-            effective_block = blocksize
-            if self.qcfg.group_size and self.qcfg.group_size > 0:
-                # Keep work chunks within a single quantization group. For RTN
-                # fallback this avoids redundant quantizer reconfiguration; for
-                # online group feedback it ensures per-group error scales apply
-                # to a well-defined column range without growing the loop size
-                # when the configured block size is larger than the group size.
-                effective_block = min(blocksize, self.qcfg.group_size)
-            if use_online_group_damping and self.qcfg.group_size and self.qcfg.group_size > 0:
-                # Online group feedback must process within group boundaries.
-                effective_block = min(blocksize, self.qcfg.group_size)
+            # RTN fallback has no cross-column Hessian propagation, while online
+            # feedback is explicitly group-local. The legacy/static GPTQ path
+            # intentionally keeps `blocksize`: changing its partition alters
+            # floating-point update order and can change scales and codes.
+            effective_block = self._resolve_effective_blocksize(
+                blocksize,
+                int(self.qcfg.group_size or -1),
+                hessian_inverse_available=Hinv is not None,
+                use_online_group_damping=use_online_group_damping,
+            )
 
             if use_online_group_damping:
                 group_error_ema_decay = damp_cfg.group_error_ema_decay
