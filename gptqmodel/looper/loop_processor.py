@@ -53,6 +53,107 @@ DEFAULT_LOG_COLUMNS: List[str] = [
 ]
 
 
+class _ThreadSafeDict(dict):
+    """Dictionary with synchronized mutations and snapshot-based iteration."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lock = threading.RLock()
+
+    def __getitem__(self, key):
+        with self._lock:
+            return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            super().__setitem__(key, value)
+
+    def __delitem__(self, key):
+        with self._lock:
+            super().__delitem__(key)
+
+    def __contains__(self, key):
+        with self._lock:
+            return super().__contains__(key)
+
+    def __iter__(self):
+        with self._lock:
+            return iter(list(super().__iter__()))
+
+    def __len__(self):
+        with self._lock:
+            return super().__len__()
+
+    def get(self, key, default=None):
+        with self._lock:
+            return super().get(key, default)
+
+    def setdefault(self, key, default=None):
+        with self._lock:
+            return super().setdefault(key, default)
+
+    def pop(self, key, *args):
+        with self._lock:
+            return super().pop(key, *args)
+
+    def popitem(self):
+        with self._lock:
+            return super().popitem()
+
+    def clear(self):
+        with self._lock:
+            super().clear()
+
+    def update(self, *args, **kwargs):
+        with self._lock:
+            super().update(*args, **kwargs)
+
+    def keys(self):
+        with self._lock:
+            return list(super().keys())
+
+    def values(self):
+        with self._lock:
+            return list(super().values())
+
+    def items(self):
+        with self._lock:
+            return list(super().items())
+
+
+class _ThreadSafeInputCache:
+    """Synchronize replacement and attribute access for a shared ``InputCache``."""
+
+    def __init__(self, cache: InputCache):
+        object.__setattr__(self, "_cache", cache)
+        object.__setattr__(self, "_lock", threading.RLock())
+
+    def set_cache(self, cache: Any) -> None:
+        if isinstance(cache, _ThreadSafeInputCache):
+            cache = cache.unwrap()
+        with self._lock:
+            object.__setattr__(self, "_cache", cache)
+
+    def unwrap(self) -> InputCache:
+        with self._lock:
+            return object.__getattribute__(self, "_cache")
+
+    def __getattr__(self, name: str):
+        with self._lock:
+            return getattr(object.__getattribute__(self, "_cache"), name)
+
+    def __setattr__(self, name: str, value):
+        if name in {"_cache", "_lock"}:
+            object.__setattr__(self, name, value)
+            return
+        with self._lock:
+            setattr(object.__getattribute__(self, "_cache"), name, value)
+
+    def __delattr__(self, name: str):
+        with self._lock:
+            delattr(object.__getattribute__(self, "_cache"), name)
+
+
 @dataclass
 class ExecutionConfig:
     """Describe how a processor participates in forward replay and activation capture.
@@ -110,6 +211,10 @@ class LoopProcessor:
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
         self._results_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._fwd_time_lock = threading.Lock()
+        self._device_smi_lock = threading.RLock()
+        self._input_cache_lock = threading.RLock()
 
         self.tokenizer = tokenizer
         self.qcfg = qcfg
@@ -119,8 +224,8 @@ class LoopProcessor:
         # one execution mode instead of a scattered set of booleans.
         self.execution_config = execution_config or ExecutionConfig()
 
-        self.inputs_cache: InputCache = InputCache(None, None, None, None)
-        self.tasks = {}
+        self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
+        self.tasks = _ThreadSafeDict()
 
         self.pb = None
         self.fwd_time = None
@@ -214,9 +319,10 @@ class LoopProcessor:
     def draw_progress(self, title: str, subtitle: str = "") -> None:
         """Best-effort progress-bar redraw for processors with an attached progress handle."""
 
-        if self.pb is None:
-            return
-        self.pb.title(title).subtitle(subtitle).draw()
+        with self._progress_lock:
+            if self.pb is None:
+                return
+            self.pb.title(title).subtitle(subtitle).draw()
 
     @staticmethod
     def _compute_total_tokens(calibration_dataset) -> int:
@@ -544,34 +650,37 @@ class LoopProcessor:
     def _safe_query_metric(self, device_key: str, handle: Device):
         """Queries Device-SMI metrics once per device, suppressing repeated failures."""
 
-        try:
-            return handle.metrics(fast=True)
-        except Exception as exc:  # pragma: no cover - defensive, external tool
-            if device_key not in self._device_metric_failures:
-                log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
-                self._device_metric_failures.add(device_key)
-            return None
+        with self._device_smi_lock:
+            try:
+                return handle.metrics(fast=True)
+            except Exception as exc:  # pragma: no cover - defensive, external tool
+                if device_key not in self._device_metric_failures:
+                    log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
+                    self._device_metric_failures.add(device_key)
+                return None
 
     def _snapshot_device_memory_gib(self) -> Dict[str, float]:
         """Captures current accelerator memory usage in GiB per device."""
 
-        snapshot: Dict[str, float] = {}
-        for device_id, handle in self._device_smi_handles.items():
-            metrics = self._safe_query_metric(device_id, handle)
-            if metrics is None:
-                continue
-            snapshot[device_id] = metrics.memory_used / (1024 ** 3)
-        return snapshot
+        with self._device_smi_lock:
+            snapshot: Dict[str, float] = {}
+            for device_id, handle in self._device_smi_handles.items():
+                metrics = self._safe_query_metric(device_id, handle)
+                if metrics is None:
+                    continue
+                snapshot[device_id] = metrics.memory_used / (1024 ** 3)
+            return snapshot
 
     def _snapshot_cpu_memory_gib(self) -> Optional[float]:
         """Captures current CPU memory usage in GiB when supported."""
 
-        if self._cpu_device_smi is None:
-            return None
-        metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
-        if metrics is None:
-            return None
-        return metrics.memory_used / (1024 ** 3)
+        with self._device_smi_lock:
+            if self._cpu_device_smi is None:
+                return None
+            metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
+            if metrics is None:
+                return None
+            return metrics.memory_used / (1024 ** 3)
 
     def device_memory_report(self) -> str:
         """Formats current accelerator memory usage for processor log rows."""
@@ -618,19 +727,20 @@ class LoopProcessor:
     def _close_device_smi_handles(self) -> None:
         """Closes all Device-SMI handles owned by this processor."""
 
-        for handle in self._device_smi_handles.values():
-            try:
-                handle.close()
-            except Exception:
-                pass
-        self._device_smi_handles.clear()
+        with self._device_smi_lock:
+            for handle in self._device_smi_handles.values():
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            self._device_smi_handles.clear()
 
-        if self._cpu_device_smi is not None:
-            try:
-                self._cpu_device_smi.close()
-            except Exception:
-                pass
-            self._cpu_device_smi = None
+            if self._cpu_device_smi is not None:
+                try:
+                    self._cpu_device_smi.close()
+                except Exception:
+                    pass
+                self._cpu_device_smi = None
 
     # Loop Procssor level scoped state data
     def result_save(self, key: str, value: Any):
@@ -658,7 +768,8 @@ class LoopProcessor:
     def results(self):
         """Returns the full processor result mapping."""
 
-        return self._results
+        with self._results_lock:
+            return dict(self._results)
 
     def collect_memory_info(self, layer_index: int):
         """Records current accelerator and CPU memory snapshots for diagnostics."""
@@ -685,13 +796,15 @@ class LoopProcessor:
     def set_fwd_time(self, fwd_time: float):
         """Stores the latest forward-pass duration for logging."""
 
-        self.fwd_time = fwd_time
+        with self._fwd_time_lock:
+            self.fwd_time = fwd_time
 
     def formatted_fwd_time(self) -> str:
         """Returns the stored forward time as a fixed-width string."""
 
-        fwd_time = self.fwd_time if self.fwd_time is not None else 0.0
-        return f"{fwd_time:.3f}"
+        with self._fwd_time_lock:
+            fwd_time = self.fwd_time if self.fwd_time is not None else 0.0
+            return f"{fwd_time:.3f}"
 
     # called first
     def preprocess(self, module: NamedModule, **kwargs):
@@ -705,17 +818,19 @@ class LoopProcessor:
 
         pass
 
-    def receive_input_cache(self, input_cache: InputCache):
+    def receive_input_cache(self, input_cache: Any):
         """Injects the shared input cache for the current processor stage."""
 
-        self.inputs_cache = input_cache
+        with self._input_cache_lock:
+            self.inputs_cache.set_cache(input_cache)
 
     # called after every module generate
     # may be called multiple times due to batch
     def receive_layer_inputs(self, layer_inputs: List[List[Tensor]]):
         """Replaces cached layer outputs that feed the next loop stage."""
 
-        self.inputs_cache.layer_inputs = layer_inputs
+        with self._input_cache_lock:
+            self.inputs_cache.layer_inputs = layer_inputs
 
     def receive_layer_forward_context(
         self,
@@ -741,8 +856,9 @@ class LoopProcessor:
     def clear_cache_data(self):
         """Drops transient task data and cached layer inputs after replay."""
 
-        self.tasks = {}
-        self.inputs_cache.layer_inputs = []
+        self.tasks.clear()
+        with self._input_cache_lock:
+            self.inputs_cache.layer_inputs = []
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Override point for per-module forward hooks used during capture."""
