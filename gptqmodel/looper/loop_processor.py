@@ -76,6 +76,21 @@ class _ThreadSafeDict(dict):
         with self._lock:
             return super().__contains__(key)
 
+    def _snapshot(self):
+        with self._lock:
+            return dict(super().items())
+
+    def __eq__(self, other):
+        if other is self:
+            return True
+        own_snapshot = self._snapshot()
+        other_snapshot = other._snapshot() if isinstance(other, _ThreadSafeDict) else other
+        return dict.__eq__(own_snapshot, other_snapshot)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        return NotImplemented if result is NotImplemented else not result
+
     def __iter__(self):
         with self._lock:
             return iter(list(super().__iter__()))
@@ -323,6 +338,20 @@ class LoopProcessor:
             if self.pb is None:
                 return
             self.pb.title(title).subtitle(subtitle).draw()
+
+    def _get_input_cache_lock(self):
+        """Returns the cache lock, including for lightweight test and script instances."""
+
+        lock = getattr(self, "_input_cache_lock", None)
+        if lock is not None:
+            return lock
+
+        with PROCESSOR_GLOBAL_LOCK:
+            lock = getattr(self, "_input_cache_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                object.__setattr__(self, "_input_cache_lock", lock)
+        return lock
 
     @staticmethod
     def _compute_total_tokens(calibration_dataset) -> int:
@@ -732,14 +761,14 @@ class LoopProcessor:
                 try:
                     handle.close()
                 except Exception:
-                    pass
+                    log.debug("Failed to close device telemetry handle during cleanup.", exc_info=True)
             self._device_smi_handles.clear()
 
             if self._cpu_device_smi is not None:
                 try:
                     self._cpu_device_smi.close()
                 except Exception:
-                    pass
+                    log.debug("Failed to close CPU telemetry handle during cleanup.", exc_info=True)
                 self._cpu_device_smi = None
 
     # Loop Procssor level scoped state data
@@ -821,15 +850,20 @@ class LoopProcessor:
     def receive_input_cache(self, input_cache: Any):
         """Injects the shared input cache for the current processor stage."""
 
-        with self._input_cache_lock:
-            self.inputs_cache.set_cache(input_cache)
+        with self._get_input_cache_lock():
+            current = getattr(self, "inputs_cache", None)
+            if isinstance(current, _ThreadSafeInputCache):
+                current.set_cache(input_cache)
+            else:
+                cache = input_cache.unwrap() if isinstance(input_cache, _ThreadSafeInputCache) else input_cache
+                self.inputs_cache = _ThreadSafeInputCache(cache)
 
     # called after every module generate
     # may be called multiple times due to batch
     def receive_layer_inputs(self, layer_inputs: List[List[Tensor]]):
         """Replaces cached layer outputs that feed the next loop stage."""
 
-        with self._input_cache_lock:
+        with self._get_input_cache_lock():
             self.inputs_cache.layer_inputs = layer_inputs
 
     def receive_layer_forward_context(
@@ -857,7 +891,7 @@ class LoopProcessor:
         """Drops transient task data and cached layer inputs after replay."""
 
         self.tasks.clear()
-        with self._input_cache_lock:
+        with self._get_input_cache_lock():
             self.inputs_cache.layer_inputs = []
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:

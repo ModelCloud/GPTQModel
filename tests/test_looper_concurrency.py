@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from gptqmodel.adapter.adapter import Lora
+from gptqmodel.looper.eora_processor import EoraProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.loop_processor import LoopProcessor, _ThreadSafeDict, _ThreadSafeInputCache
 from gptqmodel.looper.stage_subset import _collect_worker_results
@@ -102,6 +104,36 @@ def test_collect_worker_results_drains_before_raising_submission_error():
     assert events == ["first", "second"]
 
 
+@pytest.mark.parametrize("control_error", [KeyboardInterrupt("stop"), SystemExit("stop")])
+def test_collect_worker_results_drains_before_raising_control_error(control_error):
+    events = []
+    futures = [
+        _RecordingFuture(events, "first", error=control_error),
+        _RecordingFuture(events, "second", result=("b", 2)),
+    ]
+
+    with pytest.raises(type(control_error)) as exc_info:
+        _collect_worker_results(futures)
+
+    assert exc_info.value is control_error
+    assert events == ["first", "second"]
+
+
+def test_collect_worker_results_drains_before_raising_submission_control_error():
+    events = []
+    submission_error = KeyboardInterrupt("submission interrupted")
+    futures = [
+        _RecordingFuture(events, "first", error=ValueError("worker failed")),
+        _RecordingFuture(events, "second", result=("b", 2)),
+    ]
+
+    with pytest.raises(KeyboardInterrupt, match="submission interrupted") as exc_info:
+        _collect_worker_results(futures, prior_error=submission_error)
+
+    assert exc_info.value is submission_error
+    assert events == ["first", "second"]
+
+
 def test_thread_safe_dict_uses_snapshots_during_concurrent_mutation():
     tasks = _ThreadSafeDict()
     barrier = threading.Barrier(8)
@@ -133,11 +165,24 @@ def test_thread_safe_dict_mutation_api():
     assert tasks.setdefault("a", 3) == 1
     assert tasks.setdefault("c", 3) == 3
     del tasks["b"]
-    assert tasks.pop("missing", None) is None
+    missing_value = tasks.pop("missing", None)
+    assert missing_value is None
     key, value = tasks.popitem()
     assert (key, value) in {("a", 1), ("c", 3)}
     tasks.clear()
     assert not tasks
+
+
+def test_thread_safe_dict_equality_uses_snapshots():
+    tasks = _ThreadSafeDict({"a": 1, "b": 2})
+    matching = _ThreadSafeDict({"a": 1, "b": 2})
+
+    assert tasks == tasks
+    assert tasks == matching
+    assert tasks == {"a": 1, "b": 2}
+    matching["c"] = 3
+    assert tasks != matching
+    assert tasks != {"a": 2}
 
 
 def test_thread_safe_input_cache_replacement_and_attribute_access():
@@ -156,6 +201,41 @@ def test_thread_safe_input_cache_replacement_and_attribute_access():
     proxy = _ThreadSafeInputCache(InputCache([], [], [], []))
     proxy.set_cache(cache)
     assert proxy.unwrap() is replacement
+
+
+def test_receive_input_cache_initializes_missing_state_and_rewraps_raw_cache():
+    processor = LoopProcessor.__new__(LoopProcessor)
+    first = InputCache([[torch.tensor([1.0])]], [], [], [])
+
+    processor.receive_input_cache(first)
+
+    assert isinstance(processor._input_cache_lock, type(threading.RLock()))
+    assert isinstance(processor.inputs_cache, _ThreadSafeInputCache)
+    assert processor.inputs_cache.unwrap() is first
+
+    processor.inputs_cache = InputCache([], [], [], [])
+    replacement = InputCache([[torch.tensor([2.0])]], [], [], [])
+    processor.receive_input_cache(replacement)
+
+    assert isinstance(processor.inputs_cache, _ThreadSafeInputCache)
+    assert processor.inputs_cache.unwrap() is replacement
+
+
+def test_eora_progress_uses_synchronized_draw_helper():
+    class _ProgressObserved(Exception):
+        pass
+
+    processor = EoraProcessor.__new__(EoraProcessor)
+    processor.draw_progress = MagicMock(side_effect=_ProgressObserved)
+    module = MagicMock()
+    module.adapter_cfg = object.__new__(Lora)
+    module.name = "layer.proj"
+    module.module_dtype = torch.float16
+
+    with pytest.raises(_ProgressObserved):
+        processor.process(module)
+
+    processor.draw_progress.assert_called_once_with("EoRA: Processing layer.proj (torch.float16) in layer")
 
 
 def test_loop_processor_shared_accessors_are_synchronized():
@@ -220,5 +300,24 @@ def test_device_metric_handles_are_serialized_and_closed():
 
     assert cuda_handle.closed is True
     assert cpu_handle.closed is True
+    assert processor._device_smi_handles == {}
+    assert processor._cpu_device_smi is None
+
+
+def test_device_metric_close_failures_are_logged_and_suppressed(monkeypatch):
+    class _FailingHandle:
+        def close(self):
+            raise RuntimeError("close failed")
+
+    debug = MagicMock()
+    monkeypatch.setattr("gptqmodel.looper.loop_processor.log.debug", debug)
+    processor = _make_processor()
+    processor._device_smi_handles = {"cuda:0": _FailingHandle()}
+    processor._cpu_device_smi = _FailingHandle()
+
+    processor._close_device_smi_handles()
+
+    assert debug.call_count == 2
+    assert all(call.kwargs == {"exc_info": True} for call in debug.call_args_list)
     assert processor._device_smi_handles == {}
     assert processor._cpu_device_smi is None

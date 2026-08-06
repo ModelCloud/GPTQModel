@@ -240,7 +240,7 @@ class EoraProcessor(LoopProcessor):
 
         assert isinstance(module.adapter_cfg, Lora)
 
-        self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()
+        self.draw_progress(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer")
 
         start = time.time()
 

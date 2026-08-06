@@ -45,6 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 ForwardMode = Literal["parallel", "serial"]
+_WORKER_FAILURES = (Exception, KeyboardInterrupt, SystemExit, GeneratorExit)
 
 
 @dataclass
@@ -155,7 +156,7 @@ def _collect_worker_results(futures, prior_error: Optional[BaseException] = None
     for future in futures:
         try:
             results.append(future.result())
-        except BaseException as exc:
+        except _WORKER_FAILURES as exc:
             if worker_error is None:
                 worker_error = exc
 
@@ -1094,7 +1095,7 @@ def _run_single_subset_pass(
             futures_count=len(futures),
             layer_index=layer_index,
         )
-    except BaseException as exc:
+    except _WORKER_FAILURES as exc:
         submission_error = exc
 
     for name, named_module in _collect_worker_results(futures, prior_error=submission_error):
