@@ -101,12 +101,6 @@ _EXTERNAL_BACKEND_FORMATS = {
         FORMAT.GPTQ,
         FORMAT.GEMM,
     },
-    BACKEND.SGLANG: {
-        FORMAT.GPTQ,
-        FORMAT.GPTQ_V2,
-        FORMAT.GEMM,
-        FORMAT.MARLIN,
-    },
 }
 
 
@@ -494,6 +488,27 @@ def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype
 
     log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
     return torch.float16
+
+
+_SGLANG_SUPPORTED_QUANTIZATION = frozenset(
+    {
+        (METHOD.GPTQ, FORMAT.GPTQ),
+        (METHOD.GPTQ, FORMAT.GPTQ_V2),
+        (METHOD.GPTQ, FORMAT.MARLIN),
+        (METHOD.AWQ, FORMAT.GEMM),
+        (METHOD.AWQ, FORMAT.MARLIN),
+    }
+)
+
+
+def _validate_sglang_quantization(method: METHOD, format_code: FORMAT) -> None:
+    if (method, format_code) in _SGLANG_SUPPORTED_QUANTIZATION:
+        return
+
+    raise ValueError(
+        "SGLANG backend only supports GPTQ/GPTQ, GPTQ/GPTQ_V2, GPTQ/MARLIN, AWQ/GEMM, or AWQ/MARLIN: "
+        f"actual method = {method}, format = {format_code}"
+    )
 
 
 def check_versions(model_class, requirements: List[str]):
@@ -1247,7 +1262,10 @@ def ModelLoader(cls):
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             runtime_generate = None
-            _validate_external_backend_format(backend, format_code)
+            if backend == BACKEND.SGLANG:
+                _validate_sglang_quantization(export_quant_method, format_code)
+            else:
+                _validate_external_backend_format(backend, format_code)
 
             if backend == BACKEND.VLLM:
                 from ..utils.vllm import (
@@ -1278,7 +1296,7 @@ def ModelLoader(cls):
                 model, hf_config = load_model_by_sglang(
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
-                    dtype=torch.float16,
+                    dtype=dtype,
                     **sglang_kwargs,
                 )
                 model.config = hf_config
