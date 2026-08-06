@@ -449,6 +449,17 @@ def pangolin_gemv(
     for M <= 8.  M == 16 and M == 32 are sliced into M == 8 VNNI chunks in Python
     to keep the accumulator set in ZMM registers.  It can be disabled with
     ``GPTQMODEL_PANGOLIN_CPU_DISABLE_VNNI=1``.
+
+    The packed-planar VNNI path (``GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_PACKED=1``)
+    decodes the original ``[N/16, K/32, bits, 16]`` qweight layout on-the-fly
+    instead of pre-expanding it to int8, saving weight memory traffic.  This is
+    especially useful for 3-bit weights and is currently experimental.
+
+    The VPDPBUSD uint8/int8 dot-product path (``GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1``)
+    is opt-in.  It uses a 4-K-row activation scale word to keep 8-bit quantization
+    error within the default rtol=0.02/atol=0.01 tolerance on real laguna/glm45
+    shapes for bits 3/5/6/7.  The smaller scale word trades some throughput for
+    accuracy, so it is not yet the default VNNI path.
     """
     if not x.is_contiguous():
         x = x.contiguous()
@@ -479,24 +490,47 @@ def pangolin_gemv(
     avx512_disabled = disable_avx512 is not None and disable_avx512.lower() in ("1", "true", "on")
     vnni_disabled = disable_vnni is not None and disable_vnni.lower() in ("1", "true", "on")
     has_vnni = _cpu_has_avx512_vnni() and not avx512_disabled and not vnni_disabled
-    use_vnni = M <= 8 and has_vnni
-    # For M == 16 or 32 we slice the batch into M=8 VNNI calls to avoid ZMM
-    # register spills while still using the VNNI dot-product path.
-    use_vnni_prepack = (M <= 8 or M in (16, 32)) and has_vnni
-    if use_vnni_prepack:
+    vnni_packed_env = os.environ.get("GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_PACKED")
+    use_vnni_packed = (
+        vnni_packed_env is not None and vnni_packed_env.lower() in ("1", "true", "on")
+        and has_vnni
+        and (M <= 8 or M in (16, 32))
+    )
+    # VNNI prepack is used for M <= 8 (int16 or busd dot-product) and for M in
+    # {16, 32} when the C++ kernel handles the larger batch directly.
+    use_vnni_prepack = (M <= 8 or M in (16, 32)) and has_vnni and not use_vnni_packed
+    use_vnni = use_vnni_prepack
+    # VPDPBUSD (uint8 activation * int8 weight) is faster but exceeds the default
+    # numerical tolerance on real shapes, so it is gated off by default and can be
+    # enabled explicitly with GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1 for
+    # experiments.  The int16 VNNI path is the safe default for M <= 8.
+    busd_env = os.environ.get("GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD")
+    use_vnni_busd = busd_env is not None and busd_env.lower() in ("1", "true", "on")
+    if use_vnni_packed:
+        preexpand = False
+    elif use_vnni_prepack:
         preexpand = True
     qweight_packed = _prepack_qweight_for_cpu(
         qweight, qzeros, g_idx, bits, preexpand=preexpand, vnni=use_vnni_prepack
     )
-    if M in (16, 32) and has_vnni:
+    # Slice M=16/32 only when the int16 VNNI path is being used; busd can process
+    # up to M=32 in one C++ call when explicitly enabled.
+    if M in (16, 32) and has_vnni and not use_vnni_busd:
         out_chunks: list[torch.Tensor] = []
         for start in range(0, M, 8):
             chunk = x[start : start + 8]
             out_chunks.append(
-                _gemv_cpu_op()(chunk, qweight_packed, scales, qzeros, g_idx, bits, True)
+                _gemv_cpu_op()(
+                    chunk, qweight_packed, scales, qzeros, g_idx, bits,
+                    False if use_vnni_packed else True, use_vnni_packed, use_vnni_busd,
+                    None,
+                )
             )
         return torch.cat(out_chunks, dim=0).to(x.dtype)
-    return _gemv_cpu_op()(x, qweight_packed, scales, qzeros, g_idx, bits, use_vnni).to(x.dtype)
+    return _gemv_cpu_op()(
+        x, qweight_packed, scales, qzeros, g_idx, bits, use_vnni, use_vnni_packed, use_vnni_busd,
+        None,
+    ).to(x.dtype)
 
 
 __all__ = [

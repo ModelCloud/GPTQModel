@@ -333,6 +333,13 @@ alignas(64) static const int32_t k_zero_shift_w1_0_512[16] = {
 alignas(64) static const int32_t k_zero_shift_w1_16_512[16] = {
     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31};
 
+// Interleave two 16-lane int16 vectors into one 32-lane vector used by the
+// packed-planar VNNI decoder to build the 32-lane int16 weight operands for
+// VPDPBWSSD: out[2*i] = a[i], out[2*i+1] = b[i].
+alignas(64) static const int16_t k_interleave_01_512[32] = {
+    0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39,
+    8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47};
+
 template <int Bits>
 __attribute__((target("avx512f,avx512bw,avx512vl")))
 inline __m512i decode_zero_code_vec_512(
@@ -1378,6 +1385,45 @@ static void quantize_x_to_int16(
   });
 }
 
+template <int scale_word_size>
+static void quantize_x_to_uint8_perword_t(
+    const float* __restrict__ x_f,
+    int M,
+    int64_t K,
+    const int32_t* __restrict__ /*g_idx*/,
+    int /*num_groups*/,
+    uint8_t* __restrict__ x_u8,
+    float* __restrict__ x_sx_word) {
+  constexpr int dot_word_size = 4;
+  const int num_scale_words = static_cast<int>(K / scale_word_size);
+  at::parallel_for(0, static_cast<int64_t>(M) * num_scale_words, 1, [&](int64_t begin, int64_t end) {
+    for (int64_t idx = begin; idx < end; ++idx) {
+      const int m = static_cast<int>(idx / num_scale_words);
+      const int sw = static_cast<int>(idx % num_scale_words);
+      const int64_t k0 = static_cast<int64_t>(sw) * scale_word_size;
+      float max_abs = 0.0f;
+      for (int k = 0; k < scale_word_size; ++k) {
+        const float v = std::abs(x_f[static_cast<int64_t>(m) * K + k0 + k]);
+        if (v > max_abs) {
+          max_abs = v;
+        }
+      }
+      const float sx = (max_abs > 0.0f) ? (max_abs / 127.0f) : 1.0f;
+      x_sx_word[static_cast<int64_t>(m) * num_scale_words + sw] = sx;
+      for (int k = 0; k < scale_word_size; ++k) {
+        const float v = x_f[static_cast<int64_t>(m) * K + k0 + k];
+        int iv = static_cast<int>(std::nearbyintf(v / sx)) + 128;
+        if (iv < 1) {
+          iv = 1;
+        } else if (iv > 255) {
+          iv = 255;
+        }
+        x_u8[static_cast<int64_t>(m) * K + k0 + k] = static_cast<uint8_t>(iv);
+      }
+    }
+  });
+}
+
 // Decode four consecutive K values from one pre-expanded int8 qweight word
 // into two 32-lane int16 vectors ready for VPDPBWSSD.  The qweight bytes are
 // already (code - zero) in signed int8 form, so only one vpermb gather and two
@@ -1397,6 +1443,58 @@ inline void decode_bits8_quad_vnni(__m512i qword, __m512i* out01, __m512i* out23
   *out01 = _mm512_cvtepi8_epi16(_mm512_castsi512_si256(perm));
   const __m512i perm_high = _mm512_shuffle_i64x2(perm, perm, 0x0E);
   *out23 = _mm512_cvtepi8_epi16(_mm512_castsi512_si256(perm_high));
+}
+
+// Decode four consecutive K values from the packed-planar qweight layout into
+// two 32-lane int16 vectors ready for VPDPBWSSD.  The `qwords` array holds the
+// `Bits` packed 512-bit words for the current 16-column, 32-row K-block; the
+// zero-point code for the current group is subtracted from each decoded code.
+template <int Bits>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma"), always_inline))
+inline void decode_packed_planar_quad_vnni(
+    const __m512i* qwords,
+    int base,
+    __m512i zero_vec,
+    __m512i* out01,
+    __m512i* out23) {
+  constexpr auto planes = plane_info<Bits>();
+  __m512i code0 = _mm512_setzero_si512();
+  __m512i code1 = _mm512_setzero_si512();
+  __m512i code2 = _mm512_setzero_si512();
+  __m512i code3 = _mm512_setzero_si512();
+  __m512i* codes[4] = {&code0, &code1, &code2, &code3};
+  _Pragma("GCC unroll 3")
+  for (int p = 0; p < 3; ++p) {
+    const int w = planes[p].w;
+    if (w == 0) {
+      break;
+    }
+    const int pack_factor = 32 / w;
+    const int mask = (1 << w) - 1;
+    const __m512i mask_vec = _mm512_set1_epi32(mask);
+    const int start = planes[p].start;
+    const int off = planes[p].off;
+    _Pragma("GCC unroll 4")
+    for (int i = 0; i < 4; ++i) {
+      const int k = base + i;
+      const int word_idx = start + k / pack_factor;
+      const int shift = w * (k % pack_factor);
+      const __m512i word = qwords[word_idx];
+      const __m512i shift_vec = _mm512_set1_epi32(shift);
+      const __m512i part = _mm512_and_si512(_mm512_srlv_epi32(word, shift_vec), mask_vec);
+      *codes[i] = _mm512_or_si512(*codes[i], _mm512_slli_epi32(part, off));
+    }
+  }
+  // Subtract zero point and convert to 16-bit before interleaving.
+  const __m256i c0_16 = _mm512_cvtepi32_epi16(_mm512_sub_epi32(code0, zero_vec));
+  const __m256i c1_16 = _mm512_cvtepi32_epi16(_mm512_sub_epi32(code1, zero_vec));
+  const __m256i c2_16 = _mm512_cvtepi32_epi16(_mm512_sub_epi32(code2, zero_vec));
+  const __m256i c3_16 = _mm512_cvtepi32_epi16(_mm512_sub_epi32(code3, zero_vec));
+  const __m512i idx = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(k_interleave_01_512));
+  const __m512i src01 = _mm512_castsi256_si512(c0_16);
+  const __m512i src23 = _mm512_castsi256_si512(c2_16);
+  *out01 = _mm512_permutex2var_epi16(src01, idx, _mm512_castsi256_si512(c1_16));
+  *out23 = _mm512_permutex2var_epi16(src23, idx, _mm512_castsi256_si512(c3_16));
 }
 
 template <int Bits, int SizeM>
@@ -1813,6 +1911,444 @@ void gemv_kernel_avx512_vnni_single_dispatch_bits(
   }
 }
 
+// AVX-512 VNNI uint8/int8 dot-product (VPDPBUSD) micro-kernel with per-scale-word
+// activation scale.  The activation x is quantized per scale_word_size K rows to
+// uint8 and the qweight is the pre-expanded signed int8 (code - zero) layout.
+// VPDPBUSD computes sum(x_u8 * w_i8) per 32-bit lane; we accumulate all dot-words
+// inside the scale word, subtract 128 * sum(w_i8), and scale by the per-word x
+// scale and the per-column weight scale.  Larger scale words reduce FMA overhead
+// but increase 8-bit activation quantization error; 32-K-row words win for bits
+// 3/6/7 while 8-K-row words keep bits=5 within tolerance.
+template <int SizeM, int scale_word_size>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,fma")))
+void gemv_col_block_avx512_vnni_busd(
+    const uint8_t* __restrict__ x_u8,
+    const float* __restrict__ x_sx_word,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    void* __restrict__ out_ptr,
+    bool out_float,
+    int64_t col0,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int64_t kb_start,
+    int64_t kb_end,
+    const int32_t* sum_w = nullptr) {
+  constexpr int dot_word_size = 4;
+  const int64_t num_k_blocks = K / 32;
+  constexpr int dot_words_per_kblock = 32 / dot_word_size;
+  constexpr int dot_words_per_scale_word = scale_word_size / dot_word_size;
+  constexpr int scale_words_per_block = 32 / scale_word_size;
+  const int64_t num_scale_words = num_k_blocks * scale_words_per_block;
+  const int64_t chunk = col0 / 16;
+  __m512 acc_fp32[SizeM];
+  for (int m = 0; m < SizeM; ++m) {
+    acc_fp32[m] = _mm512_set1_ps(0.0f);
+  }
+  float* out_f = reinterpret_cast<float*>(out_ptr);
+  at::BFloat16* out_b = reinterpret_cast<at::BFloat16*>(out_ptr);
+  int prev_group = -1;
+  __m512 scale_vec = _mm512_set1_ps(0.0f);
+  const __m512i ones_u8 = _mm512_set1_epi32(0x01010101);
+  for (int64_t kb = kb_start; kb < kb_end; ++kb) {
+    const int64_t row0 = kb * 32;
+    int group = g_idx[row0];
+    if (__builtin_expect(group < 0, 0)) {
+      group += static_cast<int>(num_groups);
+    }
+    if (__builtin_expect(group != prev_group, 0)) {
+      scale_vec = load_scale_512(scale_b + static_cast<int64_t>(group) * N + col0);
+      prev_group = group;
+    }
+    const uint32_t* qbase =
+        reinterpret_cast<const uint32_t*>(qweight) + ((chunk * num_k_blocks + kb) * dot_words_per_kblock) * 16;
+    if (__builtin_expect(kb + 1 < kb_end, 1)) {
+      const uint32_t* next_qbase =
+          reinterpret_cast<const uint32_t*>(qweight) +
+          ((chunk * num_k_blocks + kb + 1) * dot_words_per_kblock) * 16;
+      _mm_prefetch(reinterpret_cast<const char*>(next_qbase), _MM_HINT_T0);
+      _mm_prefetch(reinterpret_cast<const char*>(next_qbase + 8), _MM_HINT_T0);
+      int next_group = g_idx[(kb + 1) * 32];
+      if (__builtin_expect(next_group < 0, 0)) {
+        next_group += static_cast<int>(num_groups);
+      }
+      if (__builtin_expect(next_group != group, 0)) {
+        _mm_prefetch(
+            reinterpret_cast<const char*>(scale_b + static_cast<int64_t>(next_group) * N + col0),
+            _MM_HINT_T0);
+      }
+      for (int m = 0; m < SizeM; ++m) {
+        _mm_prefetch(
+            reinterpret_cast<const char*>(x_u8 + static_cast<int64_t>(m) * K + (kb + 1) * 32),
+            _MM_HINT_T0);
+      }
+    }
+    for (int sw = 0; sw < scale_words_per_block; ++sw) {
+      __m512i sum_w_i32 = _mm512_setzero_si512();
+      if (sum_w != nullptr && scale_word_size == 32) {
+        sum_w_i32 = load_i_512(sum_w + (chunk * num_k_blocks + kb) * 16 + static_cast<int64_t>(sw) * 16);
+      }
+      __m512i acc_i32[SizeM];
+      for (int m = 0; m < SizeM; ++m) {
+        acc_i32[m] = _mm512_setzero_si512();
+      }
+      const int64_t k0 = row0 + static_cast<int64_t>(sw) * scale_word_size;
+      const int64_t scale_word_global = kb * scale_words_per_block + sw;
+      for (int dw = 0; dw < dot_words_per_scale_word; ++dw) {
+        const __m512i w = load_i_512(qbase + static_cast<int64_t>(sw * dot_words_per_scale_word + dw) * 16);
+        if (sum_w == nullptr || scale_word_size != 32) {
+          sum_w_i32 = _mm512_dpbusd_epi32(sum_w_i32, ones_u8, w);
+        }
+        for (int m = 0; m < SizeM; ++m) {
+          uint32_t pair_u8;
+          std::memcpy(
+              &pair_u8, x_u8 + static_cast<int64_t>(m) * K + k0 + static_cast<int64_t>(dw) * dot_word_size,
+              sizeof(pair_u8));
+          const __m512i a = _mm512_set1_epi32(pair_u8);
+          acc_i32[m] = _mm512_dpbusd_epi32(acc_i32[m], a, w);
+        }
+      }
+      for (int m = 0; m < SizeM; ++m) {
+        const __m512 partial = _mm512_cvtepi32_ps(_mm512_sub_epi32(acc_i32[m], _mm512_slli_epi32(sum_w_i32, 7)));
+        const float sx = x_sx_word[static_cast<int64_t>(m) * num_scale_words + scale_word_global];
+        const __m512 combined_scale = _mm512_mul_ps(scale_vec, _mm512_set1_ps(sx));
+        acc_fp32[m] = _mm512_fmadd_ps(partial, combined_scale, acc_fp32[m]);
+      }
+    }
+  }
+  for (int m = 0; m < SizeM; ++m) {
+    if (out_float) {
+      store_f_avx512(out_f + static_cast<int64_t>(m) * N + col0, acc_fp32[m]);
+    } else {
+      store_bf16_512(out_b + static_cast<int64_t>(m) * N + col0, acc_fp32[m]);
+    }
+  }
+}
+
+template <int SizeM, int scale_word_size>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,fma"), always_inline))
+static void gemv_kernel_avx512_vnni_busd_impl(
+    const uint8_t* __restrict__ x_u8,
+    const float* __restrict__ x_sx_word,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    const int32_t* sum_w = nullptr) {
+  constexpr int dot_word_size = 4;
+  const int64_t num_k_blocks = K / 32;
+  const int64_t col_chunks = N / 16;
+  const int num_threads = at::get_num_threads();
+  const bool k_parallel = (col_chunks < num_threads * 2) && (num_k_blocks > 1);
+  if (k_parallel) {
+    const size_t partial_per_task = static_cast<size_t>(SizeM) * N;
+    const int64_t k_grain = std::max<int64_t>(1, num_k_blocks / num_threads);
+    const int64_t num_tasks = (num_k_blocks + k_grain - 1) / k_grain;
+    std::vector<float> partial(static_cast<size_t>(num_tasks) * partial_per_task, 0.0f);
+    std::atomic<int64_t> task_counter{0};
+    at::parallel_for(0, num_k_blocks, k_grain, [&](int64_t kb_begin, int64_t kb_end) {
+      const int64_t task_id = task_counter.fetch_add(1);
+      float* p_out = partial.data() + task_id * partial_per_task;
+      for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+        gemv_col_block_avx512_vnni_busd<SizeM, scale_word_size>(
+            x_u8, x_sx_word, qweight, scale_b, g_idx, p_out, true,
+            col_block * 16, K, N, num_groups, kb_begin, kb_end, sum_w);
+      }
+    });
+    for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+      const int64_t col0 = col_block * 16;
+      for (int m = 0; m < SizeM; ++m) {
+        __m512 sum = _mm512_set1_ps(0.0f);
+        for (int64_t task_id = 0; task_id < num_tasks; ++task_id) {
+          const float* p =
+              partial.data() + task_id * partial_per_task + static_cast<int64_t>(m) * N + col0;
+          sum = _mm512_add_ps(sum, load_f_512(p));
+        }
+        store_bf16_512(out + static_cast<int64_t>(m) * N + col0, sum);
+      }
+    }
+  } else {
+    const int64_t grain = std::max<int64_t>(1, col_chunks / num_threads);
+    at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t col_block = begin; col_block < end; ++col_block) {
+        gemv_col_block_avx512_vnni_busd<SizeM, scale_word_size>(
+            x_u8, x_sx_word, qweight, scale_b, g_idx, out, false,
+            col_block * 16, K, N, num_groups, 0, num_k_blocks, sum_w);
+      }
+    });
+  }
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,fma")))
+void gemv_kernel_avx512_vnni_busd(
+    const uint8_t* __restrict__ x_u8,
+    const float* __restrict__ x_sx_word,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t /*M*/,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int busd_scale_word_size,
+    const int32_t* sum_w = nullptr) {
+  if (busd_scale_word_size == 32) {
+    gemv_kernel_avx512_vnni_busd_impl<SizeM, 32>(
+        x_u8, x_sx_word, qweight, scale_b, g_idx, out, K, N, num_groups, sum_w);
+  } else if (busd_scale_word_size == 16) {
+    gemv_kernel_avx512_vnni_busd_impl<SizeM, 16>(
+        x_u8, x_sx_word, qweight, scale_b, g_idx, out, K, N, num_groups, sum_w);
+  } else if (busd_scale_word_size == 8) {
+    gemv_kernel_avx512_vnni_busd_impl<SizeM, 8>(
+        x_u8, x_sx_word, qweight, scale_b, g_idx, out, K, N, num_groups, sum_w);
+  } else {
+    gemv_kernel_avx512_vnni_busd_impl<SizeM, 4>(
+        x_u8, x_sx_word, qweight, scale_b, g_idx, out, K, N, num_groups, sum_w);
+  }
+}
+
+template <int scale_word_size>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,fma")))
+static void gemv_kernel_avx512_vnni_busd_large(
+    const uint8_t* __restrict__ x_u8,
+    const float* __restrict__ x_sx_word,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t M,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    const int32_t* sum_w = nullptr) {
+  const int64_t num_scale_words = K / scale_word_size;
+  for (int64_t group = 0; group < M; group += 8) {
+    gemv_kernel_avx512_vnni_busd_impl<8, scale_word_size>(
+        x_u8 + group * K,
+        x_sx_word + group * num_scale_words,
+        qweight, scale_b, g_idx, out + group * N, K, N, num_groups, sum_w);
+  }
+}
+
+template <int Bits, int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_col_block_avx512_vnni_packed(
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ qzeros,
+    int64_t qzeros_stride,
+    const int32_t* __restrict__ g_idx,
+    void* __restrict__ out_ptr,
+    bool out_float,
+    int64_t col0,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    int64_t kb_start,
+    int64_t kb_end) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t chunk = col0 / 16;
+  __m512i acc_i32[SizeM];
+  __m512 acc_fp32[SizeM];
+  for (int m = 0; m < SizeM; ++m) {
+    acc_i32[m] = _mm512_set1_epi32(0);
+    acc_fp32[m] = _mm512_set1_ps(0.0f);
+  }
+  float* out_f = reinterpret_cast<float*>(out_ptr);
+  at::BFloat16* out_b = reinterpret_cast<at::BFloat16*>(out_ptr);
+  int prev_group = -1;
+  __m512 scale_vec = _mm512_set1_ps(0.0f);
+  __m512i zero_vec = _mm512_setzero_si512();
+  for (int64_t kb = kb_start; kb < kb_end; ++kb) {
+    const int64_t row0 = kb * 32;
+    int group = g_idx[row0];
+    if (__builtin_expect(group < 0, 0)) {
+      group += static_cast<int>(num_groups);
+    }
+    if (__builtin_expect(group != prev_group, 0)) {
+      if (__builtin_expect(prev_group != -1, 1)) {
+        for (int m = 0; m < SizeM; ++m) {
+          const __m512 sx_ps = _mm512_set1_ps(x_sx[static_cast<int64_t>(m) * num_groups + prev_group]);
+          const __m512 combined_scale = _mm512_mul_ps(scale_vec, sx_ps);
+          const __m512 dot_f = _mm512_cvtepi32_ps(acc_i32[m]);
+          acc_fp32[m] = _mm512_fmadd_ps(dot_f, combined_scale, acc_fp32[m]);
+          acc_i32[m] = _mm512_set1_epi32(0);
+        }
+      }
+      scale_vec = load_scale_512(scale_b + static_cast<int64_t>(group) * N + col0);
+      zero_vec = decode_zero_code_vec_512<Bits>(qzeros, group, col0, N, static_cast<int>(num_groups), qzeros_stride);
+      prev_group = group;
+    }
+    const uint32_t* qbase = reinterpret_cast<const uint32_t*>(qweight) + ((chunk * num_k_blocks + kb) * Bits) * 16;
+    __m512i qwords[Bits];
+    _Pragma("GCC unroll 8")
+    for (int pw = 0; pw < Bits; ++pw) {
+      qwords[pw] = load_i_512(qbase + static_cast<int64_t>(pw) * 16);
+    }
+    if (__builtin_expect(kb + 1 < kb_end, 1)) {
+      const uint32_t* next_qbase =
+          reinterpret_cast<const uint32_t*>(qweight) + ((chunk * num_k_blocks + kb + 1) * Bits) * 16;
+      _mm_prefetch(reinterpret_cast<const char*>(next_qbase), _MM_HINT_T0);
+      if (Bits > 2) {
+        _mm_prefetch(reinterpret_cast<const char*>(next_qbase + 16), _MM_HINT_T0);
+      }
+      if (Bits > 4) {
+        _mm_prefetch(reinterpret_cast<const char*>(next_qbase + 32), _MM_HINT_T0);
+      }
+      int next_group = g_idx[(kb + 1) * 32];
+      if (__builtin_expect(next_group < 0, 0)) {
+        next_group += static_cast<int>(num_groups);
+      }
+      if (__builtin_expect(next_group != group, 0)) {
+        _mm_prefetch(
+            reinterpret_cast<const char*>(scale_b + static_cast<int64_t>(next_group) * N + col0),
+            _MM_HINT_T0);
+      }
+      for (int m = 0; m < SizeM; ++m) {
+        _mm_prefetch(reinterpret_cast<const char*>(x_i16 + static_cast<int64_t>(m) * K + (kb + 1) * 32), _MM_HINT_T0);
+      }
+    }
+    _Pragma("GCC unroll 8")
+    for (int word_idx = 0; word_idx < 8; ++word_idx) {
+      __m512i w01, w23;
+      decode_packed_planar_quad_vnni<Bits>(qwords, word_idx * 4, zero_vec, &w01, &w23);
+      const int64_t k0 = row0 + static_cast<int64_t>(word_idx) * 4;
+      _Pragma("GCC unroll 8")
+      for (int m = 0; m < SizeM; ++m) {
+        int16_t vals[4];
+        std::memcpy(vals, x_i16 + static_cast<int64_t>(m) * K + k0, sizeof(vals));
+        const uint32_t pair01 =
+            static_cast<uint32_t>(static_cast<uint16_t>(vals[0])) |
+            (static_cast<uint32_t>(static_cast<uint16_t>(vals[1])) << 16);
+        const uint32_t pair23 =
+            static_cast<uint32_t>(static_cast<uint16_t>(vals[2])) |
+            (static_cast<uint32_t>(static_cast<uint16_t>(vals[3])) << 16);
+        const __m512i a01 = _mm512_set1_epi32(pair01);
+        const __m512i a23 = _mm512_set1_epi32(pair23);
+        acc_i32[m] = _mm512_dpwssd_epi32(
+            _mm512_dpwssd_epi32(acc_i32[m], a01, w01), a23, w23);
+      }
+    }
+  }
+  if (prev_group != -1) {
+    for (int m = 0; m < SizeM; ++m) {
+      const __m512 sx_ps = _mm512_set1_ps(x_sx[static_cast<int64_t>(m) * num_groups + prev_group]);
+      const __m512 combined_scale = _mm512_mul_ps(scale_vec, sx_ps);
+      const __m512 dot_f = _mm512_cvtepi32_ps(acc_i32[m]);
+      acc_fp32[m] = _mm512_fmadd_ps(dot_f, combined_scale, acc_fp32[m]);
+    }
+  }
+  for (int m = 0; m < SizeM; ++m) {
+    if (out_float) {
+      store_f_avx512(out_f + static_cast<int64_t>(m) * N + col0, acc_fp32[m]);
+    } else {
+      store_bf16_512(out_b + static_cast<int64_t>(m) * N + col0, acc_fp32[m]);
+    }
+  }
+}
+
+template <int Bits, int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_kernel_avx512_vnni_packed(
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ qzeros,
+    int64_t qzeros_stride,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t /*M*/,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  const int64_t num_k_blocks = K / 32;
+  const int64_t col_chunks = N / 16;
+  const int num_threads = at::get_num_threads();
+  const bool k_parallel = (col_chunks < num_threads * 2) && (num_k_blocks > 1);
+  if (k_parallel) {
+    const size_t partial_per_task = static_cast<size_t>(SizeM) * N;
+    const int64_t k_grain = std::max<int64_t>(1, num_k_blocks / num_threads);
+    const int64_t num_tasks = (num_k_blocks + k_grain - 1) / k_grain;
+    std::vector<float> partial(static_cast<size_t>(num_tasks) * partial_per_task, 0.0f);
+    std::atomic<int64_t> task_counter{0};
+    at::parallel_for(0, num_k_blocks, k_grain, [&](int64_t kb_begin, int64_t kb_end) {
+      const int64_t task_id = task_counter.fetch_add(1);
+      float* p_out = partial.data() + task_id * partial_per_task;
+      for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+        gemv_col_block_avx512_vnni_packed<Bits, SizeM>(
+            x_i16, x_sx, qweight, scale_b, qzeros, qzeros_stride, g_idx, p_out, true,
+            col_block * 16, K, N, num_groups, kb_begin, kb_end);
+      }
+    });
+    for (int64_t col_block = 0; col_block < col_chunks; ++col_block) {
+      const int64_t col0 = col_block * 16;
+      for (int m = 0; m < SizeM; ++m) {
+        __m512 sum = _mm512_set1_ps(0.0f);
+        for (int64_t task_id = 0; task_id < num_tasks; ++task_id) {
+          const float* p = partial.data() + task_id * partial_per_task + static_cast<int64_t>(m) * N + col0;
+          sum = _mm512_add_ps(sum, load_f_512(p));
+        }
+        store_bf16_512(out + static_cast<int64_t>(m) * N + col0, sum);
+      }
+    }
+  } else {
+    const int64_t grain = std::max<int64_t>(1, col_chunks / num_threads);
+    at::parallel_for(0, col_chunks, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t col_block = begin; col_block < end; ++col_block) {
+        gemv_col_block_avx512_vnni_packed<Bits, SizeM>(
+            x_i16, x_sx, qweight, scale_b, qzeros, qzeros_stride, g_idx, out, false,
+            col_block * 16, K, N, num_groups, 0, num_k_blocks);
+      }
+    });
+  }
+}
+
+template <int SizeM>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vnni,avx512vbmi,fma")))
+void gemv_kernel_avx512_vnni_packed_dispatch_bits(
+    int64_t bits,
+    const int16_t* __restrict__ x_i16,
+    const float* __restrict__ x_sx,
+    const int32_t* __restrict__ qweight,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ qzeros,
+    int64_t qzeros_stride,
+    const int32_t* __restrict__ g_idx,
+    at::BFloat16* __restrict__ out,
+    int64_t M,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups) {
+  switch (bits) {
+    case 3:
+      gemv_kernel_avx512_vnni_packed<3, SizeM>(
+          x_i16, x_sx, qweight, scale_b, qzeros, qzeros_stride, g_idx, out, M, K, N, num_groups);
+      break;
+    case 5:
+      gemv_kernel_avx512_vnni_packed<5, SizeM>(
+          x_i16, x_sx, qweight, scale_b, qzeros, qzeros_stride, g_idx, out, M, K, N, num_groups);
+      break;
+    case 6:
+      gemv_kernel_avx512_vnni_packed<6, SizeM>(
+          x_i16, x_sx, qweight, scale_b, qzeros, qzeros_stride, g_idx, out, M, K, N, num_groups);
+      break;
+    case 7:
+      gemv_kernel_avx512_vnni_packed<7, SizeM>(
+          x_i16, x_sx, qweight, scale_b, qzeros, qzeros_stride, g_idx, out, M, K, N, num_groups);
+      break;
+  }
+}
+
 #endif  // PLANAR_GEMV_CPU_X86
 
 template <int Bits, int SizeM>
@@ -2021,6 +2557,80 @@ static void dispatch_size_m(
   }
 }
 
+template <int scale_word_size>
+static void run_vnni_busd_with_scale(
+    const float* __restrict__ x_f,
+    const int32_t* __restrict__ qweight_ptr,
+    const at::BFloat16* __restrict__ scale_b,
+    const int32_t* __restrict__ g_idx_ptr,
+    at::BFloat16* __restrict__ out_ptr,
+    int64_t M,
+    int64_t K,
+    int64_t N,
+    int64_t num_groups,
+    const int32_t* __restrict__ sum_w_ptr) {
+  const int64_t num_scale_words = K / scale_word_size;
+  std::vector<uint8_t> x_u8(static_cast<size_t>(M) * K);
+  std::vector<float> x_sx_word(static_cast<size_t>(M) * num_scale_words);
+  quantize_x_to_uint8_perword_t<scale_word_size>(
+      x_f, static_cast<int>(M), K, g_idx_ptr, static_cast<int>(num_groups), x_u8.data(),
+      x_sx_word.data());
+  switch (static_cast<int>(M)) {
+    case 1:
+      gemv_kernel_avx512_vnni_busd<1>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 2:
+      gemv_kernel_avx512_vnni_busd<2>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 3:
+      gemv_kernel_avx512_vnni_busd<3>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 4:
+      gemv_kernel_avx512_vnni_busd<4>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 5:
+      gemv_kernel_avx512_vnni_busd<5>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 6:
+      gemv_kernel_avx512_vnni_busd<6>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 7:
+      gemv_kernel_avx512_vnni_busd<7>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 8:
+      gemv_kernel_avx512_vnni_busd<8>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, scale_word_size, sum_w_ptr);
+      break;
+    case 16:
+      gemv_kernel_avx512_vnni_busd_large<scale_word_size>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, sum_w_ptr);
+      break;
+    case 32:
+      gemv_kernel_avx512_vnni_busd_large<scale_word_size>(
+          x_u8.data(), x_sx_word.data(), qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+          M, K, N, num_groups, sum_w_ptr);
+      break;
+    default:
+      TORCH_CHECK(false, "pangolin_gemv_cpu supports M in {1..8,16,32}, got ", M);
+  }
+}
+
 }  // namespace
 
 torch::Tensor pangolin_gemv_cpu(
@@ -2030,7 +2640,10 @@ torch::Tensor pangolin_gemv_cpu(
     torch::Tensor qzeros,
     torch::Tensor g_idx,
     int64_t bits,
-    bool use_vnni) {
+    bool use_vnni,
+    bool use_vnni_packed,
+    bool use_vnni_busd,
+    c10::optional<at::Tensor> sum_w_32_opt) {
   TORCH_CHECK(input.device().is_cpu(), "pangolin_gemv_cpu input must be CPU");
   TORCH_CHECK(
       qweight.device().is_cpu() && scales.device().is_cpu() && qzeros.device().is_cpu() && g_idx.device().is_cpu(),
@@ -2090,6 +2703,18 @@ torch::Tensor pangolin_gemv_cpu(
   const int32_t* __restrict__ qweight_ptr = qweight.data_ptr<int32_t>();
   const int32_t* __restrict__ qzeros_ptr = qzeros.data_ptr<int32_t>();
   const int32_t* __restrict__ g_idx_ptr = g_idx.data_ptr<int32_t>();
+
+  const int32_t* sum_w_ptr = nullptr;
+  if (sum_w_32_opt.has_value() && sum_w_32_opt->numel() > 0) {
+    const auto& sum_w_32 = *sum_w_32_opt;
+    TORCH_CHECK(sum_w_32.device().is_cpu(), "pangolin_gemv_cpu sum_w_32 must be CPU");
+    TORCH_CHECK(sum_w_32.scalar_type() == at::kInt, "pangolin_gemv_cpu sum_w_32 must be int32");
+    TORCH_CHECK(
+        sum_w_32.dim() == 3 && sum_w_32.size(0) == N / 16 && sum_w_32.size(1) == K / 32 &&
+            sum_w_32.size(2) == 16,
+        "pangolin_gemv_cpu sum_w_32 must have shape [N/16, K/32, 16]");
+    sum_w_ptr = sum_w_32.data_ptr<int32_t>();
+  }
 
   const int64_t qzeros_stride = (N / 32) * bits;
 
@@ -2210,6 +2835,22 @@ torch::Tensor pangolin_gemv_cpu(
   }
 
 #if PLANAR_GEMV_CPU_X86
+  // AVX-512 VNNI uint8/int8 dot-product (VPDPBUSD) micro-kernel for the
+  // pre-expanded signed int8 qweight layout.  The activation is quantized per
+  // scale word to uint8; the word size is tuned to keep the 8-bit activation
+  // quantization error within the default rtol=0.02/atol=0.01 tolerance.
+  if (kernel_bits == 8 && cpu_supports_avx512_vnni() && N % 32 == 0 && M <= 32 && use_vnni &&
+      use_vnni_busd) {
+    // Use a 4-K-row scale word for VPDPBUSD to keep 8-bit activation
+    // quantization error within the default rtol=0.02/atol=0.01 tolerance.
+    run_vnni_busd_with_scale<4>(
+        x_f, qweight_ptr, scale_b, g_idx_ptr, out_ptr,
+        M, K, N, num_groups, nullptr);
+    return output;
+  }
+#endif
+
+#if PLANAR_GEMV_CPU_X86
   // AVX-512 VNNI int16 dot-product path for the pre-expanded int8 qweight layout.
   // Each VPDPBWSSD instruction accumulates two int16 products per lane, giving
   // 64 FLOPs/instruction vs 32 for the FP32 FMA tile2 path.  The activation
@@ -2268,6 +2909,62 @@ torch::Tensor pangolin_gemv_cpu(
   }
 #endif
 
+#if PLANAR_GEMV_CPU_X86
+  // Packed-planar AVX-512 VNNI path: decode the original [N/16, K/32, bits, 16]
+  // qweight layout on-the-fly instead of pre-expanding it to int8.  This cuts
+  // weight memory traffic by 8/bits and is especially helpful for 3-bit layers,
+  // where the pre-expanded layout is 2.67x larger.  The caller sets
+  // `use_vnni_packed` and supplies the packed-planar layout (kernel_bits == bits).
+  if (kernel_bits == bits && cpu_supports_avx512_vnni() && N % 32 == 0 && M <= 8 && use_vnni_packed) {
+    std::vector<int16_t> x_i16(static_cast<size_t>(M) * K);
+    std::vector<float> x_sx(static_cast<size_t>(M) * num_groups);
+    quantize_x_to_int16(
+        x_f, static_cast<int>(M), K, g_idx_ptr, static_cast<int>(num_groups), x_i16.data(), x_sx.data());
+    switch (M) {
+      case 1:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<1>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 2:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<2>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 3:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<3>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 4:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<4>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 5:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<5>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 6:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<6>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 7:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<7>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+      case 8:
+        gemv_kernel_avx512_vnni_packed_dispatch_bits<8>(
+            bits, x_i16.data(), x_sx.data(), qweight_ptr, scale_b, qzeros_ptr, qzeros_stride,
+            g_idx_ptr, out_ptr, M, K, N, num_groups);
+        return output;
+    }
+  }
+#endif
+
 #endif
 
   dispatch_size_m(M, kernel_bits, x_f, qweight_ptr, scale_b, zero_scale_f, g_idx_ptr, out_ptr, K, N, num_groups);
@@ -2279,7 +2976,7 @@ torch::Tensor pangolin_gemv_cpu(
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_pangolin, m) {
   m.def(
-      "gemv_cpu(Tensor input, Tensor qweight, Tensor scales, Tensor qzeros, Tensor g_idx, int bits, bool use_vnni) -> Tensor");
+      "gemv_cpu(Tensor input, Tensor qweight, Tensor scales, Tensor qzeros, Tensor g_idx, int bits, bool use_vnni, bool use_vnni_packed, bool use_vnni_busd, Tensor? sum_w_32) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_pangolin, CPU, m) {

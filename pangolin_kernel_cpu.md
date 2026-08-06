@@ -3861,3 +3861,389 @@ M=16/32 now reaches ~0.8-0.9 TFLOPS on the larger shapes, matching the M=8
 VNNI tile, and the M=8 path is unchanged.  The 2 TFLOPS target still requires a
 more efficient inner product (e.g. `vpdpbusd`, packed-planar VNNI, or wider
 column tiles) on top of this dispatch.
+
+## Optimization pass 45 (2026-08-05): packed-planar AVX-512 VNNI decode-on-the-fly
+
+This pass adds an experimental packed-planar VNNI micro-kernel that decodes the
+original `[N/16, K/32, bits, 16]` qweight layout on-the-fly instead of
+pre-expanding it to signed int8.  The goal was to cut weight memory traffic,
+which is especially high for 3-bit weights (the pre-expanded int8 layout is
+2.67x larger than the packed bit-plane layout).  The C++ op gains a
+`use_vnni_packed` argument and a new set of `gemv_col_block_avx512_vnni_packed`
+/ `gemv_kernel_avx512_vnni_packed` / dispatch helpers; Python sets the flag when
+`GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_PACKED=1` and prepacks with
+`preexpand=False, vnni=False`.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 (default and
+  `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_PACKED=1`).
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+### A/B vs pre-expanded VNNI baseline (`laguna`, threads=8)
+
+bits=3:
+
+| K x N | M | prev ms | packed ms | prev TFLOPS | packed TFLOPS | kernel ratio |
+|-------|---|--------:|----------:|------------:|------------:|-------------:|
+| 2048 x 512 | 8 | 0.073 | 0.076 | 0.229 | 0.221 | 0.96x |
+| 2048 x 1024 | 8 | 0.082 | 0.083 | 0.410 | 0.403 | 0.99x |
+| 2048 x 6144 | 8 | 0.231 | 0.310 | 0.873 | 0.649 | 0.75x |
+| 2048 x 8192 | 8 | 0.572 | 0.503 | 0.470 | 0.533 | 1.14x |
+| 6144 x 2048 | 8 | 0.316 | 0.311 | 0.637 | 0.648 | 1.02x |
+| 8192 x 2048 | 8 | 0.551 | 0.572 | 0.487 | 0.469 | 0.96x |
+
+bits=6/7 (combined geomean on `laguna`):
+
+| set | bits | kernel ratio | speedup ratio | tflops ratio |
+|-----|------|-------------:|--------------:|-------------:|
+| laguna | 6 | 0.569x | 0.577x | 0.567x |
+| laguna | 7 | 0.543x | 0.562x | 0.542x |
+| all | all | 0.556x | 0.569x | 0.554x |
+
+The packed-planar path is **0.55-0.72x** of the pre-expanded VNNI baseline on a
+`laguna` geomean.  A few large-N, M=8, bits=3 shapes are slightly faster
+(`2048 x 8192` M=8 ~1.14x, `6144 x 2048` M=8 ~1.02x), but the decode
+overhead (multiple `srlv`/`and`/`or` per K value to reconstruct each code from
+bit planes) dominates on most shapes.  Because it is not a net positive, the
+path remains gated behind `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_PACKED=1` and is
+not the default.  The next likely 2 TFLOPS lever is a denser inner product
+(`vpdpbusd` uint8/int8 VNNI) or a wider column tile to amortize the VNNI
+activation broadcasts.
+
+## Optimization pass 46 (2026-08-05): `vpdpbusd` uint8/int8 VNNI with per-8-row activation scale
+
+This pass adds an experimental `VPDPBUSD` micro-kernel (`gemv_col_block_avx512_vnni_busd`)
+for the pre-expanded signed-int8 qweight layout.  `VPDPBUSD` performs 64 int8 MACs per
+instruction (twice the density of `VPDPBWSSD`), but it needs an unsigned `uint8`
+activation.  The activation is quantized per 8-K-row word to `uint8` and the kernel
+subtracts `128 * sum(w)` to recover the signed int8 dot product.  Scaling is per 8-K-row
+word and per-column weight scale, so the hot loop issues one `vpdpbusd` per M per 4 K
+rows but only one FMA per M per 8 K rows.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 with
+  `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1`.
+- `pytest -q tests/test_pangolin_cpu_kernel.py` passed 160/160 on the default path.
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 7` passed both with and
+  without the env flag.
+
+### `laguna` bits=7 M=8 A/B vs default pre-expanded VNNI (threads=8)
+
+| K x N | M | prev ms | busd ms | prev TFLOPS | busd TFLOPS | kernel ratio |
+|-------|--:|--------:|--------:|------------:|------------:|-------------:|
+| 2048 x 6144 | 8 | 0.299 | 0.257 | 0.674 | 0.784 | 1.16x |
+| 2048 x 1024 | 8 | 0.082 | 0.066 | 0.411 | 0.505 | 1.23x |
+| 6144 x 2048 | 8 | 0.389 | 0.255 | 0.518 | 0.789 | 1.52x |
+| 2048 x 8192 | 8 | 0.437 | 0.256 | 0.615 | 1.049 | 1.71x |
+| 8192 x 2048 | 8 | 0.385 | 0.325 | 0.697 | 0.826 | 1.19x |
+| 2048 x 512 | 8 | 0.059 | 0.060 | 0.286 | 0.278 | 0.97x |
+| 512 x 2048 | 8 | 0.066 | 0.043 | 0.255 | 0.386 | 1.51x |
+| 2048 x 256 | 8 | 0.053 | 0.049 | 0.158 | 0.170 | 1.08x |
+
+### Sanity bits=7 M=8 (threads=8)
+
+| impl | time (138 iters) | speedup | TFLOPS |
+|------|-----------------:|--------:|-------:|
+| reference | 52.33 ms | 1.00x | 0.002 |
+| default VNNI | 0.116 ms | 451x | 0.858 |
+| `vpdpbusd` per-8 | 0.124 ms | 422x | 0.806 |
+
+### `laguna` bits=7 M=8 geomean
+
+- Default pre-expanded VNNI: **0.404 TFLOPS**
+- `vpdpbusd` per-8-row scale: **0.515 TFLOPS** (geomean **1.27x**)
+
+The per-8-row `vpdpbusd` path is clearly faster on the `laguna` M=8 sweep (up to **1.71x**
+on `2048 x 8192`) but is slightly slower on the smaller-N sanity shape.  It passes all
+160 kernel tests and is the first `VPDPBUSD` variant to do so.
+
+The per-8-row `vpdpbusd` path is the first single-instruction uint8/int8 dot-product
+variant that passes the full 160/160 kernel test suite.  It is faster than the
+pre-expanded int16 VNNI path on the `laguna` M=8 geomean (1.27x) and reaches **1.049
+TFLOPS** on `2048 x 8192`, but it is slightly slower on the smaller-N sanity shape (0.806
+vs 0.858 TFLOPS).  Because the win is shape-dependent, `VPDPBUSD` remained gated behind
+`GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1` while the next experiment tuned the activation
+scale granularity.
+
+## Pass 47 - per-32-K-row `vpdpbusd` activation scale and default dispatch for M >= 4
+
+Widened the `vpdpbusd` activation scale window from 8 to 32 K rows.  The kernel now
+accumulates 8 consecutive dot-words (32 K rows) in `__m512i` integer accumulators per M
+before a single `partial = acc - 128 * sum(w)` conversion and FMA.  This keeps the same
+number of `vpdpbusd` instructions but issues one FMA per M per 32 K rows instead of one
+per 8 K rows, cutting the per-scale overhead that limited the per-8-row variant.
+
+Numerical tests showed the 32-K-row scale stays within `rtol=0.02 / atol=0.01` for bits
+3/6/7 but exceeds tolerance for bits=5 on the test distribution.  To keep the path safe,
+the C++ dispatcher uses a 32-K-row scale for bits 3/6/7 and falls back to the 8-K-row
+scale for bits=5.  Python now enables `vpdpbusd` by default for `M >= 4` on VNNI-capable
+x86 CPUs; the env flag `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=0/1` still overrides.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py`: 160/160 passed.
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+### Sanity M=8 4096x11008 (threads=8) after pass 47
+
+| bits | kernel (ms) | speedup | TFLOPS |
+|-----:|------------:|--------:|-------:|
+| 3 | 0.0586 | 692x | 1.699 |
+| 5 | 0.0717 | 577x | 1.389 |
+| 6 | 0.0588 | 678x | 1.692 |
+| 7 | 0.0581 | 896x | 1.715 |
+
+### `laguna` bits=7 M=8 selected shapes (threads=8) after pass 47
+
+| K x N | M | kernel (ms) | TFLOPS |
+|-------|--:|------------:|-------:|
+| 2048 x 6144 | 8 | 0.137 | 1.472 |
+| 2048 x 8192 | 8 | 0.172 | 1.565 |
+| 6144 x 2048 | 8 | 0.207 | 0.972 |
+| 8192 x 2048 | 8 | 0.213 | 1.259 |
+
+### A/B vs previous default (laguna bits=7 M=8 geomean, threads=8)
+
+- Previous default (int16 VNNI single-chunk): **0.404 TFLOPS**
+- Pass 47 `vpdpbusd` per-32 K-row default: **~0.9 TFLOPS** geomean, with sanity shapes
+  at **1.4-1.7 TFLOPS**.
+
+This is the largest single CPU kernel speedup so far and brings the sanity M=8 path to
+within ~15-30% of the 2 TFLOPS target depending on bits.  The next lever is either a
+wider column tile, `vpdpbusd` packed across multiple M (16 M per 512-bit lane), or a
+faster activation quantization step.
+
+## Pass 48 - native `vpdpbusd` dispatch for M = 16 and 32
+
+Added a group-of-8 wrapper (`gemv_kernel_avx512_vnni_busd_large`) so the VPDPBUSD
+micro-kernel can process batches larger than 8 in a single C++ call, removing the
+Python `M=8` slice / `torch.cat` loop.  Python now lets M=16/32 through to the
+kernel when `use_vnni_busd` is active and only slices for the older int16 VNNI
+tile2 path.
+
+Per-32-K-row scale remains for M = 4..8 bits 3/6/7; for bits=5 and for M >= 16
+it falls back to per-8-K-row scale because the 8-bit activation quantization
+error exceeds `rtol=0.02/atol=0.01` for those cases.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py`: 160/160 passed.
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+### Sanity M=8 4096x11008 (threads=8) after pass 48
+
+| bits | kernel (ms) | speedup | TFLOPS |
+|-----:|------------:|--------:|-------:|
+| 3 | 0.0574 | 708x | 1.734 |
+| 5 | 0.0747 | 511x | 1.333 |
+| 6 | 0.0656 | 616x | 1.517 |
+| 7 | 0.0611 | 834x | 1.628 |
+
+### `laguna` bits=7 selected larger-batch shapes (threads=8) after pass 48
+
+| K x N | M | kernel (ms) | TFLOPS |
+|-------|--:|------------:|-------:|
+| 2048 x 8192 | 16 | 0.381 | 1.410 |
+| 8192 x 2048 | 16 | 0.756 | 0.711 |
+| 2048 x 8192 | 32 | 0.861 | 1.247 |
+| 8192 x 2048 | 32 | 0.795 | 1.350 |
+
+## Pass 51 - precompute per-32-K-row signed weight sums for VPDPBUSD
+
+The `vpdpbusd` micro-kernel was spending one `vpdpbusd` instruction per
+32-bit weight word to compute `sum_w` on-the-fly.  Python now precomputes
+`sum_w` for the signed-int8 pre-expanded VNNI qweight layout and passes it as
+an optional tensor; the C++ kernel uses it to initialize `sum_w_i32` with a
+single 512-bit load, removing the per-dot-word accumulation.
+
+The op schema grew one optional argument (`Tensor? sum_w_32`); the Python
+`_prepack_qweight_for_cpu` helper caches the sum alongside the packed qweight.
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160/160 passed.
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+### Sanity M=8 4096x11008 (threads=8) after pass 51
+
+| bits | kernel (ms) | speedup | TFLOPS |
+|-----:|------------:|--------:|-------:|
+| 3 | 0.0592 | 646x | 1.681 |
+| 5 | 0.1056 | 364x | 0.943 |
+| 6 | 0.0530 | 731x | 1.879 |
+| 7 | 0.0683 | 757x | 1.458 |
+
+### `laguna` bits=7 selected M=8 shapes (threads=8) after pass 51
+
+| K x N | M | kernel (ms) | TFLOPS |
+|-------|--:|------------:|-------:|
+| 2048 x 6144 | 8 | 0.161 | 1.253 |
+| 2048 x 8192 | 8 | 0.238 | 1.129 |
+| 8192 x 2048 | 8 | 0.242 | 1.107 |
+
+### `glm45` bits 6/7 selected M=8 shapes (threads=8) after pass 51
+
+| K x N | bits | M | kernel (ms) | TFLOPS |
+|-------|------|--:|------------:|-------:|
+| 4096 x 12288 | 6 | 8 | 0.398 | 2.021 |
+| 4096 x 10944 | 7 | 8 | 0.368 | 1.947 |
+| 10944 x 4096 | 7 | 8 | 0.416 | 1.725 |
+| 4096 x 12288 | 7 | 8 | 0.472 | 1.705 |
+
+Peak observed after pass 51: **2.021 TFLOPS** on `glm45` bits=6 `4096x12288` M=8.
+The 2 TFLOPS target is now reached on a real model-shaped layer.
+
+## Pass 52 - allow per-32-K-row scale for bits=5 at large K
+
+bits=5 was forced to per-8-K-row scale because the 8-bit activation
+quantization error exceeded tolerance for small K.  Real model layers use
+K >= 4096, where the error is small enough to tolerate the coarser scale.
+Use per-32-K-row scale for bits=5 when `K >= 4096`, matching bits 3/6/7,
+and fall back to per-8-K-row scale for smaller K.
+
+Validation:
+- `pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160/160 passed.
+- `ruff check` and `git diff --check` clean.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7` passed.
+
+### Sanity M=8 4096x11008 (threads=8) after pass 52
+
+| bits | kernel (ms) | speedup | TFLOPS |
+|-----:|------------:|--------:|-------:|
+| 3 | 0.0699 | 569x | 1.424 |
+| 5 | 0.0602 | 684x | 1.654 |
+| 6 | 0.0707 | 565x | 1.409 |
+| 7 | 0.0581 | 890x | 1.713 |
+
+### `glm45` selected M=8 shapes (threads=8) after pass 52
+
+| K x N | bits | M | kernel (ms) | TFLOPS |
+|-------|------|--:|------------:|-------:|
+| 4096 x 10944 | 6 | 8 | 0.361 | 1.986 |
+| 4096 x 12288 | 6 | 8 | 0.408 | 1.975 |
+| 4096 x 12288 | 5 | 8 | 0.561 | 1.435 |
+| 4096 x 10944 | 5 | 8 | 0.474 | 1.512 |
+
+Peak observed after pass 52: **1.986 TFLOPS** on `glm45` bits=6 `4096x10944` M=8.
+
+## Pass 53 - CPU cache memory/impact study and VPDPBUSD correctness fix
+
+Measured per-cache memory and per-call speed impact on a `glm45`-shaped layer
+(`4096x12288`, bits=6, M=8, group_size=128).  The packed/pre-expanded qweight
+caches are essential; the `_QWEIGHT_CPU_VNNI_SUM_W_CACHE` was only useful for
+the VPDPBUSD path, which exceeds the default `rtol=0.02, atol=0.01` tolerance on
+real shapes, so it was removed and busd was made opt-in only.
+
+### Per-cache memory footprint for one weight tensor
+
+For `glm45` `4096x12288` bits=6:
+
+| cache | tensor shape | size | notes |
+|-------|-------------:|-----:|-------|
+| Original `qweight` | `[768, 12288]` int32 | 36.0 MiB | baseline |
+| `_QWEIGHT_CPU_PACKED_CACHE` | `[768, 128, 6, 16]` int32 | 36.0 MiB | same size as original; used when `PREEXPAND_QWEIGHT=0` and VNNI disabled |
+| `_QWEIGHT_CPU_PREEXPAND_CACHE` | `[768, 128, 8, 16]` int32 | 48.0 MiB | +12.0 MiB vs original; used by generic FP32 path |
+| `_QWEIGHT_CPU_VNNI_CACHE` | `[768, 128, 8, 16]` int32 | 48.0 MiB | +12.0 MiB vs original; used by int16 VNNI path |
+| `_QWEIGHT_CPU_VNNI_SUM_W_CACHE` | `[768, 128, 16]` int32 | 6.0 MiB | **removed**; only sped up the inaccurate VPDPBUSD path |
+| `_G_IDX_BLOCK_UNIFORM_CACHE` | one bool per `g_idx` tensor | << 1 KiB | negligible; avoids recomputing the `all()` check |
+
+### Per-cache speed impact (bits=6, M=8, `4096x12288`)
+
+| path | cache disabled | per-call ms | TFLOPS | slowdown |
+|------|----------------|------------:|-------:|---------:|
+| VNNI int16 default | none | 1.10 | 0.73 | 1.0x |
+| VNNI int16 default | `_QWEIGHT_CPU_VNNI_CACHE` | 125.76 | 0.006 | 114x |
+| non-VNNI packed | none | 1.03 | 0.78 | 1.0x |
+| non-VNNI packed | `_QWEIGHT_CPU_PACKED_CACHE` | 1.55 | 0.52 | 1.5x |
+| non-VNNI preexpand | none | 0.78 | 1.04 | 1.0x |
+| non-VNNI preexpand | `_QWEIGHT_CPU_PREEXPAND_CACHE` | 57.39 | 0.014 | 73x |
+
+`_G_IDX_BLOCK_UNIFORM_CACHE` has no measurable impact and is kept for the cheap
+uniformity short-circuit.  The `_QWEIGHT_CPU_VNNI_SUM_W_CACHE` was removed
+because VPDPBUSD is no longer enabled by default.
+
+### VPDPBUSD correctness regression
+
+Focused `allclose` checks on `laguna` and `glm45` real shapes showed the
+`vpdpbusd` uint8/int8 dot-product path fails the default tolerance:
+
+| bits | shape | M | max abs | max rel |
+|-----:|-------|--:|--------:|--------:|
+| 3 | `4096x12288` | 8 | 0.0141 | 60.6 |
+| 5 | `4096x12288` | 8 | 0.0157 | 7446.9 |
+| 6 | `4096x12288` | 8 | 0.0157 | 813.7 |
+| 7 | `4096x12288` | 8 | 0.0160 | 106.2 |
+
+The int16 VNNI path (`vpdpwssd`) passes the same checks with `max abs` < 0.01.
+Because the 8-bit activation quantization in `vpdpbusd` is ~256x coarser than
+the int16 path, the accumulated error grows with `max|w|` (i.e. with bit width)
+and exceeds tolerance for the supported bit widths.  `vpdpbusd` is therefore now
+opt-in via `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1` while the quantization
+accuracy is improved.
+
+### Changes
+
+- Removed `_QWEIGHT_CPU_VNNI_SUM_W_CACHE` and `_compute_sum_w_32` from
+  `gptqmodel/utils/pangolin.py`.
+- `_prepack_qweight_for_cpu` now returns only the packed qweight.
+- `pangolin_gemv` no longer passes a `sum_w_32` tensor and defaults
+  `use_vnni_busd` to false unless `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1`
+  is set.
+- Updated docstrings explaining why VPDPBUSD is opt-in.
+
+### Validation after pass 53
+
+- `ruff check gptqmodel/utils/pangolin.py gptqmodel/nn_modules/triton_utils/planar.py gptqmodel/nn_modules/qlinear/tritonv2.py scripts/benchmark_pangolin_cpu.py tests/test_pangolin_cpu_kernel.py --config format/ruff.toml`: clean.
+- `pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160/160 passed.
+- `GPTQMODEL_PANGOLIN_CPU_PREEXPAND_QWEIGHT=0 pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160/160 passed.
+- `scripts/benchmark_pangolin_cpu.py --sanity --threads 8 --bits 3 5 6 7`: passed.
+- Real-shape `allclose` sweep (`laguna` + `glm45`, bits 3/5/6/7, M=1/2/4/8,
+  group_size=128): all passed.
+
+With VPDPBUSD disabled, the safe int16 VNNI path peaks at ~1 TFLOPS on the
+`glm45` `4096x12288` M=8 shape; the 2 TFLOPS target remains open for a
+numerically-correct faster micro-kernel (packed-planar VNNI decode or a wider
+tile).
+
+## Pass 54 - fix VPDPBUSD accuracy with a 4-K-row activation scale word
+
+The `vpdpbusd` path was disabled because a 32-K-row (and 16-K-row/8-K-row)
+activation scale word accumulated too much 8-bit quantization error on real
+`laguna`/`glm45` shapes.  Reducing `busd_scale_word_size` to 4 keeps the
+per-scale-word rounding error within the default `rtol=0.02`/`atol=0.01`
+tolerance for bits 3/5/6/7 across M=1/2/4/8.
+
+Implementation:
+
+- `pangolin_gemv_cpu` dispatches the VPDPBUSD path with
+  `run_vnni_busd_with_scale<4>(..., nullptr)`.
+- The hot loop continues to compute the per-`w`-word `sum_w` on-the-fly with
+  `_mm512_dpbusd_epi32(ones_u8, w)`, so there is no extra memory traffic or
+  cache from a pre-computed `sum_w` buffer.
+- `gemv_kernel_avx512_vnni_busd` now also supports `scale_word_size == 16` in
+  addition to 4/8/32, preserving the template plumbing for future experiments.
+
+### Validation
+
+- `GPTQMODEL_PANGOLIN_CPU_ENABLE_VNNI_BUSD=1` real-shape `allclose` sweep
+  (`laguna` + `glm45`, bits 3/5/6/7, M=1/2/4/8, group_size=128): all passed.
+- `ruff check` on touched Python files: clean.
+- `git diff --check`: clean.
+- `pytest -q tests/test_pangolin_cpu_kernel.py --no-header`: 160/160 passed.
+
+### Performance (VPDPBUSD enabled, `laguna`, threads=8)
+
+| bits | K x N | M | kernel (ms) | speedup | TFLOPS |
+|-----:|-------|--:|------------:|--------:|-------:|
+| 5 | 2048 x 6144 | 8 | 0.241 | 311.78x | 0.835 |
+| 5 | 2048 x 6144 | 32 | 0.880 | 88.10x | 0.915 |
+| 5 | 8192 x 2048 | 32 | 1.071 | 88.51x | 1.003 |
+| 7 | 2048 x 6144 | 8 | 0.232 | 387.87x | 0.868 |
+| 7 | 2048 x 6144 | 32 | 0.741 | 123.08x | 1.086 |
+
+The 4-K-row scale word makes `vpdpbusd` numerically correct but does not reach
+the 2 TFLOPS target on M=8 shapes.  The 2 TFLOPS path remains a trade-off
+between activation-quantization word size and per-scale-word FP32 FMA overhead;
+the next bold experiment is packed-planar VNNI decode on-the-fly to cut weight
+memory traffic.
