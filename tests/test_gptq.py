@@ -4,6 +4,7 @@
 import copy
 import math
 import os
+import random
 import subprocess
 import sys
 import textwrap
@@ -12,16 +13,21 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import pytest
-import random
 import torch
 import torch.nn as nn
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.utils.logger import QuantizationRegionTimer
 from models.model_test import ModelTest
 
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import gptq as gptq_mod
-from gptqmodel.quantization.config import FallbackStrategy, HessianConfig, QuantizeConfig, ScaleSearchConfig
+from gptqmodel.quantization.config import (
+    AdaptiveClippingConfig,
+    FallbackStrategy,
+    HessianConfig,
+    QuantizeConfig,
+    ScaleSearchConfig,
+)
 from gptqmodel.quantization.gptq import GPTQ, get_number_of_rows_and_cols
+from gptqmodel.utils.logger import QuantizationRegionTimer
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -105,7 +111,7 @@ def test_gptq_cpu_hessian_fallback_returns_quantized_weights_to_original_cuda_de
 
     calls = {"cuda": 0, "cpu": 0}
 
-    def _patched_hessian_inverse(self, hessian: torch.Tensor):
+    def _patched_hessian_inverse(self, hessian: torch.Tensor, release_input: bool = False):
         if hessian.device.type == "cuda":
             calls["cuda"] += 1
             raise RuntimeError("CUDA out of memory. simulated for regression test")
@@ -231,17 +237,131 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
         GPTQ(layer, qcfg=qcfg)
 
 
+def test_adaptive_clipping_keeps_hessian_weighting_when_inverse_fails(monkeypatch):
+    """Inverse failure must not silently change Hessian-weighted clipping to plain MSE."""
+
+    torch.manual_seed(0)
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        act_group_aware=False,
+        adaptive_clipping=AdaptiveClippingConfig(metric="hessian_diag"),
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(4, 8), None)
+
+    monkeypatch.setattr(gptq, "hessian_inverse", lambda hessian, release_input=False: (None, 1.0))
+    observed_hessians = []
+    original_search = gptq.quantizer.adaptive_clip_search
+
+    def _record_search(x, *, weight, hessian=None, gptq_inverse_cholesky=None):
+        observed_hessians.append(hessian)
+        return original_search(
+            x,
+            weight=weight,
+            hessian=hessian,
+            gptq_inverse_cholesky=gptq_inverse_cholesky,
+        )
+
+    monkeypatch.setattr(gptq.quantizer, "adaptive_clip_search", _record_search)
+    gptq.quantize(blocksize=8)
+
+    assert observed_hessians
+    assert all(hessian is not None for hessian in observed_hessians)
+
+
+def test_adaptive_clipping_default_receives_gptq_inverse_cholesky(monkeypatch):
+    """The opt-in default must receive exact calibration/error-correction geometry per group."""
+
+    torch.manual_seed(29)
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        act_group_aware=False,
+        adaptive_clipping=AdaptiveClippingConfig(),
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(16, 8), None)
+
+    observed_factors = []
+    original_search = gptq.quantizer.adaptive_clip_search
+
+    def _record_search(x, *, weight, hessian=None, gptq_inverse_cholesky=None):
+        observed_factors.append(gptq_inverse_cholesky)
+        return original_search(
+            x,
+            weight=weight,
+            hessian=hessian,
+            gptq_inverse_cholesky=gptq_inverse_cholesky,
+        )
+
+    monkeypatch.setattr(gptq.quantizer, "adaptive_clip_search", _record_search)
+    qweight, *_ = gptq.quantize(blocksize=4)
+
+    assert torch.isfinite(qweight).all()
+    assert len(observed_factors) == 2
+    assert all(factor is not None and factor.shape == (4, 4) for factor in observed_factors)
+    assert all(torch.isfinite(factor).all() and (factor.diagonal() > 0).all() for factor in observed_factors)
+
+
+@torch.inference_mode()
+def test_adaptive_clipping_skips_unused_group_hessian_clones(monkeypatch):
+    """Adaptive clipping bypasses scale search and must not snapshot its Hessian blocks."""
+
+    torch.manual_seed(31)
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        act_group_aware=False,
+        scale_search=ScaleSearchConfig.HESSIAN,
+        offload_to_disk=False,
+        adaptive_clipping=AdaptiveClippingConfig(metric="mse"),
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(torch.randn(16, 8), None)
+
+    cloned_group_hessians = []
+    before_inverse = True
+    original_clone = torch.Tensor.clone
+    original_hessian_inverse = gptq.hessian_inverse
+
+    def _record_clone(tensor, *args, **kwargs):
+        if before_inverse and tuple(tensor.shape) == (4, 4):
+            cloned_group_hessians.append(tensor)
+        return original_clone(tensor, *args, **kwargs)
+
+    def _record_hessian_inverse(*args, **kwargs):
+        nonlocal before_inverse
+        before_inverse = False
+        return original_hessian_inverse(*args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", _record_clone)
+    monkeypatch.setattr(gptq, "hessian_inverse", _record_hessian_inverse)
+    qweight, *_ = gptq.quantize(blocksize=8)
+
+    assert torch.isfinite(qweight).all()
+    assert cloned_group_hessians == []
+
+
 @pytest.mark.parametrize(
-    ("hessian_inverse_available", "use_online_group_damping", "expected"),
+    ("hessian_inverse_available", "use_online_group_damping", "use_adaptive_clipping", "expected"),
     [
-        (True, False, 128),
-        (False, False, 64),
-        (True, True, 64),
+        (True, False, False, 128),
+        (False, False, False, 64),
+        (True, True, False, 64),
+        (True, False, True, 64),
     ],
 )
 def test_gptq_effective_blocksize_preserves_legacy_update_order(
     hessian_inverse_available,
     use_online_group_damping,
+    use_adaptive_clipping,
     expected,
 ):
     """Static GPTQ must not inherit the group-local partition used by adaptive feedback."""
@@ -251,7 +371,55 @@ def test_gptq_effective_blocksize_preserves_legacy_update_order(
         64,
         hessian_inverse_available=hessian_inverse_available,
         use_online_group_damping=use_online_group_damping,
+        use_adaptive_clipping=use_adaptive_clipping,
     ) == expected
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize(
+    ("desc_act", "act_group_aware"),
+    [(False, False), (True, False), (False, True)],
+    ids=["original-order", "desc-act", "group-aware-reordering"],
+)
+@pytest.mark.parametrize("sym", [False, True], ids=["asymmetric", "symmetric"])
+def test_exact_adaptive_clipping_is_invariant_to_outer_blocksize(
+    monkeypatch,
+    desc_act,
+    act_group_aware,
+    sym,
+):
+    """Every group's clipping search must see all preceding GPTQ corrections."""
+
+    monkeypatch.setenv("GPTQMODEL_BLOCK_CPU", "0")
+    torch.manual_seed(1)
+    weight = torch.randn(6, 8, dtype=torch.float32)
+    calibration = torch.randn(32, 8, dtype=torch.float32)
+    results = []
+
+    for blocksize in (8, 4):
+        layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+        layer.weight.data.copy_(weight)
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=4,
+            sym=sym,
+            desc_act=desc_act,
+            act_group_aware=act_group_aware,
+            offload_to_disk=False,
+            adaptive_clipping=AdaptiveClippingConfig(
+                metric="gptq_error",
+                candidates=(0.5, 0.7, 0.9, 1.0),
+            ),
+        )
+        gptq = GPTQ(layer, qcfg=qcfg)
+        gptq.quantizer.configure(perchannel=True)
+        gptq.add_batch(calibration, None)
+        results.append(gptq.quantize(blocksize=blocksize))
+
+    large_block, group_block = results
+    assert torch.equal(large_block[0], group_block[0])
+    assert all(torch.equal(actual, expected) for actual, expected in zip(large_block[1], group_block[1]))
+    assert all(torch.equal(actual, expected) for actual, expected in zip(large_block[2], group_block[2]))
 
 
 @torch.inference_mode()
@@ -926,6 +1094,73 @@ def test_hessian_inverse_correctness(dtype):
     torch.testing.assert_close(identity, torch.eye(n, dtype=dtype, device="cuda"), atol=1e-4, rtol=1e-4)
 
 
+@torch.inference_mode()
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hessian_inverse_restores_diagonal_on_cholesky_oom(monkeypatch):
+    """A CUDA OOM inside _hessian_inverse_try_cholesky must not leave damping in the input Hessian."""
+
+    torch.manual_seed(0)
+    n = 64
+    H = torch.randn(n, n, dtype=torch.float32, device="cuda")
+    H = H @ H.T
+    H.diagonal().add_(0.1)
+    H_orig = H.clone()
+
+    def _raising_cholesky(H_eff: torch.Tensor, diag_delta: torch.Tensor):
+        # Simulate an allocation failure after the in-place diagonal damping has been applied.
+        H_eff.diagonal().add_(diag_delta)
+        raise RuntimeError("simulated CUDA OOM")
+
+    monkeypatch.setattr(gptq_mod, "_hessian_inverse_try_cholesky", _raising_cholesky)
+
+    g = GPTQ(nn.Linear(n, n, bias=False, dtype=torch.float32, device="cuda"))
+    g.quantizer.configure(perchannel=True, grid=100, maxshrink=0.8, trits=False)
+
+    with pytest.raises(RuntimeError):
+        g.hessian_inverse(H)
+
+    # The caller's Hessian must be restored to its original diagonal so CPU retries or
+    # subsequent quantizers see the undamped calibration matrix.
+    torch.testing.assert_close(H.diagonal(), H_orig.diagonal())
+
+
+@torch.inference_mode()
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_hessian_inverse_uses_tensor_identity_for_shared_ownership(monkeypatch):
+    """Shared sources are cloned, while reordered private Hessians are reused in place."""
+
+    torch.manual_seed(41)
+    hessian = torch.randn(32, 32, dtype=torch.float32, device="cuda")
+    hessian = hessian @ hessian.T
+    hessian.diagonal().add_(0.5)
+    layer = nn.Linear(32, 32, bias=False, dtype=torch.float32, device="cuda").eval()
+    gptq = GPTQ(layer, qcfg=QuantizeConfig(act_group_aware=False, offload_to_disk=False))
+    gptq.quantizer.configure(perchannel=True)
+
+    observed_inputs = []
+    original_try_cholesky = gptq_mod._hessian_inverse_try_cholesky
+
+    def _record_try_cholesky(hessian_input, diag_delta):
+        observed_inputs.append(hessian_input.data_ptr())
+        return original_try_cholesky(hessian_input, diag_delta)
+
+    monkeypatch.setattr(gptq_mod, "_hessian_inverse_try_cholesky", _record_try_cholesky)
+
+    # Simulate an unrelated processor flag reset: tensor identity must still
+    # protect the borrowed source from in-place diagonal damping.
+    gptq._shared_hessian_source = hessian
+    gptq._hessian_is_shared = False
+    gptq.hessian_inverse(hessian)
+    assert observed_inputs[-1] != hessian.data_ptr()
+
+    # A permuted tensor is private even if the legacy flag remains stale.
+    perm = torch.arange(hessian.shape[0] - 1, -1, -1, device=hessian.device)
+    private_hessian = hessian[perm][:, perm]
+    gptq._hessian_is_shared = True
+    gptq.hessian_inverse(private_hessian)
+    assert observed_inputs[-1] == private_hessian.data_ptr()
+
+
 def test_hessian_inverse_cpu_extension_matches_eager():
     """The compiled CPU Hessian inverse op is bit-exact with the eager torch reference."""
     torch.manual_seed(0)
@@ -1107,13 +1342,15 @@ def test_gptq_cpu_block_no_duplicate_scales_for_large_group_size(
 
 def test_find_params_batched_cpu_extension_matches_eager():
     """The compiled CPU scale-search fallback returns the same scale/zero as the eager fallback."""
-    from gptqmodel.quantization.quantizer import Quantizer
     from gptqmodel.nn_modules.qlinear.pack_block_ext import find_params_batched_cpu
     from gptqmodel.quantization.config import ScaleSearchConfig
+    from gptqmodel.quantization.quantizer import Quantizer
 
     torch.manual_seed(0)
     rows, num_groups, group_size = 32, 2, 32
-    qcfg = QuantizeConfig(bits=4, group_size=group_size)
+    # Disable adaptive clipping so this test compares the CPU scale-search
+    # extension against the eager scale-search path, not the clipping fallback.
+    qcfg = QuantizeConfig(bits=4, group_size=group_size, adaptive_clipping=None)
     quantizer = Quantizer(qcfg=qcfg)
     quantizer.configure(perchannel=True, sym=True)
 

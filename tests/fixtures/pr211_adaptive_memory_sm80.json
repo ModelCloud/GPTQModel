@@ -1,0 +1,20 @@
+{
+  "device": "NVIDIA PG506-230",
+  "sm": "8.0",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "results": [
+    {
+      "label": "down_proj",
+      "rows": 4096,
+      "cols": 12288,
+      "peak_gib": 3.108
+    },
+    {
+      "label": "gate_proj",
+      "rows": 12288,
+      "cols": 4096,
+      "peak_gib": 0.604
+    }
+  ]
+}

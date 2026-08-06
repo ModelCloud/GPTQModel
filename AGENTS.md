@@ -39,6 +39,9 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - Post-quantization evaluation (Evalution, GSM8K, lm-eval, perplexity, sanity generation): use `$gptqmodel-evaluation`.
 - GPU correctness tests, performance benchmarks, user-specified GPU IDs, idle-device preflights, or long-running
   live result tables: use `$gptqmodel-gpu-testing`.
+- Unit/branch coverage, realistic and adversarial quantization test design, dense-reference numerical gates, or
+  nondeterminism-aware CUDA/Triton coverage claims: use `$gptq-coverage-review`; combine it with
+  `$gptqmodel-gpu-testing` and `$gptqmodel-cuda-kernels` when real GPU kernels are in scope.
 - GPU allocator CLI/client for leasing one or more GPUs: use `$gpu-allocator-cli`.
 - Contiguous-memory layout regressions in quantization or kernel paths: use `$gptqmodel-contiguous-memory`.
 - Torch-profiler traces, Nsight analysis, bottleneck attribution, launch gaps, overlap, or fusion opportunities:

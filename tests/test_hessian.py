@@ -25,10 +25,6 @@ from gptqmodel.utils.safe import THREADPOOLCTL
 
 
 ######### test_hessian_accumulation_cpu.py ##########
-pytestmark = pytest.mark.skipif(
-    (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
-    reason="CUDA device 6 is required for this benchmark test",
-    )
 
 
 @dataclass
@@ -99,6 +95,10 @@ def _benchmark_add_batch(
     return BenchmarkResult(per_batch_seconds=per_batch, total_seconds=total, batches_measured=measured)
 
 
+@pytest.mark.skipif(
+    (not torch.cuda.is_available()) or torch.cuda.device_count() <= 6,
+    reason="CUDA device 6 is required for this benchmark test",
+)
 def test_hessian_accumulation_cpu_vs_gpu():
     device = torch.device("cuda", 6)
     torch.cuda.set_device(device)
@@ -572,10 +572,9 @@ def test_hessian_inverse_returns_none_for_indefinite_matrix():
 
     assert hessian_inv is None
     assert damp == 1.0
-    # The diagonal should reflect the final floor attempt.
-    assert torch.allclose(hessian.diagonal(), torch.full((2,), 0.1, device=device))
-    # Off-diagonals must remain untouched.
-    assert torch.allclose(hessian - torch.diag(hessian.diagonal()), original - torch.diag(original.diagonal()))
+    # Recovery attempts are private implementation details; no floor or damping
+    # may leak into a Hessian retained by another consumer.
+    assert torch.equal(hessian, original)
 
 
 def test_hessian_inverse_matches_reference_for_positive_definite_matrix():
@@ -604,16 +603,16 @@ def test_hessian_inverse_applies_diagonal_floor_for_semi_definite_input():
     gptq = _build_gptq(damp_percent=0.05, damp_auto_increment=0.0)
     device = gptq.module.target_device
     hessian = torch.tensor([[0.0, 0.01], [0.01, 0.0]], dtype=torch.float32, device=device)
+    original = hessian.clone()
 
     hessian_inv, used_damp = gptq.hessian_inverse(hessian)
 
     assert hessian_inv is not None
     assert used_damp == pytest.approx(gptq.qcfg.damp_percent)
-    # Diagonal should be floored to a positive value so later steps see a PD matrix.
-    assert torch.all(hessian.diagonal() > 0)
-    assert torch.allclose(hessian.diagonal(), torch.full((2,), 0.01, device=device), atol=1e-7, rtol=0.0)
-
-    damped = _damped_hessian(hessian, used_damp)
+    assert torch.equal(hessian, original)
+    effective = original.clone()
+    effective.diagonal().fill_(0.01)
+    damped = _damped_hessian(effective, used_damp)
     # Should be positive definite after flooring, so Cholesky succeeds.
     torch.linalg.cholesky(damped)
     reconstructed = hessian_inv.transpose(-1, -2) @ hessian_inv
@@ -625,14 +624,16 @@ def test_hessian_inverse_handles_singleton_flooring():
     gptq = _build_gptq(damp_percent=0.05, damp_auto_increment=0.0)
     device = gptq.module.target_device
     hessian = torch.tensor([[0.0]], dtype=torch.float32, device=device)
+    original = hessian.clone()
 
     hessian_inv, used_damp = gptq.hessian_inverse(hessian)
 
     assert hessian_inv is not None
     assert hessian_inv.shape == hessian.shape
-    assert torch.allclose(hessian.diagonal(), torch.tensor([1e-6], dtype=torch.float32, device=device))
+    assert torch.equal(hessian, original)
 
-    damped = _damped_hessian(hessian, used_damp)
+    effective = torch.tensor([[1e-6]], dtype=torch.float32, device=device)
+    damped = _damped_hessian(effective, used_damp)
     reconstructed = hessian_inv.transpose(-1, -2) @ hessian_inv
     expected_inverse = torch.linalg.inv(damped)
     assert torch.allclose(reconstructed, expected_inverse, atol=1e-6, rtol=1e-4)

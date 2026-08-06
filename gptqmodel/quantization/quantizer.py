@@ -12,10 +12,6 @@ import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
-from ._scale_search_triton import (
-    _triton_find_params_batched_activation,
-    _triton_find_params_batched_hessian_hybrid,
-)
 from .config import (
     AdaptiveClippingConfig,
     AdaptiveClippingMetric,
@@ -48,6 +44,12 @@ SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 16
 # activation or MSE search memory.
 CORRELATED_SCALE_SEARCH_TARGET_ELEMENTS = 128 * 1024 * 1024
 CORRELATED_SCALE_SEARCH_MAX_CANDIDATES_PER_CHUNK = 80
+# Adaptive clipping only searches a small, user-controlled candidate list. The q
+# and diff temporaries are the dominant per-group allocations; cap chunk size so
+# a long candidate list still has bounded peak memory. The default candidate list
+# has 4 entries, so a cap of 4 lets the common case run in one chunk while
+# keeping the per-candidate scratch small.
+ADAPTIVE_CLIP_MAX_CANDIDATES_PER_CHUNK = 4
 
 MARLIN_SCALE_SEARCH_METHODS = frozenset({
     ScaleSearchConfig.MARLIN,
@@ -81,6 +83,12 @@ class Quantizer(nn.Module):
 
     def requires_groupwise_processing(self) -> bool:
         return False
+
+    @staticmethod
+    def _scale_search_shrink_factors(candidate_count: int, grid: int, device: torch.device) -> torch.Tensor:
+        """Build the FP32 shrink grid used by the pre-optimization GPTQ path."""
+
+        return 1 - torch.arange(candidate_count, device=device, dtype=torch.float32) / grid
 
     # FIXME, optimum shouldn't call this directly, it should call hf_configure
     def configure(
@@ -593,15 +601,18 @@ class Quantizer(nn.Module):
         weight: bool = False,
         *,
         hessian: torch.Tensor | None = None,
+        gptq_inverse_cholesky: torch.Tensor | None = None,
     ) -> None:
         """Search a per-row clipping threshold for ``x`` and set ``self.scale`` / ``self.zero``.
 
         Candidates are relative factors of each row's current ``max(|x|)``.
         For every candidate the clipped range is used to derive a scale and
         zero, the original ``x`` is quantized with that scale/zero, and the
-        candidate with the lowest MSE or Hessian-weighted squared error is kept.
-        Candidate tensors are materialized in bounded chunks so a long candidate
-        list does not blow up per-group memory.
+        candidate with the lowest configured objective is kept. The default
+        ``gptq_error`` objective simulates GPTQ's sequential error correction
+        using its damped inverse-Cholesky factor. Candidate tensors are
+        materialized in bounded chunks so a long candidate list does not blow
+        up per-group memory.
         """
 
         cfg = self.qcfg.adaptive_clipping
@@ -617,9 +628,12 @@ class Quantizer(nn.Module):
             maxq_value = int(self.maxq.item())
 
         # ``find_params`` has already flattened/reshaped ``x`` to [rows, cols].
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
+        rows = x.shape[0]
+        zero = torch.zeros(rows, device=dev)
+        # Single-pass min/max; avoid two full reductions.
+        xmin_raw, xmax_raw = torch.aminmax(x, dim=-1)
+        xmin = torch.minimum(xmin_raw, zero)
+        xmax = torch.maximum(xmax_raw, zero)
 
         if self.qcfg.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
@@ -630,38 +644,63 @@ class Quantizer(nn.Module):
         xmax = torch.where(zero_range, torch.ones_like(xmax), xmax)
         maxabs = torch.maximum(torch.abs(xmin), torch.abs(xmax))
         maxabs = torch.where(maxabs <= 0, torch.ones_like(maxabs), maxabs)
-
-        candidates = torch.tensor(cfg.candidates, dtype=torch.float32, device=dev)
-        num_candidates = candidates.numel()
-
-        # Use the same candidate-chunk sizing as scale search so large
-        # projection rows do not create unbounded [candidates, rows, cols]
-        # temporary tensors.
-        chunk_size = self._scale_search_candidate_chunk_size(x, num_candidates, ScaleSearchConfig.MSE)
-
-        best_loss = torch.full((x.shape[0],), float("inf"), device=dev)
-        best_scale = None
-        best_zero = None
+        all_zero = (xmin_raw == 0) & (xmax_raw == 0)
 
         h_diag = None
-        if cfg.metric == AdaptiveClippingMetric.HESSIAN_DIAG.value and hessian is not None:
-            if hessian.ndim == 1 and hessian.shape[0] == x.shape[1]:
-                h_diag = hessian
-            elif hessian.ndim == 2 and hessian.shape[0] == hessian.shape[1] == x.shape[1]:
-                h_diag = hessian.diagonal()
+        gptq_factor = None
+        objective_geometry_valid = True
+        if cfg.metric == AdaptiveClippingMetric.HESSIAN_DIAG.value:
+            if hessian is not None:
+                if hessian.ndim == 1 and hessian.shape[0] == x.shape[1]:
+                    h_diag = hessian
+                elif hessian.ndim == 2 and hessian.shape[0] == hessian.shape[1] == x.shape[1]:
+                    h_diag = hessian.diagonal()
             if h_diag is not None:
                 h_diag = h_diag.detach().to(device=dev, dtype=torch.float32)
                 h_diag = torch.nan_to_num(h_diag, nan=0.0, posinf=0.0, neginf=0.0).clamp_min_(0)
+                objective_geometry_valid = bool(torch.any(h_diag > 0).item())
+            else:
+                objective_geometry_valid = False
+        elif cfg.metric == AdaptiveClippingMetric.GPTQ_ERROR.value:
+            factor = gptq_inverse_cholesky
+            objective_geometry_valid = bool(
+                factor is not None
+                and factor.ndim == 2
+                and factor.shape[0] == factor.shape[1] == x.shape[1]
+                and torch.isfinite(factor).all().item()
+                and (factor.diagonal() > 0).all().item()
+            )
+            if objective_geometry_valid:
+                # GPTQ arithmetic is FP32 even when the saved module is FP16/BF16.
+                # Keep a view when already colocated instead of copying a group
+                # factor for every clipping search.
+                gptq_factor = factor.detach().to(device=dev, dtype=torch.float32)
 
-        if cfg.metric == AdaptiveClippingMetric.HESSIAN_DIAG.value and h_diag is None:
-            if not getattr(self, "_adaptive_clip_hessian_diag_fallback_logged", False):
-                hessian_shape = tuple(hessian.shape) if hessian is not None else None
-                log.debug(
-                    f"Quantizer: `adaptive_clipping` metric is `hessian_diag` but no valid Hessian diagonal "
-                    f"was supplied for module `{self.name}` (received shape {hessian_shape}); "
-                    f"falling back to unweighted MSE for the clipping search."
-                )
-                self._adaptive_clip_hessian_diag_fallback_logged = True
+        if not objective_geometry_valid:
+            # A missing calibration objective must never turn adaptive clipping
+            # into an implicit weight-only optimizer. Candidate 1.0 exactly
+            # reproduces the normal per-group min/max range after sanitization.
+            candidates = torch.ones(1, dtype=torch.float32, device=dev)
+            log.warn.once(
+                f"Quantizer: `adaptive_clipping` metric `{cfg.metric}` requires valid calibration geometry "
+                f"for module `{self.name}`; using the full unclipped range."
+            )
+        else:
+            candidates = torch.tensor(cfg.candidates, dtype=torch.float32, device=dev)
+        num_candidates = candidates.numel()
+
+        # Keep the q / diff scratch tensors small; the candidate list is short so
+        # extra chunk iterations are cheap, but the per-chunk temporaries scale
+        # with rows * group_size and can dominate per-group peak memory.
+        chunk_size = min(
+            num_candidates,
+            ADAPTIVE_CLIP_MAX_CANDIDATES_PER_CHUNK,
+            self._scale_search_candidate_chunk_size(x, num_candidates, ScaleSearchConfig.MSE),
+        )
+
+        best_loss = torch.full((rows,), float("inf"), device=dev)
+        best_scale = None
+        best_zero = None
 
         for start in range(0, num_candidates, chunk_size):
             end = min(start + chunk_size, num_candidates)
@@ -669,13 +708,17 @@ class Quantizer(nn.Module):
 
             # [chunk, rows]
             thresholds = cand_chunk.unsqueeze(1) * maxabs.unsqueeze(0)
-            # [chunk, rows, cols]
-            x_clipped = x.unsqueeze(0).clamp(-thresholds.unsqueeze(2), thresholds.unsqueeze(2))
+            # Derive the clipped extrema directly from the pre-computed row min/max
+            # without materializing a [chunk, rows, cols] ``x_clipped`` tensor.
+            # For each row, clamping to [-t, t] raises the minimum to max(old_min, -t)
+            # and lowers the maximum to min(old_max, t). The original code then
+            # clamps the extrema toward zero so the asymmetric range always
+            # contains zero; preserve that behavior.
+            xmin_c = torch.maximum(xmin.unsqueeze(0), -thresholds).clamp_max(0)
+            xmax_c = torch.minimum(xmax.unsqueeze(0), thresholds).clamp_min(0)
 
             # Keep zero inside the clipped range so asymmetric zero-points stay
             # valid and constant groups don't collapse to a zero-width range.
-            xmin_c = x_clipped.min(dim=-1)[0].clamp_max(0)
-            xmax_c = x_clipped.max(dim=-1)[0].clamp_min(0)
             if self.qcfg.sym:
                 xmax_c = torch.maximum(torch.abs(xmin_c), xmax_c)
                 neg_c = xmin_c < 0
@@ -683,6 +726,13 @@ class Quantizer(nn.Module):
             zero_range_c = (xmin_c == 0) & (xmax_c == 0)
             xmin_c = torch.where(zero_range_c, -torch.ones_like(xmin_c), xmin_c)
             xmax_c = torch.where(zero_range_c, torch.ones_like(xmax_c), xmax_c)
+            # Constant-zero rows have zero loss for every clipping candidate, so
+            # the first candidate is selected. Force the full [-1, 1] range for
+            # those rows to match the scale produced by the original materialized
+            # ``x.clamp(-t, t)`` path (which sees the clipped tensor as all zeros).
+            is_all_zero = all_zero.unsqueeze(0)
+            xmin_c = torch.where(is_all_zero, -torch.ones_like(xmin_c), xmin_c)
+            xmax_c = torch.where(is_all_zero, torch.ones_like(xmax_c), xmax_c)
 
             if maxq_value < 0:
                 scale_c = xmax_c
@@ -698,21 +748,31 @@ class Quantizer(nn.Module):
                     else:
                         zero_c = torch.round(-xmin_c / scale_c)
 
-            # Quantize the *original* weights with each candidate's scale/zero so the
-            # loss is measured against the unclipped signal.
-            q = quantize(
-                x.unsqueeze(0),
-                scale_c.unsqueeze(2),
-                zero_c.unsqueeze(2),
-                maxq_value,
-                self.requires_groupwise_processing(),
-            )
-            error = (x.unsqueeze(0) - q).float()
-
-            if h_diag is not None:
-                loss_chunk = (error ** 2 * h_diag).sum(dim=-1)
+            if gptq_factor is not None:
+                loss_chunk = self._adaptive_clip_gptq_error(
+                    x,
+                    scale_c,
+                    zero_c,
+                    gptq_factor,
+                    maxq_value=maxq_value,
+                )
             else:
-                loss_chunk = (error ** 2).sum(dim=-1)
+                # Quantize the *original* weights with each candidate's
+                # scale/zero so the approximation loss is measured against the
+                # unclipped signal.
+                q = quantize(
+                    x.unsqueeze(0),
+                    scale_c.unsqueeze(2),
+                    zero_c.unsqueeze(2),
+                    maxq_value,
+                    self.requires_groupwise_processing(),
+                )
+                diff = (x.unsqueeze(0) - q).float()
+                diff.pow_(2)
+                if h_diag is not None:
+                    diff.mul_(h_diag)
+                loss_chunk = diff.sum(dim=-1)
+                del diff
 
             chunk_best, chunk_idx = loss_chunk.min(dim=0)
             take = chunk_best < best_loss
@@ -730,7 +790,45 @@ class Quantizer(nn.Module):
         self.scale = best_scale
         self.zero = best_zero
 
-    def find_params(self, x, weight=False, *, hessian: torch.Tensor | None = None):
+    def _adaptive_clip_gptq_error(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor,
+        zero: torch.Tensor,
+        inverse_cholesky: torch.Tensor,
+        *,
+        maxq_value: int,
+    ) -> torch.Tensor:
+        """Return canonical GPTQ loss for each clipping candidate and row.
+
+        Let ``U`` be the upper Cholesky factor of the damped inverse Hessian.
+        For column ``j``, GPTQ uses ``E_j = (W_j - Q_j) / U_jj`` and updates
+        every remaining column by ``W[:, j:] -= E_j outer U[j, j:]``. The
+        candidate objective is therefore ``0.5 * sum_j(E_j ** 2)``. Simulating
+        that recursion is essential: quantized values after the first column
+        depend on both calibration activations and all earlier quantization
+        errors, which a weight-only or diagonal objective cannot represent.
+        """
+
+        work = x.float().unsqueeze(0).expand(scale.shape[0], -1, -1).clone()
+        factor = inverse_cholesky.float()
+        loss = torch.zeros(scale.shape, device=x.device, dtype=torch.float32)
+        groupwise = self.requires_groupwise_processing()
+        for column in range(x.shape[1]):
+            q = quantize(work[:, :, column], scale, zero, maxq_value, groupwise)
+            error = (work[:, :, column] - q) / factor[column, column]
+            loss.add_(0.5 * error.square())
+            work[:, :, column:].sub_(error.unsqueeze(2) * factor[column, column:])
+        return loss
+
+    def find_params(
+        self,
+        x,
+        weight=False,
+        *,
+        hessian: torch.Tensor | None = None,
+        gptq_inverse_cholesky: torch.Tensor | None = None,
+    ):
         # GPU scale-search algorithms (Triton and otherwise) assume a contiguous
         # [rows, num_groups, group_size] layout. gptq.py passes reshaped column
         # slices that may not be, so copy the local batch to avoid silent fallback
@@ -779,11 +877,17 @@ class Quantizer(nn.Module):
                     "Quantizer: `adaptive_clipping` per_group is enabled; the `mse`/`scale_search` "
                     "range-search path is skipped because adaptive clipping already searches per-group ranges."
                 )
-            self.adaptive_clip_search(x, weight=weight, hessian=hessian)
+            self.adaptive_clip_search(
+                x,
+                weight=weight,
+                hessian=hessian,
+                gptq_inverse_cholesky=gptq_inverse_cholesky,
+            )
         else:
-            tmp = torch.zeros(x.shape[0], device=dev)
-            xmin = torch.minimum(x.min(1)[0], tmp)
-            xmax = torch.maximum(x.max(1)[0], tmp)
+            zero = torch.zeros(x.shape[0], device=dev)
+            xmin_raw, xmax_raw = torch.aminmax(x, dim=-1)
+            xmin = torch.minimum(xmin_raw, zero)
+            xmax = torch.maximum(xmax_raw, zero)
 
             if self.qcfg.sym:
                 xmax = torch.maximum(torch.abs(xmin), xmax)
@@ -834,11 +938,9 @@ class Quantizer(nn.Module):
                     candidate_count = int(self.maxshrink * self.grid)
 
                     chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
-                    # Vectorize the shrink factors on the device; materializing the
-                    # original Python-float list one-by-one can differ by one ULP after
-                    # cancellation and alter the serialized scale values.
-                    shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
-                    shrink = 1.0 - shrink / self.grid
+                    # Preserve the original scalar candidate values while
+                    # evaluating all rows and candidates in vectorized chunks.
+                    shrink = self._scale_search_shrink_factors(candidate_count, self.grid, dev)
                     # Precompute scale/zero for every candidate once so the chunk loop
                     # only slices views instead of recomputing elementwise ranges.
                     p = shrink.view(-1, 1)
@@ -981,14 +1083,17 @@ class Quantizer(nn.Module):
         weight: bool = False,
         *,
         hessian: torch.Tensor | None = None,
+        gptq_inverse_cholesky: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute scales and zeros for all groups in x at once.
 
         x is expected to have shape [rows, num_groups, group_size] and
         hessian is either None, a [num_groups, group_size] diagonal for
         activation search, or a [num_groups, group_size, group_size] group
-        Hessian for correlated objectives.  Returns (scale, zero) of shape
-        [rows, num_groups].
+        Hessian for correlated objectives. ``gptq_inverse_cholesky`` is either
+        the block factor [num_groups * group_size, num_groups * group_size] or
+        per-group factors [num_groups, group_size, group_size]. Returns (scale,
+        zero) of shape [rows, num_groups].
         """
 
         # The Triton activation/hessian scale-search kernels load x with
@@ -1023,7 +1128,20 @@ class Quantizer(nn.Module):
                         h_g = hessian[g]
                     elif hessian.ndim == 3:
                         h_g = hessian[g]
-                self.find_params(x_g, weight=True, hessian=h_g)
+                inverse_g = None
+                if gptq_inverse_cholesky is not None:
+                    if gptq_inverse_cholesky.ndim == 2:
+                        start = g * x.shape[2]
+                        end = start + x.shape[2]
+                        inverse_g = gptq_inverse_cholesky[start:end, start:end]
+                    elif gptq_inverse_cholesky.ndim == 3:
+                        inverse_g = gptq_inverse_cholesky[g]
+                self.find_params(
+                    x_g,
+                    weight=True,
+                    hessian=h_g,
+                    gptq_inverse_cholesky=inverse_g,
+                )
                 scale_parts.append(self.scale.view(x_g.shape[0], 1))
                 zero_parts.append(self.zero.view(x_g.shape[0], 1))
             scale = torch.cat(scale_parts, dim=1)
@@ -1044,9 +1162,10 @@ class Quantizer(nn.Module):
         rows, num_groups, group_size = x.shape
 
         # Min/max over the group dimension (last).
-        tmp = torch.zeros((rows, num_groups), device=dev)
-        xmin = torch.minimum(x.amin(dim=-1), tmp)
-        xmax = torch.maximum(x.amax(dim=-1), tmp)
+        zero = torch.zeros((rows, num_groups), device=dev)
+        xmin_raw, xmax_raw = torch.aminmax(x, dim=-1)
+        xmin = torch.minimum(xmin_raw, zero)
+        xmax = torch.maximum(xmax_raw, zero)
 
         if self.qcfg.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
@@ -1095,60 +1214,6 @@ class Quantizer(nn.Module):
                 candidate_count = int(self.maxshrink * self.grid)
 
                 if (
-                    os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
-                    and _triton_find_params_batched_activation is not None
-                    and method == ScaleSearchConfig.ACTIVATION
-                    and prepared_hessian is not None
-                    and not self.requires_groupwise_processing()
-                    and group_size <= 128
-                    and maxq_value >= 7
-                    and x.is_cuda
-                    and x.is_contiguous()
-                    and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
-                ):
-                    try:
-                        return _triton_find_params_batched_activation(
-                            x,
-                            xmin,
-                            xmax,
-                            prepared_hessian,
-                            self.grid,
-                            self.maxshrink,
-                            float(maxq_value),
-                            int(self.qcfg.sym),
-                            candidate_count,
-                        )
-                    except Exception as e:
-                        log.warn(f"Triton activation scale-search failed, falling back: {e}")
-
-                if (
-                    os.environ.get("GPTQMODEL_SCALE_SEARCH_TRITON", "1") != "0"
-                    and _triton_find_params_batched_hessian_hybrid is not None
-                    and method in (ScaleSearchConfig.HESSIAN, ScaleSearchConfig.HYBRID)
-                    and prepared_hessian is not None
-                    and not self.requires_groupwise_processing()
-                    and group_size <= 128
-                    and maxq_value >= 15
-                    and x.is_cuda
-                    and x.is_contiguous()
-                    and x.dtype in (torch.float16, torch.float32, torch.bfloat16)
-                ):
-                    try:
-                        return _triton_find_params_batched_hessian_hybrid(
-                            x,
-                            xmin,
-                            xmax,
-                            prepared_hessian,
-                            self.grid,
-                            self.maxshrink,
-                            float(maxq_value),
-                            int(self.qcfg.sym),
-                            candidate_count,
-                        )
-                    except Exception as e:
-                        log.warn(f"Triton hessian/hybrid scale-search failed, falling back: {e}")
-
-                if (
                     os.environ.get("GPTQMODEL_SCALE_SEARCH_CPU", "0") != "0"
                     and _find_params_batched_cpu is not None
                     and method in (ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MSE)
@@ -1182,8 +1247,7 @@ class Quantizer(nn.Module):
                 # strict-accuracy reference and is used when the Triton fast path
                 # is disabled or unsupported.
                 if candidate_count > 0:
-                    shrink = torch.arange(candidate_count, device=dev, dtype=torch.float32)
-                    shrink = 1.0 - shrink / self.grid
+                    shrink = self._scale_search_shrink_factors(candidate_count, self.grid, dev)
                     p = shrink.view(-1, 1, 1)
                     xmin_all = p * xmin.unsqueeze(0)
                     xmax_all = p * xmax.unsqueeze(0)

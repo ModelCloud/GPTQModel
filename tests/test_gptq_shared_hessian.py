@@ -158,6 +158,52 @@ def test_gptq_shared_hessian_toggle_disabled_uses_isolated_hessians():
     processor.cleanup_subset(subset, subset_index=0, subset_total=1)
 
 
+def test_gptq_shared_hessian_rejects_overlapping_subset_setup():
+    """A new subset cannot invalidate processor-wide caches used by active workers."""
+
+    device = _test_device()
+    processor, subset, _ = _make_qkv_processor(device, enable_shared_hessian_cache=True)
+    processor.prepare_subset(subset, subset_index=0, subset_total=2)
+
+    with pytest.raises(RuntimeError, match="cannot overlap an active subset"):
+        processor.prepare_subset(subset, subset_index=1, subset_total=2)
+
+    processor.cleanup_subset(subset, subset_index=0, subset_total=2)
+
+
+def test_gptq_shared_hessian_cleanup_accepts_in_place_subset_pruning():
+    """Stage pruning mutates the subset mapping without changing its lifecycle identity."""
+
+    device = _test_device()
+    processor, subset, names = _make_qkv_processor(device, enable_shared_hessian_cache=True)
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+
+    subset.pop(names[0])
+    processor.cleanup_subset(subset, subset_index=0, subset_total=1)
+
+    assert processor._active_shared_hessian_subset is None
+    assert processor._shared_hessian_states == {}
+    assert processor._shared_hessian_inverse_cache == {}
+
+
+def test_gptq_shared_hessian_mismatched_cleanup_fails_after_releasing_state():
+    """Misuse is reported without leaking the active subset's shared pointers."""
+
+    device = _test_device()
+    processor, subset, names = _make_qkv_processor(device, enable_shared_hessian_cache=True)
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+
+    with pytest.raises(RuntimeError, match="does not match the active subset"):
+        processor.cleanup_subset(dict(subset), subset_index=0, subset_total=1)
+
+    assert processor._active_shared_hessian_subset is None
+    assert processor._shared_hessian_states == {}
+    for name in names:
+        task = processor.tasks[name]
+        assert task._shared_hessian_state is None
+        assert task._shared_hessian_inverse_cache is None
+
+
 def test_gptq_shared_hessian_toggle_preserves_exact_quantization_math():
     device = _test_device()
     torch.cuda.set_device(device)

@@ -6,14 +6,17 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import tempfile
 import time
+from pathlib import Path
 
 import pytest
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +68,7 @@ class TestQwen3_8BAdaptiveDampingV42(ModelTest):
         "method": "power_iteration",
         "eigen_iterations": 10,
         "spectral_alpha": 0.25,
+        "module_prior_enabled": True,
     }
 
     V42_ADAPTIVE_DAMPING = {
@@ -75,24 +79,69 @@ class TestQwen3_8BAdaptiveDampingV42(ModelTest):
         "method": "power_iteration",
         "eigen_iterations": 10,
         "spectral_alpha": 0.25,
+        "module_prior_enabled": True,
         "group_error_enabled": True,
+        "online_feedback_enabled": True,
         "group_size_prior_enabled": True,
         "group_error_use_hessian_weighting": True,
         "group_error_measure_raw_residual": True,
     }
 
     ALLOWED_REGRESSION_PCT = 2.0
+    EXPECTED_METRIC_COUNT = 3
+    V3_CACHE_SCHEMA = 2
 
     # Persistent cache for the v3 baseline so comparison tests do not re-quantize
     # and re-evaluate the same baseline across iterations.
-    V3_CACHE_DIR = "/monster/data/model/Qwen3-8B-adaptive-damping-v3-baseline"
+    V3_CACHE_DIR = os.environ.get(
+        "GPTQMODEL_QWEN3_8B_ADAPTIVE_DAMPING_V3_CACHE",
+        "/monster/data/model/Qwen3-8B-adaptive-damping-v3-baseline",
+    )
     V3_RESULTS_JSON = os.path.join(V3_CACHE_DIR, "eval_records.json")
 
     @classmethod
     def _v3_config_hash(cls):
         """Stable hash of the v3 adaptive damping config to invalidate stale caches."""
-        payload = json.dumps(cls.V3_ADAPTIVE_DAMPING, sort_keys=True, ensure_ascii=True)
+        payload = {
+            "schema": cls.V3_CACHE_SCHEMA,
+            "model": cls._model_fingerprint(),
+            "quantization": {
+                key: str(getattr(cls, key, None))
+                for key in (
+                    "FORMAT",
+                    "METHOD",
+                    "BITS",
+                    "GROUP_SIZE",
+                    "DESC_ACT",
+                    "SYM",
+                    "ACT_GROUP_AWARE",
+                    "MSE",
+                    "SCALE_SEARCH",
+                    "QUANT_BATCH_SIZE",
+                    "TORCH_DTYPE",
+                    "QUANT_BACKEND",
+                    "LOAD_BACKEND",
+                )
+            },
+            "adaptive_damping": cls.V3_ADAPTIVE_DAMPING,
+            "dataset_size": cls.DATASET_SIZE,
+            "dataset_concat_size": cls.DATASET_CONCAT_SIZE,
+            "eval_tasks": cls.EVAL_TASKS_SLOW,
+        }
+        payload = json.dumps(payload, sort_keys=True, ensure_ascii=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    @classmethod
+    def _model_fingerprint(cls):
+        model_path = Path(cls.NATIVE_MODEL_ID)
+        if not model_path.is_dir():
+            return {"model_id": cls.NATIVE_MODEL_ID}
+        files = []
+        for pattern in ("config.json", "*.index.json", "*.safetensors"):
+            for path in sorted(model_path.glob(pattern)):
+                stat = path.stat()
+                files.append((path.name, stat.st_size, stat.st_mtime_ns))
+        return {"model_path": str(model_path.resolve()), "files": files}
 
     @classmethod
     def _load_v3_baseline(cls):
@@ -106,7 +155,9 @@ class TestQwen3_8BAdaptiveDampingV42(ModelTest):
             return None
         if cached.get("config_hash") != cls._v3_config_hash():
             return None
-        return cached.get("results"), cached.get("elapsed", 0.0)
+        results = cached.get("results")
+        cls._validated_metrics(results, source="cached adaptive-damping v3 baseline")
+        return results, float(cached.get("elapsed", 0.0))
 
     @classmethod
     def _save_v3_baseline(cls, results, elapsed):
@@ -157,27 +208,31 @@ class TestQwen3_8BAdaptiveDampingV42(ModelTest):
         )
         elapsed = time.perf_counter() - start
 
-        if self._loaded_model_was_prequantized:
-            self.skipTest(
-                "The dense model path unexpectedly resolved to a pre-quantized checkpoint; "
-                "skipping because a fresh quantization is required for this comparison."
+        try:
+            if self._loaded_model_was_prequantized:
+                self.skipTest(
+                    "The dense model path unexpectedly resolved to a pre-quantized checkpoint; "
+                    "skipping because a fresh quantization is required for this comparison."
+                )
+
+            backend = self._current_load_backend()
+            results = self._post_quant_eval_records.get(backend, {})
+            self._validated_metrics(
+                results,
+                source="fresh adaptive-damping v3 baseline" if is_v3 else "fresh adaptive-damping v4.2 candidate",
             )
-
-        backend = self._current_load_backend()
-        results = self._post_quant_eval_records.get(backend, {})
-
-        if is_v3:
-            self._save_v3_baseline(results, elapsed)
-
-        self._cleanup_quantized_model(q_model, enabled=True)
-        return results, elapsed
+            if is_v3:
+                self._save_v3_baseline(results, elapsed)
+            return results, elapsed
+        finally:
+            self._cleanup_quantized_model(q_model, enabled=True)
 
     @staticmethod
     def _get_metric(task_results, key):
         if key in task_results:
             return float(task_results[key])
         for k, v in task_results.items():
-            if k.startswith(key):
+            if k.startswith(f"{key},"):
                 return float(v)
         if key == "acc":
             for k, v in task_results.items():
@@ -197,6 +252,35 @@ class TestQwen3_8BAdaptiveDampingV42(ModelTest):
                 return float(task_results[metric])
         raise KeyError(f"No gsm8k accuracy metric in {task_results}")
 
+    @classmethod
+    def _validated_metrics(cls, results, *, source):
+        if not isinstance(results, dict):
+            raise AssertionError(f"{source} did not return a task-result mapping: {results!r}")
+        task_metrics = {
+            "gsm8k_platinum_cot": {"acc,num": cls._get_gsm8k},
+            "arc_challenge": {
+                "acc": lambda r: cls._get_metric(r, "acc"),
+                "acc_norm": lambda r: cls._get_metric(r, "acc_norm"),
+            },
+        }
+        validated = {}
+        for task_name, metrics in task_metrics.items():
+            if task_name not in results or not isinstance(results[task_name], dict):
+                raise AssertionError(f"{source} is missing required task `{task_name}`: {results!r}")
+            for metric_name, getter in metrics.items():
+                try:
+                    value = getter(results[task_name])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise AssertionError(
+                        f"{source} is missing required metric `{task_name}:{metric_name}`"
+                    ) from exc
+                if not math.isfinite(value):
+                    raise AssertionError(f"{source} returned non-finite `{task_name}:{metric_name}`={value}")
+                validated[(task_name, metric_name)] = value
+        if len(validated) != cls.EXPECTED_METRIC_COUNT:
+            raise AssertionError(f"{source} validated {len(validated)} metrics, expected {cls.EXPECTED_METRIC_COUNT}")
+        return validated
+
     @pytest.mark.slow
     @pytest.mark.gpu
     @pytest.mark.cuda
@@ -208,35 +292,30 @@ class TestQwen3_8BAdaptiveDampingV42(ModelTest):
 
         v3_results, v3_elapsed = self._run_config(self.V3_ADAPTIVE_DAMPING, v3_path)
         v42_results, v42_elapsed = self._run_config(self.V42_ADAPTIVE_DAMPING, v42_path)
+        v3_metrics = self._validated_metrics(v3_results, source="adaptive-damping v3 baseline")
+        v42_metrics = self._validated_metrics(v42_results, source="adaptive-damping v4.2 candidate")
 
         print("\nAdaptive damping v4.2 Qwen3-8B comparison:")
         print(f"  v3:   {v3_results} (elapsed {v3_elapsed:.1f}s)")
         print(f"  v4.2: {v42_results} (elapsed {v42_elapsed:.1f}s)")
         print(f"  runtime delta: {((v42_elapsed - v3_elapsed) / v3_elapsed * 100.0):+.1f}%")
 
-        for task_name in ("gsm8k_platinum_cot", "arc_challenge"):
-            v3_task = v3_results.get(task_name, {})
-            v42_task = v42_results.get(task_name, {})
+        for task_metric, v3_value in v3_metrics.items():
+            task_name, metric_name = task_metric
+            v42_value = v42_metrics[task_metric]
+            diff_pct = (v42_value - v3_value) / max(abs(v3_value), 1e-12) * 100.0
+            print(
+                f"  {task_name}:{metric_name}: v3={v3_value:.4f}, "
+                f"v4.2={v42_value:.4f}, diff={diff_pct:+.2f}%"
+            )
+            self.assertGreaterEqual(
+                diff_pct,
+                -self.ALLOWED_REGRESSION_PCT,
+                f"v4.2 online feedback regressed `{task_name}:{metric_name}` by "
+                f"{abs(diff_pct):.2f}% (v3={v3_value:.4f}, v4.2={v42_value:.4f}).",
+            )
 
-            if task_name == "gsm8k_platinum_cot":
-                metrics = {"acc,num": self._get_gsm8k}
-            else:
-                metrics = {"acc": lambda r: self._get_metric(r, "acc"), "acc_norm": lambda r: self._get_metric(r, "acc_norm")}
 
-            for metric_name, getter in metrics.items():
-                try:
-                    v3_value = getter(v3_task)
-                    v42_value = getter(v42_task)
-                except KeyError:
-                    continue
-                diff_pct = (v42_value - v3_value) / max(v3_value, 1e-12) * 100.0
-                print(
-                    f"  {task_name}:{metric_name}: v3={v3_value:.4f}, "
-                    f"v4.2={v42_value:.4f}, diff={diff_pct:+.2f}%"
-                )
-                self.assertGreaterEqual(
-                    diff_pct,
-                    -self.ALLOWED_REGRESSION_PCT,
-                    f"v4.2 online feedback regressed `{task_name}:{metric_name}` by "
-                    f"{abs(diff_pct):.2f}% (v3={v3_value:.4f}, v4.2={v42_value:.4f}).",
-                )
+def test_adaptive_damping_model_gate_rejects_empty_results():
+    with pytest.raises(AssertionError, match="missing required task"):
+        TestQwen3_8BAdaptiveDampingV42._validated_metrics({}, source="synthetic result")

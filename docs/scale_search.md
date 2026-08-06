@@ -19,15 +19,16 @@ qcfg = QuantizeConfig(bits=4, group_size=128, mse=0.0, scale_search=None)
 | Mode | How it scores candidates | Speed | Best for |
 |------|--------------------------|-------|----------|
 | `ScaleSearchConfig.MSE` (legacy) | Minimizes uniform squared reconstruction error: `(dequant - weight)^2` | Fastest | Baseline; ignores activation/Hessian structure. |
-| `ScaleSearchConfig.ACTIVATION` | Weights the squared error by the Hessian diagonal / activation importance per group | Fast | Default. Usually better than plain MSE with small extra cost; Triton optimized. |
+| `ScaleSearchConfig.ACTIVATION` | Weights the squared error by the Hessian diagonal / activation importance per group | Fast | Default. Usually better than plain MSE with small extra cost. |
 | `ScaleSearchConfig.HESSIAN` | Minimizes the full quadratic form `error^T @ H_group @ error` using per-group Hessian blocks | Slower | When per-group correlations matter and `group_size` is 32/64/128. |
 | `ScaleSearchConfig.HYBRID` | Averages the Hessian quadratic form with the uniform MSE term (`0.5 * Hessian + 0.5 * MSE`) | Slowest | Trade-off that keeps some correlation awareness while penalizing uniform error. |
 
 ### Effect on speed
 
 - `MSE` and `ACTIVATION` are roughly 2-3x faster than `HESSIAN`/`HYBRID` because they avoid the per-group matrix multiply in the loss.
-- `HESSIAN`/`HYBRID` are accelerated by a Triton fast path when `group_size <= 128`, `bits >= 4`, and the input is contiguous CUDA FP16/BF16/FP32. `bits=2` falls back to the exact Python loop because the coarse `maxq=3` grid creates near-tie candidates that are unsafe with the Triton top-k shortlist.
-- Disable all Triton scale-search fast paths with `GPTQMODEL_SCALE_SEARCH_TRITON=0`.
+- Every mode uses a bounded exhaustive candidate scorer. The former Triton shortlist was removed because adversarial
+  BF16 inputs demonstrated that a shortlist cannot guarantee selection of the exact minimum.
+- Candidate tensors are chunked to bound temporary VRAM without omitting any candidate or changing comparison order.
 
 ### Effect on quality
 
@@ -78,16 +79,18 @@ qcfg = QuantizeConfig(
 
 ## Accuracy guarantees
 
-The Triton fast paths are validated against the exact per-group `Quantizer.find_params` reference with a `<1e-6` scale/zero tolerance. You can rerun this check with:
+The batched path is validated bitwise against the exact per-group `Quantizer.find_params` reference, including
+adversarial BF16 weights and highly skewed activation importance. You can rerun this check with:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=5 PYTHON_GIL=0 \
   python scripts/validate_find_params_batched_strict.py
 ```
 
-The script must report `STRICT CHECK PASSED` before any speed optimization is accepted.
+The script must report `STRICT CHECK PASSED` before any speed optimization is accepted. A future accelerator path
+must preserve the exhaustive candidate set and exact winner; approximate top-k or neighbor shortlists are not valid
+for this accuracy-sensitive stage.
 
 ## Environment variables
 
-- `GPTQMODEL_SCALE_SEARCH_TRITON=0`: force the exact Python chunk loop instead of the Triton fast paths.
 - `PYTHON_GIL=0`: recommended for free-threaded runs on multi-GPU setups.

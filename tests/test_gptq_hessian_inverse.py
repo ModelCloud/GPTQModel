@@ -49,6 +49,23 @@ def test_hessian_inverse_succeeds_for_well_conditioned_matrix(gptq):
     assert used_damp < 1.0
 
 
+@pytest.mark.parametrize("release_input", [False, True])
+def test_mock_hessian_inverse_obeys_release_without_claiming_external_ownership(release_input):
+    """Mock inversion releases only the instance-owned Hessian when explicitly requested."""
+
+    owned = torch.eye(4)
+    gptq = GPTQ(nn.Linear(4, 4, bias=False), qcfg=QuantizeConfig(mock_quantization=True))
+    gptq.H = owned
+    factor, _ = gptq.mock_hessian_inverse(owned, release_input=release_input)
+    assert torch.equal(factor, torch.eye(4))
+    assert (gptq.H is None) is release_input
+
+    external = torch.eye(4) * 2
+    gptq.H = owned
+    gptq.mock_hessian_inverse(external, release_input=True)
+    assert gptq.H is owned
+
+
 @pytest.mark.skipif(not _HAS_PACK_BLOCK_EXT, reason="pack_block_ext not available")
 def test_hessian_inverse_rejects_non_finite_inverse_result(gptq, monkeypatch):
     """A Cholesky factor that inverts to NaN triggers the Hinv validity guard."""

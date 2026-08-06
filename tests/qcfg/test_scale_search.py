@@ -79,8 +79,7 @@ def _run_scalar_activation_reference(weights: torch.Tensor, hessian: torch.Tenso
     importance = importance / importance.mean()
     best = torch.full([x.shape[0]], float("inf"), device=x.device)
 
-    for index in range(80):
-        shrink = 1 - index / 100
+    for shrink in 1 - torch.arange(80, device=x.device, dtype=torch.float32) / 100:
         scale_candidate = (shrink * xmax - shrink * xmin) / quantizer.maxq
         levels = torch.clamp(
             torch.round(x / scale_candidate.unsqueeze(1)) + zero.unsqueeze(1),
@@ -136,8 +135,7 @@ def _run_scalar_correlated_reference(
     prepared_hessian = prepared_hessian / prepared_hessian.diagonal().clamp_min(0).mean()
     best = torch.full([x.shape[0]], float("inf"), device=x.device)
 
-    for index in range(80):
-        shrink = 1 - index / 100
+    for shrink in 1 - torch.arange(80, device=x.device, dtype=torch.float32) / 100:
         scale_candidate = (shrink * xmax - shrink * xmin) / quantizer.maxq
         levels = torch.clamp(
             torch.round(x / scale_candidate.unsqueeze(1)) + zero.unsqueeze(1),
@@ -469,14 +467,24 @@ def test_vectorized_correlated_search_matches_scalar_reference_ab(method, device
     assert torch.equal(vectorized_q, reference_q)
 
 
+def test_vectorized_shrink_grid_is_bitwise_equal_to_pre_optimization_grid():
+    """Candidate construction must preserve the FP32 grid used by 66a14182."""
+
+    expected = 1 - torch.arange(80, dtype=torch.float32) / 100
+    actual = Quantizer._scale_search_shrink_factors(80, 100, torch.device("cpu"))
+
+    assert torch.equal(actual, expected)
+
+
 def test_correlated_scale_search_uses_larger_bounded_candidate_chunks():
     qcfg = QuantizeConfig(scale_search=ScaleSearchConfig.HESSIAN, offload_to_disk=False)
     quantizer = Quantizer(qcfg)
 
     expected_chunks = {
         512: (16, 80),
-        2048: (16, 64),
-        8192: (8, 16),
+        8192: (16, 80),
+        16384: (16, 64),
+        65536: (8, 16),
     }
     for rows, (activation_chunk, hessian_chunk) in expected_chunks.items():
         weights = torch.empty((rows, 128))

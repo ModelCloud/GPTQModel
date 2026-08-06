@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPTQ Coverage Review"
+  short_description: "Exhaustive GPTQ numerical and coverage review"
+  default_prompt: "Use $gptq-coverage-review to build and run an exhaustive, nondeterminism-aware GPTQ test and coverage review."

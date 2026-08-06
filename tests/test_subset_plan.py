@@ -2,11 +2,17 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.stage_subset import SubsetPlan, build_layer_subset_plans, build_subset_plan
+from gptqmodel.looper.stage_subset import (
+    SubsetPlan,
+    _with_prepared_subset,
+    build_layer_subset_plans,
+    build_subset_plan,
+)
 from gptqmodel.quantization.config import VramStrategy
 
 
@@ -56,6 +62,29 @@ def _make_looper():
 class _StubProcessor:
     def __init__(self, execution_config: ExecutionConfig):
         self.execution_config = execution_config
+
+
+def test_subset_lifecycle_cleanup_runs_when_execution_fails():
+    calls = []
+    processor = types.SimpleNamespace(
+        prepare_subset=lambda subset, **kwargs: calls.append(("prepare", subset, kwargs)),
+        cleanup_subset=lambda subset, **kwargs: calls.append(("cleanup", subset, kwargs)),
+    )
+    subset = {"proj": object()}
+    plan = types.SimpleNamespace(modules=subset, subset_index=2, subset_total=4)
+
+    @_with_prepared_subset
+    def fail(_looper, _processor, _module, _plan):
+        subset.pop("proj")
+        raise ValueError("synthetic subset failure")
+
+    with pytest.raises(ValueError, match="synthetic subset failure"):
+        fail(None, processor, None, plan)
+
+    assert calls == [
+        ("prepare", subset, {"subset_index": 2, "subset_total": 4}),
+        ("cleanup", subset, {"subset_index": 2, "subset_total": 4}),
+    ]
 
 
 def test_build_subset_plan_skips_forward_for_no_forward_processor():

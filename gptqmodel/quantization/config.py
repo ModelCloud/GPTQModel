@@ -167,13 +167,18 @@ class ScaleSearchConfig(str, Enum):
 class AdaptiveClippingMetric(str, Enum):
     """Loss objective used by adaptive weight clipping search."""
 
+    GPTQ_ERROR = "gptq_error"
     MSE = "mse"
     HESSIAN_DIAG = "hessian_diag"
 
 
-# Keep the quality-oriented default explicit while distinguishing an omitted
-# selector from the public ``None`` opt-out and the legacy ``mse`` API.
-_DEFAULT_SCALE_SEARCH = ScaleSearchConfig.ACTIVATION
+# Accuracy-first GPTQ defaults. Static 5% damping and activation-aware scale
+# search remain the general defaults; adaptive damping and clipping require an
+# explicit config. Keep the scale selector distinct from the public ``None``
+# opt-out and the legacy ``mse`` API.
+GPTQ_DEFAULT_DAMP_PERCENT = 0.05
+GPTQ_DEFAULT_DAMP_AUTO_INCREMENT = 0.01
+GPTQ_DEFAULT_SCALE_SEARCH = ScaleSearchConfig.ACTIVATION
 _UNSET_SCALE_SEARCH = object()
 
 
@@ -1384,9 +1389,9 @@ class DampConfig:
     the base for :class:`AdaptiveDampingConfig`.
     """
 
-    min: float = field(default=0.05)
-    max: float = field(default=0.05)
-    step: float = field(default=0.01)
+    min: float = field(default=GPTQ_DEFAULT_DAMP_PERCENT)
+    max: float = field(default=GPTQ_DEFAULT_DAMP_PERCENT)
+    step: float = field(default=GPTQ_DEFAULT_DAMP_AUTO_INCREMENT)
 
     def __post_init__(self):
         if not (0 < self.min < 1):
@@ -1408,34 +1413,38 @@ class DampConfig:
 
 @dataclass
 class AdaptiveDampingConfig(DampConfig):
-    """Adaptive Hessian damping controls for GPTQ (v4.2 online feedback).
+    """Calibration-aware Hessian damping controls for GPTQ.
 
-    Damping is anchored at ``base_percdamp`` (the empirically strong GPTQ 0.05
-    baseline), scaled by a per-module factor, a compressed spectral ratio, and
-    an optional online residual-feedback factor applied to the GPTQ error update:
+    The default adaptive path changes only the regularization of GPTQ's
+    activation Hessian.  For calibration activations ``X`` and
+    ``H = (2 / N) X.T @ X`` it selects
 
-        r = lambda_spectral / mean(diag(H))
-        spectral_factor = r ** spectral_alpha
-        size_factor = (group_size / 128) ** group_size_prior_beta
-        feedback = (L_target / L_g) ** group_error_gamma
-        error_scale = clamp(feedback / size_factor, group_error_scale_min, group_error_scale_max)
-        err = (W - Q) / Hinv_ii * error_scale
+        r = lambda_max(H) / mean(diag(H))
+        damp_percent = clamp(base_percdamp * r ** spectral_alpha, min, max)
+        H_damped = H + damp_percent * mean(diag(H)) * I
 
-    When ``group_error_use_hessian_weighting`` is true, ``L_g`` is computed as
-    ``sum(H_ii * raw_err_i^2)``; otherwise it is ``sum(raw_err_i^2)``.  The
-    ``raw_err`` is the unscaled GPTQ residual (``err / error_scale``) so the
-    feedback EMA is not coupled to the size prior or the applied feedback scale.
+    GPTQ then uses the canonical inverse-Hessian error correction unchanged:
+    ``E_j = (W_j - Q_j) / U_jj`` and
+    ``W[:, j:] -= E_j outer U[j, j:]``, where
+    ``U = chol(inv(H_damped), upper=True)``. Thus the adaptive signal comes
+    from collected calibration activations, never from weights alone.
 
-    ``lambda_spectral`` is estimated with ``method`` (``power_iteration``,
-    ``lanczos`` or ``diagonal``).  The group error ``L_g`` is the squared norm of
-    the actual GPTQ residual ``err`` accumulated over a quantization group; the
-    target ``L_target`` is an EMA of previous group losses.  No
-    pre-quantization estimate or Hessian rebuild is used.
+    Module-role and group-size priors are metadata heuristics, while online
+    feedback scales the canonical GPTQ correction. They remain available for
+    experiments but are disabled by default so opting into adaptive damping
+    does not silently replace GPTQ's error-correction mathematics. If online
+    feedback is explicitly enabled, its canonical group loss is
+    ``0.5 * sum(E ** 2)``. Optional raw-Hessian diagonal weighting is also
+    experimental because ``E`` already contains inverse-Hessian geometry.
+
+    ``lambda_max`` is estimated with ``method`` (``power_iteration``,
+    ``lanczos``, or ``diagonal``). See ``docs/adaptive_damping_math.md`` for
+    derivation, invariants, fallbacks, and the validation matrix.
     """
 
     enabled: bool = field(default=True)
     base_percdamp: float = field(default=0.05)
-    module_prior_enabled: bool = field(default=True)
+    module_prior_enabled: bool = field(default=False)
     module_factors: Dict[str, float] = field(
         default_factory=lambda: {
             "q": 1.0,
@@ -1458,12 +1467,12 @@ class AdaptiveDampingConfig(DampConfig):
     group_error_ema_decay: float = field(default=0.9)
     group_error_factor_min: float = field(default=0.9)
     group_error_factor_max: float = field(default=1.1)
-    online_feedback_enabled: bool = field(default=True)
+    online_feedback_enabled: bool = field(default=False)
     group_error_scale_min: float = field(default=0.8)
     group_error_scale_max: float = field(default=1.2)
-    group_error_use_hessian_weighting: bool = field(default=True)
+    group_error_use_hessian_weighting: bool = field(default=False)
     group_error_measure_raw_residual: bool = field(default=True)
-    group_size_prior_enabled: bool = field(default=True)
+    group_size_prior_enabled: bool = field(default=False)
     group_size_prior_beta: float = field(default=0.25)
     group_size_prior_reference: int = field(default=128)
 
@@ -1541,16 +1550,22 @@ class AdaptiveDampingConfig(DampConfig):
 
 @dataclass
 class AdaptiveClippingConfig:
-    """Adaptive weight-clipping search for GPTQ (v1).
+    """Calibration-aware adaptive weight-clipping search for GPTQ.
 
     Searches a per-group clipping threshold before scale/zero selection so that
-    outlier weights do not dominate the quantization range. The selected scale
-    and zero are then used by the normal GPTQ quantizer and are independent of
-    the adaptive damping feedback controller.
+    outlier weights do not dominate the quantization range. ``gptq_error`` is
+    the safe default: it evaluates every candidate with the same sequential
+    inverse-Hessian correction used by GPTQ. ``hessian_diag`` is an explicit
+    diagonal approximation and ``mse`` is an explicit weight-only objective.
+
+    The feature remains opt-in at ``QuantizeConfig.adaptive_clipping``. When
+    ``gptq_error`` is selected but a valid damped inverse-Cholesky factor is not
+    available, the search conservatively uses the full, unclipped range rather
+    than silently changing to a weight-only objective.
     """
 
     enabled: bool = field(default=True)
-    metric: Union[str, AdaptiveClippingMetric] = field(default=AdaptiveClippingMetric.HESSIAN_DIAG)
+    metric: Union[str, AdaptiveClippingMetric] = field(default=AdaptiveClippingMetric.GPTQ_ERROR)
     per_group: bool = field(default=True)
     candidates: Tuple[float, ...] = field(default=(0.99, 0.995, 0.999, 1.0))
 
@@ -1558,8 +1573,16 @@ class AdaptiveClippingConfig:
         self.enabled = bool(self.enabled)
         if isinstance(self.metric, AdaptiveClippingMetric):
             self.metric = self.metric.value
-        if self.metric not in {AdaptiveClippingMetric.MSE.value, AdaptiveClippingMetric.HESSIAN_DIAG.value}:
-            raise ValueError("AdaptiveClippingConfig: `metric` must be one of {'mse', 'hessian_diag'}.")
+        valid_metrics = {
+            AdaptiveClippingMetric.GPTQ_ERROR.value,
+            AdaptiveClippingMetric.MSE.value,
+            AdaptiveClippingMetric.HESSIAN_DIAG.value,
+        }
+        if self.metric not in valid_metrics:
+            raise ValueError(
+                "AdaptiveClippingConfig: `metric` must be one of "
+                "{'gptq_error', 'mse', 'hessian_diag'}."
+            )
         self.per_group = bool(self.per_group)
         if not isinstance(self.candidates, (list, tuple)) or len(self.candidates) == 0:
             raise ValueError("AdaptiveClippingConfig: `candidates` must be a non-empty list or tuple of floats in (0, 1].")
@@ -2689,11 +2712,11 @@ def _resolve_dynamic_group_size_error() -> str:
 
 
 def _default_damp_percent(method: METHOD) -> float:
-    return 0.005 if method == METHOD.QQQ else 0.05
+    return 0.005 if method == METHOD.QQQ else GPTQ_DEFAULT_DAMP_PERCENT
 
 
 def _default_damp_auto_increment(method: METHOD) -> float:
-    return 0.001 if method == METHOD.QQQ else 0.01
+    return 0.001 if method == METHOD.QQQ else GPTQ_DEFAULT_DAMP_AUTO_INCREMENT
 
 
 def _peek_weight_only_method(payload: Any) -> Optional[WeightOnlyMethod]:
@@ -3948,8 +3971,8 @@ class GPTQConfig(PreProcessorConfig):
         default=None,
         metadata={
             "help": (
-                "Optional adaptive weight-clipping search. Pass an enabled AdaptiveClippingConfig to opt in; "
-                "the default keeps the configured mse/scale_search path."
+                "Optional adaptive weight-clipping search. Omit it to preserve the configured mse/scale_search "
+                "path; opting in defaults to the calibration-aware GPTQ correction objective."
             )
         },
     )
@@ -4063,6 +4086,22 @@ class GPTQConfig(PreProcessorConfig):
             self.damp_auto_increment = self.damp.step
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        if (
+            isinstance(self.adaptive_clipping, AdaptiveClippingConfig)
+            and self.adaptive_clipping.enabled
+            and self.adaptive_clipping.metric == AdaptiveClippingMetric.GPTQ_ERROR.value
+        ):
+            if self.static_groups:
+                raise ValueError(
+                    "QuantizeConfig: `adaptive_clipping.metric='gptq_error'` is incompatible with "
+                    "`static_groups=True` because static scales are selected before the sequential GPTQ "
+                    "inverse-Hessian correction is available. Use `hessian_diag`/`mse`, or disable static groups."
+                )
+            if self.gptaq is not None or self.foem is not None:
+                raise ValueError(
+                    "QuantizeConfig: `adaptive_clipping.metric='gptq_error'` currently supports canonical GPTQ only; "
+                    "GPTAQ/FOEM use different correction recursions. Select `hessian_diag`/`mse` explicitly."
+                )
         self.quantization_diagnostics = normalize_quantization_diagnostics_mode(
             self.quantization_diagnostics
         )
@@ -4135,7 +4174,7 @@ class GPTQConfig(PreProcessorConfig):
         if selector_was_omitted:
             # Preserve the legacy ``mse=<positive>`` API while making an
             # otherwise unconfigured GPTQ quantization use activation search.
-            self.scale_search = ScaleSearchConfig.MSE if self.mse > 0 else _DEFAULT_SCALE_SEARCH
+            self.scale_search = ScaleSearchConfig.MSE if self.mse > 0 else GPTQ_DEFAULT_SCALE_SEARCH
 
         self.scale_search = normalize_scale_search(self.scale_search)
         if self.scale_search is None:

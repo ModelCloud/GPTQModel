@@ -259,3 +259,175 @@ bitwise-identical `qweight`, scale, zero, `g_idx`, reconstructed dense weights, 
 GPU 7 remained externally saturated during final branch validation (92,388 MiB used of 98,304 MiB and 100% compute,
 with no process ownership visible to this container). The earlier GPU 7 isolation control for the block-partition fix
 was bitwise exact in all 10 cases; the final branch additionally received the full CPU bitwise A/B above.
+
+## PR 211 post-PR 215 merge validation
+
+PR 211 was merged locally with `origin/main@e3f56cdd` (PR 215 plus the later AWQ/SGLang-only PR 214). The numerical A/B
+baseline remains `117950f8`, because `117950f8..e3f56cdd` changes only the model loader and SGLang tests, not GPTQ math.
+Adaptive damping and clipping remain explicit opt-ins. "100% accuracy coverage" below means every declared GPTQ math
+decision region has a deterministic unit or dense-reference test; it does not claim proof over every possible
+floating-point tensor or 100% source-line coverage.
+
+```text
++----------------------+----------------------------------------------------------+-------------------------------+
+| Math region          | Covered spectrum                                         | Result                        |
++----------------------+----------------------------------------------------------+-------------------------------+
+| Quantization grid    | 2/3/4/6/8 bit; symmetric/asymmetric; tensor/groupwise     | Pass                          |
+| Groups and ordering  | 1/2/4/8/12/16/32/64/128/160/256, tails, static, ordering | Pass                          |
+| Adaptive damping     | off/on; diag/power/Lanczos; priors; clamps; EMA feedback  | Pass                          |
+| Damping pathology    | identity, singular, rank-deficient, indefinite, nonfinite | Pass                          |
+| Adaptive clipping    | off/on; MSE/Hessian; per-row/group; inverse-failure path  | Pass                          |
+| Clipping spectrum    | 4 widths x 2 sym x 2 metrics x 8 distributions = 128     | Pass; deterministic + finite |
+| Scale search         | MSE, activation, Hessian, hybrid; scalar/vector A/B       | Pass; same candidates         |
+| Hessian lifecycle    | accumulation, chunking, floor, inversion, ownership, OOM  | CPU pass; CUDA OOM test queued|
+| CPU optimized paths  | eager/extension block, inverse, XTX, scale-search parity  | Pass                          |
+| Fallback             | RTN, smoothing, group indices, config round trips         | Pass                          |
+| Dense-reference A/B  | 10 cases; W/Y error, KLD, top-1, packed tensors           | 60/60 tensors bitwise exact   |
+| CUDA/VRAM            | GPU-only math and peak-memory profiling                   | Deferred until an idle GPU    |
++----------------------+----------------------------------------------------------+-------------------------------+
+```
+
+The expanded CPU gate completed with 412 passed and 42 GPU-only skips. The fallback-focused gate added 12 passed and
+2 GPU-only skips. A separate adaptive-enabled A/B against merged main completed 10/10 cases with 60/60 serialized and
+auxiliary tensors bitwise equal and a maximum absolute accuracy-metric delta of `0.0`.
+
+Two test-infrastructure holes were corrected during this audit:
+
+1. A module-wide GPU-6 skip in `tests/test_hessian.py` unintentionally disabled all CPU Hessian tests. The skip now
+   applies only to the intended CPU-vs-GPU benchmark.
+2. Scale-search vector/scalar tests assumed bitwise equality across different float32 evaluation orders and contained
+   stale chunk-size expectations. They now require identical candidate selection, tight numerical equivalence, and
+   limits derived from the active workspace constants.
+
+The eager Hessian-inverse caller now restores the original diagonal in a `finally` block. This prevents CUDA OOM or
+backend exceptions from leaking an attempted damping delta into the CPU retry or a later shared-Hessian consumer,
+without allocating another diagonal clone.
+
+The deferred GPU profilers now reject a busy or unmatched visible device across three samples, perform a discarded
+warm-up on a separate GPTQ instance, time with CUDA events, and emit full ASCII tables. Optional `--baseline-json` and
+`--output-json` arguments make latency/operation speedups reproducible across revisions without running both revisions
+in one process. These helpers were statically validated only; no new GPU or VRAM result is claimed here.
+
+## Calibration-aware adaptive-math and GPU closure
+
+Commits `e7f8524f` and `c9f426e9` supersede the deferred status above. Adaptive damping and clipping remain opt-in as
+required by PR 215; the default `QuantizeConfig` still uses static damping and `adaptive_clipping=None`.
+
+```text
++----------------------+--------------------------------------------+---------------------------------------------+
+| Adaptive region      | Safe/default opt-in behavior               | Explicit experimental/compatibility modes  |
++----------------------+--------------------------------------------+---------------------------------------------+
+| Damping              | Calibration Hessian spectrum selects lambda| module/size priors and online EMA feedback  |
+| GPTQ correction      | E=(W-Q)/U_jj; loss=0.5*sum(E^2)            | optional raw-Hessian weighting              |
+| Clipping             | exact sequential GPTQ simulation using U   | Hessian-diagonal approximation or weight MSE|
+| Missing clip geometry| force candidate 1.0 (unclipped range)      | never silently fall back to weight-only MSE |
++----------------------+--------------------------------------------+---------------------------------------------+
+```
+
+For clipping candidate `c`, the exact objective simulates the actual group recursion:
+
+```text
+Q_j^c = quantize(W_j^c; scale_c, zero_c)
+E_j^c = (W_j^c - Q_j^c) / U_jj
+W_[j:]^c = W_[j:]^c - E_j^c outer U_[j,j:]
+L_c = 0.5 * sum_j ||E_j^c||^2
+```
+
+Because `U` is the upper Cholesky factor of the damped inverse calibration Hessian, `Delta = E U` and
+`0.5 * Delta H_lambda Delta^T = 0.5 * ||E||^2`. Independent scalar tests verify this identity and, without damping,
+the equivalent calibration-output error `(1/N)||X Delta^T||^2`.
+
+### Accuracy and coverage gates
+
+```text
++--------------------------------------+---------+---------+--------+-----------------------------------------------+
+| Gate                                 | Passed  | Skipped | Failed | Spectrum                                      |
++--------------------------------------+---------+---------+--------+-----------------------------------------------+
+| CPU adaptive/GPTQ math               | 464     | 57      | 0      | damping, clipping, grouped GPTQ               |
+| GPU 7 adaptive + inverse math        | 353     | 0       | 0      | CPU/GPU parity plus CUDA integration           |
+| Randomized Hessian corpus            | 10,000  | 0       | 0      | deterministic randomized inverse cases         |
+| Static checks                        | n/a     | n/a     | 0      | Ruff, py_compile, diff whitespace              |
++--------------------------------------+---------+---------+--------+-----------------------------------------------+
+```
+
+Clipping coverage includes 2/3/4/8-bit, symmetric/asymmetric, exact GPTQ/Hessian-diagonal/MSE objectives, batched and
+tail groups, CPU and GPU, zeros/constants/tiny/Gaussian/asymmetric/outlier/nonfinite weights, and identity/correlated/
+rank-deficient/ill-conditioned/dead-feature geometry. Exact candidate selection matches an independent scalar GPTQ
+oracle. Uniform Hessian scaling preserves candidate choice, while changing calibration geometry can change it, proving
+the default is calibration-dependent rather than weight-only.
+
+### GPU 7 VRAM results
+
+Physical GPU 7 was idle and isolated for these runs:
+
+```text
++----------------------+-----------------------------------------------------------------------+
+| Environment          | Value                                                                 |
++----------------------+-----------------------------------------------------------------------+
+| GPU                  | NVIDIA PG506-230, 98,304 MiB                                          |
+| UUID                 | GPU-724ea08e-67c3-c0ce-29bb-e6c48e7dde28                              |
+| Torch / CUDA / Triton| 2.13.0+cu130 / 13.0 / 3.7.1                                         |
+| Quantization         | BF16 weights, 4 bit, group 128, calibration 1x256                    |
++----------------------+-----------------------------------------------------------------------+
+```
+
+The repository profiler reproduced the historical PR 211 isolated peaks exactly:
+
+```text
++-----------+------------+----------+----------+-----------+----------------------+------------------+
+| module    | shape      | base GiB | peak GiB | delta GiB | old recorded peak GiB| peak reduction   |
++-----------+------------+----------+----------+-----------+----------------------+------------------+
+| down_proj | 4096x12288 | 0.670    | 3.108    | 2.438     | 3.670                | 15.31%           |
+| gate_proj | 12288x4096 | 0.166    | 0.604    | 0.438     | 0.667                | 9.45%            |
++-----------+------------+----------+----------+-----------+----------------------+------------------+
+```
+
+At a 4096x128 clipping-search shape, the exact objective used less peak workspace than both prior objectives:
+
+```text
++------------------+----------------------+
+| objective        | incremental peak MiB |
++------------------+----------------------+
+| clipping disabled| 2.114                |
+| weight MSE       | 26.466               |
+| Hessian diagonal | 26.466               |
+| exact GPTQ       | 18.653               |
++------------------+----------------------+
+```
+
+An end-to-end 1024x1024 grouped GPTQ micro-layer used the same quantization peak delta with exact clipping as with
+clipping disabled. Evaluation inputs were disjoint from calibration inputs.
+
+```text
++------------------+----------------------+--------------+--------------+--------------+
+| objective        | quant peak delta MiB | output MAE   | output MSE   | output maxAE |
++------------------+----------------------+--------------+--------------+--------------+
+| clipping disabled| 20.028               | 0.10046621   | 0.01593009   | 0.53220415   |
+| Hessian diagonal | 20.032               | 0.09972853   | 0.01574783   | 0.60244644   |
+| exact GPTQ       | 20.028               | 0.09906761   | 0.01550539   | 0.63079000   |
++------------------+----------------------+--------------+--------------+--------------+
+```
+
+The exact objective improved average held-out output error in this micro-test, but not the worst individual element;
+the maximum absolute error is reported explicitly rather than hidden behind the better mean metrics. This local test
+does not replace the already-recommended full-model, disjoint-heldout evaluation for release acceptance.
+
+### Model-level adaptive-clipping gates
+
+The adaptive-clipping model fixtures now explicitly use `metric="gptq_error"`, ensuring future E2E coverage exercises
+the calibration-aware default rather than the older diagonal approximation. Both available local checkpoints passed
+on isolated GPU 7:
+
+```text
++----------------+-----------------------------------------------+--------+----------+------------------------+
+| Model          | Gate                                          | Result | Runtime  | Peak observed GPU use  |
++----------------+-----------------------------------------------+--------+----------+------------------------+
+| Llama-3.2-1B   | exact-clipping quantization + task evaluation  | Pass   | 6m40s    | 14.8 GiB               |
+| Qwen3-8B       | clipping-disabled vs exact paired task A/B     | Pass   | 33m50s   | 84.0 GiB               |
++----------------+-----------------------------------------------+--------+----------+------------------------+
+```
+
+The Qwen gate retains its strict assertion that exact clipping may not regress any reported GSM8K/ARC metric by more
+than 0.5% relative to the identically configured clipping-disabled baseline. Pytest capture did not preserve the
+per-task printout for a passing test, so no unobserved task values are reconstructed or claimed here; the paired
+threshold assertion and both model test outcomes passed.

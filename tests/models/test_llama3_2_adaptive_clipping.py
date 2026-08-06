@@ -42,7 +42,7 @@ class TestLlama3_2AdaptiveClipping(ModelTest):
 
     ADAPTIVE_CLIPPING = {
         "enabled": True,
-        "metric": "hessian_diag",
+        "metric": "gptq_error",
         "per_group": True,
     }
 

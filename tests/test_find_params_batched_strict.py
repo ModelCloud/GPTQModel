@@ -15,7 +15,8 @@ import os
 import pytest
 import torch
 
-from gptqmodel.quantization import QuantizeConfig, ScaleSearchConfig, Quantizer
+from gptqmodel.quantization import QuantizeConfig, Quantizer, ScaleSearchConfig
+
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
@@ -184,3 +185,25 @@ def test_find_params_batched_narrow_rows_matches_per_group_reference(
         f"zero mismatch {zero_diff} for rows={rows}, cols={cols}, "
         f"{group_size=}, {bits=}, {sym=}, {method=}"
     )
+
+
+def test_activation_search_adversarial_reduction_order_matches_exact_path():
+    """A Triton reduction-order miss must not bypass the exhaustive scorer."""
+
+    generator = torch.Generator(device="cuda").manual_seed(9001)
+    weights = torch.randn((512, 128), generator=generator, device="cuda", dtype=torch.bfloat16) * 1e-3
+    importance = torch.exp(torch.randn(128, generator=generator, device="cuda", dtype=torch.float32) * 4)
+    hessian = torch.diag(importance)
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        sym=False,
+        mse=2.0,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+    )
+
+    exact_scale, exact_zero = _reference_find_params(weights, hessian, qcfg)
+    default_scale, default_zero = _batched_find_params(weights, hessian, qcfg, triton_flag="1")
+
+    assert torch.equal(default_scale, exact_scale)
+    assert torch.equal(default_zero, exact_zero)

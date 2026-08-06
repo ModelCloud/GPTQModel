@@ -19,6 +19,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre
@@ -688,6 +689,30 @@ def _pop_task(name: str, processor: LoopProcessor, subset: Dict[str, NamedModule
     return skipped_module
 
 
+def _with_prepared_subset(func):
+    """Scope processor sharing state to the complete subset execution."""
+
+    @wraps(func)
+    def wrapped(looper, processor, module, plan, *args, **kwargs):
+        subset = plan.modules
+        processor.prepare_subset(
+            subset,
+            subset_index=plan.subset_index,
+            subset_total=plan.subset_total,
+        )
+        try:
+            return func(looper, processor, module, plan, *args, **kwargs)
+        finally:
+            processor.cleanup_subset(
+                subset,
+                subset_index=plan.subset_index,
+                subset_total=plan.subset_total,
+            )
+
+    return wrapped
+
+
+@_with_prepared_subset
 def _run_single_subset_pass(
     looper: 'ModuleLooper',
     processor: LoopProcessor,
@@ -737,15 +762,6 @@ def _run_single_subset_pass(
     execute_forward = plan.execute_forward if execute_forward is None else execute_forward
     if is_embeddings_module is None:
         is_embeddings_module = is_lm_head_module
-
-    # Generic per-subset sharing lifecycle. GPTQ installs same-input Hessian
-    # sharing here; AWQ installs same-input activation sharing here. The stage
-    # stays quantizer-agnostic so future processors can reuse the same boundary.
-    processor.prepare_subset(
-        subset,
-        subset_index=subset_index,
-        subset_total=subset_total,
-    )
 
     handle = []
     subset_size = len(subset_names)
@@ -1115,49 +1131,56 @@ def _run_single_subset_pass(
                 )
         return nm.name, nm
 
-    for name in active_subset_names:
-        named_module = subset[name]
-        # Launch processing for every module in the subset; tasks may run in
-        # parallel as allowed by the device thread pool.
-        tgt_dev = quant_target_devices.get(name, cur_layer_device)
-        futures.append(
-            DEVICE_THREAD_POOL.submit(
-                tgt_dev,
-                _process_on_worker,
-                processor,
-                named_module,
-                tgt_dev,
-                subset,
-                previous_processed_subset,
-                subset_index,
-                subset_total,
-            )
-        )
-
-    _emit_moe_parallel_quant_subset_telemetry(
-        plan=plan,
-        quant_target_devices=quant_target_devices,
-        futures_count=len(futures),
-        layer_index=layer_index,
-    )
-
+    submission_error = None
     try:
-        for fut in futures:
-            # Collect results in submission order so the final subset map preserves
-            # deterministic iteration for downstream consumers.
-            name, named_module = fut.result()
-            if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
-                # Capture-only modules should not be finalized or offloaded.
-                continue
-            processed_subset[name] = named_module
-    finally:
-        # Release any per-subset sharing state after every worker has consumed
-        # it. This keeps heavy Hessian/activation caches scoped to one subset.
-        processor.cleanup_subset(
-            subset,
-            subset_index=subset_index,
-            subset_total=subset_total,
+        for name in active_subset_names:
+            named_module = subset[name]
+            # Launch processing for every module in the subset; tasks may run in
+            # parallel as allowed by the device thread pool.
+            tgt_dev = quant_target_devices.get(name, cur_layer_device)
+            futures.append(
+                DEVICE_THREAD_POOL.submit(
+                    tgt_dev,
+                    _process_on_worker,
+                    processor,
+                    named_module,
+                    tgt_dev,
+                    subset,
+                    previous_processed_subset,
+                    subset_index,
+                    subset_total,
+                )
+            )
+
+        _emit_moe_parallel_quant_subset_telemetry(
+            plan=plan,
+            quant_target_devices=quant_target_devices,
+            futures_count=len(futures),
+            layer_index=layer_index,
         )
+    except BaseException as exc:
+        submission_error = exc
+
+    worker_error = None
+    for fut in futures:
+        # Collect results in submission order so the final subset map preserves
+        # deterministic iteration for downstream consumers. Continue joining
+        # every submitted worker after the first failure so subset cleanup
+        # cannot clear shared state while another worker is still consuming it.
+        try:
+            name, named_module = fut.result()
+        except BaseException as exc:
+            if worker_error is None:
+                worker_error = exc
+            continue
+        if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
+            # Capture-only modules should not be finalized or offloaded.
+            continue
+        processed_subset[name] = named_module
+    if submission_error is not None:
+        raise submission_error
+    if worker_error is not None:
+        raise worker_error
     timer = getattr(looper.gptq_model, "quant_region_timer", None)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
         sync_start = time.perf_counter() if timer is not None else None

@@ -5,6 +5,9 @@ common:
   skip: false
 
 tests:
+  test_gptq_adaptive_vram_gate:
+    sm: '8.0'
+
   test_multi_gpu_inference: # per-test config
     gpu: 5
 

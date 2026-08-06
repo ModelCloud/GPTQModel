@@ -42,6 +42,7 @@ class TestLlama32AdaptiveDampingV41(ModelTest):
         "method": "power_iteration",
         "eigen_iterations": 10,
         "spectral_alpha": 0.25,
+        "module_prior_enabled": True,
     }
 
     V41_ADAPTIVE_DAMPING = {
@@ -52,8 +53,11 @@ class TestLlama32AdaptiveDampingV41(ModelTest):
         "method": "power_iteration",
         "eigen_iterations": 10,
         "spectral_alpha": 0.25,
+        "module_prior_enabled": True,
         "group_error_enabled": True,
+        "online_feedback_enabled": True,
         "group_size_prior_enabled": True,
+        "group_error_use_hessian_weighting": True,
     }
 
     ALLOWED_REGRESSION_PCT = 2.0

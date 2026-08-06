@@ -11,7 +11,6 @@ import os
 import sys
 import threading
 import time
-import zlib
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -190,14 +189,15 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 @torch.inference_mode()
 def _hessian_inverse_try_cholesky(H: torch.Tensor, diag_delta: torch.Tensor):
-    """Add a diagonal delta to a clone of H and attempt its Cholesky decomposition.
+    """Apply a diagonal delta to ``H`` in place and attempt its Cholesky decomposition.
 
     Returns the lower Cholesky factor ``L`` and a 0-dim boolean ``success``
-    tensor (``info == 0``) without using exceptions or Python scalar control flow.
+    tensor (``info == 0``). The caller is responsible for restoring ``H``'s
+    diagonal between damping attempts; this helper intentionally does not clone
+    so that non-shared Hessians can avoid a full matrix copy.
     """
-    H_eff = H.clone()
-    H_eff.diagonal().add_(diag_delta)
-    L, info = torch.linalg.cholesky_ex(H_eff, upper=False)
+    H.diagonal().add_(diag_delta)
+    L, info = torch.linalg.cholesky_ex(H, upper=False)
     success = (info == 0).view(())
     return L, success
 
@@ -219,13 +219,14 @@ class GPTQ:
         *,
         hessian_inverse_available: bool,
         use_online_group_damping: bool,
+        use_adaptive_clipping: bool,
     ) -> int:
         """Preserve legacy GPTQ update order unless group-local work requires otherwise."""
 
         effective_block = blocksize
         if not hessian_inverse_available and group_size > 0:
             effective_block = group_size
-        if use_online_group_damping and group_size > 0:
+        if (use_online_group_damping or use_adaptive_clipping) and group_size > 0:
             effective_block = min(blocksize, group_size)
         return effective_block
 
@@ -334,6 +335,11 @@ class GPTQ:
         # Hessian accumulation/materialization and inverse/Cholesky can be
         # shared across q/k/v or gate/up groups. They stay None for GPTAQ, FOEM,
         # embeddings, and modules without a same-input peer.
+        # ``_shared_hessian_source`` records the exact borrowed tensor. Identity,
+        # rather than processor-wide mutable flags, decides whether in-place
+        # damping is safe when quantization workers run concurrently.
+        self._hessian_is_shared = False
+        self._shared_hessian_source = None
         self._shared_hessian_inverse_cache = None
         self._shared_hessian_inverse_lock = None
         self._shared_hessian_inverse_key = None
@@ -419,13 +425,18 @@ class GPTQ:
         else:
             return (0, 0)
 
-    def mock_hessian_inverse(self, H: torch.Tensor):
-        """Mock hessian inverse for fast testing"""
+    def mock_hessian_inverse(self, H: torch.Tensor, release_input: bool = False):
+        """Mock hessian inverse for fast testing."""
+        if H is None:
+            H = self.H
         # Use the anchor/base damping, not the clamp floor, so adaptive and
         # static configs behave consistently.
         damp = getattr(self.qcfg.damp, "base_percdamp", self.qcfg.damp.min)
         # Return identity matrix instead of complex inversion
         identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
+        if release_input and getattr(self, "H", None) is H:
+            self.H = None
+            del H
         return identity, damp
 
     def log_cpu_fallback(self, stage: str, source_device: torch.device) -> None:
@@ -1094,6 +1105,7 @@ class GPTQ:
                     hessian = hessian.to(device=device)
                     shared_state["H"] = hessian
                 self.H = hessian
+                self._shared_hessian_source = hessian
                 self._set_nsamples(int(shared_state["total_samples"]))
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = hessian.device
@@ -1166,6 +1178,7 @@ class GPTQ:
             sample_counts.clear()
 
             self.H = result_accum
+            self._shared_hessian_source = result_accum
             self._set_nsamples(total)
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
@@ -1415,23 +1428,16 @@ class GPTQ:
             ref_counts[base_key] = remaining
 
     @staticmethod
-    def _stable_probe_seed(name: str, dim: int) -> int:
-        """Return a deterministic seed for eigenvalue probe vectors.
+    def _stable_probe_seed(dim: int) -> int:
+        """Return a deterministic seed derived only from the probe dimension.
 
-        The seed is derived from the module name and Hessian dimension so power
-        iteration is reproducible without consuming the global RNG state.
+        The probe is part of the Hessian spectral approximation, so module names
+        and cache ownership must not change its value for identical mathematical
+        inputs. The dimension is sufficient to create a reproducible local RNG
+        stream without consuming global RNG state.
         """
-        seed = 0
-        for ch in name or "":
-            seed = (seed * 31 + ord(ch)) & 0xFFFFFFFF
-        return (seed + dim) & 0xFFFFFFFF
 
-    @staticmethod
-    def _stable_key_seed(key: Tuple[object, ...]) -> int:
-        """Return a deterministic 32-bit seed from a shared Hessian inverse key."""
-
-        seed = zlib.adler32(repr(key).encode()) & 0xFFFFFFFF
-        return seed if seed != 0 else 1
+        return (0x9E3779B9 ^ int(dim)) & 0xFFFFFFFF
 
     @staticmethod
     def _lambda_max_kernel(H: torch.Tensor, v0: torch.Tensor, n_iter: int):
@@ -1479,8 +1485,8 @@ class GPTQ:
 
         Only ``lambda_max`` is returned; ``lambda_min`` is treated as 0 in the
         damping formula, giving the safe upper bound ``lambda >= lambda_max / (K-1)``.
-        Probe vectors are drawn from a module-local generator so estimates are
-        deterministic and do not perturb the global RNG stream. The power iteration
+        Probe vectors are drawn from a dimension-seeded local generator so estimates
+        depend only on mathematical inputs and do not perturb the global RNG stream. The power iteration
         loop is compiled when ``torch.compile`` is available to reduce kernel-launch
         overhead.
 
@@ -1509,16 +1515,7 @@ class GPTQ:
         if n_iter <= 0:
             return None, None
 
-        # When the Hessian is shared across a group (q/k/v, gate/up, etc.), seed
-        # from the shared inverse key so every consumer resolves the same damping
-        # value and the shared inverse cache remains valid. Otherwise fall back to
-        # a per-module seed.
-        shared_key = getattr(self, "_shared_hessian_inverse_key", None)
-        if shared_key is not None:
-            seed = self._stable_key_seed(shared_key)
-        else:
-            seed = self._stable_probe_seed(self.name, d)
-
+        seed = self._stable_probe_seed(d)
         gen = torch.Generator(device=H.device).manual_seed(seed)
         v0 = torch.randn(d, generator=gen, dtype=H.dtype, device=H.device)
         lambda_max_t = self._compiled_lambda_max_kernel()(H, v0, n_iter)
@@ -1553,15 +1550,18 @@ class GPTQ:
         mean: torch.Tensor,
         lambda_spectral: Optional[float] = None,
     ):
-        """Choose the initial GPTQ damping fraction (hybrid v3).
+        """Choose a calibration-Hessian-aware GPTQ damping fraction.
 
         ``current_diag`` is the diagonal of the effective Hessian (including any
-        applied positive-definiteness floor) and ``mean`` is its mean. The
-        damping is anchored at ``base_percdamp`` and scaled by a module-type
-        factor and a compressed spectral ratio:
+        applied positive-definiteness floor) and ``mean`` is its mean. For the
+        default configuration the damping is determined entirely by the
+        activation Hessian ``H = (2 / N) X.T @ X``:
 
             r = lambda_spectral / mean(current_diag)
-            damp = base_percdamp * module_factor * r ** spectral_alpha
+            damp = base_percdamp * r ** spectral_alpha
+
+        An explicitly enabled module prior additionally multiplies this result
+        by ``module_factor``. It is not part of the calibration-derived default.
 
         For ``method="diagonal"`` the eigenvalue estimate is also taken from
         ``current_diag`` so the proxy is consistent with the denominator. The
@@ -1651,10 +1651,17 @@ class GPTQ:
         h_diag_slice: Optional[torch.Tensor],
         use_hessian_weighting: bool,
     ) -> float:
-        """Return the scalar group loss ``L_g`` used by the online feedback controller."""
+        """Return the GPTQ group loss used by the experimental feedback controller.
+
+        For the upper inverse-Cholesky factor ``U`` used by GPTQ, the canonical
+        correction coefficient is ``E = (W - Q) / diag(U)`` and its block loss
+        contribution is ``0.5 * ||E||_F^2``. Optional multiplication by the raw
+        Hessian diagonal is an experimental heuristic, not the canonical GPTQ
+        objective, because ``E`` already incorporates inverse-Hessian geometry.
+        """
         if h_diag_slice is not None and use_hessian_weighting:
-            return float(torch.sum(h_diag_slice * (err_slice ** 2)).item())
-        return float(torch.sum(err_slice ** 2).item())
+            return float((0.5 * torch.sum(h_diag_slice * (err_slice ** 2))).item())
+        return float((0.5 * torch.sum(err_slice ** 2)).item())
 
     @staticmethod
     def _group_error_scale(
@@ -1677,13 +1684,26 @@ class GPTQ:
     def hessian_inverse(
         self,
         H: torch.Tensor,
+        release_input: bool = False,
     ):
-        """Return the GPTQ inverse/Cholesky result."""
+        """Return the GPTQ inverse/Cholesky result.
+
+        When ``release_input`` is true, ``self.H`` is released as soon as the
+        Cholesky factor ``L`` is available, before the dense inverse factorization
+        that produces ``Hinv``. Callers must clone any Hessian-derived objective
+        data (diagonal, scale-search Hessians) before calling.
+        """
 
         # Resolve the initial damping before the cache lookup so the cache key can
         # distinguish consumers of the same shared Hessian that resolve to different
         # adaptive damping values. The expensive eigen estimate is hoisted out of
         # the floor-attempt loop and reused by ``_compute_hessian_inverse_uncached``.
+        # Do not re-attach an external Hessian to ``self.H``; callers that pass an
+        # explicit tensor keep ownership.  Only resolve a missing argument from the
+        # instance buffer.
+        if H is None:
+            H = self.H
+
         initial_damp = None
         lambda_spectral = None
         cache_damp = self.qcfg.damp.min
@@ -1724,7 +1744,10 @@ class GPTQ:
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
                 result = self._compute_hessian_inverse_uncached(
-                    H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
+                    H,
+                    initial_damp=initial_damp,
+                    lambda_spectral=lambda_spectral,
+                    release_input=release_input,
                 )
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse end {self.name}")
@@ -1737,6 +1760,8 @@ class GPTQ:
                     if stats is not None:
                         stats["inverse_hits"] = int(stats.get("inverse_hits", 0)) + 1
                     self._release_shared_hessian_inverse_cache_entry(cache, cache_key)
+                    if release_input and getattr(self, "H", None) is H:
+                        self.H = None
                     return cached
 
                 if stats is not None:
@@ -1745,7 +1770,10 @@ class GPTQ:
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
                 result = self._compute_hessian_inverse_uncached(
-                    H, initial_damp=initial_damp, lambda_spectral=lambda_spectral
+                    H,
+                    initial_damp=initial_damp,
+                    lambda_spectral=lambda_spectral,
+                    release_input=release_input,
                 )
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse end {self.name}")
@@ -1760,6 +1788,7 @@ class GPTQ:
         H: torch.Tensor,
         initial_damp: Optional[float] = None,
         lambda_spectral: Optional[float] = None,
+        release_input: bool = False,
     ):
         # A Hessian with non-finite entries can only produce a non-finite inverse.
         # Bail out early so the caller can fall back instead of propagating NaN/Inf.
@@ -1831,6 +1860,10 @@ class GPTQ:
             damp_recovery_started = False
             recovery_initial_damp = None
             recovery_last_damp = None
+            # Shared Hessians are referenced by multiple GPTQ tasks; never mutate
+            # the exact borrowed tensor in place. A reordered Hessian is private,
+            # even if the task remains attached to a shared inverse-cache group.
+            is_shared_hessian = getattr(self, "_shared_hessian_source", None) is H
 
             while (damp_per_col > 0).all().item() and (damp_per_col < 1).all().item():
                 # Build the diagonal adjustment for this damping attempt.
@@ -1855,6 +1888,10 @@ class GPTQ:
                                     f"`damp_percent={used_damp:.5f}` "
                                     f"(started at {recovery_initial_damp:.5f})."
                                 )
+                            if release_input:
+                                if getattr(self, "H", None) is H:
+                                    self.H = None
+                                del H, H_eff
                             return Hinv_result, used_damp
                         # Treat a numerically bad inverse the same as a Cholesky failure.
                         raise torch.linalg.LinAlgError(
@@ -1890,14 +1927,66 @@ class GPTQ:
                     # Use the eager Cholesky path for damp recovery; torch.compile
                     # on these ops showed no speedup in micro-benchmarks and can hang
                     # when the compiled graph raises a RuntimeError and is re-entered.
-                    L, success = _hessian_inverse_try_cholesky(H, diag_delta)
+                    # Avoid a full H clone for private Hessians; restore the diagonal
+                    # before each damping attempt because _hessian_inverse_try_cholesky
+                    # applies diag_delta in place.
+                    if is_shared_hessian:
+                        H_eff = H.clone()
+                    else:
+                        H_eff = H
+                    # _hessian_inverse_try_cholesky adds diag_delta in place.  Restore
+                    # the original diagonal in a finally block so an exception (e.g.
+                    # CUDA OOM) does not leave the caller's Hessian carrying leftover
+                    # damping when quantize() falls back to CPU and retries.
+                    try:
+                        H_eff.diagonal().copy_(orig_diag)
+                        L, success = _hessian_inverse_try_cholesky(H_eff, diag_delta)
+                    finally:
+                        H_eff.diagonal().copy_(orig_diag)
                     if success.item():
+                        # Compute the dense inverse into a temporary buffer. ``L`` is
+                        # freed before the final Cholesky so peak memory stays at two
+                        # [columns, columns] tensors during that step.
+                        Hinv_dense = torch.empty_like(L)
                         try:
-                            Hinv_result = _hessian_inverse_factor(L)
+                            torch.cholesky_inverse(L, upper=False, out=Hinv_dense)
                         except RuntimeError as e:
                             Hinv_result = None
-                            success = H.new_tensor(False, dtype=torch.bool)
+                            success = damp_per_col.new_tensor(False, dtype=torch.bool)
                             last_error = e
+                        else:
+                            is_dense_inverse_valid = (
+                                torch.isfinite(Hinv_dense).all().item()
+                                and (Hinv_dense.diagonal() > 0).all().item()
+                            )
+                            if not is_dense_inverse_valid:
+                                Hinv_result = None
+                                success = damp_per_col.new_tensor(False, dtype=torch.bool)
+                                last_error = torch.linalg.LinAlgError(
+                                    "Dense Hessian inverse is non-finite or not positive-definite."
+                                )
+                            else:
+                                # Factor the dense inverse in place. The input buffer
+                                # is overwritten with the upper Cholesky factor ``U``,
+                                # while the original Hessian ``H`` stays intact so
+                                # damping recovery can continue if this step fails.
+                                del L
+                                info = Hinv_dense.new_empty((), dtype=torch.int32)
+                                try:
+                                    Hinv_result, info = torch.linalg.cholesky_ex(
+                                        Hinv_dense, upper=True, out=(Hinv_dense, info)
+                                    )
+                                except RuntimeError as e:
+                                    Hinv_result = None
+                                    success = damp_per_col.new_tensor(False, dtype=torch.bool)
+                                    last_error = e
+                                else:
+                                    if info.item() != 0:
+                                        Hinv_result = None
+                                        success = damp_per_col.new_tensor(False, dtype=torch.bool)
+                                        last_error = torch.linalg.LinAlgError(
+                                            f"Cholesky factorization of H^-1 failed with info={info.item()}."
+                                        )
 
                 if success.item() and Hinv_result is not None:
                     is_valid = (
@@ -1912,10 +2001,29 @@ class GPTQ:
                                 f"`damp_percent={used_damp:.5f}` "
                                 f"(started at {recovery_initial_damp:.5f})."
                             )
+                        if release_input:
+                            if getattr(self, "H", None) is H:
+                                self.H = None
+                            del H
+                            try:
+                                del H_eff
+                            except NameError:
+                                pass
+                        try:
+                            del L
+                        except NameError:
+                            pass
                         return Hinv_result, used_damp
                     # The factorization produced a non-finite or non-positive-definite
                     # inverse. Treat it as a Cholesky failure and continue damping.
-                    success = H.new_tensor(False, dtype=torch.bool)
+                    last_error = torch.linalg.LinAlgError(
+                        "Final upper Cholesky factor is non-finite or not positive-definite."
+                    )
+                    success = damp_per_col.new_tensor(False, dtype=torch.bool)
+                    try:
+                        del L
+                    except NameError:
+                        pass
 
                 if damp_cfg.step != 0:
                     if not damp_recovery_started:
@@ -2292,10 +2400,12 @@ class GPTQ:
         # H = self.H.to(device=self.H.device)
 
         if use_hessian:
-            # Read the Hessian diagonal as a view; torch.diag would allocate a
-            # copy before dead-column handling and activation ordering.
+            # Read the Hessian diagonal as a view, compute the dead-column mask,
+            # then drop the view so the dense Hessian can be released for peak
+            # memory during activation-order permutation and inversion.
             h_diag = self.H.diagonal()
             dead = h_diag == 0
+            del h_diag
             self.H[dead, dead] = 1
             W[:, dead] = 0
 
@@ -2357,22 +2467,46 @@ class GPTQ:
 
         if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(self.H.diagonal(), descending=True)
+            old_H = self.H
+            H_perm = None
+            weight_permuted = False
             try:
+                # First permute; then drop the original Hessian before the second
+                # copy is allocated so only two [columns, columns] tensors coexist.
+                H_perm = old_H[perm]
+                self.H = None
+                del old_H
                 W = W[:, perm]
-                self.H = self.H[perm][:, perm]
+                weight_permuted = True
+                self.H = H_perm[:, perm]
+                del H_perm
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                source_device = H_perm.device if H_perm is not None else old_H.device
+                if source_device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
 
-                self.log_cpu_fallback("Hessian permutation", self.H.device)
+                self.log_cpu_fallback("Hessian permutation", source_device)
                 cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 perm = perm.to(device=cpu_device)
-                W = W.to(device=cpu_device)[:, perm]
-                self.H = self.H.to(device=cpu_device)[perm][:, perm]
+                W = W.to(device=cpu_device)
+                if not weight_permuted:
+                    W = W[:, perm]
+                if H_perm is not None:
+                    H_cpu = H_perm.to(device=cpu_device)
+                    del H_perm
+                    self.H = H_cpu[:, perm]
+                    del H_cpu
+                else:
+                    H_cpu = old_H.to(device=cpu_device)
+                    del old_H
+                    self.H = H_cpu[perm][:, perm]
+                    del H_cpu
                 if not uses_group_params:
                     self.quantizer.find_params(W, weight=True, hessian=self.H)
             invperm = torch.argsort(perm)
+            self._hessian_is_shared = False
+            self._shared_hessian_source = None
 
         elif self.qcfg.act_group_aware and use_hessian:
             diag_h = self.H.diagonal()
@@ -2397,21 +2531,49 @@ class GPTQ:
                 quantizer_group_order = global_perm.tolist()
                 groups = [groups[i] for i in quantizer_group_order] + groups[reordered_group_count:]
                 del quantizer_group_order
+            # ``diag_h`` is a view of the original Hessian; keeping it alive would
+            # prevent the unpermuted Hessian from being freed after ``self.H`` is
+            # reassigned.  ``local_perms`` is also no longer needed.
+            del diag_h, local_perms
+            old_H = self.H
+            H_perm = None
+            weight_permuted = False
             try:
                 W = W[:, final_perm]
-                self.H = self.H[final_perm][:, final_perm]
+                weight_permuted = True
+                # Free the unpermuted Hessian before allocating the fully permuted
+                # copy; only two [columns, columns] tensors are live at once.
+                H_perm = old_H[final_perm]
+                self.H = None
+                del old_H
+                self.H = H_perm[:, final_perm]
+                del H_perm
             except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                source_device = H_perm.device if H_perm is not None else old_H.device
+                if source_device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
 
-                self.log_cpu_fallback("act-group Hessian permutation", self.H.device)
+                self.log_cpu_fallback("act-group Hessian permutation", source_device)
                 cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 final_perm = final_perm.to(device=cpu_device)
-                W = W.to(device=cpu_device)[:, final_perm]
-                self.H = self.H.to(device=cpu_device)[final_perm][:, final_perm]
+                W = W.to(device=cpu_device)
+                if not weight_permuted:
+                    W = W[:, final_perm]
+                if H_perm is not None:
+                    H_cpu = H_perm.to(device=cpu_device)
+                    del H_perm
+                    self.H = H_cpu[:, final_perm]
+                    del H_cpu
+                else:
+                    H_cpu = old_H.to(device=cpu_device)
+                    del old_H
+                    self.H = H_cpu[final_perm][:, final_perm]
+                    del H_cpu
                 if not uses_group_params:
                     self.quantizer.find_params(W, weight=True, hessian=self.H)
+            self._hessian_is_shared = False
+            self._shared_hessian_source = None
 
         damp_cfg = self.qcfg.damp
         use_online_group_damping = (
@@ -2431,38 +2593,18 @@ class GPTQ:
             and clip_cfg.enabled
             and clip_cfg.per_group
         )
-        if use_hessian:
-            try:
-                Hinv, damp = self.hessian_inverse(self.H)
-            except RuntimeError as exc:
-                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
-                    raise
-
-                # Full-attention blocks on very large models can exceed GPU memory during the
-                # dense Hessian inverse; finish that module on CPU instead of aborting the run.
-                self.log_cpu_fallback("Hessian inverse", self.H.device)
-                cpu_fallback_used = True
-                cpu_device = torch.device("cpu")
-                self.H = self.H.to(device=cpu_device)
-                W = W.to(device=cpu_device)
-                if not uses_group_params:
-                    self.quantizer.find_params(W, weight=True, hessian=self.H)
-                Hinv, damp = self.hessian_inverse(self.H)
-        else:
-            Hinv, damp = None, 0.0
-
-        # Ultra releases the dense Hessian before allocating output/scratch
-        # tensors. Preserve that peak-memory optimization while retaining only
-        # the objective data needed by dynamic grouped scale search.
+        # Capture all Hessian-derived objective data before the inverse step.
+        # hessian_inverse() will release self.H as soon as the lower Cholesky
+        # factor is known, so these clones must be taken here.
         group_scale_search_diagonal = None
         group_scale_search_hessians = None
         scale_search = getattr(self.qcfg, "scale_search", None)
         if (
-            Hinv is not None
+            use_hessian
             and uses_group_params
             and not self.qcfg.static_groups
-            and not use_adaptive_clipping
             and float(getattr(self.qcfg, "mse", 0.0) or 0.0) > 0.0
+            and not use_adaptive_clipping
         ):
             if scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}:
                 # clone() is required: retaining a diagonal view would keep the
@@ -2480,8 +2622,64 @@ class GPTQ:
                 )
 
         clip_hessian_diag = None
-        if use_adaptive_clipping and getattr(clip_cfg, "metric", None) == "hessian_diag":
-            clip_hessian_diag = self.H.diagonal().float().clone()
+        group_loss_hessian_diag = None
+        clip_need_diag = (
+            use_adaptive_clipping and getattr(clip_cfg, "metric", None) == "hessian_diag"
+        )
+        loss_need_diag = (
+            use_online_group_damping
+            and isinstance(damp_cfg, AdaptiveDampingConfig)
+            and getattr(damp_cfg, "group_error_use_hessian_weighting", False)
+        )
+        if clip_need_diag or loss_need_diag:
+            _shared_hessian_diag = self.H.diagonal().float().clone()
+            if clip_need_diag:
+                clip_hessian_diag = _shared_hessian_diag
+            if loss_need_diag:
+                group_loss_hessian_diag = _shared_hessian_diag
+
+        if use_hessian:
+            try:
+                Hinv, damp = self.hessian_inverse(self.H, release_input=True)
+            except RuntimeError as exc:
+                if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
+                    raise
+
+                # Full-attention blocks on very large models can exceed GPU memory during the
+                # dense Hessian inverse; finish that module on CPU instead of aborting the run.
+                self.log_cpu_fallback("Hessian inverse", self.H.device)
+                cpu_fallback_used = True
+                cpu_device = torch.device("cpu")
+                self.H = self.H.to(device=cpu_device)
+                W = W.to(device=cpu_device)
+                # Objective snapshots were captured before inversion so they
+                # still live on the original CUDA device. Keep every enabled
+                # scale/clipping objective colocated with the CPU fallback.
+                if group_scale_search_diagonal is not None:
+                    group_scale_search_diagonal = group_scale_search_diagonal.to(device=cpu_device)
+                if group_scale_search_hessians is not None:
+                    group_scale_search_hessians = tuple(
+                        hessian.to(device=cpu_device) for hessian in group_scale_search_hessians
+                    )
+                if clip_hessian_diag is not None:
+                    clip_hessian_diag = clip_hessian_diag.to(device=cpu_device)
+                if group_loss_hessian_diag is not None:
+                    group_loss_hessian_diag = group_loss_hessian_diag.to(device=cpu_device)
+                if not uses_group_params:
+                    self.quantizer.find_params(W, weight=True, hessian=self.H)
+                Hinv, damp = self.hessian_inverse(self.H, release_input=True)
+        else:
+            Hinv, damp = None, 0.0
+
+        # If the Hessian could not be inverted, the old (pre-VRAM) path did not
+        # pass Hessian-derived objective data to find_params or the loss
+        # feedback. Drop the captured clones here so the failure path behaves
+        # the same and does not retain a full-Hessian worth of memory for a
+        # module that will not use error feedback.
+        if Hinv is None:
+            group_scale_search_diagonal = None
+            group_scale_search_hessians = None
+            group_loss_hessian_diag = None
 
         def group_scale_search_hessian(group_start: int, group_end: int) -> torch.Tensor | None:
             if group_scale_search_diagonal is not None:
@@ -2492,18 +2690,22 @@ class GPTQ:
                 return clip_hessian_diag[group_start:group_end]
             return None
 
-        group_loss_hessian_diag = None
+        def group_gptq_inverse_cholesky(group_start: int, group_end: int) -> torch.Tensor | None:
+            """Return a view of the exact correction geometry for one group.
 
-        if Hinv is not None:
-            # The dense Hessian is only needed to build Hinv. Drop it before
-            # allocating the full output buffer and block scratch tensors so
-            # peak GPTQ memory does not hold H and Hinv at the same time.
-            # Capture the diagonal here, after all desc_act/act_group_aware
-            # permutations, so it aligns with the reordered GPTQ workspace.
-            if use_online_group_damping:
-                group_loss_hessian_diag = self.H.diagonal().float().clone()
-            del self.H
-            self.H = None
+            The view is intentionally not cloned: ``Hinv`` remains live for the
+            GPTQ update itself, and copying every group would add avoidable VRAM.
+            Earlier-group corrections are already reflected in the working
+            weights supplied to the clipping search.
+            """
+
+            if (
+                Hinv is not None
+                and use_adaptive_clipping
+                and getattr(clip_cfg, "metric", None) == "gptq_error"
+            ):
+                return Hinv[group_start:group_end, group_start:group_end]
+            return None
 
         # Loss is only reported after quantization; keep a scalar accumulator
         # instead of a second full weight-sized tensor during GPTQ. Accumulate
@@ -2629,6 +2831,7 @@ class GPTQ:
                 int(self.qcfg.group_size or -1),
                 hessian_inverse_available=Hinv is not None,
                 use_online_group_damping=use_online_group_damping,
+                use_adaptive_clipping=use_adaptive_clipping,
             )
 
             if use_online_group_damping:
@@ -2668,10 +2871,11 @@ class GPTQ:
                             size_factor = 1.0
                         current_group_start = group_start
                         current_group_end = group_end
-                        # v4.2: scale the GPTQ residual update, not the Hessian
-                        # inverse.  Larger groups are damped more by dividing the
-                        # error scale by the size prior; high group loss reduces
-                        # the scale via the inverted feedback exponent.
+                        # Experimental online relaxation scales the GPTQ
+                        # correction coefficient, not the Hessian inverse.
+                        # Larger groups are damped more by dividing the error
+                        # scale by the size prior; high group loss reduces the
+                        # scale via the inverted feedback exponent.
                         current_group_error_scale = self._group_error_scale(
                             error_update_scale,
                             size_factor,
@@ -2727,7 +2931,10 @@ class GPTQ:
                                 batched_group_count, group_size
                             )
                         batched_scale, batched_zero = self.quantizer.find_params_batched(
-                            x_3d, weight=True, hessian=batched_hessian
+                            x_3d,
+                            weight=True,
+                            hessian=batched_hessian,
+                            gptq_inverse_cholesky=group_gptq_inverse_cholesky(i1, batched_last),
                         )
 
                 # Fast fused Triton path: one kernel launch per block for the
@@ -2738,6 +2945,7 @@ class GPTQ:
                     _USE_GPTQ_TRITON_BLOCK
                     and gptq_block_triton is not None
                     and Hinv is not None
+                    and W1.is_cuda
                     and count <= 128
                     and group_size > 0
                     and not self.qcfg.static_groups
@@ -2827,6 +3035,7 @@ class GPTQ:
                                     W[:, group_start:group_end],
                                     weight=True,
                                     hessian=group_scale_search_hessian(group_start, group_end),
+                                    gptq_inverse_cholesky=group_gptq_inverse_cholesky(group_start, group_end),
                                 )
                             cpu_scale = self.quantizer.scale.view(W1.size(0), -1).contiguous()
                             cpu_zero = self.quantizer.zero.view(W1.size(0), -1).contiguous()
@@ -2849,6 +3058,9 @@ class GPTQ:
                                     W[:, tail_start:tail_group_end],
                                     weight=True,
                                     hessian=group_scale_search_hessian(tail_start, tail_group_end),
+                                    gptq_inverse_cholesky=group_gptq_inverse_cholesky(
+                                        tail_start, tail_group_end
+                                    ),
                                 )
                                 tail_scale = self.quantizer.scale.view(W1.size(0), -1)
                                 tail_zero = self.quantizer.zero.view(W1.size(0), -1)
@@ -2925,6 +3137,9 @@ class GPTQ:
                                             W[:, group_start:group_end],
                                             weight=True,
                                             hessian=group_scale_search_hessian(group_start, group_end),
+                                            gptq_inverse_cholesky=group_gptq_inverse_cholesky(
+                                                group_start, group_end
+                                            ),
                                         )
 
                                 if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
@@ -2977,11 +3192,11 @@ class GPTQ:
                             and damp_cfg.group_error_enabled
                             and (i1 + i + 1) == current_group_end
                         ):
-                            # v4.2/v4.3: measure the unscaled GPTQ residual for
-                            # this group and update the EMA target for the next
-                            # group.  Using the raw residual (before the size
-                            # prior and feedback scale are applied) decouples the
-                            # feedback controller from its own output.
+                            # Measure the unscaled canonical GPTQ correction for
+                            # this group and update the experimental EMA target
+                            # for the next group. Using the raw coefficient
+                            # (before the size prior and feedback scale) decouples
+                            # the controller from its own output.
                             local_group_start = max(current_group_start - i1, 0)
                             local_group_end = current_group_end - i1
                             err_slice = Err1[:, local_group_start:local_group_end].float()
@@ -3122,7 +3337,7 @@ class GPTQ:
                 temp_zero.extend(zero[reordered_group_count:])
                 zero = temp_zero
                 del inv_global_perm, inv_global_perm_list
-            del final_perm, inv_final, global_perm, local_perms
+            del final_perm, inv_final, global_perm
 
         if adjacent_model is not None:
             if adjacent_reference_weight is None or adjacent_reference_hessian is None:

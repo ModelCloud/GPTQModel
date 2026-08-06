@@ -294,6 +294,11 @@ class GPTQProcessor(LoopProcessor):
         # subset cleanup.
         self._shared_hessian_inverse_ref_counts = {}
         self._shared_hessian_group_counts: Dict[Tuple[object, ...], int] = {}
+        # Subset setup owns processor-wide cache dictionaries. The stage runner
+        # cleans one subset before preparing the next; retain an explicit token
+        # so an accidental overlapping prepare fails before it can invalidate
+        # active quantization workers.
+        self._active_shared_hessian_subset = None
         self._shared_hessian_stats = {
             "batch_requests": 0,
             "batch_hits": 0,
@@ -435,16 +440,26 @@ class GPTQProcessor(LoopProcessor):
         runtime cache key later also includes the actual source activation view.
         """
 
+        subset_token = (subset_index, subset_total, subset)
         with self._shared_hessian_lock:
+            if self._active_shared_hessian_subset is not None:
+                raise RuntimeError(
+                    "GPTQProcessor.prepare_subset() cannot overlap an active subset; "
+                    "wait for cleanup_subset() after all quantization workers finish."
+                )
+            self._active_shared_hessian_subset = subset_token
             self._shared_hessian_batch_cache.clear()
             self._shared_hessian_states.clear()
             self._shared_hessian_inverse_cache.clear()
             self._shared_hessian_inverse_ref_counts.clear()
             self._shared_hessian_group_counts.clear()
 
-        for task in self.tasks.values():
+        for name in subset:
+            task = self.tasks.get(name)
             if not isinstance(task, GPTQ):
                 continue
+            task._hessian_is_shared = False
+            task._shared_hessian_source = None
             task._shared_hessian_accum_key = None
             task._shared_hessian_inverse_key = None
             task._shared_hessian_state = None
@@ -526,6 +541,7 @@ class GPTQProcessor(LoopProcessor):
                     self._hessian_inverse_signature(task.qcfg),
                 )
                 inverse_ref_counts[inverse_key] = inverse_ref_counts.get(inverse_key, 0) + 1
+                task._hessian_is_shared = True
                 task._shared_hessian_accum_key = accum_key
                 task._shared_hessian_inverse_key = inverse_key
                 task._shared_hessian_state = shared_state
@@ -561,18 +577,36 @@ class GPTQProcessor(LoopProcessor):
     ) -> None:
         """Drop per-subset shared Hessian tensors after all workers finish."""
 
-        del subset, subset_index, subset_total
-
         with self._shared_hessian_lock:
+            expected_token = None if subset is None else (subset_index, subset_total, subset)
+            active_token = self._active_shared_hessian_subset
+            if (
+                expected_token is not None
+                and active_token is not None
+                and (
+                    expected_token[0] != active_token[0]
+                    or expected_token[1] != active_token[1]
+                    or expected_token[2] is not active_token[2]
+                )
+            ):
+                mismatch = True
+            else:
+                mismatch = False
+            active_subset = active_token[2] if active_token is not None else subset
             self._shared_hessian_batch_cache.clear()
             self._shared_hessian_states.clear()
             self._shared_hessian_inverse_cache.clear()
             self._shared_hessian_inverse_ref_counts.clear()
             self._shared_hessian_group_counts.clear()
+            self._active_shared_hessian_subset = None
 
-        for task in self.tasks.values():
+        task_names = tuple(self.tasks) if active_subset is None else tuple(active_subset)
+        for name in task_names:
+            task = self.tasks.get(name)
             if not isinstance(task, GPTQ):
                 continue
+            task._hessian_is_shared = False
+            task._shared_hessian_source = None
             task._shared_hessian_accum_key = None
             task._shared_hessian_inverse_key = None
             task._shared_hessian_state = None
@@ -581,6 +615,9 @@ class GPTQProcessor(LoopProcessor):
             task._shared_hessian_inverse_ref_counts = None
             task._shared_hessian_stats = None
             task._shared_hessian_logical_key = False
+
+        if mismatch:
+            raise RuntimeError("GPTQProcessor.cleanup_subset() does not match the active subset.")
 
     def clear_shared_hessian_subset(self) -> None:
         """Compatibility wrapper for tests/tools that call the GPTQ-specific hook."""
