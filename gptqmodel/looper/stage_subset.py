@@ -45,6 +45,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 ForwardMode = Literal["parallel", "serial"]
+_WORKER_FAILURES = (Exception, KeyboardInterrupt, SystemExit, GeneratorExit)
 
 
 @dataclass
@@ -145,6 +146,25 @@ class SubsetStageResult:
     processed_subset: Dict[str, NamedModule]
     layer_inputs: List[List[torch.Tensor]]
     plan: Optional[SubsetPlan]
+
+
+def _collect_worker_results(futures, prior_error: Optional[BaseException] = None):
+    """Resolve every submitted worker before propagating the first error."""
+
+    results = []
+    worker_error = None
+    for future in futures:
+        try:
+            results.append(future.result())
+        except _WORKER_FAILURES as exc:
+            if worker_error is None:
+                worker_error = exc
+
+    if prior_error is not None:
+        raise prior_error
+    if worker_error is not None:
+        raise worker_error
+    return results
 
 
 def _resolve_cache_flush_device(
@@ -1049,36 +1069,38 @@ def _run_single_subset_pass(
                 )
         return nm.name, nm
 
-    for name in active_subset_names:
-        named_module = subset[name]
-        # Launch processing for every module in the subset; tasks may run in
-        # parallel as allowed by the device thread pool.
-        tgt_dev = quant_target_devices.get(name, cur_layer_device)
-        futures.append(
-            DEVICE_THREAD_POOL.submit(
-                tgt_dev,
-                _process_on_worker,
-                processor,
-                named_module,
-                tgt_dev,
-                subset,
-                previous_processed_subset,
-                subset_index,
-                subset_total,
+    submission_error = None
+    try:
+        for name in active_subset_names:
+            named_module = subset[name]
+            # Launch processing for every module in the subset; tasks may run in
+            # parallel as allowed by the device thread pool.
+            tgt_dev = quant_target_devices.get(name, cur_layer_device)
+            futures.append(
+                DEVICE_THREAD_POOL.submit(
+                    tgt_dev,
+                    _process_on_worker,
+                    processor,
+                    named_module,
+                    tgt_dev,
+                    subset,
+                    previous_processed_subset,
+                    subset_index,
+                    subset_total,
+                )
             )
+        _emit_moe_parallel_quant_subset_telemetry(
+            plan=plan,
+            quant_target_devices=quant_target_devices,
+            futures_count=len(futures),
+            layer_index=layer_index,
         )
+    except _WORKER_FAILURES as exc:
+        submission_error = exc
 
-    _emit_moe_parallel_quant_subset_telemetry(
-        plan=plan,
-        quant_target_devices=quant_target_devices,
-        futures_count=len(futures),
-        layer_index=layer_index,
-    )
-
-    for fut in futures:
+    for name, named_module in _collect_worker_results(futures, prior_error=submission_error):
         # Collect results in submission order so the final subset map preserves
         # deterministic iteration for downstream consumers.
-        name, named_module = fut.result()
         if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
             # Capture-only modules should not be finalized or offloaded.
             continue
