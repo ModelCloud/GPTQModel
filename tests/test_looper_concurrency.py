@@ -177,11 +177,11 @@ def test_thread_safe_dict_equality_uses_snapshots():
     tasks = _ThreadSafeDict({"a": 1, "b": 2})
     matching = _ThreadSafeDict({"a": 1, "b": 2})
 
-    assert tasks == tasks
+    assert tasks.__eq__(tasks) is True
     assert tasks == matching
     assert tasks == {"a": 1, "b": 2}
-    matching["c"] = 3
-    assert tasks != matching
+    different = _ThreadSafeDict({"a": 1, "b": 2, "c": 3})
+    assert tasks.__ne__(different) is True
     assert tasks != {"a": 2}
 
 
