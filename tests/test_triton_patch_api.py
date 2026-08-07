@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from triton.runtime import autotuner as triton_autotuner
+import pytest
 
 import gptqmodel
 from gptqmodel.utils import nogil_patcher
@@ -62,6 +62,7 @@ def test_triton_patch_external_usage_snippet():
 
 
 def test_patched_autotuner_constructor_owns_cache_lock(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
     original_lock = threading.Lock()
     existing_cache_value = object()
 
