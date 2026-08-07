@@ -3,22 +3,19 @@
 
 from __future__ import annotations
 
-from importlib import import_module
-from dataclasses import dataclass
 import threading
+from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Callable
 
 from .utils.logger import setup_logger
+
 
 if TYPE_CHECKING:
     from .utils.cpp import TorchOpsJitExtension
 
 
 log = setup_logger()
-# Serialize same-extension API calls so Python 3.13t no-GIL callers do not
-# race clear/load cycles for the same JIT target.
-_EXTENSION_API_LOCKS: dict[str, threading.Lock] = {}
-_EXTENSION_API_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -118,6 +115,11 @@ _EXTENSION_SPECS = (
 
 _EXTENSION_SPECS_BY_NAME = {spec.name: spec for spec in _EXTENSION_SPECS}
 
+# Serialize same-extension API calls so free-threaded callers do not race
+# clear/load cycles. The complete extension set is known at import time, so
+# lock ownership is fixed rather than created dynamically by API calls.
+_EXTENSION_API_LOCKS = {spec.name: threading.Lock() for spec in _EXTENSION_SPECS}
+
 _EXTENSION_GROUPS = {
     "marlin": ("marlin_fp16", "marlin_bf16"),
 }
@@ -177,15 +179,6 @@ def _process_loaded(extension: TorchOpsJitExtension) -> bool:
     return extension._ops_available()
 
 
-def _extension_api_lock(name: str) -> threading.Lock:
-    with _EXTENSION_API_LOCKS_GUARD:
-        lock = _EXTENSION_API_LOCKS.get(name)
-        if lock is None:
-            lock = threading.Lock()
-            _EXTENSION_API_LOCKS[name] = lock
-        return lock
-
-
 def _resolve_single_extension_name(name: str) -> str:
     resolved = _resolve_requested_extensions(name)
     if len(resolved) != 1:
@@ -205,7 +198,7 @@ def _load_one(name: str, *, use_cache: bool) -> TorchOpsJitExtension:
     spec = _EXTENSION_SPECS_BY_NAME[extension_name]
     if not _spec_supported(spec):
         raise RuntimeError(_spec_unsupported_error(spec))
-    with _extension_api_lock(extension_name):
+    with _EXTENSION_API_LOCKS[extension_name]:
         extension = spec.resolve()
 
         if not use_cache:

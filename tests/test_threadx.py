@@ -427,6 +427,9 @@ class TestThreadxJanitor():
         pool._virtual_to_parent = {}
         pool._family_keys = {}
         pool._dispatch_lock = threading.Lock()
+        pool._device_smi_lock = threading.Lock()
+        pool._device_smi_handles = {}
+        pool._device_smi_failures = set()
         pool._device_warmup_lock = threading.Lock()
         pool._device_warmup_states = {}
         pool._worker_warmups = {}
