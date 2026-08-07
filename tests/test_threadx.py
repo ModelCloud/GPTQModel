@@ -7,6 +7,7 @@ import contextlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -427,6 +428,9 @@ class TestThreadxJanitor():
         pool._virtual_to_parent = {}
         pool._family_keys = {}
         pool._dispatch_lock = threading.Lock()
+        pool._device_smi_lock = threading.Lock()
+        pool._device_smi_handles = {}
+        pool._device_smi_failures = set()
         pool._device_warmup_lock = threading.Lock()
         pool._device_warmup_states = {}
         pool._worker_warmups = {}
@@ -496,6 +500,44 @@ class TestThreadxJanitor():
         assert calls["count"] == 1
         assert pool._gc_passes == 1
         assert pool._last_consumed_gc_generation == pool._gc_generation
+
+    @pytest.mark.parametrize("debug_enabled", [False, True])
+    def test_shutdown_closes_device_handles_and_logs_failures(self, monkeypatch, debug_enabled):
+        class _Handle:
+            def __init__(self, error=None):
+                self.error = error
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+                if self.error is not None:
+                    raise self.error
+
+        pool = self._make_pool()
+        pool._janitor = None
+        good_handle = _Handle()
+        close_error = RuntimeError("close failed")
+        failing_handle = _Handle(close_error)
+        pool._device_smi_handles = {
+            "cuda:0": good_handle,
+            "cuda:1": failing_handle,
+        }
+        debug = MagicMock()
+        monkeypatch.setattr(threadx_mod, "DEBUG_ON", debug_enabled)
+        monkeypatch.setattr(threadx_mod.log, "debug", debug)
+
+        pool.shutdown(wait=True)
+
+        assert good_handle.close_calls == 1
+        assert failing_handle.close_calls == 1
+        assert pool._device_smi_handles == {}
+        if debug_enabled:
+            debug.assert_any_call(
+                "DeviceThreadPool: ignoring Device-SMI handle close failure during shutdown: %s",
+                close_error,
+            )
+        else:
+            debug.assert_not_called()
 
 ######## test_threadx_mps.py #########
 

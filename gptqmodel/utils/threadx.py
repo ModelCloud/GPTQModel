@@ -714,7 +714,8 @@ class DeviceThreadPool:
         self._gc_pending_physical: Dict[str, int] = {}
         self._physical_children: Dict[str, Set[str]] = {}
 
-        # Device-SMI handles are created lazily for GC logging.
+        # Device-SMI handles are created lazily for GC logging, while their
+        # synchronization state is an invariant of every pool instance.
         self._device_smi_lock = threading.Lock()
         self._device_smi_handles: Dict[str, Any] = {}
         self._device_smi_failures: Set[str] = set()
@@ -1187,14 +1188,14 @@ class DeviceThreadPool:
                 for w in snapshot:
                     w.join()
 
-        if hasattr(self, "_device_smi_handles"):
-            with self._device_smi_lock:
-                for handle in list(self._device_smi_handles.values()):
-                    try:
-                        handle.close()
-                    except Exception:
-                        pass
-                self._device_smi_handles.clear()
+        with self._device_smi_lock:
+            for handle in list(self._device_smi_handles.values()):
+                try:
+                    handle.close()
+                except Exception as exc:
+                    if DEBUG_ON:
+                        log.debug("DeviceThreadPool: ignoring Device-SMI handle close failure during shutdown: %s", exc)
+            self._device_smi_handles.clear()
 
         if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
 
@@ -1556,10 +1557,6 @@ class DeviceThreadPool:
     def _query_device_vram_gib(self, key: str) -> Optional[float]:
         if Device is None:
             return None
-        if not hasattr(self, "_device_smi_lock"):
-            self._device_smi_lock = threading.Lock()
-            self._device_smi_handles = {}
-            self._device_smi_failures = set()
         dev = self._devices_by_key.get(key)
         if dev is None:
             return None

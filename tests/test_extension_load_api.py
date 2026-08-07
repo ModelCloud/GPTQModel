@@ -94,6 +94,10 @@ def test_package_root_exports_extension_module():
     assert gptqmodel.extension is extension_api
 
 
+def test_extension_api_locks_are_initialized_eagerly():
+    assert set(extension_api._EXTENSION_API_LOCKS) == set(extension_api.available_extensions())
+
+
 def test_load_defaults_to_all_extensions(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
 

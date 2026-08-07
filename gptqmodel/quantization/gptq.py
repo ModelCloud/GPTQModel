@@ -51,7 +51,7 @@ def _log_hessian_verbose() -> bool:
     return env_flag("GPTQMODEL_LOG_HESSIAN")
 
 
-lock = threading.Lock()
+_WORKSPACE_LOCKS_GUARD = threading.Lock()
 
 # Shared workspaces are cached globally per device so that concurrent GPTQ
 # instances reuse temporary buffers instead of repeatedly allocating large
@@ -70,6 +70,19 @@ def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
 
 def _workspace_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return _device_cache_key(device)
+
+
+def _workspace_lock(key: Tuple[str, Optional[int]]) -> threading.Lock:
+    lock = _WORKSPACE_LOCKS.get(key)
+    if lock is not None:
+        return lock
+
+    with _WORKSPACE_LOCKS_GUARD:
+        lock = _WORKSPACE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKSPACE_LOCKS[key] = lock
+    return lock
 
 
 def _needs_workspace_resize(
@@ -99,7 +112,7 @@ def _lease_workspace(
     required_rows: int,
 ) -> Tuple[torch.Tensor, bool]:
     key = _workspace_cache_key(device)
-    lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
+    lock = _workspace_lock(key)
     with lock:
         workspace = _WORKSPACE_CACHE.pop(key, None)
         reused = workspace is not None and not _needs_workspace_resize(

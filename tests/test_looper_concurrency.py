@@ -59,6 +59,7 @@ def test_loop_processor_initializes_synchronized_state(monkeypatch, tmp_path):
 
     assert isinstance(processor.tasks, _ThreadSafeDict)
     assert isinstance(processor.inputs_cache, _ThreadSafeInputCache)
+    assert isinstance(processor._input_cache_lock, type(threading.RLock()))
     assert processor.inputs_cache.unwrap().layer_inputs == []
 
 
@@ -134,7 +135,41 @@ def test_collect_worker_results_drains_before_raising_submission_control_error()
     assert events == ["first", "second"]
 
 
-def test_thread_safe_dict_uses_snapshots_during_concurrent_mutation():
+class _WorkerAbort(BaseException):
+    """Custom non-Exception BaseException used for drain regression tests."""
+
+
+def test_collect_worker_results_drains_direct_baseexception_subclass():
+    events = []
+    error = _WorkerAbort("worker abort")
+    futures = [
+        _RecordingFuture(events, "first", error=error),
+        _RecordingFuture(events, "second", result=("b", 2)),
+    ]
+
+    with pytest.raises(_WorkerAbort, match="worker abort") as exc_info:
+        _collect_worker_results(futures)
+
+    assert exc_info.value is error
+    assert events == ["first", "second"]
+
+
+def test_collect_worker_results_drains_before_raising_custom_submission_error():
+    events = []
+    submission_error = _WorkerAbort("submission abort")
+    futures = [
+        _RecordingFuture(events, "first", result=("a", 1)),
+        _RecordingFuture(events, "second", result=("b", 2)),
+    ]
+
+    with pytest.raises(_WorkerAbort, match="submission abort") as exc_info:
+        _collect_worker_results(futures, prior_error=submission_error)
+
+    assert exc_info.value is submission_error
+    assert events == ["first", "second"]
+
+
+def test_thread_safe_dict_iteration_snapshots_during_concurrent_mutation():
     tasks = _ThreadSafeDict()
     barrier = threading.Barrier(8)
 
@@ -173,16 +208,42 @@ def test_thread_safe_dict_mutation_api():
     assert not tasks
 
 
-def test_thread_safe_dict_equality_uses_snapshots():
+def test_thread_safe_dict_uses_builtin_dict_equality():
     tasks = _ThreadSafeDict({"a": 1, "b": 2})
     matching = _ThreadSafeDict({"a": 1, "b": 2})
 
-    assert tasks.__eq__(tasks) is True
+    assert _ThreadSafeDict.__eq__ is dict.__eq__
+    assert _ThreadSafeDict.__ne__ is dict.__ne__
     assert tasks == matching
     assert tasks == {"a": 1, "b": 2}
     different = _ThreadSafeDict({"a": 1, "b": 2, "c": 3})
-    assert tasks.__ne__(different) is True
+    assert tasks != different
     assert tasks != {"a": 2}
+
+
+def test_thread_safe_dict_builtin_equality_during_concurrent_mutation():
+    tasks = _ThreadSafeDict()
+    barrier = threading.Barrier(8)
+
+    def writer(worker_index):
+        barrier.wait(timeout=5)
+        for iteration in range(1_000):
+            tasks[f"{worker_index}:{iteration}"] = iteration
+
+    def comparer(_worker_index):
+        barrier.wait(timeout=5)
+        for _ in range(5_000):
+            snapshot = dict(tasks.items())
+            assert isinstance(tasks == snapshot, bool)
+            assert isinstance(tasks != {}, bool)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(writer, worker_index) for worker_index in range(4)]
+        futures.extend(executor.submit(comparer, worker_index) for worker_index in range(4))
+        for future in futures:
+            future.result()
+
+    assert len(tasks) == 4_000
 
 
 def test_thread_safe_input_cache_replacement_and_attribute_access():
@@ -203,13 +264,13 @@ def test_thread_safe_input_cache_replacement_and_attribute_access():
     assert proxy.unwrap() is replacement
 
 
-def test_receive_input_cache_initializes_missing_state_and_rewraps_raw_cache():
+def test_receive_input_cache_rewraps_missing_and_raw_cache_state():
     processor = LoopProcessor.__new__(LoopProcessor)
+    processor._input_cache_lock = threading.RLock()
     first = InputCache([[torch.tensor([1.0])]], [], [], [])
 
     processor.receive_input_cache(first)
 
-    assert isinstance(processor._input_cache_lock, type(threading.RLock()))
     assert isinstance(processor.inputs_cache, _ThreadSafeInputCache)
     assert processor.inputs_cache.unwrap() is first
 

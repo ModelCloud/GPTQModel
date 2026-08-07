@@ -5,6 +5,7 @@ import contextlib
 import copy
 import math
 import statistics
+import threading
 import time
 import tracemalloc
 import types
@@ -146,6 +147,54 @@ def reset_workspace_caches():
     gptq_impl._WORKSPACE_CACHE.clear()
     gptq_impl._WORKSPACE_LOCKS.clear()
     gptq_impl._BF16_SUPPORT_CACHE.clear()
+
+
+def test_workspace_lock_is_created_once_per_device(monkeypatch):
+    real_lock = gptq_impl.threading.Lock
+    lock_creations = 0
+
+    def counting_lock():
+        nonlocal lock_creations
+        lock_creations += 1
+        return real_lock()
+
+    monkeypatch.setattr(gptq_impl.threading, "Lock", counting_lock)
+    key = ("cpu", None)
+
+    first = gptq_impl._workspace_lock(key)
+    second = gptq_impl._workspace_lock(key)
+
+    assert second is first
+    assert lock_creations == 1
+
+
+def test_workspace_lock_contended_creation_returns_one_lock(monkeypatch):
+    class _ContendedLockMap(dict):
+        def __init__(self):
+            super().__init__()
+            self._initial_gets = 0
+            self._initial_gets_lock = threading.Lock()
+            self._initial_gets_barrier = threading.Barrier(2)
+
+        def get(self, key, default=None):
+            with self._initial_gets_lock:
+                initial_get = self._initial_gets < 2
+                if initial_get:
+                    self._initial_gets += 1
+            if initial_get:
+                self._initial_gets_barrier.wait(timeout=5)
+                return default
+            return super().get(key, default)
+
+    workspace_locks = _ContendedLockMap()
+    monkeypatch.setattr(gptq_impl, "_WORKSPACE_LOCKS", workspace_locks)
+    key = ("cpu", None)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        locks = list(pool.map(gptq_impl._workspace_lock, [key, key]))
+
+    assert locks[0] is locks[1]
+    assert workspace_locks == {key: locks[0]}
 
 
 def _clone_module(module: torch.nn.Module) -> torch.nn.Module:
