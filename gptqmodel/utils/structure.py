@@ -38,7 +38,6 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -650,6 +649,57 @@ def _lazy_turtle_parallel_workers(num_jobs: int, num_cuda_devices: int) -> int:
     return min(num_jobs, max_workers, 8)
 
 
+def _run_lazy_turtle_jobs(jobs: list[Any], worker, max_workers: int) -> list[Any]:
+    """Run ordered LazyTurtle jobs on persistent threadx loader lanes.
+
+    One lane processes a stable slice of jobs serially. This bounds concurrent
+    shard access to ``max_workers`` while avoiding a temporary executor and its
+    thread/device-context warmup on every materialization batch.
+    """
+
+    if max_workers <= 1 or len(jobs) <= 1:
+        return [worker(job) for job in jobs]
+
+    # Import lazily because package initialization imports this module before
+    # exposing the process-wide pool proxy.
+    from .. import DEVICE_THREAD_POOL
+
+    lane_count = min(max_workers, len(jobs))
+    lanes: list[list[tuple[int, Any]]] = [[] for _ in range(lane_count)]
+    for index, job in enumerate(jobs):
+        lanes[index % lane_count].append((index, job))
+
+    def run_lane(lane: list[tuple[int, Any]]) -> tuple[list[tuple[int, Any]], Optional[BaseException]]:
+        """Execute one lane while returning ordinary loader failures to the caller."""
+
+        lane_results: list[tuple[int, Any]] = []
+        try:
+            for index, job in lane:
+                lane_results.append((index, worker(job)))
+        except BaseException as exc:
+            # ThreadX treats an exception escaping a persistent worker as
+            # process-fatal. Loader failures are recoverable caller errors, so
+            # transport them as values and re-raise after every lane drains.
+            return lane_results, exc
+        return lane_results, None
+
+    futures = [
+        DEVICE_THREAD_POOL.submit("model_loader:cpu", run_lane, lane)
+        for lane in lanes
+    ]
+    indexed_results: list[tuple[int, Any]] = []
+    errors: list[BaseException] = []
+    for future in futures:
+        lane_results, error = future.result()
+        indexed_results.extend(lane_results)
+        if error is not None:
+            errors.append(error)
+    if errors:
+        raise errors[0]
+    indexed_results.sort(key=lambda item: item[0])
+    return [result for _, result in indexed_results]
+
+
 @dataclass
 class _LazyWeightRenaming:
     """Lightweight 1:1 renaming rule that mirrors `transformers.WeightRenaming` matching semantics."""
@@ -1155,6 +1205,8 @@ class LazyTurtle:
         if not submodules:
             return
 
+        batch_started_at = time.perf_counter()
+
         # Fast path: a single submodule is just the normal materialize path.
         if len(submodules) == 1:
             target_submodule, module_path, device = submodules[0]
@@ -1170,22 +1222,40 @@ class LazyTurtle:
             )
             return
 
+        module_scan_started_at = time.perf_counter()
         modules_by_name = dict(target_model.named_modules())
+        module_scan_elapsed = time.perf_counter() - module_scan_started_at
         all_jobs: list[_LazyTurtleCopyJob] = []
         fallback_needed = False
+        prepare_elapsed = 0.0
+        copy_elapsed = 0.0
+        prepare_phases = {
+            "enumerate": 0.0,
+            "concat": 0.0,
+            "resolve": 0.0,
+            "hint": 0.0,
+            "allocate_bind": 0.0,
+        }
 
         with self._lock:
+            prepare_started_at = time.perf_counter()
             for target_submodule, module_path, device in submodules:
+                enumerate_started_at = time.perf_counter()
                 t_params = dict(target_submodule.named_parameters(recurse=True))
                 t_bufs = dict(target_submodule.named_buffers(recurse=True))
+                prepare_phases["enumerate"] += time.perf_counter() - enumerate_started_at
 
                 for rel_name in t_params:
+                    phase_started_at = time.perf_counter()
                     concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
+                    prepare_phases["concat"] += time.perf_counter() - phase_started_at
                     if concat_source is not None:
                         fallback_needed = True
                         break
 
+                    phase_started_at = time.perf_counter()
                     full_name, expert_index, split_index, split_dim = self._resolve_checkpoint_tensor_source(module_path, rel_name)
+                    prepare_phases["resolve"] += time.perf_counter() - phase_started_at
                     if full_name is None:
                         continue
                     shard = self._weight_map.get(full_name)
@@ -1193,12 +1263,14 @@ class LazyTurtle:
                         fallback_needed = True
                         break
 
+                    phase_started_at = time.perf_counter()
                     prefer_transposed = self._resolve_prefer_transposed_hint(
                         target_model=target_model,
                         module_path=module_path,
                         rel_name=rel_name,
                         modules_by_name=modules_by_name,
                     )
+                    prepare_phases["hint"] += time.perf_counter() - phase_started_at
 
                     target_param = t_params.get(rel_name)
                     if target_param is None:
@@ -1213,6 +1285,7 @@ class LazyTurtle:
                     if not is_meta and already_loaded:
                         source_tensor = target_param
 
+                    phase_started_at = time.perf_counter()
                     new_param = torch.nn.Parameter(
                         torch.empty_like(target_param, device=device),
                         requires_grad=False,
@@ -1220,6 +1293,7 @@ class LazyTurtle:
                     t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
                     setattr(t_parent, leaf, new_param)
                     target_param = new_param
+                    prepare_phases["allocate_bind"] += time.perf_counter() - phase_started_at
 
                     all_jobs.append(
                         _LazyTurtleCopyJob(
@@ -1306,14 +1380,18 @@ class LazyTurtle:
                 if fallback_needed:
                     break
 
+            prepare_elapsed = time.perf_counter() - prepare_started_at
+
             # Keep the turtle lock held for the whole grouped copy so shard-handler
             # creation and parallel reads are serialized with the per-submodule path.
             if not fallback_needed and all_jobs:
+                copy_started_at = time.perf_counter()
                 self._copy_grouped_entries_batch(
                     jobs=all_jobs,
                     device=None,  # per-job target already on the right device
                     non_blocking=non_blocking,
                 )
+                copy_elapsed = time.perf_counter() - copy_started_at
 
         if fallback_needed:
             # Unlikely edge cases are handled by the well-tested per-submodule path.
@@ -1331,8 +1409,27 @@ class LazyTurtle:
                 target_model.tie_weights()
             return
 
+        tie_started_at = time.perf_counter()
         if all_jobs and tie_weights and hasattr(target_model, "tie_weights"):
             target_model.tie_weights()
+        tie_elapsed = time.perf_counter() - tie_started_at
+        if all_jobs:
+            _log_info(
+                "LazyTurtle: batch phases total=%.3fs scan=%.3fs prepare=%.3fs "
+                "(enumerate=%.3fs concat=%.3fs resolve=%.3fs hint=%.3fs allocate_bind=%.3fs) "
+                "copy=%.3fs tie=%.3fs jobs=%d",
+                time.perf_counter() - batch_started_at,
+                module_scan_elapsed,
+                prepare_elapsed,
+                prepare_phases["enumerate"],
+                prepare_phases["concat"],
+                prepare_phases["resolve"],
+                prepare_phases["hint"],
+                prepare_phases["allocate_bind"],
+                copy_elapsed,
+                tie_elapsed,
+                len(all_jobs),
+            )
 
     def _copy_grouped_entries_batch(
         self,
@@ -1452,28 +1549,18 @@ class LazyTurtle:
         )
 
         async_sources: list[torch.Tensor] = []
-        if max_workers > 1:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(_worker, job) for job in jobs]
-                for future in futures:
-                    rel_name, nbytes, read_time, from_disk, source, non_blocking = future.result()
-                    if non_blocking:
-                        async_sources.append(source)
-                    if from_disk:
-                        total_read_bytes += nbytes
-                        disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
-                    else:
-                        total_source_bytes += nbytes
-        else:
-            for job in jobs:
-                rel_name, nbytes, read_time, from_disk, source, non_blocking = _worker(job)
-                if non_blocking:
-                    async_sources.append(source)
-                if from_disk:
-                    total_read_bytes += nbytes
-                    disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
-                else:
-                    total_source_bytes += nbytes
+        for rel_name, nbytes, read_time, from_disk, source, non_blocking in _run_lazy_turtle_jobs(
+            jobs,
+            _worker,
+            max_workers,
+        ):
+            if non_blocking:
+                async_sources.append(source)
+            if from_disk:
+                total_read_bytes += nbytes
+                disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
+            else:
+                total_source_bytes += nbytes
 
         if async_sources:
             for dev in target_cuda_devices:
@@ -2553,6 +2640,14 @@ class LazyTurtle:
         module_path: str,
         rel_name: str,
     ) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+        # Defused checkpoints commonly use the shell's exact runtime key. The
+        # general resolver below expands module-tree aliases, base-prefix
+        # variants, and converter chains; avoid that combinatorial search when
+        # its first effective candidate is already an exact checkpoint hit.
+        exact_name = self._join_tensor_name(module_path, rel_name)
+        if exact_name in self._weight_map:
+            return exact_name, None, None, None
+
         # Reuse direct-name resolution so alias handling stays in one place.
         full_name = self._resolve_checkpoint_tensor_name(module_path, rel_name)
         if full_name in self._weight_map:
@@ -3035,32 +3130,20 @@ class LazyTurtle:
         )
 
         async_sources: list[torch.Tensor] = []
-        if max_workers > 1:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(_worker, job) for job in jobs]
-                for future in futures:
-                    rel_name, nbytes, read_time, source, non_blocking = future.result()
-                    if non_blocking:
-                        async_sources.append(source)
-                    total_read_bytes += nbytes
-                    disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
-                    loaded_entries += 1
-                    if progress is not None:
-                        progress.current_iter_step = loaded_entries
-                        progress.subtitle(f"{rel_name}: {loaded_entries}/{total_entries}")
-                        progress.draw()
-        else:
-            for job in jobs:
-                rel_name, nbytes, read_time, source, non_blocking = _worker(job)
-                if non_blocking:
-                    async_sources.append(source)
-                total_read_bytes += nbytes
-                disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
-                loaded_entries += 1
-                if progress is not None:
-                    progress.current_iter_step = loaded_entries
-                    progress.subtitle(f"{rel_name}: {loaded_entries}/{total_entries}")
-                    progress.draw()
+        for rel_name, nbytes, read_time, source, non_blocking in _run_lazy_turtle_jobs(
+            jobs,
+            _worker,
+            max_workers,
+        ):
+            if non_blocking:
+                async_sources.append(source)
+            total_read_bytes += nbytes
+            disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
+            loaded_entries += 1
+            if progress is not None:
+                progress.current_iter_step = loaded_entries
+                progress.subtitle(f"{rel_name}: {loaded_entries}/{total_entries}")
+                progress.draw()
 
         for job in jobs:
             self._loaded_tensor_ids.add(id(job.target_tensor))

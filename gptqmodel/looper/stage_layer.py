@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import threading
 import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
@@ -28,6 +27,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
+from ..models.base import MODULE_TREE_FLAG_ROUTED
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..nn_modules.fused_group_forward import (
     clear_fused_group_forward_caches,
@@ -73,6 +73,77 @@ def _build_pre_quantize_skip_plan(layer_modules: List[List[str]]) -> Set[str]:
     return skip_module_names
 
 
+def _build_pre_quantize_defer_plan(
+    looper: "ModuleLooper",
+    layer_modules: List[List[str]],
+) -> Set[str]:
+    """Return routed leaves whose weights are unnecessary during direct capture.
+
+    GPTQ's MoE bypass invokes input hooks directly for routed gate/up leaves and
+    reconstructs down inputs from the already-quantized gate/up pair. Those
+    routed shells can therefore stay meta until the subset quantization batch
+    loads them directly onto their assigned device. Classification comes only
+    from module-tree metadata; runtime path spelling is not semantic.
+    """
+
+    if not looper.gptq_model.quantize_config.moe_routing_bypass():
+        return set()
+    if not looper.processors or not all(
+        getattr(processor, "moe_input_capture_without_forward", False)
+        for processor in looper.processors
+    ):
+        return set()
+
+    deferred: Set[str] = set()
+    for block in layer_modules:
+        for raw_name in block:
+            clean_name = raw_name.split(":", 1)[0]
+            if not clean_name:
+                continue
+            flags = looper.gptq_model.get_module_tree_flags(clean_name)
+            if MODULE_TREE_FLAG_ROUTED in flags:
+                deferred.add(clean_name)
+    return deferred
+
+
+def _materialize_unclaimed_deferred_modules(
+    looper: "ModuleLooper",
+    *,
+    module: torch.nn.Module,
+    layer_name: str,
+    defer_module_names: Set[str],
+    device: torch.device,
+) -> None:
+    """Load deferred leaves that no subset claimed before replay/finalization.
+
+    Dynamic exclusions and calibration-coverage pruning can remove a routed
+    leaf after the initial batch-load plan deliberately left it meta. Keep the
+    fast path for claimed leaves, but reconcile any remaining shells in one
+    grouped LazyTurtle load so native replay and ``post_quantize`` always see a
+    complete layer.
+    """
+
+    pending = []
+    for relative_name in sorted(defer_module_names):
+        try:
+            deferred_module = module.get_submodule(relative_name)
+        except AttributeError:
+            continue
+        has_direct_meta = any(
+            tensor.device.type == "meta"
+            for tensor in (
+                *deferred_module.parameters(recurse=False),
+                *deferred_module.buffers(recurse=False),
+            )
+        )
+        if has_direct_meta:
+            full_name = f"{layer_name}.{relative_name}" if layer_name else relative_name
+            pending.append((deferred_module, full_name, device))
+
+    if pending:
+        looper.gptq_model.lazy_turtle_batch_materialize_submodules(pending)
+
+
 def _should_drain_finalize_futures_synchronously(
     looper: "ModuleLooper",
     *,
@@ -98,24 +169,13 @@ def _should_drain_finalize_futures_synchronously(
     can visibly ratchet active VRAM upward from layer N to N+1, so ParoQuant
     always drains per-layer finalizers synchronously.
 
-    Any multi-accelerator quantization flow can overlap layer N finalizers with
-    layer N+1 materialization/replay if we keep the default async drain. That
-    saves some wall time, but it also broadens the lifetime of device-resident
-    weights, activations, and packing state across layer boundaries. In
-    practice, the overlap is not worth the allocator pressure risk, so
-    multi-device runs drain per-layer finalizers synchronously.
+    GPTQ finalization packs CPU-owned leaves and writes them to the configured
+    offload target. It does not participate in the next layer's forward, so it
+    may overlap that layer even when quantization uses multiple accelerators.
     """
     if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
         return True
 
-    quant_devices = getattr(looper, "_quant_devices", None) or []
-    active_accelerators = {
-        (device.type, device.index)
-        for device_like in quant_devices
-        if (device := normalize_device_like(device_like)) is not None and device.type != "cpu"
-    }
-    if len(active_accelerators) > 1:
-        return True
     # AWQ/ParoQuant finalizers are drained synchronously for correctness/VRAM
     # reasons noted above; everything else defaults to async parallel drain.
     return any(isinstance(process, (AWQProcessor, ParoQuantProcessor)) for process, *_ in finalize_tasks)
@@ -512,13 +572,16 @@ def run_layer_stage(
         ):
             continue
 
+        defer_module_names: Set[str] = set()
         if is_embeddings_module or not layer_modules:
             module = looper.gptq_model.pre_quantize(module, layer_name=layer_name or "")
         else:
             skip_module_names = _build_pre_quantize_skip_plan(layer_modules)
+            defer_module_names = _build_pre_quantize_defer_plan(looper, layer_modules)
             module = looper.gptq_model.pre_quantize(
                 module,
                 skip_module_names=skip_module_names,
+                defer_module_names=defer_module_names,
                 layer_name=layer_name or "",
             )
 
@@ -673,7 +736,8 @@ def run_layer_stage(
                 and p_index == len(looper.processors) - 1
             )
             needs_downstream_outputs = not is_last_module and not is_terminal_quantized_layer
-            for subset_plan in subset_plans:
+            weight_prefetch_state: Dict[int, object] = {}
+            for subset_plan_index, subset_plan in enumerate(subset_plans):
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
                 if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
@@ -720,6 +784,12 @@ def run_layer_stage(
                     region_timer=region_timer,
                     previous_processed_subset=previous_subset_processed,
                     subset_event_cb=looper._subset_event_dispatch,
+                    next_plan=(
+                        subset_plans[subset_plan_index + 1]
+                        if subset_plan_index + 1 < len(subset_plans)
+                        else None
+                    ),
+                    weight_prefetch_state=weight_prefetch_state,
                 )
 
                 layer_inputs = subset_result.layer_inputs
@@ -741,6 +811,15 @@ def run_layer_stage(
 
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
+
+            if defer_module_names:
+                _materialize_unclaimed_deferred_modules(
+                    looper,
+                    module=module,
+                    layer_name=layer_name,
+                    defer_module_names=defer_module_names,
+                    device=cur_layer_device,
+                )
 
             # When dynamic exclusions remove every tracked module from a layer,
             # no subset stage runs, so nothing materializes that layer's
@@ -1134,22 +1213,20 @@ def run_layer_stage(
                         ):
                             torch_empty_cache(device=cur_layer_device, gc=False, sync=True)
                     else:
-                        # Asynchronous (current/default behavior): drain in background thread
-                        # This allows next layer to start while current layer finalizes
-                        finalizer_thread = threading.Thread(
-                            target=_drain_finalize_futures,
-                            args=(
-                                [future for future, *_ in finalize_futures_snapshot],
-                                finalize_pb,
-                                finalize_count,
-                                layer_index,
-                                drain_label,
-                            ),
-                            name="SubmoduleFinalizeWatcher",
-                            daemon=True,
+                        # Queue the watcher behind already-submitted CPU pack
+                        # tasks on the process-wide threadx pool. This lets the
+                        # next layer start without creating an ad-hoc lifecycle
+                        # thread, while the pool's final wait still accounts for
+                        # both pack work and watcher completion.
+                        DEVICE_THREAD_POOL.submit(
+                            CPU,
+                            _drain_finalize_futures,
+                            [future for future, *_ in finalize_futures_snapshot],
+                            finalize_pb,
+                            finalize_count,
+                            layer_index,
+                            drain_label,
                         )
-                        looper.register_dangling_thread(finalizer_thread)
-                        finalizer_thread.start()
                 else:
                     looper._emit_layer_complete(
                         layer_idx=layer_index,

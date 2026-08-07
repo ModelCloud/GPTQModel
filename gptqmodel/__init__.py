@@ -185,6 +185,7 @@ def _default_cpu_workers() -> int:
 
 
 def _build_device_thread_pool():
+    cpu_workers = _default_cpu_workers()
     return DeviceThreadPool(
         inference_mode=True,
         warmups={
@@ -198,8 +199,13 @@ def _build_device_thread_pool():
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,
-            "cpu": _default_cpu_workers(),
-            "model_loader:cpu": 2,
+            "cpu": cpu_workers,
+            # LazyTurtle fans checkpoint reads/copies through persistent loader
+            # lanes instead of constructing one temporary executor per batch.
+            "model_loader:cpu": min(8, cpu_workers),
+            # One coordinator may wait on loader lanes while the current routed
+            # expert subset continues quantizing on accelerator workers.
+            "model_prefetch:cpu": 1,
         },
         empty_cache_every_n=512,
     )

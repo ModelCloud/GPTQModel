@@ -142,17 +142,13 @@ class StageInputsCapture:
                 calibration_batches,
             )
 
-        # Materialize the first layer and base modules (embeddings, lm_head,
-        # norms) on the quantization device so the initial input capture does not
-        # run on CPU and then pay a cross-device copy for every calibration batch.
-        # With offload_to_disk enabled, only the modules touched here are resident
-        # on the accelerator; the rest of the model stays on disk.
+        # The first-layer pre-hook raises before the layer body executes, so its
+        # parameters are deliberately left as checkpoint-backed shells here.
+        # Base modules (embeddings, model-level norms, and other pre-layer
+        # components) are materialized below on the capture device. The layer's
+        # leaves are then loaded once by the quantization stage, directly onto
+        # their module-tree-planned devices.
         capture_device = normalize_device_like(self.gptq_model.quantize_config.device) or CPU
-        layers[0] = self.gptq_model.shell_module_materialize(
-            target_submodule=layers[0],
-            device=capture_device,
-            module_path=module_path,
-        )
         cur_layer_device = capture_device
 
         # Use calibration_data_device if specified, otherwise use cur_layer_device
@@ -305,6 +301,8 @@ class StageInputsCapture:
                         and "input_ids" in example
                 ):
                     src_inputs.append([move_to(example["input_ids"], device=self.gptq_model.quantize_config.device)])
+                captured_before = len(layer_inputs)
+                capture_completed = False
                 try:
                     with ctx(
                         DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
@@ -315,9 +313,15 @@ class StageInputsCapture:
                             use_cache=use_cache,
                             data_device=data_device,
                         )
+                    capture_completed = True
                 except StopForward:
-                    pass
+                    capture_completed = True
                 finally:
+                    if capture_completed and len(layer_inputs) != captured_before + 1:
+                        raise RuntimeError(
+                            "Input capture did not reach the first-layer pre-hook exactly once; "
+                            "refusing to continue with an unverified shell layer."
+                        )
                     processed_batches = batch_index
                     if cache_forward_pb is not None:
                         rows_for_batch = 0
@@ -336,9 +340,8 @@ class StageInputsCapture:
         finally:
             if cache_forward_pb is not None:
                 cache_forward_pb.close()
-
-        self.gptq_model.pre_quantize_generate_hook_end()
-        handle.remove()
+            self.gptq_model.pre_quantize_generate_hook_end()
+            handle.remove()
 
         # In offload_to_disk mode the input embedding is no longer needed once
         # hidden-state inputs are cached. Move it to disk (unless it is tied

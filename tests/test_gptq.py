@@ -8,6 +8,7 @@ import random
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -33,6 +34,36 @@ from gptqmodel.utils.logger import QuantizationRegionTimer
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
     layer = nn.Linear(hidden_dim, hidden_dim, bias=False, dtype=torch.float16)
     return layer.to(device).eval()
+
+
+def test_defer_hessian_sync_is_thread_scoped_and_nestable():
+    assert gptq_mod._hessian_sync_deferred() is False
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    worker_state = []
+
+    def worker():
+        with gptq_mod.defer_hessian_sync():
+            worker_state.append(gptq_mod._hessian_sync_deferred())
+            worker_entered.set()
+            assert release_worker.wait(timeout=5)
+        worker_state.append(gptq_mod._hessian_sync_deferred())
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert worker_entered.wait(timeout=5)
+    assert gptq_mod._hessian_sync_deferred() is False
+    release_worker.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert worker_state == [True, False]
+    with gptq_mod.defer_hessian_sync():
+        assert gptq_mod._hessian_sync_deferred() is True
+        with gptq_mod.defer_hessian_sync():
+            assert gptq_mod._hessian_sync_deferred() is True
+        assert gptq_mod._hessian_sync_deferred() is True
+    assert gptq_mod._hessian_sync_deferred() is False
 
 def _generate_input(
         batch_size: int,

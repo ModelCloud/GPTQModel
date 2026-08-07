@@ -193,8 +193,6 @@ class ModuleLooper():
         self._loop_stop_event = threading.Event()
         self._loop_stop_exc: Optional[BaseException] = None
         self._loop_stop_waited = False
-        self._dangling_threads: List[threading.Thread] = []
-        self._dangling_threads_lock = threading.Lock()
 
         io_write_speed = io_write_performance()
         if io_write_speed is not None:
@@ -512,26 +510,6 @@ class ModuleLooper():
         """Register or replace the subset event callback target."""
         self._subset_callback = callback
 
-    def register_dangling_thread(self, watcher: threading.Thread) -> None:
-        """Track a watcher thread that should be joined before exit."""
-
-        with self._dangling_threads_lock:
-            if self._dangling_threads:
-                self._dangling_threads = [
-                    thread for thread in self._dangling_threads if thread.is_alive()
-                ]
-            self._dangling_threads.append(watcher)
-
-    def wait_dangling_threads(self) -> None:
-        """Join any still-running watcher threads and clear the registry."""
-
-        with self._dangling_threads_lock:
-            threads = list(self._dangling_threads)
-            self._dangling_threads.clear()
-        alive_threads = [thread for thread in threads if thread.is_alive()]
-        for thread in alive_threads:
-            thread.join()
-
     def _resolve_layer_callback(self):
         """Resolve the active layer-complete callback using legacy fallbacks."""
 
@@ -839,7 +817,10 @@ class ModuleLooper():
 
         if not module_name:
             return None
-        return self.gptq_model.get_module_tree_expert_group(module_name)
+        resolver = getattr(self.gptq_model, "get_module_tree_expert_group", None)
+        if not callable(resolver):
+            return None
+        return resolver(module_name)
 
     def _is_attention_module_name(self, module_name: str) -> bool:
         """Heuristically detect attention modules from their qualified name."""
@@ -942,6 +923,7 @@ class ModuleLooper():
         device_map: Dict[str, torch.device],
         *,
         fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
+        skip_meta_modules: bool = False,
     ) -> Dict[str, torch.device]:
         """Move selected modules to temporary forward devices and record prior placement."""
 
@@ -963,6 +945,13 @@ class ModuleLooper():
                 current = get_device(module_ref)
             except Exception:
                 current = None
+
+            if skip_meta_modules and current == META:
+                # Direct MoE input capture invokes the shell's hook without
+                # executing its projection. Keep a deliberately deferred
+                # routed leaf on meta until the quantization batch loads it on
+                # the final assigned device.
+                continue
 
             if target is None or (current is not None and current == target):
                 continue
@@ -1680,8 +1669,6 @@ class ModuleLooper():
         self._check_loop_stop()
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
-        # Drain any watcher threads tracking submodule finalization progress.
-        self.wait_dangling_threads()
         # Ensure any background stream sync tasks complete before returning.
         from ..utils.stream import STREAM_DEVICE_POOL
         STREAM_DEVICE_POOL.wait()

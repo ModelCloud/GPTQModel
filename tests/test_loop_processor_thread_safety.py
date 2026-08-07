@@ -20,9 +20,9 @@ from gptqmodel.looper.loop_processor import (
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.definitions.laguna import LagunaQModel
 from gptqmodel.quantization.config import (
-    BaseMoERouting,
     ExpertsRoutingBypass,
     MoEConfig,
+    MoERoutingConfig,
     QuantizeConfig,
 )
 
@@ -295,7 +295,7 @@ def test_assert_calibration_sample_count_allows_routed_moe_variance():
 
     p = _make_processor()
     p.gptq_model = object.__new__(LagunaQModel)
-    p.qcfg.moe = MoEConfig(routing=BaseMoERouting())
+    p.qcfg.moe = MoEConfig(routing=MoERoutingConfig())
     p._global_max_padded_nsamples = 2048
 
     routed_name = "model.layers.0.mlp.router"
@@ -318,7 +318,7 @@ def test_module_tree_helpers_public_and_safe():
 
     p = _make_processor()
     p.gptq_model = object.__new__(LagunaQModel)
-    p.qcfg.moe = MoEConfig(routing=BaseMoERouting())
+    p.qcfg.moe = MoEConfig(routing=MoERoutingConfig())
 
     assert p._is_bypass_moe_routing() is False
     assert p._is_bypass_moe_routing() is False

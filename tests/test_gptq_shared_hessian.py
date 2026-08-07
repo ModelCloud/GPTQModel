@@ -9,7 +9,13 @@ import torch
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.definitions.llama import LlamaQModel
-from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import (
+    ExpertsRoutingBypass,
+    HessianConfig,
+    MoEConfig,
+    MoEExecutionConfig,
+    QuantizeConfig,
+)
 
 
 pytestmark = pytest.mark.cuda
@@ -262,14 +268,20 @@ def test_gptq_shared_hessian_toggle_preserves_exact_quantization_math():
 def test_gptq_shared_hessian_toggle_serializes_as_process_config():
     qcfg = QuantizeConfig(
         enable_shared_hessian_cache=False,
+        moe=MoEConfig(routing=ExpertsRoutingBypass()),
     )
     assert qcfg.enable_shared_hessian_cache is False
-    assert qcfg.moe_parallel_input_capture is True
+    assert qcfg.moe.execution.parallel_input_capture is True
 
     restored = QuantizeConfig.from_quant_config(qcfg.to_dict())
     assert restored.enable_shared_hessian_cache is False
-    assert restored.moe_parallel_input_capture is True
+    assert restored.moe.execution.parallel_input_capture is True
 
-    opted_out = QuantizeConfig(moe_parallel_input_capture=False)
+    opted_out = QuantizeConfig(
+        moe=MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(parallel_input_capture=False),
+        )
+    )
     restored_opt_out = QuantizeConfig.from_quant_config(opted_out.to_dict())
-    assert restored_opt_out.moe_parallel_input_capture is False
+    assert restored_opt_out.moe.execution.parallel_input_capture is False

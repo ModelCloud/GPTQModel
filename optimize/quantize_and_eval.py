@@ -249,13 +249,17 @@ def _build_quantize_config(args: argparse.Namespace):
     from gptqmodel.quantization.config import (
         ExpertsRoutingBypass,
         MoEConfig,
+        MoEExecutionConfig,
         QuantizeConfig,
         VramStrategy,
     )
 
     kwargs: dict = {}
     if args.moe_routing_bypass:
-        kwargs["moe"] = MoEConfig(routing=ExpertsRoutingBypass(batch_size=args.moe_batch_size))
+        kwargs["moe"] = MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(batch_size=args.moe_batch_size),
+        )
     if args.vram_strategy is not None:
         strategy = VramStrategy(args.vram_strategy)
         kwargs["dense_vram_strategy"] = strategy

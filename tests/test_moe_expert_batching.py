@@ -29,7 +29,7 @@ class TestMoEExpertBatching(unittest.TestCase):
 
         # Setup config with ExpertsRoutingBypass routing strategy
         self.looper.gptq_model.quantize_config.moe = MoEConfig(routing=ExpertsRoutingBypass())
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = None
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = None
         self.looper.gptq_model.quantize_config.gc_mode = GcMode.ON_STAGE_END
         self.looper.gptq_model.quantize_config.auto_forward_data_parallel = False
 
@@ -95,7 +95,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_no_batching_when_batch_size_is_none(self, mock_empty_cache):
         """When batch_size is None, all experts should be processed in one batch."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = None
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = None
 
         self._run_subset_stage(self.subset)
 
@@ -104,7 +104,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_no_batching_when_batch_size_is_zero(self, mock_empty_cache):
         """When batch_size is 0, batching should be disabled."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 0
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = 0
 
         self._run_subset_stage(self.subset)
 
@@ -113,7 +113,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_with_expert_groups(self, mock_empty_cache):
         """Test batching when modules are processed by module count."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 2
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = 2
 
         # Create 10 experts with 2 modules each (gate_proj, up_proj)
         subset = {}
@@ -143,7 +143,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_with_odd_number_of_experts(self, mock_empty_cache):
         """Test batching with odd number of experts that don't divide evenly."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 3
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = 3
 
         # Create 7 experts
         subset = {}
@@ -170,7 +170,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_when_batch_size_exceeds_expert_count(self, mock_empty_cache):
         """When batch_size > number of experts, all should be in one batch."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 100
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = 100
 
         # Create 5 experts
         subset = {}
@@ -194,7 +194,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_one_expert_per_batch(self, mock_empty_cache):
         """Test with batch_size=1, meaning one module per batch."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 1
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = 1
 
         # Create 4 experts
         subset = {}
@@ -243,7 +243,7 @@ class TestMoEExpertBatching(unittest.TestCase):
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_batching_with_non_expert_modules(self, mock_empty_cache):
         """Test batching when subset contains both expert and non-expert modules."""
-        self.looper.gptq_model.quantize_config.moe.routing.batch_size = 2
+        self.looper.gptq_model.quantize_config.moe.execution.batch_size = 2
 
         # Create 4 experts + 2 non-expert modules
         subset = {}

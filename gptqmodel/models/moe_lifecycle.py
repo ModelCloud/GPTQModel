@@ -21,6 +21,7 @@ from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.python import has_gil_disabled
+from ..utils.torch import torch_sync
 
 
 log = setup_logger()
@@ -29,8 +30,10 @@ log = setup_logger()
 def _moe_parallel_input_capture_eligible(quantize_config: Any) -> bool:
     """Return whether default-on MoE input capture can safely run in parallel."""
 
+    moe_config = getattr(quantize_config, "moe", None)
+    execution = getattr(moe_config, "execution", None)
     return bool(
-        getattr(quantize_config, "moe_parallel_input_capture", True)
+        getattr(execution, "parallel_input_capture", True)
         and has_gil_disabled()
         and torch.cuda.device_count() > 1
     )
@@ -692,14 +695,29 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                     expert_input_for(device)
 
                 def capture_device_group(device: torch.device, entries) -> tuple[int, bool]:
+                    from ..quantization.gptq import defer_hessian_sync
+
                     module_looper._set_processor_mask(processor, parent_mask)
                     processor._set_current_batch_index(parent_batch_index)
                     local_stop = False
+                    group_started_at = time.perf_counter()
                     try:
                         expert_input = expert_inputs_by_device[str(device)]
-                        for expert, down_key in entries:
-                            local_stop |= capture_down_input(expert, down_key, expert_input)
+                        with defer_hessian_sync():
+                            for expert, down_key in entries:
+                                local_stop |= capture_down_input(expert, down_key, expert_input)
                     finally:
+                        # Each ThreadX CUDA worker owns a stream. Complete all
+                        # ordered Hessian updates once per device group before
+                        # later quant workers may consume them on other streams.
+                        torch_sync(device=device)
+                        timer = getattr(getattr(module_looper, "gptq_model", None), "quant_region_timer", None)
+                        if timer is not None:
+                            timer.record(
+                                "moe_capture_device_group",
+                                time.perf_counter() - group_started_at,
+                                source=str(device),
+                            )
                         module_looper._set_processor_mask(processor, None)
                         processor._set_current_batch_index(None)
                     return len(entries), local_stop

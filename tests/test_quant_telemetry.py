@@ -33,7 +33,8 @@ class TestQuantTelemetry(unittest.TestCase):
         cpu = workers["cpu"]
         self.assertGreaterEqual(cpu, 2)
         self.assertLessEqual(cpu, 8)
-        self.assertEqual(workers["model_loader:cpu"], 2)
+        self.assertEqual(workers["model_loader:cpu"], min(8, cpu))
+        self.assertEqual(workers["model_prefetch:cpu"], 1)
 
     def test_device_thread_pool_cpu_workers_keep_historical_default_on_gil(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
@@ -43,7 +44,8 @@ class TestQuantTelemetry(unittest.TestCase):
         cpu = workers["cpu"]
         self.assertGreaterEqual(cpu, 1)
         self.assertLessEqual(cpu, 12)
-        self.assertEqual(workers["model_loader:cpu"], 2)
+        self.assertEqual(workers["model_loader:cpu"], min(8, cpu))
+        self.assertEqual(workers["model_prefetch:cpu"], 1)
 
     def test_device_thread_pool_cpu_workers_env_override(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
@@ -52,7 +54,8 @@ class TestQuantTelemetry(unittest.TestCase):
                     _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
         self.assertEqual(workers["cpu"], 4)
-        self.assertEqual(workers["model_loader:cpu"], 2)
+        self.assertEqual(workers["model_loader:cpu"], 4)
+        self.assertEqual(workers["model_prefetch:cpu"], 1)
 
     def test_device_thread_pool_cpu_workers_env_override_invalid_ignored(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:

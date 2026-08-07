@@ -2652,6 +2652,7 @@ class BaseQModel(nn.Module):
         module: nn.Module,
         *,
         skip_module_names: Optional[set[str]] = None,
+        defer_module_names: Optional[set[str]] = None,
         layer_name: str = "",
     ) -> nn.Module:
         timer = getattr(self, "quant_region_timer", None)
@@ -2670,6 +2671,7 @@ class BaseQModel(nn.Module):
                 self._pre_quantize_with_skip(
                     module,
                     skip_module_names=skip_module_names,
+                    defer_module_names=defer_module_names,
                     base_device=base_device,
                     layer_name=layer_name,
                 )
@@ -2703,6 +2705,7 @@ class BaseQModel(nn.Module):
         module: nn.Module,
         *,
         skip_module_names: set[str],
+        defer_module_names: Optional[set[str]],
         base_device: torch.device,
         layer_name: str,
     ) -> None:
@@ -2751,8 +2754,11 @@ class BaseQModel(nn.Module):
         # Batch load all skipped leaf modules onto the layer device. The cross-submodule
         # grouped loader produces a single "LazyTurtle: loading N grouped tensors ...
         # [modules=...]" log line instead of one-per-expert "using 1 worker(s)" lines.
+        deferred = defer_module_names or set()
         batch: List[Tuple[torch.nn.Module, str, torch.device]] = []
         for rel_name in sorted(skip_module_names):
+            if rel_name in deferred:
+                continue
             try:
                 sub = module.get_submodule(rel_name)
             except AttributeError:

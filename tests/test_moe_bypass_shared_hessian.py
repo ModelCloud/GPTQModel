@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import threading
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from gptqmodel.quantization.config import (
     ExpertsRoutingBypass,
     HessianConfig,
     MoEConfig,
+    MoEExecutionConfig,
     QuantizeConfig,
 )
 
@@ -40,7 +42,12 @@ def test_moe_parallel_input_capture_runtime_eligibility(
     monkeypatch.setattr(moe_lifecycle, "has_gil_disabled", lambda: gil_disabled)
     monkeypatch.setattr(moe_lifecycle.torch.cuda, "device_count", lambda: visible_gpu_count)
 
-    quantize_config = SimpleNamespace(moe_parallel_input_capture=configured)
+    quantize_config = SimpleNamespace(
+        moe=MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(parallel_input_capture=configured),
+        )
+    )
     assert moe_lifecycle._moe_parallel_input_capture_eligible(quantize_config) is expected
 
 
@@ -49,6 +56,35 @@ def test_moe_parallel_input_capture_missing_config_uses_default(monkeypatch):
     monkeypatch.setattr(moe_lifecycle.torch.cuda, "device_count", lambda: 2)
 
     assert moe_lifecycle._moe_parallel_input_capture_eligible(SimpleNamespace()) is True
+
+
+def test_moe_execution_config_serialization_and_round_trip():
+    qcfg = QuantizeConfig(
+        moe=MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(batch_size=4, parallel_input_capture=False),
+        )
+    )
+    payload = qcfg.to_dict()
+    serialized_moe = payload["meta"]["moe"]
+    assert serialized_moe == {
+        "routing": {"class": "ExpertsRoutingBypass"},
+        "execution": {"batch_size": 4, "parallel_input_capture": False},
+    }
+    assert "moe_parallel_input_capture" not in payload["meta"]
+
+    restored = QuantizeConfig.from_quant_config(copy.deepcopy(payload))
+    assert isinstance(restored.moe.routing, ExpertsRoutingBypass)
+    assert restored.moe.execution.batch_size == 4
+    assert restored.moe.execution.parallel_input_capture is False
+
+
+def test_removed_moe_parallel_constructor_field_is_rejected():
+    with pytest.raises(ValueError, match="moe.execution.parallel_input_capture"):
+        QuantizeConfig(
+            moe=MoEConfig(routing=ExpertsRoutingBypass()),
+            moe_parallel_input_capture=False,
+        )
 
 
 def _make_moe_bypass_processor(
@@ -68,7 +104,6 @@ def _make_moe_bypass_processor(
         moe=MoEConfig(routing=ExpertsRoutingBypass()),
         hessian=HessianConfig(staging_dtype=torch.float32),
         enable_shared_hessian_cache=True,
-        moe_parallel_input_capture=True,
     )
 
     processor = GPTQProcessor(

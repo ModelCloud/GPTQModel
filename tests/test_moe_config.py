@@ -16,6 +16,7 @@ from gptqmodel.quantization.config import (
     ExpertsRoutingBypass,
     ExpertsRoutingOverride,
     MoEConfig,
+    MoEExecutionConfig,
     QuantizeConfig,
     VramStrategy,
 )
@@ -171,5 +172,8 @@ class TestMoEConfig(ModelTest):
     def test_moe_routing_bypass_batch_size(self):
         """Test dictionary-based initialization for ExpertsRoutingBypass"""
         # Dictionary-based initialization with ExpertsRoutingBypass
-        self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass(batch_size=4))
+        self.MOE_CONFIG = MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(batch_size=4),
+        )
         self.quantize_and_assert()

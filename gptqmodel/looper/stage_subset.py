@@ -184,6 +184,77 @@ def _collect_worker_results(futures, prior_error: Optional[BaseException] = None
     return results
 
 
+def _supports_async_input_only_weight_prefetch(
+    looper: "ModuleLooper",
+    processor: LoopProcessor,
+    plan: Optional[SubsetPlan],
+) -> bool:
+    """Return whether a plan can load weights concurrently with its forward.
+
+    Direct routed-expert capture invokes the input hooks without evaluating the
+    target projection. Loading those exact leaves early therefore cannot alter
+    forward math. Dense and shared-expert plans deliberately remain synchronous.
+    """
+
+    if plan is None or plan.batching_enabled or not plan.execute_forward:
+        return False
+    if not getattr(processor, "moe_input_capture_without_forward", False):
+        return False
+    if not looper.gptq_model.quantize_config.moe_routing_bypass():
+        return False
+    if not plan.modules:
+        return False
+
+    for named_module in plan.modules.values():
+        if not isinstance(named_module, NamedModule):
+            return False
+        flags = named_module.state.get("module_tree_flags", frozenset())
+        if MODULE_TREE_FLAG_ROUTED not in flags or not hasattr(named_module.module, "forward_hook"):
+            return False
+    return True
+
+
+def _schedule_async_weight_prefetch(
+    looper: "ModuleLooper",
+    processor: LoopProcessor,
+    plan: Optional[SubsetPlan],
+    *,
+    fallback_device: torch.device,
+    prefetch_state: Optional[Dict[int, object]],
+) -> None:
+    """Start one following routed subset load on the persistent threadx pool."""
+
+    if prefetch_state is None or not _supports_async_input_only_weight_prefetch(looper, processor, plan):
+        return
+    plan_key = id(plan)
+    if plan_key in prefetch_state:
+        return
+
+    batch: List[Tuple[torch.nn.Module, str, torch.device]] = []
+    for name in plan.ordered_module_names:
+        named_module = plan.modules.get(name)
+        if not isinstance(named_module, NamedModule):
+            continue
+        target_device = looper._assign_quant_device_for_module(
+            named_module,
+            fallback_device=fallback_device,
+        )
+        batch.append(
+            (
+                named_module.module,
+                getattr(named_module, "full_name", named_module.name),
+                target_device,
+            )
+        )
+
+    if batch:
+        prefetch_state[plan_key] = DEVICE_THREAD_POOL.submit(
+            "model_prefetch:cpu",
+            looper.gptq_model.lazy_turtle_batch_materialize_submodules,
+            batch,
+        )
+
+
 def _resolve_cache_flush_device(
     cur_layer_device: Optional[torch.device],
     used_devices,
@@ -548,7 +619,7 @@ def build_subset_plan(
     moe_routing = looper.gptq_model.quantize_config.moe
     batch_size = None
     if moe_routing is not None and isinstance(moe_routing.routing, ExpertsRoutingBypass):
-        batch_size = moe_routing.routing.batch_size
+        batch_size = moe_routing.execution.batch_size
 
     module_chunks = [subset]
     if is_moe_subset and batch_size is not None and batch_size > 0 and execute_forward:
@@ -758,6 +829,8 @@ def _run_single_subset_pass(
     disable_moe_hooks: bool = False,
     execute_forward: Optional[bool] = None,
     is_embeddings_module: Optional[bool] = None,
+    next_plan: Optional[SubsetPlan] = None,
+    weight_prefetch_state: Optional[Dict[int, object]] = None,
 ) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]], bool]:
     """Execute forward and quantization for a specific subset/chunk.
 
@@ -909,6 +982,7 @@ def _run_single_subset_pass(
             subset,
             forward_device_map,
             fallback_modules=full,
+            skip_meta_modules=direct_moe_input_capture,
         )
 
     forward_outputs = None
@@ -975,6 +1049,17 @@ def _run_single_subset_pass(
 
     if execute_forward and subset_event_cb:
         subset_event_cb(stage="forward_end", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=subset_names, processor=getattr(processor, "name", type(processor).__name__))
+
+    # The following routed input-only subset does not evaluate its target
+    # projections during forward, so its checkpoint load can overlap this
+    # subset's quantization without changing activation or quantization order.
+    _schedule_async_weight_prefetch(
+        looper,
+        processor,
+        next_plan,
+        fallback_device=cur_layer_device,
+        prefetch_state=weight_prefetch_state,
+    )
 
     fwd_time = (time.perf_counter() - fwd_start) if fwd_start is not None else 0.0
     processor.set_fwd_time(fwd_time)
@@ -1056,7 +1141,17 @@ def _run_single_subset_pass(
                     target_device,
                 )
             )
-    if batch_prefetch:
+    prefetched = None if weight_prefetch_state is None else weight_prefetch_state.pop(id(plan), None)
+    if prefetched is not None:
+        wait_start = time.perf_counter() if region_timer is not None else None
+        prefetched.result()
+        if region_timer is not None and wait_start is not None:
+            region_timer.record(
+                "module_prefetch_wait",
+                time.perf_counter() - wait_start,
+                source=f"subset={subset_index + 1}/{subset_total}",
+            )
+    elif batch_prefetch:
         looper.gptq_model.lazy_turtle_batch_materialize_submodules(batch_prefetch)
 
     for name in active_subset_names:
@@ -1247,6 +1342,8 @@ def run_subset_stage(
     region_timer=None,
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
     subset_event_cb: Optional[Callable[..., None]] = None,
+    next_plan: Optional[SubsetPlan] = None,
+    weight_prefetch_state: Optional[Dict[int, object]] = None,
 ) -> SubsetStageResult:
     """Process one subset using a precomputed plan.
 
@@ -1321,6 +1418,8 @@ def run_subset_stage(
         "is_awq_processor": is_awq_processor,
         "region_timer": region_timer,
         "previous_processed_subset": previous_processed_subset,
+        "next_plan": next_plan,
+        "weight_prefetch_state": weight_prefetch_state,
     }
 
     # Once a plan exists, subset execution is just a dispatch over the plan's

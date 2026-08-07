@@ -222,13 +222,17 @@ def build_quantize_config(args: argparse.Namespace):
         AdaptiveDampingConfig,
         ExpertsRoutingBypass,
         MoEConfig,
+        MoEExecutionConfig,
         QuantizeConfig,
         VramStrategy,
     )
 
     kwargs: dict[str, Any] = {}
     if args.moe_routing_bypass:
-        kwargs["moe"] = MoEConfig(routing=ExpertsRoutingBypass(batch_size=args.moe_batch_size))
+        kwargs["moe"] = MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(batch_size=args.moe_batch_size),
+        )
 
     vram_strategy = getattr(args, "vram_strategy", None)
     if vram_strategy is not None:

@@ -1661,15 +1661,15 @@ class FOEMConfig:
 
 
 @dataclass
-class BaseMoERouting:
-    pass
+class MoERoutingConfig:
+    """Base configuration for model routing behavior during MoE quantization."""
 
 
 MOE_ALL_EXPERTS = "all"
 
 
 @dataclass
-class ExpertsRoutingOverride(BaseMoERouting):
+class ExpertsRoutingOverride(MoERoutingConfig):
     num_experts_per_tok: Union[int, str] = MOE_ALL_EXPERTS
 
     def __post_init__(self):
@@ -1710,26 +1710,55 @@ class ExpertsRoutingOverride(BaseMoERouting):
 # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
 # This ensures all experts receive sufficient calibration samples but increases quantization time
 @dataclass
-class ExpertsRoutingBypass(BaseMoERouting):
-    # Number of modules to process in a single batch to reduce VRAM pressure during quantization
-    # For example, with batch_size=10 and 20 expert modules (gate_proj + up_proj for 10 experts):
-    # - First batch processes 10 modules (could be gate_proj for experts 0-9, or a mix depending on sorting)
-    # - Second batch processes remaining 10 modules
+class ExpertsRoutingBypass(MoERoutingConfig):
+    """Route every calibration observation to every routed expert."""
+
+
+@dataclass
+class MoEExecutionConfig:
+    """Controls how MoE quantization work is scheduled without changing routing semantics."""
+
+    # Number of projection modules processed in one subset. None keeps the full
+    # module-tree subset; zero disables batching and a positive value limits peak VRAM.
     batch_size: Optional[int] = field(
         default=None,
         metadata={"help": "Number of modules to process in a single batch during MoE quantization"}
     )
+    # Parallel capture is effective only with free-threaded Python and multiple
+    # visible CUDA devices; the runtime eligibility gate remains authoritative.
+    parallel_input_capture: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Run independent MoE bypass input-capture groups concurrently across CUDA devices. "
+                "Requires a free-threaded Python runtime with GIL disabled and multiple visible CUDA GPUs."
+            )
+        },
+    )
+
+    def __post_init__(self):
+        if self.batch_size is not None:
+            if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 0:
+                raise ValueError("MoEExecutionConfig: `batch_size` must be a non-negative integer or None.")
+        if not isinstance(self.parallel_input_capture, bool):
+            raise ValueError("MoEExecutionConfig: `parallel_input_capture` must be a boolean.")
 
 
 @dataclass
 class MoEConfig:
-    routing: BaseMoERouting
+    routing: MoERoutingConfig
+    execution: MoEExecutionConfig = field(default_factory=MoEExecutionConfig)
 
     def __post_init__(self):
-        if not isinstance(self.routing, BaseMoERouting):
+        if not isinstance(self.routing, MoERoutingConfig):
             raise ValueError(
-                f"routing must be an instance of BaseMoERouting, "
+                f"routing must be an instance of MoERoutingConfig, "
                 f"got {type(self.routing).__name__}"
+            )
+        if not isinstance(self.execution, MoEExecutionConfig):
+            raise ValueError(
+                f"execution must be an instance of MoEExecutionConfig, "
+                f"got {type(self.execution).__name__}"
             )
 
     def routing_bypass(self) -> bool:
@@ -1768,7 +1797,8 @@ class MoEConfig:
             "routing": {
                 "class": self.routing.__class__.__name__,
                 **asdict(self.routing),
-            }
+            },
+            "execution": asdict(self.execution),
         }
 
 
@@ -2689,22 +2719,37 @@ def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> 
         raise ValueError("QuantizeConfig: `moe` must be a MoEConfig, dict, or None.")
 
     routing = value.get("routing")
-    if isinstance(routing, BaseMoERouting):
-        return MoEConfig(routing=routing)
+    execution = value.get("execution")
+    if execution is None:
+        execution_obj = MoEExecutionConfig()
+    elif isinstance(execution, MoEExecutionConfig):
+        execution_obj = execution
+    elif isinstance(execution, dict):
+        execution_obj = MoEExecutionConfig(
+            batch_size=execution.get("batch_size"),
+            parallel_input_capture=execution.get("parallel_input_capture", True),
+        )
+    else:
+        raise ValueError("QuantizeConfig: `moe.execution` must be a MoEExecutionConfig, dict, or None.")
+
+    if isinstance(routing, MoERoutingConfig):
+        return MoEConfig(routing=routing, execution=execution_obj)
     if not isinstance(routing, dict):
-        raise ValueError("QuantizeConfig: `moe.routing` must be a BaseMoERouting, dict, or None.")
+        raise ValueError("QuantizeConfig: `moe.routing` must be a MoERoutingConfig, dict, or None.")
 
     routing_class = routing.get("class")
-    if routing_class == ExpertsRoutingOverride.__name__:
+    if routing_class == MoERoutingConfig.__name__:
+        routing_obj = MoERoutingConfig()
+    elif routing_class == ExpertsRoutingOverride.__name__:
         routing_obj = ExpertsRoutingOverride(
             num_experts_per_tok=routing.get("num_experts_per_tok", MOE_ALL_EXPERTS)
         )
     elif routing_class == ExpertsRoutingBypass.__name__:
-        routing_obj = ExpertsRoutingBypass(batch_size=routing.get("batch_size"))
+        routing_obj = ExpertsRoutingBypass()
     else:
         raise ValueError(f"QuantizeConfig: Unknown `moe.routing.class`: `{routing_class}`.")
 
-    return MoEConfig(routing=routing_obj)
+    return MoEConfig(routing=routing_obj, execution=execution_obj)
 
 
 def _resolve_dynamic_group_size_error() -> str:
@@ -3005,6 +3050,11 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
         return kwargs
 
     normalized = dict(kwargs)
+    if "moe_parallel_input_capture" in normalized:
+        raise ValueError(
+            "QuantizeConfig: `moe_parallel_input_capture` has been removed; "
+            "use `moe.execution.parallel_input_capture`."
+        )
     for legacy_name in ("_adjacent_model_config", "adjacent_config"):
         if legacy_name in normalized:
             raise ValueError(f"QuantizeConfig: `{legacy_name}` was renamed to `adjacent_model`.")
@@ -3177,11 +3227,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     moe: Optional[MoEConfig] = field(
         default=None,
-        metadata={"help": "Mixture-of-Experts (MoE) configuration for routing strategy and expert batching. "
-                  "Requires import: from gptqmodel.quantization.config import MoEConfig, ExpertsRoutingBypass, ExpertsRoutingOverride. "
+        metadata={"help": "Mixture-of-Experts (MoE) routing and execution configuration. "
+                  "Requires import: from gptqmodel.quantization.config import MoEConfig, MoEExecutionConfig, ExpertsRoutingBypass, ExpertsRoutingOverride. "
                   "Example with bypass routing (forward all data to each expert): "
                   "moe=MoEConfig(routing=ExpertsRoutingBypass()) - processes all experts in one batch (default). "
-                  "moe=MoEConfig(routing=ExpertsRoutingBypass(batch_size=4)) - processes 4 modules at a time to reduce VRAM pressure. "
+                  "moe=MoEConfig(routing=ExpertsRoutingBypass(), execution=MoEExecutionConfig(batch_size=4)) "
+                  "- processes 4 modules at a time to reduce VRAM pressure. "
                   "Example with routing override (limit experts per token): "
                   "moe=MoEConfig(routing=ExpertsRoutingOverride(num_experts_per_tok=2)). "
                   "Example to forward to all experts: "
@@ -3700,7 +3751,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "scale_search_gpu_weight_restore": "scale_search_gpu_weight_restore",
             "scale_search_refine_steps": "scale_search_refine_steps",
             "enable_shared_hessian_cache": "enable_shared_hessian_cache",
-            "moe_parallel_input_capture": "moe_parallel_input_capture",
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
             "quantization_diagnostics": "quantization_diagnostics",
             "fused_forward": "fused_forward",
@@ -3998,16 +4048,6 @@ class GPTQConfig(PreProcessorConfig):
         default=True,
         metadata={
             "help": "Share same-input GPTQ Hessian accumulation and inverse/Cholesky cache within one processor subset."
-        },
-    )
-    moe_parallel_input_capture: bool = field(
-        default=True,
-        metadata={
-            "help": (
-                "Run independent MoE bypass input-capture groups concurrently across CUDA devices by default. "
-                "Runtime activation requires a free-threaded Python runtime with GIL disabled and more than one "
-                "visible CUDA GPU."
-            )
         },
     )
     quantization_diagnostics: QuantizationDiagnosticsMode = field(
@@ -4316,7 +4356,6 @@ class GPTQConfig(PreProcessorConfig):
         else:
             meta_payload["adjacent_model"] = _serialize_adjacent_model(self.adjacent_model)
         meta_payload["enable_shared_hessian_cache"] = self.enable_shared_hessian_cache
-        meta_payload["moe_parallel_input_capture"] = self.moe_parallel_input_capture
         meta_payload["quantization_diagnostics"] = self.quantization_diagnostics.value
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,

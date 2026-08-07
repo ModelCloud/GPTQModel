@@ -20,9 +20,9 @@ from gptqmodel.models.definitions.laguna import LagunaQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.quantization.config import (
-    BaseMoERouting,
     ExpertsRoutingBypass,
     MoEConfig,
+    MoERoutingConfig,
     QuantizeConfig,
 )
 from gptqmodel.utils.model import find_modules
@@ -394,7 +394,7 @@ def test_loop_processor_module_tree_helpers():
         group_size=8,
         sym=True,
         desc_act=False,
-        moe=MoEConfig(routing=BaseMoERouting()),
+        moe=MoEConfig(routing=MoERoutingConfig()),
     )
     assert processor._is_bypass_moe_routing() is False
 

@@ -79,6 +79,30 @@ _WORKSPACE_LOCKS_GUARD = threading.Lock()
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
+# The defer depth is worker-local, not shared state. ThreadX CUDA workers can
+# enter this scope independently without a lock or cross-device serialization.
+_HESSIAN_SYNC_STATE = threading.local()
+
+
+@contextlib.contextmanager
+def defer_hessian_sync():
+    """Defer per-update accelerator synchronization within one worker thread.
+
+    The caller must synchronize the worker's device before exposing accumulated
+    Hessians to another stream. Nesting is supported so lifecycle scopes can be
+    composed without accidentally restoring eager synchronization too early.
+    """
+
+    depth = int(getattr(_HESSIAN_SYNC_STATE, "depth", 0))
+    _HESSIAN_SYNC_STATE.depth = depth + 1
+    try:
+        yield
+    finally:
+        _HESSIAN_SYNC_STATE.depth = depth
+
+
+def _hessian_sync_deferred() -> bool:
+    return bool(getattr(_HESSIAN_SYNC_STATE, "depth", 0))
 
 
 def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
@@ -844,7 +868,8 @@ class GPTQ:
                     else:
                         hessian_xtx_cpu(materialized, xtx, beta=1.0, alpha=1.0)
 
-            torch_sync(device=xtx.device)
+            if not _hessian_sync_deferred():
+                torch_sync(device=xtx.device)
             return xtx
 
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
@@ -860,7 +885,8 @@ class GPTQ:
                 out.addmm_(mat32.T, mat32, beta=1.0, alpha=1.0)
                 xtx = out
             del mat32
-            torch_sync(device=xtx.device)
+            if not _hessian_sync_deferred():
+                torch_sync(device=xtx.device)
             return xtx
 
         if out is None:
@@ -877,7 +903,8 @@ class GPTQ:
                 else:
                     xtx.addmm_(materialized.T, materialized, beta=1.0, alpha=1.0)
 
-        torch_sync(device=xtx.device)
+        if not _hessian_sync_deferred():
+            torch_sync(device=xtx.device)
         return xtx
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:

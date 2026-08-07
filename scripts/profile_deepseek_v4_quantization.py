@@ -63,6 +63,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-search-candidate-chunk-size", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--moe-batch-size", type=int, default=None)
+    parser.add_argument(
+        "--offload-path",
+        type=Path,
+        default=None,
+        help="Optional finalized-module offload directory (for example, a sufficiently large tmpfs).",
+    )
     parser.add_argument("--calibration-limit", type=int, default=None)
     parser.add_argument(
         "--apply-chat-template",
@@ -579,6 +585,8 @@ def main() -> None:
         )
 
     artifact_dir = _artifact_dir(args.artifacts_dir)
+    if args.offload_path is not None:
+        args.offload_path.mkdir(parents=True, exist_ok=True)
     calibration_frame = pd.read_parquet(args.calibration)
     if "messages" not in calibration_frame:
         raise ValueError(f"Calibration parquet lacks a messages column: {args.calibration}")
@@ -599,6 +607,7 @@ def main() -> None:
     from gptqmodel.quantization.config import (
         ExpertsRoutingBypass,
         MoEConfig,
+        MoEExecutionConfig,
         QuantizeConfig,
         VramStrategy,
     )
@@ -613,12 +622,18 @@ def main() -> None:
         act_group_aware=True,
         scale_search=ScaleSearchConfig.ACTIVATION,
         scale_search_candidate_chunk_size=args.scale_search_candidate_chunk_size,
-        moe=MoEConfig(routing=ExpertsRoutingBypass(batch_size=args.moe_batch_size)),
-        moe_parallel_input_capture=True,
+        moe=MoEConfig(
+            routing=ExpertsRoutingBypass(),
+            execution=MoEExecutionConfig(
+                batch_size=args.moe_batch_size,
+                parallel_input_capture=True,
+            ),
+        ),
         auto_forward_data_parallel=True,
         calibration_data_device="balanced",
         dense_vram_strategy=VramStrategy.EXCLUSIVE,
         moe_vram_strategy=VramStrategy.BALANCED,
+        offload_to_disk_path=str(args.offload_path) if args.offload_path is not None else None,
         quantization_diagnostics=args.diagnostics,
     )
     print(f"[config] {quantize_config}", flush=True)

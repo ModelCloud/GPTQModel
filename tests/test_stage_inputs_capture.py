@@ -49,7 +49,7 @@ class TestStageInputsCapture(unittest.TestCase):
         gptq_model.shell_module_materialize.return_value = layer
         gptq_model.shell_direct_meta_materialize.return_value = None
         gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
-        gptq_model.quant_region_timer = None
+        gptq_model.quant_region_timer = MagicMock()
 
         looper = MagicMock()
         looper.gptq_model = gptq_model
@@ -58,7 +58,7 @@ class TestStageInputsCapture(unittest.TestCase):
         return capture, layer_list, layer_names_list, gptq_model
 
     def test_cache_inputs_uses_caller_supplied_layer_name(self):
-        """`layer_names[0]` should win and become the materialization module_path."""
+        """`layer_names[0]` should win as the capture label without loading the layer."""
 
         layer = FakeLayer()
         capture, layers, layer_names, gptq_model = self._make_capture(
@@ -73,9 +73,11 @@ class TestStageInputsCapture(unittest.TestCase):
             layer_names=layer_names,
         )
 
-        gptq_model.shell_module_materialize.assert_called_once()
-        call_kwargs = gptq_model.shell_module_materialize.call_args[1]
-        self.assertEqual(call_kwargs["module_path"], "model.layers.42")
+        gptq_model.shell_module_materialize.assert_not_called()
+        self.assertEqual(
+            gptq_model.quant_region_timer.record.call_args.kwargs["source"],
+            "cache_inputs:model.layers.42",
+        )
 
     def test_cache_inputs_falls_back_to_named_modules_resolution(self):
         """Without `layer_names` and `full_name`, scan `named_modules()` for dotted path."""
@@ -91,12 +93,14 @@ class TestStageInputsCapture(unittest.TestCase):
             embed_quant_mode=None,
         )
 
-        call_kwargs = gptq_model.shell_module_materialize.call_args[1]
-        self.assertEqual(call_kwargs["module_path"], "layers.0")
+        gptq_model.shell_module_materialize.assert_not_called()
+        self.assertEqual(
+            gptq_model.quant_region_timer.record.call_args.kwargs["source"],
+            "cache_inputs:layers.0",
+        )
 
     def test_cache_inputs_falls_back_to_class_name_for_orphan_layer(self):
-        """If the layer cannot be found in the model tree, the display label falls back to its class name,
-        but the materialization module_path is left unset so the underlying resolver can either find it or fail loudly."""
+        """If the layer cannot be found in the model tree, its capture label falls back to its class name."""
 
         layer = FakeLayer()
         capture, layers, _, gptq_model = self._make_capture(layer, gptq_model_model=FakeModel())
@@ -110,8 +114,11 @@ class TestStageInputsCapture(unittest.TestCase):
             embed_quant_mode=None,
         )
 
-        call_kwargs = gptq_model.shell_module_materialize.call_args[1]
-        self.assertIsNone(call_kwargs["module_path"])
+        gptq_model.shell_module_materialize.assert_not_called()
+        self.assertEqual(
+            gptq_model.quant_region_timer.record.call_args.kwargs["source"],
+            "cache_inputs:FakeLayer",
+        )
 
     def test_cache_inputs_prefers_full_name_attribute(self):
         """A layer-level `full_name` attribute is respected when `layer_names` is absent."""
@@ -127,8 +134,11 @@ class TestStageInputsCapture(unittest.TestCase):
             embed_quant_mode=None,
         )
 
-        call_kwargs = gptq_model.shell_module_materialize.call_args[1]
-        self.assertEqual(call_kwargs["module_path"], "custom.path.layer_0")
+        gptq_model.shell_module_materialize.assert_not_called()
+        self.assertEqual(
+            gptq_model.quant_region_timer.record.call_args.kwargs["source"],
+            "cache_inputs:custom.path.layer_0",
+        )
 
     def test_cache_inputs_warns_when_caller_name_differs_from_full_name(self):
         """A caller-supplied `layer_names[0]` wins, but a mismatch against `full_name` is logged."""
@@ -151,8 +161,11 @@ class TestStageInputsCapture(unittest.TestCase):
             layer_names=layer_names,
         )
 
-        call_kwargs = gptq_model.shell_module_materialize.call_args[1]
-        self.assertEqual(call_kwargs["module_path"], "model.layers.42")
+        gptq_model.shell_module_materialize.assert_not_called()
+        self.assertEqual(
+            gptq_model.quant_region_timer.record.call_args.kwargs["source"],
+            "cache_inputs:model.layers.42",
+        )
         mock_logger.warn.assert_called_once()
         message = mock_logger.warn.call_args[0][0]
         self.assertIn("model.layers.42", message)

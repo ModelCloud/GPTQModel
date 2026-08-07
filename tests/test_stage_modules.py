@@ -3,6 +3,7 @@ import threading
 import types
 from typing import Dict
 
+import pytest
 import torch
 
 import gptqmodel.looper.stage_subset as stage_subset_module
@@ -15,7 +16,9 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import (
+    _build_pre_quantize_defer_plan,
     _capture_pristine_group_context,
+    _materialize_unclaimed_deferred_modules,
     _processor_needs_pristine_group_clone,
     _replay_layer_outputs,
     _should_drain_finalize_futures_synchronously,
@@ -25,6 +28,161 @@ from gptqmodel.looper.stage_layer import (
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.config import QuantizeConfig
+
+
+def test_pre_quantize_defer_plan_uses_routed_module_tree_flags():
+    flags_by_name = {
+        "mlp.route_bank.0.gate_proj": frozenset({"routed", "gate"}),
+        "mlp.always_on.gate_proj": frozenset({"shared", "gate"}),
+    }
+    gptq_model = types.SimpleNamespace(
+        quantize_config=types.SimpleNamespace(moe_routing_bypass=lambda: True),
+        get_module_tree_flags=lambda name: flags_by_name.get(name, frozenset()),
+    )
+    looper = types.SimpleNamespace(
+        gptq_model=gptq_model,
+        processors=[types.SimpleNamespace(moe_input_capture_without_forward=True)],
+    )
+
+    deferred = _build_pre_quantize_defer_plan(
+        looper,
+        [["mlp.route_bank.0.gate_proj", "mlp.always_on.gate_proj"]],
+    )
+
+    assert deferred == {"mlp.route_bank.0.gate_proj"}
+
+
+def test_pre_quantize_defer_plan_requires_direct_bypass_capture():
+    gptq_model = types.SimpleNamespace(
+        quantize_config=types.SimpleNamespace(moe_routing_bypass=lambda: False),
+        get_module_tree_flags=lambda _name: frozenset({"routed"}),
+    )
+    looper = types.SimpleNamespace(
+        gptq_model=gptq_model,
+        processors=[types.SimpleNamespace(moe_input_capture_without_forward=True)],
+    )
+    layer_modules = [["mlp.route_bank.0.gate_proj"]]
+
+    assert _build_pre_quantize_defer_plan(looper, layer_modules) == set()
+
+    gptq_model.quantize_config.moe_routing_bypass = lambda: True
+    looper.processors[0].moe_input_capture_without_forward = False
+    assert _build_pre_quantize_defer_plan(looper, layer_modules) == set()
+
+
+def test_materialize_unclaimed_deferred_modules_batches_only_meta_leaves():
+    layer = torch.nn.Module()
+    layer.experts = torch.nn.ModuleList(
+        [
+            torch.nn.Linear(4, 4, bias=False, device="meta"),
+            torch.nn.Linear(4, 4, bias=False),
+        ]
+    )
+    batches = []
+    looper = types.SimpleNamespace(
+        gptq_model=types.SimpleNamespace(
+            lazy_turtle_batch_materialize_submodules=lambda pending: batches.append(pending)
+        )
+    )
+
+    _materialize_unclaimed_deferred_modules(
+        looper,
+        module=layer,
+        layer_name="model.layers.3",
+        defer_module_names={"experts.0", "experts.1"},
+        device=torch.device("cpu"),
+    )
+
+    assert len(batches) == 1
+    assert [(path, device) for _, path, device in batches[0]] == [
+        ("model.layers.3.experts.0", torch.device("cpu"))
+    ]
+
+def test_async_weight_prefetch_requires_routed_input_only_module_tree_flags(monkeypatch):
+    routed = torch.nn.Linear(4, 4, bias=False)
+    routed.forward_hook = None
+    named = NamedModule(
+        routed,
+        name="route_bank.0.down_proj",
+        full_name="model.layers.0.route_bank.0.down_proj",
+        layer_index=0,
+    )
+    named.state["module_tree_flags"] = frozenset({"routed", "down"})
+    modules = {named.name: named}
+    plan = SubsetPlan(
+        modules=modules,
+        subset_index=1,
+        subset_total=2,
+        execute_forward=True,
+        replay_after_process=False,
+        forward_mode="parallel",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={"route_bank": [named.name]},
+        forward_device_map={},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[modules],
+    )
+    submitted = []
+
+    class FakePool:
+        def submit(self, device, fn, *args):
+            submitted.append((device, fn, args))
+            return object()
+
+    gptq_model = types.SimpleNamespace(
+        quantize_config=types.SimpleNamespace(moe_routing_bypass=lambda: True),
+        lazy_turtle_batch_materialize_submodules=lambda _batch: None,
+    )
+    looper = types.SimpleNamespace(
+        gptq_model=gptq_model,
+        _assign_quant_device_for_module=lambda _named, fallback_device: fallback_device,
+    )
+    processor = types.SimpleNamespace(moe_input_capture_without_forward=True)
+    prefetch_state = {}
+    monkeypatch.setattr(stage_subset_module, "DEVICE_THREAD_POOL", FakePool())
+
+    stage_subset_module._schedule_async_weight_prefetch(
+        looper,
+        processor,
+        plan,
+        fallback_device=torch.device("cpu"),
+        prefetch_state=prefetch_state,
+    )
+
+    assert len(submitted) == 1
+    assert submitted[0][0] == "model_prefetch:cpu"
+    assert len(submitted[0][2][0]) == 1
+    assert id(plan) in prefetch_state
+
+    named.state["module_tree_flags"] = frozenset({"shared", "down"})
+    assert not stage_subset_module._supports_async_input_only_weight_prefetch(looper, processor, plan)
+
+def test_forward_device_override_keeps_direct_capture_shell_on_meta():
+    looper = object.__new__(ModuleLooper)
+    looper.gptq_model = types.SimpleNamespace(quant_region_timer=None)
+    shell = torch.nn.Linear(4, 4, bias=False, device="meta")
+    named_module = NamedModule(
+        shell,
+        name="route.0.gate",
+        full_name="layer.route.0.gate",
+        layer_index=0,
+    )
+
+    previous = looper._apply_forward_device_overrides(
+        {"route.0.gate": named_module},
+        {"route.0.gate": torch.device("cpu")},
+        skip_meta_modules=True,
+    )
+
+    assert previous == {}
+    assert named_module.module.weight.device.type == "meta"
 
 
 class _DummyQModel:
@@ -142,7 +300,12 @@ def test_module_looper_runtime_telemetry_reports_gil_and_split_pools(monkeypatch
 
 
 class _TinyLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.forward_calls = 0
+
     def forward(self, hidden_states, attention_mask=None, position_ids=None, **kwargs):
+        self.forward_calls += 1
         return hidden_states
 
 
@@ -388,7 +551,7 @@ def test_stage_layer_keeps_async_finalizers_for_non_paroquant_when_unset():
     ) is False
 
 
-def test_stage_layer_forces_sync_finalizers_for_multi_device_generic_processor():
+def test_stage_layer_keeps_async_finalizers_for_multi_device_generic_processor():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -403,10 +566,10 @@ def test_stage_layer_forces_sync_finalizers_for_multi_device_generic_processor()
     assert _should_drain_finalize_futures_synchronously(
         looper,
         finalize_tasks=[(types.SimpleNamespace(), None, None, None, None)],
-    ) is True
+    ) is False
 
 
-def test_stage_layer_forces_sync_finalizers_for_multi_device_gptq():
+def test_stage_layer_keeps_async_finalizers_for_multi_device_gptq():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(
             quantize_config=QuantizeConfig(
@@ -422,7 +585,7 @@ def test_stage_layer_forces_sync_finalizers_for_multi_device_gptq():
     assert _should_drain_finalize_futures_synchronously(
         looper,
         finalize_tasks=[(gptq_processor, None, None, None, None)],
-    ) is True
+    ) is False
 
 
 def test_stage_layer_keeps_async_finalizers_for_single_device_gptq():
@@ -565,6 +728,23 @@ def test_stage_inputs_capture_collects_real_inputs():
     assert torch.equal(cache.layer_input_kwargs[0]["extra"], extra.unsqueeze(0))
     assert gptq_model._hook_started is True
     assert gptq_model._hook_finished is True
+    assert gptq_model.layer.forward_calls == 0
+
+
+def test_stage_inputs_capture_rejects_custom_capture_that_misses_first_layer():
+    gptq_model = _TinyGptqModel()
+    gptq_model.run_input_capture = lambda *_args, **_kwargs: None
+    stage = StageInputsCapture(_TinyLooper(gptq_model), logger=None)
+
+    with pytest.raises(RuntimeError, match="did not reach the first-layer pre-hook"):
+        stage.cache_inputs(
+            layers=[gptq_model.layer],
+            calibration_data=[{"hidden_states": torch.ones(1, 2, 3)}],
+            use_cache=False,
+        )
+
+    assert gptq_model._hook_finished is True
+    assert not gptq_model.layer._forward_pre_hooks
 
 
 def test_forward_executor_run_single_can_skip_moe_routing_override_for_replay():
@@ -1254,7 +1434,9 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             self.forward_replay_calls.append(kwargs)
             return [[tensor]]
 
-        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+        def _apply_forward_device_overrides(
+            self, modules, forward_device_map, fallback_modules=None, skip_meta_modules=False
+        ):
             self.forward_override_modules = modules
             self.forward_override_map = forward_device_map
             return {"self_attn.q_proj": torch.device("cpu")}
@@ -1273,9 +1455,6 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             self._stop_exc = exc
 
         def _subset_event_dispatch(self, *kwargs):
-            return None
-
-        def register_dangling_thread(self, thread):
             return None
 
     looper = DummyLooper()
@@ -1469,7 +1648,9 @@ def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides(
             self.forward_calls.append(kwargs)
             return [[tensor]]
 
-        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+        def _apply_forward_device_overrides(
+            self, modules, forward_device_map, fallback_modules=None, skip_meta_modules=False
+        ):
             self.forward_override_modules = modules
             self.forward_override_map = forward_device_map
             self.forward_override_fallback = fallback_modules
@@ -1584,7 +1765,9 @@ def test_replay_layer_outputs_with_plan_can_skip_override_restore():
             self.forward_calls.append(kwargs)
             return [[tensor]]
 
-        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+        def _apply_forward_device_overrides(
+            self, modules, forward_device_map, fallback_modules=None, skip_meta_modules=False
+        ):
             self.forward_override_modules = modules
             self.forward_override_map = forward_device_map
             return {"self_attn.q_proj": torch.device("cpu")}
@@ -1694,7 +1877,9 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
             self.forward_calls.append(kwargs)
             return [[tensor]]
 
-        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+        def _apply_forward_device_overrides(
+            self, modules, forward_device_map, fallback_modules=None, skip_meta_modules=False
+        ):
             self.override_calls.append((modules, forward_device_map, fallback_modules))
             return {}
 
@@ -1989,9 +2174,6 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             self._stop_exc = exc
 
         def _subset_event_dispatch(self, *kwargs):
-            return None
-
-        def register_dangling_thread(self, thread):
             return None
 
         def create_named_modules(

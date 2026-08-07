@@ -27,6 +27,51 @@ class DummyStackModel(nn.Module):
         self.lm_head = nn.Linear(4, 4)
 
 
+class _ImmediateFuture:
+    def __init__(self, value):
+        self.value = value
+        self.result_calls = 0
+
+    def result(self):
+        self.result_calls += 1
+        return self.value
+
+
+class _ImmediatePool:
+    def __init__(self):
+        self.futures = []
+
+    def submit(self, _device, fn, *args):
+        future = _ImmediateFuture(fn(*args))
+        self.futures.append(future)
+        return future
+
+
+def test_run_lazy_turtle_jobs_drains_all_lanes_before_reraising(monkeypatch):
+    pool = _ImmediatePool()
+    monkeypatch.setattr("gptqmodel.DEVICE_THREAD_POOL", pool)
+    completed = []
+
+    def worker(job):
+        if job == 0:
+            raise OSError("broken shard")
+        completed.append(job)
+        return job
+
+    with pytest.raises(OSError, match="broken shard"):
+        structure._run_lazy_turtle_jobs([0, 1, 2, 3], worker, max_workers=2)
+
+    assert completed == [1, 3]
+    assert [future.result_calls for future in pool.futures] == [1, 1]
+
+
+def test_run_lazy_turtle_jobs_preserves_input_order(monkeypatch):
+    pool = _ImmediatePool()
+    monkeypatch.setattr("gptqmodel.DEVICE_THREAD_POOL", pool)
+
+    assert structure._run_lazy_turtle_jobs([3, 1, 2, 0], lambda value: value * 2, max_workers=3) == [6, 2, 4, 0]
+
+
 def test_print_module_tree_caps_layer_stacks_by_default(capsys):
     model = DummyStackModel(num_layers=6)
 
@@ -204,6 +249,22 @@ def test_lazy_turtle_checkpoint_tensors_for_submodule_uses_module_path(tmp_path,
 
     assert "layer0.weight" in tensors
     assert torch.equal(tensors["layer0.weight"], source["inner.layer0.weight"])
+
+
+def test_lazy_turtle_exact_checkpoint_key_skips_general_alias_resolution(monkeypatch):
+    turtle = object.__new__(LazyTurtle)
+    exact_name = "model.layers.0.mlp.experts.7.down_proj.weight"
+    turtle._weight_map = {exact_name: "model.safetensors"}
+
+    def fail_general_resolution(*_args, **_kwargs):
+        raise AssertionError("exact checkpoint keys must not enter general alias resolution")
+
+    monkeypatch.setattr(turtle, "_resolve_checkpoint_tensor_name", fail_general_resolution)
+
+    assert turtle._resolve_direct_checkpoint_tensor_source(
+        "model.layers.0.mlp.experts.7.down_proj",
+        "weight",
+    ) == (exact_name, None, None, None)
 
 
 def test_lazy_turtle_materialize_submodule_falls_back_to_get_qualified_name(tmp_path, monkeypatch):
