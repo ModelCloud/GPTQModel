@@ -32,7 +32,7 @@ from ..models.writer import (
 )
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..quantization import QuantizeConfig
-from ..quantization.config import EXL3Config, FORMAT, GPTQConfig, METHOD
+from ..quantization.config import EXL3Config, FORMAT, GPTQConfig, HessianConfig, METHOD
 from ..quantization.gptq import GPTQ
 from ..utils.device import get_device
 from ..utils.exllamav3 import create_exllamav3_module
@@ -142,6 +142,7 @@ class EXL3Processor(LoopProcessor):
             device=module_qcfg.device,
             pack_dtype=module_qcfg.pack_dtype,
             act_group_aware=False,
+            hessian=HessianConfig(length_aware=False),
         )
 
         task = GPTQ(module=module, qcfg=capture_qcfg)

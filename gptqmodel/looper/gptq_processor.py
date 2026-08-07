@@ -6,7 +6,7 @@
 import copy
 import threading
 import time
-from typing import Callable, Dict, Optional, Tuple, Type
+from typing import Callable, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,8 @@ from ..quantization.config import (
     FOEMConfig,
     GPTAQConfig,
     HessianConfig,
+    LengthAwareConfig,
+    LengthAwareMode,
     QuantizeConfig,
     normalize_scale_search,
     resolve_quant_format,
@@ -254,6 +256,14 @@ class GPTQProcessor(LoopProcessor):
             ),
         )
 
+        # Compute per-sequence token lengths from the prepared calibration dataset
+        # (using attention masks when available) and materialize any EQUAL_PER_BUCKET_WEIGHT
+        # config that does not yet have bucket_boundaries/bucket_weights.
+        self._calibration_sequence_lengths = self._extract_calibration_sequence_lengths(
+            self.calibration_dataset
+        )
+        self._ensure_length_aware_materialized(self.qcfg)
+
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
         self.quantization_diagnostics_mode = resolve_quantization_diagnostics_mode(
@@ -357,6 +367,10 @@ class GPTQProcessor(LoopProcessor):
                 )
                 self._gar_small_group_warned = True
 
+        # Materialize bucketed length-aware configs after dynamic overrides so every
+        # module/task path uses the same resolved boundaries/weights.
+        self._ensure_length_aware_materialized(qcfg_clone)
+
         region_timer = kwargs.get("region_timer", None)
 
         if qcfg_clone.gptaq is not None:
@@ -390,6 +404,85 @@ class GPTQProcessor(LoopProcessor):
         task._diagnostic_output_inputs = sample if existing is None else torch.cat((existing, sample), dim=0)
 
     @staticmethod
+    def _length_aware_hashable(cfg: LengthAwareConfig) -> Tuple[object, ...]:
+        """Convert a LengthAwareConfig into a hashable tuple for shared-Hessian grouping."""
+
+        return tuple(
+            (key, tuple(value) if isinstance(value, list) else value)
+            for key, value in cfg.to_dict().items()
+        )
+
+    @staticmethod
+    def _extract_calibration_sequence_lengths(calibration_dataset) -> List[int]:
+        """Return one true token count per sequence, using attention masks when available."""
+
+        lengths: List[int] = []
+        for row in calibration_dataset:
+            if not isinstance(row, dict):
+                continue
+            mask = row.get("attention_mask")
+            if mask is not None:
+                if isinstance(mask, torch.Tensor):
+                    if mask.ndim == 0:
+                        continue
+                    if mask.ndim == 1:
+                        lengths.append(int(mask.sum().item()))
+                    else:
+                        for i in range(mask.shape[0]):
+                            lengths.append(int(mask[i].sum().item()))
+                else:
+                    for seq_mask in mask:
+                        try:
+                            lengths.append(int(sum(seq_mask)))
+                        except Exception:
+                            pass
+                continue
+            input_ids = row.get("input_ids")
+            if input_ids is None:
+                continue
+            if isinstance(input_ids, torch.Tensor):
+                if input_ids.dim() == 0:
+                    continue
+                if input_ids.dim() == 1:
+                    lengths.append(int(input_ids.numel()))
+                else:
+                    for i in range(input_ids.shape[0]):
+                        lengths.append(int(input_ids[i].numel()))
+            else:
+                lengths.append(len(input_ids))
+        return lengths
+
+    def _ensure_length_aware_materialized(self, qcfg: QuantizeConfig) -> None:
+        """Materialize unresolved EQUAL_PER_BUCKET_WEIGHT length-aware configs from calibration lengths."""
+
+        hessian_cfg = getattr(qcfg, "hessian", None)
+        if hessian_cfg is None:
+            return
+        la = getattr(hessian_cfg, "length_aware", None)
+        if not isinstance(la, LengthAwareConfig) or not bool(la):
+            return
+        if la.mode is not LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT:
+            return
+        if la.bucket_boundaries is not None:
+            return
+        if not self._calibration_sequence_lengths:
+            log.warn(
+                "LengthAwareConfig EQUAL_PER_BUCKET_WEIGHT has no bucket_boundaries and no "
+                "calibration sequence lengths are available; disabling length-aware normalization."
+            )
+            hessian_cfg.length_aware = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
+            return
+        hessian_cfg.length_aware = LengthAwareConfig.from_lengths(
+            self._calibration_sequence_lengths,
+            mode=la.mode,
+            min_length=la.min_length,
+            min_bucket_size=la.min_bucket_size,
+            max_bucket_ratio=la.max_bucket_ratio,
+            bucket_weight_exponent=la.bucket_weight_exponent,
+            target_bucket_count=la.target_bucket_count,
+        )
+
+    @staticmethod
     def _hessian_config_signature(qcfg: QuantizeConfig) -> Tuple[object, ...]:
         """Return the Hessian accumulation fields that must match to share XtX."""
 
@@ -398,6 +491,7 @@ class GPTQProcessor(LoopProcessor):
             hessian.chunk_size,
             hessian.chunk_bytes,
             str(hessian.staging_dtype),
+            GPTQProcessor._length_aware_hashable(hessian.length_aware),
         )
 
     @staticmethod
@@ -530,9 +624,11 @@ class GPTQProcessor(LoopProcessor):
                 "lock": threading.Lock(),
                 "partials": {},
                 "sample_counts": {},
+                "sequence_counts": {},
                 "H": None,
                 "dirty": False,
                 "total_samples": 0,
+                "total_sequences": 0,
             }
             self._shared_hessian_states[accum_key] = shared_state
             inverse_ref_counts: Dict[Tuple[object, ...], int] = {}
@@ -668,7 +764,13 @@ class GPTQProcessor(LoopProcessor):
         )
 
     @staticmethod
-    def _accumulate_shared_hessian_state(shared_state, batch_token_size: int, xtx: torch.Tensor, device: torch.device) -> None:
+    def _accumulate_shared_hessian_state(
+        shared_state,
+        batch_token_size: int,
+        xtx: torch.Tensor,
+        device: torch.device,
+        sequence_count: int = 1,
+    ) -> None:
         """Accumulate one XtX result into the processor-owned shared Hessian state."""
 
         dev = torch.device(device)
@@ -683,6 +785,8 @@ class GPTQProcessor(LoopProcessor):
                 else:
                     existing.add_(xtx)
             shared_state["sample_counts"][dev] = shared_state["sample_counts"].get(dev, 0) + batch_token_size
+            if sequence_count:
+                shared_state["sequence_counts"][dev] = shared_state["sequence_counts"].get(dev, 0) + sequence_count
             shared_state["dirty"] = True
 
     def _add_batch_with_shared_hessian(
@@ -735,7 +839,10 @@ class GPTQProcessor(LoopProcessor):
                 if batch_token_size == 0 or xtx is None:
                     return
 
-                self._accumulate_shared_hessian_state(shared_state, batch_token_size, xtx, device)
+                sequence_count = getattr(task, "_last_batch_sequence_count", 1)
+                self._accumulate_shared_hessian_state(
+                    shared_state, batch_token_size, xtx, device, sequence_count=sequence_count
+                )
                 self._shared_hessian_stats["batch_misses"] += 1
                 group_key = getattr(task, "_shared_hessian_accum_key", None)
                 remaining = max(0, self._shared_hessian_group_counts.get(group_key, 1) - 1)
@@ -743,11 +850,20 @@ class GPTQProcessor(LoopProcessor):
                     self._shared_hessian_batch_cache[cache_key] = {
                         "batch_token_size": batch_token_size,
                         "remaining": remaining,
+                        "sequence_count": sequence_count,
                     }
 
         if cached is not None:
-            batch_token_size = cached["batch_token_size"]
-        task.record_shared_hessian_batch(batch_token_size, shared_state)
+            task.record_shared_hessian_batch(
+                cached["batch_token_size"],
+                shared_state,
+                sequence_count=cached.get("sequence_count", 1),
+            )
+            return
+
+        task.record_shared_hessian_batch(
+            batch_token_size, shared_state, sequence_count=sequence_count
+        )
 
     def moe_shared_input_group_key(self, name: str):
         """Return the logical shared-Hessian key eligible for one-call MoE capture."""
@@ -866,6 +982,10 @@ class GPTQProcessor(LoopProcessor):
                         ),
                     )
             else:
+                # Flattened (2-D) activations have lost per-sequence membership, so
+                # length-aware normalization is unsafe. Disable it before accumulating.
+                g._disable_length_aware_for_flat_input(inp_tensor)
+
                 self._add_batch_with_shared_hessian(
                     g,
                     inp_tensor.data,

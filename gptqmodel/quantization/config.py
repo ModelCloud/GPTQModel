@@ -1341,16 +1341,269 @@ class AnalysisConfig(BasePreProcessorConfig):
         return payload
 
 
+class LengthAwareMode(str, Enum):
+    """Length-aware Hessian weighting modes."""
+
+    DISABLED = "disabled"
+    SINGLE = "single"
+    EQUAL_PER_BUCKET_WEIGHT = "equal_per_bucket_weight"
+
+
+@dataclass
+class LengthAwareConfig:
+    """Length-aware Hessian weighting configuration for GPTQ calibration."""
+
+    mode: Union[str, LengthAwareMode] = field(default_factory=lambda: LengthAwareMode.SINGLE)
+    min_length: Optional[int] = None
+    min_bucket_size: int = 16
+    max_bucket_ratio: float = 2.0
+    bucket_weight_exponent: float = 1.0
+    target_bucket_count: Optional[int] = None
+    bucket_boundaries: Optional[List[Optional[Union[int, float]]]] = None
+    bucket_scales: Optional[List[float]] = None
+    bucket_weights: Optional[List[float]] = None
+
+    def __post_init__(self):
+        if isinstance(self.mode, str) and not isinstance(self.mode, LengthAwareMode):
+            try:
+                self.mode = LengthAwareMode(self.mode.lower())
+            except ValueError as exc:
+                raise ValueError(f"LengthAwareConfig: invalid mode `{self.mode}`.") from exc
+        if not isinstance(self.mode, LengthAwareMode):
+            raise ValueError("LengthAwareConfig: `mode` must be a LengthAwareMode or string.")
+        if self.min_length is not None and (not isinstance(self.min_length, int) or self.min_length <= 0):
+            raise ValueError("LengthAwareConfig: `min_length` must be a positive integer or None.")
+        if not isinstance(self.min_bucket_size, int) or self.min_bucket_size <= 0:
+            raise ValueError("LengthAwareConfig: `min_bucket_size` must be a positive integer.")
+        if not isinstance(self.max_bucket_ratio, (int, float)) or self.max_bucket_ratio <= 1.0:
+            raise ValueError("LengthAwareConfig: `max_bucket_ratio` must be > 1.0.")
+        if self.target_bucket_count is not None and (not isinstance(self.target_bucket_count, int) or self.target_bucket_count <= 0):
+            raise ValueError("LengthAwareConfig: `target_bucket_count` must be a positive integer or None.")
+        if not isinstance(self.bucket_weight_exponent, (int, float)) or self.bucket_weight_exponent < 0:
+            raise ValueError("LengthAwareConfig: `bucket_weight_exponent` must be a non-negative number.")
+        if self.bucket_boundaries is not None:
+            normalized_boundaries: List[Optional[Union[int, float]]] = []
+            for boundary in self.bucket_boundaries:
+                if boundary is None:
+                    normalized_boundaries.append(float("inf"))
+                elif isinstance(boundary, (int, float)) and boundary >= 0:
+                    normalized_boundaries.append(float(boundary))
+                else:
+                    raise ValueError("LengthAwareConfig: `bucket_boundaries` must be non-negative numbers or None.")
+            self.bucket_boundaries = normalized_boundaries
+            if self.bucket_scales is not None and len(self.bucket_scales) != len(self.bucket_boundaries) - 1:
+                raise ValueError("LengthAwareConfig: `bucket_scales` length must match `bucket_boundaries`.")
+            if self.bucket_weights is not None and len(self.bucket_weights) != len(self.bucket_boundaries) - 1:
+                raise ValueError("LengthAwareConfig: `bucket_weights` length must match `bucket_boundaries`.")
+        if self.bucket_scales is not None and not all(isinstance(s, (int, float)) and s > 0 for s in self.bucket_scales):
+            raise ValueError("LengthAwareConfig: `bucket_scales` must be positive numbers.")
+        if self.bucket_weights is not None and not all(isinstance(w, (int, float)) and w > 0 for w in self.bucket_weights):
+            raise ValueError("LengthAwareConfig: `bucket_weights` must be positive numbers.")
+
+    def __bool__(self) -> bool:
+        return self.mode is not LengthAwareMode.DISABLED
+
+    @staticmethod
+    def _value_change_split(
+        sorted_lengths: List[int],
+        lo: int,
+        hi: int,
+        min_bucket_size: int,
+        target: Optional[int] = None,
+    ) -> Optional[int]:
+        """Return a split index in [lo, hi] at a token-length value change, or None.
+
+        Splits inside a run of identical token lengths would make `from_lengths()`
+        bucket counts (taken from index slices) disagree with runtime
+        `bisect_right` partitioning (which uses value boundaries).
+        """
+        if hi - lo < 2 * min_bucket_size:
+            return None
+        candidates = [
+            i for i in range(lo + min_bucket_size, hi - min_bucket_size + 1)
+            if sorted_lengths[i - 1] < sorted_lengths[i]
+        ]
+        if not candidates:
+            return None
+        if target is None:
+            mid = (lo + hi) // 2
+            return min(candidates, key=lambda i: (abs(i - mid), i))
+        return min(candidates, key=lambda i: (abs(sorted_lengths[i] - target), i))
+
+    @staticmethod
+    def _adaptive_bucket_intervals(
+        lengths: List[int],
+        min_bucket_size: int,
+        max_bucket_ratio: float,
+    ) -> Tuple[List[Tuple[int, int]], List[int]]:
+        sorted_lengths = sorted(int(length) for length in lengths if length > 0)
+        if not sorted_lengths:
+            raise ValueError("LengthAwareConfig: all lengths must be positive.")
+        intervals: List[Tuple[int, int]] = []
+
+        def _split(lo: int, hi: int) -> None:
+            if hi - lo < 2 * min_bucket_size:
+                intervals.append((lo, hi))
+                return
+            min_len = sorted_lengths[lo]
+            max_len = sorted_lengths[hi - 1]
+            if max_len <= min_len or max_len / min_len <= max_bucket_ratio:
+                intervals.append((lo, hi))
+                return
+            target = math.isqrt(min_len * max_len)
+            mid = LengthAwareConfig._value_change_split(
+                sorted_lengths, lo, hi, min_bucket_size, target
+            )
+            if mid is None:
+                intervals.append((lo, hi))
+                return
+            _split(lo, mid)
+            _split(mid, hi)
+
+        _split(0, len(sorted_lengths))
+        return intervals, sorted_lengths
+
+    @staticmethod
+    def _targeted_bucket_intervals(
+        sorted_lengths: List[int],
+        target_bucket_count: int,
+        min_bucket_size: int,
+    ) -> List[Tuple[int, int]]:
+        """Split sorted lengths into a target number of buckets.
+
+        Greedily splits the bucket with the largest max/min length ratio until
+        the target bucket count is reached or no bucket can be split while
+        respecting `min_bucket_size`.
+        """
+        intervals: List[Tuple[int, int]] = [(0, len(sorted_lengths))]
+        unsplittable: set = set()
+        while len(intervals) < target_bucket_count:
+            best_idx = -1
+            best_ratio = -1.0
+            for idx, (lo, hi) in enumerate(intervals):
+                if (lo, hi) in unsplittable:
+                    continue
+                if hi - lo < 2 * min_bucket_size:
+                    unsplittable.add((lo, hi))
+                    continue
+                min_len = sorted_lengths[lo]
+                max_len = sorted_lengths[hi - 1]
+                if max_len <= min_len:
+                    unsplittable.add((lo, hi))
+                    continue
+                ratio = max_len / min_len
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_idx = idx
+            if best_idx < 0:
+                break
+            lo, hi = intervals[best_idx]
+            min_len = sorted_lengths[lo]
+            max_len = sorted_lengths[hi - 1]
+            target_val = math.isqrt(min_len * max_len)
+            mid = LengthAwareConfig._value_change_split(
+                sorted_lengths, lo, hi, min_bucket_size, target_val
+            )
+            if mid is None:
+                unsplittable.add((lo, hi))
+                continue
+            intervals[best_idx] = (lo, mid)
+            intervals.append((mid, hi))
+        return intervals
+
+    @classmethod
+    def from_lengths(
+        cls,
+        lengths: List[int],
+        mode: Union[str, LengthAwareMode] = LengthAwareMode.SINGLE,
+        min_length: Optional[int] = None,
+        min_bucket_size: int = 16,
+        max_bucket_ratio: float = 2.0,
+        bucket_weight_exponent: float = 1.0,
+        target_bucket_count: Optional[int] = None,
+    ) -> "LengthAwareConfig":
+        """Build a LengthAwareConfig with adaptive buckets computed from token lengths."""
+        sorted_lengths = sorted(int(length) for length in lengths if length > 0)
+        if not sorted_lengths:
+            raise ValueError("LengthAwareConfig: all lengths must be positive.")
+        if isinstance(mode, str) and not isinstance(mode, LengthAwareMode):
+            mode = LengthAwareMode(mode.lower())
+        if target_bucket_count is not None:
+            intervals = cls._targeted_bucket_intervals(
+                sorted_lengths, target_bucket_count=target_bucket_count, min_bucket_size=min_bucket_size
+            )
+        else:
+            intervals = cls._adaptive_bucket_intervals(
+                lengths, min_bucket_size=min_bucket_size, max_bucket_ratio=max_bucket_ratio
+            )[0]
+        # Bucket boundaries must be monotonic; intervals may be created out of order.
+        intervals = sorted(intervals, key=lambda x: x[0])
+        boundaries: List[Optional[int]] = [0]
+        scales: List[float] = []
+        counts: List[int] = []
+        for lo, hi in intervals:
+            bucket = sorted_lengths[lo:hi]
+            scales.append(float(sum(bucket) / len(bucket)))
+            counts.append(len(bucket))
+            if hi < len(sorted_lengths):
+                boundaries.append(int(sorted_lengths[hi]))
+        boundaries.append(None)
+        total = len(sorted_lengths)
+        non_empty_buckets = sum(1 for count in counts if count > 0)
+        if non_empty_buckets == 0 or total == 0:
+            weights = None
+        else:
+            weights = [float((non_empty_buckets * count / total) ** bucket_weight_exponent) for count in counts]
+        return cls(
+            mode=mode,
+            min_length=min_length,
+            min_bucket_size=min_bucket_size,
+            max_bucket_ratio=max_bucket_ratio,
+            bucket_weight_exponent=bucket_weight_exponent,
+            target_bucket_count=target_bucket_count,
+            bucket_boundaries=boundaries,
+            bucket_scales=scales,
+            bucket_weights=weights if mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT else None,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        bucket_boundaries = None
+        if self.bucket_boundaries is not None:
+            bucket_boundaries = [None if b == float("inf") else int(b) for b in self.bucket_boundaries]
+        return {
+            "mode": self.mode.value,
+            "min_length": self.min_length,
+            "min_bucket_size": self.min_bucket_size,
+            "max_bucket_ratio": self.max_bucket_ratio,
+            "bucket_weight_exponent": self.bucket_weight_exponent,
+            "target_bucket_count": self.target_bucket_count,
+            "bucket_boundaries": bucket_boundaries,
+            "bucket_scales": self.bucket_scales,
+            "bucket_weights": self.bucket_weights,
+        }
+
+
+
+
+
 @dataclass
 class HessianConfig:
     """Controls for chunked Hessian accumulation during GPTQ calibration."""
 
-    # Hessian accumulation controls (GPTQ only)
     chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
     chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
     staging_dtype: Union[str, torch.dtype] = field(
         default=torch.float32,
         metadata={"help": "Stage Hessian chunks in a lower precision dtype when supported"},
+    )
+    length_aware: Union[bool, str, LengthAwareConfig] = field(
+        default_factory=lambda: LengthAwareConfig(
+            mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
+            target_bucket_count=6,
+            bucket_weight_exponent=0.2,
+        ),
+        metadata={"help": "Enable length-aware per-sequence Hessian normalization (MaCa); "
+                          "use a LengthAwareConfig for advanced modes."},
     )
 
     def __post_init__(self):
@@ -1378,6 +1631,29 @@ class HessianConfig:
                 raise ValueError("HessianConfig: `staging_dtype` must be float32, float16, or bfloat16.")
         else:
             raise ValueError("HessianConfig: `staging_dtype` must be a torch.dtype or string.")
+
+        if self.length_aware is None:
+            self.length_aware = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
+        elif isinstance(self.length_aware, bool):
+            self.length_aware = LengthAwareConfig(
+                mode=LengthAwareMode.SINGLE if self.length_aware else LengthAwareMode.DISABLED
+            )
+        elif isinstance(self.length_aware, str):
+            self.length_aware = LengthAwareConfig(mode=self.length_aware)
+        elif isinstance(self.length_aware, dict):
+            self.length_aware = LengthAwareConfig(**self.length_aware)
+        elif isinstance(self.length_aware, LengthAwareConfig):
+            self.length_aware = copy.deepcopy(self.length_aware)
+        else:
+            raise ValueError("HessianConfig: `length_aware` must be None, bool, string, dict, or LengthAwareConfig.")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "chunk_size": self.chunk_size,
+            "chunk_bytes": self.chunk_bytes,
+            "staging_dtype": str(self.staging_dtype).split(".")[-1],
+            "length_aware": self.length_aware.to_dict() if self.length_aware.mode is not LengthAwareMode.DISABLED else None,
+        }
 
 
 @dataclass
@@ -4357,11 +4633,7 @@ class GPTQConfig(PreProcessorConfig):
             meta_payload["adjacent_model"] = _serialize_adjacent_model(self.adjacent_model)
         meta_payload["enable_shared_hessian_cache"] = self.enable_shared_hessian_cache
         meta_payload["quantization_diagnostics"] = self.quantization_diagnostics.value
-        meta_payload["hessian"] = {
-            "chunk_size": self.hessian.chunk_size,
-            "chunk_bytes": self.hessian.chunk_bytes,
-            "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
-        }
+        meta_payload["hessian"] = self.hessian.to_dict()
         if self.adaptive_damping is not None:
             meta_payload["adaptive_damping"] = self.adaptive_damping.to_dict()
         if self.adaptive_clipping is not None:

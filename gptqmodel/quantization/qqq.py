@@ -14,7 +14,7 @@ from torch import nn
 
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
-from ..quantization.config import FallbackStrategy, SmoothMSE
+from ..quantization.config import FallbackStrategy, LengthAwareMode, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
 from ..utils.device import get_device
@@ -215,6 +215,11 @@ class QQQ:
         self._validate_module(self.layer)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
+
+        hessian_cfg = getattr(self.qcfg, "hessian", None)
+        length_aware = getattr(hessian_cfg, "length_aware", None)
+        if length_aware is not None and getattr(length_aware, "mode", None) is not LengthAwareMode.DISABLED:
+            log.warn("HessianConfig.length_aware is not implemented for QQQ; ignoring it.")
 
         self._original_rows = self.rows
         self._original_columns = self.columns

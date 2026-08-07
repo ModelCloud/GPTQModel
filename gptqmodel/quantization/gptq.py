@@ -5,6 +5,7 @@
 
 # Based on original gptq algorithm and code from https://github.com/IST-DASLab/gptq
 
+import bisect
 import contextlib
 import math
 import os
@@ -25,6 +26,8 @@ from ..quantization.config import (
     AdaptiveDampingConfig,
     DampConfig,
     FallbackStrategy,
+    LengthAwareConfig,
+    LengthAwareMode,
     ScaleSearchConfig,
     SmoothMSE,
 )
@@ -277,6 +280,43 @@ class GPTQ:
             return module.module
         return module
 
+    @staticmethod
+    def _sequence_count_for_input(inp: torch.Tensor) -> int:
+        """Batch dimension of a 3-D+ activation tensor, or 1 for already-flattened inputs."""
+
+        if inp.dim() >= 3:
+            return max(1, int(inp.shape[0]))
+        return 1
+
+    def _lookup_length_bucket(self, length: float) -> Optional[int]:
+        """Map a token length to the index of its configured bucket."""
+
+        cfg = self.length_aware_config
+        if cfg is None or cfg.bucket_boundaries is None or len(cfg.bucket_boundaries) == 0:
+            return None
+        bucket_idx = bisect.bisect_right(cfg.bucket_boundaries, length) - 1
+        max_idx = len(cfg.bucket_boundaries) - 2
+        return max(0, min(bucket_idx, max_idx))
+
+    def _disable_length_aware_for_flat_input(self, inp: torch.Tensor) -> None:
+        """Disable length-aware normalization when an activation has lost sequence membership."""
+
+        if (
+            getattr(self, "length_aware", False)
+            and not isinstance(self.module, nn.Embedding)
+            and torch.is_tensor(inp)
+            and inp.dim() < 3
+        ):
+            log.warn(
+                "GPTQ module '%s' received a %d-D flattened activation while length-aware "
+                "normalization is active. Per-sequence membership is lost; disabling length-aware "
+                "normalization for this module.",
+                self.name,
+                inp.dim(),
+            )
+            self.length_aware = False
+            self.length_aware_config = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
+
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
         self.lock = threading.Lock()
         self.region_timer = region_timer
@@ -331,6 +371,38 @@ class GPTQ:
         self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
+        hessian_cfg = getattr(self.qcfg, "hessian", None)
+        self.length_aware_config = getattr(hessian_cfg, "length_aware", None)
+        if not isinstance(self.length_aware_config, LengthAwareConfig):
+            self.length_aware_config = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
+        self.length_aware = (
+            self.length_aware_config.mode is not LengthAwareMode.DISABLED
+            and not isinstance(self.module, nn.Embedding)
+        )
+        if self.length_aware and type(self) is not GPTQ:
+            log.warn(
+                "HessianConfig.length_aware is only implemented for the standard GPTQ algorithm; "
+                "disabling it for `%s`.",
+                type(self).__name__,
+            )
+            self.length_aware = False
+            self.length_aware_config = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
+
+        # Bucketed EQUAL_PER_BUCKET_WEIGHT requires pre-materialized boundaries
+        # (and at least one of bucket_weights/bucket_scales). Without them the
+        # estimator would silently fall back to per-sequence SINGLE scaling.
+        if self.length_aware and self.length_aware_config.mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT:
+            if self.length_aware_config.bucket_boundaries is None or (
+                self.length_aware_config.bucket_weights is None
+                and self.length_aware_config.bucket_scales is None
+            ):
+                log.warn(
+                    "GPTQ module '%s' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without "
+                    "materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.",
+                    self.name,
+                )
+                self.length_aware = False
+                self.length_aware_config = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
         self._validate_act_group_aware_shape()
 
         self.module_copy = None
@@ -361,6 +433,7 @@ class GPTQ:
         # For Embedding modules: map device -> 1D token frequency vector (length = vocab)
         self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        self._device_sequence_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
         self._hessian_rebuild_invalid: bool = False
 
@@ -611,6 +684,7 @@ class GPTQ:
 
         # Non-Embedding: accumulate directly into a per-device partial to avoid
         # allocating a columns x columns temporary for every batch.
+        sequence_count = self._sequence_count_for_input(inp)
         batch_token_size, reshaped_inp, canonical_device = self._reshape_input(inp)
         if batch_token_size == 0:
             del reshaped_inp
@@ -631,7 +705,7 @@ class GPTQ:
                 self._device_hessian_partials[dev] = existing
 
             try:
-                self.compute_hessian_xtx(reshaped_inp, out=existing)
+                self.compute_hessian_xtx(reshaped_inp, out=existing, sequence_count=sequence_count)
             except RuntimeError as exc:
                 if (
                     dev.type == "cuda"
@@ -654,7 +728,7 @@ class GPTQ:
                             device=cpu_dev,
                         )
                         self._device_hessian_partials[cpu_dev] = existing_cpu
-                    self.compute_hessian_xtx(reshaped_inp_cpu, out=existing_cpu)
+                    self.compute_hessian_xtx(reshaped_inp_cpu, out=existing_cpu, sequence_count=sequence_count)
                     del reshaped_inp_cpu
                     dev = cpu_dev
                 else:
@@ -664,6 +738,9 @@ class GPTQ:
                 del reshaped_inp
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+            if self.length_aware:
+                self._device_sequence_counts[dev] = self._device_sequence_counts.get(dev, 0) + sequence_count
+                self._last_batch_sequence_count = sequence_count
             self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
 
@@ -672,6 +749,7 @@ class GPTQ:
         batch_token_size: int,
         xtx: Optional[torch.Tensor],
         device: torch.device,
+        sequence_count: int = 1,
     ) -> None:
         """Accumulate a precomputed dense Hessian contribution.
 
@@ -702,18 +780,32 @@ class GPTQ:
                     existing.add_(xtx)
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+            if self.length_aware:
+                sequence_count = max(1, sequence_count)
+                self._device_sequence_counts[dev] = self._device_sequence_counts.get(dev, 0) + sequence_count
             self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
 
-    def record_shared_hessian_batch(self, batch_token_size: int, shared_state, observation_count: int = 1) -> None:
+    def record_shared_hessian_batch(
+        self,
+        batch_token_size: int,
+        shared_state,
+        *,
+        sequence_count: int = 1,
+        observation_count: Optional[int] = None,
+    ) -> None:
         """Record that this task observed a batch accumulated by a shared Hessian state."""
 
         if batch_token_size == 0:
             return
 
+        obs = observation_count if observation_count is not None else 1
         with self.lock:
-            self.fwd_counter += observation_count
+            self.fwd_counter += obs
             self._set_nsamples(self.nsamples + batch_token_size)
+            if self.length_aware:
+                dev = next(iter(self._device_sample_counts), None) or torch.device("cpu")
+                self._device_sequence_counts[dev] = self._device_sequence_counts.get(dev, 0) + sequence_count
             self._hessian_dirty = True
             self._shared_hessian_state = shared_state
 
@@ -829,12 +921,29 @@ class GPTQ:
         self,
         matrix: torch.Tensor,
         out: Optional[torch.Tensor] = None,
+        sequence_count: int = 1,
     ) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
             if out is not None:
                 return out
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
+
+        sequence_count = max(1, sequence_count)
+        per_sequence_length = rows / sequence_count
+        scale_length = per_sequence_length
+        if self.length_aware and self.length_aware_config is not None:
+            cfg = self.length_aware_config
+            if cfg.mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT and cfg.bucket_weights is not None:
+                bucket_idx = self._lookup_length_bucket(per_sequence_length)
+                if bucket_idx is not None:
+                    scale_length = per_sequence_length * cfg.bucket_weights[bucket_idx]
+            elif cfg.bucket_scales is not None:
+                bucket_idx = self._lookup_length_bucket(per_sequence_length)
+                if bucket_idx is not None:
+                    scale_length = cfg.bucket_scales[bucket_idx]
+            if cfg.min_length is not None and cfg.min_length > 0:
+                scale_length = max(scale_length, float(cfg.min_length))
 
         # CPU fallback: route to the compiled extension which calls ATen's
         # AVX-512/MKL-optimized addmm path with lower Python overhead than
@@ -847,8 +956,9 @@ class GPTQ:
             self._borrow_workspace_stage_dtype = stage_dtype
             self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
+            length_aware_scale = 1.0 / scale_length if self.length_aware else 1.0
             if chunk_size is None:
-                return hessian_xtx_cpu(matrix, out, beta=1.0 if out is not None else 0.0, alpha=1.0)
+                return hessian_xtx_cpu(matrix, out, beta=1.0 if out is not None else 0.0, alpha=length_aware_scale)
 
             if out is None:
                 xtx = torch.zeros(
@@ -864,9 +974,9 @@ class GPTQ:
                 source = matrix[start:start + rows_this]
                 with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                     if out is None:
-                        xtx.add_(hessian_xtx_cpu(materialized, None, beta=0.0, alpha=1.0))
+                        xtx.add_(hessian_xtx_cpu(materialized, None, beta=0.0, alpha=length_aware_scale))
                     else:
-                        hessian_xtx_cpu(materialized, xtx, beta=1.0, alpha=1.0)
+                        hessian_xtx_cpu(materialized, xtx, beta=1.0, alpha=length_aware_scale)
 
             if not _hessian_sync_deferred():
                 torch_sync(device=xtx.device)
@@ -877,12 +987,15 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = stage_dtype
         self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
+        length_aware_scale = 1.0 / scale_length if self.length_aware else 1.0
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
             if out is None:
                 xtx = torch.matmul(mat32.T, mat32)
+                if self.length_aware:
+                    xtx.div_(scale_length)
             else:
-                out.addmm_(mat32.T, mat32, beta=1.0, alpha=1.0)
+                out.addmm_(mat32.T, mat32, beta=1.0, alpha=length_aware_scale)
                 xtx = out
             del mat32
             if not _hessian_sync_deferred():
@@ -899,9 +1012,9 @@ class GPTQ:
             source = matrix[start:start + rows_this]
             with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 if out is None:
-                    xtx.add_(torch.matmul(materialized.T, materialized))
+                    xtx.add_(torch.matmul(materialized.T, materialized), alpha=length_aware_scale)
                 else:
-                    xtx.addmm_(materialized.T, materialized, beta=1.0, alpha=1.0)
+                    xtx.addmm_(materialized.T, materialized, beta=1.0, alpha=length_aware_scale)
 
         if not _hessian_sync_deferred():
             torch_sync(device=xtx.device)
@@ -914,13 +1027,14 @@ class GPTQ:
             counts = torch.bincount(ids, minlength=self.columns).to(torch.float32)
             return ids.numel(), counts, torch.device(inp_device)
 
+        sequence_count = self._sequence_count_for_input(inp)
         batch_token_size, reshaped_inp, canonical_device = self._reshape_input(inp)
         if batch_token_size == 0:
             del reshaped_inp
             return 0, None, canonical_device
 
         try:
-            xtx = self.compute_hessian_xtx(reshaped_inp)
+            xtx = self.compute_hessian_xtx(reshaped_inp, sequence_count=sequence_count)
         except RuntimeError as exc:
             if (
                 canonical_device.type == "cuda"
@@ -935,7 +1049,7 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
-                xtx = self.compute_hessian_xtx(reshaped_inp_cpu)
+                xtx = self.compute_hessian_xtx(reshaped_inp_cpu, sequence_count=sequence_count)
                 del reshaped_inp_cpu
             else:
                 del reshaped_inp
@@ -943,6 +1057,7 @@ class GPTQ:
         else:
             del reshaped_inp
 
+        self._last_batch_sequence_count = sequence_count
         self._snapshot_borrow_workspace_stats(context="process_batch")
         return batch_token_size, xtx, canonical_device
 
@@ -1044,7 +1159,7 @@ class GPTQ:
                     self.H = self.H.to(device=device)
                 return
 
-            total_samples = sum(self._device_sample_counts.values())
+            total_tokens = sum(self._device_sample_counts.values())
 
             # If the Hessian partials have already been merged and freed (e.g. the
             # mock-quantization recursion path after ``self.H`` was released for peak
@@ -1052,9 +1167,9 @@ class GPTQ:
             # That makes every column look dead and zeroes the whole weight. The
             # per-device sample counts are intentionally preserved so the correct
             # number of calibration tokens is still known; route straight to fallback.
-            if total_samples > 0 and not self._device_hessian_partials and self.H is None:
+            if total_tokens > 0 and not self._device_hessian_partials and self.H is None:
                 self._hessian_rebuild_invalid = True
-                self._set_nsamples(total_samples)
+                self._set_nsamples(total_tokens)
                 return
 
             # Track how many samples the existing ``self.H`` already represents so
@@ -1062,8 +1177,12 @@ class GPTQ:
             # built) re-weights the existing Hessian instead of zeroing it.
             # ``total_samples`` is cumulative; ``_hessian_total_samples`` is the
             # count already merged into ``self.H``.
-            total_old = getattr(self, "_hessian_total_samples", 0) if self.H is not None else 0
-            total = total_samples
+            if self.length_aware:
+                total_old = getattr(self, "_hessian_total_sequences", 0) if self.H is not None else 0
+                total = sum(self._device_sequence_counts.values())
+            else:
+                total_old = getattr(self, "_hessian_total_samples", 0) if self.H is not None else 0
+                total = total_tokens
 
             # Reuse the existing tensor when possible to avoid an extra allocation.
             if self.H is not None and self.H.shape == (self.columns, self.columns):
@@ -1078,7 +1197,7 @@ class GPTQ:
                     device=device,
                 )
 
-            if total_samples == 0:
+            if total_tokens == 0:
                 if self._max_observed_nsamples > 0:
                     self._hessian_rebuild_invalid = True
                 self.H = result_accum
@@ -1115,8 +1234,10 @@ class GPTQ:
                 del partial
 
             self.H = result_accum
-            self._hessian_total_samples = total
-            self._set_nsamples(total)
+            self._hessian_total_samples = total_tokens
+            if self.length_aware:
+                self._hessian_total_sequences = total
+            self._set_nsamples(total_tokens)
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
             # Keep per-device sample counts so a mock-quantization recursion (after
@@ -1152,18 +1273,27 @@ class GPTQ:
 
             partials = shared_state["partials"]
             sample_counts = shared_state["sample_counts"]
-            total_old = int(shared_state.get("total_samples", 0) or 0)
-            total_new = sum(sample_counts.values())
+            sequence_counts = shared_state.get("sequence_counts", {})
+            total_old_tokens = int(shared_state.get("total_samples", 0) or 0)
+            total_new_tokens = sum(sample_counts.values())
+            total_tokens = total_old_tokens + total_new_tokens if total_old_tokens > 0 else total_new_tokens
+
             # If this is a re-accumulation after a previous materialization, the
             # existing Hessian was scaled by 2/total_old and must be re-weighted
             # so the new partials can be merged without losing earlier batches.
+            if self.length_aware:
+                total_old = int(shared_state.get("total_sequences", 0) or 0)
+                total_new = sum(sequence_counts.values())
+            else:
+                total_old = total_old_tokens
+                total_new = total_new_tokens
             total = total_old + total_new if total_old > 0 else total_new
 
             # The shared Hessian was freed but the sample count is still recorded;
             # rebuilding from an empty partial set would produce an all-zero H.
-            if hessian is None and total_old > 0 and not partials:
+            if hessian is None and total_old_tokens > 0 and not partials:
                 self._hessian_rebuild_invalid = True
-                self._set_nsamples(total_old)
+                self._set_nsamples(total_old_tokens)
                 return
 
             if (
@@ -1213,12 +1343,16 @@ class GPTQ:
 
             shared_state["H"] = result_accum
             shared_state["dirty"] = False
-            shared_state["total_samples"] = total
+            shared_state["total_samples"] = total_tokens
+            if self.length_aware:
+                shared_state["total_sequences"] = total
             sample_counts.clear()
+            if self.length_aware:
+                sequence_counts.clear()
 
             self.H = result_accum
             self._shared_hessian_source = result_accum
-            self._set_nsamples(total)
+            self._set_nsamples(total_tokens)
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
 
