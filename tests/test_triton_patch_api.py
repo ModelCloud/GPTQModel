@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import gptqmodel
 from gptqmodel.utils import nogil_patcher
 
@@ -57,6 +59,30 @@ def test_triton_patch_external_usage_snippet():
     # Run the exact user-facing API snippet.
     from gptqmodel import TritonPatch
     TritonPatch.apply()
+
+
+def test_patched_autotuner_constructor_owns_cache_lock(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
+    original_lock = threading.Lock()
+    existing_cache_value = object()
+
+    class _FakeAutotuner:
+        def __init__(self):
+            self.cache = {"existing": existing_cache_value}
+            self._cache_lock = original_lock
+
+    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
+    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
+    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
+
+    nogil_patcher.patch_triton_autotuner()
+    autotuner = _FakeAutotuner()
+
+    assert autotuner._cache_lock is not original_lock
+    assert isinstance(autotuner._cache_lock, type(threading.RLock()))
+    assert autotuner.cache is autotuner._cache
+    assert autotuner._cache == {"existing": existing_cache_value}
+    assert autotuner._cache_futures == {}
 
 
 def test_package_init_uses_triton_patch_api():

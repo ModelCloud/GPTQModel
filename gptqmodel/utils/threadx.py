@@ -1192,8 +1192,9 @@ class DeviceThreadPool:
             for handle in list(self._device_smi_handles.values()):
                 try:
                     handle.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if DEBUG_ON:
+                        log.debug("DeviceThreadPool: ignoring Device-SMI handle close failure during shutdown: %s", exc)
             self._device_smi_handles.clear()
 
         if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
