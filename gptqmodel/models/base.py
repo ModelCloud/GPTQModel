@@ -209,6 +209,53 @@ CAPTURE_ONLY_FLAG = ":?"
 MOE_FLAG = ":moe"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
+MODULE_TREE_FLAG_MOE = "moe"
+MODULE_TREE_FLAG_ROUTED = "routed"
+MODULE_TREE_FLAG_SHARED = "shared"
+MODULE_TREE_FLAG_GATE = "gate"
+MODULE_TREE_FLAG_UP = "up"
+MODULE_TREE_FLAG_DOWN = "down"
+MODULE_TREE_FLAG_Q = "q"
+MODULE_TREE_FLAG_K = "k"
+MODULE_TREE_FLAG_V = "v"
+MODULE_TREE_EXPERT_FLAGS = frozenset({MODULE_TREE_FLAG_ROUTED, MODULE_TREE_FLAG_SHARED})
+MODULE_TREE_MOE_FLAGS = frozenset({MODULE_TREE_FLAG_MOE, *MODULE_TREE_EXPERT_FLAGS})
+MODULE_TREE_PROJECTION_FLAGS = frozenset(
+    {MODULE_TREE_FLAG_GATE, MODULE_TREE_FLAG_UP, MODULE_TREE_FLAG_DOWN}
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ModuleTreeMetadata:
+    """Normalized semantic metadata emitted by one explicit module-tree declaration."""
+
+    flags: frozenset[str] = frozenset()
+    expert_group: Optional[str] = None
+
+
+def normalize_module_tree_flags(flags) -> frozenset[str]:
+    """Normalize structural tags and reject ambiguous expert declarations."""
+
+    normalized = frozenset(flags or ())
+    expert_roles = normalized & MODULE_TREE_EXPERT_FLAGS
+    if len(expert_roles) > 1:
+        raise ValueError(f"Module-tree node cannot be both routed and shared: {sorted(normalized)}")
+    if expert_roles and MODULE_TREE_FLAG_MOE in normalized:
+        normalized = normalized - {MODULE_TREE_FLAG_MOE}
+    return normalized
+
+
+def module_tree_flags_are_moe(flags) -> bool:
+    """Return whether explicit structural tags place a module inside an MoE path."""
+
+    return bool(frozenset(flags or ()) & MODULE_TREE_MOE_FLAGS)
+
+
+def module_tree_flags_are_expert(flags) -> bool:
+    """Return whether explicit structural tags identify a routed or shared expert."""
+
+    return bool(frozenset(flags or ()) & MODULE_TREE_EXPERT_FLAGS)
+
 
 # Fix cpu memory leak.
 # See https://github.com/huggingface/transformers/issues/34366
@@ -231,7 +278,7 @@ class BaseQModel(nn.Module):
     # Cache of role/semantic module-tree flags keyed by the path within a layer.
     # Populated by ``_build_layer_modules_for_tree`` and consulted by the looper
     # when constructing ``NamedModule`` wrappers.
-    _module_tree_flags_cache: ClassVar[Dict[Type["BaseQModel"], Dict[str, frozenset]]] = {}
+    _module_tree_metadata_cache: ClassVar[Dict[Type["BaseQModel"], Dict[str, ModuleTreeMetadata]]] = {}
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -315,8 +362,6 @@ class BaseQModel(nn.Module):
     # Optional runtime->checkpoint overrides for LazyTurtle. Prefer reversed
     # `WeightRenaming` entries; legacy runtime->checkpoint dicts are still accepted.
     HF_CONVERSION_MAP_REVERSED: Optional[Any] = None
-
-    moe_expert_module_name_prefixes = [".expert"]
 
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
 
@@ -513,19 +558,42 @@ class BaseQModel(nn.Module):
         return name, flags
 
     @classmethod
-    def _set_module_tree_flags(cls, path: str, flags: frozenset) -> None:
+    def _set_module_tree_flags(
+        cls,
+        path: str,
+        flags: frozenset,
+        *,
+        expert_group: Optional[str] = None,
+    ) -> None:
         """Store role/semantic flags for a module-tree path (within a decoder layer)."""
 
-        cache = cls._module_tree_flags_cache.setdefault(cls, {})
+        normalized = normalize_module_tree_flags(flags)
+        if expert_group is not None and not module_tree_flags_are_expert(normalized):
+            raise ValueError(
+                f"Module-tree expert group `{expert_group}` requires an explicit routed/shared tag on `{path}`."
+            )
+        cache = cls._module_tree_metadata_cache.setdefault(cls, {})
         if path not in cache:
-            cache[path] = flags
+            cache[path] = ModuleTreeMetadata(flags=normalized, expert_group=expert_group)
+
+    @classmethod
+    def get_module_tree_metadata(cls, path: str) -> ModuleTreeMetadata:
+        """Return normalized semantic metadata for ``path`` within a decoder layer."""
+
+        cache = cls._module_tree_metadata_cache.get(cls, {})
+        return cache.get(path, ModuleTreeMetadata())
 
     @classmethod
     def get_module_tree_flags(cls, path: str) -> frozenset:
         """Return the role/semantic flags associated with ``path`` in the module tree, if any."""
 
-        cache = cls._module_tree_flags_cache.get(cls, {})
-        return cache.get(path, frozenset())
+        return cls.get_module_tree_metadata(path).flags
+
+    @classmethod
+    def get_module_tree_expert_group(cls, path: str) -> Optional[str]:
+        """Return the explicit module-tree expert group identity for ``path``."""
+
+        return cls.get_module_tree_metadata(path).expert_group
 
     @classmethod
     def has_moe_flag(cls, module_spec: str) -> bool:
@@ -620,20 +688,16 @@ class BaseQModel(nn.Module):
         Returns:
             True if any parent in the path is marked with :moe flag
         """
-        moe_modules = cls.get_moe_modules()
-
-        # Check if any MoE module is a prefix of this path
-        for moe_module in moe_modules:
-            # Handle layer index in path (e.g., "model.layers.0.mlp" should match "mlp")
-            if f".{moe_module}" in module_path or module_path.endswith(moe_module):
-                return True
-            # Also check for patterns like "mlp.experts.5" matching "mlp.experts"
-            path_parts = module_path.split(".")
-            for i in range(len(path_parts)):
-                partial_path = ".".join(path_parts[i:])
-                if partial_path.startswith(moe_module + ".") or partial_path == moe_module:
+        path_parts = tuple(module_path.split("."))
+        for declared_path in cls.get_moe_modules():
+            declared_parts = tuple(declared_path.split("."))
+            declared_size = len(declared_parts)
+            # Full runtime names include a model/layer prefix that is outside
+            # module_tree. Match complete path components only; semantic names
+            # such as "expert" never participate in classification.
+            for offset in range(len(path_parts) - declared_size + 1):
+                if path_parts[offset:offset + declared_size] == declared_parts:
                     return True
-
         return False
 
     @classmethod
@@ -680,6 +744,28 @@ class BaseQModel(nn.Module):
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
             num_experts = cls.get_num_experts(model_config)
+
+            def _copy_expanded_metadata(template_path: str, expanded_path: str, index: int) -> None:
+                """Copy template metadata while resolving its explicit expert-group placeholder."""
+
+                metadata = cls.get_module_tree_metadata(template_path)
+                expert_group = metadata.expert_group
+                if expert_group is not None:
+                    expert_group = expert_group.replace(EXPERT_INDEX_PLACEHOLDER, str(index))
+                cls._set_module_tree_flags(
+                    expanded_path,
+                    metadata.flags,
+                    expert_group=expert_group,
+                )
+
+            def _is_expert_gate_up_block(names: List[str]) -> bool:
+                """Return whether explicit tags describe only expert gate/up projections."""
+
+                metadata = [cls.get_module_tree_metadata(name) for name in names]
+                if not metadata or not all(module_tree_flags_are_expert(item.flags) for item in metadata):
+                    return False
+                roles = set().union(*(item.flags & MODULE_TREE_PROJECTION_FLAGS for item in metadata))
+                return roles == {MODULE_TREE_FLAG_GATE, MODULE_TREE_FLAG_UP}
 
             moe_simple = []
             capture_only_modules = None
@@ -730,11 +816,11 @@ class BaseQModel(nn.Module):
                             for n in segment_names:
                                 expanded = n.replace(EXPERT_INDEX_PLACEHOLDER, str(index))
                                 moe_simple[-1].append(expanded)
-                                cls._set_module_tree_flags(expanded, cls.get_module_tree_flags(n))
+                                _copy_expanded_metadata(n, expanded, index)
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
-                    add_capture_only_module = len(names) == (4 if any("shared_expert" in n for n in names) else 2)
+                    add_capture_only_module = _is_expert_gate_up_block(names)
                     if add_capture_only_module and capture_only_modules:
                         # Extend all elements in capture_only_modules
                         moe_simple[-1].extend(capture_only_modules)
@@ -744,7 +830,7 @@ class BaseQModel(nn.Module):
                         for index in range(num_experts):
                             expanded = n.replace(EXPERT_INDEX_PLACEHOLDER, str(index))
                             moe_simple[-1].append(expanded)
-                            cls._set_module_tree_flags(expanded, cls.get_module_tree_flags(n))
+                            _copy_expanded_metadata(n, expanded, index)
 
             return moe_simple
 
@@ -3235,6 +3321,7 @@ class BaseQModel(nn.Module):
         last_module = None  # most recent norm obj (from a '!...' block)
         last_module_name = None
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
+        expert_prev_op_by_group: Dict[str, str] = {}
         if isinstance(module_kwargs, dict):
             per_feature_kwargs = module_kwargs.get("_awq_feature_kwargs", {})
             base_module_kwargs = {
@@ -3289,6 +3376,9 @@ class BaseQModel(nn.Module):
                     kwargs_for_feature.update(feature_specific_kwargs)
             return kwargs_for_feature
 
+        def _metadata_for_name(raw_name: str) -> ModuleTreeMetadata:
+            return self.get_module_tree_metadata(strip_non_quantize_flags(raw_name))
+
         full_layer_modules = self.full_layer_modules(
             self.model.config,
             is_awq_quantize=True,
@@ -3308,14 +3398,28 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            is_moe_block = any(any(k in name for k in self.moe_expert_module_name_prefixes) for name in block)
-            is_moe_down_block = is_moe_block and any("down" in name for name in block)
-            is_moe_gate_up_block = is_moe_block and any("gate" in name for name in block) and any("up" in name for name in block)
+            block_metadata = [_metadata_for_name(name) for name in block]
+            is_moe_block = any(module_tree_flags_are_expert(item.flags) for item in block_metadata)
+            is_moe_down_block = is_moe_block and any(
+                MODULE_TREE_FLAG_DOWN in item.flags for item in block_metadata
+            )
+            block_roles = set().union(*(item.flags for item in block_metadata))
+            is_moe_gate_up_block = is_moe_block and {
+                MODULE_TREE_FLAG_GATE,
+                MODULE_TREE_FLAG_UP,
+            }.issubset(block_roles)
             if is_moe_down_block and last_module is not None and last_module_name is not None:
-                # mlp.experts.0.down_proj
-                target_suffix = last_module_name.split(".")[-1]
                 for name in block:
-                    prev_op_name = ".".join(name.split(".")[:-1] + [target_suffix])
+                    metadata = _metadata_for_name(name)
+                    if MODULE_TREE_FLAG_DOWN not in metadata.flags or metadata.expert_group is None:
+                        continue
+                    prev_op_name = expert_prev_op_by_group.get(metadata.expert_group)
+                    if prev_op_name is None:
+                        log.debug(
+                            "awq_get_modules_for_scaling: skipping expert `%s` because its module-tree group has no gate/up predecessor",
+                            name,
+                        )
+                        continue
                     prev_op, _ = get_module_by_name_prefix(module, prev_op_name)
                     if prev_op is None or name not in input_feat:
                         log.debug("awq_get_modules_for_scaling: skipping expert `%s` due to missing prev_op or features", name)
@@ -3404,17 +3508,24 @@ class BaseQModel(nn.Module):
                 # before or after routed experts depending on real forward order.
                 # For AWQ scaling, we still want the last routed expert gate/up proj
                 # as the effective boundary for the expert segment in this block.
-                gate_up_proj_indices = [
-                    i for i, name in enumerate(block)
-                    if any(k in name for k in self.moe_expert_module_name_prefixes) and ("gate" in name or "up" in name)
-                ]
+                gate_up_proj_indices = []
+                routed_gate_up_indices = []
+                for block_index, (name, metadata) in enumerate(zip(block, block_metadata)):
+                    if not module_tree_flags_are_expert(metadata.flags):
+                        continue
+                    if not metadata.flags & {MODULE_TREE_FLAG_GATE, MODULE_TREE_FLAG_UP}:
+                        continue
+                    gate_up_proj_indices.append(block_index)
+                    if metadata.expert_group is not None:
+                        expert_prev_op_by_group[metadata.expert_group] = strip_non_quantize_flags(name)
+                    if MODULE_TREE_FLAG_ROUTED in metadata.flags:
+                        routed_gate_up_indices.append(block_index)
 
                 # Use the last one if any exist
                 assert len(gate_up_proj_indices) > 0, "No expert gate_proj/up_proj found in block."
-                last_up_proj_index = gate_up_proj_indices[-1]
+                last_up_proj_index = (routed_gate_up_indices or gate_up_proj_indices)[-1]
 
                 candidate_name = strip_non_quantize_flags(block[last_up_proj_index])
-                assert "gate" in candidate_name or "up" in candidate_name
             else:
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
@@ -3616,11 +3727,22 @@ class BaseQModel(nn.Module):
         turtle_model = getattr(self, "turtle_model", None)
         if not isinstance(turtle_model, LazyTurtle) or not submodules:
             return
-        turtle_model.materialize_submodules(
-            target_model=self.model,
-            submodules=submodules,
-            non_blocking=non_blocking,
-        )
+        timer = getattr(self, "quant_region_timer", None)
+        start = time.perf_counter() if timer is not None else None
+        try:
+            turtle_model.materialize_submodules(
+                target_model=self.model,
+                submodules=submodules,
+                non_blocking=non_blocking,
+            )
+        finally:
+            if timer is not None and start is not None:
+                devices = sorted({str(device) for _, _, device in submodules})
+                timer.record(
+                    "module_load_batch",
+                    time.perf_counter() - start,
+                    source=f"LazyTurtle batch count={len(submodules)} devices={','.join(devices)}",
+                )
 
     ## overrides nn.module.train()
     # def train(self, mode=True):
@@ -3692,24 +3814,13 @@ class BaseQModel(nn.Module):
                 return None
             return parent_name.split(".", 1)[0]
 
-        MOE_STRUCTURAL_FLAGS = frozenset({"moe", "routed", "shared"})
-
-        def _infer_moe_role_flags(parent_name: str, inherited_flags: frozenset[str] = frozenset()) -> frozenset[str]:
-            """Infer structural MoE flags from the module-tree path."""
-            base = parent_name.split(".")[-1] if parent_name else ""
-            inferred: set[str] = set()
-            if base == "experts":
-                inferred.add("routed")
-            elif base in ("shared_expert", "shared_experts"):
-                inferred.add("shared")
-            return frozenset(inferred) | inherited_flags
-
         def process_entries(
             parent_token: str,
             entries,
             parent_group_offset: int = 0,
             scope_key: str | None = None,
             inherited_role_flags: frozenset[str] = frozenset(),
+            inherited_expert_group: str | None = None,
         ):
             """Process entries recursively to handle nested dict structures for MoE"""
             groups: defaultdict[int, List[tuple]] = defaultdict(list)
@@ -3724,11 +3835,10 @@ class BaseQModel(nn.Module):
             scope = scope_key if scope_key is not None else _get_scope(parent_name)
             parent_alias_scope = scope if parent_has_numeric else parent_name
 
-            parent_role_flags = (
-                frozenset(_role_flags(parent_flags))
-                | inherited_role_flags
-                | _infer_moe_role_flags(parent_name)
-            )
+            declared_parent_flags = frozenset(_role_flags(parent_flags))
+            parent_role_flags = normalize_module_tree_flags(declared_parent_flags | inherited_role_flags)
+            declared_expert_role = declared_parent_flags & MODULE_TREE_EXPERT_FLAGS
+            parent_expert_group = parent_name if declared_expert_role else inherited_expert_group
             parent_extra_flags = sorted(parent_role_flags)
 
             def _make_entry(
@@ -3746,7 +3856,11 @@ class BaseQModel(nn.Module):
             child_group_offset = parent_group_offset
             add_parent = parent_has_bang or (parent_capture_only and include_capture_only)
             if add_parent:
-                cls._set_module_tree_flags(parent_name, frozenset(parent_extra_flags))
+                cls._set_module_tree_flags(
+                    parent_name,
+                    frozenset(parent_extra_flags),
+                    expert_group=parent_expert_group,
+                )
                 alias_base = parent_rel_group if parent_has_numeric else parent_group
                 parent_entry_scope = f"{parent_alias_scope}.__parent__" if parent_alias_scope is not None else None
                 groups[parent_group].append(
@@ -3786,8 +3900,14 @@ class BaseQModel(nn.Module):
                     alias_scope = scope if parent_has_numeric else parent_name
                     alias_base = parent_rel_group if parent_has_numeric else grp
                     alias_rel = child_rel_group if parent_has_numeric else 0
-                    child_extra_flags = sorted(frozenset(_role_flags(child_flags)) | parent_role_flags)
-                    cls._set_module_tree_flags(full_path, frozenset(child_extra_flags))
+                    child_extra_flags = sorted(
+                        normalize_module_tree_flags(frozenset(_role_flags(child_flags)) | parent_role_flags)
+                    )
+                    cls._set_module_tree_flags(
+                        full_path,
+                        frozenset(child_extra_flags),
+                        expert_group=parent_expert_group,
+                    )
                     groups[grp].append(
                         _make_entry(
                             full_path,
@@ -3826,13 +3946,22 @@ class BaseQModel(nn.Module):
                         )
                         # Use a higher offset for expert modules to avoid conflicts with parent level
                         expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
+                        template_expert_group = (
+                            template_parent
+                            if module_tree_flags_are_expert(parent_role_flags)
+                            else parent_expert_group
+                        )
 
                         # Handle special case where sub_entries is ("#",) or "#" - this means use the parent path directly
                         if (isinstance(sub_entries, (tuple, list)) and len(sub_entries) == 1 and sub_entries[0] == "#") or sub_entries == "#":
                             # For ("#",) or "#" format, use the template_parent directly with default group 0
                             alias_scope = scope if parent_has_numeric else template_parent
                             alias_base = parent_rel_group if parent_has_numeric else expert_offset
-                            cls._set_module_tree_flags(template_parent, frozenset(parent_extra_flags))
+                            cls._set_module_tree_flags(
+                                template_parent,
+                                frozenset(parent_extra_flags),
+                                expert_group=template_expert_group,
+                            )
                             groups[expert_offset].append(
                                 _make_entry(
                                     template_parent,
@@ -3851,6 +3980,7 @@ class BaseQModel(nn.Module):
                                 expert_offset,
                                 scope,
                                 parent_role_flags,
+                                template_expert_group,
                             )
                             for grp, items in sub_groups.items():
                                 groups[grp].extend(items)
@@ -3861,19 +3991,22 @@ class BaseQModel(nn.Module):
                         # inside ``mlp:moe`` in Laguna's first layer).
                         if sub_parent == "":
                             full_sub_parent = parent_name
-                            sub_role_flags = parent_role_flags - MOE_STRUCTURAL_FLAGS
+                            sub_role_flags = parent_role_flags - MODULE_TREE_MOE_FLAGS
+                            sub_expert_group = None
                         else:
                             full_sub_parent = (
                                 f"{parent_name}.{sub_parent}"
                                 if parent_name else sub_parent
                             )
                             sub_role_flags = parent_role_flags
+                            sub_expert_group = parent_expert_group
                         sub_groups = process_entries(
                             full_sub_parent,
                             sub_entries,
                             current_offset,
                             scope,
                             sub_role_flags,
+                            sub_expert_group,
                         )
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)

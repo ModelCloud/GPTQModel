@@ -26,7 +26,7 @@ class Glm4MoeLiteQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 "gate": ("gate:!",),
-                "experts:0:routed": {
+                "experts:0:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 "shared_experts:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),

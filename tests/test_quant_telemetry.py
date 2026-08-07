@@ -126,3 +126,22 @@ class TestQuantTelemetry(unittest.TestCase):
                 gptq.hessian_inverse(H)
         self.assertTrue(any(_has_marker(call, "hessian_inverse begin") for call in mock_info.call_args_list))
         self.assertTrue(any(_has_marker(call, "hessian_inverse end") for call in mock_info.call_args_list))
+
+    def test_region_timer_preserves_independent_period_snapshots(self):
+        timer = QuantizationRegionTimer()
+
+        timer.record("process_quant", 2.0, source="model.layers.0.self_attn.q_proj")
+        timer.flush_period(label="layer 0")
+        timer.record("process_quant", 3.0, source="model.layers.1.self_attn.q_proj")
+        timer.record("scale_search", 1.0, source="model.layers.1.self_attn.q_proj")
+        timer.flush_period(label="layer 1")
+
+        periods = timer.period_snapshots()
+        self.assertEqual([period["label"] for period in periods], ["layer 0", "layer 1"])
+        self.assertEqual(periods[0]["regions"]["process_quant"]["total"], 2.0)
+        self.assertEqual(periods[1]["regions"]["process_quant"]["total"], 3.0)
+        self.assertEqual(periods[1]["regions"]["scale_search"]["total"], 1.0)
+
+        # Callers receive copies so artifact post-processing cannot corrupt live telemetry.
+        periods[0]["regions"]["process_quant"]["total"] = -1.0
+        self.assertEqual(timer.period_snapshots()[0]["regions"]["process_quant"]["total"], 2.0)

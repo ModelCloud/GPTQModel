@@ -45,7 +45,7 @@ class DeepSeekOCR2QModel(BaseQModel):
                 "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "gate": ("gate:!",),
                 "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
-                "experts:routed": {
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

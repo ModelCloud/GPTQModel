@@ -205,6 +205,10 @@ def clone_gptq_config_for_module(
 class GPTQProcessor(LoopProcessor):
     """Captures activations and quantizes modules with GPTQ or GPTAQ/FOEM."""
 
+    # GPTQ Hessian capture consumes projection inputs only. MoE bypass can call
+    # HookedLinear's capture hook directly and skip an otherwise-unused GEMM.
+    moe_input_capture_without_forward = True
+
     def __init__(
         self,
         tokenizer,
@@ -321,8 +325,7 @@ class GPTQProcessor(LoopProcessor):
             return signature
 
         expert_key = self._module_expert_isolation_key(name)
-        flags = self._module_tree_flags(task)
-        is_down = "down" in flags or self._module_is_expert_down_proj(name)
+        is_down = self._module_is_expert_down_proj(name)
         if expert_key is not None and is_down:
             # Each expert's down projection consumes a distinct intermediate activation,
             # so its Hessian must not be shared with other experts.
@@ -715,6 +718,7 @@ class GPTQProcessor(LoopProcessor):
             return
 
         cached = None
+        batch_token_size = 0
         with self._shared_hessian_lock:
             self._shared_hessian_stats["batch_requests"] += 1
             cached = self._shared_hessian_batch_cache.get(cache_key)
@@ -723,28 +727,85 @@ class GPTQProcessor(LoopProcessor):
                 cached["remaining"] -= 1
                 if cached["remaining"] <= 0:
                     self._shared_hessian_batch_cache.pop(cache_key, None)
+            else:
+                # Keep cache-miss computation inside the lock so free-threaded
+                # device workers cannot both accumulate the same logical MoE
+                # activation before either publishes its cache entry.
+                batch_token_size, xtx, device = task.process_batch(inp)
+                if batch_token_size == 0 or xtx is None:
+                    return
+
+                self._accumulate_shared_hessian_state(shared_state, batch_token_size, xtx, device)
+                self._shared_hessian_stats["batch_misses"] += 1
+                group_key = getattr(task, "_shared_hessian_accum_key", None)
+                remaining = max(0, self._shared_hessian_group_counts.get(group_key, 1) - 1)
+                if remaining:
+                    self._shared_hessian_batch_cache[cache_key] = {
+                        "batch_token_size": batch_token_size,
+                        "remaining": remaining,
+                    }
 
         if cached is not None:
-            task.record_shared_hessian_batch(cached["batch_token_size"], shared_state)
-            return
-
-        batch_token_size, xtx, device = task.process_batch(inp)
-        if batch_token_size == 0 or xtx is None:
-            return
-
-        self._accumulate_shared_hessian_state(shared_state, batch_token_size, xtx, device)
-
-        with self._shared_hessian_lock:
-            self._shared_hessian_stats["batch_misses"] += 1
-            group_key = getattr(task, "_shared_hessian_accum_key", None)
-            remaining = max(0, self._shared_hessian_group_counts.get(group_key, 1) - 1)
-            if remaining:
-                self._shared_hessian_batch_cache[cache_key] = {
-                    "batch_token_size": batch_token_size,
-                    "remaining": remaining,
-                }
-
+            batch_token_size = cached["batch_token_size"]
         task.record_shared_hessian_batch(batch_token_size, shared_state)
+
+    def moe_shared_input_group_key(self, name: str):
+        """Return the logical shared-Hessian key eligible for one-call MoE capture."""
+
+        if self.quantization_diagnostics_mode == QuantizationDiagnosticsMode.CHANNEL:
+            return None
+        task = self.tasks.get(name)
+        if not isinstance(task, GPTQ) or not getattr(task, "_shared_hessian_logical_key", False):
+            return None
+        return getattr(task, "_shared_hessian_accum_key", None)
+
+    def record_moe_shared_input_followers(
+        self,
+        *,
+        source_name: str,
+        follower_names: list[str],
+        source_nsamples_before: int,
+        source_fwd_counter_before: int,
+    ) -> None:
+        """Fan one logical MoE input observation out to shared-Hessian tasks.
+
+        The source hook has already performed the sole XtX accumulation. Every
+        follower receives the same sample/fwd counters and shared-state handle,
+        matching the ordinary cache-hit path without hundreds of Python hooks.
+        """
+
+        if not follower_names:
+            return
+        source_task = self.tasks[source_name]
+        batch_token_size = int(source_task.nsamples) - int(source_nsamples_before)
+        observation_count = int(source_task.fwd_counter) - int(source_fwd_counter_before)
+        shared_state = getattr(source_task, "_shared_hessian_state", None)
+        group_key = getattr(source_task, "_shared_hessian_accum_key", None)
+        if batch_token_size <= 0 or observation_count <= 0 or shared_state is None or group_key is None:
+            raise RuntimeError(f"Cannot fan out an empty shared MoE Hessian observation from `{source_name}`.")
+
+        for name in follower_names:
+            task = self.tasks[name]
+            if getattr(task, "_shared_hessian_accum_key", None) != group_key:
+                raise RuntimeError(f"MoE Hessian follower `{name}` does not share source `{source_name}`.")
+            task.record_shared_hessian_batch(
+                batch_token_size,
+                shared_state,
+                observation_count=observation_count,
+            )
+
+        batch_index = self.current_batch_index()
+        with self._shared_hessian_lock:
+            stale_keys = [
+                key
+                for key in self._shared_hessian_batch_cache
+                if key[0] == group_key and key[1] == batch_index
+            ]
+            for key in stale_keys:
+                self._shared_hessian_batch_cache.pop(key, None)
+            fanout_observations = len(follower_names) * observation_count
+            self._shared_hessian_stats["batch_requests"] += fanout_observations
+            self._shared_hessian_stats["batch_hits"] += fanout_observations
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing omitted this module from GPTQ work."""
@@ -794,7 +855,7 @@ class GPTQProcessor(LoopProcessor):
                     self._add_batch_with_shared_hessian(
                         g,
                         sample_inp.data,
-                        sample_out.data,
+                        sample_out.data if torch.is_tensor(sample_out) else None,
                         batch_index=batch_idx,
                         cache_source=inp_tensor,
                         cache_extra=(
@@ -808,7 +869,7 @@ class GPTQProcessor(LoopProcessor):
                 self._add_batch_with_shared_hessian(
                     g,
                     inp_tensor.data,
-                    out.data,
+                    out.data if torch.is_tensor(out) else None,
                     batch_index=batch_idx,
                     cache_source=inp_tensor,
                 )

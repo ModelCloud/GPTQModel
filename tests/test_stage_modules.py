@@ -118,6 +118,7 @@ def test_module_looper_runtime_telemetry_reports_gil_and_split_pools(monkeypatch
 
     looper = ModuleLooper.__new__(ModuleLooper)
     looper.gptq_model = types.SimpleNamespace(dynamic_expert_index=object())
+    looper._has_moe_module_tree = True
     looper._dense_quant_devices = [torch.device("cuda:0")]
     looper._moe_quant_devices = [torch.device("cuda:1"), torch.device("cuda:2")]
     looper._dense_vram_strategy = "exclusive"
@@ -171,6 +172,7 @@ class _TinyGptqModel:
     move_input_capture_example = BaseQModel.move_input_capture_example
     prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
     run_input_capture = BaseQModel.run_input_capture
+    get_modules_with_direct_meta_tensors = staticmethod(lambda _model: [])
 
     def __init__(self):
         self.layer = _TinyLayer()
@@ -178,6 +180,7 @@ class _TinyGptqModel:
         self.quantize_config = types.SimpleNamespace(
             device=torch.device("cpu"),
             calibration_data_device=None,
+            offload_to_disk=False,
         )
         self._hook_started = False
         self._hook_finished = False
@@ -189,6 +192,12 @@ class _TinyGptqModel:
 
     def get_base_modules(self, model):
         return []
+
+    def get_input_embeddings(self):
+        return None
+
+    def get_input_embeddings_name(self):
+        return None
 
     def pre_quantize_generate_hook_start(self):
         self._hook_started = True
@@ -757,7 +766,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, **_kwargs):
             return module
 
         def post_quantize(self, module):
@@ -765,6 +774,9 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
 
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
+
+        def should_quantize_layer(self, *_args):
+            return True
 
     class DummyLooper:
         def __init__(self):
@@ -828,7 +840,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         layers=layers,
         layer_modules=layer_modules,
         planning_layer_modules=layer_modules,
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
@@ -844,6 +856,9 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
 def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
     calls = []
 
+    def fail_replay(*_args, **_kwargs):
+        raise AssertionError("the final dynamically selected layer has no downstream output consumer")
+
     def fake_run_subset_stage(looper, **kwargs):
         calls.append(kwargs["layer_index"])
         return SubsetStageResult(
@@ -854,6 +869,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
 
     monkeypatch.setattr("gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage)
     monkeypatch.setattr("gptqmodel.looper.stage_layer.find_modules", lambda *_, **__: {})
+    monkeypatch.setattr("gptqmodel.looper.stage_layer._replay_layer_outputs", fail_replay)
 
     class DummyPB:
         def __init__(self, iterable):
@@ -912,7 +928,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_replay_after_process=False,
+                fwd_replay_after_process=True,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -970,7 +986,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, **_kwargs):
             return module
 
         def should_quantize_layer(self, *_args):
@@ -1206,7 +1222,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, **_kwargs):
             return module
 
         def post_quantize(self, module):
@@ -1214,6 +1230,9 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
 
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
+
+        def should_quantize_layer(self, *_args):
+            return True
 
     class DummyLooper:
         def __init__(self):
@@ -1270,7 +1289,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         layers=[torch.nn.Linear(1, 1, bias=False) for _ in range(2)],
         layer_modules=[["self_attn.q_proj"]],
         planning_layer_modules=[["self_attn.q_proj"]],
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0", "model.layers.1"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
@@ -1902,7 +1921,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             )
             self.lm_head = None
 
-        def pre_quantize(self, module):
+        def pre_quantize(self, module, **_kwargs):
             return module
 
         def post_quantize(self, module):
@@ -1910,6 +1929,9 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
 
         def lm_head_pre_quantize_generate_hook(self, value):
             return value
+
+        def should_quantize_layer(self, *_args):
+            return True
 
     class DummyLooper:
         def __init__(self, layers, initial_inputs):
@@ -2020,7 +2042,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             ["mlp.gate_proj", "mlp.up_proj"],
             ["mlp.down_proj"],
         ],
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0", "model.layers.1"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,

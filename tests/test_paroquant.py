@@ -1435,13 +1435,13 @@ def test_paroquant_processor_groups_common_llama_compute_blocks():
 
     state = SimpleNamespace(
         modules={
-            "self_attn.q_proj": SimpleNamespace(name="self_attn.q_proj"),
-            "self_attn.k_proj": SimpleNamespace(name="self_attn.k_proj"),
-            "self_attn.v_proj": SimpleNamespace(name="self_attn.v_proj"),
-            "self_attn.o_proj": SimpleNamespace(name="self_attn.o_proj"),
-            "mlp.gate_proj": SimpleNamespace(name="mlp.gate_proj"),
-            "mlp.up_proj": SimpleNamespace(name="mlp.up_proj"),
-            "mlp.down_proj": SimpleNamespace(name="mlp.down_proj"),
+            "self_attn.q_proj": SimpleNamespace(name="self_attn.q_proj", state={"module_tree_flags": frozenset({"q"})}),
+            "self_attn.k_proj": SimpleNamespace(name="self_attn.k_proj", state={"module_tree_flags": frozenset({"k"})}),
+            "self_attn.v_proj": SimpleNamespace(name="self_attn.v_proj", state={"module_tree_flags": frozenset({"v"})}),
+            "self_attn.o_proj": SimpleNamespace(name="self_attn.o_proj", state={"module_tree_flags": frozenset()}),
+            "mlp.gate_proj": SimpleNamespace(name="mlp.gate_proj", state={"module_tree_flags": frozenset({"gate"})}),
+            "mlp.up_proj": SimpleNamespace(name="mlp.up_proj", state={"module_tree_flags": frozenset({"up"})}),
+            "mlp.down_proj": SimpleNamespace(name="mlp.down_proj", state={"module_tree_flags": frozenset({"down"})}),
         }
     )
 
@@ -1861,18 +1861,18 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
 def test_paroquant_processor_layer_scope_live_path_is_dense_only():
     """Guard the official-like live layer path for dense decoder layers only."""
     dense_modules = [
-        SimpleNamespace(name="self_attn.q_proj"),
-        SimpleNamespace(name="self_attn.k_proj"),
-        SimpleNamespace(name="self_attn.v_proj"),
-        SimpleNamespace(name="self_attn.o_proj"),
-        SimpleNamespace(name="mlp.gate_proj"),
-        SimpleNamespace(name="mlp.up_proj"),
-        SimpleNamespace(name="mlp.down_proj"),
+        SimpleNamespace(name="self_attn.q_proj", state={"module_tree_flags": frozenset({"q"})}),
+        SimpleNamespace(name="self_attn.k_proj", state={"module_tree_flags": frozenset({"k"})}),
+        SimpleNamespace(name="self_attn.v_proj", state={"module_tree_flags": frozenset({"v"})}),
+        SimpleNamespace(name="self_attn.o_proj", state={"module_tree_flags": frozenset()}),
+        SimpleNamespace(name="mlp.gate_proj", state={"module_tree_flags": frozenset({"gate"})}),
+        SimpleNamespace(name="mlp.up_proj", state={"module_tree_flags": frozenset({"up"})}),
+        SimpleNamespace(name="mlp.down_proj", state={"module_tree_flags": frozenset({"down"})}),
     ]
     moe_modules = [
-        SimpleNamespace(name="self_attn.q_proj"),
-        SimpleNamespace(name="mlp.experts.0.gate_up_proj"),
-        SimpleNamespace(name="mlp.experts.0.down_proj"),
+        SimpleNamespace(name="self_attn.q_proj", state={"module_tree_flags": frozenset({"q"})}),
+        SimpleNamespace(name="mlp.specialists.0.proj_a", state={"module_tree_flags": frozenset({"gate", "routed"})}),
+        SimpleNamespace(name="mlp.specialists.0.proj_b", state={"module_tree_flags": frozenset({"down", "routed"})}),
     ]
 
     assert ParoQuantProcessor._supports_live_layer_scope(dense_modules) is True

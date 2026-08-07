@@ -10,6 +10,7 @@ This module provides a base class for model-specific MoE lifecycle hooks that al
 customization of MoE forward passes and routing logic during quantization.
 """
 
+import time
 from typing import Any, Dict, Optional
 
 import torch
@@ -19,9 +20,20 @@ from ..nn_modules.hooked_linear import StopForward
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
+from ..utils.python import has_gil_disabled
 
 
 log = setup_logger()
+
+
+def _moe_parallel_input_capture_eligible(quantize_config: Any) -> bool:
+    """Return whether default-on MoE input capture can safely run in parallel."""
+
+    return bool(
+        getattr(quantize_config, "moe_parallel_input_capture", True)
+        and has_gil_disabled()
+        and torch.cuda.device_count() > 1
+    )
 
 
 def _get_module_by_relative_path(parent: nn.Module, relative_path: str) -> Optional[nn.Module]:
@@ -365,8 +377,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         order they appear in the subset/module tree, then calls the original
         routed forward for the final output.
         """
-        import torch.nn.functional as F
-
         if not processor or not original_forward:
             error_msg = "Missing processor or original_forward"
             log.error(error_msg)
@@ -380,6 +390,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         expert_count = 0
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]
+        input_only_capture = bool(getattr(processor, "moe_input_capture_without_forward", False))
 
         def get_callable_module(key: str):
             """
@@ -403,6 +414,30 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             # Fallback to using subset (original behavior for single-GPU)
             subset_module = subset.get(key)
             return subset_module
+
+        def capture_input_or_forward(key: str, module_input: torch.Tensor):
+            """Run an input-only quantization hook without computing an unused projection output."""
+
+            callable_module = get_callable_module(key)
+            raw_module = getattr(callable_module, "module", callable_module)
+            capture_hook = getattr(raw_module, "forward_hook", None)
+            if not input_only_capture or not callable(capture_hook):
+                return callable_module(module_input)
+
+            timer = getattr(getattr(module_looper, "gptq_model", None), "quant_region_timer", None)
+            started_at = time.perf_counter() if timer is not None else None
+            try:
+                capture_hook(raw_module, (module_input,), None)
+                if getattr(raw_module, "forward_hook_last", False):
+                    raise StopForward()
+            finally:
+                if timer is not None and started_at is not None:
+                    timer.record(
+                        "moe_input_capture_direct",
+                        time.perf_counter() - started_at,
+                        source=key,
+                    )
+            return None
 
         # Get experts modules and shared expert attribute name
         experts_module = self.get_experts_module(moe_block, model_class)
@@ -459,6 +494,118 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             # view would include padded tokens and inflate expert sample counts
             # to batch_size * seq_len instead of the number of valid tokens.
             hidden_states_for_experts = hidden_states
+            shared_input_captures = {}
+            expert_inputs_by_device = {}
+            expert_replay_ops = {}
+
+            parallel_down_groups = {}
+            quantize_config = getattr(getattr(module_looper, "gptq_model", None), "quantize_config", None)
+            parallel_down_enabled = bool(
+                input_only_capture and _moe_parallel_input_capture_eligible(quantize_config)
+            )
+            if parallel_down_enabled:
+                for expert_idx, expert in enumerate(experts_module):
+                    down_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.down_proj_name}"
+                    if down_key not in subset:
+                        continue
+                    gate_module_ref = getattr(expert, self.gate_proj_name, None)
+                    expert_device = get_device(gate_module_ref) if gate_module_ref is not None else get_device(expert)
+                    parallel_down_groups.setdefault(expert_device, []).append((expert, down_key))
+
+                parallel_down_enabled = bool(
+                    len(parallel_down_groups) > 1
+                    and all(device.type == "cuda" for device in parallel_down_groups)
+                )
+
+            def expert_input_for(device: torch.device) -> torch.Tensor:
+                """Reuse one hidden-state transfer for every expert on a device."""
+
+                cache_key = str(device)
+                cached = expert_inputs_by_device.get(cache_key)
+                if cached is None:
+                    cached = move_to(hidden_states_for_experts, device)
+                    expert_inputs_by_device[cache_key] = cached
+                return cached
+
+            def capture_down_input(expert: nn.Module, down_key: str, expert_input: torch.Tensor) -> bool:
+                """Build one expert intermediate and capture it for its down projection."""
+
+                try:
+                    replay_op = expert_replay_ops.get(down_key)
+                    if replay_op is None and down_key not in expert_replay_ops:
+                        named_module = subset[down_key]
+                        flags = getattr(named_module, "state", {}).get("module_tree_flags", frozenset())
+                        declarations = sorted(
+                            (kind, flag.split("=", 1)[1])
+                            for flag in flags
+                            for kind in ("expert_activation", "expert_forward", "expert_gate")
+                            if flag.startswith(f"{kind}=") and flag.split("=", 1)[1]
+                        )
+                        if len(declarations) > 1:
+                            raise RuntimeError(
+                                f"MoE module_tree declares multiple expert replay methods for {down_key}: "
+                                f"{declarations}"
+                            )
+                        if declarations:
+                            kind, method_path = declarations[0]
+                            owner_name, separator, relative_path = method_path.partition(".")
+                            owners = {"expert": expert, "experts": experts_module}
+                            owner = owners.get(owner_name)
+                            if owner is None or not separator or not relative_path:
+                                raise RuntimeError(
+                                    f"MoE module_tree declaration {kind}={method_path} for {down_key} must start "
+                                    "with the explicit owner `expert.` or `experts.`"
+                                )
+                            replay_fn = owner
+                            for attribute in relative_path.split("."):
+                                replay_fn = getattr(replay_fn, attribute, None)
+                                if replay_fn is None:
+                                    break
+                            if not callable(replay_fn):
+                                raise RuntimeError(
+                                    f"MoE module_tree declares {kind}={method_path} for {down_key}, but it does "
+                                    "not resolve to a callable"
+                                )
+                            replay_op = (kind, replay_fn)
+                        expert_replay_ops[down_key] = replay_op
+
+                    if replay_op is None:
+                        # Without an exact module-tree declaration, execute the
+                        # model's expert forward and let the down-projection hook
+                        # capture its real input. This can compute an unused down
+                        # GEMM, but never guesses activation or gating semantics.
+                        try:
+                            expert(expert_input)
+                        except NotImplementedError as exc:
+                            raise RuntimeError(
+                                f"Cannot reconstruct the down-projection input for {down_key}: the expert has no "
+                                "forward and its module_tree node does not declare an exact expert replay method"
+                            ) from exc
+                        return False
+
+                    replay_kind, replay_fn = replay_op
+                    if replay_kind == "expert_forward":
+                        # Some experts do not implement the standard gated MLP
+                        # equation for every configuration. Their module tree
+                        # explicitly selects exact forward replay instead.
+                        replay_fn(expert_input)
+                        return False
+
+                    gate_module = getattr(expert, self.gate_proj_name)
+                    up_module = getattr(expert, self.up_proj_name)
+                    gate_out = gate_module(expert_input)
+                    up_out = up_module(expert_input)
+                    if replay_kind == "expert_activation":
+                        intermediate = replay_fn(gate_out) * up_out
+                    else:
+                        intermediate = replay_fn(torch.cat([gate_out, up_out], dim=-1))
+                    del gate_out, up_out
+
+                    capture_input_or_forward(down_key, intermediate)
+                    del intermediate
+                except StopForward:
+                    return True
+                return False
 
             for expert_idx, expert in enumerate(experts_module):
                 gate_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.gate_proj_name}"
@@ -468,41 +615,115 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 if gate_key not in subset and up_key not in subset and down_key not in subset:
                     continue
 
-                gate_module_ref = getattr(expert, self.gate_proj_name, None)
-                expert_device = get_device(gate_module_ref) if gate_module_ref is not None else get_device(expert)
-                expert_input = move_to(hidden_states_for_experts, expert_device)
+                if down_key in subset and parallel_down_enabled:
+                    continue
+
+                input_only_gate_up = input_only_capture and down_key not in subset
+                if input_only_gate_up:
+                    # Direct hooks only consume the input tensor; an unloaded
+                    # projection shell may still live on meta and must not
+                    # determine the activation device.
+                    expert_input = hidden_states_for_experts
+                else:
+                    gate_module_ref = getattr(expert, self.gate_proj_name, None)
+                    expert_device = get_device(gate_module_ref) if gate_module_ref is not None else get_device(expert)
+                    expert_input = expert_input_for(expert_device)
 
                 try:
                     if down_key in subset:
-                        gate_module = getattr(expert, self.gate_proj_name)
-                        up_module = getattr(expert, self.up_proj_name)
-                        gate_out = gate_module(expert_input)
-                        up_out = up_module(expert_input)
-
-                        if hasattr(expert, 'act_fn'):
-                            intermediate = expert.act_fn(gate_out) * up_out
-                        else:
-                            intermediate = F.silu(gate_out) * up_out
-                        del gate_out, up_out
-
-                        get_callable_module(down_key)(intermediate)
-                        del intermediate
+                        stop_forward_raised |= capture_down_input(expert, down_key, expert_input)
                         expert_count += 1
                     else:
                         called_any = False
                         if gate_key in subset:
-                            get_callable_module(gate_key)(expert_input)
+                            group_key = processor.moe_shared_input_group_key(gate_key) if input_only_capture else None
+                            group_capture = shared_input_captures.get(group_key) if group_key is not None else None
+                            if group_capture is None:
+                                task = processor.tasks[gate_key]
+                                group_capture = {
+                                    "source_name": gate_key,
+                                    "source_nsamples_before": int(task.nsamples),
+                                    "source_fwd_counter_before": int(task.fwd_counter),
+                                    "follower_names": [],
+                                }
+                                if group_key is not None:
+                                    shared_input_captures[group_key] = group_capture
+                                capture_input_or_forward(gate_key, expert_input)
+                            else:
+                                group_capture["follower_names"].append(gate_key)
+                                callable_module = get_callable_module(gate_key)
+                                raw_module = getattr(callable_module, "module", callable_module)
+                                stop_forward_raised |= bool(getattr(raw_module, "forward_hook_last", False))
                             called_any = True
                         if up_key in subset:
-                            get_callable_module(up_key)(expert_input)
+                            group_key = processor.moe_shared_input_group_key(up_key) if input_only_capture else None
+                            group_capture = shared_input_captures.get(group_key) if group_key is not None else None
+                            if group_capture is None:
+                                task = processor.tasks[up_key]
+                                group_capture = {
+                                    "source_name": up_key,
+                                    "source_nsamples_before": int(task.nsamples),
+                                    "source_fwd_counter_before": int(task.fwd_counter),
+                                    "follower_names": [],
+                                }
+                                if group_key is not None:
+                                    shared_input_captures[group_key] = group_capture
+                                capture_input_or_forward(up_key, expert_input)
+                            else:
+                                group_capture["follower_names"].append(up_key)
+                                callable_module = get_callable_module(up_key)
+                                raw_module = getattr(callable_module, "module", callable_module)
+                                stop_forward_raised |= bool(getattr(raw_module, "forward_hook_last", False))
                             called_any = True
                         if called_any:
                             expert_count += 1
 
                 except StopForward:
                     stop_forward_raised = True
-                finally:
-                    del expert_input
+
+            if parallel_down_enabled:
+                parent_mask = module_looper._get_processor_mask(processor)
+                parent_batch_index = processor.current_batch_index()
+
+                # Materialize one immutable activation copy per device before
+                # worker launch. Each worker then preserves expert order on its
+                # own CUDA stream while independent devices run concurrently.
+                for device in parallel_down_groups:
+                    expert_input_for(device)
+
+                def capture_device_group(device: torch.device, entries) -> tuple[int, bool]:
+                    module_looper._set_processor_mask(processor, parent_mask)
+                    processor._set_current_batch_index(parent_batch_index)
+                    local_stop = False
+                    try:
+                        expert_input = expert_inputs_by_device[str(device)]
+                        for expert, down_key in entries:
+                            local_stop |= capture_down_input(expert, down_key, expert_input)
+                    finally:
+                        module_looper._set_processor_mask(processor, None)
+                        processor._set_current_batch_index(None)
+                    return len(entries), local_stop
+
+                # Lifecycle work must use the process-wide threadx pool so it
+                # inherits stable device contexts, worker warmups, accounting,
+                # and GC coordination. The enclosing bypass forward is serial
+                # whenever expert placement spans devices, so these submissions
+                # cannot wait on their own outer device worker.
+                from .. import DEVICE_THREAD_POOL
+
+                futures = [
+                    DEVICE_THREAD_POOL.submit(device, capture_device_group, device, entries)
+                    for device, entries in parallel_down_groups.items()
+                ]
+                for future in futures:
+                    captured_count, local_stop = future.result()
+                    expert_count += captured_count
+                    stop_forward_raised |= local_stop
+
+            for group_capture in shared_input_captures.values():
+                processor.record_moe_shared_input_followers(**group_capture)
+
+            expert_inputs_by_device.clear()
 
         execution_order = self.get_subset_execution_order(
             ordered_module_names=ordered_module_names or [],

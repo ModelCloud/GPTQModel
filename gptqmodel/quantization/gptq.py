@@ -682,14 +682,14 @@ class GPTQ:
             self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
 
-    def record_shared_hessian_batch(self, batch_token_size: int, shared_state) -> None:
+    def record_shared_hessian_batch(self, batch_token_size: int, shared_state, observation_count: int = 1) -> None:
         """Record that this task observed a batch accumulated by a shared Hessian state."""
 
         if batch_token_size == 0:
             return
 
         with self.lock:
-            self.fwd_counter += 1
+            self.fwd_counter += observation_count
             self._set_nsamples(self.nsamples + batch_token_size)
             self._hessian_dirty = True
             self._shared_hessian_state = shared_state

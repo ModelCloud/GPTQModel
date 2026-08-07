@@ -26,7 +26,7 @@ class KlearQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 }
             }

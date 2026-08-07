@@ -42,7 +42,7 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",),  # router gate is tiny and accuracy-sensitive
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

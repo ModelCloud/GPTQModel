@@ -29,6 +29,7 @@ from ..looper.named_module import NamedModule
 from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
+from ..models.base import ModuleTreeMetadata
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import (
     BitsAndBytesConfig,
@@ -181,28 +182,25 @@ class WeightOnlyLooper:
         self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
         self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
-    @staticmethod
-    def _extract_moe_group_key(module_name: Optional[str]) -> Optional[str]:
-        """Return the expert family key used to co-locate gate/up/down modules."""
+    def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
+        """Return the expert family identity emitted by the module tree."""
 
-        if not module_name or ".experts." not in module_name:
+        if not module_name:
             return None
-        prefix, remainder = module_name.split(".experts.", 1)
-        expert_id = remainder.split(".", 1)[0]
-        if not expert_id:
-            return None
-        return f"{prefix}.experts.{expert_id}"
+        return self._module_tree_metadata(module_name).expert_group
 
-    @staticmethod
-    def _collect_assignable_moe_group_keys(moe_groups: Dict[str, List[str]]) -> List[str]:
+    def _module_tree_metadata(self, module_name: str) -> ModuleTreeMetadata:
+        """Resolve parsed metadata, treating models without a tree API as untagged."""
+
+        resolver = getattr(self.gptq_model, "get_module_tree_metadata", None)
+        if callable(resolver):
+            return resolver(module_name)
+        return ModuleTreeMetadata()
+
+    def _collect_assignable_moe_group_keys(self, moe_groups: Dict[str, List[str]]) -> List[str]:
         """Return expert families that should stay co-located on one device."""
 
-        assignable_group_keys: List[str] = []
-        for group_key, module_names in moe_groups.items():
-            suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-            if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
-                assignable_group_keys.append(group_key)
-        return assignable_group_keys
+        return [group_key for group_key, module_names in moe_groups.items() if module_names]
 
     @staticmethod
     def _normalize_planning_module_name(module_name: str) -> str:
@@ -714,6 +712,9 @@ class WeightOnlyLooper:
                 return None
 
         if isinstance(resolved, NamedModule):
+            metadata = self._module_tree_metadata(module_name)
+            resolved.state.setdefault("module_tree_flags", metadata.flags)
+            resolved.state.setdefault("module_tree_expert_group", metadata.expert_group)
             return resolved
 
         layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layer_path}.{module_name}"
@@ -723,6 +724,9 @@ class WeightOnlyLooper:
             full_name=layer_name,
             layer_index=layer_index,
         )
+        metadata = self._module_tree_metadata(module_name)
+        named.state.setdefault("module_tree_flags", metadata.flags)
+        named.state.setdefault("module_tree_expert_group", metadata.expert_group)
         full[module_name] = named
         return named
 

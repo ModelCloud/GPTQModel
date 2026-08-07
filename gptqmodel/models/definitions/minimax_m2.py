@@ -42,7 +42,7 @@ class MiniMaxM2GPTQ(BaseQModel):
             "block_sparse_moe:moe": {  # MoE module
                 "gate": ("gate:!",),
                 "e_score_correction_bias": ("e_score_correction_bias:!",),
-                "experts:routed": {
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("w1:0:gate", "w3:0:up", "w2:1:down"),
                 },
             },

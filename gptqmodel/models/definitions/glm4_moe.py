@@ -39,7 +39,7 @@ class GLM4MoEGPTQ(BaseQModel):
             "mlp:moe": {  # MoE module - can be Glm4MoeMLP (layer 0) or Glm4MoeMoE (layers 1-46)
                 "gate": ("gate:!",),
                 # Glm4MoeTopKRouter, ~1.6MB float32 per layer.  We really do not quant to quantize this.
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 "shared_experts:shared": {

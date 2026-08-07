@@ -500,6 +500,25 @@ def test_correlated_scale_search_uses_larger_bounded_candidate_chunks():
         ) == hessian_chunk
 
 
+def test_explicit_scale_search_candidate_chunk_size_overrides_bounded_policy():
+    qcfg = QuantizeConfig(
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        scale_search_candidate_chunk_size=80,
+        offload_to_disk=False,
+    )
+    quantizer = Quantizer(qcfg)
+    weights = torch.empty((65536, 128))
+
+    assert quantizer._scale_search_candidate_chunk_size(weights, 80, ScaleSearchConfig.ACTIVATION) == 80
+    assert quantizer._scale_search_candidate_chunk_size(weights, 40, ScaleSearchConfig.ACTIVATION) == 40
+
+
+@pytest.mark.parametrize("value", [0, -1, False])
+def test_scale_search_candidate_chunk_size_rejects_non_positive_values(value):
+    with pytest.raises(ValueError, match="positive integer"):
+        QuantizeConfig(scale_search_candidate_chunk_size=value, offload_to_disk=False)
+
+
 @pytest.mark.parametrize("fill_value", [0.0, float("nan")])
 def test_activation_search_invalid_hessian_falls_back_to_mse(fill_value):
     weights = torch.tensor([[0.17, -0.91, 0.38, 0.04, -0.55, 0.73]], dtype=torch.float32)

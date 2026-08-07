@@ -3700,6 +3700,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "scale_search_gpu_weight_restore": "scale_search_gpu_weight_restore",
             "scale_search_refine_steps": "scale_search_refine_steps",
             "enable_shared_hessian_cache": "enable_shared_hessian_cache",
+            "moe_parallel_input_capture": "moe_parallel_input_capture",
             "enable_activation_x_mean_cache": "enable_activation_x_mean_cache",
             "quantization_diagnostics": "quantization_diagnostics",
             "fused_forward": "fused_forward",
@@ -3951,6 +3952,15 @@ class GPTQConfig(PreProcessorConfig):
             )
         },
     )
+    scale_search_candidate_chunk_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional exact scale-search candidate chunk size. Larger values reduce launch overhead at the "
+                "cost of temporary accelerator memory; None uses the bounded automatic policy."
+            )
+        },
+    )
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
     mock_quantization: bool = field(
@@ -3990,6 +4000,16 @@ class GPTQConfig(PreProcessorConfig):
             "help": "Share same-input GPTQ Hessian accumulation and inverse/Cholesky cache within one processor subset."
         },
     )
+    moe_parallel_input_capture: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Run independent MoE bypass input-capture groups concurrently across CUDA devices by default. "
+                "Runtime activation requires a free-threaded Python runtime with GIL disabled and more than one "
+                "visible CUDA GPU."
+            )
+        },
+    )
     quantization_diagnostics: QuantizationDiagnosticsMode = field(
         default=QuantizationDiagnosticsMode.AUTO,
         metadata={
@@ -4023,6 +4043,10 @@ class GPTQConfig(PreProcessorConfig):
         self._adaptive_damping_user_value = adaptive_damping_user_value
 
         self.adjacent_model = _normalize_adjacent_model(self.adjacent_model)
+        if self.scale_search_candidate_chunk_size is not None:
+            if isinstance(self.scale_search_candidate_chunk_size, bool) or self.scale_search_candidate_chunk_size < 1:
+                raise ValueError("QuantizeConfig: `scale_search_candidate_chunk_size` must be a positive integer or None.")
+            self.scale_search_candidate_chunk_size = int(self.scale_search_candidate_chunk_size)
         if self.adjacent_model is not None and self.method != METHOD.GPTQ:
             raise ValueError(
                 "QuantizeConfig: `adjacent_model` currently supports `method=\"gptq\"` only."
@@ -4292,6 +4316,7 @@ class GPTQConfig(PreProcessorConfig):
         else:
             meta_payload["adjacent_model"] = _serialize_adjacent_model(self.adjacent_model)
         meta_payload["enable_shared_hessian_cache"] = self.enable_shared_hessian_cache
+        meta_payload["moe_parallel_input_capture"] = self.moe_parallel_input_capture
         meta_payload["quantization_diagnostics"] = self.quantization_diagnostics.value
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,

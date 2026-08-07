@@ -151,6 +151,13 @@ class _FakeQModel:
         self.quant_log = None
         self.turtle_model = None
         self._turtle_lock = threading.RLock()
+        self.module_tree_metadata = {}
+
+    def get_module_tree_metadata(self, module_name):
+        return self.module_tree_metadata.get(
+            module_name,
+            SimpleNamespace(flags=frozenset(), expert_group=None),
+        )
 
     def extract_layers_node(self):
         return ["layers"]
@@ -520,6 +527,13 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
         ["mlp.experts.1.gate_proj", "mlp.experts.1.up_proj"],
         ["mlp.shared_expert.down_proj"],
     ]
+    model.module_tree_metadata = {
+        "mlp.experts.0.gate_proj": SimpleNamespace(flags=frozenset({"gate", "routed"}), expert_group="specialist-0"),
+        "mlp.experts.0.up_proj": SimpleNamespace(flags=frozenset({"up", "routed"}), expert_group="specialist-0"),
+        "mlp.experts.1.gate_proj": SimpleNamespace(flags=frozenset({"gate", "routed"}), expert_group="specialist-1"),
+        "mlp.experts.1.up_proj": SimpleNamespace(flags=frozenset({"up", "routed"}), expert_group="specialist-1"),
+        "mlp.shared_expert.down_proj": SimpleNamespace(flags=frozenset({"down", "shared"}), expert_group="always-on"),
+    }
 
     devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
 
@@ -549,7 +563,7 @@ def test_weight_only_looper_respects_dense_and_moe_vram_strategy_devices(monkeyp
         ("layers.0.mlp.experts.0.up_proj", torch.device("cuda:1")),
         ("layers.0.mlp.experts.1.gate_proj", torch.device("cuda:2")),
         ("layers.0.mlp.experts.1.up_proj", torch.device("cuda:2")),
-        ("layers.0.mlp.shared_expert.down_proj", torch.device("cuda:0")),
+        ("layers.0.mlp.shared_expert.down_proj", torch.device("cuda:1")),
     ]
 
 

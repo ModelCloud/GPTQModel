@@ -260,8 +260,16 @@ def test_gptq_shared_hessian_toggle_preserves_exact_quantization_math():
 
 
 def test_gptq_shared_hessian_toggle_serializes_as_process_config():
-    qcfg = QuantizeConfig(enable_shared_hessian_cache=False)
+    qcfg = QuantizeConfig(
+        enable_shared_hessian_cache=False,
+    )
     assert qcfg.enable_shared_hessian_cache is False
+    assert qcfg.moe_parallel_input_capture is True
 
     restored = QuantizeConfig.from_quant_config(qcfg.to_dict())
     assert restored.enable_shared_hessian_cache is False
+    assert restored.moe_parallel_input_capture is True
+
+    opted_out = QuantizeConfig(moe_parallel_input_capture=False)
+    restored_opt_out = QuantizeConfig.from_quant_config(opted_out.to_dict())
+    assert restored_opt_out.moe_parallel_input_capture is False

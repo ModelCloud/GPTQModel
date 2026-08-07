@@ -47,7 +47,7 @@ class Qwen3NextGPTQ(BaseQModel):
                 "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
 
                 # Experts list with dynamic index
-                "experts:0:routed": {
+                "experts:0:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

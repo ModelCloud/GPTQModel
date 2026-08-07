@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 
+import gptqmodel.models.moe_lifecycle as moe_lifecycle
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -19,7 +21,43 @@ from gptqmodel.quantization.config import (
 )
 
 
-def _make_moe_bypass_processor(*, num_experts: int = 3, hidden_size: int = 16, intermediate_size: int = 12):
+@pytest.mark.parametrize(
+    ("configured", "gil_disabled", "visible_gpu_count", "expected"),
+    [
+        pytest.param(True, True, 2, True, id="enabled-free-threaded-multi-gpu"),
+        pytest.param(True, True, 1, False, id="single-visible-gpu"),
+        pytest.param(True, False, 2, False, id="gil-enabled"),
+        pytest.param(False, True, 2, False, id="explicit-opt-out"),
+    ],
+)
+def test_moe_parallel_input_capture_runtime_eligibility(
+    monkeypatch,
+    configured: bool,
+    gil_disabled: bool,
+    visible_gpu_count: int,
+    expected: bool,
+):
+    monkeypatch.setattr(moe_lifecycle, "has_gil_disabled", lambda: gil_disabled)
+    monkeypatch.setattr(moe_lifecycle.torch.cuda, "device_count", lambda: visible_gpu_count)
+
+    quantize_config = SimpleNamespace(moe_parallel_input_capture=configured)
+    assert moe_lifecycle._moe_parallel_input_capture_eligible(quantize_config) is expected
+
+
+def test_moe_parallel_input_capture_missing_config_uses_default(monkeypatch):
+    monkeypatch.setattr(moe_lifecycle, "has_gil_disabled", lambda: True)
+    monkeypatch.setattr(moe_lifecycle.torch.cuda, "device_count", lambda: 2)
+
+    assert moe_lifecycle._moe_parallel_input_capture_eligible(SimpleNamespace()) is True
+
+
+def _make_moe_bypass_processor(
+    *,
+    num_experts: int = 3,
+    hidden_size: int = 16,
+    intermediate_size: int = 12,
+    expert_gate_declaration: str | None = "expert_gate=experts._apply_gate",
+):
     """Build a GPTQProcessor with a small MoE bypass subset for unit testing."""
 
     qcfg = QuantizeConfig(
@@ -30,6 +68,7 @@ def _make_moe_bypass_processor(*, num_experts: int = 3, hidden_size: int = 16, i
         moe=MoEConfig(routing=ExpertsRoutingBypass()),
         hessian=HessianConfig(staging_dtype=torch.float32),
         enable_shared_hessian_cache=True,
+        moe_parallel_input_capture=True,
     )
 
     processor = GPTQProcessor(
@@ -62,9 +101,13 @@ def _make_moe_bypass_processor(*, num_experts: int = 3, hidden_size: int = 16, i
             )
             # Module-tree flags are normally parsed from the model definition by
             # ``ModuleLooper.create_named_modules``; set them explicitly here so
-            # the processor can identify gate/up/down roles without relying on
-            # the model lifecycle hooks.
-            named.state["module_tree_flags"] = frozenset({proj.split("_")[0]})
+            # the processor can identify the routed expert and gate/up/down role
+            # without relying on model attribute names or lifecycle hooks.
+            flags = {"routed", proj.split("_")[0]}
+            if expert_gate_declaration is not None:
+                flags.add(expert_gate_declaration)
+            named.state["module_tree_flags"] = frozenset(flags)
+            named.state["module_tree_expert_group"] = f"routed-specialist-{expert_idx}"
             processor.preprocess(named)
             subset[name] = named
 
@@ -150,6 +193,9 @@ def _build_replica_and_run_bypass(
     keep_mask,
     *,
     expert_devices=None,
+    forward_counts=None,
+    activation=None,
+    captured_tensors=None,
 ):
     """Attach forward hooks and run ``forward_to_all_experts`` through a fake MoE block."""
 
@@ -166,16 +212,29 @@ def _build_replica_and_run_bypass(
             self.gate_proj = HookedLinear.from_linear(nn.Linear(hidden.shape[-1], intermediate_size, bias=False))
             self.up_proj = HookedLinear.from_linear(nn.Linear(hidden.shape[-1], intermediate_size, bias=False))
             self.down_proj = HookedLinear.from_linear(nn.Linear(intermediate_size, hidden.shape[-1], bias=False))
+            self.act_fn = activation or nn.SiLU()
             if device is not None:
                 self.gate_proj = self.gate_proj.to(device)
                 self.up_proj = self.up_proj.to(device)
                 self.down_proj = self.down_proj.to(device)
 
+        def forward(self, value):
+            return self.down_proj(self.act_fn(self.gate_proj(value)) * self.up_proj(value))
+
+    class FakeExperts(nn.ModuleList):
+        def __init__(self, experts):
+            super().__init__(experts)
+            self.act_fn = activation or nn.SiLU()
+
+        def _apply_gate(self, gate_up):
+            gate, up = gate_up.chunk(2, dim=-1)
+            return self.act_fn(gate) * up
+
     class FakeMoEBlock(nn.Module):
         def __init__(self, num_experts, devices=None):
             super().__init__()
             devices = devices or [None] * num_experts
-            self.experts = nn.ModuleList([FakeExpert(d) for d in devices])
+            self.experts = FakeExperts([FakeExpert(d) for d in devices])
 
     class FakeLayer(nn.Module):
         def __init__(self, num_experts, devices=None):
@@ -194,6 +253,24 @@ def _build_replica_and_run_bypass(
         for p in parts:
             mod = getattr(mod, p)
         mod.forward_hook = processor.pre_process_fwd_hook(name)
+        if captured_tensors is not None:
+            original_hook = mod.forward_hook
+
+            def capture_tensor(module, inputs, output, *, module_name=name, hook=original_hook):
+                captured_tensors[module_name] = {
+                    "input": inputs[0].detach().clone(),
+                    "output": output.detach().clone() if isinstance(output, torch.Tensor) else output,
+                }
+                return hook(module, inputs, output)
+
+            mod.forward_hook = capture_tensor
+        if forward_counts is not None:
+            forward_counts[name] = 0
+
+            def count_forward(_module, _inputs, *, module_name=name):
+                forward_counts[module_name] += 1
+
+            mod.register_forward_pre_hook(count_forward)
 
     class FakeModuleLooper:
         def __init__(self, mask):
@@ -205,6 +282,9 @@ def _build_replica_and_run_bypass(
 
         def _get_processor_mask(self, processor):
             return self._mask
+
+        def _set_processor_mask(self, processor, mask):
+            processor._mask_tls.value = mask
 
     processor._mask_tls = threading.local()
     processor._mask_tls.value = keep_mask
@@ -235,6 +315,81 @@ def _build_replica_and_run_bypass(
     )
 
 
+@pytest.mark.parametrize(
+    "activation_declaration",
+    ["expert_activation=expert.act_fn", "expert_activation=experts.act_fn"],
+)
+def test_moe_bypass_down_input_uses_module_tree_declared_activation(activation_declaration):
+    """Down replay resolves the declared activation from the exact expert owner."""
+
+    class SquareActivation(nn.Module):
+        def forward(self, value):
+            return value.square()
+
+    processor, subset = _make_moe_bypass_processor(num_experts=2, hidden_size=16, intermediate_size=8)
+    for named_module in subset.values():
+        role = next(flag for flag in named_module.state["module_tree_flags"] if flag in {"gate", "up", "down"})
+        named_module.state["module_tree_flags"] = frozenset(
+            {"routed", role, activation_declaration}
+        )
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    hidden = torch.randn(2, 8, 16)
+    keep_mask = torch.ones((2, 8), dtype=torch.bool)
+    captured = {}
+
+    _build_replica_and_run_bypass(
+        processor,
+        subset,
+        hidden,
+        keep_mask,
+        activation=SquareActivation(),
+        captured_tensors=captured,
+    )
+
+    for expert_idx in range(2):
+        prefix = f"mlp.experts.{expert_idx}"
+        gate = captured[f"{prefix}.gate_proj"]["output"]
+        up = captured[f"{prefix}.up_proj"]["output"]
+        down_input = captured[f"{prefix}.down_proj"]["input"]
+        torch.testing.assert_close(down_input, gate.square() * up, rtol=0, atol=0)
+        assert not torch.allclose(down_input, torch.nn.functional.silu(gate) * up)
+
+
+@pytest.mark.parametrize("replay_declaration", [None, "expert_forward=expert.forward"])
+def test_moe_bypass_down_input_exact_expert_forward(replay_declaration):
+    """Fallback and explicitly declared forward replay both preserve exact expert math."""
+
+    class SquareActivation(nn.Module):
+        def forward(self, value):
+            return value.square()
+
+    processor, subset = _make_moe_bypass_processor(
+        num_experts=1,
+        hidden_size=16,
+        intermediate_size=8,
+        expert_gate_declaration=replay_declaration,
+    )
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    hidden = torch.randn(2, 8, 16)
+    keep_mask = torch.ones((2, 8), dtype=torch.bool)
+    captured = {}
+
+    _build_replica_and_run_bypass(
+        processor,
+        subset,
+        hidden,
+        keep_mask,
+        activation=SquareActivation(),
+        captured_tensors=captured,
+    )
+
+    gate = captured["mlp.experts.0.gate_proj"]["output"]
+    up = captured["mlp.experts.0.up_proj"]["output"]
+    down_input = captured["mlp.experts.0.down_proj"]["input"]
+    torch.testing.assert_close(down_input, gate.square() * up, rtol=0, atol=0)
+    assert not torch.allclose(down_input, torch.nn.functional.silu(gate) * up)
+
+
 def test_moe_bypass_padded_sample_counts_single_device():
     """Routing=bypass must drop padding positions and count only valid tokens."""
 
@@ -261,6 +416,84 @@ def test_moe_bypass_padded_sample_counts_single_device():
         assert task.nsamples == valid_tokens, (
             f"{name} recorded {task.nsamples} samples, expected {valid_tokens}"
         )
+
+
+def test_moe_bypass_gptq_skips_unused_projection_outputs():
+    """Input-only GPTQ hooks must not execute projection GEMMs whose outputs are discarded."""
+
+    processor, full_subset = _make_moe_bypass_processor(
+        num_experts=2,
+        hidden_size=16,
+        intermediate_size=8,
+    )
+    hidden = torch.randn(2, 8, 16)
+    keep_mask = torch.ones((2, 8), dtype=torch.bool)
+
+    processor.prepare_subset(full_subset, subset_index=0, subset_total=1)
+    down_counts = {}
+    _build_replica_and_run_bypass(
+        processor,
+        full_subset,
+        hidden,
+        keep_mask,
+        forward_counts=down_counts,
+    )
+    assert all(count == 1 for name, count in down_counts.items() if not name.endswith(".down_proj"))
+    assert all(count == 0 for name, count in down_counts.items() if name.endswith(".down_proj"))
+    processor.cleanup_subset(full_subset, subset_index=0, subset_total=1)
+
+    gate_up_subset = {
+        name: module for name, module in full_subset.items() if not name.endswith(".down_proj")
+    }
+    processor.prepare_subset(gate_up_subset, subset_index=0, subset_total=1)
+    counters_before = {
+        name: (processor.tasks[name].nsamples, processor.tasks[name].fwd_counter)
+        for name in gate_up_subset
+    }
+    stats_before = processor.shared_hessian_stats()
+    gate_up_counts = {}
+    _build_replica_and_run_bypass(
+        processor,
+        gate_up_subset,
+        hidden,
+        keep_mask,
+        forward_counts=gate_up_counts,
+    )
+    assert all(count == 0 for count in gate_up_counts.values())
+    for name in gate_up_subset:
+        task = processor.tasks[name]
+        nsamples_before, fwd_counter_before = counters_before[name]
+        assert task.nsamples - nsamples_before == 16
+        assert task.fwd_counter - fwd_counter_before == 2
+
+    stats = processor.shared_hessian_stats()
+    assert stats["batch_misses"] - stats_before["batch_misses"] == 2
+    assert stats["batch_hits"] - stats_before["batch_hits"] == (len(gate_up_subset) - 1) * 2
+
+
+def test_moe_bypass_reuses_hidden_state_transfer_per_device(monkeypatch):
+    """Down-input replay must copy a calibration batch at most once per expert device."""
+
+    processor, subset = _make_moe_bypass_processor(
+        num_experts=3,
+        hidden_size=16,
+        intermediate_size=8,
+    )
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    hidden = torch.randn(2, 8, 16)
+    keep_mask = torch.ones((2, 8), dtype=torch.bool)
+
+    original_move_to = moe_lifecycle.move_to
+    transfers = []
+
+    def record_move_to(value, device, dtype=None):
+        transfers.append(str(device))
+        return original_move_to(value, device, dtype=dtype)
+
+    monkeypatch.setattr(moe_lifecycle, "move_to", record_move_to)
+    _build_replica_and_run_bypass(processor, subset, hidden, keep_mask)
+
+    assert transfers == ["cpu"]
 
 
 @pytest.mark.slow

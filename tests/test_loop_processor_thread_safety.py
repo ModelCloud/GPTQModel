@@ -298,14 +298,19 @@ def test_assert_calibration_sample_count_allows_routed_moe_variance():
     p.qcfg.moe = MoEConfig(routing=BaseMoERouting())
     p._global_max_padded_nsamples = 2048
 
+    routed_name = "model.layers.0.mlp.router"
+    routed = NamedModule(nn.Linear(4, 4), name=routed_name, full_name=routed_name, layer_index=0)
+    routed.state["module_tree_flags"] = frozenset({"moe"})
+    p.tasks[routed_name] = MagicMock(_named_module=routed)
+
     p._assert_calibration_sample_count("model.layers.0.self_attn.q_proj", 512)
-    p._assert_calibration_sample_count("model.layers.0.mlp.gate", 256)
-    p._assert_calibration_sample_count("model.layers.0.mlp.gate", 800)
-    p._assert_calibration_sample_count("model.layers.0.mlp.gate", 2048)
+    p._assert_calibration_sample_count(routed_name, 256)
+    p._assert_calibration_sample_count(routed_name, 800)
+    p._assert_calibration_sample_count(routed_name, 2048)
     p._assert_calibration_sample_count("model.layers.0.mlp.experts.0.gate_proj", 0)
 
     with pytest.raises(AssertionError):
-        p._assert_calibration_sample_count("model.layers.0.mlp.gate", 2049)
+        p._assert_calibration_sample_count(routed_name, 2049)
 
 
 def test_module_tree_helpers_public_and_safe():
@@ -321,25 +326,29 @@ def test_module_tree_helpers_public_and_safe():
     p.qcfg.moe = MoEConfig(routing=ExpertsRoutingBypass())
     assert p._is_bypass_moe_routing() is True
 
-    # Routed expert isolation
+    # Routed expert isolation is derived from explicit module-tree flags.
+    routed_name = "model.layers.0.mlp.experts.12.down_proj"
+    routed = NamedModule(nn.Linear(4, 4), name=routed_name, full_name=routed_name, layer_index=0)
+    routed.state["module_tree_flags"] = frozenset({"down", "routed"})
+    routed.state["module_tree_expert_group"] = "model.layers.0.mlp.specialists.12"
+    p.tasks[routed_name] = MagicMock(_named_module=routed)
     assert p._module_expert_isolation_key(
-        "model.layers.0.mlp.experts.12.down_proj"
-    ) == ("experts", 12)
+        routed_name
+    ) == "model.layers.0.mlp.specialists.12"
     assert (
         p._module_expert_isolation_key("model.layers.0.mlp.shared_expert.down_proj")
         is None
     )
 
-    # Expert down-proj detection falls back to hooks when flags are absent.
-    assert (
-        p._module_is_expert_down_proj("model.layers.0.mlp.experts.0.down_proj") is True
-    )
+    # Expert down-proj detection does not guess from conventional path names.
+    assert p._module_is_expert_down_proj(routed_name) is True
     assert (
         p._module_is_expert_down_proj("model.layers.0.mlp.experts.0.gate_proj") is False
     )
 
-    # MoE membership uses module_tree flags.
-    assert p._module_is_moe_related("model.layers.0.mlp.gate") is True
+    # MoE membership uses metadata attached to the task.
+    assert p._module_is_moe_related(routed_name) is True
+    assert p._module_is_moe_related("model.layers.0.mlp.gate") is False
     assert p._module_is_moe_related("model.layers.0.self_attn.q_proj") is False
 
 

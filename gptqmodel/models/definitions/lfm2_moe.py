@@ -28,7 +28,7 @@ class LFM2MoeQModel(BaseQModel):
             "feed_forward:moe": {
                 "gate": ("gate:!",),
                 "": ("w1:0:gate", "w3:0:up", "w2:1:down"),
-                "experts:routed": {
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("w1:0:gate", "w3:0:up", "w2:1:down"),
                 },
             },

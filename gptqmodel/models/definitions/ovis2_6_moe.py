@@ -34,7 +34,7 @@ class Ovis2_6_MoeQModel(Ovis2_5QModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 "gate": ("gate:!",),
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },
@@ -99,7 +99,7 @@ class Ovis2_6_NextQModel(Ovis2_6_MoeQModel):
                 "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
 
                 # Experts list with dynamic index
-                "experts:0:routed": {
+                "experts:0:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

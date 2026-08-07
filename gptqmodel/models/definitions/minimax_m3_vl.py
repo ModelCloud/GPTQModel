@@ -49,7 +49,9 @@ class MiniMaxM3VLGPTQ(BaseQModel):
                 "": ("gate_up_proj:0:gate:up", "down_proj:1:down"),
                 "gate": ("gate:!", "e_score_correction_bias:!"),
                 "shared_experts:shared": ("gate_up_proj:0:gate:up", "down_proj:1:down"),
-                "experts:routed": {
+                # MiniMax-M3 applies clamped SwiGLU in its declared helper;
+                # this is not equivalent to a generic ACT2FN lookup.
+                "experts:routed:expert_gate=experts._apply_gate": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

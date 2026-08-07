@@ -39,7 +39,7 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
                 "gate": ("gate:!",),
                 "shared_expert_gate": ("shared_expert_gate:!",),
                 "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
-                "experts:0:routed": {
+                "experts:0:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

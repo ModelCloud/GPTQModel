@@ -31,7 +31,7 @@ class LongCatFlashQModel(BaseQModel):
                 "1": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down")
             },
             "mlp:moe": {
-                "experts:routed": {
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down")
                 }
             }

@@ -27,7 +27,7 @@ class MixtralQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp|block_sparse_moe:moe:?": {
                 "gate": ("gate:!",),
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj|w1:0:gate", "up_proj|w3:0:up", "down_proj|w2:1:down"),
                 }
             }

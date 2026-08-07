@@ -38,7 +38,7 @@ class HunYuanMoEV1QModel(BaseQModel):
                 "gate": ("gate:!",),
                 # The original forward runs shared_mlp before routed experts.
                 "shared_mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
-                "experts:0:routed": {
+                "experts:0:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

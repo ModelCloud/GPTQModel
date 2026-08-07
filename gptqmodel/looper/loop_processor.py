@@ -18,7 +18,13 @@ from torch.nn import Module
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
-from ..models import BaseQModel
+from ..models.base import (
+    BaseQModel,
+    MODULE_TREE_FLAG_DOWN,
+    MODULE_TREE_FLAG_ROUTED,
+    module_tree_flags_are_expert,
+    module_tree_flags_are_moe,
+)
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -386,62 +392,23 @@ class LoopProcessor:
                 return self._module_tree_flags(task)
         return frozenset()
 
-    def _module_expert_isolation_key(self, name: str) -> Optional[Tuple[str, int]]:
-        """Return (expert_block_name, expert_index) if ``name`` points inside a routed expert list.
-
-        Primary source is the ``module_tree_flags`` on the wrapped module:
-        a path inside a routed expert block carries the ``routed`` flag. If that
-        flag is unavailable, fall back to a structural parse of the name using
-        the model's ``expert_block_names``.
-
-        Example:
-            For ``name = "model.layers.0.mlp.experts.12.gate_proj"`` the path
-            segment ``experts.12`` indicates expert index ``12`` inside the
-            ``experts`` block, so this returns ``("experts", 12)``. A shared
-            expert path such as ``mlp.shared_experts.0.gate_proj`` returns
-            ``None`` because shared experts are not isolated per index.
-        """
+    def _module_expert_isolation_key(self, name: str) -> Optional[str]:
+        """Return the parsed routed-expert identity for ``name``."""
 
         flags = self._module_tree_flags(name=name)
-        if "routed" in flags:
-            parts = name.split(".")
-            if len(parts) >= 2 and parts[-2].isdigit():
-                block = parts[-3] if len(parts) >= 3 else "experts"
-                return (block, int(parts[-2]))
-            # The routed flag is set, but the expert index is not in the
-            # expected position; fall through to the structural parse below.
-
-        # Fallback for module trees that do not yet carry the ``:routed`` flag.
-        hooks = getattr(getattr(self, "gptq_model", None), "moe_lifecycle_hooks", None)
-        if hooks is None:
+        if MODULE_TREE_FLAG_ROUTED not in flags:
             return None
-
-        parts = name.split(".")
-        for i, part in enumerate(parts):
-            if part in getattr(hooks, "expert_block_names", ["experts"]):
-                if i + 1 < len(parts) and parts[i + 1].isdigit():
-                    return (part, int(parts[i + 1]))
-        return None
+        task = getattr(self, "tasks", {}).get(name)
+        named_module = getattr(task, "_named_module", None)
+        if not isinstance(named_module, NamedModule):
+            return None
+        return named_module.state.get("module_tree_expert_group")
 
     def _module_is_expert_down_proj(self, name: str) -> bool:
         """Return True if ``name`` is the down projection of an expert."""
 
         flags = self._module_tree_flags(name=name)
-        if "down" in flags:
-            # A down projection is only an expert projection when it lives inside
-            # a routed or shared expert block; ordinary dense MLP down projections
-            # also carry the ``:down`` role flag.
-            return bool(flags & {"routed", "shared"})
-
-        # Fallback for module trees without role/structural flags: check the
-        # down-projection suffix and that the module is inside a routed expert list.
-        hooks = getattr(getattr(self, "gptq_model", None), "moe_lifecycle_hooks", None)
-        if hooks is None:
-            return False
-        down_name = getattr(hooks, "down_proj_name", None)
-        if down_name is None or not name.endswith(f".{down_name}"):
-            return False
-        return self._module_expert_isolation_key(name) is not None
+        return MODULE_TREE_FLAG_DOWN in flags and module_tree_flags_are_expert(flags)
 
     def _module_is_moe_related(self, name: str) -> bool:
         """Return True if ``name`` belongs to an MoE block (routed/shared expert or gate).
@@ -450,28 +417,14 @@ class LoopProcessor:
         gate are treated as MoE-related because they may receive flattened
         activations that include padded token positions.
 
-        Primary source is the module-tree flags stored on ``NamedModule.state``.
-        If those flags do not include structural MoE markers, fall back to the
-        model definition (``BaseQModel.is_moe_module``), which derives MoE
-        membership from the module-tree :moe container flags rather than from
-        hard-coded name patterns.
+        The parsed module-tree flags stored on ``NamedModule.state`` are the
+        only source of structural MoE membership.
         """
 
         task = getattr(self, "tasks", {}).get(name)
         if isinstance(getattr(task, "_named_module", None), NamedModule):
             flags = task._named_module.state.get("module_tree_flags", frozenset())
-            if flags & {"moe", "routed", "shared"}:
-                return True
-            # Local role flags without structural markers can still belong to a
-            # dense fallback inside an :moe container (e.g. gate_proj inside
-            # mlp:moe with an empty-string fallback key), so fall through to the
-            # model-level check.
-
-        gptq_model = getattr(self, "gptq_model", None)
-        if gptq_model is not None:
-            is_moe_fn = getattr(type(gptq_model), "is_moe_module", None)
-            if is_moe_fn is not None:
-                return is_moe_fn(name)
+            return module_tree_flags_are_moe(flags)
         return False
 
     def _module_is_embedding(self, name: str) -> bool:

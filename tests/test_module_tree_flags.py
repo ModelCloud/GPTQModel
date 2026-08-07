@@ -14,6 +14,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.models.auto import MODEL_MAP
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.laguna import LagunaQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
@@ -33,6 +34,24 @@ class _NoOpProcessor:
 
     def is_skipped(self, named_module):
         return False
+
+
+def _routed_expert_replay_declarations(node):
+    declarations = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str):
+                parts = key.split(":")
+                aliases = parts[0].split("|")
+                if "experts" in aliases and "routed" in parts:
+                    declarations.append(
+                        (key, [part for part in parts[1:] if part.startswith("expert_") and "=" in part])
+                    )
+            declarations.extend(_routed_expert_replay_declarations(value))
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            declarations.extend(_routed_expert_replay_declarations(value))
+    return declarations
 
 
 def test_llama_build_layer_modules_caches_module_tree_flags():
@@ -63,20 +82,139 @@ def test_laguna_moe_expansion_caches_role_flags():
     gate_block = next(b for b in simple if "mlp.experts.0.gate_proj" in b)
     assert "mlp.experts.0.gate_proj" in gate_block
 
-    assert LagunaQModel.get_module_tree_flags("mlp.experts.0.gate_proj") == frozenset({"gate", "moe", "routed"})
-    assert LagunaQModel.get_module_tree_flags("mlp.experts.2.up_proj") == frozenset({"up", "moe", "routed"})
-    assert LagunaQModel.get_module_tree_flags("mlp.experts.3.down_proj") == frozenset({"down", "moe", "routed"})
-    assert LagunaQModel.get_module_tree_flags("mlp.shared_expert.gate_proj") == frozenset({"gate", "moe", "shared"})
-    assert LagunaQModel.get_module_tree_flags("mlp.shared_experts.up_proj") == frozenset({"up", "moe", "shared"})
+    assert LagunaQModel.get_module_tree_flags("mlp.experts.0.gate_proj") == frozenset(
+        {"expert_activation=experts.act_fn", "gate", "routed"}
+    )
+    assert LagunaQModel.get_module_tree_flags("mlp.experts.2.up_proj") == frozenset(
+        {"expert_activation=experts.act_fn", "routed", "up"}
+    )
+    assert LagunaQModel.get_module_tree_flags("mlp.experts.3.down_proj") == frozenset(
+        {"down", "expert_activation=experts.act_fn", "routed"}
+    )
+    assert LagunaQModel.get_module_tree_flags("mlp.shared_expert.gate_proj") == frozenset({"gate", "shared"})
+    assert LagunaQModel.get_module_tree_flags("mlp.shared_experts.up_proj") == frozenset({"up", "shared"})
+    assert LagunaQModel.get_module_tree_expert_group("mlp.experts.2.up_proj") == "mlp.experts.2"
+    assert LagunaQModel.get_module_tree_expert_group("mlp.shared_expert.gate_proj") == "mlp.shared_expert"
+
+
+def test_all_moe_module_trees_declare_exact_expert_replay():
+    """Every routed expert tree names its exact activation, gate, or forward owner."""
+
+    checked_classes = set()
+    for model_class in MODEL_MAP.values():
+        if model_class in checked_classes or getattr(model_class, "moe_lifecycle_hooks", None) is None:
+            continue
+        checked_classes.add(model_class)
+        routed_nodes = _routed_expert_replay_declarations(model_class.module_tree)
+        assert routed_nodes, f"{model_class.__name__} has lifecycle hooks but no routed expert tree"
+        for node, declarations in routed_nodes:
+            assert len(declarations) == 1, f"{model_class.__name__} {node} has replay declarations {declarations}"
+
+
+def test_all_model_tree_expert_flags_are_normalized():
+    """Routed/shared roles imply MoE and never coexist with a redundant moe role."""
+
+    checked_classes = set()
+    for model_class in MODEL_MAP.values():
+        if model_class in checked_classes or model_class.module_tree is None:
+            continue
+        checked_classes.add(model_class)
+        model_class.build_layer_modules(model_class.module_tree, include_capture_only=True)
+        for block in model_class.full_layer_modules(include_capture_only=True):
+            for raw_name in block:
+                name, _ = model_class._parse_module_flags(raw_name)
+                flags = model_class.get_module_tree_flags(name)
+                assert not ({"routed", "shared"} <= flags), (model_class.__name__, name, flags)
+                assert not ("moe" in flags and flags & {"routed", "shared"}), (
+                    model_class.__name__,
+                    name,
+                    flags,
+                )
 
 
 def test_build_layer_modules_direct_expert_placeholder():
-    """A tree with ``experts: {"#": "#"}`` uses the template parent directly."""
+    """A direct expert placeholder inherits only explicitly declared structural roles."""
 
-    tree = ["model", "layers", "#", {"mlp": {"experts": {"#": "#"}}}]
-    blocks = BaseQModel._build_layer_modules_for_tree(tree)
+    class ExplicitRoutedTreeQModel(BaseQModel):
+        """Test model whose expert role is explicitly declared in its module tree."""
+
+    tree = ["model", "layers", "#", {"mlp": {"experts:routed": {"#": "#"}}}]
+    blocks = ExplicitRoutedTreeQModel._build_layer_modules_for_tree(tree)
     assert blocks == [["mlp.experts.{expert_index}"]]
-    assert BaseQModel.get_module_tree_flags("mlp.experts.{expert_index}") == frozenset({"routed"})
+    assert ExplicitRoutedTreeQModel.get_module_tree_flags("mlp.experts.{expert_index}") == frozenset({"routed"})
+    assert ExplicitRoutedTreeQModel.get_module_tree_expert_group(
+        "mlp.experts.{expert_index}"
+    ) == "mlp.experts.{expert_index}"
+
+
+def test_build_layer_modules_does_not_infer_expert_roles_from_names():
+    """Names such as experts/shared_experts must not manufacture structural flags."""
+
+    class UntaggedExpertTreeQModel(BaseQModel):
+        """Test model with deliberately untagged expert-like module names."""
+
+    tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "mlp:moe": {
+                "experts": {"#": ("gate_proj:gate",)},
+                "shared_experts": ("up_proj:up",),
+            }
+        },
+    ]
+    UntaggedExpertTreeQModel._build_layer_modules_for_tree(tree)
+
+    assert UntaggedExpertTreeQModel.get_module_tree_flags(
+        "mlp.experts.{expert_index}.gate_proj"
+    ) == frozenset({"gate", "moe"})
+    assert UntaggedExpertTreeQModel.get_module_tree_flags("mlp.shared_experts.up_proj") == frozenset(
+        {"moe", "up"}
+    )
+
+
+def test_arbitrary_names_use_explicit_expert_roles_and_groups():
+    """Expert semantics remain exact when no path contains conventional MoE words."""
+
+    class ArbitraryNamesQModel(BaseQModel):
+        """Test model whose semantic roles cannot be inferred from its names."""
+
+    tree = [
+        "model", "layers", "#",
+        {
+            "ffn:moe": {
+                "specialists:routed": {"#": ("left:gate", "right:up", "reduce:down")},
+                "always_on:shared": ("left:gate", "right:up", "reduce:down"),
+            },
+            "experts": ("gate_proj:gate",),
+        },
+    ]
+    ArbitraryNamesQModel._build_layer_modules_for_tree(tree)
+
+    routed_path = "ffn.specialists.{expert_index}.left"
+    assert ArbitraryNamesQModel.get_module_tree_flags(routed_path) == frozenset({"gate", "routed"})
+    assert ArbitraryNamesQModel.get_module_tree_expert_group(routed_path) == "ffn.specialists.{expert_index}"
+    assert ArbitraryNamesQModel.get_module_tree_flags("ffn.always_on.reduce") == frozenset({"down", "shared"})
+    assert ArbitraryNamesQModel.get_module_tree_expert_group("ffn.always_on.reduce") == "ffn.always_on"
+    assert ArbitraryNamesQModel.get_module_tree_flags("experts.gate_proj") == frozenset({"gate"})
+    assert ArbitraryNamesQModel.get_module_tree_expert_group("experts.gate_proj") is None
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = ArbitraryNamesQModel
+    assert looper._extract_moe_group_key(routed_path) == "ffn.specialists.{expert_index}"
+    assert looper._extract_moe_group_key("experts.gate_proj") is None
+
+
+def test_module_tree_rejects_ambiguous_expert_roles():
+    """One node cannot be both a routed and shared expert container."""
+
+    class AmbiguousExpertQModel(BaseQModel):
+        """Deliberately invalid test declaration."""
+
+    tree = ["model", "layers", "#", {"ffn:moe": {"specialists:routed:shared": ("left:gate",)}}]
+    with pytest.raises(ValueError, match="both routed and shared"):
+        AmbiguousExpertQModel._build_layer_modules_for_tree(tree)
 
 
 def test_module_looper_create_named_modules_sets_module_tree_flags():
@@ -274,9 +412,15 @@ def test_loop_processor_module_tree_helpers():
     assert processor._module_expert_isolation_key("mlp.experts.0.gate_proj") is None
 
     processor.gptq_model = SimpleNamespace(moe_lifecycle_hooks=GateUpDownMoELifecycleHooks())
-    assert processor._module_expert_isolation_key("mlp.experts.0.gate_proj") == ("experts", 0)
+    assert processor._module_expert_isolation_key("mlp.experts.0.gate_proj") is None
     assert processor._module_expert_isolation_key("mlp.shared_experts.0.gate_proj") is None
     assert processor._module_expert_isolation_key("mlp.gate_proj") is None
+
+    routed = NamedModule(nn.Linear(4, 4), name="mlp.specialists.0.proj_a", full_name="routed", layer_index=0)
+    routed.state["module_tree_flags"] = frozenset({"gate", "routed"})
+    routed.state["module_tree_expert_group"] = "mlp.specialists.0"
+    processor.tasks = {routed.name: SimpleNamespace(_named_module=routed)}
+    assert processor._module_expert_isolation_key(routed.name) == "mlp.specialists.0"
 
     # _module_tree_flags
     module = nn.Linear(4, 4)
@@ -291,11 +435,17 @@ def test_loop_processor_module_tree_helpers():
     assert processor._module_is_expert_down_proj("mlp.experts.0.down_proj") is False
 
     processor.gptq_model = SimpleNamespace(moe_lifecycle_hooks=GateUpDownMoELifecycleHooks())
-    assert processor._module_is_expert_down_proj("mlp.experts.0.down_proj") is True
+    assert processor._module_is_expert_down_proj("mlp.experts.0.down_proj") is False
     assert processor._module_is_expert_down_proj("mlp.experts.0.gate_proj") is False
 
+    down = NamedModule(nn.Linear(4, 4), name="mlp.specialists.0.proj_c", full_name="down", layer_index=0)
+    down.state["module_tree_flags"] = frozenset({"down", "routed"})
+    down.state["module_tree_expert_group"] = "mlp.specialists.0"
+    processor.tasks = {down.name: SimpleNamespace(_named_module=down)}
+    assert processor._module_is_expert_down_proj(down.name) is True
 
-def test_module_is_moe_related_uses_module_tree_flags_and_fallback():
+
+def test_module_is_moe_related_uses_only_named_module_tree_flags():
     """MoE membership is derived from module_tree flags, not name patterns."""
 
     processor = LoopProcessor.__new__(LoopProcessor)
@@ -313,11 +463,11 @@ def test_module_is_moe_related_uses_module_tree_flags_and_fallback():
     named.state["module_tree_flags"] = frozenset({"gate"})
     assert processor._module_is_moe_related("model.layers.0.mlp.gate_proj") is False
 
-    # When no tasks are present, fall back to the model definition.
+    # Names never manufacture membership when task metadata is absent.
     processor.tasks = {}
     processor.gptq_model = object.__new__(LagunaQModel)
-    assert processor._module_is_moe_related("model.layers.0.mlp.gate") is True
-    assert processor._module_is_moe_related("model.layers.0.mlp.experts.0.gate_proj") is True
+    assert processor._module_is_moe_related("model.layers.0.mlp.gate") is False
+    assert processor._module_is_moe_related("model.layers.0.mlp.experts.0.gate_proj") is False
     assert processor._module_is_moe_related("model.layers.0.self_attn.q_proj") is False
 
     # A model without module_tree MoE flags returns False.

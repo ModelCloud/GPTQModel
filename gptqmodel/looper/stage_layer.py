@@ -666,6 +666,13 @@ def run_layer_stage(
             pristine_group_module = None
 
             is_last_module = layer_index == len(pb) - 1
+            is_terminal_quantized_layer = bool(
+                not is_embeddings_module
+                and last_quantized_layer_index is not None
+                and model_layer_index == last_quantized_layer_index
+                and p_index == len(looper.processors) - 1
+            )
+            needs_downstream_outputs = not is_last_module and not is_terminal_quantized_layer
             for subset_plan in subset_plans:
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
@@ -741,7 +748,7 @@ def run_layer_stage(
             # (`fwd_replay_after_process`) still need one forward of the untouched
             # layer so the next layer receives the correct activations.
             replay_skipped_layer = (
-                not is_last_module
+                needs_downstream_outputs
                 and not subset_plans
                 and execution_config.require_fwd
                 and execution_config.fwd_replay_after_process
@@ -751,7 +758,7 @@ def run_layer_stage(
             # current layer. In that case, replay the layer once using the
             # metadata already computed by the final subset plan.
             replay_after_process = (
-                not is_last_module
+                needs_downstream_outputs
                 and replay_plan is not None
                 and replay_plan.replay_after_process
             )

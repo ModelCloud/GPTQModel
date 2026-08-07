@@ -30,3 +30,6 @@ def test_deepseek_v4_module_tree_matches_v4_attention_and_fused_experts():
     assert "mlp.experts.99.up_proj" in flat_modules
     assert "mlp.experts.99.down_proj" in flat_modules
     assert "mlp.shared_experts.gate_proj" in flat_modules
+    assert DeepSeekV4QModel.get_module_tree_flags("mlp.experts.99.down_proj") == frozenset(
+        {"down", "expert_gate=experts._apply_gate", "routed"}
+    )

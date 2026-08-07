@@ -28,7 +28,7 @@ class Cohere2MoeQModel(BaseQModel):
             "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "mlp:moe": {
                 "gate": ("gate:!",),
-                "experts:routed": {
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 # Dense fallback used by Cohere2-MoE prefix decoder blocks.

@@ -57,7 +57,13 @@ class TestDots1Struct(ModelTest):
             if Dots1QModel._parse_module_flags(key)[0] == "mlp"
         )
         self.assertIn("gate_proj:0:gate", Dots1QModel.module_tree[3][mlp_key][""])
-        self.assertIn("#", Dots1QModel.module_tree[3][mlp_key]["experts:routed"])
+        experts_key = next(
+            key
+            for key in Dots1QModel.module_tree[3][mlp_key]
+            if Dots1QModel._parse_module_flags(key)[0] == "experts"
+            and "routed" in Dots1QModel._parse_module_flags(key)[1]
+        )
+        self.assertIn("#", Dots1QModel.module_tree[3][mlp_key][experts_key])
         self.assertIn("shared_experts:shared", Dots1QModel.module_tree[3][mlp_key])
 
 
@@ -131,7 +137,13 @@ class TestQwen2MoeModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.mlp, "experts"))
         self.assertIn("shared_expert_gate", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
         self.assertIn("shared_expert:0:shared", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
-        self.assertIn("experts:0:routed", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
+        experts_key = next(
+            key
+            for key in Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"]
+            if Qwen2MoeQModel._parse_module_flags(key)[0] == "experts"
+            and "routed" in Qwen2MoeQModel._parse_module_flags(key)[1]
+        )
+        self.assertIn("#", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"][experts_key])
 
 
 class TestQwen2VLModuleTree(ModelTest):

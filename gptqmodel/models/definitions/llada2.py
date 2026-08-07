@@ -79,7 +79,9 @@ class LLaDA2MoeQModel(BaseQModel):
                 "gate": ("gate:!",),
                 "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
-                "experts:routed": {
+                # Keep replay exact until the model implementation exposes a
+                # source-backed activation/gate contract in this definition.
+                "experts:routed:expert_forward=expert.forward": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

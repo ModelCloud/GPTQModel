@@ -263,6 +263,8 @@ class QuantizationRegionTimer:
                 (region, self._fresh_stat()) for region in self._region_labels.keys()
             )
             self._last_period_snapshot: Optional[Dict[str, Dict[str, Any]]] = None
+            # Preserve bounded layer/stage deltas for machine-readable profiling artifacts.
+            self._period_snapshots: list[Dict[str, Any]] = []
             self._header_printed = False
             self._pending_refresh = False
 
@@ -334,6 +336,12 @@ class QuantizationRegionTimer:
             self._last_period_snapshot = current
             if not any(stat.get("count", 0) for stat in delta.values()):
                 return
+            self._period_snapshots.append(
+                {
+                    "label": label,
+                    "regions": {region: dict(stat) for region, stat in delta.items()},
+                }
+            )
             if label is not None:
                 self.logger.info("Telemetry summary: %s", label)
             self._print_stats_locked(delta)
@@ -426,6 +434,21 @@ class QuantizationRegionTimer:
                 }
                 for region, stat in self._stats.items()
             }
+
+    def period_snapshots(self) -> list[Dict[str, Any]]:
+        """Return recorded per-period deltas without exposing mutable timer state."""
+
+        with self._lock:
+            return [
+                {
+                    "label": period.get("label"),
+                    "regions": {
+                        region: dict(stat)
+                        for region, stat in period.get("regions", {}).items()
+                    },
+                }
+                for period in self._period_snapshots
+            ]
 
 
 @contextlib.contextmanager

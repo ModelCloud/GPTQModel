@@ -51,7 +51,7 @@ class AXK2QModel(BaseQModel):
             "mlp:moe": {
                 "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "gate": ("gate:!", "e_score_correction_bias:!"),
-                "experts:routed": {
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),

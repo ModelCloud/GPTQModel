@@ -35,7 +35,9 @@ class HymbaQModel(BaseQModel):
             "mamba": ("in_proj:0", "out_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "moe:moe": {
-                "experts:routed": {
+                # HymbaMLP supports both gated SiLU and non-gated relu2. Exact
+                # forward replay is required because act_fn alone is ambiguous.
+                "experts:routed:expert_forward=expert.forward": {
                     "0": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 }
             }

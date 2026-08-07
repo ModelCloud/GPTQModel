@@ -318,13 +318,17 @@ class Quantizer(nn.Module):
 
         raise ValueError(f"Unsupported scale search method: `{method}`.")
 
-    @staticmethod
     def _scale_search_candidate_chunk_size(
+        self,
         x: torch.Tensor,
         candidate_count: int,
         method: ScaleSearchConfig,
     ) -> int:
         """Choose a bounded candidate batch that amortizes eager launch overhead."""
+
+        configured_chunk_size = getattr(self.qcfg, "scale_search_candidate_chunk_size", None)
+        if configured_chunk_size is not None:
+            return max(1, min(candidate_count, int(configured_chunk_size)))
 
         if method in {
             ScaleSearchConfig.HESSIAN,

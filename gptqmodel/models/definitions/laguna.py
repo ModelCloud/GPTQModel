@@ -39,7 +39,9 @@ class LagunaQModel(BaseQModel):
                 "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "shared_expert:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 "gate": ("gate:!",),
-                "experts:routed": {
+                # LagunaExperts owns ACT2FN[config.hidden_act]; the defused
+                # per-expert containers intentionally do not duplicate it.
+                "experts:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 # Dense fallback used by Laguna's first decoder block.

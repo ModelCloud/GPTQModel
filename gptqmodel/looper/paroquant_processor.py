@@ -36,6 +36,15 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
+from ..models.base import (
+    MODULE_TREE_FLAG_DOWN,
+    MODULE_TREE_FLAG_GATE,
+    MODULE_TREE_FLAG_K,
+    MODULE_TREE_FLAG_Q,
+    MODULE_TREE_FLAG_UP,
+    MODULE_TREE_FLAG_V,
+    module_tree_flags_are_expert,
+)
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -2473,25 +2482,10 @@ class ParoQuantProcessor(LoopProcessor):
         """
         if not group_modules:
             return False
-        expert_markers = (
-            "expert",
-            "experts",
-            "shared_expert",
-            "gate_up_proj",
-        )
-        expert_prefixes = ("experts.", "mlp.experts.", "moe.")
-        expert_like_modules = 0
-        dense_modules = 0
         for module in group_modules:
-            module_name = getattr(module, "name", "")
-            leaf = module_name.rsplit(".", 1)[-1]
-            if any(marker in module_name for marker in expert_markers) or module_name.startswith(expert_prefixes):
-                expert_like_modules += 1
-                continue
-            dense_modules += 1
-            if leaf not in {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}:
+            if module_tree_flags_are_expert(module.state.get("module_tree_flags", frozenset())):
                 return False
-        return dense_modules > 0 and expert_like_modules == 0
+        return True
 
     def _optimize_group(
         self,
@@ -2584,33 +2578,41 @@ class ParoQuantProcessor(LoopProcessor):
             return results, val_loss
 
     @staticmethod
-    def _module_compute_block_label(module_name: str) -> str:
+    def _module_compute_block_label(named_module: NamedModule) -> str:
         """Map common projection archetypes to compute_block optimization buckets."""
+        module_name = named_module.name
+        flags = named_module.state.get("module_tree_flags", frozenset())
         leaf = module_name.rsplit(".", 1)[-1]
-        if leaf in {"q_proj", "k_proj", "v_proj"}:
+        if flags & {MODULE_TREE_FLAG_Q, MODULE_TREE_FLAG_K, MODULE_TREE_FLAG_V}:
             return "attn_qkv"
+        # Attention output projections do not yet have a module-tree role tag.
         if leaf == "o_proj":
             return "attn_o"
-        if leaf in {"gate_proj", "up_proj"}:
+        if flags & {MODULE_TREE_FLAG_GATE, MODULE_TREE_FLAG_UP}:
             return "mlp_gate_up"
-        if leaf == "down_proj":
+        if MODULE_TREE_FLAG_DOWN in flags:
             return "mlp_down"
         return f"single:{module_name}"
 
     @staticmethod
-    def _module_compute_block_order(module_name: str) -> tuple[int, str]:
+    def _module_compute_block_order(named_module: NamedModule) -> tuple[int, str]:
         """Keep compute_block members in canonical architectural order."""
+        module_name = named_module.name
+        flags = named_module.state.get("module_tree_flags", frozenset())
         leaf = module_name.rsplit(".", 1)[-1]
-        order = {
-            "q_proj": 0,
-            "k_proj": 1,
-            "v_proj": 2,
-            "o_proj": 3,
-            "gate_proj": 4,
-            "up_proj": 5,
-            "down_proj": 6,
+        role_order = {
+            MODULE_TREE_FLAG_Q: 0,
+            MODULE_TREE_FLAG_K: 1,
+            MODULE_TREE_FLAG_V: 2,
+            MODULE_TREE_FLAG_GATE: 4,
+            MODULE_TREE_FLAG_UP: 5,
+            MODULE_TREE_FLAG_DOWN: 6,
         }
-        return (order.get(leaf, 100), module_name)
+        for role, order in role_order.items():
+            if role in flags:
+                return (order, module_name)
+        # Attention output projections do not yet have a module-tree role tag.
+        return (3 if leaf == "o_proj" else 100, module_name)
 
     def _optimization_groups_for_layer(
         self,
@@ -2629,9 +2631,9 @@ class ParoQuantProcessor(LoopProcessor):
         if mode == "compute_block":
             grouped: Dict[str, list[NamedModule]] = {}
             for module in named_modules:
-                grouped.setdefault(self._module_compute_block_label(module.name), []).append(module)
+                grouped.setdefault(self._module_compute_block_label(module), []).append(module)
             for label in grouped:
-                grouped[label].sort(key=lambda module: self._module_compute_block_order(module.name))
+                grouped[label].sort(key=self._module_compute_block_order)
             return [(label, grouped[label]) for label in sorted(grouped)]
         if mode == "layer":
             return [("layer", named_modules)]

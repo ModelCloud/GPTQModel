@@ -62,7 +62,7 @@ class Qwen3_5_MoeQModel(BaseQModel):
                 # execution mismatch until subset early-stop started relying on the
                 # final module in the merged block.
                 "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
-                "experts:0:routed": {
+                "experts:0:routed:expert_activation=experts.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

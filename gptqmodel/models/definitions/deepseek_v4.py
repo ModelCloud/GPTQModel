@@ -28,7 +28,11 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate:!",),
-                "experts:routed": {
+                # DeepSeek V4's exact expert gate path includes the model's
+                # configured activation and swiglu_limit clamps. Lifecycle
+                # replay must call this declared method instead of rebuilding
+                # the intermediate from an assumed activation.
+                "experts:routed:expert_gate=experts._apply_gate": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
                 "shared_experts:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),

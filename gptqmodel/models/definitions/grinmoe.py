@@ -27,7 +27,7 @@ class GrinMoeQModel(BaseQModel):
             "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "block_sparse_moe:moe": {
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("w1:0:gate", "w3:0:up", "w2:1:down"),
                 }
             }

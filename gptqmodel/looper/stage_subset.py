@@ -29,6 +29,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
+from ..models.base import MODULE_TREE_FLAG_ROUTED, module_tree_flags_are_moe
 from ..models._const import META
 from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy
 from ..utils.device import get_device
@@ -338,15 +339,9 @@ def _collect_layer_candidate_names(
 def _collect_assignable_moe_group_keys(
     moe_groups: Dict[str, List[str]],
 ) -> List[str]:
-    """Return expert families that should stay co-located on one device."""
+    """Return every explicitly declared expert family for co-location."""
 
-    assignable_group_keys: List[str] = []
-    for group_key, module_names in moe_groups.items():
-        suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-        # Some MoE families route pairs like gate/up or w1/w3 together.
-        if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
-            assignable_group_keys.append(group_key)
-    return assignable_group_keys
+    return [group_key for group_key, module_names in moe_groups.items() if module_names]
 
 
 def _normalize_planning_module_name(module_name: str) -> str:
@@ -789,26 +784,30 @@ def _run_single_subset_pass(
     handle = []
     subset_size = len(subset_names)
 
+    direct_moe_input_capture = bool(
+        execute_forward
+        and getattr(processor, "moe_input_capture_without_forward", False)
+        and looper.gptq_model.quantize_config.moe_routing_bypass()
+    )
     if execute_forward:
-        for named_module in subset.values():
-            if isinstance(named_module, NamedModule):
+        for name, named_module in subset.items():
+            if not isinstance(named_module, NamedModule):
+                continue
+            # Expert-bypass GPTQ calls HookedLinear's input capture directly.
+            # The current gate/up or down projection output is never consumed:
+            # down inputs are produced by the already-quantized gate/up pair.
+            # Leave these shells lazy until the quantization prefetch instead
+            # of loading hundreds of weights solely for an input hook.
+            skip_input_only_weight = bool(
+                direct_moe_input_capture
+                and MODULE_TREE_FLAG_ROUTED in named_module.state.get("module_tree_flags", frozenset())
+                and hasattr(named_module.module, "forward_hook")
+            )
+            if not skip_input_only_weight:
                 looper._prepare_named_module_for_forward(
                     named_module=named_module,
                     fallback_device=cur_layer_device,
                 )
-
-    # Determine MoE block name for hook selection
-    moe_block_name = None
-    if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
-        hooks = looper.gptq_model.moe_lifecycle_hooks
-        if hooks is not None:
-            moe_block = hooks.get_moe_block(module, looper.gptq_model.__class__)
-            if moe_block is not None:
-                # Get the full name/path of the MoE block
-                for mod_name, mod in module.named_modules():
-                    if mod is moe_block:
-                        moe_block_name = mod_name
-                        break
 
     quant_embeddings_only = getattr(looper, "embed_quant_mode", None) is not None
     if execute_forward and (not quant_embeddings_only or is_embeddings_module):
@@ -824,8 +823,9 @@ def _run_single_subset_pass(
             if hook_source is None:
                 hook_source = str(name)
 
-            # Determine if this module is part of MoE block (needs pre-hook to avoid StopForward)
-            is_moe_module = moe_block_name and name.startswith(moe_block_name + ".")
+            is_moe_module = module_tree_flags_are_moe(
+                m.state.get("module_tree_flags", frozenset())
+            )
 
             if hasattr(subset[name], 'forward_hook'):
                 original_hook = processor.pre_process_fwd_hook(name)

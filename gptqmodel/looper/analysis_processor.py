@@ -12,7 +12,15 @@ import transformers
 from ..looper.loop_processor import ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..models.base import CAPTURE_ONLY_FLAG
+from ..models.base import (
+    CAPTURE_ONLY_FLAG,
+    MODULE_TREE_FLAG_DOWN,
+    MODULE_TREE_FLAG_GATE,
+    MODULE_TREE_FLAG_K,
+    MODULE_TREE_FLAG_Q,
+    MODULE_TREE_FLAG_UP,
+    MODULE_TREE_FLAG_V,
+)
 from ..quantization.analysis import QuantizationAnalyzer, report_to_json, score_quantizability
 from ..quantization.config import AnalysisConfig
 from ..utils.logger import setup_logger
@@ -55,6 +63,7 @@ class AnalysisProcessor(LoopProcessor):
         self.plan: Dict[str, Any] = {}
         self.analyzer = QuantizationAnalyzer(qcfg, self.config, compute_device=CPU)
         self._checkpoint_weight_resolver = None
+        self._module_tree_flags_resolver = lambda _name: frozenset()
         self._analyzed = False
 
     def _resolve_config(self) -> AnalysisConfig:
@@ -84,6 +93,9 @@ class AnalysisProcessor(LoopProcessor):
                 f"{type(gptq_model).__module__}.{type(gptq_model).__name__}.module_tree"
             )
             self.analyzer.set_module_groups(layer_modules, source=group_source)
+            resolver = getattr(gptq_model, "get_module_tree_flags", None)
+            if callable(resolver):
+                self._module_tree_flags_resolver = resolver
         turtle = getattr(gptq_model, "turtle_model", None)
         model = kwargs.get("model")
         if model is not None and callable(getattr(turtle, "checkpoint_tensors_for_submodule", None)):
@@ -168,7 +180,7 @@ class AnalysisProcessor(LoopProcessor):
         record = self.analyzer.analyze_module(
             module,
             module_name=full_name,
-            role=self._role_from_name(module_name),
+            role=self._role_from_flags(self._module_tree_flags_resolver(module_name)),
             bits=bits,
             group_size=group_size,
             sym=sym,
@@ -235,26 +247,17 @@ class AnalysisProcessor(LoopProcessor):
         return self._checkpoint_weight_resolver(module)
 
     @staticmethod
-    def _role_from_name(module_name: str) -> str:
-        lowered = module_name.lower()
-        for suffix, role in (
-            ("q_proj", "attention_q"),
-            ("k_proj", "attention_k"),
-            ("v_proj", "attention_v"),
-            ("o_proj", "attention_o"),
-            ("out_proj", "attention_o"),
-            ("gate_proj", "mlp_gate"),
-            ("up_proj", "mlp_up"),
-            ("down_proj", "mlp_down"),
+    def _role_from_flags(flags: frozenset[str]) -> str:
+        for flag, role in (
+            (MODULE_TREE_FLAG_Q, "attention_q"),
+            (MODULE_TREE_FLAG_K, "attention_k"),
+            (MODULE_TREE_FLAG_V, "attention_v"),
+            (MODULE_TREE_FLAG_GATE, "mlp_gate"),
+            (MODULE_TREE_FLAG_UP, "mlp_up"),
+            (MODULE_TREE_FLAG_DOWN, "mlp_down"),
         ):
-            if lowered.endswith(suffix):
+            if flag in flags:
                 return role
-        if "shared_expert" in lowered:
-            return "shared_expert"
-        if "expert" in lowered:
-            return "expert"
-        if "router" in lowered:
-            return "router"
         return "linear"
 
     def _weight_matrix(self, module: torch.nn.Module) -> torch.Tensor:

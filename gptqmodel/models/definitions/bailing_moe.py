@@ -29,7 +29,7 @@ class BailingMoeQModel(BaseQModel):
             "mlp:moe": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
                 "shared_experts:shared": ("gate_proj:gate", "up_proj:up", "down_proj:down"),
-                "experts:routed": {
+                "experts:routed:expert_activation=expert.act_fn": {
                     "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
                 },
             },

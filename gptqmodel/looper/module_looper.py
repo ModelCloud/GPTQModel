@@ -329,8 +329,11 @@ class ModuleLooper():
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
 
-        # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
-        if getattr(self.gptq_model, "dynamic_expert_index", None):
+        # MoE routing behavior is declared by the module tree. The dynamic
+        # expert index is only the model-specific lookup used to obtain a count.
+        get_moe_module_name = getattr(self.gptq_model, "get_moe_module_name", None)
+        self._has_moe_module_tree = bool(get_moe_module_name()) if callable(get_moe_module_name) else False
+        if self._has_moe_module_tree and getattr(self.gptq_model, "dynamic_expert_index", None):
             num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
             self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
         else:
@@ -360,7 +363,7 @@ class ModuleLooper():
     def _emit_moe_parallel_quant_runtime(self) -> None:
         """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
 
-        if not getattr(self.gptq_model, "dynamic_expert_index", None):
+        if not self._has_moe_module_tree:
             return
 
         dense_devices = [str(device) for device in self._dense_quant_devices]
@@ -832,27 +835,11 @@ class ModuleLooper():
         return counts
 
     def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
-        """Collapse expert module names into a stable MoE routing group key."""
+        """Return the expert-group identity emitted by the parsed module tree."""
 
         if not module_name:
             return None
-
-        if ".experts." in module_name:
-            prefix, remainder = module_name.split(".experts.", 1)
-            expert_id = remainder.split(".", 1)[0]
-            if expert_id:
-                return f"{prefix}.experts.{expert_id}"
-            return None
-
-        if ".shared_experts." in module_name:
-            prefix, _ = module_name.split(".shared_experts.", 1)
-            return f"{prefix}.shared_experts"
-
-        if ".shared_expert." in module_name:
-            prefix, _ = module_name.split(".shared_expert.", 1)
-            return f"{prefix}.shared_expert"
-
-        return None
+        return self.gptq_model.get_module_tree_expert_group(module_name)
 
     def _is_attention_module_name(self, module_name: str) -> bool:
         """Heuristically detect attention modules from their qualified name."""
@@ -1795,7 +1782,11 @@ class ModuleLooper():
         create_start = time.perf_counter()
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
-        get_module_tree_flags = getattr(self.gptq_model, "get_module_tree_flags", lambda _p: frozenset())
+        get_module_tree_metadata = getattr(
+            self.gptq_model,
+            "get_module_tree_metadata",
+            BaseQModel.get_module_tree_metadata,
+        )
         for token in names:
             if isinstance(token, str):
                 name, flags = BaseQModel._parse_module_flags(token)
@@ -1844,10 +1835,9 @@ class ModuleLooper():
                 subset[name].state["capture_only"] = True
 
             named_module = subset[name]
-            named_module.state.setdefault(
-                "module_tree_flags",
-                get_module_tree_flags(name),
-            )
+            metadata = get_module_tree_metadata(name)
+            named_module.state.setdefault("module_tree_flags", metadata.flags)
+            named_module.state.setdefault("module_tree_expert_group", metadata.expert_group)
 
             preprocess_start = time.perf_counter()
             if isinstance(processor, GPTQProcessor):
