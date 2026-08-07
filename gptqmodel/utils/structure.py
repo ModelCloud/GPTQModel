@@ -1166,6 +1166,25 @@ class LazyTurtle:
                 param_cache={},
                 buffer_cache={},
             )
+            direct_buffers = dict(target_submodule.named_buffers(recurse=False))
+            nonpersistent = getattr(
+                target_submodule,
+                "_non_persistent_buffers_set",
+                set(),
+            )
+            missing_nonpersistent_buffers = [
+                (name, name)
+                for name, buffer in direct_buffers.items()
+                if name in nonpersistent and _is_meta_tensor(buffer)
+            ]
+            if missing_nonpersistent_buffers:
+                self._restore_missing_nonpersistent_buffers(
+                    target_model=target_model,
+                    target_submodule=target_submodule,
+                    t_bufs=direct_buffers,
+                    missing_nonpersistent_buffers=missing_nonpersistent_buffers,
+                    device=device,
+                )
             return target_submodule
 
     def _load_weight_map(self, model_local_path: str) -> Dict[str, str]:
