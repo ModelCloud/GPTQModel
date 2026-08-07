@@ -96,7 +96,7 @@ def test_hrm_text_direct_meta_materialization_hook_targets_root_stack():
     calls = []
 
     class _FakeTurtle:
-        def materialize_direct_meta_tensors(self, *, target_model, target_submodule, device=None):
+        def materialize_direct_meta_tensors(self, *, target_model, target_submodule, device=None, module_path=None):
             calls.append((target_model, target_submodule, device))
             target_submodule.register_parameter(
                 "z_L_init",
@@ -137,7 +137,7 @@ def test_stage_input_capture_materializes_hrm_direct_meta_tensor_modules():
         def get_modules_with_direct_meta_tensors(self, model):
             return HrmTextQModel.get_modules_with_direct_meta_tensors(model)
 
-        def shell_direct_meta_materialize(self, *, target_submodule, device=None):
+        def shell_direct_meta_materialize(self, *, target_submodule, device=None, module_path=None):
             calls.append((target_submodule, device))
             target_submodule.register_parameter(
                 "z_L_init",

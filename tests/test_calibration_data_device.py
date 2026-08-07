@@ -256,6 +256,7 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
                 device=torch.device("cpu"),
                 calibration_data_device=torch.device("cpu"),
                 compute_device_filter=None,
+                offload_to_disk=False,
             )
             self.model = model
             self.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
@@ -269,6 +270,16 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
 
         def get_base_modules(self, model):
             return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            return []
+
+        def get_input_embeddings(self):
+            return None
+
+        def get_input_embeddings_name(self):
+            return None
 
         def pre_quantize_generate_hook_start(self):
             pass
@@ -402,6 +413,7 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
                 device=torch.device("cuda:0"),
                 calibration_data_device="balanced",
                 compute_device_filter=compute_device_filter,
+                offload_to_disk=False,
             )
             self.model = model
             self.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
@@ -415,6 +427,16 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
 
         def get_base_modules(self, model):
             return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            return []
+
+        def get_input_embeddings(self):
+            return None
+
+        def get_input_embeddings_name(self):
+            return None
 
         def pre_quantize_generate_hook_start(self):
             pass
@@ -557,6 +579,7 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
                 device=torch.device("cuda:0"),
                 calibration_data_device="balanced",
                 compute_device_filter=compute_device_filter_returns_empty,
+                offload_to_disk=False,
             )
             self.model = model
             self.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
@@ -570,6 +593,16 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
 
         def get_base_modules(self, model):
             return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            return []
+
+        def get_input_embeddings(self):
+            return None
+
+        def get_input_embeddings_name(self):
+            return None
 
         def pre_quantize_generate_hook_start(self):
             pass
