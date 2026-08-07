@@ -21,12 +21,14 @@ class InputCache:
 
     def __post_init__(self):
         if self.src_inputs is None:
-            self.src_inputs = self.layer_inputs
+            self.src_inputs = (
+                list(self.layer_inputs) if self.layer_inputs is not None else []
+            )
 
     def module_kwargs(self):
         """Returns the replay kwargs that are shared across cached module calls."""
 
-        result = dict()
+        result = {}
         result["position_ids"] = self.position_ids
         result["attention_masks"] = self.attention_masks
         return result

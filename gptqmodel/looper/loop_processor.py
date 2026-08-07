@@ -39,8 +39,6 @@ from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
 
 log = setup_logger()
 
-# global level lock
-PROCESSOR_GLOBAL_LOCK = threading.Lock()
 _PROJECT_LOG_DIR = Path("logs")
 
 MODULE_FEATURE_COLUMN = "feat: in, out"
@@ -254,7 +252,7 @@ class LoopProcessor:
         # one execution mode instead of a scattered set of booleans.
         self.execution_config = execution_config or ExecutionConfig()
 
-        self.inputs_cache = _ThreadSafeInputCache(InputCache(None, None, None, None, None))
+        self.inputs_cache = _ThreadSafeInputCache(InputCache([], [], [], []))
         self.tasks = _SafeDict()
 
         self.pb = None
@@ -600,9 +598,9 @@ class LoopProcessor:
     def draw_progress(self, title: str, subtitle: str = "") -> None:
         """Best-effort progress-bar redraw for processors with an attached progress handle."""
 
-        if self.pb is None:
-            return
         with self._pb_lock:
+            if self.pb is None:
+                return
             self.pb.title(title).subtitle(subtitle).draw()
 
     @staticmethod
@@ -1044,14 +1042,14 @@ class LoopProcessor:
                 try:
                     handle.close()
                 except Exception:
-                    pass
+                    log.debug("Failed to close device telemetry handle during cleanup.", exc_info=True)
             self._device_smi_handles.clear()
 
             if self._cpu_device_smi is not None:
                 try:
                     self._cpu_device_smi.close()
                 except Exception:
-                    pass
+                    log.debug("Failed to close CPU telemetry handle during cleanup.", exc_info=True)
                 self._cpu_device_smi = None
 
     # Loop Procssor level scoped state data
@@ -1130,11 +1128,17 @@ class LoopProcessor:
 
         pass
 
-    def receive_input_cache(self, input_cache: InputCache):
+    def receive_input_cache(self, input_cache: Any):
         """Injects the shared input cache for the current processor stage."""
 
         with self._cache_lock:
-            self.inputs_cache.set_cache(input_cache)
+            current = getattr(self, "inputs_cache", None)
+            if isinstance(current, _ThreadSafeInputCache):
+                current.set_cache(input_cache)
+            else:
+                if isinstance(input_cache, _ThreadSafeInputCache):
+                    input_cache = input_cache.unwrap()
+                object.__setattr__(self, "inputs_cache", _ThreadSafeInputCache(input_cache))
 
     # called after every module generate
     # may be called multiple times due to batch

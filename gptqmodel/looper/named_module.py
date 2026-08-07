@@ -16,6 +16,7 @@ from ..utils.module_locks import get_parent_lock
 from ..utils.stream import stream_sync as stream_sync_events
 from ..utils.stream import stream_tensor_dict_to_cpu
 
+
 log = setup_logger()
 
 class NamedModule(torch.nn.Module):
@@ -26,6 +27,7 @@ class NamedModule(torch.nn.Module):
 
         super().__init__()
 
+        self._parent_lock = get_parent_lock(full_name)
         self.module = module  # wrapped module
         representative = next(module.parameters(), None)
         if representative is None:
@@ -46,7 +48,6 @@ class NamedModule(torch.nn.Module):
         self.name = name  # module name
         self.full_name = full_name  # full dotted path inside model
         self.layer_index = layer_index  # layer index for repeated blocks
-        self._parent_lock = get_parent_lock(full_name)
 
         if hasattr(module, "module_name") and module.module_name is None:
             module.module_name = full_name
@@ -156,13 +157,8 @@ class NamedModule(torch.nn.Module):
     def __getattr__(self, name: str):
         """Falls back to the wrapped module while preserving lock discipline."""
 
-        try:
-            lock = object.__getattribute__(self, "_parent_lock")
-        except AttributeError:
-            lock = None
+        lock = object.__getattribute__(self, "_parent_lock")
         module = object.__getattribute__(self, "module")
-        if lock is None:
-            return getattr(module, name)
         with lock:
             return getattr(module, name)
 
@@ -187,16 +183,10 @@ class NamedModule(torch.nn.Module):
             object.__setattr__(self, name, value)
             return
 
-        try:
-            lock = object.__getattribute__(self, "_parent_lock")
-        except AttributeError:
-            lock = None
+        lock = object.__getattribute__(self, "_parent_lock")
         module = object.__getattribute__(self, "module")
-        if lock is None:
+        with lock:
             setattr(module, name, value)
-        else:
-            with lock:
-                setattr(module, name, value)
 
     def stream_state_payload_to_cpu(
         self,
@@ -216,7 +206,7 @@ class NamedModule(torch.nn.Module):
         """Streams this module's direct parameters to CPU-backed state storage."""
 
         state_lock = self._parent_lock
-        tensor_map = {name: param for name, param in self.module.named_parameters(recurse=False)}
+        tensor_map = dict(self.module.named_parameters(recurse=False))
         return stream_tensor_dict_to_cpu(
             tensor_map,
             store_callback=lambda host_map: self.state.setdefault("parameters_cpu", {}).update(host_map),
@@ -228,7 +218,7 @@ class NamedModule(torch.nn.Module):
         """Streams this module's direct buffers to CPU-backed state storage."""
 
         state_lock = self._parent_lock
-        tensor_map = {name: buf for name, buf in self.module.named_buffers(recurse=False)}
+        tensor_map = dict(self.module.named_buffers(recurse=False))
         return stream_tensor_dict_to_cpu(
             tensor_map,
             store_callback=lambda host_map: self.state.setdefault("buffers_cpu", {}).update(host_map),

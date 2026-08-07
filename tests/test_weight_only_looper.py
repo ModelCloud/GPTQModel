@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import threading
 from concurrent.futures import Future
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -149,6 +150,7 @@ class _FakeQModel:
         self.tokenizer = None
         self.quant_log = None
         self.turtle_model = None
+        self._turtle_lock = threading.RLock()
 
     def extract_layers_node(self):
         return ["layers"]

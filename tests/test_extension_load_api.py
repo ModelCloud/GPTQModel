@@ -12,18 +12,18 @@ import gptqmodel
 import gptqmodel.exllamav3.ext as exllamav3_ext
 import gptqmodel.extension as extension_api
 import gptqmodel.nn_modules.triton_utils.planar as planar_utils
-import gptqmodel.utils.amplin as amplin_utils
 import gptqmodel.utils.adjacent_exact as adjacent_exact_utils
+import gptqmodel.utils.amplin as amplin_utils
 import gptqmodel.utils.awq as awq_utils
+import gptqmodel.utils.cannoe as cannoe_utils
 import gptqmodel.utils.cpp as cpp_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
-import gptqmodel.utils.cannoe as cannoe_utils
 import gptqmodel.utils.grasshopper as grasshopper_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.marlin_lora as marlin_lora_utils
-import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.pangolin as pangolin_utils
+import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
 import gptqmodel.utils.trilin as trilin_utils
 import gptqmodel_ext.planar as planar_api
@@ -131,6 +131,10 @@ def _install_fake_extensions(monkeypatch):
 
 def test_package_root_exports_extension_module():
     assert gptqmodel.extension is extension_api
+
+
+def test_extension_api_locks_are_initialized_eagerly():
+    assert set(extension_api._EXTENSION_API_LOCKS) == set(extension_api.available_extensions())
 
 
 def test_planar_external_api_proxies_shared_implementation():

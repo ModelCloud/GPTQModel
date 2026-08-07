@@ -25,13 +25,20 @@ from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.module_preprocessor import ModulePreProcessor
-from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..looper.named_module import NamedModule
+from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import BitsAndBytesConfig, FP8Config, GGUFConfig, QuantizeEmbed, RTNConfig, VramStrategy, \
-    QuantizeEmbedConfig
+from ..quantization.config import (
+    BitsAndBytesConfig,
+    FP8Config,
+    GGUFConfig,
+    QuantizeEmbed,
+    QuantizeEmbedConfig,
+    RTNConfig,
+    VramStrategy,
+)
 from ..utils import has_gil_disabled
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
@@ -69,6 +76,7 @@ class WeightOnlyLooper:
         """Initializes the looper with the model being quantized and its processor."""
 
         self.gptq_model = model
+        self._turtle_lock = model._turtle_lock
         self.processor = processor
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
@@ -780,20 +788,12 @@ class WeightOnlyLooper:
         checkpoint_tensors = None
         turtle_model = getattr(self.gptq_model, "turtle_model", None)
         if turtle_model is not None and hasattr(turtle_model, "checkpoint_tensors_for_submodule"):
-            turtle_lock = getattr(self.gptq_model, "_turtle_lock", None)
-            if turtle_lock is None:
+            with self._turtle_lock:
                 checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
                     target_model=self.gptq_model.model,
                     target_submodule=module,
                     recurse=False,
                 )
-            else:
-                with turtle_lock:
-                    checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
-                        target_model=self.gptq_model.model,
-                        target_submodule=module,
-                        recurse=False,
-                    )
 
         if not checkpoint_tensors:
             needs_materialize = False

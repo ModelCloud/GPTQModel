@@ -148,6 +148,25 @@ def reset_workspace_caches():
     gptq_impl._BF16_SUPPORT_CACHE.clear()
 
 
+def test_workspace_lock_is_created_once_per_device(monkeypatch):
+    real_lock = gptq_impl.threading.Lock
+    lock_creations = 0
+
+    def counting_lock():
+        nonlocal lock_creations
+        lock_creations += 1
+        return real_lock()
+
+    monkeypatch.setattr(gptq_impl.threading, "Lock", counting_lock)
+    key = ("cpu", None)
+
+    first = gptq_impl._workspace_lock(key)
+    second = gptq_impl._workspace_lock(key)
+
+    assert second is first
+    assert lock_creations == 1
+
+
 def _clone_module(module: torch.nn.Module) -> torch.nn.Module:
     replica = type(module)(module.in_features, module.out_features, bias=False)
     replica.load_state_dict(module.state_dict())

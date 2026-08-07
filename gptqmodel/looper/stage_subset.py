@@ -48,6 +48,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 ForwardMode = Literal["parallel", "serial"]
 
+# Catch every BaseException so worker result collection drains all submitted
+# futures before propagating the first error, including custom abort signals.
+_WORKER_FAILURES = (BaseException,)
+
 
 @dataclass
 class CalibrationCoveragePolicy:
@@ -158,6 +162,25 @@ class SubsetStageResult:
     processed_subset: Dict[str, NamedModule]
     layer_inputs: List[List[torch.Tensor]]
     plan: Optional[SubsetPlan]
+
+
+def _collect_worker_results(futures, prior_error: Optional[BaseException] = None):
+    """Resolve every submitted worker before propagating the first error."""
+
+    results = []
+    worker_error = None
+    for future in futures:
+        try:
+            results.append(future.result())
+        except _WORKER_FAILURES as exc:
+            if worker_error is None:
+                worker_error = exc
+
+    if prior_error is not None:
+        raise prior_error
+    if worker_error is not None:
+        raise worker_error
+    return results
 
 
 def _resolve_cache_flush_device(
@@ -1158,29 +1181,16 @@ def _run_single_subset_pass(
             futures_count=len(futures),
             layer_index=layer_index,
         )
-    except BaseException as exc:
+    except _WORKER_FAILURES as exc:
         submission_error = exc
 
-    worker_error = None
-    for fut in futures:
+    for name, named_module in _collect_worker_results(futures, prior_error=submission_error):
         # Collect results in submission order so the final subset map preserves
-        # deterministic iteration for downstream consumers. Continue joining
-        # every submitted worker after the first failure so subset cleanup
-        # cannot clear shared state while another worker is still consuming it.
-        try:
-            name, named_module = fut.result()
-        except BaseException as exc:
-            if worker_error is None:
-                worker_error = exc
-            continue
+        # deterministic iteration for downstream consumers.
         if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
             # Capture-only modules should not be finalized or offloaded.
             continue
         processed_subset[name] = named_module
-    if submission_error is not None:
-        raise submission_error
-    if worker_error is not None:
-        raise worker_error
     timer = getattr(looper.gptq_model, "quant_region_timer", None)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
         sync_start = time.perf_counter() if timer is not None else None

@@ -118,7 +118,7 @@ def patch_triton_autotuner() -> None:
         cache_map = getattr(self, "cache", {})
         self._cache = dict(cache_map)
         self.cache = self._cache
-        self._cache_lock = getattr(self, "_cache_lock", threading.RLock())
+        self._cache_lock = threading.RLock()
         self._cache_futures = {}
 
     def patched_check_disk_cache(self, tuning_key, configs, bench_fn):
