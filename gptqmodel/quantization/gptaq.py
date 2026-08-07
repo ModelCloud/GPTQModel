@@ -7,8 +7,6 @@
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import math
-import os
-import sys
 import time
 from typing import Optional
 
@@ -124,14 +122,6 @@ class GPTAQ(GPTQ):
         # Keep `hessian_inverse` eager: torch.compile on this path can deadlock/hang
         # when a RuntimeError is raised inside the damp-recovery loop and the graph
         # is re-entered.
-
-        # if self.device.type not in ["mps", "cpu"]:
-        #     self.module.weight.data = self.module.weight.data.cpu()
-
-        # TODO: waiting for pytorch implementation of ops for MPS
-        if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-            raise RuntimeError(
-                "For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
