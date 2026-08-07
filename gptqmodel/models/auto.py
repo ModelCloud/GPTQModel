@@ -39,13 +39,6 @@ if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ
 #     os.environ["NCCL_SHM_DISABLE"] = '1'
 #     log.info("ENV: Auto setting NCCL_SHM_DISABLE=1 for multi-gpu memory safety.")
 
-import sys  # noqa: E402
-
-
-# TODO: waiting for pytorch implementgation of aten ops for MPS
-if sys.platform == "darwin":
-    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
 import os.path  # noqa: E402
 from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402

@@ -8,7 +8,6 @@
 import contextlib
 import math
 import os
-import sys
 import threading
 import time
 from typing import Dict, Optional, Tuple
@@ -2157,14 +2156,6 @@ class GPTQ:
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
             self.hessian_inverse = self.mock_hessian_inverse
-
-        # if self.device.type not in ["mps", "cpu"]:
-        #     self.module.weight.data = self.module.weight.data.cpu()
-
-        # TODO: waiting for pytorch implementation of ops for MPS
-        if sys.platform == "darwin" and os.getenv("PYTORCH_ENABLE_MPS_FALLBACK") != "1":
-            raise RuntimeError(
-                "For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
         # -----------------------------
         # Embedding-specialized path
