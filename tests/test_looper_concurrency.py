@@ -221,6 +221,31 @@ def test_thread_safe_dict_uses_builtin_dict_equality():
     assert tasks != {"a": 2}
 
 
+def test_thread_safe_dict_builtin_equality_during_concurrent_mutation():
+    tasks = _ThreadSafeDict()
+    barrier = threading.Barrier(8)
+
+    def writer(worker_index):
+        barrier.wait(timeout=5)
+        for iteration in range(1_000):
+            tasks[f"{worker_index}:{iteration}"] = iteration
+
+    def comparer(_worker_index):
+        barrier.wait(timeout=5)
+        for _ in range(5_000):
+            snapshot = dict(tasks.items())
+            assert isinstance(tasks == snapshot, bool)
+            assert isinstance(tasks != {}, bool)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(writer, worker_index) for worker_index in range(4)]
+        futures.extend(executor.submit(comparer, worker_index) for worker_index in range(4))
+        for future in futures:
+            future.result()
+
+    assert len(tasks) == 4_000
+
+
 def test_thread_safe_input_cache_replacement_and_attribute_access():
     cache = _ThreadSafeInputCache(InputCache([], [], [], []))
     cache.layer_inputs = [[torch.tensor([1.0])]]
