@@ -18,6 +18,7 @@ import torch
 
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 # Triton's Python JIT launcher mutates per-function device/binder/kernel caches.
@@ -43,7 +44,7 @@ if _triton_available():
     import triton.language as tl
 
     @triton.jit
-    def _round_half_to_even(x):
+    def _round_half_to_even(x):  # pragma: no cover - executed as Triton device code
         """Round-to-nearest-even for float32; matches torch.round."""
         s = tl.where(x >= 0.0, 1.0, -1.0)
         ax = x * s
@@ -55,7 +56,7 @@ if _triton_available():
         return s * y
 
     @triton.jit
-    def _gptq_block_kernel(
+    def _gptq_block_kernel(  # pragma: no cover - executed as Triton device code
         w_ptr,
         q_ptr,
         err_ptr,
@@ -168,13 +169,21 @@ if _triton_available():
             group_size: columns per group (must divide count).
             groupwise: use groupwise symmetric formula (scale * round(w / scale)).
         """
+        if W1.ndim != 2:
+            raise ValueError(f"W1 must be two-dimensional, got shape {tuple(W1.shape)}")
         rows, count = W1.shape
         if count > 128:
             raise ValueError(f"Triton block kernel supports count <= 128, got {count}")
+        if group_size <= 0:
+            raise ValueError(f"group_size must be positive, got {group_size}")
         if count % group_size != 0:
             raise ValueError(f"group_size {group_size} must divide count {count}")
         if W1.dtype != torch.float32 or Q1.dtype != torch.float32 or Err1.dtype != torch.float32:
             raise TypeError("Triton GPTQ block kernel expects float32 W1/Q1/Err1")
+        if Q1.shape != W1.shape or Err1.shape != W1.shape:
+            raise ValueError(
+                f"Q1/Err1 must match W1 shape {tuple(W1.shape)}, got {tuple(Q1.shape)}/{tuple(Err1.shape)}"
+            )
 
         Hinv1 = Hinv1.contiguous()
         scale = scale.contiguous()
@@ -191,10 +200,12 @@ if _triton_available():
         expected_groups = count // group_size
         if Hinv1.shape != (count, count):
             raise ValueError(f"Hinv1 must have shape {(count, count)}, got {tuple(Hinv1.shape)}")
-        if scale.shape != (rows, expected_groups) or zero.shape != (rows, expected_groups):
+        if scale.shape != (rows, expected_groups) or zero.shape != (
+            rows,
+            expected_groups,
+        ):
             raise ValueError(
-                f"scale/zero must have shape {(rows, expected_groups)}, got "
-                f"{tuple(scale.shape)}/{tuple(zero.shape)}"
+                f"scale/zero must have shape {(rows, expected_groups)}, got {tuple(scale.shape)}/{tuple(zero.shape)}"
             )
 
         BLOCK_SIZE = 128
