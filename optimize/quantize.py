@@ -23,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-# Set thread limits before importing torch/numpy.
+# Set process environment before importing torch/numpy.
 from optimize._common import (
     add_common_args,
     build_quantize_config,
@@ -37,18 +37,26 @@ from optimize._common import (
 
 set_env()
 
-import torch  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_common_args(parser)
+    parser.add_argument(
+        "--hessian-length-aware",
+        action="store_true",
+        help=(
+            "Enable length-aware per-sequence Hessian normalization (MaCa) with default settings: "
+            "mode=equal_per_bucket_weight, target_bucket_count=6, bucket_weight_exponent=0.2."
+        ),
+    )
     return parser.parse_args()
 
 
 def quantize(args: argparse.Namespace) -> None:
     """Run dense-to-GPTQ quantization; caller is responsible for GPU visibility."""
+    import torch
+    from gptqmodel import BACKEND, GPTQModel
+
     set_torch_threads()
     faulthandler.enable(file=sys.stderr, all_threads=True)
     try:

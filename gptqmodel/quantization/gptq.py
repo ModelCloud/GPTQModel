@@ -1266,7 +1266,9 @@ class GPTQ:
                     shared_state["H"] = hessian
                 self.H = hessian
                 self._shared_hessian_source = hessian
-                self._set_nsamples(int(shared_state["total_samples"]))
+                # ``record_shared_hessian_batch`` is the sole authority for this
+                # module's observed sample count. In particular, zero means the
+                # module was inactive and must remain eligible for RTN fallback.
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = hessian.device
                 return
@@ -1293,7 +1295,6 @@ class GPTQ:
             # rebuilding from an empty partial set would produce an all-zero H.
             if hessian is None and total_old_tokens > 0 and not partials:
                 self._hessian_rebuild_invalid = True
-                self._set_nsamples(total_old_tokens)
                 return
 
             if (
@@ -1352,7 +1353,7 @@ class GPTQ:
 
             self.H = result_accum
             self._shared_hessian_source = result_accum
-            self._set_nsamples(total_tokens)
+            # Keep the module-local sample count, including an authoritative zero.
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
 
@@ -2571,8 +2572,16 @@ class GPTQ:
             h_diag = self.H.diagonal()
             dead = h_diag == 0
             del h_diag
-            self.H[dead, dead] = 1
-            W[:, dead] = 0
+            if dead.any().item():
+                # Shared Hessians are immutable borrowed state. A dead-column
+                # repair is an in-place write, so isolate only the task that
+                # actually needs the repair instead of corrupting peers that may
+                # be quantizing concurrently.
+                if getattr(self, "_shared_hessian_source", None) is self.H:
+                    self.H = self.H.clone()
+                    self._shared_hessian_source = None
+                self.H[dead, dead] = 1
+                W[:, dead] = 0
 
         for legacy_name in ("_adjacent_model_config", "adjacent_config"):
             if getattr(self.qcfg, legacy_name, None) is not None:

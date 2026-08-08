@@ -172,7 +172,8 @@ def _load_parquet(path: Path) -> list[dict[str, Any]]:
     df = pd.read_parquet(path)
     if "messages" not in df.columns:
         raise ValueError(f"Calibration parquet must contain a 'messages' column: {path}")
-    return [{"messages": list(messages)} for messages in df["messages"].tolist()]
+    rows = [{"messages": list(messages)} for messages in df["messages"].tolist()]
+    return [_add_text(row) for row in rows]
 
 
 def load_calibration_data(
@@ -221,6 +222,9 @@ def build_quantize_config(args: argparse.Namespace):
         AdaptiveClippingConfig,
         AdaptiveDampingConfig,
         ExpertsRoutingBypass,
+        HessianConfig,
+        LengthAwareConfig,
+        LengthAwareMode,
         MoEConfig,
         MoEExecutionConfig,
         QuantizeConfig,
@@ -263,6 +267,18 @@ def build_quantize_config(args: argparse.Namespace):
         qcfg_kwargs["adaptive_damping"] = AdaptiveDampingConfig(enabled=args.adaptive_damping)
     if hasattr(args, "adaptive_clipping"):
         qcfg_kwargs["adaptive_clipping"] = AdaptiveClippingConfig(enabled=args.adaptive_clipping)
+
+    if hasattr(args, "hessian_length_aware"):
+        length_aware = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
+        if args.hessian_length_aware:
+            length_aware = LengthAwareConfig(
+                mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
+                target_bucket_count=6,
+                bucket_weight_exponent=0.2,
+            )
+        qcfg_kwargs["hessian"] = HessianConfig(
+            length_aware=length_aware,
+        )
 
     return QuantizeConfig(**qcfg_kwargs, **kwargs)
 
