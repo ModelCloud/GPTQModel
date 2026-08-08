@@ -869,3 +869,99 @@ End-to-end `GPTQ.quantize` (`4096 x 4096`, `blocksize=128`, `bits=4`, `sym=False
 
 - The `_gptq_block_kernel` per-column scalar extraction remains the largest single-kernel cost.
 - The `cholesky(cholesky_inverse(L), upper=True)` path is already a cuSOLVER-optimized way to compute the required upper Cholesky factor of `H^{-1}`; direct `solve_triangular` approaches produce a different (non-Cholesky) factor and are not a drop-in replacement.
+
+---
+
+## Round: replace the Triton GPTQ block with deterministic native CUDA
+
+### Objective
+
+Remove the free-threaded multi-GPU illegal-address failure in the Triton GPTQ
+block path without giving up its fused serial-column algorithm or quantization
+accuracy, and make the block step materially faster than the eager fallback.
+
+### Changes
+
+1. **`gptqmodel_ext/gptq_block/gptq_block_cuda.cu`**
+   - Added a hand-written CUDA kernel with four independent row-warps per block.
+   - Keeps up to 128 working columns in registers, broadcasts each serial GPTQ
+     error with a warp shuffle, and uses explicit round-to-nearest multiply then
+     subtract instructions to match `torch.addr` operation order bit-for-bit.
+   - Launches on the caller's current stream under a CUDA device guard and checks
+     launch errors at the native boundary.
+2. **`gptqmodel/utils/gptq_block.py`**
+   - Added the JIT extension wrapper, strict input/output validation, noncontiguous
+     input preparation, explicit output reuse, and allocator `record_stream`
+     bookkeeping for free-threaded workers.
+   - Rejects oversized row grids and quantization levels before native integer/
+     FP32 narrowing, rejects scalar type coercion, and skips the NVIDIA-only
+     extension cleanly on ROCm.
+   - Serializes only cold operator resolution; cached multi-GPU launches do not
+     share a process-wide launch lock.
+3. **`gptqmodel/quantization/gptq.py`**
+   - Replaced the default Triton dispatch with the native CUDA operator.
+   - `GPTQMODEL_CUDA_BLOCK=0` selects the eager fallback. The obsolete Triton
+     implementation and its old opt-out variable were removed.
+4. **Validation and benchmarking**
+   - Added a 72-test CUDA suite covering production W2-W8 modes, W4G64 and
+     W4G128 MaCa settings, random legal shapes, ties and adjacent ULPs, outliers,
+     scale/Hessian extremes, nonfinite propagation, invalid contracts, stream
+     ownership, allocator pressure, input immutability, deterministic repeats,
+     two-device guards, cold initialization, and ThreadX free-threaded workers.
+   - Added an idle-gated benchmark that imports Torch only after validating the
+     selected physical GPU.
+
+### Accuracy and safety validation
+
+- Python 3.14.6t, Torch 2.13.0+cu130, CUDA 13.0, `PYTHON_GIL=0`, two `sm_80`
+  PG506-230/232 GPUs: **70 passed, 2 probe-only skipped**.
+- Python 3.12 coverage pass on two GPUs: **67 passed, 5 free-thread-only/probe
+  skips**, with **100% of 113 statements and 54 branches** in the Python wrapper.
+- Compute Sanitizer memcheck: **0 errors**.
+- Eager versus native results are bit-exact for raw quantized values, raw GPTQ
+  errors, logical codes, production quantized weights, scales, zero points,
+  group indices, reported loss, and held-out dense outputs.
+- Ten repeated launches for each of three seeds and four concurrent streams had
+  zero output spread.
+- Final `sm_80` and `sm_89` builds use 40 registers, zero stack bytes, zero spill
+  loads/stores, and zero barriers.
+
+### Isolated block benchmark
+
+PG506-230 (`sm_80`, 124 SMs), FP32 working state, 7168 rows x 128 columns, 10
+warmups and 50 measured repetitions:
+
+| group_size | eager median (ms) | native median (ms) | native p95 (ms) | speedup | code mismatches | max abs error |
+|------------|-------------------|--------------------|-----------------|---------|-----------------|---------------|
+| 64         | 19.052            | 0.318              | 0.328           | 59.92x  | 0               | 0             |
+| 128        | 19.087            | 0.318              | 0.330           | 59.93x  | 0               | 0             |
+
+### Real-model integration
+
+Laguna-S-2.1 PER-LAYER, W4G64, activation scale search, GAR enabled,
+`desc_act=False`, routing bypass, length-aware Hessian, GIL disabled, and two
+GPUs completed layers 0-4 and exited cleanly with no CUDA/NCCL error or native
+kernel fallback. The asynchronous stop callback allowed one layer beyond the
+requested four, providing additional coverage.
+
+Compared with the existing eager-fallback W4G64 run on the same GPU class, the
+sum of the five logged layer lifecycle times improved from 1066.197s to
+969.438s (1.10x). Per-layer variation remains dominated by checkpoint I/O,
+Hessian work, and expert finalization/CPU packing rather than the 0.318ms block
+kernel:
+
+| layer | eager fallback (s) | native CUDA (s) | speedup |
+|-------|--------------------|-----------------|---------|
+| 0     | 12.586             | 7.088           | 1.78x   |
+| 1     | 301.756            | 247.271         | 1.22x   |
+| 2     | 272.101            | 109.206         | 2.49x   |
+| 3     | 200.295            | 254.401         | 0.79x   |
+| 4     | 279.459            | 351.472         | 0.80x   |
+| total | 1066.197           | 969.438         | 1.10x   |
+
+### Remaining bottleneck
+
+The block kernel itself exceeds the 4x target by a wide margin, but the real
+five-layer run does not yet reach 4x end-to-end. Further work should profile and
+reduce routed-expert finalization/packing, materialization, and Hessian time;
+changing the now bit-exact CUDA block math cannot deliver the remaining gain.

@@ -19,12 +19,16 @@ import gptqmodel.utils.cannoe as cannoe_utils
 import gptqmodel.utils.cpp as cpp_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
 import gptqmodel.utils.grasshopper as grasshopper_utils
+import gptqmodel.utils.gptq_block as gptq_block_utils
+import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.marlin_lora as marlin_lora_utils
+import gptqmodel.utils.marlin_moe as marlin_moe_utils
 import gptqmodel.utils.pangolin as pangolin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
+import gptqmodel.utils.swordfish as swordfish_utils
 import gptqmodel.utils.trilin as trilin_utils
 import gptqmodel_ext.planar as planar_api
 
@@ -72,6 +76,7 @@ def _install_fake_extensions(monkeypatch):
     fakes = {
         "adjacent_exact": _FakeExtension("AdjacentExact CUDA"),
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
+        "gptq_block": _FakeExtension("GPTQ CUDA block quantization"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
         "awq": _FakeExtension("AWQ"),
         "qqq": _FakeExtension("QQQ"),
@@ -82,10 +87,15 @@ def _install_fake_extensions(monkeypatch):
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "marlin_lora": _FakeExtension("Marlin fused LoRA"),
+        "marlin_moe": _FakeExtension("Marlin MoE"),
         "trilin": _FakeExtension("Trilin native 3-bit WMMA"),
         "amplin": _FakeExtension("Amplin Ampere GPTQ W4A16 GEMV"),
+        "pangolin": _FakeExtension("Pangolin planar GPTQ GEMV"),
+        "pangolin_cpu": _FakeExtension("Pangolin planar GPTQ GEMV CPU"),
         "grasshopper": _FakeExtension("GrassHopper GPTQ grouped GEMV/GEMM"),
+        "swordfish": _FakeExtension("Swordfish"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
+        "hadamard": _FakeExtension("Fast Hadamard transform"),
         "cannoe": _FakeExtension("Cannoe V3"),
         "cannoe_ascendc": _FakeExtension("Cannoe Ascend C"),
     }
@@ -99,6 +109,12 @@ def _install_fake_extensions(monkeypatch):
         adjacent_exact_utils, "adjacent_exact_cuda_supported", lambda: True
     )
     monkeypatch.setattr(cpp_utils, "_pack_block_extension", lambda: fakes["pack_block_cpu"])
+    monkeypatch.setattr(
+        gptq_block_utils,
+        "_GPTQ_BLOCK_TORCH_OPS_EXTENSION",
+        fakes["gptq_block"],
+    )
+    monkeypatch.setattr(gptq_block_utils, "gptq_block_cuda_supported", lambda: True)
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
     monkeypatch.setattr(qqq_utils, "_QQQ_TORCH_OPS_EXTENSION", fakes["qqq"])
@@ -111,16 +127,25 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
     monkeypatch.setattr(marlin_lora_utils, "_MARLIN_LORA_TORCH_OPS_EXTENSION", fakes["marlin_lora"])
     monkeypatch.setattr(marlin_lora_utils, "marlin_lora_supported", lambda: True)
+    monkeypatch.setattr(marlin_moe_utils, "_MARLIN_MOE_TORCH_OPS_EXTENSION", fakes["marlin_moe"])
     monkeypatch.setattr(trilin_utils, "_TRILIN_TORCH_OPS_EXTENSION", fakes["trilin"])
     monkeypatch.setattr(amplin_utils, "_AMPLIN_TORCH_OPS_EXTENSION", fakes["amplin"])
     monkeypatch.setattr(amplin_utils, "amplin_supported", lambda: True)
+    monkeypatch.setattr(pangolin_utils, "_PANGOLIN_TORCH_OPS_EXTENSION", fakes["pangolin"])
+    monkeypatch.setattr(pangolin_utils, "_PANGOLIN_CPU_TORCH_OPS_EXTENSION", fakes["pangolin_cpu"])
+    monkeypatch.setattr(pangolin_utils, "pangolin_supported", lambda: True)
+    monkeypatch.setattr(pangolin_utils, "pangolin_cpu_supported", lambda: True)
     monkeypatch.setattr(
         grasshopper_utils,
         "_GRASSHOPPER_TORCH_OPS_EXTENSION",
         fakes["grasshopper"],
     )
     monkeypatch.setattr(grasshopper_utils, "grasshopper_supported", lambda: True)
+    monkeypatch.setattr(swordfish_utils, "_SWORDFISH_TORCH_OPS_EXTENSION", fakes["swordfish"])
+    monkeypatch.setattr(swordfish_utils, "_validate_swordfish_device_support", lambda: True)
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
+    monkeypatch.setattr(hadamard_utils, "_HADAMARD_TORCH_OPS_EXTENSION", fakes["hadamard"])
+    monkeypatch.setattr(hadamard_utils, "hadamard_supported", lambda: True)
     monkeypatch.setattr(cannoe_utils, "_CANNOE_V3_TORCH_OPS_EXTENSION", fakes["cannoe"])
     monkeypatch.setattr(cannoe_utils, "_CANNOE_ASCENDC_TORCH_OPS_EXTENSION", fakes["cannoe_ascendc"])
     monkeypatch.setattr(cannoe_utils, "_cannoe_v3_supported", lambda: True)
@@ -170,6 +195,15 @@ def test_load_adjacent_exact_cuda_alias_builds_solver_extension(monkeypatch):
     assert fakes["adjacent_exact"].load_calls == 1
 
 
+def test_load_gptq_block_cuda_alias_builds_native_extension(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+
+    result = extension_api.load(name="gptq_block_cuda")
+
+    assert result == {"gptq_block": True}
+    assert fakes["gptq_block"].load_calls == 1
+
+
 def test_load_defaults_to_all_extensions(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
 
@@ -178,6 +212,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
     assert result == {
         "adjacent_exact": True,
         "pack_block_cpu": True,
+        "gptq_block": True,
         "floatx_cpu": True,
         "awq": True,
         "qqq": True,
@@ -187,11 +222,16 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "machete": True,
         "marlin_fp16": True,
         "marlin_bf16": True,
-        "marlin_lora": True,
         "trilin": True,
         "amplin": True,
+        "pangolin": True,
+        "pangolin_cpu": True,
+        "marlin_lora": True,
+        "marlin_moe": True,
         "grasshopper": True,
+        "swordfish": True,
         "paroquant": True,
+        "hadamard": True,
         "cannoe": True,
         "cannoe_ascendc": True,
     }

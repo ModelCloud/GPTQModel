@@ -34,6 +34,7 @@ from ..quantization.config import (
 from ..utils import gte_python_3_14, has_gil_disabled
 from ..utils.device import get_device
 from ..utils.env import env_flag
+from ..utils.gptq_block import gptq_block_cuda
 from ..utils.logger import setup_logger
 from ..utils.torch import TORCH_GTE_28, TORCH_GTE_214, torch_compile, torch_sync
 from .fallback_smooth import mse_optimal_quant, smooth_block
@@ -49,16 +50,11 @@ from .quantizer import HF_OPTIMUM, Quantizer
 
 
 try:
-    from ._gptq_block_triton import gptq_block_triton
-except Exception:
-    gptq_block_triton = None
-
-try:
     from ..nn_modules.qlinear.pack_block_ext import gptq_block_cpu
 except Exception:
     gptq_block_cpu = None
 
-_USE_GPTQ_TRITON_BLOCK = os.environ.get("GPTQMODEL_TRITON_BLOCK", "1") != "0"
+_USE_GPTQ_CUDA_BLOCK = env_flag("GPTQMODEL_CUDA_BLOCK", default=True)
 
 
 log = setup_logger()
@@ -3025,9 +3021,9 @@ class GPTQ:
                 W1 = W[:, i1:i2].clone().float()
                 # Q1 and Err1 are column-complete scratch buffers. Avoid
                 # zero-filling them because no element is read before it is
-                # assigned by the quantization loop below.  Use FP32 so
-                # per-column updates keep the same precision as the fused
-                # Triton kernel.
+                # assigned by the quantization loop below. Use FP32 so
+                # per-column updates keep the same precision as the native
+                # CUDA block kernel.
                 Q1 = torch.empty_like(W1)
                 Err1 = torch.empty_like(W1) if Hinv is not None else None
 
@@ -3111,13 +3107,12 @@ class GPTQ:
                             gptq_inverse_cholesky=group_gptq_inverse_cholesky(i1, batched_last),
                         )
 
-                # Fast fused Triton path: one kernel launch per block for the
+                # Fast native CUDA path: one kernel launch per block for the
                 # common grouped-GPTQ case. Falls back to the serial loop below
-                # for unsupported configurations.
-                triton_block_done = False
+                # for unsupported configurations or extension build failures.
+                cuda_block_done = False
                 if (
-                    _USE_GPTQ_TRITON_BLOCK
-                    and gptq_block_triton is not None
+                    _USE_GPTQ_CUDA_BLOCK
                     and Hinv is not None
                     and W1.is_cuda
                     and count <= 128
@@ -3133,28 +3128,28 @@ class GPTQ:
                             if self.quantizer.requires_groupwise_processing()
                             else 2 ** self.qcfg.bits - 1
                         )
-                        gptq_block_triton(
+                        Q1, Err1 = gptq_block_cuda(
                             W1,
-                            Q1,
-                            Err1,
                             Hinv1,
                             batched_scale,
                             batched_zero,
                             maxq_value,
                             group_size,
                             groupwise=self.quantizer.requires_groupwise_processing(),
+                            out=(Q1, Err1),
                         )
+                    except Exception as exc:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> CUDA block kernel failed, "
+                            f"falling back to serial loop: {exc}"
+                        )
+                    else:
                         # Append per-group scale/zero for downstream packing/return.
                         if batched_group_count > 0:
                             scale.extend(batched_scale.chunk(batched_group_count, dim=1))
                             zero.extend(batched_zero.chunk(batched_group_count, dim=1))
                             now_idx = batched_first_global_idx + batched_group_count + 1
-                        triton_block_done = True
-                    except Exception as exc:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Triton block kernel failed, "
-                            f"falling back to serial loop: {exc}"
-                        )
+                        cuda_block_done = True
 
                 # Compiled CPU block path for the same grouped case.  This is
                 # especially important for large MLP shapes like mlp.down where
@@ -3163,7 +3158,7 @@ class GPTQ:
                 if (
                     not use_online_group_damping
                     and os.environ.get("GPTQMODEL_BLOCK_CPU", "1") != "0"
-                    and not triton_block_done
+                    and not cuda_block_done
                     and gptq_block_cpu is not None
                     and Hinv is not None
                     and count <= 128
@@ -3291,7 +3286,7 @@ class GPTQ:
                             f"falling back to serial loop: {exc}"
                         )
 
-                if not triton_block_done and not cpu_block_done:
+                if not cuda_block_done and not cpu_block_done:
                     for i in range(count):
                         w = W1[:, i]
                         if Hinv is not None:

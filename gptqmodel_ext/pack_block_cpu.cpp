@@ -1887,7 +1887,7 @@ inline float round_half_to_even(float x) {
 }
 
 // Dequantize a single weight with the same formula used by the eager GPTQ
-// block loop (and the Triton block kernel).  This keeps the CPU block kernel
+// block loop (and the native CUDA block kernel). This keeps the CPU block kernel
 // bit-identical to the existing PyTorch reference.
 inline float quantize_gptq(
     float w,

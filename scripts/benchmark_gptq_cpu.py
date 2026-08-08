@@ -93,8 +93,8 @@ def bench_quantize(in_features, out_features, scale_search=None, iters=3):
     )
     inp = torch.randn(2048, in_features, dtype=torch.float32)
 
-    # Avoid Triton scale-search so both runs use the same Python scale search.
-    os.environ["GPTQMODEL_TRITON_BLOCK"] = "0"
+    # Keep the quantization block on CPU so both runs use the same backend.
+    os.environ["GPTQMODEL_CUDA_BLOCK"] = "0"
     os.environ["GPTQMODEL_SCALE_SEARCH_TRITON"] = "0"
     os.environ["GPTQMODEL_SCALE_SEARCH_CPU"] = "0"
 
