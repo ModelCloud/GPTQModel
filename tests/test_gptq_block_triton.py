@@ -4,6 +4,7 @@
 """Strict accuracy tests for the fused Triton GPTQ block kernel."""
 
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -12,6 +13,20 @@ import torch.nn as nn
 from gptqmodel.quantization import QuantizeConfig, ScaleSearchConfig
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+
+def _serial_block(W1, Q1, Err1, Hinv1, scale, zero, maxq, group_size):
+    """Exact eager reference for one asymmetric grouped-GPTQ block."""
+
+    for i in range(W1.shape[1]):
+        w = W1[:, i]
+        q_scale = scale[:, i // group_size]
+        q_zero = zero[:, i // group_size]
+        q = q_scale * (torch.clamp(torch.round(w / q_scale) + q_zero, 0, maxq) - q_zero)
+        err = (w - q) / Hinv1[i, i]
+        Q1[:, i] = q
+        Err1[:, i] = err
+        W1[:, i:] = torch.addr(W1[:, i:], err, Hinv1[i, i:], alpha=-1.0)
 
 
 def _run_gptq_quantize(group_size: int, use_triton: bool):
@@ -84,3 +99,102 @@ def test_gptq_triton_block_env_disable_falls_back():
     Q_ref, *_ = _run_gptq_quantize(128, use_triton=False)
     assert Q_ref is not None
     assert Q_ref.numel() > 0
+
+
+@pytest.mark.parametrize("group_size", [64, 128])
+def test_gptq_triton_block_records_prepared_operands_on_launch_stream(group_size):
+    """Local contiguous copies must remain allocator-owned until Triton finishes.
+
+    Activation scale search can hand the wrapper strided views. The wrapper's
+    contiguous copies are local variables, so failing to record their external
+    Triton use permits a free-threaded worker to recycle them after return.
+    """
+
+    import gptqmodel.quantization._gptq_block_triton as block_module
+
+    gptq_block_triton = block_module.gptq_block_triton
+
+    if gptq_block_triton is None:
+        pytest.skip("Triton GPTQ block kernel is unavailable")
+
+    torch.manual_seed(7)
+    device = torch.device("cuda:0")
+    rows, count = 96, 128
+    groups = count // group_size
+    maxq = 15
+
+    weights = torch.randn(rows, count, device=device, dtype=torch.float32)
+    hessian_factor = torch.randn(count, count, device=device, dtype=torch.float32)
+    hessian_inverse = hessian_factor @ hessian_factor.T + 0.5 * torch.eye(count, device=device)
+    hessian_inverse = torch.linalg.cholesky(torch.linalg.inv(hessian_inverse), upper=True)
+
+    # Force wrapper-local contiguous copies for all three read-only operands.
+    hessian_storage = torch.empty(count, count * 2, device=device, dtype=torch.float32)
+    hessian_storage[:, ::2] = hessian_inverse
+    hessian_inverse = hessian_storage[:, ::2]
+    scale_storage = torch.rand(rows, groups * 2, device=device, dtype=torch.float32) + 0.05
+    zero_storage = torch.full((rows, groups * 2), 8.0, device=device, dtype=torch.float32)
+    scale = scale_storage[:, ::2]
+    zero = zero_storage[:, ::2]
+    assert not hessian_inverse.is_contiguous()
+    assert not scale.is_contiguous()
+    assert not zero.is_contiguous()
+
+    ref_weights = weights.clone()
+    ref_quantized = torch.empty_like(ref_weights)
+    ref_errors = torch.empty_like(ref_weights)
+    _serial_block(
+        ref_weights,
+        ref_quantized,
+        ref_errors,
+        hessian_inverse.contiguous(),
+        scale.contiguous(),
+        zero.contiguous(),
+        maxq,
+        group_size,
+    )
+
+    actual_weights = weights.clone()
+    actual_quantized = torch.empty_like(actual_weights)
+    actual_errors = torch.empty_like(actual_weights)
+    recorded_operands = []
+    original_record_stream = torch.Tensor.record_stream
+
+    class TrackingLock:
+        def __init__(self):
+            self.enter_count = 0
+
+        def __enter__(self):
+            self.enter_count += 1
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    launch_lock = TrackingLock()
+
+    def capture_record_stream(tensor, stream):
+        recorded_operands.append((tensor, stream))
+        return original_record_stream(tensor, stream)
+
+    with (
+        patch.object(block_module, "_TRITON_LAUNCH_LOCK", launch_lock),
+        patch.object(torch.Tensor, "record_stream", capture_record_stream),
+    ):
+        gptq_block_triton(
+            actual_weights,
+            actual_quantized,
+            actual_errors,
+            hessian_inverse,
+            scale,
+            zero,
+            maxq,
+            group_size,
+        )
+        torch.cuda.synchronize(device)
+
+    assert launch_lock.enter_count == 1
+    assert len(recorded_operands) == 6
+    assert all(tensor.is_contiguous() for tensor, _ in recorded_operands)
+    assert all(stream.device == device for _, stream in recorded_operands)
+    torch.testing.assert_close(actual_quantized, ref_quantized, atol=1e-4, rtol=1e-5)
+    torch.testing.assert_close(actual_errors, ref_errors, atol=2e-4, rtol=1e-5)

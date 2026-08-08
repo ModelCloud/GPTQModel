@@ -11,11 +11,22 @@ issues as many separate small kernels.
 
 from __future__ import annotations
 
+import os
+import threading
+
 import torch
 
 from ..utils.logger import setup_logger
 
 log = setup_logger()
+
+# Triton's Python JIT launcher mutates per-function device/binder/kernel caches.
+# CPython's GIL normally serializes that state, but Python 3.14t allows the
+# ThreadX CUDA workers to enter it concurrently. Keep the host-side cache/launch
+# operation atomic; kernels remain asynchronous and continue to overlap on the
+# GPUs after the lock is released.
+_TRITON_LAUNCH_LOCK = threading.Lock()
+_CUDA_CRASH_PROBE = os.environ.get("GPTQMODEL_CUDA_CRASH_PROBE", "0") != "0"
 
 
 def _triton_available() -> bool:
@@ -169,34 +180,66 @@ if _triton_available():
         scale = scale.contiguous()
         zero = zero.contiguous()
 
+        operands = (W1, Q1, Err1, Hinv1, scale, zero)
+        devices = {tensor.device for tensor in operands}
+        if len(devices) != 1:
+            raise ValueError(f"Triton GPTQ block tensors must share one device, got {sorted(map(str, devices))}")
+        if not W1.is_cuda:
+            raise ValueError(f"Triton GPTQ block tensors must be CUDA tensors, got {W1.device}")
+        if Hinv1.dtype != torch.float32 or scale.dtype != torch.float32 or zero.dtype != torch.float32:
+            raise TypeError("Triton GPTQ block kernel expects float32 Hinv1/scale/zero")
+        expected_groups = count // group_size
+        if Hinv1.shape != (count, count):
+            raise ValueError(f"Hinv1 must have shape {(count, count)}, got {tuple(Hinv1.shape)}")
+        if scale.shape != (rows, expected_groups) or zero.shape != (rows, expected_groups):
+            raise ValueError(
+                f"scale/zero must have shape {(rows, expected_groups)}, got "
+                f"{tuple(scale.shape)}/{tuple(zero.shape)}"
+            )
+
         BLOCK_SIZE = 128
         grid = (rows,)
-        _gptq_block_kernel[grid](
-            W1,
-            Q1,
-            Err1,
-            Hinv1,
-            scale,
-            zero,
-            rows,
-            count,
-            group_size,
-            float(maxq),
-            int(groupwise),
-            W1.stride(0),
-            W1.stride(1),
-            Q1.stride(0),
-            Q1.stride(1),
-            Err1.stride(0),
-            Err1.stride(1),
-            Hinv1.stride(0),
-            Hinv1.stride(1),
-            scale.stride(0),
-            scale.stride(1),
-            zero.stride(0),
-            zero.stride(1),
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
+        stream = torch.cuda.current_stream(W1.device)
+        with _TRITON_LAUNCH_LOCK:
+            _gptq_block_kernel[grid](
+                W1,
+                Q1,
+                Err1,
+                Hinv1,
+                scale,
+                zero,
+                rows,
+                count,
+                group_size,
+                float(maxq),
+                int(groupwise),
+                W1.stride(0),
+                W1.stride(1),
+                Q1.stride(0),
+                Q1.stride(1),
+                Err1.stride(0),
+                Err1.stride(1),
+                Hinv1.stride(0),
+                Hinv1.stride(1),
+                scale.stride(0),
+                scale.stride(1),
+                zero.stride(0),
+                zero.stride(1),
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+        # Triton launches asynchronously outside the PyTorch dispatcher. Some
+        # operands above may be local contiguous copies, and worker tasks can
+        # release their final Python reference immediately after returning.
+        # Tell the caching allocator which stream still owns every operand so
+        # another free-threaded quantization worker cannot recycle the storage
+        # while the kernel is running.
+        for tensor in operands:
+            tensor.record_stream(stream)
+        # Keep crash localization opt-in: a device synchronization here is far
+        # too expensive for normal quantization, but it attributes asynchronous
+        # CUDA faults to this launch instead of an unrelated later torch call.
+        if _CUDA_CRASH_PROBE:
+            torch.cuda.synchronize(W1.device)
 
 else:
     gptq_block_triton = None
