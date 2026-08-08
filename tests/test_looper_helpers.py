@@ -1,6 +1,53 @@
+import pytest
 import torch
 
 import gptqmodel.utils.looper_helpers as looper_helpers
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_clone_module_for_cuda_devices_avoids_nccl_broadcast(monkeypatch):
+    """Replica staging must not enter torch replicate/NCCL broadcast_coalesced."""
+
+    devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    torch.manual_seed(17)
+    module = (
+        torch.nn.Sequential(
+            torch.nn.Linear(32, 64, bias=True),
+            torch.nn.SiLU(),
+            torch.nn.Linear(64, 32, bias=False),
+        )
+        .to(devices[0])
+        .eval()
+    )
+    held_out = torch.randn(4, 32)
+    with torch.inference_mode():
+        reference = module(held_out.to(devices[0])).cpu()
+    broadcast_attempts = []
+
+    def reject_broadcast(*args, **kwargs):
+        broadcast_attempts.append((args, kwargs))
+        raise AssertionError("NCCL broadcast_coalesced must not be used for module cloning")
+
+    monkeypatch.setattr(torch._C, "_broadcast_coalesced", reject_broadcast)
+    clones = looper_helpers.clone_module_for_devices(module, devices)
+
+    assert broadcast_attempts == []
+    assert list(clones) == devices
+    for device, replica in clones.items():
+        assert replica is not module
+        assert getattr(replica, "_gptqmodule_device_hint") == device
+        assert all(parameter.device == device for parameter in replica.parameters())
+        with torch.inference_mode():
+            actual = replica(held_out.to(device)).cpu()
+        torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-5)
+
+    for source_parameter, first_parameter, second_parameter in zip(
+        module.parameters(), clones[devices[0]].parameters(), clones[devices[1]].parameters()
+    ):
+        assert source_parameter.data_ptr() != first_parameter.data_ptr()
+        assert first_parameter.data_ptr() != second_parameter.data_ptr()
+
+    torch.cuda.synchronize()
 
 
 class _DummyProcessor:
@@ -20,12 +67,15 @@ class _DynamicConfig:
 
 
 def test_find_last_quantized_layer_index_uses_dynamic_exclusions():
-    assert looper_helpers.find_last_quantized_layer_index(
-        _DynamicConfig(),
-        layer_modules=[["linear#capture_only"]],
-        layer_names=["layers.0", "layers.1", "layers.2"],
-        layer_count=3,
-    ) == 0
+    assert (
+        looper_helpers.find_last_quantized_layer_index(
+            _DynamicConfig(),
+            layer_modules=[["linear#capture_only"]],
+            layer_names=["layers.0", "layers.1", "layers.2"],
+            layer_count=3,
+        )
+        == 0
+    )
 
 
 class _RequiresAttentionMask(torch.nn.Module):

@@ -8,56 +8,21 @@ import copy
 import threading
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 import torch
-from torch.nn import parallel as torch_parallel
 
-from .. import DEBUG_ON, DEVICE_THREAD_POOL
+from .. import DEBUG_ON
 from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
-from ..utils.env import env_flag
 from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
 from ..utils.model import get_layer_name, move_to, nested_move_to
-from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
 
 
-USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
-
-
-_THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
 _DEEPCOPY_LOCK = threading.Lock()
-
-def torch_replicate(
-    module: torch.nn.Module,
-    devices: Sequence[torch.device | str | int],
-    detach: bool = True,
-):
-    """Replicate a module across ``devices`` while coordinating device locks and syncs.
-
-    Clones default to ``detach=True`` because quantization workflows operate in inference-only
-    mode and do not need autograd edges.
-    """
-    normalized_devices: List[torch.device] = []
-    for candidate in devices:
-        normalized = normalize_device_like(candidate)
-        if normalized is None:
-            raise ValueError(f"Unsupported device spec: {candidate!r}")
-        normalized_devices.append(normalized)
-
-    lock_scope = normalized_devices or None
-
-    with DEVICE_THREAD_POOL.lock(lock_scope):
-        for dev in normalized_devices:
-            if dev.type in {"cuda", "xpu", "mps", "npu"}:
-                try:
-                    torch_sync(dev)
-                except BaseException:
-                    pass
-        return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
 log = setup_logger()
 
@@ -92,12 +57,7 @@ def find_last_quantized_layer_index(
     if quantize_config.lm_head or not layer_names:
         return None
 
-    layer_module_names = {
-        name.split("#", 1)[0]
-        for module_group in layer_modules
-        for name in module_group
-        if name
-    }
+    layer_module_names = {name.split("#", 1)[0] for module_group in layer_modules for name in module_group if name}
     if not layer_module_names:
         return None
 
@@ -136,7 +96,9 @@ def device_ctx(dev: Optional[torch.device | "DEVICE"]):
     # cpu/mps/meta -> nothing special needed
     yield
 
+
 _rehome_lock = threading.Lock()
+
 
 @torch.inference_mode()
 def rehome_module_to_device(
@@ -303,17 +265,6 @@ def clone_module_for_devices(
             log.info(f"ModuleLooper: clone {module_label} via {method} in {total_duration:.2f}ms")
 
     base_device = devices[0]
-    device_type = base_device.type
-    homogeneous_type = all(dev.type == device_type for dev in devices)
-
-    def backend_available(dev_type: str) -> bool:
-        if dev_type == "cuda":
-            return torch.cuda.is_available()
-        if dev_type == "xpu" and hasattr(torch, "xpu"):
-            return bool(getattr(torch.xpu, "is_available", lambda: False)())  # type: ignore[attr-defined]
-        if dev_type == "mps":
-            return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
-        return False
 
     def _prepare_module(target_device: torch.device, step_name: str) -> None:
         start_ts = time.perf_counter()
@@ -324,39 +275,7 @@ def clone_module_for_devices(
         setattr(module, "_gptqmodule_device_hint", target_device)
         _record(step_name, start_ts)
 
-    use_replicate = (
-        USE_TORCH_REPLICATE
-        and homogeneous_type
-        and backend_available(device_type)
-        and device_type != "cpu"
-    )
-
     stage_device = base_device if base_device.type != "cpu" else CPU
-
-    if use_replicate:
-        try:
-            _prepare_module(base_device, f"stage_{base_device}")
-            _notify(0, base_device, "stage")
-
-            replicate_start = time.perf_counter()
-            replicas = torch_replicate(module, devices)
-            _record("replicate", replicate_start)
-
-            for idx, (dev, replica) in enumerate(zip(devices, replicas), start=1):
-                replica.eval()
-                rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
-                clear_state_fn(replica)
-                setattr(replica, "_gptqmodule_device_hint", dev)
-                clones[dev] = replica
-                _notify(idx, dev, "replica")
-
-            _emit_clone_log("replicate")
-            return clones
-        except Exception as e:
-            log.info(f"Clone: fast clone failed {e}")
-            clone_timings.append(("replicate_failed", 0.0))
-            if stage_device != base_device:
-                _prepare_module(stage_device, f"stage_{stage_device}")
 
     if len(devices) == 1 and devices[0].type == "cpu":
         _prepare_module(CPU, "stage_cpu")
@@ -366,9 +285,13 @@ def clone_module_for_devices(
         _emit_clone_log("reuse")
         return clones
 
-    if not use_replicate:
-        _prepare_module(stage_device, f"stage_{stage_device}")
-        _notify(0, stage_device, "stage")
+    # torch.nn.parallel.replicate routes CUDA parameters through NCCL
+    # broadcast_coalesced. That path can hang in ncclGroupEnd or leave the CUDA
+    # context corrupted before quantization starts. Independent copies use
+    # ordinary device transfers and preserve the same replica ownership without
+    # introducing a process-wide NCCL communicator.
+    _prepare_module(stage_device, f"stage_{stage_device}")
+    _notify(0, stage_device, "stage")
 
     for idx, dev in enumerate(devices, start=1):
         start_ts = time.perf_counter()
@@ -468,7 +391,12 @@ def forward_batch_worker(
             mask_tls.value = None
         processor._set_current_batch_index(None)
 
-    if (reuse_kv or write_shared_kv_cache) and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
+    if (
+        (reuse_kv or write_shared_kv_cache)
+        and module_output is not None
+        and isinstance(module_output, tuple)
+        and len(module_output) > 0
+    ):
         kv_next = module_output[-1]
 
     if gptq_model is not None and module_output is not None:
