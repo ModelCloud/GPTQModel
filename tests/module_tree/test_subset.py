@@ -573,7 +573,12 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
         num_attention_heads=4,
         num_key_value_heads=4,
         num_experts=4,
-        num_experts_per_tok=2,
+        # Route all experts: with top-k < num_experts the executed expert set
+        # (and therefore the forward-hook order asserted below) depends on the
+        # random router weights, which shift with prior RNG consumption in
+        # other test files. Routing every expert keeps the subset execution
+        # order fully deterministic.
+        num_experts_per_tok=4,
         vocab_size=128,
         pad_token_id=0,
         bos_token_id=1,

@@ -241,6 +241,10 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
         def get_base_modules(self, model):
             return []
 
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
+            return []
+
         def pre_quantize_generate_hook_start(self):
             pass
 
@@ -385,6 +389,10 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
             return target_submodule
 
         def get_base_modules(self, model):
+            return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
             return []
 
         def pre_quantize_generate_hook_start(self):
@@ -540,6 +548,10 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
             return target_submodule
 
         def get_base_modules(self, model):
+            return []
+
+        @classmethod
+        def get_modules_with_direct_meta_tensors(cls, model):
             return []
 
         def pre_quantize_generate_hook_start(self):
