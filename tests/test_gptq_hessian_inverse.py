@@ -11,6 +11,9 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 
+MPS_AVAILABLE = torch.backends.mps.is_available()
+
+
 try:
     import gptqmodel.nn_modules.qlinear.pack_block_ext as pack_block_ext
     _HAS_PACK_BLOCK_EXT = hasattr(pack_block_ext, "hessian_inverse_cholesky_cpu")
@@ -84,3 +87,61 @@ def test_hessian_inverse_rejects_non_finite_inverse_result(gptq, monkeypatch):
     Hinv, used_damp = gptq._compute_hessian_inverse_uncached(H)
     assert Hinv is None
     assert used_damp == 1.0
+
+
+@pytest.mark.mps
+@pytest.mark.skipif(not MPS_AVAILABLE, reason="MPS is not available")
+@pytest.mark.parametrize(("size", "seed"), [(8, 37), (64, 701), (128, 2027)])
+def test_mps_hessian_inverse_is_bitwise_equal_to_canonical_factorization(size, seed):
+    torch.manual_seed(seed)
+    matrix = torch.randn(size, size, device="mps")
+    hessian = matrix.T @ matrix / size + torch.eye(size, device="mps") * 0.1
+    original = hessian.clone()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=size,
+        damp_percent=0.05,
+        damp_auto_increment=0.01,
+        offload_to_disk=False,
+    )
+    quantizer = GPTQ(nn.Linear(size, 4, bias=False, device="mps"), qcfg=qcfg)
+
+    expected_input = hessian.clone()
+    expected_input.diagonal().add_(hessian.diagonal().mean() * 0.05)
+    lower, info = torch.linalg.cholesky_ex(expected_input, upper=False)
+    assert info.item() == 0
+    dense_inverse = torch.empty_like(lower)
+    torch.cholesky_inverse(lower, upper=False, out=dense_inverse)
+    expected = torch.linalg.cholesky(dense_inverse, upper=True, out=dense_inverse)
+
+    actual, used_damp = quantizer._compute_hessian_inverse_uncached(hessian)
+    torch.mps.synchronize()
+
+    assert used_damp == pytest.approx(0.05)
+    assert torch.equal(actual, expected)
+    assert torch.equal(hessian, original)
+
+
+@pytest.mark.mps
+@pytest.mark.skipif(not MPS_AVAILABLE, reason="MPS is not available")
+def test_mps_hessian_inverse_fast_failure_enters_damping_recovery():
+    hessian = torch.eye(8, device="mps")
+    hessian[:2, :2] = torch.tensor([[1.0, 1.2], [1.2, 1.0]], device="mps")
+    original = hessian.clone()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=8,
+        damp_percent=0.05,
+        damp_auto_increment=0.05,
+        offload_to_disk=False,
+    )
+    quantizer = GPTQ(nn.Linear(8, 4, bias=False, device="mps"), qcfg=qcfg)
+
+    actual, used_damp = quantizer._compute_hessian_inverse_uncached(hessian)
+    torch.mps.synchronize()
+
+    assert actual is not None
+    assert used_damp == pytest.approx(0.25)
+    assert torch.isfinite(actual).all()
+    assert (actual.diagonal() > 0).all()
+    assert torch.equal(hessian, original)

@@ -116,46 +116,67 @@ kernel void gptq_block(
         }
       }
 
-      for (uint candidate = 0; candidate < evaluated_candidates; ++candidate) {
-        const float shrink = scale_search == 0 ? 1.0f : 1.0f - float(candidate) / float(grid);
-        const float candidate_xmin = xmin * shrink;
-        const float candidate_xmax = xmax * shrink;
-        float scale;
-        float zero;
-        if (groupwise != 0) {
-          scale = candidate_xmax / float(maxq);
-          zero = 0.0f;
-        } else {
-          scale = (candidate_xmax - candidate_xmin) / float(maxq);
-          zero = symmetric != 0 ? (float(maxq) + 1.0f) * 0.5f : rint(-candidate_xmin / scale);
-        }
-
-        float loss = 0.0f;
-        if (scale_search != 0) {
-          for (uint offset = 0; offset < group_size; ++offset) {
-            const float value = weights[group_start + offset];
-            float reconstructed;
+      // Evaluate a small candidate tile together. Each lane still accumulates
+      // offsets in the original order and candidates are compared in their
+      // original order, preserving exact loss and first-tie semantics while
+      // loading each weight (and importance value) only once per eight candidates.
+      for (uint candidate_base = 0; candidate_base < evaluated_candidates; candidate_base += 8) {
+        float candidate_scale[8];
+        float candidate_zero[8];
+        float candidate_loss[8] = {0.0f};
+        for (uint lane = 0; lane < 8; ++lane) {
+          const uint candidate = candidate_base + lane;
+          if (candidate < evaluated_candidates) {
+            const float shrink = scale_search == 0 ? 1.0f : 1.0f - float(candidate) / float(grid);
+            const float candidate_xmin = xmin * shrink;
+            const float candidate_xmax = xmax * shrink;
             if (groupwise != 0) {
-              reconstructed = scale * clamp(rint(value / scale), -float(maxq), float(maxq));
+              candidate_scale[lane] = candidate_xmax / float(maxq);
+              candidate_zero[lane] = 0.0f;
             } else {
-              reconstructed = scale * (clamp(rint(value / scale) + zero, 0.0f, float(maxq)) - zero);
-            }
-            const float error = abs(reconstructed - value);
-            if (scale_search == 2) {
-              const float raw_importance = importance[group * group_size + offset];
-              const float normalized_importance = use_unit_importance
-                  ? 1.0f
-                  : (isfinite(raw_importance) ? max(raw_importance, 0.0f) / importance_mean : 0.0f);
-              loss += error * error * normalized_importance;
-            } else {
-              loss += pow(error, mse);
+              candidate_scale[lane] = (candidate_xmax - candidate_xmin) / float(maxq);
+              candidate_zero[lane] = symmetric != 0
+                  ? (float(maxq) + 1.0f) * 0.5f
+                  : rint(-candidate_xmin / candidate_scale[lane]);
             }
           }
         }
-        if (loss < best_loss) {
-          best_loss = loss;
-          best_scale = scale;
-          best_zero = zero;
+
+        if (scale_search != 0) {
+          for (uint offset = 0; offset < group_size; ++offset) {
+            const float value = weights[group_start + offset];
+            const float raw_importance = scale_search == 2
+                ? importance[group * group_size + offset]
+                : 1.0f;
+            const float normalized_importance = scale_search == 2
+                ? (use_unit_importance
+                    ? 1.0f
+                    : (isfinite(raw_importance) ? max(raw_importance, 0.0f) / importance_mean : 0.0f))
+                : 1.0f;
+            for (uint lane = 0; lane < 8; ++lane) {
+              if (candidate_base + lane < evaluated_candidates) {
+                const float scale = candidate_scale[lane];
+                const float zero = candidate_zero[lane];
+                float reconstructed;
+                if (groupwise != 0) {
+                  reconstructed = scale * clamp(rint(value / scale), -float(maxq), float(maxq));
+                } else {
+                  reconstructed = scale * (clamp(rint(value / scale) + zero, 0.0f, float(maxq)) - zero);
+                }
+                const float error = abs(reconstructed - value);
+                candidate_loss[lane] += scale_search == 2
+                    ? error * error * normalized_importance
+                    : (mse == 2.0f ? error * error : pow(error, mse));
+              }
+            }
+          }
+        }
+        for (uint lane = 0; lane < 8; ++lane) {
+          if (candidate_base + lane < evaluated_candidates && candidate_loss[lane] < best_loss) {
+            best_loss = candidate_loss[lane];
+            best_scale = candidate_scale[lane];
+            best_zero = candidate_zero[lane];
+          }
         }
       }
       scales[scale_base + group] = best_scale;

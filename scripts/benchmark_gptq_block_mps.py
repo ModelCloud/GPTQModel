@@ -82,14 +82,15 @@ def benchmark(rows, columns, group_size, repeats):
     return eager_ms, metal_ms
 
 
-def benchmark_lifecycle(rows, columns, group_size, repeats):
+def benchmark_lifecycle(rows, columns, group_size, repeats, *, scale_search):
     torch.manual_seed(rows + columns + group_size + 1)
     weights = torch.randn(rows, columns, device="mps")
     hessian_inverse = torch.triu(torch.randn(columns, columns, device="mps") * 0.03)
     hessian_inverse.diagonal().copy_(torch.rand(columns, device="mps") + 0.5)
     importance = torch.rand(columns // group_size, group_size, device="mps")
     quantizer = Quantizer(
-        QuantizeConfig(bits=4, group_size=group_size), name="benchmark"
+        QuantizeConfig(bits=4, group_size=group_size, scale_search=scale_search),
+        name="benchmark",
     )
     quantizer.configure(perchannel=True)
     output = (torch.empty_like(weights), torch.empty_like(weights))
@@ -113,8 +114,8 @@ def benchmark_lifecycle(rows, columns, group_size, repeats):
             15,
             group_size,
             find_params=True,
-            scale_search="activation",
-            importance=importance,
+            scale_search=scale_search,
+            importance=importance if scale_search == "activation" else None,
             candidate_count=80,
             out=output,
         )
@@ -151,23 +152,28 @@ def main():
         )
     print("+------+---------+-------+----------+----------+---------+")
 
-    print("\nActivation scale search + GPTQ correction lifecycle")
-    print("+------+---------+-------+----------+----------+---------+")
-    print("| Rows | Columns | Group | Eager ms | Metal ms | Speedup |")
-    print("+------+---------+-------+----------+----------+---------+")
-    for rows, columns, group_size in [
-        (128, 128, 32),
-        (512, 128, 128),
-        (4096, 128, 128),
-    ]:
-        eager_ms, metal_ms = benchmark_lifecycle(
-            rows, columns, group_size, args.repeats
-        )
-        print(
-            f"| {rows:4d} | {columns:7d} | {group_size:5d} | {eager_ms:8.3f} | "
-            f"{metal_ms:8.3f} | {eager_ms / metal_ms:6.2f}x |"
-        )
-    print("+------+---------+-------+----------+----------+---------+")
+    for scale_search in ("activation", "mse"):
+        print(f"\n{scale_search.title()} scale search + GPTQ correction lifecycle")
+        print("+------+---------+-------+----------+----------+---------+")
+        print("| Rows | Columns | Group | Eager ms | Metal ms | Speedup |")
+        print("+------+---------+-------+----------+----------+---------+")
+        for rows, columns, group_size in [
+            (128, 128, 32),
+            (512, 128, 128),
+            (4096, 128, 128),
+        ]:
+            eager_ms, metal_ms = benchmark_lifecycle(
+                rows,
+                columns,
+                group_size,
+                args.repeats,
+                scale_search=scale_search,
+            )
+            print(
+                f"| {rows:4d} | {columns:7d} | {group_size:5d} | {eager_ms:8.3f} | "
+                f"{metal_ms:8.3f} | {eager_ms / metal_ms:6.2f}x |"
+            )
+        print("+------+---------+-------+----------+----------+---------+")
 
 
 if __name__ == "__main__":

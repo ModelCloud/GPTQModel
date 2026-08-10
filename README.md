@@ -397,10 +397,13 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
 On PyTorch builds with `torch.mps.compile_shader`, grouped GPTQ quantization automatically uses the native Metal
-error-correction kernel and fuses the default activation scale search into that launch. On an M4, the benchmarked
-128-column scale-search-plus-correction lifecycle is 2.4–2.7x faster for 128–4096 rows, while correction alone is
-3.0–6.8x faster. Set `GPTQMODEL_MPS_BLOCK=0` to retain the eager MPS path for diagnosis.
+error-correction kernel and fuses activation or MSE scale search into that launch. Candidate tiling preserves exact
+search ordering while reducing repeated Metal loads. On an M4, the benchmarked 128-column
+scale-search-plus-correction lifecycle is 3.0–4.2x faster for 128–4096 rows. Set `GPTQMODEL_MPS_BLOCK=0` to retain
+the eager MPS path for diagnosis.
 Set `GPTQMODEL_MPS_FUSED_PARAMS=0` to keep the Metal correction kernel while diagnosing fused scale discovery.
+Healthy MPS Hessian inverse-Cholesky factorization avoids redundant host status synchronizations and measures
+1.2–1.3x faster for 128–1024 columns with bitwise-identical factors. Set `GPTQMODEL_MPS_FAST_HESSIAN=0` for A/B diagnosis.
 
 
 ## Install

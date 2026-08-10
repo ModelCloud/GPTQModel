@@ -364,6 +364,40 @@ def test_mps_fused_scale_search_matches_eager_candidates(
 
 @mps_only
 @pytest.mark.mps
+@pytest.mark.parametrize("mse", [1.5, 2.4, 4.0])
+def test_mps_fused_mse_scale_search_matches_eager_for_general_exponents(mse):
+    operands, _ = _case(527, 11, 64, 32, False)
+    expected_scale, expected_zero = _reference_scale_search(
+        operands[0],
+        32,
+        15,
+        symmetric=False,
+        groupwise=False,
+        mode="mse",
+        mse=mse,
+    )
+    actual_scale = torch.empty_like(expected_scale)
+    actual_zero = torch.empty_like(expected_zero)
+    block_module.gptq_block_mps(
+        operands[0].clone(),
+        operands[1],
+        actual_scale,
+        actual_zero,
+        15,
+        32,
+        find_params=True,
+        scale_search="mse",
+        candidate_count=80,
+        mse=mse,
+    )
+    torch.mps.synchronize()
+
+    torch.testing.assert_close(actual_scale, expected_scale, atol=0, rtol=0)
+    torch.testing.assert_close(actual_zero, expected_zero, atol=0, rtol=0)
+
+
+@mps_only
+@pytest.mark.mps
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), -float("inf")])
 def test_mps_fused_scale_search_preserves_eager_nonfinite_params(nonfinite):
     operands, _ = _case(711, 2, 32, 16, False)

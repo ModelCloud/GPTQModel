@@ -66,6 +66,7 @@ except Exception:
 _USE_GPTQ_CUDA_BLOCK = env_flag("GPTQMODEL_CUDA_BLOCK", default=True)
 _USE_GPTQ_MPS_BLOCK = env_flag("GPTQMODEL_MPS_BLOCK", default=True)
 _USE_GPTQ_MPS_FUSED_PARAMS = env_flag("GPTQMODEL_MPS_FUSED_PARAMS", default=True)
+_USE_GPTQ_MPS_FAST_HESSIAN = env_flag("GPTQMODEL_MPS_FAST_HESSIAN", default=True)
 
 
 log = setup_logger()
@@ -2156,6 +2157,53 @@ class GPTQ:
                     # the original diagonal in a finally block so an exception (e.g.
                     # CUDA OOM) does not leave the caller's Hessian carrying leftover
                     # damping when quantize() falls back to CPU and retries.
+                    if H.device.type == "mps" and _USE_GPTQ_MPS_FAST_HESSIAN:
+                        # The throwing Cholesky API performs its own status check.
+                        # On the healthy path this avoids the repeated host scalar
+                        # synchronizations required by cholesky_ex/info and the
+                        # intermediate dense-inverse checks below. The operations
+                        # and their order are otherwise identical to the canonical
+                        # factorization. Any failure enters the existing recovery.
+                        mps_result = None
+                        try:
+                            H_eff.diagonal().copy_(orig_diag)
+                            H_eff.diagonal().add_(diag_delta)
+                            mps_lower = linalg_cholesky(H_eff, upper=False)
+                            mps_dense_inverse = torch.empty_like(mps_lower)
+                            cholesky_inverse(mps_lower, upper=False, out=mps_dense_inverse)
+                            del mps_lower
+                            mps_result = linalg_cholesky(
+                                mps_dense_inverse,
+                                upper=True,
+                                out=mps_dense_inverse,
+                            )
+                            mps_valid = (
+                                torch.isfinite(mps_result).all()
+                                & (mps_result.diagonal() > 0).all()
+                            ).item()
+                        except RuntimeError as e:
+                            last_error = e
+                            mps_valid = False
+                        finally:
+                            H_eff.diagonal().copy_(orig_diag)
+                        if mps_valid:
+                            used_damp = float(damp_per_col.mean().item())
+                            if damp_recovery_started:
+                                log.warn(
+                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
+                                    f"`damp_percent={used_damp:.5f}` "
+                                    f"(started at {recovery_initial_damp:.5f})."
+                                )
+                            if release_input:
+                                if getattr(self, "H", None) is H:
+                                    self.H = None
+                                del H, H_eff
+                            return mps_result, used_damp
+                        mps_result = None
+                        try:
+                            del mps_dense_inverse
+                        except NameError:
+                            pass
                     try:
                         H_eff.diagonal().copy_(orig_diag)
                         L, success = _hessian_inverse_try_cholesky(H_eff, diag_delta)
