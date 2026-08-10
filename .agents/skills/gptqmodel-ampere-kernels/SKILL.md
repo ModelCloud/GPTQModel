@@ -37,3 +37,7 @@ In code, branch on runtime device properties. Do not recognize A100 by product s
 - Keep accumulation precision explicit and compare long-K error with the dense reference.
 
 Use existing A100-oriented scripts such as `scripts/benchmark_marlin_a100.py` and the prefill/decode kernel benchmarks when they match the operation. Report the full hardware/software/configuration table alongside results.
+
+## Hidden Ampere/CUDA performance cliffs
+
+Review the bullet list in [references/ampere-notes.md](references/ampere-notes.md) for shape/bank/occupancy/launch/spill/coalescing facts that are not visible in source code or compiler warnings but regularly dominate kernel performance.
