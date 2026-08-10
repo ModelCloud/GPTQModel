@@ -35,6 +35,7 @@ from ..utils import gte_python_3_14, has_gil_disabled
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.gptq_block import gptq_block_cuda
+from ..utils.gptq_block_mps import gptq_block_mps, gptq_block_mps_supported
 from ..utils.logger import setup_logger
 from ..utils.torch import (
     TORCH_GTE_28,
@@ -63,6 +64,8 @@ except Exception:
     gptq_block_cpu = None
 
 _USE_GPTQ_CUDA_BLOCK = env_flag("GPTQMODEL_CUDA_BLOCK", default=True)
+_USE_GPTQ_MPS_BLOCK = env_flag("GPTQMODEL_MPS_BLOCK", default=True)
+_USE_GPTQ_MPS_FUSED_PARAMS = env_flag("GPTQMODEL_MPS_FUSED_PARAMS", default=True)
 
 
 log = setup_logger()
@@ -3107,6 +3110,12 @@ class GPTQ:
                 batched_scale = batched_zero = None
                 batched_group_count = 0
                 batched_first_global_idx = 0
+                mps_block_eligible = False
+                mps_find_params = False
+                mps_scale_search = "none"
+                mps_scale_search_importance = None
+                mps_scale_search_candidates = 0
+                mps_scale_search_mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
                 if (
                     group_size != -1
                     and not self.qcfg.static_groups
@@ -3145,12 +3154,52 @@ class GPTQ:
                             batched_hessian = clip_hessian_diag[i1:batched_last].reshape(
                                 batched_group_count, group_size
                             )
-                        batched_scale, batched_zero = self.quantizer.find_params_batched(
-                            x_3d,
-                            weight=True,
-                            hessian=batched_hessian,
-                            gptq_inverse_cholesky=group_gptq_inverse_cholesky(i1, batched_last),
+                        mps_block_eligible = (
+                            _USE_GPTQ_MPS_BLOCK
+                            and Hinv is not None
+                            and W1.device.type == "mps"
+                            and gptq_block_mps_supported()
+                            and count <= 128
+                            and count % group_size == 0
+                            and batched_group_count == count // group_size
+                            and not use_online_group_damping
                         )
+                        if mps_block_eligible and _USE_GPTQ_MPS_FUSED_PARAMS and not use_adaptive_clipping:
+                            mps_method = scale_search
+                            if mps_method is None and mps_scale_search_mse > 0.0:
+                                mps_method = ScaleSearchConfig.MSE
+                            elif isinstance(mps_method, str):
+                                mps_method = ScaleSearchConfig(mps_method)
+                            mps_scale_search_candidates = int(self.quantizer.maxshrink * self.quantizer.grid)
+                            if mps_scale_search_mse <= 0.0 or mps_method is None:
+                                mps_find_params = True
+                            elif mps_scale_search_candidates > 0 and mps_method == ScaleSearchConfig.MSE:
+                                mps_find_params = True
+                                mps_scale_search = "mse"
+                            elif (
+                                mps_scale_search_candidates > 0
+                                and mps_method == ScaleSearchConfig.ACTIVATION
+                                and (batched_hessian is None or batched_hessian.is_contiguous())
+                            ):
+                                mps_find_params = True
+                                if batched_hessian is None:
+                                    # The established activation objective falls back
+                                    # to ordinary MSE without calibration importance.
+                                    mps_scale_search = "mse"
+                                else:
+                                    mps_scale_search = "activation"
+                                    mps_scale_search_importance = batched_hessian
+                        if mps_find_params:
+                            param_shape = (W1.shape[0], batched_group_count)
+                            batched_scale = torch.empty(param_shape, device=W1.device, dtype=torch.float32)
+                            batched_zero = torch.empty_like(batched_scale)
+                        else:
+                            batched_scale, batched_zero = self.quantizer.find_params_batched(
+                                x_3d,
+                                weight=True,
+                                hessian=batched_hessian,
+                                gptq_inverse_cholesky=group_gptq_inverse_cholesky(i1, batched_last),
+                            )
 
                 # Fast native CUDA path: one kernel launch per block for the
                 # common grouped-GPTQ case. Falls back to the serial loop below
@@ -3196,6 +3245,54 @@ class GPTQ:
                             now_idx = batched_first_global_idx + batched_group_count + 1
                         cuda_block_done = True
 
+                # Native Metal path for the same common grouped-GPTQ case.
+                # One thread owns each row, preserving the serial dependency
+                # between columns without paying one Python dispatch per column.
+                mps_block_done = False
+                if mps_block_eligible:
+                    try:
+                        maxq_value = (
+                            2 ** (self.qcfg.bits - 1) - 1
+                            if self.quantizer.requires_groupwise_processing()
+                            else 2 ** self.qcfg.bits - 1
+                        )
+                        Q1, Err1 = gptq_block_mps(
+                            W1,
+                            Hinv1,
+                            batched_scale,
+                            batched_zero,
+                            maxq_value,
+                            group_size,
+                            groupwise=self.quantizer.requires_groupwise_processing(),
+                            find_params=mps_find_params,
+                            symmetric=self.qcfg.sym,
+                            scale_search=mps_scale_search,
+                            importance=mps_scale_search_importance,
+                            candidate_count=mps_scale_search_candidates,
+                            grid=self.quantizer.grid,
+                            mse=mps_scale_search_mse,
+                            out=(Q1, Err1),
+                        )
+                    except Exception as exc:
+                        W1.copy_(W[:, i1:i2])
+                        if mps_find_params:
+                            batched_scale, batched_zero = self.quantizer.find_params_batched(
+                                x_3d,
+                                weight=True,
+                                hessian=batched_hessian,
+                                gptq_inverse_cholesky=group_gptq_inverse_cholesky(i1, batched_last),
+                            )
+                        log.warning(
+                            f"Quantization: Module `{self.name}` -> MPS block kernel failed, "
+                            f"falling back to serial loop: {exc}"
+                        )
+                    else:
+                        if batched_group_count > 0:
+                            scale.extend(batched_scale.chunk(batched_group_count, dim=1))
+                            zero.extend(batched_zero.chunk(batched_group_count, dim=1))
+                            now_idx = batched_first_global_idx + batched_group_count + 1
+                        mps_block_done = True
+
                 # Compiled CPU block path for the same grouped case.  This is
                 # especially important for large MLP shapes like mlp.down where
                 # the eager per-column torch.addr loop is slow on CPU.
@@ -3204,6 +3301,7 @@ class GPTQ:
                     not use_online_group_damping
                     and os.environ.get("GPTQMODEL_BLOCK_CPU", "1") != "0"
                     and not cuda_block_done
+                    and not mps_block_done
                     and gptq_block_cpu is not None
                     and Hinv is not None
                     and count <= 128
@@ -3331,7 +3429,7 @@ class GPTQ:
                             f"falling back to serial loop: {exc}"
                         )
 
-                if not cuda_block_done and not cpu_block_done:
+                if not cuda_block_done and not mps_block_done and not cpu_block_done:
                     for i in range(count):
                         w = W1[:, i]
                         if Hinv is not None:
