@@ -528,8 +528,8 @@ def test_emit_moe_parallel_quant_subset_telemetry_reports_gil_and_worker_fanout(
         stage_subset_module.DEVICE_THREAD_POOL,
         "_collect_state_snapshot",
         lambda: {
-            "workers": {"cuda:1": 4, "cuda:2": 4},
-            "total_workers": 8,
+            "workers": {"cuda:1": 1, "cuda:2": 1},
+            "total_workers": 2,
             "total_inflight": 2,
         },
     )
@@ -572,6 +572,6 @@ def test_emit_moe_parallel_quant_subset_telemetry_reports_gil_and_worker_fanout(
     assert fields["layer_index"] == 3
     assert fields["submitted_tasks"] == 2
     assert fields["quant_devices"] == ["cuda:1", "cuda:2"]
-    assert fields["thread_pool_workers"] == {"cuda:1": 4, "cuda:2": 4}
+    assert fields["thread_pool_workers"] == {"cuda:1": 1, "cuda:2": 1}
     assert fields["python_gil_disabled"] is True
     assert fields["free_threaded_parallel_quant_active"] is True

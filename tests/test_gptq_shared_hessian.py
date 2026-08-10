@@ -108,10 +108,13 @@ def test_llama_same_input_modules_share_hessian_accumulation_and_inverse():
     assert list(shared_state["partials"].keys()) == [device]
     assert shared_state["sample_counts"][device] == x.shape[0] * x.shape[1]
     assert shared_state["partials"][device].shape == (16, 16)
+    assert device in shared_state["partial_events"]
 
     materialized = [processor.tasks[name].finalize_hessian(target_device=device) for name in names]
     for hessian in materialized[1:]:
         assert hessian.data_ptr() == materialized[0].data_ptr()
+    assert shared_state["partial_events"] == {}
+    assert shared_state["H_event"] is not None
 
     for name in names:
         task = processor.tasks[name]
@@ -127,6 +130,95 @@ def test_llama_same_input_modules_share_hessian_accumulation_and_inverse():
     assert processor._shared_hessian_inverse_cache == {}
     assert processor._shared_hessian_inverse_ref_counts == {}
 
+    processor.cleanup_subset(subset, subset_index=0, subset_total=1)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_shared_hessian_async_cross_device_materialization_matches_reference():
+    """CUDA events preserve exact shared-Hessian math without per-batch host synchronization."""
+
+    devices = (torch.device("cuda", 0), torch.device("cuda", 1))
+    processor, subset, names = _make_qkv_processor(devices[0], enable_shared_hessian_cache=True)
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    shared_state = processor.tasks[names[0]]._shared_hessian_state
+
+    contributions = (
+        torch.diag(torch.arange(1, 17, dtype=torch.float32)),
+        torch.diag(torch.arange(17, 33, dtype=torch.float32)),
+    )
+    token_counts = (4, 6)
+    streams = [torch.cuda.Stream(device=device) for device in devices]
+    for device, stream, contribution, token_count in zip(devices, streams, contributions, token_counts):
+        with torch.cuda.device(device), torch.cuda.stream(stream):
+            device_contribution = contribution.to(device)
+            GPTQProcessor._accumulate_shared_hessian_state(
+                shared_state,
+                token_count,
+                device_contribution,
+                device,
+            )
+
+    canonical = processor.tasks[names[0]].finalize_hessian(target_device=devices[0])
+    private = processor.tasks[names[1]].finalize_hessian(target_device=devices[1])
+    torch.cuda.synchronize(devices[0])
+    torch.cuda.synchronize(devices[1])
+
+    # Mirror the serialized pre-change CUDA operation order exactly. Computing
+    # the reference on CPU can differ by one FP32 ULP despite identical math.
+    expected = torch.zeros_like(contributions[0], device=devices[0])
+    scale = 2.0 / sum(token_counts)
+    # ``dict.popitem`` consumes the most recently inserted device first.
+    expected.add_(contributions[1].to(devices[0]), alpha=scale)
+    expected.add_(contributions[0].to(devices[0]), alpha=scale)
+    torch.testing.assert_close(canonical, expected, rtol=0, atol=0)
+    torch.testing.assert_close(private.to(devices[0]), expected, rtol=0, atol=0)
+    assert canonical.data_ptr() == shared_state["H"].data_ptr()
+    assert private.data_ptr() != canonical.data_ptr()
+    assert processor.tasks[names[0]]._shared_hessian_source is canonical
+    assert processor.tasks[names[1]]._shared_hessian_source is None
+    assert shared_state["partials"] == {}
+    assert shared_state["partial_events"] == {}
+
+    # A dirty re-accumulation must wait for the prior canonical event before
+    # reweighting its storage in place.
+    extra = torch.eye(16, dtype=torch.float32, device=devices[0])
+    GPTQProcessor._accumulate_shared_hessian_state(shared_state, 2, extra, devices[0])
+    updated = processor.tasks[names[0]].finalize_hessian(target_device=devices[0])
+    torch.cuda.synchronize(devices[0])
+    updated_expected = expected * (sum(token_counts) / (sum(token_counts) + 2))
+    updated_expected.add_(extra, alpha=2.0 / (sum(token_counts) + 2))
+    torch.testing.assert_close(updated, updated_expected, rtol=0, atol=0)
+
+    processor.cleanup_subset(subset, subset_index=0, subset_total=1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_shared_hessian_cuda_events_materialize_safely_on_cpu():
+    """Host materialization synchronizes producer and canonical CUDA events."""
+
+    cuda = torch.device("cuda", 0)
+    processor, subset, names = _make_qkv_processor(cuda, enable_shared_hessian_cache=True)
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    shared_state = processor.tasks[names[0]]._shared_hessian_state
+
+    first = torch.diag(torch.arange(1, 17, dtype=torch.float32, device=cuda))
+    GPTQProcessor._accumulate_shared_hessian_state(shared_state, 2, first, cuda)
+    canonical = processor.tasks[names[0]].finalize_hessian(target_device=torch.device("cpu"))
+    torch.testing.assert_close(canonical, first.cpu(), rtol=0, atol=0)
+
+    second = torch.eye(16, dtype=torch.float32, device=cuda)
+    shared_state["H_event"] = torch.cuda.Event(enable_timing=False, blocking=False)
+    shared_state["H_event"].record(torch.cuda.current_stream(cuda))
+    GPTQProcessor._accumulate_shared_hessian_state(shared_state, 2, second, cuda)
+    updated = processor.tasks[names[1]].finalize_hessian(target_device=torch.device("cpu"))
+    expected = first.cpu().mul(0.5).add(second.cpu(), alpha=0.5)
+    torch.testing.assert_close(updated, expected, rtol=0, atol=0)
+
+    # A clean CPU reader waits for the canonical completion event before aliasing.
+    shared_state["H_event"] = torch.cuda.Event(enable_timing=False, blocking=False)
+    shared_state["H_event"].record(torch.cuda.current_stream(cuda))
+    clean = processor.tasks[names[2]].finalize_hessian(target_device=torch.device("cpu"))
+    torch.testing.assert_close(clean, expected, rtol=0, atol=0)
     processor.cleanup_subset(subset, subset_index=0, subset_total=1)
 
 

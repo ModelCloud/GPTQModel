@@ -77,6 +77,77 @@ def test_basic_submit_and_do(pool, devices_two):
     torch.testing.assert_close(out2, a + b)
 
 
+def test_nested_do_executes_inline_on_same_cuda_owner(pool, devices_two):
+    """A CUDA owner may synchronously enter a routed helper without self-deadlocking."""
+
+    d0 = devices_two[0]
+    caller_thread = threading.get_ident()
+
+    def outer_task():
+        owner_thread = threading.get_ident()
+        assert pool.is_device_owner_thread(d0)
+        nested_thread = pool.do(d0, threading.get_ident)
+        return owner_thread, nested_thread
+
+    owner_thread, nested_thread = pool.submit(d0, outer_task).result(timeout=5)
+    assert owner_thread == nested_thread
+    assert owner_thread != caller_thread
+    assert not pool.is_device_owner_thread(d0)
+
+
+def test_nested_do_orders_cuda_event_on_owner_stream(pool, devices_two, monkeypatch):
+    """The inline path must preserve the same event dependency as queued work."""
+
+    d0 = devices_two[0]
+    event = object()
+    waits = []
+
+    class _StreamSpy:
+        def wait_event(self, waited_event):
+            waits.append((threading.get_ident(), waited_event))
+
+    worker = pool._worker_groups["cuda:0"][0]
+    monkeypatch.setattr(worker, "_record_cuda_completion", lambda: None)
+    monkeypatch.setattr(threadx_mod.torch.cuda, "current_stream", lambda _device=None: _StreamSpy())
+
+    def outer_task():
+        return pool.do(d0, lambda: threading.get_ident(), cuda_event=event)
+
+    owner_thread = pool.submit(d0, outer_task).result(timeout=5)
+    assert waits == [(owner_thread, event)]
+
+
+def test_nested_do_rejects_cuda_event_for_cpu_owner():
+    """Nested dependency events remain CUDA-only even on the inline path."""
+
+    cpu_pool = DeviceThreadPool(
+        devices=[torch.device("cpu")],
+        workers={"cpu": 1},
+        empty_cache_every_n=0,
+    )
+    try:
+        def outer_task():
+            with pytest.raises(ValueError, match="cuda_event is only valid for CUDA devices"):
+                cpu_pool.do(torch.device("cpu"), lambda: None, cuda_event=object())
+
+        cpu_pool.submit(torch.device("cpu"), outer_task).result(timeout=5)
+    finally:
+        cpu_pool.shutdown(wait=True)
+
+
+def test_owner_check_rejects_runtime_cuda_worker_duplication(pool, devices_two):
+    """The ownership assertion also catches post-construction bookkeeping corruption."""
+
+    d0 = devices_two[0]
+    original_workers = pool._worker_groups["cuda:0"]
+    pool._worker_groups["cuda:0"] = [MagicMock(), MagicMock()]
+    try:
+        with pytest.raises(RuntimeError, match="ThreadX invariant violated"):
+            pool.is_device_owner_thread(d0)
+    finally:
+        pool._worker_groups["cuda:0"] = original_workers
+
+
 def test_linear_forward(pool, devices_two):
     d0 = devices_two[0]
     m = nn.Linear(128, 64).to(d0)
@@ -156,6 +227,19 @@ def test_cuda_event_wait_is_honored(pool, devices_two):
     assert ok == 1
 
 
+def test_cuda_event_dependency_is_a_stream_wait_not_a_host_sync(monkeypatch):
+    worker = threadx_mod._DeviceWorker.__new__(threadx_mod._DeviceWorker)
+    worker.device = torch.device("cuda", 0)
+    stream = MagicMock()
+    event = MagicMock()
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: stream)
+
+    worker._wait_for_cuda_dependency(event)
+
+    stream.wait_event.assert_called_once_with(event)
+    event.synchronize.assert_not_called()
+
+
 def test_parallel_submissions_from_many_threads(pool, devices_two):
     d0, d1 = devices_two
 
@@ -181,6 +265,27 @@ def test_parallel_submissions_from_many_threads(pool, devices_two):
     assert len(outs) == 8
     assert sum(o.device == d0 for o in outs) == cnt0
     assert sum(o.device == d1 for o in outs) == cnt1
+
+
+def test_concurrent_submitters_use_one_execution_thread_per_cuda_device(pool, devices_two):
+    d0 = devices_two[0]
+    execution_threads = set()
+    execution_threads_lock = threading.Lock()
+
+    def record_execution_thread(value):
+        with execution_threads_lock:
+            execution_threads.add(threading.get_ident())
+        return value
+
+    def submit(value):
+        return pool.do(d0, record_execution_thread, value)
+
+    with ThreadPoolExecutor(max_workers=16) as submitters:
+        results = list(submitters.map(submit, range(64)))
+
+    assert results == list(range(64))
+    assert len(execution_threads) == 1
+    assert len(pool._worker_groups["cuda:0"]) == 1
 
 
 def test_submit_serial_recovers_after_worker_exit(pool, devices_two):
@@ -335,6 +440,294 @@ def test_janitor_triggers_empty_cache_every_n(pool, devices_two, monkeypatch):
     monkeypatch.setattr(torch.cuda, "empty_cache", orig_empty)
 
 
+def test_janitor_synchronizes_async_cuda_work_before_empty_cache(devices_two, monkeypatch):
+    """Cleanup runs on the owner after unfinished device work completes."""
+
+    d0, _ = devices_two
+    pool = DeviceThreadPool(
+        devices=devices_two,
+        inference_mode=True,
+        empty_cache_every_n=1,
+        gc_debounce_seconds=0.0,
+        gc_min_interval_seconds=0.0,
+    )
+    completion_events = []
+    cache_observations = []
+    task_threads = []
+    cache_threads = []
+    cache_called = threading.Event()
+    original_empty_cache = torch.cuda.empty_cache
+
+    def reject_device_wide_sync(*, device):
+        raise AssertionError(f"janitor unexpectedly synchronized all work on {device}")
+
+    def launch_delayed_work():
+        task_threads.append(threading.get_ident())
+        _sleep_kernel_ms(50)
+        completion = torch.cuda.Event(enable_timing=False, blocking=False)
+        completion.record(torch.cuda.current_stream(d0))
+        completion_events.append(completion)
+        return completion
+
+    def observe_empty_cache():
+        current = torch.cuda.current_device()
+        if current == d0.index and completion_events:
+            cache_threads.append(threading.get_ident())
+            cache_observations.append(completion_events[-1].query())
+            cache_called.set()
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", observe_empty_cache)
+    monkeypatch.setattr(threadx_mod, "torch_sync", reject_device_wide_sync)
+    try:
+        completions = []
+        for repetition in range(10):
+            cache_called.clear()
+            completions.append(pool.submit(d0, launch_delayed_work).result(timeout=5))
+            assert cache_called.wait(timeout=5), f"janitor did not run for repetition {repetition}"
+            deadline = time.time() + 5
+            while pool._gc_passes < repetition + 1 and time.time() < deadline:
+                time.sleep(0.01)
+            assert pool._gc_passes >= repetition + 1
+        assert cache_observations == [True] * 10
+        assert all(completion.query() for completion in completions)
+        assert set(cache_threads) == set(task_threads)
+        assert len(set(task_threads)) == 1
+    finally:
+        pool.shutdown(wait=True)
+        monkeypatch.setattr(torch.cuda, "empty_cache", original_empty_cache)
+
+
+def test_cuda_task_exception_still_records_completion_event(devices_two, monkeypatch):
+    d0, _ = devices_two
+    pool = DeviceThreadPool(
+        devices=[d0],
+        inference_mode=True,
+        empty_cache_every_n=0,
+    )
+    monkeypatch.setattr(threadx_mod._DeviceWorker, "_abort_process", lambda self, exc: None)
+
+    def launch_then_fail():
+        _sleep_kernel_ms(25)
+        raise RuntimeError("synthetic task failure")
+
+    try:
+        with pytest.raises(RuntimeError, match="synthetic task failure"):
+            pool.submit(d0, launch_then_fail).result(timeout=5)
+
+        worker = pool._worker_groups["cuda:0"][0]
+        assert worker._cuda_completion_event is not None
+        worker.synchronize_cuda_completion()
+        assert worker._cuda_completion_event.query()
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_shutdown_waits_for_queued_cuda_work_and_worker_event(devices_two, monkeypatch):
+    d0, _ = devices_two
+    pool = DeviceThreadPool(
+        devices=[d0],
+        inference_mode=True,
+        empty_cache_every_n=0,
+    )
+
+    def reject_device_wide_sync(*, device):
+        raise AssertionError(f"shutdown unexpectedly synchronized all work on {device}")
+
+    def launch_delayed_work(value):
+        _sleep_kernel_ms(25)
+        completion = torch.cuda.Event(enable_timing=False, blocking=False)
+        completion.record(torch.cuda.current_stream(d0))
+        return value, completion
+
+    monkeypatch.setattr(threadx_mod, "torch_sync", reject_device_wide_sync)
+    futures = [pool.submit(d0, launch_delayed_work, value) for value in range(4)]
+    pool.shutdown(wait=True)
+
+    results = [future.result(timeout=1) for future in futures]
+    assert [value for value, _ in results] == list(range(4))
+    assert all(completion.query() for _, completion in results)
+
+
+def test_worker_exit_reports_completion_sync_failure(devices_two, monkeypatch):
+    d0, _ = devices_two
+    pool = DeviceThreadPool(
+        devices=[d0],
+        inference_mode=True,
+        empty_cache_every_n=0,
+    )
+    worker = pool._worker_groups["cuda:0"][0]
+    failures = []
+
+    def fail_completion_sync():
+        raise RuntimeError("synthetic worker completion failure")
+
+    monkeypatch.setattr(worker, "synchronize_cuda_completion", fail_completion_sync)
+    monkeypatch.setattr(worker, "_abort_process", lambda exc: failures.append(exc))
+    worker.stop()
+    worker.join()
+
+    assert len(failures) == 1
+    assert str(failures[0]) == "synthetic worker completion failure"
+
+    # The synthetic abort returns instead of terminating the process, so clean
+    # up the dead worker bookkeeping that production never continues past.
+    pool._on_worker_exit("cuda:0", worker)
+    pool.shutdown(wait=True)
+
+
+def test_cuda_cache_release_routes_to_owner_after_worker_event(devices_two, monkeypatch):
+    """Pre-fix control: the janitor must not dispatch CUDA from its own thread."""
+
+    d0, _ = devices_two
+    pool = DeviceThreadPool(
+        devices=[d0],
+        inference_mode=True,
+        empty_cache_every_n=0,
+    )
+    pending = True
+    calls = []
+    caller_thread = threading.get_ident()
+
+    def fake_worker_sync():
+        nonlocal pending
+        calls.append(("worker_event", threading.get_ident()))
+        pending = False
+
+    worker = pool._worker_groups["cuda:0"][0]
+    monkeypatch.setattr(worker, "synchronize_cuda_completion", fake_worker_sync)
+
+    def fake_empty_cache_any(*, device, gc):
+        calls.append(("empty_cache", threading.get_ident(), device, gc))
+        assert pending is False, "pre-fix janitor released cache with asynchronous work pending"
+        return True
+
+    monkeypatch.setattr(
+        threadx_mod,
+        "torch_sync",
+        lambda **kwargs: pytest.fail(f"unexpected device-wide sync: {kwargs}"),
+    )
+    monkeypatch.setattr(threadx_mod, "torch_empty_cache_any", fake_empty_cache_any)
+    monkeypatch.setattr(threadx_mod.torch_utils.resolve_empty_cache_callable, "cache_clear", lambda: None)
+
+    try:
+        assert pool._run_empty_cache_for_device("cuda:0", d0) is not None
+        owner_thread = worker._thread.ident
+        assert owner_thread is not None
+        assert owner_thread != caller_thread
+        assert calls == [
+            ("worker_event", owner_thread),
+            ("empty_cache", owner_thread, d0, False),
+        ]
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_cuda_cache_release_rolls_back_inflight_when_owner_enqueue_fails(devices_two, monkeypatch):
+    """A failed maintenance enqueue must not leave ThreadX permanently busy."""
+
+    d0, _ = devices_two
+    pool = DeviceThreadPool(
+        devices=[d0],
+        inference_mode=True,
+        empty_cache_every_n=0,
+    )
+    worker = pool._worker_groups["cuda:0"][0]
+
+    def fail_submit(*_args, **_kwargs):
+        raise RuntimeError("synthetic maintenance enqueue failure")
+
+    monkeypatch.setattr(worker, "submit_maintenance", fail_submit)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic maintenance enqueue failure"):
+            pool._run_empty_cache_for_device("cuda:0", d0)
+        assert pool._inflight["cuda:0"] == 0
+    finally:
+        pool.shutdown(wait=True)
+
+
+def test_janitor_skips_cache_release_when_device_sync_fails(monkeypatch):
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    pool._dispatch_lock = threading.Lock()
+    pool._worker_groups = {}
+    pool._devices_by_key = {"cuda:0": torch.device("cuda", 0)}
+    empty_cache_called = False
+
+    def fail_sync(*, device):
+        raise RuntimeError(f"synthetic sync failure on {device}")
+
+    def fake_empty_cache_any(*, device, gc):
+        nonlocal empty_cache_called
+        empty_cache_called = True
+        return True
+
+    monkeypatch.setattr(threadx_mod, "torch_sync", fail_sync)
+    monkeypatch.setattr(threadx_mod, "torch_empty_cache_any", fake_empty_cache_any)
+
+    assert pool._run_empty_cache_for_device("cpu", torch.device("cpu")) is None
+    assert empty_cache_called is False
+
+
+def test_janitor_rejects_multiple_workers_for_one_cuda_device(monkeypatch):
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    pool._dispatch_lock = threading.Lock()
+    pool._locks = {"cuda:0": MagicMock()}
+    pool._virtual_to_parent = {}
+    pool._worker_groups = {"cuda:0": [MagicMock(), MagicMock()]}
+    pool._devices_by_key = {"cuda:0": torch.device("cuda", 0)}
+    empty_cache_called = False
+
+    def fake_empty_cache_any(*, device, gc):
+        nonlocal empty_cache_called
+        empty_cache_called = True
+        return True
+
+    monkeypatch.setattr(threadx_mod, "torch_empty_cache_any", fake_empty_cache_any)
+
+    with pytest.raises(RuntimeError, match="ThreadX invariant violated"):
+        pool._run_empty_cache_for_device("cuda:0", torch.device("cuda", 0))
+    assert empty_cache_called is False
+
+
+def test_janitor_non_cuda_backend_uses_backend_sync(monkeypatch):
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    calls = []
+    device = torch.device("cpu")
+
+    monkeypatch.setattr(threadx_mod, "torch_sync", lambda *, device: calls.append(("sync", device)))
+    monkeypatch.setattr(
+        threadx_mod,
+        "torch_empty_cache_any",
+        lambda *, device, gc: calls.append(("empty_cache", device, gc)) or True,
+    )
+    monkeypatch.setattr(threadx_mod.torch_utils.resolve_empty_cache_callable, "cache_clear", lambda: None)
+
+    assert pool._run_empty_cache_for_device("cpu", device) is not None
+    assert calls == [("sync", device), ("empty_cache", device, False)]
+
+
+@pytest.mark.parametrize(
+    ("device", "workers"),
+    [
+        (torch.device("cpu"), {}),
+        (torch.device("cuda", 0), {"cuda:0": []}),
+    ],
+)
+def test_worker_completion_sync_noops_without_cuda_worker(device, workers, monkeypatch):
+    key = str(device)
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    pool._virtual_to_parent = {}
+    pool._devices_by_key = {key: device}
+    pool._worker_groups = workers
+    pool._dispatch_lock = threading.Lock()
+    monkeypatch.setattr(
+        threadx_mod,
+        "torch_sync",
+        lambda **kwargs: pytest.fail(f"unexpected device-wide sync: {kwargs}"),
+    )
+
+    pool._synchronize_cuda_worker_completion(key)
+
+
 @pytest.mark.xfail(
     reason="Janitor retrigger timing remains runner-sensitive under shared multi-GPU load",
     strict=False,
@@ -424,7 +817,6 @@ class TestThreadxJanitor():
         pool._last_gc_ts = None
         pool._gc_generation = 0
         pool._last_consumed_gc_generation = 0
-        pool._synchronize_all = lambda: None
         pool._virtual_to_parent = {}
         pool._family_keys = {}
         pool._dispatch_lock = threading.Lock()
@@ -445,13 +837,27 @@ class TestThreadxJanitor():
         return pool
 
 
-    @pytest.mark.parametrize("threshold_triggers", [3])
-    def test_janitor_coalesces_pending_triggers(self, monkeypatch, threshold_triggers):
+    @pytest.mark.parametrize(
+        ("device_type", "debug_enabled", "cleanup_duration"),
+        [
+            ("cuda", False, 0.0),
+            ("xpu", True, 0.0),
+            ("mps", False, None),
+        ],
+    )
+    def test_janitor_coalesces_pending_triggers(
+        self,
+        monkeypatch,
+        device_type,
+        debug_enabled,
+        cleanup_duration,
+    ):
         pool = self._make_pool()
+        threshold_triggers = 3
         pool._empty_cache_every_n = threshold_triggers
 
-        key = "cuda:0"
-        dev = torch.device("cuda", 0)
+        key = f"{device_type}:0"
+        dev = torch.device(device_type, 0)
         pool._devices_by_key[key] = dev
         pool._locks[key] = _DummyLock()
         pool._ordered_keys = [key]
@@ -463,17 +869,15 @@ class TestThreadxJanitor():
 
         calls = {"count": 0}
 
-        def fake_empty_cache():
+        def fake_empty_cache(_key, _device):
             calls["count"] += 1
+            return cleanup_duration
 
-        monkeypatch.setattr(threadx_mod.torch.cuda, "empty_cache", fake_empty_cache, raising=False)
-        monkeypatch.setattr(threadx_mod, "TORCH_CUDA_EMPTY_CACHE", fake_empty_cache, raising=False)
-
-        @contextlib.contextmanager
-        def fake_cuda_device(index):
-            yield
-
-        monkeypatch.setattr(threadx_mod.torch.cuda, "device", fake_cuda_device, raising=False)
+        # This test exercises trigger coalescing only; owner-thread routing is
+        # covered separately with a real CUDA DeviceThreadPool.
+        monkeypatch.setattr(pool, "_run_empty_cache_for_device", fake_empty_cache)
+        monkeypatch.setattr(pool, "_format_vram_summary", lambda _keys: "n/a")
+        monkeypatch.setattr(threadx_mod, "DEBUG_ON", debug_enabled)
 
         # Simulate multiple threshold triggers before janitor runs.
         for _ in range(threshold_triggers * 3):
@@ -916,13 +1320,13 @@ def test_virtual_pool_raises_when_exceeding_parent_capacity():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_virtual_pool_cuda_parent_requires_index():
-    with pytest.raises(ValueError):
+def test_virtual_pool_cuda_is_rejected():
+    with pytest.raises(ValueError, match="would create a second thread"):
         DeviceThreadPool(
-            devices=[torch.device("cuda")],
+            devices=[torch.device("cuda", 0)],
             workers={
-                "cuda": 2,
-                "gryphon:cuda": 1,
+                "cuda:0": 1,
+                "gryphon:cuda:0": 1,
             },
             empty_cache_every_n=0,
         )
@@ -930,61 +1334,14 @@ def test_virtual_pool_cuda_parent_requires_index():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_virtual_pool_cuda_alias_behaviour():
-    dev = torch.device("cuda", 0)
-    pool = DeviceThreadPool(
-        devices=[dev],
-        inference_mode=True,
-        workers={
-            "cuda:0": 2,
-            "gryphon:cuda:0": 1,
-        },
-        empty_cache_every_n=0,
-    )
-
-    running = 0
-    max_seen = 0
-    lock = threading.Lock()
-
-    def busy(delay: int):
-        nonlocal running, max_seen
-        with lock:
-            running += 1
-            max_seen = max(max_seen, running)
-        if hasattr(torch.cuda, "_sleep"):
-            torch.cuda._sleep(int(delay) * 1_000_000)
-        else:
-            time.sleep(delay / 1000.0)
-        with lock:
-            running -= 1
-        return delay
-
-    try:
-        delays = [50, 60, 70]
-        futs = [pool.submit("gryphon:cuda:0", busy, d) for d in delays]
-        results = [f.result(timeout=5) for f in futs]
-        assert results == delays
-        assert max_seen == 1
-
-        start_evt = threading.Event()
-
-        def marker(evt: threading.Event):
-            evt.set()
-            return True
-
-        with pool.device_lock("cuda:0"):
-            fut = pool.submit("gryphon:cuda:0", marker, start_evt)
-            time.sleep(0.05)
-            assert not start_evt.is_set()
-
-        assert fut.result(timeout=2) is True
-        assert start_evt.wait(timeout=2)
-
-        stats = pool.stats()["per_device"]
-        assert stats.get("gryphon:cuda:0") == len(delays) + 1
-        assert stats.get("cuda:0", 0) == 0
-    finally:
-        pool.shutdown(wait=True)
+@pytest.mark.parametrize("workers", [{"cuda:per": 2}, {"cuda:0": 2}, {"cuda:0": 0}])
+def test_cuda_worker_count_must_be_exactly_one(workers):
+    with pytest.raises(ValueError, match="exactly one worker per physical CUDA device"):
+        DeviceThreadPool(
+            devices=[torch.device("cuda", 0)],
+            workers=workers,
+            empty_cache_every_n=0,
+        )
 
 ######## test_threadx_wait.py #########
 
@@ -1025,7 +1382,7 @@ def pool_default_two_cuda():
 def pool_workers_override():
     """
     Pool validating worker-count overrides:
-      - cuda:0 -> 3 workers (override)
+      - cuda:0 -> exactly 1 worker (required)
       - cuda:1 -> 1 worker (via 'cuda:per')
       - cpu    -> 4 workers
     """
@@ -1035,7 +1392,7 @@ def pool_workers_override():
         devices=devices,
         inference_mode=True,
         empty_cache_every_n=0,
-        workers={"cuda:per": 1, "cuda:0": 3, "cpu": 4},
+        workers={"cuda:per": 1, "cuda:0": 1, "cpu": 4},
     )
     try:
         yield p
@@ -1058,6 +1415,61 @@ def test_wait_cuda_without_lock(pool_default_two_cuda):
     for f in futs:
         assert f.done()
         assert f.result() == 150
+
+
+@pytest.mark.parametrize("hold_lock", [False, True])
+def test_wait_cuda_includes_worker_device_completion(pool_default_two_cuda, monkeypatch, hold_lock):
+    d0 = torch.device("cuda", 0)
+
+    def reject_device_wide_sync(*, device):
+        raise AssertionError(f"wait unexpectedly synchronized all work on {device}")
+
+    def launch_delayed_work():
+        _sleep_kernel_ms(50)
+        completion = torch.cuda.Event(enable_timing=False, blocking=False)
+        completion.record(torch.cuda.current_stream(d0))
+        return completion
+
+    monkeypatch.setattr(threadx_mod, "torch_sync", reject_device_wide_sync)
+    completion = pool_default_two_cuda.submit(d0, launch_delayed_work).result(timeout=5)
+
+    if hold_lock:
+        with pool_default_two_cuda.wait(d0, lock=True):
+            assert completion.query()
+    else:
+        pool_default_two_cuda.wait(d0)
+        assert completion.query()
+
+
+def test_wait_cuda_lock_releases_locks_when_completion_sync_fails(pool_default_two_cuda, monkeypatch):
+    d0 = torch.device("cuda", 0)
+    original_sync = pool_default_two_cuda._synchronize_cuda_worker_completion
+
+    def fail_completion_sync(key):
+        raise RuntimeError(f"synthetic completion failure on {key}")
+
+    monkeypatch.setattr(pool_default_two_cuda, "_synchronize_cuda_worker_completion", fail_completion_sync)
+    with pytest.raises(RuntimeError, match="synthetic completion failure"):
+        with pool_default_two_cuda.wait(d0, lock=True):
+            pytest.fail("wait context entered despite completion failure")
+
+    monkeypatch.setattr(pool_default_two_cuda, "_synchronize_cuda_worker_completion", original_sync)
+    assert pool_default_two_cuda.submit(d0, lambda: "lock-released").result(timeout=2) == "lock-released"
+
+
+def test_shutdown_without_wait_stops_workers_without_lifecycle_drain():
+    pool = DeviceThreadPool(
+        devices=[torch.device("cpu")],
+        inference_mode=True,
+        empty_cache_every_n=0,
+    )
+    workers = list(pool._worker_groups["cpu"])
+
+    pool.shutdown(wait=False)
+    for worker in workers:
+        worker.join()
+
+    assert pool._stop_event.is_set()
 
 
 def test_wait_cuda_with_lock_blocks_new_tasks(pool_default_two_cuda):
@@ -1128,19 +1540,20 @@ def test_wait_returns_context_manager_with_lock(pool_default_two_cuda):
 
 def test_worker_count_override_cuda0_vs_cuda1(pool_workers_override):
     """
-    With workers={"cuda:per":1, "cuda:0":3}:
-      - cuda:0 has 3 workers -> up to 3 tasks can start almost immediately.
-      - cuda:1 has 1 worker  -> tasks start one-by-one.
-    We measure host-level concurrency via start events.
+    Both CUDA devices have one FIFO worker regardless of explicit policy form.
+    We measure host-level concurrency via start events and inspect the groups.
     """
     d0, d1 = torch.device("cuda", 0), torch.device("cuda", 1)
 
-    # cuda:0 — expect ~3 tasks to start quickly
+    assert len(pool_workers_override._worker_groups["cuda:0"]) == 1
+    assert len(pool_workers_override._worker_groups["cuda:1"]) == 1
+
+    # cuda:0 — only one host task may run at a time.
     start_events_0 = [threading.Event() for _ in range(6)]
     futs0 = [pool_workers_override.submit(d0, _start_then_sleep, ev, 200) for ev in start_events_0]
     time.sleep(0.10)  # give workers time to start tasks
     started0 = sum(ev.is_set() for ev in start_events_0)
-    assert started0 >= 3  # at least the configured worker count
+    assert started0 == 1
     # Drain
     for f in futs0:
         assert f.result(timeout=3) == 200
@@ -1150,7 +1563,7 @@ def test_worker_count_override_cuda0_vs_cuda1(pool_workers_override):
     futs1 = [pool_workers_override.submit(d1, _start_then_sleep, ev, 150) for ev in start_events_1]
     time.sleep(0.08)
     started1 = sum(ev.is_set() for ev in start_events_1)
-    assert started1 <= 2  # typically 1; allow 2 to avoid flakiness
+    assert started1 == 1
     # Drain
     for f in futs1:
         assert f.result(timeout=3) == 150

@@ -36,7 +36,15 @@ from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.gptq_block import gptq_block_cuda
 from ..utils.logger import setup_logger
-from ..utils.torch import TORCH_GTE_28, TORCH_GTE_214, torch_compile, torch_sync
+from ..utils.torch import (
+    TORCH_GTE_28,
+    TORCH_GTE_214,
+    cholesky_inverse,
+    linalg_cholesky,
+    linalg_cholesky_ex,
+    torch_compile,
+    torch_sync,
+)
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -232,7 +240,7 @@ def _hessian_inverse_try_cholesky(H: torch.Tensor, diag_delta: torch.Tensor):
     so that non-shared Hessians can avoid a full matrix copy.
     """
     H.diagonal().add_(diag_delta)
-    L, info = torch.linalg.cholesky_ex(H, upper=False)
+    L, info = linalg_cholesky_ex(H, upper=False)
     success = (info == 0).view(())
     return L, success
 
@@ -243,7 +251,7 @@ def _hessian_inverse_factor(L: torch.Tensor):
     factor ``L`` of ``H``, matching the original ``cholesky_inverse`` + ``cholesky``
     sequence: ``U^T U = H^{-1}`` with ``U`` upper triangular.
     """
-    return torch.linalg.cholesky(torch.cholesky_inverse(L), upper=True)
+    return linalg_cholesky(cholesky_inverse(L), upper=True)
 
 
 class GPTQ:
@@ -1252,24 +1260,40 @@ class GPTQ:
 
         with shared_state["lock"]:
             hessian = shared_state.get("H")
+            hessian_event = shared_state.get("H_event")
             if (
                 hessian is not None
                 and not shared_state.get("dirty", False)
                 and shared_state.get("total_samples", 0) > 0
             ):
+                if hessian_event is not None:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).wait_event(hessian_event)
+                    else:
+                        hessian_event.synchronize()
+                # The shared Hessian is read-only once clean.  Give this task a
+                # private per-device copy rather than moving the canonical tensor,
+                # so other workers that already reference the canonical storage
+                # are not affected by device repinning under free-threading.
                 if hessian.device != device:
-                    hessian = hessian.to(device=device)
-                    shared_state["H"] = hessian
-                self.H = hessian
-                self._shared_hessian_source = hessian
+                    task_hessian = hessian.to(device=device)
+                    # Private per-device copy: in-place damping is safe, so do not
+                    # mark it as shared-canonical to avoid redundant clones.
+                    shared_source = None
+                else:
+                    task_hessian = hessian
+                    shared_source = hessian
+                self.H = task_hessian
+                self._shared_hessian_source = shared_source
                 # ``record_shared_hessian_batch`` is the sole authority for this
                 # module's observed sample count. In particular, zero means the
                 # module was inactive and must remain eligible for RTN fallback.
                 self._hessian_dirty = False
-                self._final_hessian_device_hint = hessian.device
+                self._final_hessian_device_hint = task_hessian.device
                 return
 
             partials = shared_state["partials"]
+            partial_events = shared_state.setdefault("partial_events", {})
             sample_counts = shared_state["sample_counts"]
             sequence_counts = shared_state.get("sequence_counts", {})
             total_old_tokens = int(shared_state.get("total_samples", 0) or 0)
@@ -1297,10 +1321,18 @@ class GPTQ:
                 hessian is not None
                 and hessian.shape == (self.columns, self.columns)
             ):
+                if hessian_event is not None:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).wait_event(hessian_event)
+                    else:
+                        hessian_event.synchronize()
+                # Reuse the existing buffer only when it already matches the
+                # target device/dtype.  Otherwise materialize into a private
+                # copy and let the final assignment replace the canonical tensor.
                 if hessian.device != device or hessian.dtype != torch.float32:
-                    hessian = hessian.to(device=device, dtype=torch.float32)
-                    shared_state["H"] = hessian
-                result_accum = hessian
+                    result_accum = hessian.to(device=device, dtype=torch.float32)
+                else:
+                    result_accum = hessian
             else:
                 torch_sync(device)
                 result_accum = torch.zeros(
@@ -1327,7 +1359,13 @@ class GPTQ:
                     scale_new = 1.0
 
                 while partials:
-                    _, partial = partials.popitem()
+                    partial_device, partial = partials.popitem()
+                    partial_event = partial_events.pop(partial_device, None)
+                    if partial_event is not None:
+                        if result_accum.device.type == "cuda":
+                            torch.cuda.current_stream(result_accum.device).wait_event(partial_event)
+                        else:
+                            partial_event.synchronize()
                     if (
                         partial.device != result_accum.device
                         or partial.dtype != torch.float32
@@ -1344,6 +1382,7 @@ class GPTQ:
             if self.length_aware:
                 shared_state["total_sequences"] = total
             sample_counts.clear()
+            partial_events.clear()
             if self.length_aware:
                 sequence_counts.clear()
 
@@ -1352,6 +1391,12 @@ class GPTQ:
             # Keep the module-local sample count, including an authoritative zero.
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
+            if result_accum.device.type == "cuda":
+                completion = torch.cuda.Event(enable_timing=False, blocking=False)
+                completion.record(torch.cuda.current_stream(result_accum.device))
+                shared_state["H_event"] = completion
+            else:
+                shared_state["H_event"] = None
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
@@ -2119,7 +2164,7 @@ class GPTQ:
                         # [columns, columns] tensors during that step.
                         Hinv_dense = torch.empty_like(L)
                         try:
-                            torch.cholesky_inverse(L, upper=False, out=Hinv_dense)
+                            cholesky_inverse(L, upper=False, out=Hinv_dense)
                         except RuntimeError as e:
                             Hinv_result = None
                             success = damp_per_col.new_tensor(False, dtype=torch.bool)
@@ -2143,7 +2188,7 @@ class GPTQ:
                                 del L
                                 info = Hinv_dense.new_empty((), dtype=torch.int32)
                                 try:
-                                    Hinv_result, info = torch.linalg.cholesky_ex(
+                                    Hinv_result, info = linalg_cholesky_ex(
                                         Hinv_dense, upper=True, out=(Hinv_dense, info)
                                     )
                                 except RuntimeError as e:

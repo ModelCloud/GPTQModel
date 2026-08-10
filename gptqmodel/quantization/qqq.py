@@ -18,6 +18,7 @@ from ..quantization.config import FallbackStrategy, LengthAwareMode, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
 from ..utils.device import get_device
+from ..utils.torch import cholesky_inverse, linalg_cholesky
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gptq import get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
@@ -589,9 +590,9 @@ class QQQ:
                 if not success.item():
                     raise torch._C._LinAlgError("QQQ Hessian Cholesky failed on CPU.")
             else:
-                H = torch.linalg.cholesky(H)
-                H = torch.cholesky_inverse(H)
-                H = torch.linalg.cholesky(H, upper=True)
+                H = linalg_cholesky(H)
+                H = cholesky_inverse(H)
+                H = linalg_cholesky(H, upper=True)
             Hinv = H
         except Exception:
             fallback_requested = should_use_fallback(

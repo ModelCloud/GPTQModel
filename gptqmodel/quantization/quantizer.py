@@ -29,6 +29,7 @@ except Exception:
 
 from ..utils.backend import BACKEND
 from ..utils.marlin import marlin_runtime_available, replace_parameter
+from ..utils.torch import linalg_cholesky
 
 
 log = setup_logger()
@@ -494,10 +495,10 @@ class Quantizer(nn.Module):
                 damping = max(1e-6, diag_mean * 1e-6)
                 H_g = H_g + torch.eye(gs, device=H_g.device, dtype=H_g.dtype) * damping
                 try:
-                    L_g = torch.linalg.cholesky(H_g)
+                    L_g = linalg_cholesky(H_g)
                 except RuntimeError:
                     H_g = torch.diag(H_g.diagonal().clamp_min(damping))
-                    L_g = torch.linalg.cholesky(H_g)
+                    L_g = linalg_cholesky(H_g)
 
                 # A_g^T A_g = H_g, so ``||A_g (w - q)^T||^2`` equals the Hessian quadratic form.
                 A_g = L_g.transpose(-2, -1).to(dtype=marlin_dtype).contiguous()

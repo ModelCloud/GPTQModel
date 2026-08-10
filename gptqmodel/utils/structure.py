@@ -700,6 +700,40 @@ def _run_lazy_turtle_jobs(jobs: list[Any], worker, max_workers: int) -> list[Any
     return [result for _, result in indexed_results]
 
 
+def _copy_tensor_to_target(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    non_blocking: bool,
+) -> bool:
+    """Copy one prepared tensor and report whether its CPU source must stay alive.
+
+    Route any CUDA-backed copy through ThreadX's sole physical-device owner.
+    Loader lanes are intentionally limited to checkpoint I/O and CPU tensor
+    transforms; they must never enqueue work into a CUDA context themselves.
+    """
+
+    cuda_device = target.device if target.device.type == "cuda" else source.device
+    if cuda_device.type == "cuda":
+        from .. import DEVICE_THREAD_POOL
+
+        if not DEVICE_THREAD_POOL.is_device_owner_thread(cuda_device):
+            return DEVICE_THREAD_POOL.do(
+                cuda_device,
+                _copy_tensor_to_target,
+                source,
+                target,
+                non_blocking=non_blocking,
+            )
+
+    pinned = source.device.type == "cpu" and source.is_pinned()
+    if target.device.type == "cuda":
+        target.copy_(source, non_blocking=pinned)
+        return pinned
+    target.copy_(source, non_blocking=(non_blocking and pinned))
+    return False
+
+
 @dataclass
 class _LazyWeightRenaming:
     """Lightweight 1:1 renaming rule that mirrors `transformers.WeightRenaming` matching semantics."""
@@ -959,6 +993,10 @@ class LazyTurtle:
         # pinned across adjacent layers. Controlled via the quantize_config attribute
         # `lazy_turtle_max_pinned_gb` (None or <=0 means unlimited).
         self._shard_lru: OrderedDict[str, int] = OrderedDict()
+        # A shard larger than the entire pin budget can never enter the LRU.
+        # Remember those paths so repeated subset materialization does not rescan
+        # every tensor range or retry an expensive whole-file registration.
+        self._shard_pin_ineligible: Set[str] = set()
         max_pinned_gb = max_pinned_gb if max_pinned_gb is not None else 4.0
         self._max_pinned_bytes = float("inf") if max_pinned_gb <= 0 else float(max_pinned_gb) * 1024**3
         # Track tensors that have already been loaded by this LazyTurtle instance so
@@ -1064,6 +1102,8 @@ class LazyTurtle:
     ) -> None:
         """Page-lock the mmap backing a safetensors shard so get_tensor views are pinned."""
 
+        if shard_path in self._shard_pin_ineligible:
+            return
         if shard_path in self._shard_pin_ranges:
             self._shard_lru.move_to_end(shard_path)
             return
@@ -1090,6 +1130,15 @@ class LazyTurtle:
         end = ((max_ptr + page_size - 1) // page_size) * page_size
         size = end - start
         if size <= 0:
+            return
+        if self._max_pinned_bytes != float("inf") and size > self._max_pinned_bytes:
+            self._shard_pin_ineligible.add(shard_path)
+            _log_info(
+                "LazyTurtle: skipping cudaHostRegister for %.2f GB shard %s; exceeds %.2f GB pin budget",
+                size / 1024**3,
+                shard_path,
+                self._max_pinned_bytes / 1024**3,
+            )
             return
         try:
             self._ensure_pinned_room(size, protected_paths)
@@ -1145,6 +1194,27 @@ class LazyTurtle:
         tie_weights: bool = True,
         show_progress: bool = True,
     ) -> torch.nn.Module:
+        device = torch.device(device)
+        if device.type == "cuda":
+            # LazyTurtle is often entered from a CPU prefetch coordinator.  All
+            # CUDA allocation and copy work still belongs to ThreadX's single
+            # physical-device owner thread.  DeviceThreadPool.do() executes
+            # inline when this method is re-entered by that owner.
+            from .. import DEVICE_THREAD_POOL
+
+            if not DEVICE_THREAD_POOL.is_device_owner_thread(device):
+                return DEVICE_THREAD_POOL.do(
+                    device,
+                    self.materialize_submodule,
+                    target_model=target_model,
+                    target_submodule=target_submodule,
+                    device=device,
+                    non_blocking=non_blocking,
+                    module_path=module_path,
+                    recurse=recurse,
+                    tie_weights=tie_weights,
+                    show_progress=show_progress,
+                )
         if module_path is None:
             module_path = _get_qualified_name(target_model, target_submodule)
         if module_path is not None:
@@ -1204,6 +1274,87 @@ class LazyTurtle:
 
         if not submodules:
             return
+
+        normalized_submodules = [
+            (target_submodule, module_path, torch.device(device))
+            for target_submodule, module_path, device in submodules
+        ]
+        cuda_groups: Dict[str, List[Tuple[torch.nn.Module, str, torch.device]]] = {}
+        cpu_or_other: List[Tuple[torch.nn.Module, str, torch.device]] = []
+        for entry in normalized_submodules:
+            device = entry[2]
+            if device.type == "cuda":
+                cuda_groups.setdefault(str(device), []).append(entry)
+            else:
+                cpu_or_other.append(entry)
+
+        if cuda_groups:
+            from .. import DEVICE_THREAD_POOL
+
+        sole_cuda_device = next(iter(cuda_groups.values()))[0][2] if len(cuda_groups) == 1 else None
+        from_owner = (
+            sole_cuda_device is not None
+            and not cpu_or_other
+            and DEVICE_THREAD_POOL.is_device_owner_thread(sole_cuda_device)
+        ) if cuda_groups else False
+
+        if cuda_groups and not from_owner:
+            # A batch may span devices, but each physical CUDA device still has
+            # exactly one execution owner.  Submit one grouped materialization
+            # per device and drain every group before surfacing an error so no
+            # background task can keep mutating model state after this call.
+            pending = []
+            errors: List[BaseException] = []
+            for device_key, entries in cuda_groups.items():
+                device = entries[0][2]
+                if DEVICE_THREAD_POOL.is_device_owner_thread(device):
+                    try:
+                        self.materialize_submodules(
+                            target_model=target_model,
+                            submodules=entries,
+                            non_blocking=non_blocking,
+                            tie_weights=False,
+                            show_progress=show_progress,
+                        )
+                    except BaseException as exc:
+                        errors.append(exc)
+                else:
+                    pending.append(
+                        DEVICE_THREAD_POOL.submit(
+                            device_key,
+                            self.materialize_submodules,
+                            target_model=target_model,
+                            submodules=entries,
+                            non_blocking=non_blocking,
+                            tie_weights=False,
+                            show_progress=show_progress,
+                        )
+                    )
+
+            if cpu_or_other:
+                try:
+                    self.materialize_submodules(
+                        target_model=target_model,
+                        submodules=cpu_or_other,
+                        non_blocking=non_blocking,
+                        tie_weights=False,
+                        show_progress=show_progress,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            for future in pending:
+                try:
+                    future.result()
+                except BaseException as exc:
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
+            if tie_weights and hasattr(target_model, "tie_weights"):
+                target_model.tie_weights()
+            return
+
+        submodules = normalized_submodules
 
         batch_started_at = time.perf_counter()
 
@@ -1467,23 +1618,13 @@ class LazyTurtle:
         total_read_bytes = 0
         total_source_bytes = 0
 
-        def _copy_to_target(source: torch.Tensor, target: torch.Tensor) -> bool:
-            """Return True if the copy was non-blocking and the caller must keep `source` alive."""
-            pinned = source.is_pinned()
-            if use_async_h2d:
-                target.copy_(source, non_blocking=pinned)
-                return pinned
-            target.copy_(source, non_blocking=(non_blocking and pinned))
-            return False
+        def _worker(job: _LazyTurtleCopyJob) -> tuple[_LazyTurtleCopyJob, int, float, bool, torch.Tensor]:
+            """Read and transform one source without dispatching CUDA work."""
 
-        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float, bool, torch.Tensor, bool]:
             with torch.inference_mode():
                 if job.source_tensor is not None:
                     source = job.source_tensor.detach()
-                    if source.dtype != job.target_tensor.dtype:
-                        source = source.to(dtype=job.target_tensor.dtype)
-                    non_blocking = _copy_to_target(source, job.target_tensor)
-                    return job.rel_name, _tensor_nbytes(source), 0.0, False, source, non_blocking
+                    return job, _tensor_nbytes(source), 0.0, False, source
 
                 read_start = time.perf_counter()
                 with shard_locks[job.shard]:
@@ -1532,8 +1673,7 @@ class LazyTurtle:
                 source = tensor.detach()
                 if source.dtype != job.target_tensor.dtype:
                     source = source.to(dtype=job.target_tensor.dtype)
-                non_blocking = _copy_to_target(source, job.target_tensor)
-                return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start, True, source, non_blocking
+                return job, _tensor_nbytes(tensor), time.perf_counter() - read_start, True, source
 
         num_cuda_devices = len(target_cuda_devices)
         max_workers = _lazy_turtle_parallel_workers(len(jobs), num_cuda_devices)
@@ -1549,12 +1689,17 @@ class LazyTurtle:
         )
 
         async_sources: list[torch.Tensor] = []
-        for rel_name, nbytes, read_time, from_disk, source, non_blocking in _run_lazy_turtle_jobs(
+        for job, nbytes, read_time, from_disk, source in _run_lazy_turtle_jobs(
             jobs,
             _worker,
             max_workers,
         ):
-            if non_blocking:
+            source_is_async = _copy_tensor_to_target(
+                source,
+                job.target_tensor,
+                non_blocking=non_blocking,
+            )
+            if source_is_async:
                 async_sources.append(source)
             if from_disk:
                 total_read_bytes += nbytes
@@ -3048,23 +3193,13 @@ class LazyTurtle:
                 # refreshes their recency in the LRU cache so hot shards are not evicted early.
                 self._host_register_shard(shard_path, handler, protected_paths=protected_paths)
 
-        def _copy_to_target(source: torch.Tensor, target: torch.Tensor) -> bool:
-            """Return True if the copy was non-blocking and the caller must keep `source` alive."""
-            pinned = source.is_pinned()
-            if use_async_h2d:
-                target.copy_(source, non_blocking=pinned)
-                return pinned
-            target.copy_(source, non_blocking=(non_blocking and pinned))
-            return False
+        def _worker(job: _LazyTurtleCopyJob) -> tuple[_LazyTurtleCopyJob, int, float, torch.Tensor]:
+            """Read and transform one source without dispatching CUDA work."""
 
-        def _worker(job: _LazyTurtleCopyJob) -> tuple[str, int, float, torch.Tensor, bool]:
             with torch.inference_mode():
                 if job.source_tensor is not None:
                     source = job.source_tensor.detach()
-                    if source.dtype != job.target_tensor.dtype:
-                        source = source.to(dtype=job.target_tensor.dtype)
-                    non_blocking = _copy_to_target(source, job.target_tensor)
-                    return job.rel_name, _tensor_nbytes(source), 0.0, source, non_blocking
+                    return job, _tensor_nbytes(source), 0.0, source
 
                 read_start = time.perf_counter()
                 with shard_locks[job.shard]:
@@ -3113,8 +3248,7 @@ class LazyTurtle:
                 source = tensor.detach()
                 if source.dtype != job.target_tensor.dtype:
                     source = source.to(dtype=job.target_tensor.dtype)
-                non_blocking = _copy_to_target(source, job.target_tensor)
-            return job.rel_name, _tensor_nbytes(tensor), time.perf_counter() - read_start, source, non_blocking
+            return job, _tensor_nbytes(tensor), time.perf_counter() - read_start, source
 
         num_cuda_devices = len({j.target_tensor.device for j in jobs if j.target_tensor.device.type == "cuda"})
         max_workers = _lazy_turtle_parallel_workers(len(jobs), num_cuda_devices)
@@ -3130,19 +3264,24 @@ class LazyTurtle:
         )
 
         async_sources: list[torch.Tensor] = []
-        for rel_name, nbytes, read_time, source, non_blocking in _run_lazy_turtle_jobs(
+        for job, nbytes, read_time, source in _run_lazy_turtle_jobs(
             jobs,
             _worker,
             max_workers,
         ):
-            if non_blocking:
+            source_is_async = _copy_tensor_to_target(
+                source,
+                job.target_tensor,
+                non_blocking=non_blocking,
+            )
+            if source_is_async:
                 async_sources.append(source)
             total_read_bytes += nbytes
             disk_telemetry.record_read(nbytes, read_time, "lazy_turtle")
             loaded_entries += 1
             if progress is not None:
                 progress.current_iter_step = loaded_entries
-                progress.subtitle(f"{rel_name}: {loaded_entries}/{total_entries}")
+                progress.subtitle(f"{job.rel_name}: {loaded_entries}/{total_entries}")
                 progress.draw()
 
         for job in jobs:

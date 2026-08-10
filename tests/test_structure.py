@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -116,7 +117,7 @@ class _LazyTurtleShell(nn.Module):
 
 
 def _write_lazy_turtle_index(model_dir: Path, shard_name: str, tensors: dict[str, torch.Tensor]) -> None:
-    weight_map = {k: shard_name for k in tensors}
+    weight_map = dict.fromkeys(tensors, shard_name)
     (model_dir / "model.safetensors.index.json").write_text(
         json.dumps({"weight_map": weight_map}), encoding="utf-8"
     )
@@ -176,6 +177,327 @@ def test_lazy_turtle_parallel_materialization_preserves_src_dst_values(tmp_path,
             reloaded[name] = f.get_tensor(name)
     for name in source:
         assert torch.equal(reloaded[name], source[name])
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_lazy_turtle_cuda_materialization_uses_only_device_owner_thread(tmp_path, monkeypatch):
+    """Parallel loader lanes may prepare CPU sources but only ThreadX may dispatch CUDA copies."""
+
+    from gptqmodel import DEVICE_THREAD_POOL
+
+    monkeypatch.setenv("GPTQMODEL_LAZY_TURTLE_PARALLEL_LOAD_WORKERS", "4")
+    model_dir = tmp_path / "cuda_owner"
+    model_dir.mkdir()
+    source = {
+        f"inner.layer{i}.weight": torch.randn(16, 32, dtype=torch.float32)
+        for i in range(8)
+    }
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+
+    previous_device = torch.get_default_device()
+    torch.set_default_device("meta")
+    try:
+        shell = _LazyTurtleShell()
+    finally:
+        torch.set_default_device(previous_device)
+    for parameter in shell.parameters():
+        parameter.requires_grad = False
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    # Reproduce the prefetch handoff: checkpoint lanes first materialize CPU
+    # sources, then the CUDA request moves those already-loaded tensors.
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        device=torch.device("cpu"),
+        module_path="inner",
+    )
+
+    copy_threads = []
+    original_copy = structure._copy_tensor_to_target
+
+    def copy_on_owner(source_tensor, target_tensor, *, non_blocking):
+        copy_threads.append(
+            (
+                threading.get_ident(),
+                str(target_tensor.device),
+                DEVICE_THREAD_POOL.is_device_owner_thread(target_tensor.device),
+            )
+        )
+        original_copy(source_tensor, target_tensor, non_blocking=non_blocking)
+        # Exercise the caller's pinned-source lifetime path. The real helper
+        # returns True when cudaHostRegister makes this copy non-blocking.
+        return True
+
+    monkeypatch.setattr(structure, "_copy_tensor_to_target", copy_on_owner)
+
+    target_device = torch.device("cuda", 0)
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=shell.inner,
+        device=target_device,
+        module_path="inner",
+    )
+
+    assert len(copy_threads) == len(source)
+    assert all(device == "cuda:0" and is_owner for _, device, is_owner in copy_threads)
+    assert len({thread_id for thread_id, _, _ in copy_threads}) == 1
+
+    loaded = DEVICE_THREAD_POOL.do(
+        target_device,
+        lambda: {
+            f"inner.layer{i}.weight": getattr(shell.inner, f"layer{i}").weight.detach().cpu()
+            for i in range(8)
+        },
+    )
+    for name, expected_source in source.items():
+        torch.testing.assert_close(loaded[name], expected_source.transpose(0, 1).contiguous(), rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_copy_helper_routes_off_owner_cuda_call_through_threadx(monkeypatch):
+    """The lowest copy boundary repairs an off-owner call instead of dispatching CUDA directly."""
+
+    from gptqmodel import get_device_thread_pool
+
+    pool = get_device_thread_pool()
+    device = torch.device("cuda", 0)
+    source = torch.arange(32, dtype=torch.float32).reshape(4, 8)
+    real_do = pool.do
+    target = real_do(device, torch.empty_like, source, device=device)
+    dispatches = []
+    caller_thread = threading.get_ident()
+
+    def record_do(routed_device, fn, *args, **kwargs):
+        dispatches.append((threading.get_ident(), str(torch.device(routed_device))))
+        return real_do(routed_device, fn, *args, **kwargs)
+
+    monkeypatch.setattr(pool, "do", record_do)
+    source_is_async = structure._copy_tensor_to_target(source, target, non_blocking=False)
+
+    assert source_is_async is False
+    assert dispatches == [(caller_thread, "cuda:0")]
+    loaded = real_do(device, lambda: target.cpu())
+    torch.testing.assert_close(loaded, source, rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two CUDA devices required")
+def test_lazy_turtle_multi_cuda_batch_has_one_owner_per_device(tmp_path, monkeypatch):
+    """A mixed-device batch must split into one FIFO ThreadX task per physical CUDA device."""
+
+    from gptqmodel import DEVICE_THREAD_POOL
+
+    model_dir = tmp_path / "multi_cuda_owner"
+    model_dir.mkdir()
+    source = {
+        "inner.layer0.weight": torch.randn(16, 32, dtype=torch.float32),
+        "inner.layer1.weight": torch.randn(16, 32, dtype=torch.float32),
+        "inner.layer2.weight": torch.randn(16, 32, dtype=torch.float32),
+        "inner.layer3.weight": torch.randn(16, 32, dtype=torch.float32),
+    }
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+
+    previous_device = torch.get_default_device()
+    torch.set_default_device("meta")
+    try:
+        shell = _LazyTurtleShell()
+    finally:
+        torch.set_default_device(previous_device)
+    for parameter in shell.parameters():
+        parameter.requires_grad = False
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    initial_batch = [
+        (shell.inner.layer0, "inner.layer0", torch.device("cpu")),
+        (shell.inner.layer1, "inner.layer1", torch.device("cpu")),
+        (shell.inner.layer2, "inner.layer2", torch.device("cpu")),
+        (shell.inner.layer3, "inner.layer3", torch.device("cpu")),
+    ]
+    turtle.materialize_submodules(target_model=shell, submodules=initial_batch)
+
+    copy_threads_by_device = {}
+    tie_calls = []
+    original_copy = structure._copy_tensor_to_target
+
+    def copy_on_owner(source_tensor, target_tensor, *, non_blocking):
+        device = str(target_tensor.device)
+        assert DEVICE_THREAD_POOL.is_device_owner_thread(target_tensor.device)
+        copy_threads_by_device.setdefault(device, set()).add(threading.get_ident())
+        original_copy(source_tensor, target_tensor, non_blocking=non_blocking)
+        return True
+
+    monkeypatch.setattr(structure, "_copy_tensor_to_target", copy_on_owner)
+    monkeypatch.setattr(shell, "tie_weights", lambda: tie_calls.append(1), raising=False)
+    DEVICE_THREAD_POOL.do(
+        torch.device("cuda", 0),
+        turtle.materialize_submodules,
+        target_model=shell,
+        submodules=[
+            (shell.inner.layer0, "inner.layer0", torch.device("cuda", 0)),
+            (shell.inner.layer1, "inner.layer1", torch.device("cuda", 1)),
+            (shell.inner.layer2, "inner.layer2", torch.device("cuda", 0)),
+            (shell.inner.layer3, "inner.layer3", torch.device("cpu")),
+        ],
+    )
+
+    assert set(copy_threads_by_device) == {"cuda:0", "cuda:1"}
+    assert all(len(thread_ids) == 1 for thread_ids in copy_threads_by_device.values())
+    assert copy_threads_by_device["cuda:0"].isdisjoint(copy_threads_by_device["cuda:1"])
+    assert tie_calls == [1]
+
+    # Also cover the explicit no-tie route; an already materialized tensor is
+    # a no-op but must still traverse and drain the CUDA owner queue.
+    turtle.materialize_submodules(
+        target_model=shell,
+        submodules=[(shell.inner.layer1, "inner.layer1", torch.device("cuda", 1))],
+        tie_weights=False,
+    )
+
+    loaded0 = DEVICE_THREAD_POOL.do(torch.device("cuda", 0), lambda: shell.inner.layer0.weight.detach().cpu())
+    loaded2 = DEVICE_THREAD_POOL.do(torch.device("cuda", 0), lambda: shell.inner.layer2.weight.detach().cpu())
+    loaded1 = DEVICE_THREAD_POOL.do(torch.device("cuda", 1), lambda: shell.inner.layer1.weight.detach().cpu())
+    torch.testing.assert_close(loaded0, source["inner.layer0.weight"].transpose(0, 1), rtol=0, atol=0)
+    torch.testing.assert_close(loaded2, source["inner.layer2.weight"].transpose(0, 1), rtol=0, atol=0)
+    torch.testing.assert_close(loaded1, source["inner.layer1.weight"].transpose(0, 1), rtol=0, atol=0)
+
+
+def test_lazy_turtle_cuda_routing_drains_failed_future(monkeypatch):
+    """A routed device failure is re-raised only after its future is consumed."""
+
+    import gptqmodel
+
+    expected_error = RuntimeError("synthetic CUDA materialization failure")
+
+    class _FailedFuture:
+        def __init__(self):
+            self.result_calls = 0
+
+        def result(self):
+            self.result_calls += 1
+            raise expected_error
+
+    failed_future = _FailedFuture()
+
+    class _FailedPool:
+        @staticmethod
+        def is_device_owner_thread(_device):
+            return False
+
+        @staticmethod
+        def submit(_device, _fn, *args, **kwargs):
+            return failed_future
+
+    monkeypatch.setattr(gptqmodel, "DEVICE_THREAD_POOL", _FailedPool())
+    turtle = object.__new__(LazyTurtle)
+    with pytest.raises(RuntimeError, match="synthetic CUDA materialization failure"):
+        turtle.materialize_submodules(
+            target_model=nn.Module(),
+            submodules=[(nn.Linear(1, 1), "leaf", torch.device("cuda", 0))],
+        )
+    assert failed_future.result_calls == 1
+
+
+def test_lazy_turtle_mixed_routing_collects_direct_and_cpu_errors(monkeypatch):
+    """Mixed batches drain both inline CUDA and non-CUDA groups before raising."""
+
+    import gptqmodel
+
+    owner_checks = []
+
+    class _OwnerPool:
+        @staticmethod
+        def is_device_owner_thread(device):
+            owner_checks.append(str(device))
+            return True
+
+    monkeypatch.setattr(gptqmodel, "DEVICE_THREAD_POOL", _OwnerPool())
+    turtle = object.__new__(LazyTurtle)
+    target = nn.Linear(1, 1)
+    with pytest.raises(AttributeError, match="_lock"):
+        turtle.materialize_submodules(
+            target_model=nn.Module(),
+            submodules=[
+                (target, "cuda_leaf", torch.device("cuda", 0)),
+                (target, "cpu_leaf", torch.device("cpu")),
+            ],
+        )
+    assert owner_checks == ["cuda:0", "cuda:0", "cuda:0"]
+
+
+def test_lazy_turtle_loader_casts_cpu_sources_before_single_and_batch_copy(tmp_path):
+    """Loader lanes cast checkpoint fp32 to the target bf16 before either copy path."""
+
+    model_dir = tmp_path / "loader_dtype_cast"
+    model_dir.mkdir()
+    source = {
+        f"inner.layer{i}.weight": torch.randn(16, 32, dtype=torch.float32)
+        for i in range(8)
+    }
+    save_file(source, str(model_dir / "model.safetensors"))
+    _write_lazy_turtle_index(model_dir, "model.safetensors", source)
+
+    def make_bf16_shell():
+        previous_device = torch.get_default_device()
+        previous_dtype = torch.get_default_dtype()
+        torch.set_default_device("meta")
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            result = _LazyTurtleShell()
+        finally:
+            torch.set_default_dtype(previous_dtype)
+            torch.set_default_device(previous_device)
+        for parameter in result.parameters():
+            parameter.requires_grad = False
+        return result
+
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    single_shell = make_bf16_shell()
+    turtle.materialize_submodule(
+        target_model=single_shell,
+        target_submodule=single_shell.inner,
+        device=torch.device("cpu"),
+        module_path="inner",
+    )
+
+    batch_shell = make_bf16_shell()
+    turtle.materialize_submodules(
+        target_model=batch_shell,
+        submodules=[
+            (getattr(batch_shell.inner, f"layer{i}"), f"inner.layer{i}", torch.device("cpu"))
+            for i in range(8)
+        ],
+    )
+
+    for i in range(8):
+        expected = source[f"inner.layer{i}.weight"].transpose(0, 1).to(torch.bfloat16)
+        single_weight = getattr(single_shell.inner, f"layer{i}").weight
+        batch_weight = getattr(batch_shell.inner, f"layer{i}").weight
+        assert single_weight.dtype == batch_weight.dtype == torch.bfloat16
+        torch.testing.assert_close(single_weight, expected, rtol=0, atol=0)
+        torch.testing.assert_close(batch_weight, expected, rtol=0, atol=0)
 
 
 def _make_simple_checkpoint(tmp_path):
@@ -739,3 +1061,45 @@ def test_lazy_turtle_host_register_shard_uses_safetensors_api(tmp_path, monkeypa
     assert calls[0][0] == start
     assert calls[0][1] == size
     assert calls[0][2] == 0
+
+
+def test_lazy_turtle_skips_shard_larger_than_total_pin_budget(tmp_path, monkeypatch):
+    """An oversized mmap must fall back to pageable copies without retrying registration."""
+
+    model_dir, _ = _make_simple_checkpoint(tmp_path)
+    turtle = LazyTurtle.maybe_create(
+        model_local_path=str(model_dir),
+        config=SimpleNamespace(_experts_implementation=None),
+        model_init_kwargs={"device_map": {"": "cpu"}},
+    )
+    assert turtle is not None
+
+    shard_path = str(model_dir / "model.safetensors")
+    real_handler = turtle._get_shard_handler(shard_path)
+    key_calls = []
+
+    class _CountingHandler:
+        def keys(self):
+            key_calls.append(1)
+            return real_handler.keys()
+
+        def get_tensor(self, key):
+            return real_handler.get_tensor(key)
+
+    def reject_registration():
+        raise AssertionError("oversized shard unexpectedly reached cudaHostRegister")
+
+    logs = []
+    monkeypatch.setattr(structure.torch.cuda, "cudart", reject_registration)
+    monkeypatch.setattr(structure, "_log_info", lambda message, *args: logs.append(message % args))
+    turtle._max_pinned_bytes = 1
+
+    handler = _CountingHandler()
+    turtle._host_register_shard(shard_path, handler)
+    turtle._host_register_shard(shard_path, handler)
+
+    assert key_calls == [1]
+    assert turtle._shard_pin_ineligible == {shard_path}
+    assert shard_path not in turtle._shard_pin_ranges
+    assert len(logs) == 1
+    assert "exceeds 0.00 GB pin budget" in logs[0]

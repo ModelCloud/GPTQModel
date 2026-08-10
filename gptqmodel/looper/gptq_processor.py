@@ -623,6 +623,7 @@ class GPTQProcessor(LoopProcessor):
             shared_state = {
                 "lock": threading.Lock(),
                 "partials": {},
+                "partial_events": {},
                 "sample_counts": {},
                 "sequence_counts": {},
                 "H": None,
@@ -776,6 +777,13 @@ class GPTQProcessor(LoopProcessor):
         dev = torch.device(device)
         with shared_state["lock"]:
             partials = shared_state["partials"]
+            partial_events = shared_state.setdefault("partial_events", {})
+            current_stream = None
+            if dev.type == "cuda":
+                current_stream = torch.cuda.current_stream(dev)
+                previous_event = partial_events.get(dev)
+                if previous_event is not None:
+                    current_stream.wait_event(previous_event)
             existing = partials.get(dev)
             if existing is None:
                 partials[dev] = xtx.to(device=dev, dtype=torch.float32, copy=True).detach()
@@ -788,6 +796,10 @@ class GPTQProcessor(LoopProcessor):
             if sequence_count:
                 shared_state["sequence_counts"][dev] = shared_state["sequence_counts"].get(dev, 0) + sequence_count
             shared_state["dirty"] = True
+            if current_stream is not None:
+                completion = torch.cuda.Event(enable_timing=False, blocking=False)
+                completion.record(current_stream)
+                partial_events[dev] = completion
 
     def _add_batch_with_shared_hessian(
         self,

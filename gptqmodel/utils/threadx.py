@@ -30,7 +30,7 @@ from .. import DEBUG_ON
 from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_NPU, torch_empty_cache_any
+from ..utils.torch import HAS_NPU, torch_empty_cache_any, torch_sync
 
 
 log = setup_logger()
@@ -351,14 +351,14 @@ class _WorkerWarmupState:
 
 # --------------------------- Worker Thread ---------------------------
 # Each worker is bound to a specific device and runs a single thread. Tasks are
-# executed under the device’s read lock; GC acquires the writer lock to keep
-# memory management steps from interleaving with tasks.
+# executed under the device’s read lock. CUDA GC is a task on that same owner
+# queue; other backends use the writer lock for exclusive cache cleanup.
 
 class _DeviceWorker:
     """
     Single worker thread bound to one device.
 
-    Queue entries: (is_task: bool, fn, args, kwargs, future)
+    Queue entries: (is_task, count_completion, fn, args, kwargs, future)
     - is_task=False is a sentinel to exit the thread loop.
     - Tasks run within a device-scoped reader lock to prevent interleaving
       with GC passes (which need a write lock).
@@ -367,7 +367,7 @@ class _DeviceWorker:
         self,
         device: torch.device,
         rwlock: _RWLock,
-        on_task_finished: Callable[[str], None],
+        on_task_finished: Callable[[str, bool], None],
         on_worker_exit: Callable[[str, "_DeviceWorker"], None],
         name: Optional[str] = None,
         inference_mode: bool = False,
@@ -387,12 +387,16 @@ class _DeviceWorker:
         else:
             self.key = f"{device.type}:{device.index}" if device.index is not None else device.type
         self.name = name or f"DPWorker-{self.key}"
-        self._q: "queue.Queue[Tuple[bool, Callable[..., Any], tuple, dict, Future]]" = queue.Queue()
+        self._q: "queue.Queue[Tuple[bool, bool, Callable[..., Any], tuple, dict, Future]]" = queue.Queue()
         self._stop = threading.Event()
 
         self._inference_mode = inference_mode
         self._target_cpu_core = cpu_core
         self._affinity_applied = False
+        # Created and recorded only by this worker thread. CUDA janitor cleanup
+        # consumes it on this same owner queue, so no separate Python lock is
+        # required for that lifecycle.
+        self._cuda_completion_event: Optional[torch.cuda.Event] = None
         self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
         if DEBUG_ON: log.debug(f"Spawned worker '{self.name}' for {self.key}")
@@ -401,8 +405,16 @@ class _DeviceWorker:
         """
         Enqueue a callable and return a Future that resolves with its result/exception.
         """
+        return self._enqueue(fn, args, kwargs, count_completion=True)
+
+    def submit_maintenance(self, fn: Callable[..., Any], /, *args, **kwargs) -> Future:
+        """Enqueue owner-only maintenance without advancing user-task counters."""
+
+        return self._enqueue(fn, args, kwargs, count_completion=False)
+
+    def _enqueue(self, fn: Callable[..., Any], args: tuple, kwargs: dict, *, count_completion: bool) -> Future:
         fut = Future()
-        self._q.put((True, fn, args, kwargs, fut))
+        self._q.put((True, count_completion, fn, args, kwargs, fut))
         if DEBUG_ON: log.debug(f"{self.name}: task enqueued; qsize={self._q.qsize()}")
         return fut
 
@@ -412,7 +424,7 @@ class _DeviceWorker:
         ASAP after receiving it.
         """
         self._stop.set()
-        self._q.put((False, lambda: None, (), {}, Future()))
+        self._q.put((False, False, lambda: None, (), {}, Future()))
         if DEBUG_ON: log.debug(f"{self.name}: stop requested; sentinel queued")
 
     def join(self):
@@ -421,6 +433,11 @@ class _DeviceWorker:
         """
         if DEBUG_ON: log.debug(f"{self.name}: joining thread")
         self._thread.join()
+
+    def is_current_thread(self) -> bool:
+        """Return whether the caller is this device's sole owner thread."""
+
+        return threading.current_thread() is self._thread
 
     def _apply_cpu_affinity(self) -> None:
         if self._affinity_applied or self._target_cpu_core is None:
@@ -462,6 +479,27 @@ class _DeviceWorker:
             warmup_state.run(device=self.device, rwlock=self.rwlock)
         self._pending_warmups = ()
 
+    def _wait_for_cuda_dependency(self, event: Optional[torch.cuda.Event]) -> None:
+        if event is None or self.device.type != "cuda":
+            return
+        # Preserve asynchronous execution: order this worker's stream after
+        # the producer event instead of blocking its host thread.
+        torch.cuda.current_stream(self.device).wait_event(event)
+
+    def _record_cuda_completion(self) -> None:
+        if self.device.type != "cuda":
+            return
+        if self._cuda_completion_event is None:
+            self._cuda_completion_event = torch.cuda.Event(enable_timing=False, blocking=False)
+        self._cuda_completion_event.record(torch.cuda.current_stream(self.device))
+
+    def synchronize_cuda_completion(self) -> None:
+        """Wait for the last CUDA task submitted by this worker to finish."""
+
+        event = self._cuda_completion_event
+        if event is not None:
+            event.synchronize()
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -474,7 +512,7 @@ class _DeviceWorker:
         self._apply_cpu_affinity()
         _activate_thread_device(self.device)
         while not self._stop.is_set():
-            is_task, fn, args, kwargs, fut = self._q.get()
+            is_task, count_completion, fn, args, kwargs, fut = self._q.get()
             try:
                 if not is_task:
                     if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
@@ -493,28 +531,39 @@ class _DeviceWorker:
                 )
                 use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
-                # Tasks take a **read** lock so janitor's write lock can't interleave
+                # Tasks take a **read** lock so exclusive callers and non-CUDA
+                # janitor cleanup cannot interleave.
                 with ctx(self.rwlock.reader(), _device_ctx(self.device)):
                     inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
                     with inference_ctx:
-                        if event is not None and self.device.type == "cuda":
-                            event.synchronize()
-                        result = fn(*args, **kwargs)
+                        self._wait_for_cuda_dependency(event)
+                        try:
+                            result = fn(*args, **kwargs)
+                        finally:
+                            # Future completion is host-side.  Record the CUDA
+                            # boundary before releasing the reader lock so the
+                            # janitor can safely wait for device-side completion.
+                            self._record_cuda_completion()
                 # Counters must be updated before resolving futures to prevent
                 # tests reading stats mid-transition and seeing stale totals.
-                self._on_task_finished(self.key)
+                self._on_task_finished(self.key, count_completion)
                 if not fut.cancelled():
                     fut.set_result(result)
                 if DEBUG_ON: log.debug(f"{self.name}: task done")
             except BaseException as exc:
                 # Even on exception we must decrement inflight and update totals.
-                self._on_task_finished(self.key)
+                self._on_task_finished(self.key, count_completion)
                 if not fut.cancelled():
                     fut.set_exception(exc)
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
                 self._abort_process(exc)
             finally:
                 self._q.task_done()
+        try:
+            self.synchronize_cuda_completion()
+        except BaseException as exc:
+            self._abort_process(exc)
+            return
         try:
             self._on_worker_exit(self.key, self)
         finally:
@@ -597,9 +646,10 @@ class DeviceThreadPool:
     """
     Multi-device thread pool with:
       - Eager discovery/creation of workers and locks for CUDA/XPU/MPS/CPU.
-      - Configurable worker counts per device (default 1).
+      - Exactly one FIFO worker thread per physical CUDA device.
+      - Configurable worker counts for CPU and other device families.
       - Correct per-thread device context.
-      - submit()/do() for async/sync, with optional CUDA event synchronization.
+      - submit()/do() for async/sync, with optional CUDA event dependency ordering.
       - Per-device RWLocks + global lock and family/all read-locks.
       - wait(scope, lock=False/True) to drain tasks (optionally with exclusive locks).
       - Per-device/global completed counters and in-flight counters.
@@ -619,7 +669,7 @@ class DeviceThreadPool:
         inference_mode: bool = False,
         warmups: Optional[Dict[str, WarmupTask]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
-        workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
+        workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
         gc_min_interval_seconds: float = 0.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
@@ -631,14 +681,13 @@ class DeviceThreadPool:
             workers: dict mapping worker-count policy:
                 - 'cpu': N                -> N workers total for CPU
                 - 'mps': N                -> N workers for MPS (single device)
-                - 'cuda:per': N           -> N workers per CUDA index
+                - 'cuda:per': 1           -> one worker per CUDA index (required)
                 - 'xpu:per': N            -> N workers per XPU index
                 - 'npu:per': N            -> N workers per NPU index
-                - 'cuda:<i>': N           -> override for specific CUDA index
+                - 'cuda:<i>': 1           -> explicit CUDA worker count (required)
                 - 'xpu:<i>': N            -> override for specific XPU index
                 - 'npu:<i>': N            -> override for specific NPU index
-                - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
-                  (CUDA/NPU parents must include an explicit index, e.g. 'alias:cuda:0')
+                - '<alias>:<parent>': N   -> virtual pool sharing locks with a non-CUDA parent device
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
             warmups: optional mapping from device family (e.g. 'cuda') to a
@@ -735,9 +784,18 @@ class DeviceThreadPool:
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"Worker count for '{raw_key}' must be an integer (got {raw_count!r})") from exc
             if alias_info is None:
+                if (raw_key == "cuda" or raw_key == "cuda:per" or raw_key.startswith("cuda:")) and count != 1:
+                    raise ValueError(
+                        f"ThreadX requires exactly one worker per physical CUDA device; '{raw_key}' requested {count}"
+                    )
                 base_workers[raw_key] = count
             else:
                 _, parent_key = alias_info
+                if parent_key == "cuda" or parent_key.startswith("cuda:"):
+                    raise ValueError(
+                        f"Virtual CUDA pool '{raw_key}' would create a second thread for '{parent_key}'; "
+                        "submit directly to the physical CUDA device"
+                    )
                 if parent_key.startswith("cuda") or parent_key.startswith("npu"):
                     parts = parent_key.split(":")
                     if len(parts) < 2 or not parts[1].isdigit():
@@ -1151,10 +1209,36 @@ class DeviceThreadPool:
         **kwargs,
     ) -> Any:
         """
-        Synchronously schedule work and block for the result.
+        Synchronously execute work on the device's owner thread.
+
+        A device task may call a helper which also routes CUDA work through
+        ThreadX.  Execute that nested call inline when it is already running on
+        the sole owner; enqueueing it behind itself would deadlock.  The outer
+        task retains the device lock and records the CUDA completion event.
         """
+        key = self._resolve_device_key(device)
+        dev = self._devices_by_key[key]
+        if self.is_device_owner_thread(key):
+            if cuda_event is not None:
+                if dev.type != "cuda":
+                    raise ValueError("cuda_event is only valid for CUDA devices")
+                torch.cuda.current_stream(dev).wait_event(cuda_event)
+            return fn(*args, **kwargs)
         fut = self.submit(device, fn, *args, cuda_event=cuda_event, **kwargs)
         return fut.result()
+
+    def is_device_owner_thread(self, device: DeviceLike | str) -> bool:
+        """Return whether the caller owns dispatch for the requested device."""
+
+        key = self._resolve_device_key(device)
+        physical_key = self._physical_key(key)
+        with self._dispatch_lock:
+            workers = tuple(self._worker_groups.get(physical_key, ()))
+        if self._devices_by_key[physical_key].type == "cuda" and len(workers) > 1:
+            raise RuntimeError(
+                f"ThreadX invariant violated: {physical_key} has {len(workers)} CUDA workers"
+            )
+        return len(workers) == 1 and workers[0].is_current_thread()
 
     def shutdown(self, wait: bool = True):
         """
@@ -1163,6 +1247,11 @@ class DeviceThreadPool:
         IMPORTANT: We snapshot groups before stopping/joining to avoid mutating
         the lists while iterating (workers remove themselves on exit).
         """
+        if wait:
+            # Drain queued host work and its recorded CUDA completion before
+            # stop sentinels can let worker threads (and their events) exit.
+            self.wait()
+
         self._stop_event.set()
         self._gc_event.set()  # wake janitor if waiting
 
@@ -1333,7 +1422,14 @@ class DeviceThreadPool:
                                 if DEBUG_ON: log.debug(f"wait(lock=True) blocking on inflight[{kk}]={self._outer._inflight[kk]}")
                                 cv.wait()
                     if DEBUG_ON: log.debug(f"wait(lock=True) acquire writer locks: keys={self._keys}")
-                    return self._group.__enter__()
+                    result = self._group.__enter__()
+                    try:
+                        for kk in self._keys:
+                            self._outer._synchronize_cuda_worker_completion(kk)
+                    except BaseException:
+                        self._group.__exit__(*sys.exc_info())
+                        raise
+                    return result
 
                 def __exit__(self, exc_type, exc, tb):
                     if DEBUG_ON: log.debug(f"wait(lock=True) releasing writer locks: keys={self._keys}")
@@ -1349,6 +1445,20 @@ class DeviceThreadPool:
                 while self._inflight[k] > 0:
                     if DEBUG_ON: log.debug(f"wait(lock=False) blocking on inflight[{k}]={self._inflight[k]}")
                     cv.wait()
+
+        cuda_keys = [
+            key
+            for key in sorted(keys)
+            if self._devices_by_key[key].type == "cuda"
+        ]
+        if cuda_keys:
+            # Draining host tasks is not sufficient for asynchronous CUDA.
+            # Briefly exclude new device tasks while consuming each worker's
+            # recorded completion event.
+            pairs = [(key, self._locks[key]) for key in cuda_keys]
+            with _LockGroup(pairs):
+                for key in cuda_keys:
+                    self._synchronize_cuda_worker_completion(key)
         if DEBUG_ON: log.debug(f"wait(lock=False) drain done: keys={keys}")
         return None
 
@@ -1433,6 +1543,12 @@ class DeviceThreadPool:
           - family-per (e.g. 'cuda:per') applies to all indices
           - family singletons ('cpu', 'mps') apply to that single device
         """
+        if dev.type == "cuda":
+            # This invariant is also validated at configuration parsing time,
+            # but returning the fixed value here makes it impossible for a
+            # future policy path to reintroduce multiple CUDA dispatch threads.
+            return 1
+
         key = self._key(dev)
         if key in table:
             return int(table[key])
@@ -1508,12 +1624,56 @@ class DeviceThreadPool:
         """
         return getattr(self, "_virtual_to_parent", {}).get(key, key)
 
+    def _synchronize_cuda_worker_completion(self, key: str, *, fallback_to_device: bool = False) -> None:
+        """Consume the sole CUDA worker's last device-completion event."""
+
+        physical_key = self._physical_key(key)
+        dev = self._devices_by_key.get(physical_key)
+        if dev is None or dev.type != "cuda":
+            return
+        with self._dispatch_lock:
+            workers = list(self._worker_groups.get(physical_key, ()))
+        if len(workers) > 1:
+            raise RuntimeError(
+                f"ThreadX invariant violated: {physical_key} has {len(workers)} CUDA workers"
+            )
+        if workers:
+            workers[0].synchronize_cuda_completion()
+        elif fallback_to_device:
+            torch_sync(device=dev)
+
     def _run_empty_cache_for_device(self, key: str, dev: torch.device) -> Optional[float]:
         """
-        Execute an empty_cache call for the given device. Returns execution time in seconds.
+        Synchronize and empty the allocator cache for one device.
+
+        CUDA cleanup is device work too.  Route it through the same sole owner
+        thread as quantization and materialization instead of letting the
+        janitor become a second CUDA-dispatch thread.  The recursive call runs
+        inline once it reaches the owner.  A completed task may still have
+        asynchronous CUDA work in flight, so consume the owner's completion
+        event before releasing cached storage.
         """
+        if dev.type == "cuda" and not self.is_device_owner_thread(key):
+            resolved_key = self._resolve_device_key(dev)
+            worker = self._pick_worker(resolved_key)
+            self._mark_scheduled(resolved_key)
+            try:
+                future = worker.submit_maintenance(
+                    self._run_empty_cache_for_device,
+                    key,
+                    dev,
+                )
+            except BaseException:
+                self._mark_finished(resolved_key)
+                raise
+            return future.result()
+
         start = time.time()
         try:
+            if dev.type == "cuda":
+                self._synchronize_cuda_worker_completion(key)
+            else:
+                torch_sync(device=dev)
             # Tests and runtime hooks may monkeypatch empty_cache between janitor passes.
             torch_utils.resolve_empty_cache_callable.cache_clear()
             success = torch_empty_cache_any(device=dev, gc=False)
@@ -1630,10 +1790,10 @@ class DeviceThreadPool:
             if self._inflight[key] == 0:
                 cv.notify_all()
 
-    def _on_task_finished(self, key: str) -> None:
+    def _on_task_finished(self, key: str, count_completion: bool = True) -> None:
         """
-        Called at the end of every task (success or failure). Updates counters
-        and signals the janitor if the per-device threshold is reached.
+        Called at the end of every task (success or failure). Maintenance work
+        drains inflight accounting but does not count toward its own GC trigger.
         """
         if not hasattr(self, "_gc_done_physical"):
             self._gc_done_physical = {}
@@ -1647,6 +1807,9 @@ class DeviceThreadPool:
             self._physical_children = {}
 
         self._mark_finished(key)
+
+        if not count_completion:
+            return
 
         trigger_gc = False
         with self._stats_lock:
@@ -1812,44 +1975,12 @@ class DeviceThreadPool:
         table_totals = self._ansi_table(totals_headers, totals_rows)
         return table_main + "\n" + table_totals
 
-    # ---- janitor (per-device empty-cache under exclusive writer lock) ----
+    # ---- janitor (per-device empty-cache on the device owner) ----
     # The janitor runs in the background. When a device completes N tasks, a trigger
     # is set. The janitor debounces triggers, takes a snapshot, and if at least one
     # accelerator device progressed by >= N tasks since the last pass, it iterates
-    # devices, acquiring each device's writer lock before calling empty_cache().
-
-    def _synchronize_all(self):
-        """
-        Optionally ensure devices are idle before empty_cache() to avoid races with
-        outstanding kernels. Keeping this disabled by default for performance.
-        """
-        # CUDA
-        for key in self._ordered_keys:
-            dev = self._devices_by_key[key]
-            if dev.type != "cuda":
-                continue
-            with torch.cuda.device(dev.index):
-                torch.cuda.synchronize()
-        # XPU
-        for key in self._ordered_keys:
-            dev = self._devices_by_key[key]
-            if dev.type != "xpu":
-                continue
-            if hasattr(torch, "xpu") and hasattr(torch.xpu, "synchronize"):
-                with torch.xpu.device(dev.index):
-                    torch.xpu.synchronize()
-        # NPU
-        for key in self._ordered_keys:
-            dev = self._devices_by_key[key]
-            if dev.type != "npu":
-                continue
-            if HAS_NPU:
-                with torch.npu.device(dev.index):
-                    torch.npu.synchronize()
-        # MPS
-        has_mps_device = any(self._devices_by_key[k].type == "mps" for k in self._ordered_keys)
-        if has_mps_device and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
-            torch.mps.synchronize()
+    # devices. CUDA cleanup joins the sole device-owner queue; other backends
+    # acquire each device's writer lock before calling empty_cache().
 
     def _should_run_gc_from_snapshot(self, snap: Dict[str, Any]) -> bool:
         """
@@ -1904,9 +2035,9 @@ class DeviceThreadPool:
           - Waits on a trigger (with short timeout to honor shutdowns promptly).
           - Debounces additional triggers for a brief window.
           - Takes a snapshot and decides whether to run.
-          - For each accelerator device, acquires its writer lock and calls
-            empty_cache() using the LIVE attribute if callable, otherwise the
-            HARD COPY captured at import time.
+          - For each CUDA device, queues cache cleanup on that device's sole
+            owner thread. Other accelerator backends retain their writer-lock
+            cleanup path.
         """
         while True:
             if DEBUG_ON:
@@ -2073,14 +2204,20 @@ class DeviceThreadPool:
                 if lk is None:
                     skipped_devices.append(key)
                     continue
-                if DEBUG_ON:
-                    log.debug("DP-Janitor: attempting writer lock for %s", key)
-                with lk.writer():
-                    if DEBUG_ON:
-                        log.debug("DP-Janitor: acquired writer lock for %s", key)
+                if dev.type == "cuda":
+                    # A second janitor-side CUDA context defeats ThreadX's core
+                    # safety contract. The FIFO owner queue already makes this
+                    # cleanup exclusive with every task for the same device.
                     duration = self._run_empty_cache_for_device(key, dev)
-                    if duration is not None:
-                        per_device_durations[key] = duration
+                else:
+                    if DEBUG_ON:
+                        log.debug("DP-Janitor: attempting writer lock for %s", key)
+                    with lk.writer():
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: acquired writer lock for %s", key)
+                        duration = self._run_empty_cache_for_device(key, dev)
+                if duration is not None:
+                    per_device_durations[key] = duration
                 processed_devices.append(key)
 
             if not processed_devices and DEBUG_ON:
@@ -2147,6 +2284,3 @@ class DeviceThreadPool:
                         _best_effort_stderr_write(
                             f"Failed to render GC post-snapshot: {e!r}; secondary logging failed: {log_exc!r}"
                         )
-
-    def _empty_all_caches(self):
-        torch_empty_cache_any(gc=False)

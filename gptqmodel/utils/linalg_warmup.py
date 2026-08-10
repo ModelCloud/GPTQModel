@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .torch import TORCH_GTE_210
+from .torch import TORCH_GTE_210, linalg_cholesky, linalg_eigh, linalg_qr, linalg_svd
 
 
 if TYPE_CHECKING:
@@ -49,18 +49,18 @@ def _make_spd(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
 
 def _run_cholesky_and_eigh(device: torch.device, dtype: torch.dtype) -> None:
     spd = _make_spd(4, device, dtype)
-    torch.linalg.cholesky(spd)
+    linalg_cholesky(spd)
 
     # mps has no aten.eigh implementation
     if device.type == "mps":
         return
 
-    torch.linalg.eigh(spd)
+    linalg_eigh(spd)
 
 
 def _run_svd(device: torch.device, dtype: torch.dtype) -> None:
     mat = torch.randn((4, 3), device=device, dtype=dtype)
-    torch.linalg.svd(mat, full_matrices=False)
+    linalg_svd(mat, full_matrices=False)
 
 
 def _run_qr(device: torch.device, dtype: torch.dtype) -> None:
@@ -69,7 +69,7 @@ def _run_qr(device: torch.device, dtype: torch.dtype) -> None:
         return
 
     square = torch.randn((4, 4), device=device, dtype=dtype)
-    torch.linalg.qr(square)
+    linalg_qr(square)
 
 
 def run_torch_linalg_warmup(device: torch.device, warmup_ctx: "WarmUpCtx") -> None:

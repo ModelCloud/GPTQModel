@@ -195,7 +195,10 @@ def _build_device_thread_pool():
             "cpu": WarmupTask(run_torch_linalg_warmup, scope=WarmUpCtx.THREAD_AND_DEVICE),
         },
         workers={
-            "cuda:per": 4,
+            # ThreadX owns exactly one FIFO dispatch thread per physical CUDA
+            # device.  Multiple host threads dispatching into one CUDA context
+            # are unsafe under free-threaded Python and defeat that contract.
+            "cuda:per": 1,
             "xpu:per": 1,
             "npu:per": 1,
             "mps": 8,

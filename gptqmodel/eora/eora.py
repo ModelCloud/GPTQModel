@@ -23,7 +23,7 @@ from ..adapter.adapter import EORA_SVD_ALGOS, EoRAConfig
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.rocm import IS_ROCM
-from ..utils.torch import TORCH_GTE_210
+from ..utils.torch import TORCH_GTE_210, linalg_cholesky_ex, linalg_eigh, linalg_qr, linalg_svd
 
 log = setup_logger()
 
@@ -46,7 +46,7 @@ def _eora_randomized_svd(matrix: Tensor, rank: int) -> Tuple[Tensor, Tensor, Ten
     target = min(rows, columns)
     subspace_size = min(target, max(rank, rank * _EORA_LOWRANK_OVERSAMPLE))
     if subspace_size >= target:
-        return torch.linalg.svd(matrix, full_matrices=False)
+        return linalg_svd(matrix, full_matrices=False)
 
     transposed = rows < columns
     work = matrix.mH if transposed else matrix
@@ -60,13 +60,13 @@ def _eora_randomized_svd(matrix: Tensor, rank: int) -> Tuple[Tensor, Tensor, Ten
         generator=generator,
     )
 
-    basis = torch.linalg.qr(work @ random_basis, mode="reduced").Q
+    basis = linalg_qr(work @ random_basis, mode="reduced").Q
     for _ in range(_EORA_LOWRANK_POWER_ITERS):
-        basis = torch.linalg.qr(work.mH @ basis, mode="reduced").Q
-        basis = torch.linalg.qr(work @ basis, mode="reduced").Q
+        basis = linalg_qr(work.mH @ basis, mode="reduced").Q
+        basis = linalg_qr(work @ basis, mode="reduced").Q
 
     projected = basis.mH @ work
-    projected_u, singular_values, projected_vh = torch.linalg.svd(projected, full_matrices=False)
+    projected_u, singular_values, projected_vh = linalg_svd(projected, full_matrices=False)
     work_u = basis @ projected_u
 
     if transposed:
@@ -95,11 +95,11 @@ def _eora_compute_svd(matrix: Tensor, rank: int, algo: str = "lowrank") -> Tuple
     use_gesvda = algo == "auto" and _eora_gesvda_supported(matrix)
     if use_gesvda:
         try:
-            return torch.linalg.svd(matrix, full_matrices=False, driver="gesvda")
+            return linalg_svd(matrix, full_matrices=False, driver="gesvda")
         except RuntimeError as exc:
             log.warn.once(f"EoRA: CUDA gesvda fast path failed ({exc}); falling back to the exact solver.")
 
-    return torch.linalg.svd(matrix, full_matrices=False)
+    return linalg_svd(matrix, full_matrices=False)
 
 
 def eora_process_input(
@@ -165,7 +165,7 @@ def _eora_compute_lora_eigh(
     dtype: torch.dtype,
     algo: str,
 ) -> Tuple[Tensor, Tensor]:
-    L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
+    L, Q = linalg_eigh(raw_scaling_diag_matrix)
 
     if not torch.isfinite(L).all():
         raise FloatingPointError(f"EoRA covariance eigensolve produced non-finite eigenvalues for `{name}`.")
@@ -229,7 +229,7 @@ def _eora_compute_lora_cholesky(
         log.warn.once("EoRA: Cholesky fast path requires torch.linalg.cholesky_ex; falling back to eigensolve.")
         return None
 
-    scaling_diag_matrix, info = torch.linalg.cholesky_ex(raw_scaling_diag_matrix, check_errors=False)
+    scaling_diag_matrix, info = linalg_cholesky_ex(raw_scaling_diag_matrix, check_errors=False)
     info_value = int(info.item())
     if info_value != 0:
         log.warn.once(

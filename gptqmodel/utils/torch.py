@@ -6,6 +6,7 @@
 import contextlib
 import importlib
 import os
+import threading
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -48,6 +49,57 @@ DEFAULT_BALANCE_STRATEGY = BalanceStrategy.GPU
 STREAM = None # cache
 
 log = setup_logger()
+
+# Lazy CUDA linalg builds load ``libtorch_cuda_linalg.so`` from the first
+# solver-backed operation.  PyTorch's loader stub uses an unprotected process-
+# global invocation counter, so two first calls can both enter the stub under a
+# free-threaded interpreter.  Only initialization needs serialization: once one
+# CUDA solver call returns, the library has replaced every lazy dispatch stub.
+_LINALG_DISPATCH_LOCK = threading.Lock()
+_LINALG_DISPATCH_READY = False
+
+
+def _linalg_dispatch_call(operation, *args, **kwargs):
+    global _LINALG_DISPATCH_READY
+
+    tensor = next((arg for arg in args if isinstance(arg, torch.Tensor)), None)
+    if tensor is None or tensor.device.type != "cuda" or _LINALG_DISPATCH_READY:
+        return operation(*args, **kwargs)
+
+    with _LINALG_DISPATCH_LOCK:
+        if _LINALG_DISPATCH_READY:
+            return operation(*args, **kwargs)
+        result = operation(*args, **kwargs)
+        _LINALG_DISPATCH_READY = True
+        return result
+
+
+def linalg_cholesky_ex(*args, **kwargs):
+    return _linalg_dispatch_call(torch.linalg.cholesky_ex, *args, **kwargs)
+
+
+def linalg_cholesky(*args, **kwargs):
+    return _linalg_dispatch_call(torch.linalg.cholesky, *args, **kwargs)
+
+
+def cholesky_inverse(*args, **kwargs):
+    return _linalg_dispatch_call(torch.cholesky_inverse, *args, **kwargs)
+
+
+def linalg_inv(*args, **kwargs):
+    return _linalg_dispatch_call(torch.linalg.inv, *args, **kwargs)
+
+
+def linalg_eigh(*args, **kwargs):
+    return _linalg_dispatch_call(torch.linalg.eigh, *args, **kwargs)
+
+
+def linalg_svd(*args, **kwargs):
+    return _linalg_dispatch_call(torch.linalg.svd, *args, **kwargs)
+
+
+def linalg_qr(*args, **kwargs):
+    return _linalg_dispatch_call(torch.linalg.qr, *args, **kwargs)
 
 
 def timed_gc_collect() -> int:

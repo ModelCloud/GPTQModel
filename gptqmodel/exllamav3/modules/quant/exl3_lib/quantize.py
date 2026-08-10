@@ -12,6 +12,7 @@ from functools import lru_cache
 
 import torch
 
+from gptqmodel.utils.torch import linalg_cholesky, linalg_inv
 from ....ext import exllamav3_ext as ext
 from ....util.progress import ProgressBar
 from ....util.memory import free_mem
@@ -283,7 +284,7 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
     # Try on GPU first
     try:
         retry_cpu = False
-        L = torch.linalg.cholesky(H)
+        L = linalg_cholesky(H)
         # H is not needed after this, move to CPU. Then overwrite H's GPU storage with L, since we can't otherwise
         # free up that VRAM as the tensor is referenced by the parent frame
         H_cpu = H.cpu()
@@ -301,7 +302,7 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
         print(f" !! Out of memory on {str(H.device)}, trying CPU fallback")
         free_mem()
         H_cpu = H.cpu()
-        L_cpu = torch.linalg.cholesky(H_cpu)
+        L_cpu = linalg_cholesky(H_cpu)
         # This is ugly, but overwrite H in VRAM to avoid allocating a new tensor, then replace reference with CPU copy
         H.copy_(L_cpu)
         del L_cpu
@@ -315,7 +316,7 @@ def block_ldl(H: torch.Tensor, b: int, verbose: bool):
     # D = DL @ DL.transpose(1, 2)
 
     # Invert each diagonal block
-    DL = torch.linalg.inv(DL)
+    DL = linalg_inv(DL)
 
     # Multiply each block's column with its inverse
     L = L.view(n, m, b)
