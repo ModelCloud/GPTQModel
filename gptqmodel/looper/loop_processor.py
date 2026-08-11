@@ -19,9 +19,9 @@ from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models.base import (
-    BaseQModel,
     MODULE_TREE_FLAG_DOWN,
     MODULE_TREE_FLAG_ROUTED,
+    BaseQModel,
     module_tree_flags_are_expert,
     module_tree_flags_are_moe,
 )
@@ -37,6 +37,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization.config import ExpertsRoutingBypass, QuantizeConfig
+from ..utils.attn_mask import attention_mask_sequence_lengths, input_id_sequence_lengths
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
@@ -566,26 +567,14 @@ class LoopProcessor:
         for row in calibration_dataset:
             if not isinstance(row, dict):
                 continue
-            if "attention_mask" in row:
-                mask = row["attention_mask"]
-                if isinstance(mask, torch.Tensor):
-                    total += int(mask.sum().item())
-                else:
-                    try:
-                        total += sum(int(x) for x in mask)
-                    except Exception:
-                        total += 0
+            mask = row.get("attention_mask")
+            if mask is not None:
+                input_lengths = input_id_sequence_lengths(row.get("input_ids"))
+                seq_len = input_lengths[0] if input_lengths and len(set(input_lengths)) == 1 else None
+                batch_size = len(input_lengths) if input_lengths else None
+                total += sum(attention_mask_sequence_lengths(mask, seq_len=seq_len, batch_size=batch_size))
                 continue
-            input_ids = row.get("input_ids")
-            if input_ids is None:
-                continue
-            if isinstance(input_ids, torch.Tensor):
-                total += int(input_ids.numel())
-            else:
-                try:
-                    total += len(input_ids)
-                except Exception:
-                    total += 0
+            total += sum(input_id_sequence_lengths(row.get("input_ids")))
         return total
 
     @staticmethod
@@ -600,23 +589,14 @@ class LoopProcessor:
                 continue
             input_ids = row.get("input_ids")
             if input_ids is not None:
-                if isinstance(input_ids, torch.Tensor):
-                    total += int(input_ids.numel())
-                else:
-                    try:
-                        total += len(input_ids)
-                    except Exception:
-                        total += 0
+                total += sum(input_id_sequence_lengths(input_ids))
                 continue
             attention_mask = row.get("attention_mask")
             if attention_mask is not None:
-                if isinstance(attention_mask, torch.Tensor):
-                    total += int(attention_mask.numel())
-                else:
-                    try:
-                        total += len(attention_mask)
-                    except Exception:
-                        total += 0
+                mask = torch.as_tensor(attention_mask)
+                if mask.ndim == 0:
+                    raise ValueError("attention_mask must have at least one dimension.")
+                total += int(mask.shape[-1]) * (int(mask.shape[0]) if mask.ndim > 1 else 1)
         return total
 
     def _set_current_batch_index(self, batch_index: Optional[int]) -> None:

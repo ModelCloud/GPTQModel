@@ -2274,6 +2274,7 @@ class BaseQModel(nn.Module):
             eora_path: Optional[str] = None,
             split_by: Optional[str] = None,
             shard_strategy: Optional[Union[ShardStrategy, str]] = None,
+            moe_modules_per_shard: int = 128,
             **kwargs,
     ):
         timer = getattr(self, "quant_region_timer", None)
@@ -2300,6 +2301,7 @@ class BaseQModel(nn.Module):
                         eora_path=eora_path,
                         split_by=split_by,
                         shard_strategy=shard_strategy,
+                        moe_modules_per_shard=moe_modules_per_shard,
                     )
 
                 # overwrite quant_override_files

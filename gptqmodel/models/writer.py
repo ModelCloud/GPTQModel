@@ -13,7 +13,7 @@ import os
 import shutil
 from datetime import datetime, timezone
 from os.path import isfile, join
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 import pcre
 import torch
@@ -78,6 +78,11 @@ from ..utils.model import (
     streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta, alias_from_turtle_for_submodule
+from ..utils.reshard import (
+    _group_per_layer_names,
+    _pack_routed_module_subgroups,
+    routed_module_templates_from_model_definition,
+)
 from ..utils.torch import torch_empty_cache
 from ..version import __local_version__
 from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
@@ -933,6 +938,9 @@ def _stream_state_dict_per_layer_shards(
     metadata: Dict[str, str],
     max_shard_size: Optional[int],
     layer_prefixes: List[str],
+    shard_strategy: ShardStrategy = ShardStrategy.PER_LAYER,
+    routed_module_templates: Optional[List[str]] = None,
+    moe_modules_per_shard: int = 128,
 ) -> tuple[List[str], Dict[str, str], int]:
     """Stream a state dict into per-layer safetensors shards in the root dir.
 
@@ -940,20 +948,30 @@ def _stream_state_dict_per_layer_shards(
     (embeddings, final norm, lm_head, ...) are grouped into a final shard.
     Output files are named ``model-XXXXX-of-YYYYY.safetensors`` in ``save_dir``.
     """
-    layer_groups: Dict[str, Dict[str, Any]] = {}
-    non_layer_group: Dict[str, Any] = {}
-    for tensor_name, tensor_source in state_dict.items():
-        group_name, is_layer_group = _resolve_layer_split_group(tensor_name, layer_prefixes)
-        if is_layer_group:
-            layer_groups.setdefault(group_name, {})[tensor_name] = tensor_source
+    grouped_names, _ = _group_per_layer_names(
+        state_dict,
+        layer_prefixes=layer_prefixes,
+        strategy=shard_strategy,
+        routed_module_templates=routed_module_templates,
+        moe_modules_per_shard=moe_modules_per_shard,
+    )
+    ordered_groups = []
+    for group_name, names in grouped_names.items():
+        if shard_strategy is ShardStrategy.PER_LAYER_MOE and ".routed." in group_name:
+            layer_group = group_name.rsplit(".routed.", 1)[0]
+            subgroups = _pack_routed_module_subgroups(
+                names,
+                {name: state_dict[name].num_bytes for name in names},
+                max_shard_size,
+                layer_group=layer_group,
+                routed_module_templates=routed_module_templates or (),
+            )
+            ordered_groups.extend(
+                (f"{group_name}.part.{index:04d}", {name: state_dict[name] for name in subgroup})
+                for index, subgroup in enumerate(subgroups)
+            )
         else:
-            non_layer_group[tensor_name] = tensor_source
-
-    ordered_groups: List[Tuple[str, Dict[str, Any]]] = []
-    for key in sorted(layer_groups, key=lambda s: _layer_sort_key(s, layer_prefixes)):
-        ordered_groups.append((key, layer_groups[key]))
-    if non_layer_group:
-        ordered_groups.append(("non_layer", non_layer_group))
+            ordered_groups.append((group_name, {name: state_dict[name] for name in names}))
 
     staging_dir = os.path.join(save_dir, ".per_layer_staging")
     shutil.rmtree(staging_dir, ignore_errors=True)
@@ -972,7 +990,14 @@ def _stream_state_dict_per_layer_shards(
             model_base_name=model_base_name,
             single_file_name=model_save_name,
             metadata=metadata,
-            max_shard_size=max_shard_size,
+            # Routed groups were already split at module boundaries above.
+            # Passing the byte cap again would allow the generic tensor-level
+            # planner to separate qweight/scales/zeros for one module.
+            max_shard_size=(
+                None
+                if shard_strategy is ShardStrategy.PER_LAYER_MOE and ".routed." in group_key
+                else max_shard_size
+            ),
         )
         group_filenames.append(filenames)
         group_tensor_maps.append(tensor_to_filename)
@@ -1206,6 +1231,7 @@ def ModelWriter(cls):
             eora_path: Optional[str] = None,
             split_by: Optional[str] = None,
             shard_strategy: Optional[Union[ShardStrategy, str]] = None,
+            moe_modules_per_shard: int = 128,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -1523,11 +1549,11 @@ def ModelWriter(cls):
         if isinstance(shard_strategy, str):
             shard_strategy = _normalize_shard_strategy_for_save(shard_strategy)
 
-        if shard_strategy is ShardStrategy.PER_LAYER and not self.qlinear_kernel.SUPPORTS_SHARDS:
+        if shard_strategy in (ShardStrategy.PER_LAYER, ShardStrategy.PER_LAYER_MOE) and not self.qlinear_kernel.SUPPORTS_SHARDS:
             log.warn("Per-layer sharding is not supported for this quant. Falling back to a single checkpoint file.")
             shard_strategy = None
 
-        if shard_strategy is ShardStrategy.PER_LAYER:
+        if shard_strategy in (ShardStrategy.PER_LAYER, ShardStrategy.PER_LAYER_MOE):
             expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_per_layer_shards(
                 state_dict,
                 save_dir=save_dir,
@@ -1536,6 +1562,13 @@ def ModelWriter(cls):
                 metadata=metadata_dict,
                 max_shard_size=max_shard_size_bytes,
                 layer_prefixes=self.extract_layers_node(),
+                shard_strategy=shard_strategy,
+                routed_module_templates=(
+                    routed_module_templates_from_model_definition(type(self))
+                    if shard_strategy is ShardStrategy.PER_LAYER_MOE
+                    else None
+                ),
+                moe_modules_per_shard=moe_modules_per_shard,
             )
         elif split_by_mode == "layer":
             expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_to_layer_dirs(
@@ -1566,7 +1599,7 @@ def ModelWriter(cls):
 
         total_size_mb = total_size_bytes / (1024 * 1024)
 
-        if shard_strategy is ShardStrategy.PER_LAYER or split_by_mode == "layer" or len(expected_files) > 1:
+        if shard_strategy in (ShardStrategy.PER_LAYER, ShardStrategy.PER_LAYER_MOE) or split_by_mode == "layer" or len(expected_files) > 1:
             index = {
                 "metadata": {"total_size": total_size_bytes},
                 "weight_map": tensor_to_filename,

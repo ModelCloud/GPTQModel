@@ -510,51 +510,58 @@ def prepare_calibration_dataset(
             f"Unsupported tokenizer.padding_side `{padding_side}`. Expected `left` or `right`."
         )
 
+    if tokenizer is None:
+        pad_token_id = 0
+    else:
+        pad_token_id = getattr(tokenizer, "pad_token_id", None)
+        if pad_token_id is None:
+            # Reusing EOS storage is safe because the attention mask remains the
+            # sole source of padding truth. Do not mutate tokenizer state here;
+            # reusable tokenizer normalization remains Tokenicer's ownership.
+            pad_token_id = getattr(tokenizer, "eos_token_id", None)
+        if not isinstance(pad_token_id, int):
+            raise ValueError("Quantize: tokenizer must define an integer pad_token_id or eos_token_id.")
+
     for example in calibration_dataset:
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
-        if max_positions is not None:
-            trimmed = False
-            trimmed_input_ids = []
-            trimmed_attention_mask = []
-
-            for row_ids, row_mask in zip(input_ids, attention_mask):
-                row_len = len(row_ids)
-                if row_len > max_positions:
-                    trimmed = True
-                    trimmed_row_count += 1
-                    longest_trimmed_row = max(longest_trimmed_row, row_len)
-                    if padding_side == "left":
-                        trimmed_input_ids.append(row_ids[-max_positions:])
-                        trimmed_attention_mask.append(row_mask[-max_positions:])
-                    else:
-                        trimmed_input_ids.append(row_ids[:max_positions])
-                        trimmed_attention_mask.append(row_mask[:max_positions])
+        # Normalize every logical sequence into its own calibration row. Later
+        # sorting, filtering, concatenation, and batching must never use only the
+        # first row of a packed tokenizer result or treat masked width as data.
+        for row_ids, row_mask in zip(input_ids, attention_mask):
+            row_len = len(row_ids)
+            if max_positions is not None and row_len > max_positions:
+                trimmed_row_count += 1
+                longest_trimmed_row = max(longest_trimmed_row, row_len)
+                if padding_side == "left":
+                    row_ids = row_ids[-max_positions:]
+                    row_mask = row_mask[-max_positions:]
                 else:
-                    trimmed_input_ids.append(row_ids)
-                    trimmed_attention_mask.append(row_mask)
+                    row_ids = row_ids[:max_positions]
+                    row_mask = row_mask[:max_positions]
 
-            if trimmed:
-                input_ids = trimmed_input_ids
-                attention_mask = trimmed_attention_mask
+            valid_token_count = sum(bool(value) for value in row_mask)
+            if valid_token_count <= calibration_data_min_length:
+                too_short_calibration_data_count += 1
+                continue
 
-        if len(input_ids[0]) <= calibration_data_min_length:
-            too_short_calibration_data_count += 1
-            continue
-
-        new_calibration_dataset.append(
-            {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-            }
-        )
+            new_calibration_dataset.append(
+                {
+                    "input_ids": [row_ids],
+                    "attention_mask": [row_mask],
+                }
+            )
 
     if too_short_calibration_data_count > 0:
         log.warn(
-            f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
+            f"Quantize: {too_short_calibration_data_count} input rows with valid-token count <= "
+            f"{calibration_data_min_length} were removed. "
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
         )
+
+    if not new_calibration_dataset:
+        raise ValueError("Quantize: calibration dataset has no usable rows after valid-token filtering.")
 
     if message_examples > 0 and message_template_name is not None:
         log.info(
@@ -608,8 +615,13 @@ def prepare_calibration_dataset(
             current_length = 0
 
         for example in new_calibration_dataset:
-            row_ids = example["input_ids"][0]
-            row_mask = example["attention_mask"][0]
+            source_ids = example["input_ids"][0]
+            source_mask = example["attention_mask"][0]
+            # Concatenation changes sequence geometry deliberately. Compact only
+            # positions selected by the mask so pre-existing padding cannot
+            # consume the concat budget or separate otherwise adjacent tokens.
+            row_ids = [token_id for token_id, keep in zip(source_ids, source_mask) if keep]
+            row_mask = [1] * len(row_ids)
             position = 0
             row_length = len(row_ids)
 
@@ -645,12 +657,11 @@ def prepare_calibration_dataset(
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
-                pad_id = getattr(tokenizer, "pad_token_id", 0)
                 if padding_side == "left":
-                    input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
+                    input_ids_buff = ([pad_token_id] * padding_length) + input_ids_buff
                     attention_mask_buff = ([0] * padding_length) + attention_mask_buff
                 else:
-                    input_ids_buff.extend([pad_id] * padding_length)
+                    input_ids_buff.extend([pad_token_id] * padding_length)
                     attention_mask_buff.extend([0] * padding_length)
             concatenated_data.append(
                 {
@@ -665,13 +676,13 @@ def prepare_calibration_dataset(
         log.info("Calibration: Sort in ascending order by length")
         sorted_dataset = sorted(
             new_calibration_dataset,
-            key=lambda item: len(item["input_ids"][0]),
+            key=lambda item: sum(bool(value) for value in item["attention_mask"][0]),
         )
     elif calibration_dataset_sort == "desc":
         log.info("Calibration: Sort in descending order by length")
         sorted_dataset = sorted(
             new_calibration_dataset,
-            key=lambda item: len(item["input_ids"][0]),
+            key=lambda item: sum(bool(value) for value in item["attention_mask"][0]),
             reverse=True,
         )
     elif calibration_dataset_sort == "shuffle":
@@ -702,7 +713,6 @@ def prepare_calibration_dataset(
             )
 
     if support_batch_quantize:
-        pad_token_id = getattr(tokenizer, "pad_token_id", 0) if tokenizer is not None else 0
         new_calibration_dataset_batched = [
             collate_data(
                 sorted_dataset[start : start + batch_size],
@@ -724,12 +734,16 @@ def prepare_calibration_dataset(
         log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
         log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
     else:
-        new_calibration_dataset_batched = [
-            {
-                "input_ids": torch.tensor(block["input_ids"], dtype=torch.long),
-            }
-            for block in sorted_dataset
-        ]
+        new_calibration_dataset_batched = []
+        for block in sorted_dataset:
+            row_ids = block["input_ids"][0]
+            row_mask = block["attention_mask"][0]
+            compact_ids = [token_id for token_id, keep in zip(row_ids, row_mask) if keep]
+            new_calibration_dataset_batched.append(
+                {
+                    "input_ids": torch.tensor([compact_ids], dtype=torch.long),
+                }
+            )
 
     return new_calibration_dataset_batched
 

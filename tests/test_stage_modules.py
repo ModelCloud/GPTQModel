@@ -299,6 +299,21 @@ def test_module_looper_runtime_telemetry_reports_gil_and_split_pools(monkeypatch
     assert fields["free_threaded_parallel_quant_eligible"] is True
 
 
+def test_setting_processor_mask_invalidates_thread_local_mask_metadata():
+    looper = object.__new__(ModuleLooper)
+    processor = types.SimpleNamespace(
+        _mask_tls=threading.local(),
+        _mask_metadata_tls=threading.local(),
+    )
+    processor._mask_metadata_tls.value = (object(), [3])
+    mask = torch.ones((1, 3), dtype=torch.bool)
+
+    looper._set_processor_mask(processor, mask)
+
+    assert processor._mask_tls.value is mask
+    assert processor._mask_metadata_tls.value is None
+
+
 class _TinyLayer(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -731,6 +746,35 @@ def test_stage_inputs_capture_collects_real_inputs():
     assert gptq_model.layer.forward_calls == 0
 
 
+def test_stage_inputs_capture_keeps_position_ids_aligned_with_batches():
+    """A missing position_ids entry must not shift a later batch into its slot."""
+
+    gptq_model = _TinyGptqModel()
+    stage = StageInputsCapture(_TinyLooper(gptq_model), logger=None)
+    later_position_ids = torch.arange(3).unsqueeze(0)
+    dataset = [
+        {
+            "hidden_states": torch.ones(1, 3, 3),
+            "attention_mask": torch.ones(1, 3),
+        },
+        {
+            "hidden_states": torch.ones(1, 3, 3),
+            "attention_mask": torch.ones(1, 3),
+            "position_ids": later_position_ids,
+        },
+    ]
+
+    cache = stage.cache_inputs(
+        layers=[gptq_model.layer],
+        calibration_data=dataset,
+        use_cache=False,
+        embed_quant_mode=None,
+    )
+
+    assert cache.position_ids[0] is None
+    assert torch.equal(cache.position_ids[1], later_position_ids)
+
+
 def test_stage_inputs_capture_rejects_custom_capture_that_misses_first_layer():
     gptq_model = _TinyGptqModel()
     gptq_model.run_input_capture = lambda *_args, **_kwargs: None
@@ -796,6 +840,50 @@ def test_forward_executor_run_single_can_skip_moe_lifecycle_for_replay():
     assert lifecycle_entries == ["enter"]
 
 
+def test_forward_executor_run_single_uses_exact_retained_moe_input():
+    looper = _make_forward_executor_looper()
+    replay_input = torch.full((1, 1, 1), 7.0)
+
+    class ReplayHooks:
+        @staticmethod
+        def take_input_replay(batch_index):
+            assert batch_index == 0
+            return replay_input
+
+        @staticmethod
+        def get_moe_block(module, _model_class):
+            return module
+
+    looper.gptq_model.moe_lifecycle_hooks = ReplayHooks()
+    executor = ForwardExecutor(looper)
+    outputs = _run_executor_single(executor, _DummyForwardProcessor(), apply_moe_config=True)
+
+    assert torch.equal(outputs[0][0], replay_input)
+
+
+def test_forward_executor_run_single_embeddings_bypass_layer_kwargs():
+    looper = _make_forward_executor_looper()
+    executor = ForwardExecutor(looper)
+    value = torch.full((1, 1, 1), 5.0)
+    outputs = executor.run_single(
+        module=_TinyExecutorLayer(),
+        processor=_DummyForwardProcessor(),
+        layer_inputs=[[value]],
+        layer_input_kwargs=[{"unexpected": torch.ones(1)}],
+        position_ids=[],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        is_embeddings_module=True,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=True,
+        reuse_kv=False,
+    )
+
+    assert torch.equal(outputs[0][0], value)
+
+
 def test_forward_executor_run_parallel_can_skip_moe_config_for_replay():
     """Parallel replay must skip the same MoE config that serial replay skips."""
 
@@ -821,6 +909,347 @@ def test_forward_executor_run_parallel_can_skip_moe_config_for_replay():
 
     assert len(outputs) == 2
     assert override_entries == ["enter", "enter"]
+
+
+def test_forward_executor_ordered_wave_attachment_stripes_and_flushes_consecutive_batches():
+    looper = _make_forward_executor_looper()
+    executor = ForwardExecutor(looper)
+    events = []
+
+    class WaveProcessor(_DummyForwardProcessor):
+        def begin_parallel_forward_wave(self, batch_indices, canonical_device):
+            events.append(("begin", tuple(batch_indices), str(canonical_device)))
+
+        def flush_parallel_forward_wave(self):
+            events.append(("flush",))
+
+        def abort_parallel_forward_wave(self):
+            events.append(("abort",))
+
+    processor = WaveProcessor()
+    batches = [[torch.full((1, 1, 1), float(index))] for index in range(5)]
+
+    def clone_module_for_devices_fn(module, devices, progress_callback=None):
+        del progress_callback
+        return dict.fromkeys(devices, module)
+
+    def forward_batch_worker_fn(
+        _replica,
+        _processor,
+        batch_idx,
+        _batch_inputs,
+        _batch_kwargs,
+        _attention_mask,
+        _position_ids,
+        **_kwargs,
+    ):
+        events.append(("forward", batch_idx))
+        return batch_idx, torch.zeros(1, 1, 1), None
+
+    outputs = executor.run_parallel(
+        module=_TinyExecutorLayer(),
+        processor=processor,
+        layer_inputs=batches,
+        layer_input_kwargs=[{} for _ in batches],
+        position_ids=[None for _ in batches],
+        attention_masks=[None for _ in batches],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=True,
+        reuse_kv=False,
+        devices=[torch.device("cuda:0"), torch.device("cuda:1")],
+        clone_module_for_devices_fn=clone_module_for_devices_fn,
+        forward_batch_worker_fn=forward_batch_worker_fn,
+        device_thread_pool=_ImmediateThreadPool(),
+    )
+
+    assert len(outputs) == 5
+    assert events == [
+        ("begin", (0, 1), "cpu"),
+        ("forward", 0),
+        ("forward", 1),
+        ("flush",),
+        ("begin", (2, 3), "cpu"),
+        ("forward", 2),
+        ("forward", 3),
+        ("flush",),
+        ("begin", (4,), "cpu"),
+        ("forward", 4),
+        ("flush",),
+    ]
+
+
+def test_forward_executor_ordered_wave_covers_kv_progress_and_row_fallbacks():
+    looper = _make_forward_executor_looper()
+    looper.gptq_model.write_shared_kv_cache = True
+    executor = ForwardExecutor(looper)
+    events = []
+
+    class WaveProcessor(_DummyForwardProcessor):
+        def begin_parallel_forward_wave(self, batch_indices, canonical_device):
+            events.append(("begin", tuple(batch_indices), str(canonical_device)))
+
+        def flush_parallel_forward_wave(self):
+            events.append(("flush",))
+
+        def abort_parallel_forward_wave(self):
+            events.append(("abort",))
+
+    class Progress:
+        current_iter_step = 0
+
+        def title(self, value):
+            events.append(("title", value))
+            return self
+
+        def subtitle(self, value):
+            events.append(("subtitle", value))
+            return self
+
+        def draw(self, *args, **kwargs):
+            return self
+
+    batches = [[torch.zeros(1, 1, 1)], []]
+    shared_kv = {}
+
+    def clone(module, devices, progress_callback=None):
+        if progress_callback is not None:
+            for index, device in enumerate(devices, start=1):
+                progress_callback(index, len(devices), device, "done")
+        return dict.fromkeys(devices, module)
+
+    def worker(_replica, _processor, batch_idx, *_args, **_kwargs):
+        return batch_idx, None, torch.tensor([batch_idx])
+
+    outputs = executor.run_parallel(
+        module=_TinyExecutorLayer(),
+        processor=WaveProcessor(),
+        layer_inputs=batches,
+        layer_input_kwargs=[{}, {}],
+        position_ids=[None, None],
+        attention_masks=[None, None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict=shared_kv,
+        layer_index=0,
+        need_outputs=False,
+        reuse_kv=True,
+        devices=[torch.device("cuda:0"), torch.device("cuda:1")],
+        progress_pb=Progress(),
+        progress_title="Calibration",
+        progress_rows_per_batch=[0, 0],
+        progress_total_rows=2,
+        clone_module_for_devices_fn=clone,
+        forward_batch_worker_fn=worker,
+        device_thread_pool=_ImmediateThreadPool(),
+    )
+
+    assert outputs == []
+    assert torch.equal(shared_kv[0], torch.tensor([0]))
+    assert any(event == ("title", "Calibration") for event in events)
+    assert not any(event == ("abort",) for event in events)
+
+    events.clear()
+    executor.run_parallel(
+        module=_TinyExecutorLayer(),
+        processor=WaveProcessor(),
+        layer_inputs=[[]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=False,
+        reuse_kv=False,
+        devices=[torch.device("cuda:0")],
+        progress_pb=Progress(),
+        progress_rows_per_batch=[0],
+        progress_total_rows=1,
+        clone_module_for_devices_fn=clone,
+        forward_batch_worker_fn=worker,
+        device_thread_pool=_ImmediateThreadPool(),
+    )
+
+    assert ("subtitle", "Forward rows 1/1") in events
+
+
+def test_forward_executor_serial_empty_batch_uses_one_progress_row():
+    looper = _make_forward_executor_looper()
+    executor = ForwardExecutor(looper)
+    events = []
+
+    class NoInputLayer(torch.nn.Module):
+        def forward(self):
+            return torch.ones(1, 1, 1)
+
+    class Progress:
+        current_iter_step = 0
+
+        def subtitle(self, value):
+            events.append(value)
+            return self
+
+        def draw(self, *args, **kwargs):
+            return self
+
+    outputs = executor.run_single(
+        module=NoInputLayer(),
+        processor=_DummyForwardProcessor(),
+        layer_inputs=[[]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=True,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=True,
+        reuse_kv=False,
+        progress_pb=Progress(),
+        progress_rows_per_batch=[0],
+        progress_total_rows=1,
+    )
+
+    assert torch.equal(outputs[0][0], torch.ones(1, 1, 1))
+    assert events == ["Forward rows 1/1"]
+
+
+def test_forward_executor_ordered_wave_aborts_after_worker_failure():
+    looper = _make_forward_executor_looper()
+    executor = ForwardExecutor(looper)
+    events = []
+
+    class WaveProcessor(_DummyForwardProcessor):
+        def begin_parallel_forward_wave(self, batch_indices, canonical_device):
+            events.append(("begin", tuple(batch_indices)))
+
+        def flush_parallel_forward_wave(self):
+            events.append(("flush",))
+
+        def abort_parallel_forward_wave(self):
+            events.append(("abort",))
+
+    def clone(module, devices, progress_callback=None):
+        del progress_callback
+        return dict.fromkeys(devices, module)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("forward failed")
+
+    with pytest.raises(RuntimeError, match="forward failed"):
+        executor.run_parallel(
+            module=_TinyExecutorLayer(),
+            processor=WaveProcessor(),
+            layer_inputs=[[torch.zeros(1, 1, 1)]],
+            layer_input_kwargs=[{}],
+            position_ids=[None],
+            attention_masks=[None],
+            cur_layer_device=torch.device("cpu"),
+            is_lm_head_module=False,
+            shared_kv_cache_dict={},
+            layer_index=0,
+            need_outputs=True,
+            reuse_kv=False,
+            devices=[torch.device("cuda:0")],
+            clone_module_for_devices_fn=clone,
+            forward_batch_worker_fn=fail,
+            device_thread_pool=_ImmediateThreadPool(),
+        )
+
+    assert events == [("begin", (0,)), ("abort",)]
+
+
+def test_forward_executor_balanced_non_attachment_assigns_by_input_device():
+    looper = _make_forward_executor_looper()
+    looper.gptq_model.quantize_config.calibration_data_device = "balanced"
+    executor = ForwardExecutor(looper)
+    observed = []
+
+    def clone(module, devices, progress_callback=None):
+        del progress_callback
+        return dict.fromkeys(devices, module)
+
+    def worker(_replica, _processor, batch_idx, *_args, **_kwargs):
+        observed.append(batch_idx)
+        return batch_idx, torch.zeros(1, 1, 1), None
+
+    outputs = executor.run_parallel(
+        module=_TinyExecutorLayer(),
+        processor=_DummyForwardProcessor(),
+        layer_inputs=[[torch.zeros(1, 1, 1)], [torch.zeros(1, 1, 1)]],
+        layer_input_kwargs=[{}, {}],
+        position_ids=[None, None],
+        attention_masks=[None, None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=True,
+        reuse_kv=False,
+        devices=[torch.device("cuda:0"), torch.device("cuda:1")],
+        clone_module_for_devices_fn=clone,
+        forward_batch_worker_fn=worker,
+        device_thread_pool=_ImmediateThreadPool(),
+    )
+
+    assert observed == [0, 1]
+    assert len(outputs) == 2
+
+
+def test_forward_executor_parallel_preserves_model_replay_kwargs_updates_without_requested_outputs():
+    looper = _make_forward_executor_looper()
+    updates = []
+    worker_need_output = []
+
+    def update_replay_kwargs(**kwargs):
+        updates.append(
+            (
+                kwargs["layer_input_kwargs"]["batch"],
+                kwargs["layer_output"].item(),
+                kwargs["target_device"],
+            )
+        )
+
+    looper.gptq_model.update_layer_replay_kwargs_from_output = update_replay_kwargs
+    executor = ForwardExecutor(looper)
+
+    def clone(module, devices, progress_callback=None):
+        del progress_callback
+        return dict.fromkeys(devices, module)
+
+    def worker(_replica, _processor, batch_idx, *_args, **kwargs):
+        worker_need_output.append(kwargs["need_output"])
+        return batch_idx, torch.tensor(float(batch_idx + 10)), None
+
+    outputs = executor.run_parallel(
+        module=_TinyExecutorLayer(),
+        processor=_DummyForwardProcessor(),
+        layer_inputs=[[torch.zeros(1, 1, 1)], [torch.zeros(1, 1, 1)]],
+        layer_input_kwargs=[{"batch": 0}, {"batch": 1}],
+        position_ids=[None, None],
+        attention_masks=[None, None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        need_outputs=False,
+        reuse_kv=False,
+        devices=[torch.device("cuda:0"), torch.device("cuda:1")],
+        clone_module_for_devices_fn=clone,
+        forward_batch_worker_fn=worker,
+        device_thread_pool=_ImmediateThreadPool(),
+    )
+
+    assert outputs == []
+    assert worker_need_output == [True, True]
+    assert updates == [
+        (0, 10.0, torch.device("cpu")),
+        (1, 11.0, torch.device("cpu")),
+    ]
 
 
 def test_run_layer_stage_invokes_subset_stage(monkeypatch):
@@ -1802,8 +2231,8 @@ def test_replay_layer_outputs_with_plan_can_skip_override_restore():
     assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
 
 
-def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
-    """Multi-device replay should disable MoE config without changing override install."""
+def test_replay_layer_outputs_parallel_moe_plan_uses_ordered_replica_executor():
+    """MoE output replay should fan batches out without installing subset overrides."""
 
     tensor = torch.zeros(1, 1, 1)
     replay_modules = {
@@ -1824,7 +2253,7 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
         batch_count=2,
         forward_row_counts=[2, 3],
         forward_total_rows=5,
-        moe_groups={},
+        moe_groups={"experts": ["mlp.experts.0.gate_proj"]},
         forward_device_map={
             "self_attn.q_proj": torch.device("cuda:0"),
             "mlp.experts.0.gate_proj": torch.device("cuda:1"),
@@ -1872,6 +2301,13 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
             self._current_subset = replay_modules
             self.forward_calls = []
             self.override_calls = []
+            self.gptq_model = types.SimpleNamespace(
+                quantize_config=types.SimpleNamespace(
+                    moe=types.SimpleNamespace(
+                        execution=types.SimpleNamespace(parallel_output_replay=True),
+                    ),
+                ),
+            )
 
         def _run_forward_batches(self, **kwargs):
             self.forward_calls.append(kwargs)
@@ -1909,21 +2345,12 @@ def test_replay_layer_outputs_with_multi_device_plan_skips_moe_config():
     )
 
     assert outputs == [[tensor]]
-    assert looper.override_calls == [
-        (
-            replay_modules,
-            {
-                "self_attn.q_proj": torch.device("cuda:0"),
-                "mlp.experts.0.gate_proj": torch.device("cuda:1"),
-            },
-            {},
-        )
-    ]
+    assert looper.override_calls == []
     assert len(looper.forward_calls) == 1
     assert looper.forward_calls[0]["progress_rows_per_batch"] == [2, 3]
     assert looper.forward_calls[0]["progress_total_rows"] == 5
-    assert looper.forward_calls[0]["force_serial"] is True
-    assert looper.forward_calls[0]["preserve_module_devices"] is True
+    assert looper.forward_calls[0]["force_serial"] is False
+    assert looper.forward_calls[0]["preserve_module_devices"] is False
     assert looper.forward_calls[0]["apply_moe_config"] is False
     assert timer_records[0][1]["source"] == "model.layers.0:subset1/1"
 

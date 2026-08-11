@@ -89,7 +89,7 @@ class StageInputsCapture:
         src_inputs: List[List[torch.Tensor]] = []
         layer_inputs: List[List[torch.Tensor]] = []
         attention_masks: List[torch.Tensor | None] = []
-        position_ids: List[torch.Tensor] = []
+        position_ids: List[Optional[torch.Tensor]] = []
         layer_input_kwargs: List[Dict[str, Any]] = []
 
         timer = getattr(self.gptq_model, "quant_region_timer", None)
@@ -223,6 +223,11 @@ class StageInputsCapture:
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
                 position_ids.append(move_to(pos_ids, device=batch_device))
+            else:
+                # Preserve one metadata slot per captured batch. Omitting None
+                # entries shifts every later position_ids tensor to the wrong
+                # replay batch.
+                position_ids.append(None)
             one_kwargs: Dict[str, Any] = {}
             for (k, v) in kwargs.items():
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:

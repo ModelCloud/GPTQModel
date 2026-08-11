@@ -5,7 +5,18 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
+
+
+def _as_tensor(value, *, name: str) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value
+    try:
+        return torch.as_tensor(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a rectangular tensor or sequence.") from exc
 
 
 def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) -> torch.Tensor | None:
@@ -22,37 +33,70 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
         return None
 
     m = mask
-    # Convert numeric to bool 'keep' (HF tends to use >0 for keep; extended masks use big negatives for masked)
-    if m.dtype != torch.bool:
-        if torch.any(m < 0):
-            m = (m >= 0)
-        else:
-            m = (m > 0)
+    if m.ndim == 0:
+        raise ValueError("Unsupported scalar attention_mask.")
+    if m.ndim == 1:
+        m = m.unsqueeze(0)
 
-    # Squeeze broadcast dims to reach [B, S]
-    if m.dim() == 4 and m.size(1) == 1:
-        if m.size(2) == 1:
-            # Common HF format: [B, 1, 1, S]
-            m = m[:, 0, 0, :]
-        elif m.size(2) == m.size(3):
-            # Causal mask expanded to [B, 1, S, S]; collapse query axis so any
-            # attended position is marked for retention.
-            m = m[:, 0].any(dim=1)
-        else:
-            # Fallback: collapse singleton dim, leave seq axis for later handling
-            m = m[:, 0, 0, :]
-    elif m.dim() == 3 and m.size(1) == 1:
-        m = m[:, 0, :]  # [B, S]
-    elif m.dim() == 2:
-        pass  # already [B, S]
+    if m.is_floating_point() and torch.isnan(m).any():
+        raise ValueError("attention_mask must not contain NaN values.")
+
+    # Binary masks use positive=keep. HF additive/extended masks use zero for
+    # allowed positions and a negative bias (usually -inf) for masked positions.
+    # An all-zero floating mask with broadcast/query axes is therefore an
+    # unmasked additive mask, not an all-padding binary mask.
+    if m.dtype == torch.bool:
+        keep = m
     else:
-        # Fallback: try to flatten to [B, S] if seq_len is known
-        if seq_len is not None and m.dim() > 2 and m.size(-1) == seq_len:
-            m = m.reshape(m.size(0), -1)[..., :seq_len]
-        else:
-            raise ValueError(f"Unsupported attention_mask shape: {tuple(mask.shape)}")
+        has_negative = bool(torch.any(m < 0))
+        extended_all_nonpositive = m.is_floating_point() and m.ndim > 2 and not bool(torch.any(m > 0))
+        keep = m >= 0 if has_negative or extended_all_nonpositive else m > 0
 
-    return m.to(dtype=torch.bool)
+    if keep.ndim > 2:
+        # Treat the last axis as key/token position and union every broadcast,
+        # head, and causal-query axis. Taking the first causal query would keep
+        # only token zero and silently discard the rest of the sequence.
+        normalized = keep.reshape(keep.shape[0], -1, keep.shape[-1]).any(dim=1)
+    else:
+        normalized = keep
+
+    if seq_len is not None and normalized.shape[-1] != seq_len:
+        raise ValueError(
+            f"attention_mask sequence width {normalized.shape[-1]} does not match expected seq_len {seq_len}."
+        )
+    return normalized.to(dtype=torch.bool)
+
+
+def attention_mask_sequence_lengths(
+    mask,
+    seq_len: int | None = None,
+    batch_size: int | None = None,
+) -> list[int]:
+    """Return one valid-token count per sequence using normalized mask semantics."""
+
+    if mask is None:
+        return []
+    keep = cast(torch.Tensor, normalize_seq_mask(_as_tensor(mask, name="attention_mask"), seq_len=seq_len))
+    if batch_size is not None and keep.shape[0] != batch_size:
+        raise ValueError(
+            f"attention_mask batch size {keep.shape[0]} does not match input_ids batch size {batch_size}."
+        )
+    return [int(length) for length in keep.sum(dim=1, dtype=torch.int64).tolist()]
+
+
+def input_id_sequence_lengths(input_ids) -> list[int]:
+    """Return one physical token-position count per unbatched or batched input-id row."""
+
+    if input_ids is None:
+        return []
+    ids = _as_tensor(input_ids, name="input_ids")
+    if ids.ndim == 0:
+        raise ValueError("input_ids must have at least one dimension.")
+    if ids.ndim == 1:
+        return [int(ids.numel())]
+    if ids.ndim != 2:
+        raise ValueError(f"input_ids must have shape [S] or [B, S], got {tuple(ids.shape)}.")
+    return [int(ids.shape[1])] * int(ids.shape[0])
 
 
 def apply_keep_mask_bt(x: torch.Tensor, keep_mask_bs: torch.Tensor | None) -> torch.Tensor:

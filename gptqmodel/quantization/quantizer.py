@@ -81,6 +81,13 @@ class Quantizer(nn.Module):
         self.register_buffer("zero", torch.zeros(shape))
 
         self.name=name
+        # Scale search revisits one module in consecutive GPTQ blocks.  The
+        # candidate shrink grid is immutable for a configured quantizer, so do
+        # not rebuild and relaunch the same tiny CUDA arange/divide expression
+        # for every block.  Keep this as ordinary task-local state rather than
+        # a registered buffer: it is scratch, follows the active compute
+        # device explicitly, and must never enter a checkpoint.
+        self._scale_search_shrink_cache = None
 
     def requires_groupwise_processing(self) -> bool:
         return False
@@ -90,6 +97,22 @@ class Quantizer(nn.Module):
         """Build the FP32 shrink grid used by the pre-optimization GPTQ path."""
 
         return 1 - torch.arange(candidate_count, device=device, dtype=torch.float32) / grid
+
+    def _cached_scale_search_shrink_factors(
+        self,
+        candidate_count: int,
+        grid: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Return the exact legacy shrink grid, reusing it across module blocks."""
+
+        device = torch.device(device)
+        key = (int(candidate_count), int(grid), device.type, device.index)
+        cached = self._scale_search_shrink_cache
+        if cached is None or cached[0] != key:
+            cached = (key, self._scale_search_shrink_factors(candidate_count, grid, device))
+            self._scale_search_shrink_cache = cached
+        return cached[1]
 
     # FIXME, optimum shouldn't call this directly, it should call hf_configure
     def configure(
@@ -945,7 +968,7 @@ class Quantizer(nn.Module):
                     chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
                     # Preserve the original scalar candidate values while
                     # evaluating all rows and candidates in vectorized chunks.
-                    shrink = self._scale_search_shrink_factors(candidate_count, self.grid, dev)
+                    shrink = self._cached_scale_search_shrink_factors(candidate_count, self.grid, dev)
                     # Precompute scale/zero for every candidate once so the chunk loop
                     # only slices views instead of recomputing elementwise ranges.
                     p = shrink.view(-1, 1)
@@ -1088,6 +1111,7 @@ class Quantizer(nn.Module):
         weight: bool = False,
         *,
         hessian: torch.Tensor | None = None,
+        hessian_prepared: bool = False,
         gptq_inverse_cholesky: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute scales and zeros for all groups in x at once.
@@ -1113,6 +1137,33 @@ class Quantizer(nn.Module):
             raise ValueError(f"find_params_batched expects a 3D tensor, got {tuple(x.shape)}.")
         if not (weight and self.perchannel):
             raise ValueError("find_params_batched is only supported for per-channel weight quantization.")
+
+        rows, num_groups, group_size = x.shape
+        mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
+        method = getattr(self.qcfg, "scale_search", None)
+        if method is None and mse > 0:
+            method = ScaleSearchConfig.MSE
+        elif isinstance(method, str):
+            method = ScaleSearchConfig(method)
+
+        if hessian_prepared:
+            if mse <= 0.0 or method not in {
+                ScaleSearchConfig.ACTIVATION,
+                ScaleSearchConfig.MARLIN_ACTIVATION,
+            }:
+                raise ValueError(
+                    "find_params_batched only accepts pre-normalized Hessian data for active activation scale search."
+                )
+            expected_shape = (num_groups, group_size)
+            if hessian is None or tuple(hessian.shape) != expected_shape:
+                actual_shape = None if hessian is None else tuple(hessian.shape)
+                raise ValueError(
+                    f"Prepared activation Hessian must have shape {expected_shape}, got {actual_shape}."
+                )
+            if hessian.dtype != torch.float32 or hessian.device != x.device:
+                raise ValueError(
+                    "Prepared activation Hessian must be FP32 and colocated with the quantized weights."
+                )
 
         adaptive_clip_cfg = getattr(self.qcfg, "adaptive_clipping", None)
         if (
@@ -1164,8 +1215,6 @@ class Quantizer(nn.Module):
             maxq_value = int(self.maxq.item())
             self._maxq_value = maxq_value
 
-        rows, num_groups, group_size = x.shape
-
         # Min/max over the group dimension (last).
         zero = torch.zeros((rows, num_groups), device=dev)
         xmin_raw, xmax_raw = torch.aminmax(x, dim=-1)
@@ -1194,13 +1243,6 @@ class Quantizer(nn.Module):
                 else:
                     zero = torch.round(-xmin / scale)
 
-        mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
-        method = getattr(self.qcfg, "scale_search", None)
-        if method is None and mse > 0:
-            method = ScaleSearchConfig.MSE
-        elif isinstance(method, str):
-            method = ScaleSearchConfig(method)
-
         if method is not None and mse > 0.0:
             timer = getattr(self, "region_timer", None)
             timer_cm = (
@@ -1209,8 +1251,8 @@ class Quantizer(nn.Module):
                 else contextlib.nullcontext()
             )
             with timer_cm:
-                prepared_hessian = None
-                if method != ScaleSearchConfig.MSE:
+                prepared_hessian = hessian if hessian_prepared else None
+                if method != ScaleSearchConfig.MSE and not hessian_prepared:
                     prepared_hessian = self._prepare_scale_search_hessian_batched(
                         hessian,
                         method=method,
@@ -1252,7 +1294,7 @@ class Quantizer(nn.Module):
                 # strict-accuracy reference and is used when the Triton fast path
                 # is disabled or unsupported.
                 if candidate_count > 0:
-                    shrink = self._scale_search_shrink_factors(candidate_count, self.grid, dev)
+                    shrink = self._cached_scale_search_shrink_factors(candidate_count, self.grid, dev)
                     p = shrink.view(-1, 1, 1)
                     xmin_all = p * xmin.unsqueeze(0)
                     xmax_all = p * xmax.unsqueeze(0)

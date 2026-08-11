@@ -17,6 +17,8 @@ import torch
 import torch.nn as nn
 
 from ..nn_modules.hooked_linear import StopForward
+from .moe_input_replay import RoutedMoEInputReplayAttachment
+from .moe_capture_streams import RoutedMoECaptureStreamAttachment
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
@@ -25,6 +27,7 @@ from ..utils.torch import torch_sync
 
 
 log = setup_logger()
+_ROUTED_CAPTURE_STREAMS = RoutedMoECaptureStreamAttachment()
 
 
 def _moe_parallel_input_capture_eligible(quantize_config: Any) -> bool:
@@ -320,6 +323,13 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 f"Projection names must be set either as class attributes or constructor parameters. "
                 f"Got: gate={self.gate_proj_name}, up={self.up_proj_name}, down={self.down_proj_name}"
             )
+        self.input_replay = RoutedMoEInputReplayAttachment()
+
+    def prepare_input_replay(self, subset, batch_count: int) -> None:
+        self.input_replay.prepare_subset(subset, batch_count)
+
+    def take_input_replay(self, batch_index: int) -> Optional[torch.Tensor]:
+        return self.input_replay.take(batch_index)
 
     def _extract_moe_block_prefix(self, subset: Dict[str, Any], moe_block: nn.Module) -> Optional[str]:
         """
@@ -394,6 +404,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]
         input_only_capture = bool(getattr(processor, "moe_input_capture_without_forward", False))
+        self.input_replay.retain(processor.current_batch_index(), hidden_states)
 
         def get_callable_module(key: str):
             """
@@ -506,6 +517,8 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             parallel_down_enabled = bool(
                 input_only_capture and _moe_parallel_input_capture_eligible(quantize_config)
             )
+            moe_execution = getattr(getattr(quantize_config, "moe", None), "execution", None)
+            capture_stream_count = int(getattr(moe_execution, "parallel_input_capture_streams", 2))
             if parallel_down_enabled:
                 for expert_idx, expert in enumerate(experts_module):
                     down_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.down_proj_name}"
@@ -642,11 +655,8 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                             group_key = processor.moe_shared_input_group_key(gate_key) if input_only_capture else None
                             group_capture = shared_input_captures.get(group_key) if group_key is not None else None
                             if group_capture is None:
-                                task = processor.tasks[gate_key]
                                 group_capture = {
                                     "source_name": gate_key,
-                                    "source_nsamples_before": int(task.nsamples),
-                                    "source_fwd_counter_before": int(task.fwd_counter),
                                     "follower_names": [],
                                 }
                                 if group_key is not None:
@@ -662,11 +672,8 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                             group_key = processor.moe_shared_input_group_key(up_key) if input_only_capture else None
                             group_capture = shared_input_captures.get(group_key) if group_key is not None else None
                             if group_capture is None:
-                                task = processor.tasks[up_key]
                                 group_capture = {
                                     "source_name": up_key,
-                                    "source_nsamples_before": int(task.nsamples),
-                                    "source_fwd_counter_before": int(task.fwd_counter),
                                     "follower_names": [],
                                 }
                                 if group_key is not None:
@@ -704,8 +711,13 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                     try:
                         expert_input = expert_inputs_by_device[str(device)]
                         with defer_hessian_sync():
-                            for expert, down_key in entries:
-                                local_stop |= capture_down_input(expert, down_key, expert_input)
+                            results = _ROUTED_CAPTURE_STREAMS.run(
+                                device=device,
+                                entries=entries,
+                                stream_count=capture_stream_count,
+                                launch=lambda entry: capture_down_input(entry[0], entry[1], expert_input),
+                            )
+                            local_stop = any(results)
                     finally:
                         # Each ThreadX CUDA worker owns a stream. Complete all
                         # ordered Hessian updates once per device group before
@@ -716,7 +728,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                             timer.record(
                                 "moe_capture_device_group",
                                 time.perf_counter() - group_started_at,
-                                source=str(device),
+                                source=f"{device};streams={capture_stream_count}",
                             )
                         module_looper._set_processor_mask(processor, None)
                         processor._set_current_batch_index(None)

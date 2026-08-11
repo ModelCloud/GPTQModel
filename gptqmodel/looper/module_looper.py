@@ -713,6 +713,9 @@ class ModuleLooper():
 
         tls = self._processor_mask_tls(processor)
         tls.value = mask
+        metadata_tls = getattr(processor, "_mask_metadata_tls", None)
+        if metadata_tls is not None:
+            metadata_tls.value = None
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""

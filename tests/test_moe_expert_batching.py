@@ -102,6 +102,14 @@ class TestMoEExpertBatching(unittest.TestCase):
         self.assertEqual(self.looper._run_forward_batches.call_count, 1)
 
     @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
+    def test_input_replay_attachment_is_not_prepared_without_direct_capture(self, mock_empty_cache):
+        self.processor.moe_input_capture_without_forward = False
+
+        self._run_subset_stage(self.subset)
+
+        self.looper.gptq_model.moe_lifecycle_hooks.prepare_input_replay.assert_not_called()
+
+    @patch('gptqmodel.looper.stage_subset.torch_empty_cache')
     def test_no_batching_when_batch_size_is_zero(self, mock_empty_cache):
         """When batch_size is 0, batching should be disabled."""
         self.looper.gptq_model.quantize_config.moe.execution.batch_size = 0

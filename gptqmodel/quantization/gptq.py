@@ -2874,6 +2874,7 @@ class GPTQ:
         # hessian_inverse() will release self.H as soon as the lower Cholesky
         # factor is known, so these clones must be taken here.
         group_scale_search_diagonal = None
+        group_scale_search_diagonal_prepared = None
         group_scale_search_hessians = None
         scale_search = getattr(self.qcfg, "scale_search", None)
         if (
@@ -2887,6 +2888,22 @@ class GPTQ:
                 # clone() is required: retaining a diagonal view would keep the
                 # complete dense Hessian storage alive.
                 group_scale_search_diagonal = self.H.diagonal().clone()
+                full_group_columns = (self.columns // self.qcfg.group_size) * self.qcfg.group_size
+                if full_group_columns:
+                    # Every 128-column GPTQ block revisits the same per-group
+                    # activation importance.  Normalize all complete groups
+                    # once with the identical row-wise FP32 operations used by
+                    # find_params_batched; tail groups continue through the
+                    # original per-call path below.
+                    group_scale_search_diagonal_prepared = (
+                        self.quantizer._prepare_scale_search_hessian_batched(
+                            group_scale_search_diagonal[:full_group_columns].reshape(
+                                -1,
+                                self.qcfg.group_size,
+                            ),
+                            method=scale_search,
+                        )
+                    )
             elif scale_search in {
                 ScaleSearchConfig.HESSIAN,
                 ScaleSearchConfig.HYBRID,
@@ -2934,6 +2951,10 @@ class GPTQ:
                 # scale/clipping objective colocated with the CPU fallback.
                 if group_scale_search_diagonal is not None:
                     group_scale_search_diagonal = group_scale_search_diagonal.to(device=cpu_device)
+                if group_scale_search_diagonal_prepared is not None:
+                    group_scale_search_diagonal_prepared = group_scale_search_diagonal_prepared.to(
+                        device=cpu_device
+                    )
                 if group_scale_search_hessians is not None:
                     group_scale_search_hessians = tuple(
                         hessian.to(device=cpu_device) for hessian in group_scale_search_hessians
@@ -2955,6 +2976,7 @@ class GPTQ:
         # module that will not use error feedback.
         if Hinv is None:
             group_scale_search_diagonal = None
+            group_scale_search_diagonal_prepared = None
             group_scale_search_hessians = None
             group_loss_hessian_diag = None
 
@@ -3188,13 +3210,20 @@ class GPTQ:
                         batched_last = i1 + batched_group_count * group_size
                         x_3d = W[:, i1:batched_last].reshape(W.shape[0], batched_group_count, group_size)
                         batched_hessian = None
+                        batched_hessian_prepared = None
                         if (
                             scale_search in {ScaleSearchConfig.ACTIVATION, ScaleSearchConfig.MARLIN_ACTIVATION}
                             and group_scale_search_diagonal is not None
                         ):
+                            # Keep the raw diagonal for fused backends such as
+                            # MPS that perform their own normalization.
                             batched_hessian = group_scale_search_diagonal[i1:batched_last].reshape(
                                 batched_group_count, group_size
                             )
+                            if group_scale_search_diagonal_prepared is not None:
+                                batched_hessian_prepared = group_scale_search_diagonal_prepared[
+                                    batched_first_global_idx : batched_first_global_idx + batched_group_count
+                                ].reshape(batched_group_count, group_size)
                         elif (
                             scale_search in {
                                 ScaleSearchConfig.HESSIAN,
@@ -3253,10 +3282,16 @@ class GPTQ:
                             batched_scale = torch.empty(param_shape, device=W1.device, dtype=torch.float32)
                             batched_zero = torch.empty_like(batched_scale)
                         else:
+                            quantizer_hessian = (
+                                batched_hessian_prepared
+                                if batched_hessian_prepared is not None
+                                else batched_hessian
+                            )
                             batched_scale, batched_zero = self.quantizer.find_params_batched(
                                 x_3d,
                                 weight=True,
-                                hessian=batched_hessian,
+                                hessian=quantizer_hessian,
+                                hessian_prepared=batched_hessian_prepared is not None,
                                 gptq_inverse_cholesky=group_gptq_inverse_cholesky(i1, batched_last),
                             )
 

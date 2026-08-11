@@ -42,6 +42,7 @@ from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_de
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
+from .output_replay import resolve_output_replay_execution
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 
@@ -297,6 +298,7 @@ def _replay_layer_outputs(
         replay_forward_device_map: Dict[str, torch.device] = {}
         replay_force_serial = False
         replay_preserve_module_devices = False
+        replay_install_device_overrides = False
     else:
         replay_batch_count = replay_plan.batch_count
         replay_row_counts = replay_plan.forward_row_counts
@@ -306,9 +308,16 @@ def _replay_layer_outputs(
             f"{replay_plan.subset_index + 1}/{replay_plan.subset_total}"
         )
         replay_modules = replay_plan.modules
-        replay_forward_device_map = replay_plan.forward_device_map
-        replay_force_serial = replay_plan.subset_forward_serial
-        replay_preserve_module_devices = replay_plan.preserve_module_devices
+        quantize_config = getattr(getattr(looper, "gptq_model", None), "quantize_config", None)
+        moe_execution = getattr(getattr(quantize_config, "moe", None), "execution", None)
+        replay_execution = resolve_output_replay_execution(
+            replay_plan,
+            parallel_moe_replay=bool(getattr(moe_execution, "parallel_output_replay", True)),
+        )
+        replay_forward_device_map = replay_execution.forward_device_map
+        replay_force_serial = replay_execution.force_serial
+        replay_preserve_module_devices = replay_execution.preserve_module_devices
+        replay_install_device_overrides = replay_execution.install_device_overrides
 
     replay_msg = (
         "Forward replay "
@@ -324,7 +333,7 @@ def _replay_layer_outputs(
     ).draw()
 
     replay_prev_devices: Dict[str, torch.device] = {}
-    if replay_modules is not None and replay_forward_device_map:
+    if replay_modules is not None and replay_install_device_overrides:
         replay_prev_devices = looper._apply_forward_device_overrides(
             replay_modules,
             replay_forward_device_map,

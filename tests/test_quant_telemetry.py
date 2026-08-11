@@ -27,14 +27,25 @@ class TestQuantTelemetry(unittest.TestCase):
 
     def test_device_thread_pool_cpu_workers_capped_on_free_threading(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
-            with patch("gptqmodel.has_gil_disabled", return_value=True):
+            with patch("gptqmodel.has_gil_disabled", return_value=True), patch(
+                "gptqmodel.os.cpu_count", return_value=256
+            ):
                 _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
         cpu = workers["cpu"]
-        self.assertGreaterEqual(cpu, 2)
-        self.assertLessEqual(cpu, 8)
+        self.assertEqual(cpu, 32)
         self.assertEqual(workers["model_loader:cpu"], min(8, cpu))
         self.assertEqual(workers["model_prefetch:cpu"], 1)
+
+    def test_device_thread_pool_cpu_workers_stay_conservative_on_small_free_threaded_host(self):
+        with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
+            with patch("gptqmodel.has_gil_disabled", return_value=True), patch(
+                "gptqmodel.os.cpu_count", return_value=64
+            ):
+                _build_device_thread_pool()
+        workers = mock_init.call_args.kwargs["workers"]
+        self.assertEqual(workers["cpu"], 8)
+        self.assertEqual(workers["model_loader:cpu"], 8)
 
     def test_device_thread_pool_cpu_workers_keep_historical_default_on_gil(self):
         with patch.object(DeviceThreadPool, "__init__", return_value=None) as mock_init:
@@ -63,8 +74,8 @@ class TestQuantTelemetry(unittest.TestCase):
                 with patch("gptqmodel.has_gil_disabled", return_value=True):
                     _build_device_thread_pool()
         workers = mock_init.call_args.kwargs["workers"]
-        self.assertGreaterEqual(workers["cpu"], 2)
-        self.assertLessEqual(workers["cpu"], 8)
+        self.assertGreaterEqual(workers["cpu"], 8)
+        self.assertLessEqual(workers["cpu"], 32)
 
     def test_log_time_block_is_silent_by_default(self):
         with patch.dict(

@@ -21,6 +21,25 @@ def test_parse_physical_gpus_rejects_duplicates():
         PROFILE._parse_physical_gpus("6,6")
 
 
+def test_profiler_idle_utilization_override_is_bounded(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--idle-max-utilization", "5"])
+    assert PROFILE._parse_args().idle_max_utilization == 5
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--idle-max-utilization", "101"])
+    with pytest.raises(SystemExit):
+        PROFILE._parse_args()
+
+
+def test_profiler_moe_capture_stream_count_must_be_positive(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--moe-capture-streams", "0"])
+    with pytest.raises(SystemExit):
+        PROFILE._parse_args()
+
+
+def test_profiler_can_disable_parallel_moe_output_replay(monkeypatch):
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--no-moe-parallel-output-replay"])
+    assert PROFILE._parse_args().moe_parallel_output_replay is False
+
+
 def test_region_period_snapshots_supports_current_and_legacy_timers():
     class CurrentTimer:
         @staticmethod

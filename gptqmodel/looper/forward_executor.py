@@ -320,7 +320,19 @@ class ForwardExecutor:
                     module_output = None
                     try:
                         with torch.no_grad():
-                            if is_embeddings_module:
+                            lifecycle_hooks = getattr(self.looper.gptq_model, "moe_lifecycle_hooks", None)
+                            take_input_replay = getattr(lifecycle_hooks, "take_input_replay", None)
+                            replay_input = (
+                                take_input_replay(batch_idx)
+                                if apply_moe_config and callable(take_input_replay)
+                                else None
+                            )
+                            if replay_input is not None:
+                                moe_block = lifecycle_hooks.get_moe_block(
+                                    module, self.looper.gptq_model.__class__
+                                )
+                                module_output = moe_block(replay_input)
+                            elif is_embeddings_module:
                                 module_output = module(*layer_input)
                             else:
                                 module_output = module(*layer_input, **additional_inputs)
@@ -373,7 +385,11 @@ class ForwardExecutor:
 
                 rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
                 if rows_for_batch <= 0:
-                    rows_for_batch = self.looper._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
+                    rows_for_batch = (
+                        self.looper._batch_row_count(layer_inputs[batch_idx])
+                        if batch_idx < len(layer_inputs) and layer_inputs[batch_idx]
+                        else 1
+                    )
                     rows_for_batch = max(rows_for_batch, 1)
 
                 processed_rows = min(processed_rows + rows_for_batch, total_rows)
@@ -509,6 +525,12 @@ class ForwardExecutor:
             prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
             results: Dict[int, torch.Tensor | None] = {}
             processed_rows = 0
+            update_replay_kwargs = getattr(
+                self.looper.gptq_model,
+                "update_layer_replay_kwargs_from_output",
+                None,
+            )
+            needs_worker_output = need_outputs or callable(update_replay_kwargs)
 
             if self.looper.gptq_model.quantize_config.compute_device_filter is not None:
                 forward_devices = self.looper.gptq_model.quantize_config.compute_device_filter(devices)
@@ -521,6 +543,14 @@ class ForwardExecutor:
             else:
                 forward_devices = devices
 
+            begin_wave_replay = getattr(processor, "begin_parallel_forward_wave", None)
+            flush_wave_replay = getattr(processor, "flush_parallel_forward_wave", None)
+            abort_wave_replay = getattr(processor, "abort_parallel_forward_wave", None)
+            ordered_wave_replay = all(
+                callable(callback)
+                for callback in (begin_wave_replay, flush_wave_replay, abort_wave_replay)
+            )
+
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0
             num_devices = len(forward_devices)
@@ -529,7 +559,14 @@ class ForwardExecutor:
             calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
             is_balanced_mode = calib_device_cfg == "balanced"
 
-            if is_balanced_mode:
+            if ordered_wave_replay:
+                # Accuracy-preserving Hessian replay can retain only one bounded
+                # consecutive wave. Stripe batch indices across devices so each
+                # wave is [0, 1, ...], never distant contiguous segments such as
+                # [0, 23] that would require an expanding activation queue.
+                for index, device in enumerate(forward_devices):
+                    device_segments[device] = list(range(index, total_batches, num_devices))
+            elif is_balanced_mode:
                 # In balanced mode, assign each batch to the device where its input resides
                 for device in forward_devices:
                     device_segments[device] = []
@@ -568,63 +605,98 @@ class ForwardExecutor:
 
             for position in range(max_segment_length):
                 futures = []
-                for device in forward_devices:
-                    segment_indices = device_segments.get(device, [])
-                    if position >= len(segment_indices):
-                        continue
-                    batch_idx = segment_indices[position]
-                    replica = module_replicas[device]
-                    submitter = (
-                        device_thread_pool.submit_serial
-                        if device.type in ("cuda", "xpu", "npu", "mps")
-                        else device_thread_pool.submit
-                    )
+                wave_batches = [
+                    device_segments[device][position]
+                    for device in forward_devices
+                    if position < len(device_segments.get(device, []))
+                ]
+                wave_started = False
+                try:
+                    if ordered_wave_replay:
+                        begin_wave_replay(wave_batches, cur_layer_device)
+                        wave_started = True
 
-                    futures.append(
-                        submitter(
-                            device,
-                            forward_batch_worker_fn,
-                            replica,
-                            processor,
-                            batch_idx,
-                            layer_inputs[batch_idx],
-                            layer_input_kwargs[batch_idx],
-                            attention_masks[batch_idx],
-                            position_ids[batch_idx] if position_ids else None,
-                            gptq_model=self.looper.gptq_model,
-                            support_batch_quantize=self.looper.support_batch_quantize,
-                            is_embeddings_module=is_embeddings_module,
-                            need_output=need_outputs,
-                            reuse_kv=reuse_kv,
-                            prev_kv=prev_kv,
-                            write_shared_kv_cache=write_shared_kv_cache,
+                    for device in forward_devices:
+                        segment_indices = device_segments.get(device, [])
+                        if position >= len(segment_indices):
+                            continue
+                        batch_idx = segment_indices[position]
+                        replica = module_replicas[device]
+                        submitter = (
+                            device_thread_pool.submit_serial
+                            if device.type in ("cuda", "xpu", "npu", "mps")
+                            else device_thread_pool.submit
                         )
-                    )
 
-                for fut in futures:
-                    batch_idx, module_output, kv_next = fut.result()
-                    if need_outputs and module_output is not None:
-                        input_device = layer_inputs[batch_idx][0].device if layer_inputs[batch_idx] else cur_layer_device
-                        target_device = input_device if calib_device_cfg is not None else cur_layer_device
-                        # Move each batch result to its final target device as
-                        # soon as the worker finishes.
-                        primary = module_output[0] if isinstance(module_output, tuple) else module_output
-                        results[batch_idx] = move_to(primary, device=target_device)
-                        del module_output
-                    if (reuse_kv or write_shared_kv_cache) and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
-                        shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
+                        futures.append(
+                            submitter(
+                                device,
+                                forward_batch_worker_fn,
+                                replica,
+                                processor,
+                                batch_idx,
+                                layer_inputs[batch_idx],
+                                layer_input_kwargs[batch_idx],
+                                attention_masks[batch_idx],
+                                position_ids[batch_idx] if position_ids else None,
+                                gptq_model=self.looper.gptq_model,
+                                support_batch_quantize=self.looper.support_batch_quantize,
+                                is_embeddings_module=is_embeddings_module,
+                                need_output=needs_worker_output,
+                                reuse_kv=reuse_kv,
+                                prev_kv=prev_kv,
+                                write_shared_kv_cache=write_shared_kv_cache,
+                            )
+                        )
 
-                    rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
-                    if rows_for_batch <= 0:
-                        rows_for_batch = self.looper._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
-                        rows_for_batch = max(rows_for_batch, 1)
+                    for fut in futures:
+                        batch_idx, module_output, kv_next = fut.result()
+                        if module_output is not None:
+                            input_device = layer_inputs[batch_idx][0].device if layer_inputs[batch_idx] else cur_layer_device
+                            target_device = input_device if calib_device_cfg is not None else cur_layer_device
+                            if callable(update_replay_kwargs):
+                                update_replay_kwargs(
+                                    layer=module,
+                                    layer_output=module_output,
+                                    layer_input_kwargs=layer_input_kwargs[batch_idx],
+                                    target_device=target_device,
+                                )
+                            if need_outputs:
+                                # Move each batch result to its final target
+                                # device as soon as the worker finishes.
+                                primary = module_output[0] if isinstance(module_output, tuple) else module_output
+                                results[batch_idx] = move_to(primary, device=target_device)
+                            del module_output
+                        if (reuse_kv or write_shared_kv_cache) and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
+                            shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
 
-                    processed_rows = min(processed_rows + rows_for_batch, total_rows)
-                    if progress_pb is not None:
-                        if progress_title:
-                            progress_pb.title(progress_title)
-                        progress_pb.current_iter_step = processed_rows
-                        progress_pb.subtitle(f"{stage_label} rows {processed_rows}/{total_rows}").draw()
+                        rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
+                        if rows_for_batch <= 0:
+                            rows_for_batch = (
+                                self.looper._batch_row_count(layer_inputs[batch_idx])
+                                if batch_idx < len(layer_inputs) and layer_inputs[batch_idx]
+                                else 1
+                            )
+                            rows_for_batch = max(rows_for_batch, 1)
+
+                        processed_rows = min(processed_rows + rows_for_batch, total_rows)
+                        if progress_pb is not None:
+                            if progress_title:
+                                progress_pb.title(progress_title)
+                            progress_pb.current_iter_step = processed_rows
+                            progress_pb.subtitle(f"{stage_label} rows {processed_rows}/{total_rows}").draw()
+
+                    if ordered_wave_replay:
+                        flush_submitter = (
+                            device_thread_pool.submit_serial
+                            if cur_layer_device.type in ("cuda", "xpu", "npu", "mps")
+                            else device_thread_pool.submit
+                        )
+                        flush_submitter(cur_layer_device, flush_wave_replay).result()
+                        wave_started = False
+                finally:
+                    if wave_started:
+                        abort_wave_replay()
         finally:
             for ctx in moe_contexts:
                 try:

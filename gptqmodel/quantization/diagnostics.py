@@ -328,6 +328,40 @@ def analyze_group_index(
     }
 
 
+def polynomial_kid_mmd2(source_features: torch.Tensor, reconstructed_features: torch.Tensor) -> float:
+    """Return a KID-style polynomial-kernel MMD^2 for paired feature sets.
+
+    Image KID uses Inception embeddings. LLM callers pass raw output/logit
+    features instead, and must label that feature domain when reporting the
+    value. The biased finite-sample form is deliberate: identical paired sets
+    produce exactly zero instead of a negative unbiased-estimator fluctuation.
+    """
+
+    if (
+        source_features.ndim != 2
+        or reconstructed_features.ndim != 2
+        or source_features.shape[1] != reconstructed_features.shape[1]
+        or source_features.shape[1] == 0
+        or source_features.shape[0] == 0
+        or reconstructed_features.shape[0] == 0
+    ):
+        raise ValueError("KID feature sets must be non-empty two-dimensional tensors with equal widths.")
+
+    source = source_features.detach().to(device="cpu", dtype=torch.float64)
+    reconstructed = reconstructed_features.detach().to(device="cpu", dtype=torch.float64)
+    feature_scale = 1.0 / max(int(source.shape[1]), 1)
+
+    def polynomial_kernel(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        return (left @ right.T * feature_scale + 1.0).pow(3)
+
+    distance = (
+        polynomial_kernel(source, source).mean()
+        + polynomial_kernel(reconstructed, reconstructed).mean()
+        - 2.0 * polynomial_kernel(source, reconstructed).mean()
+    ).clamp_min(0.0)
+    return float(distance.item())
+
+
 def analyze_output_error(
     inputs: torch.Tensor,
     source_weight: torch.Tensor,
@@ -365,6 +399,13 @@ def analyze_output_error(
     source_log_prob = torch.log_softmax(source_output, dim=-1)
     reconstructed_log_prob = torch.log_softmax(reconstructed_output, dim=-1)
     kld = torch.sum(source_log_prob.exp() * (source_log_prob - reconstructed_log_prob), dim=-1)
+    # KID is conventionally computed on image Inception embeddings.  For LLM
+    # diagnostics we apply the same degree-3 polynomial-kernel MMD^2 to raw
+    # output/logit features and name the feature domain explicitly.  The biased
+    # finite-sample form is intentional: paired identical outputs must report
+    # exactly zero instead of a negative unbiased-estimator fluctuation.
+    output_logit_kid = polynomial_kid_mmd2(source_output, reconstructed_output)
+
     result = {
         "available": True,
         "sample_count": int(sample.shape[0]),
@@ -377,11 +418,19 @@ def analyze_output_error(
         "softmax_kld_median": float(kld.median().item()),
         "softmax_kld_p95": float(torch.quantile(kld, 0.95).item()),
         "softmax_kld_max": float(kld.max().item()),
+        "logit_kid_polynomial_mmd2": output_logit_kid,
         "top1_agreement": float(
             (source_output.argmax(dim=-1) == reconstructed_output.argmax(dim=-1)).float().mean().item()
         ),
     }
-    del sample, source_output, reconstructed_output, difference, absolute, kld
+    del (
+        sample,
+        source_output,
+        reconstructed_output,
+        difference,
+        absolute,
+        kld,
+    )
     return result
 
 
@@ -1017,6 +1066,10 @@ def render_quantization_diagnostics_markdown(diagnostics: Mapping[str, Any]) -> 
                 ["Post-quant sampled activation rows", output_error.get("sample_count", 0)],
                 ["Mean module output MAE", _format_number(output_error.get("mean_module_absolute_error"))],
                 ["Mean module softmax KLD", _format_number(output_error.get("mean_module_softmax_kld"))],
+                [
+                    "Mean module logit KID polynomial MMD^2",
+                    _format_number(output_error.get("mean_module_logit_kid_polynomial_mmd2")),
+                ],
                 ["Scale/channel records", scale_channels.get("module_count", 0)],
                 ["Code-fingerprint records", fingerprints.get("module_count", 0)],
                 ["Pre-pack sampled code mismatches", fingerprints.get("prepack_mismatch_count", 0)],
@@ -1125,13 +1178,24 @@ def render_quantization_diagnostics_markdown(diagnostics: Mapping[str, Any]) -> 
     lines.extend(["", "## Post-quantization output error", ""])
     lines.append(
         "Metrics replay the same bounded calibration inputs through dense and reconstructed GPTQ weights. "
-        "Softmax KLD is token-distribution KLD only for an LM head; for hidden projections it is a sensitivity signal."
+        "Softmax KLD is token-distribution KLD only for an LM head; for hidden projections it is a sensitivity signal. "
+        "Logit KID is the KID polynomial-kernel MMD^2 estimator applied to raw output features, not image Inception "
+        "embeddings."
     )
     lines.append("")
     if output_error_records:
         lines.extend(
             _markdown_table(
-                ["Module", "Samples", "Mean abs. error", "Relative L2", "Mean KLD", "P95 KLD", "Top-1"],
+                [
+                    "Module",
+                    "Samples",
+                    "Mean abs. error",
+                    "Relative L2",
+                    "Mean KLD",
+                    "P95 KLD",
+                    "Logit KID MMD^2",
+                    "Top-1",
+                ],
                 [
                     [
                         _display_module(record),
@@ -1140,6 +1204,7 @@ def render_quantization_diagnostics_markdown(diagnostics: Mapping[str, Any]) -> 
                         _format_percent(record.get("relative_l2_error")),
                         _format_number(record.get("softmax_kld_mean")),
                         _format_number(record.get("softmax_kld_p95")),
+                        _format_number(record.get("logit_kid_polynomial_mmd2")),
                         _format_percent(record.get("top1_agreement")),
                     ]
                     for record in output_error_records[:40]

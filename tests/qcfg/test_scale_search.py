@@ -1,12 +1,16 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
 from gptqmodel.looper import gptq_processor
 from gptqmodel.looper.gptq_processor import clone_gptq_config_for_module, log_scale_search_config
 from gptqmodel.quantization import QuantizeConfig, Quantizer, ScaleSearchConfig
+from gptqmodel.quantization.config import AdaptiveClippingConfig
+from gptqmodel.quantization.gptq import GPTQ
 
 
 def _run_scale_search(
@@ -227,7 +231,11 @@ def test_gptq_processor_logs_scale_search_during_startup(monkeypatch):
         "log_scale_search_config",
         lambda active_qcfg: summaries.append(active_qcfg.scale_search_cli_summary()),
     )
-    monkeypatch.setattr(gptq_processor.LoopProcessor, "__init__", lambda self, **kwargs: None)
+    def _mock_loop_processor_init(self, **kwargs):
+        self.calibration_dataset = []
+        self.qcfg = kwargs["qcfg"]
+
+    monkeypatch.setattr(gptq_processor.LoopProcessor, "__init__", _mock_loop_processor_init)
 
     gptq_processor.GPTQProcessor(
         tokenizer=None,
@@ -474,6 +482,418 @@ def test_vectorized_shrink_grid_is_bitwise_equal_to_pre_optimization_grid():
     actual = Quantizer._scale_search_shrink_factors(80, 100, torch.device("cpu"))
 
     assert torch.equal(actual, expected)
+
+
+def test_scale_search_shrink_grid_cache_reuses_exact_task_local_tensor():
+    qcfg = QuantizeConfig(scale_search=ScaleSearchConfig.ACTIVATION, offload_to_disk=False)
+    quantizer = Quantizer(qcfg)
+
+    first = quantizer._cached_scale_search_shrink_factors(80, 100, torch.device("cpu"))
+    second = quantizer._cached_scale_search_shrink_factors(80, 100, torch.device("cpu"))
+
+    assert first is second
+    assert torch.equal(first, Quantizer._scale_search_shrink_factors(80, 100, torch.device("cpu")))
+    assert all("shrink" not in key for key in quantizer.state_dict())
+
+
+def test_scale_search_shrink_grid_cache_invalidates_for_changed_grid():
+    qcfg = QuantizeConfig(scale_search=ScaleSearchConfig.ACTIVATION, offload_to_disk=False)
+    quantizer = Quantizer(qcfg)
+
+    first = quantizer._cached_scale_search_shrink_factors(80, 100, torch.device("cpu"))
+    changed = quantizer._cached_scale_search_shrink_factors(80, 200, torch.device("cpu"))
+
+    assert changed is not first
+    assert torch.equal(changed, 1 - torch.arange(80, dtype=torch.float32) / 200)
+
+
+def test_scale_search_shrink_grid_cache_invalidates_for_candidate_count():
+    qcfg = QuantizeConfig(scale_search=ScaleSearchConfig.ACTIVATION, offload_to_disk=False)
+    quantizer = Quantizer(qcfg)
+
+    first = quantizer._cached_scale_search_shrink_factors(80, 100, torch.device("cpu"))
+    changed = quantizer._cached_scale_search_shrink_factors(79, 100, torch.device("cpu"))
+
+    assert changed is not first
+    assert torch.equal(changed, 1 - torch.arange(79, dtype=torch.float32) / 100)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible CUDA devices")
+def test_scale_search_shrink_grid_cache_is_device_local():
+    qcfg = QuantizeConfig(scale_search=ScaleSearchConfig.ACTIVATION, offload_to_disk=False)
+    quantizer = Quantizer(qcfg)
+
+    first = quantizer._cached_scale_search_shrink_factors(80, 100, torch.device("cuda:0"))
+    changed = quantizer._cached_scale_search_shrink_factors(80, 100, torch.device("cuda:1"))
+
+    assert changed is not first
+    assert first.device == torch.device("cuda:0")
+    assert changed.device == torch.device("cuda:1")
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_batched_activation_search_prepared_hessian_is_bitwise_exact(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the prepared-Hessian A/B")
+
+    generator = torch.Generator(device=device).manual_seed(9102)
+    weights = torch.randn((32, 2, 64), generator=generator, device=device, dtype=torch.float32)
+    hessian = torch.rand((2, 64), generator=generator, device=device, dtype=torch.float32)
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=64,
+        sym=True,
+        mse=2.0,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        scale_search_candidate_chunk_size=80,
+        offload_to_disk=False,
+    )
+    reference = Quantizer(qcfg)
+    reference.configure(perchannel=True, grid=100, maxshrink=0.8)
+    expected_scale, expected_zero = reference.find_params_batched(
+        weights,
+        weight=True,
+        hessian=hessian,
+    )
+
+    candidate = Quantizer(qcfg)
+    candidate.configure(perchannel=True, grid=100, maxshrink=0.8)
+    prepared = candidate._prepare_scale_search_hessian_batched(
+        hessian,
+        method=ScaleSearchConfig.ACTIVATION,
+    )
+    actual_scale, actual_zero = candidate.find_params_batched(
+        weights,
+        weight=True,
+        hessian=prepared,
+        hessian_prepared=True,
+    )
+
+    assert torch.equal(actual_scale, expected_scale)
+    assert torch.equal(actual_zero, expected_zero)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("sym,bits", [(True, 2), (False, 4), (True, 8)])
+@pytest.mark.parametrize("importance_kind", ["zero", "constant", "skewed", "invalid"])
+def test_prepared_activation_hessian_matches_raw_across_accuracy_spectrum(
+    device, dtype, sym, bits, importance_kind
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the prepared-Hessian A/B")
+
+    generator = torch.Generator(device=device).manual_seed(7219)
+    storage = torch.randn((3, 2, 128), generator=generator, device=device, dtype=dtype)
+    # Exercise the non-contiguous input canonicalization path while retaining
+    # an exact raw/prepared comparison for a final partial-like odd row count.
+    weights = storage[..., ::2]
+    assert not weights.is_contiguous()
+    if importance_kind == "zero":
+        hessian = torch.zeros((2, 64), device=device)
+    elif importance_kind == "constant":
+        hessian = torch.full((2, 64), 3.25, device=device)
+    elif importance_kind == "skewed":
+        hessian = torch.logspace(-6, 6, 128, device=device).reshape(2, 64)
+    else:
+        hessian = torch.ones((2, 64), device=device)
+        hessian[0, 0] = torch.nan
+        hessian[0, 1] = torch.inf
+        hessian[1, 0] = -4.0
+
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=64,
+        sym=sym,
+        mse=2.0,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        scale_search_candidate_chunk_size=17,
+        offload_to_disk=False,
+    )
+    raw = Quantizer(qcfg)
+    raw.configure(perchannel=True, grid=31, maxshrink=0.8)
+    expected_scale, expected_zero = raw.find_params_batched(weights, weight=True, hessian=hessian)
+
+    candidate = Quantizer(qcfg)
+    candidate.configure(perchannel=True, grid=31, maxshrink=0.8)
+    prepared = candidate._prepare_scale_search_hessian_batched(
+        hessian,
+        method=ScaleSearchConfig.ACTIVATION,
+    )
+    actual_scale, actual_zero = candidate.find_params_batched(
+        weights,
+        weight=True,
+        hessian=prepared,
+        hessian_prepared=True,
+    )
+
+    assert torch.equal(actual_scale, expected_scale)
+    assert torch.equal(actual_zero, expected_zero)
+
+
+@pytest.mark.parametrize(
+    "method,hessian,match",
+    [
+        (ScaleSearchConfig.MSE, torch.ones(2, 64), "only accepts"),
+        (ScaleSearchConfig.ACTIVATION, None, "must have shape"),
+        (ScaleSearchConfig.ACTIVATION, torch.ones(1, 64), "must have shape"),
+        (ScaleSearchConfig.ACTIVATION, torch.ones(2, 64, dtype=torch.bfloat16), "must be FP32"),
+    ],
+)
+def test_prepared_hessian_contract_rejects_ambiguous_or_inexact_state(method, hessian, match):
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=64,
+        sym=True,
+        mse=2.0,
+        scale_search=method,
+        offload_to_disk=False,
+    )
+    quantizer = Quantizer(qcfg)
+    quantizer.configure(perchannel=True, grid=10, maxshrink=0.8)
+    with pytest.raises(ValueError, match=match):
+        quantizer.find_params_batched(
+            torch.randn(3, 2, 64),
+            weight=True,
+            hessian=hessian,
+            hessian_prepared=True,
+        )
+
+
+@pytest.mark.parametrize("method,mse", [(None, 2.0), ("activation", 2.0), (None, 0.0)])
+def test_batched_scale_search_resolves_implicit_string_and_disabled_methods(method, mse):
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=64,
+        sym=True,
+        mse=mse,
+        scale_search=ScaleSearchConfig.MSE,
+        offload_to_disk=False,
+    )
+    quantizer = Quantizer(qcfg)
+    quantizer.qcfg.scale_search = method
+    quantizer.qcfg.mse = mse
+    quantizer.configure(perchannel=True, grid=10, maxshrink=0.8)
+
+    scale, zero = quantizer.find_params_batched(
+        torch.randn(3, 2, 64),
+        weight=True,
+        hessian=torch.ones(2, 64),
+    )
+
+    assert scale.shape == (3, 2)
+    assert zero.shape == (3, 2)
+
+
+@pytest.mark.parametrize(
+    "mse,adaptive_clipping",
+    [
+        (0.0, AdaptiveClippingConfig(enabled=False)),
+        (2.0, AdaptiveClippingConfig(enabled=True, per_group=True)),
+    ],
+)
+def test_prepared_hessian_contract_is_enforced_before_disabled_or_adaptive_paths(mse, adaptive_clipping):
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=64,
+        sym=True,
+        mse=mse,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        adaptive_clipping=adaptive_clipping,
+        offload_to_disk=False,
+    )
+    quantizer = Quantizer(qcfg)
+    quantizer.configure(perchannel=True, grid=10, maxshrink=0.8)
+    hessian = torch.ones(2, 64, dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="active activation|must be FP32"):
+        quantizer.find_params_batched(
+            torch.randn(3, 2, 64),
+            weight=True,
+            hessian=hessian,
+            hessian_prepared=True,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_prepared_hessian_contract_rejects_cross_device_state():
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=64,
+        sym=True,
+        mse=2.0,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        offload_to_disk=False,
+    )
+    quantizer = Quantizer(qcfg)
+    quantizer.configure(perchannel=True, grid=10, maxshrink=0.8)
+    with pytest.raises(ValueError, match="colocated"):
+        quantizer.find_params_batched(
+            torch.randn(3, 2, 64, device="cuda"),
+            weight=True,
+            hessian=torch.ones(2, 64),
+            hessian_prepared=True,
+        )
+
+
+def _small_grouped_activation_gptq(device="cpu", method=ScaleSearchConfig.ACTIVATION, group_size=4):
+    torch.manual_seed(8042)
+    layer = torch.nn.Linear(10, 5, bias=False, dtype=torch.float32, device=device).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        act_group_aware=False,
+        mse=2.0,
+        scale_search=method,
+        offload_to_disk=False,
+    )
+    task = GPTQ(layer, qcfg=qcfg)
+    task.quantizer.configure(perchannel=True, grid=20, maxshrink=0.8)
+    task.add_batch(torch.randn(3, 10, device=device), None)
+    return task
+
+
+def test_gptq_prepares_full_groups_once_and_keeps_raw_partial_group(monkeypatch):
+    task = _small_grouped_activation_gptq()
+    prepare_calls = []
+    batched_calls = []
+    scalar_hessian_shapes = []
+    original_prepare = task.quantizer._prepare_scale_search_hessian_batched
+    original_batched = task.quantizer.find_params_batched
+    original_scalar = task.quantizer.find_params
+
+    def record_prepare(hessian, *, method):
+        prepare_calls.append((tuple(hessian.shape), method))
+        return original_prepare(hessian, method=method)
+
+    def record_batched(*args, **kwargs):
+        batched_calls.append((tuple(kwargs["hessian"].shape), kwargs["hessian_prepared"]))
+        return original_batched(*args, **kwargs)
+
+    def record_scalar(*args, **kwargs):
+        hessian = kwargs.get("hessian")
+        scalar_hessian_shapes.append(None if hessian is None else tuple(hessian.shape))
+        return original_scalar(*args, **kwargs)
+
+    monkeypatch.setattr(task.quantizer, "_prepare_scale_search_hessian_batched", record_prepare)
+    monkeypatch.setattr(task.quantizer, "find_params_batched", record_batched)
+    monkeypatch.setattr(task.quantizer, "find_params", record_scalar)
+    result = task.quantize(blocksize=8)
+
+    assert prepare_calls == [((2, 4), ScaleSearchConfig.ACTIVATION)]
+    assert batched_calls == [((2, 4), True)]
+    assert scalar_hessian_shapes == [(2,)]
+    assert torch.isfinite(result[0]).all()
+
+
+def test_gptq_prepared_hessian_is_bitwise_repeatable_with_partial_group():
+    first = _small_grouped_activation_gptq().quantize(blocksize=8)
+    second = _small_grouped_activation_gptq().quantize(blocksize=8)
+
+    assert torch.equal(first[0], second[0])
+    assert all(torch.equal(left, right) for left, right in zip(first[1], second[1]))
+    assert all(torch.equal(left, right) for left, right in zip(first[2], second[2]))
+    assert torch.equal(first[3], second[3])
+    assert first[5:] == second[5:]
+
+
+def test_gptq_activation_search_with_only_a_partial_group_stays_on_raw_hessian_path(monkeypatch):
+    task = _small_grouped_activation_gptq(group_size=16)
+    prepare = Mock(wraps=task.quantizer._prepare_scale_search_hessian_batched)
+    monkeypatch.setattr(task.quantizer, "_prepare_scale_search_hessian_batched", prepare)
+
+    result = task.quantize(blocksize=8)
+
+    prepare.assert_not_called()
+    assert torch.isfinite(result[0]).all()
+
+
+def test_gptq_activation_search_fails_closed_to_raw_hessian_when_preparation_is_unavailable(monkeypatch):
+    task = _small_grouped_activation_gptq()
+    batched_calls = []
+    original_batched = task.quantizer.find_params_batched
+
+    monkeypatch.setattr(task.quantizer, "_prepare_scale_search_hessian_batched", lambda *_args, **_kwargs: None)
+
+    def record_batched(*args, **kwargs):
+        batched_calls.append((kwargs["hessian"].clone(), kwargs["hessian_prepared"]))
+        return original_batched(*args, **kwargs)
+
+    monkeypatch.setattr(task.quantizer, "find_params_batched", record_batched)
+    result = task.quantize(blocksize=8)
+
+    assert batched_calls[0][0].shape == (2, 4)
+    assert batched_calls[0][1] is False
+    assert torch.isfinite(result[0]).all()
+
+
+def test_gptq_drops_prepared_hessian_when_inverse_is_unavailable(monkeypatch):
+    task = _small_grouped_activation_gptq()
+    batched_calls = []
+    original_batched = task.quantizer.find_params_batched
+
+    monkeypatch.setattr(task, "hessian_inverse", lambda *_args, **_kwargs: (None, 0.0))
+
+    def record_batched(*args, **kwargs):
+        batched_calls.append((kwargs["hessian"], kwargs["hessian_prepared"]))
+        return original_batched(*args, **kwargs)
+
+    monkeypatch.setattr(task.quantizer, "find_params_batched", record_batched)
+    result = task.quantize(blocksize=8)
+
+    assert batched_calls == [(None, False), (None, False)]
+    assert torch.isfinite(result[0]).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gptq_cpu_oom_fallback_moves_prepared_hessian_with_weights(monkeypatch):
+    task = _small_grouped_activation_gptq(device="cuda")
+    original_inverse = task.hessian_inverse
+    inverse_devices = []
+    search_devices = []
+    original_batched = task.quantizer.find_params_batched
+
+    def fail_once_then_invert(hessian, *args, **kwargs):
+        inverse_devices.append(hessian.device.type)
+        if len(inverse_devices) == 1:
+            raise RuntimeError("CUDA out of memory")
+        return original_inverse(hessian, *args, **kwargs)
+
+    monkeypatch.setattr(task, "hessian_inverse", fail_once_then_invert)
+
+    def record_batched(*args, **kwargs):
+        search_devices.append((args[0].device.type, kwargs["hessian"].device.type))
+        return original_batched(*args, **kwargs)
+
+    monkeypatch.setattr(task.quantizer, "find_params_batched", record_batched)
+    result = task.quantize(blocksize=8)
+
+    assert inverse_devices == ["cuda", "cpu"]
+    assert search_devices == [("cpu", "cpu")]
+    assert result[0].device.type == "cuda"
+    assert torch.isfinite(result[0]).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gptq_correlated_search_cpu_oom_fallback_has_no_prepared_diagonal(monkeypatch):
+    task = _small_grouped_activation_gptq(device="cuda", method=ScaleSearchConfig.HESSIAN)
+    original_inverse = task.hessian_inverse
+    inverse_calls = 0
+
+    def fail_once_then_invert(hessian, *args, **kwargs):
+        nonlocal inverse_calls
+        inverse_calls += 1
+        if inverse_calls == 1:
+            raise RuntimeError("CUDA out of memory")
+        return original_inverse(hessian, *args, **kwargs)
+
+    monkeypatch.setattr(task, "hessian_inverse", fail_once_then_invert)
+    result = task.quantize(blocksize=8)
+
+    assert inverse_calls == 2
+    assert result[0].device.type == "cuda"
+    assert torch.isfinite(result[0]).all()
 
 
 def test_correlated_scale_search_uses_larger_bounded_candidate_chunks():

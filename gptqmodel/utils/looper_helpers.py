@@ -268,7 +268,11 @@ def clone_module_for_devices(
 
     def _prepare_module(target_device: torch.device, step_name: str) -> None:
         start_ts = time.perf_counter()
-        module.to(target_device)
+        # Lazy shell layers deliberately retain untouched parameters on meta.
+        # ``Module.to()`` rejects a mixed materialized/meta tree even though the
+        # current forward only needs the materialized subset.  Rehome registered
+        # tensors individually so live tensors move while meta placeholders stay
+        # meta in every replica.
         module.eval()
         rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
         clear_state_fn(module)
@@ -387,6 +391,9 @@ def forward_batch_worker(
     except StopForward:
         module_output = None
     finally:
+        seal_parallel_batch = getattr(processor, "seal_parallel_forward_batch", None)
+        if callable(seal_parallel_batch):
+            seal_parallel_batch(batch_index, torch.device(module_device))
         if mask_tls is not None:
             mask_tls.value = None
         processor._set_current_batch_index(None)

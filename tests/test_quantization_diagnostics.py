@@ -16,6 +16,7 @@ from gptqmodel.quantization.diagnostics import (
     compare_quant_code_samples,
     render_quantization_diagnostics_markdown,
     resolve_quantization_diagnostics_mode,
+    polynomial_kid_mmd2,
     sample_packed_quant_codes,
     sample_reconstructed_quant_codes,
     summarize_quant_code_fingerprints,
@@ -150,7 +151,42 @@ def test_output_error_reports_kld_and_mean_error_on_identical_inputs():
     assert summary["mean_absolute_error"] == pytest.approx(0.1875)
     assert summary["rmse"] > summary["mean_absolute_error"]
     assert summary["softmax_kld_mean"] > 0
+    assert summary["logit_kid_polynomial_mmd2"] > 0
     assert 0 <= summary["top1_agreement"] <= 1
+
+
+def test_output_error_kid_is_zero_for_identical_outputs():
+    inputs = torch.tensor([[1.0, -1.0], [0.5, 2.0]], dtype=torch.float32)
+    weight = torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=torch.float32)
+
+    summary = analyze_output_error(inputs, weight, weight.clone())
+
+    assert summary["softmax_kld_mean"] == pytest.approx(0.0)
+    assert summary["logit_kid_polynomial_mmd2"] == pytest.approx(0.0)
+
+
+def test_polynomial_kid_rejects_invalid_feature_geometry():
+    with pytest.raises(ValueError, match="KID feature sets"):
+        polynomial_kid_mmd2(torch.empty(0, 2), torch.empty(0, 2))
+    with pytest.raises(ValueError, match="KID feature sets"):
+        polynomial_kid_mmd2(torch.ones(2), torch.ones(2))
+    with pytest.raises(ValueError, match="KID feature sets"):
+        polynomial_kid_mmd2(torch.ones(2, 2), torch.ones(2, 3))
+    with pytest.raises(ValueError, match="KID feature sets"):
+        polynomial_kid_mmd2(torch.empty(2, 0), torch.empty(2, 0))
+
+
+def test_polynomial_kid_is_symmetric_and_permutation_invariant():
+    source = torch.tensor([[1.0, -2.0], [3.0, 0.5], [-1.0, 4.0]])
+    reconstructed = torch.tensor([[1.25, -2.0], [2.5, 0.75], [-0.5, 3.0]])
+
+    forward = polynomial_kid_mmd2(source, reconstructed)
+    reverse = polynomial_kid_mmd2(reconstructed, source)
+    permuted = polynomial_kid_mmd2(source[[2, 0, 1]], reconstructed[[1, 2, 0]])
+
+    assert forward > 0
+    assert reverse == pytest.approx(forward)
+    assert permuted == pytest.approx(forward)
 
 
 def test_during_quantization_markdown_is_human_readable_and_zero_based():
@@ -208,6 +244,7 @@ def test_during_quantization_markdown_is_human_readable_and_zero_based():
                 "sample_count": 8,
                 "mean_module_absolute_error": 0.01,
                 "mean_module_softmax_kld": 0.003,
+                "mean_module_logit_kid_polynomial_mmd2": 0.125,
                 "records": [
                     {
                         "layer": 0,
@@ -218,6 +255,7 @@ def test_during_quantization_markdown_is_human_readable_and_zero_based():
                         "relative_l2_error": 0.02,
                         "softmax_kld_mean": 0.003,
                         "softmax_kld_p95": 0.005,
+                        "logit_kid_polynomial_mmd2": 0.125,
                         "top1_agreement": 0.875,
                     }
                 ],
@@ -236,6 +274,8 @@ def test_during_quantization_markdown_is_human_readable_and_zero_based():
     assert "## Canonical GPTQ reconstruction error" in markdown
     assert "## Post-quantization output error" in markdown
     assert "Mean KLD" in markdown
+    assert "Logit KID MMD^2" in markdown
+    assert "not image Inception embeddings" in markdown
     assert "Mean module output MAE" in markdown
     assert "## Localized reconstruction rows and input features" in markdown
     assert "## Logical-code lifecycle" in markdown

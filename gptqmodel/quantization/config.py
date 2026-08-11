@@ -208,6 +208,10 @@ class ShardStrategy(str, Enum):
     """One output shard per transformer layer. Non-layer tensors (embeddings,
     final norm, lm_head) are grouped into a separate non-layer shard."""
 
+    PER_LAYER_MOE = "per_layer_moe"
+    """One dense/shared shard per transformer layer plus bounded shards for
+    routed expert projection modules declared by the model's module tree."""
+
 
 class FallbackStrategy(str, Enum):
     """
@@ -1469,47 +1473,79 @@ class LengthAwareConfig:
         target_bucket_count: int,
         min_bucket_size: int,
     ) -> List[Tuple[int, int]]:
-        """Split sorted lengths into a target number of buckets.
+        """Split sorted lengths into balanced, value-safe quantile buckets.
 
-        Greedily splits the bucket with the largest max/min length ratio until
-        the target bucket count is reached or no bucket can be split while
-        respecting `min_bucket_size`.
+        Dynamic programming chooses cumulative cuts nearest the equal-count
+        quantiles. Cuts may only land where token length changes, because
+        runtime lookup is value-based and cannot assign identical lengths to
+        different buckets. If the requested count is infeasible, return the
+        largest feasible partition so the caller can report the exact collapse.
         """
-        intervals: List[Tuple[int, int]] = [(0, len(sorted_lengths))]
-        unsplittable: set = set()
-        while len(intervals) < target_bucket_count:
-            best_idx = -1
-            best_ratio = -1.0
-            for idx, (lo, hi) in enumerate(intervals):
-                if (lo, hi) in unsplittable:
-                    continue
-                if hi - lo < 2 * min_bucket_size:
-                    unsplittable.add((lo, hi))
-                    continue
-                min_len = sorted_lengths[lo]
-                max_len = sorted_lengths[hi - 1]
-                if max_len <= min_len:
-                    unsplittable.add((lo, hi))
-                    continue
-                ratio = max_len / min_len
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best_idx = idx
-            if best_idx < 0:
-                break
-            lo, hi = intervals[best_idx]
-            min_len = sorted_lengths[lo]
-            max_len = sorted_lengths[hi - 1]
-            target_val = math.isqrt(min_len * max_len)
-            mid = LengthAwareConfig._value_change_split(
-                sorted_lengths, lo, hi, min_bucket_size, target_val
-            )
-            if mid is None:
-                unsplittable.add((lo, hi))
-                continue
-            intervals[best_idx] = (lo, mid)
-            intervals.append((mid, hi))
-        return intervals
+
+        sample_count = len(sorted_lengths)
+        value_change_indexes = [
+            index
+            for index in range(1, sample_count)
+            if sorted_lengths[index - 1] < sorted_lengths[index]
+        ]
+
+        def _balanced_partition(bucket_count: int) -> Optional[List[Tuple[int, int]]]:
+            if bucket_count == 1:
+                return [(0, sample_count)]
+            if sample_count < bucket_count * min_bucket_size:
+                return None
+
+            # DP state is keyed by the most recent value-safe cut. A prefix
+            # minimum keeps each cut stage linear in the distinct-length count.
+            previous_costs = {0: 0.0}
+            parents: List[Dict[int, int]] = []
+            for cut_number in range(1, bucket_count):
+                ideal_cut = sample_count * cut_number / bucket_count
+                current_costs: Dict[int, float] = {}
+                current_parents: Dict[int, int] = {}
+                previous_items = sorted(previous_costs.items())
+                previous_cursor = 0
+                best_previous_index: Optional[int] = None
+                best_previous_cost = float("inf")
+
+                for cut_index in value_change_indexes:
+                    if cut_index < cut_number * min_bucket_size:
+                        continue
+                    if sample_count - cut_index < (bucket_count - cut_number) * min_bucket_size:
+                        continue
+                    while (
+                        previous_cursor < len(previous_items)
+                        and previous_items[previous_cursor][0] <= cut_index - min_bucket_size
+                    ):
+                        candidate_index, candidate_cost = previous_items[previous_cursor]
+                        if candidate_cost < best_previous_cost:
+                            best_previous_index = candidate_index
+                            best_previous_cost = candidate_cost
+                        previous_cursor += 1
+                    if best_previous_index is None:
+                        continue
+                    current_costs[cut_index] = best_previous_cost + (cut_index - ideal_cut) ** 2
+                    current_parents[cut_index] = best_previous_index
+
+                if not current_costs:
+                    return None
+                previous_costs = current_costs
+                parents.append(current_parents)
+
+            last_cut = min(previous_costs, key=lambda index: (previous_costs[index], index))
+            cuts = [last_cut]
+            for parent_map in reversed(parents[1:]):
+                last_cut = parent_map[last_cut]
+                cuts.append(last_cut)
+            cuts.reverse()
+            points = [0, *cuts, sample_count]
+            return list(zip(points, points[1:]))
+
+        for bucket_count in range(target_bucket_count, 0, -1):
+            intervals = _balanced_partition(bucket_count)
+            if intervals is not None:
+                return intervals
+        return [(0, sample_count)]
 
     @classmethod
     def from_lengths(
@@ -1532,6 +1568,15 @@ class LengthAwareConfig:
             intervals = cls._targeted_bucket_intervals(
                 sorted_lengths, target_bucket_count=target_bucket_count, min_bucket_size=min_bucket_size
             )
+            if len(intervals) != target_bucket_count:
+                raise ValueError(
+                    "LengthAwareConfig: calibration bucket calculation collapsed from "
+                    f"target_bucket_count={target_bucket_count} to resolved_bucket_count={len(intervals)} "
+                    f"non-empty value-based bucket(s) from {len(sorted_lengths)} sequence(s), "
+                    f"{len(set(sorted_lengths))} unique length(s), range=[{sorted_lengths[0]},{sorted_lengths[-1]}], "
+                    f"min_bucket_size={min_bucket_size}. Add more length-diverse calibration data, lower "
+                    "target_bucket_count, or lower min_bucket_size when calibration row count is the constraint."
+                )
         else:
             intervals = cls._adaptive_bucket_intervals(
                 lengths, min_bucket_size=min_bucket_size, max_bucket_ratio=max_bucket_ratio
@@ -2011,6 +2056,8 @@ class MoEExecutionConfig:
             )
         },
     )
+    parallel_input_capture_streams: int = field(default=2)
+    parallel_output_replay: bool = field(default=True)
 
     def __post_init__(self):
         if self.batch_size is not None:
@@ -2018,6 +2065,10 @@ class MoEExecutionConfig:
                 raise ValueError("MoEExecutionConfig: `batch_size` must be a non-negative integer or None.")
         if not isinstance(self.parallel_input_capture, bool):
             raise ValueError("MoEExecutionConfig: `parallel_input_capture` must be a boolean.")
+        if isinstance(self.parallel_input_capture_streams, bool) or not isinstance(self.parallel_input_capture_streams, int) or self.parallel_input_capture_streams <= 0:
+            raise ValueError("MoEExecutionConfig: `parallel_input_capture_streams` must be a positive integer.")
+        if not isinstance(self.parallel_output_replay, bool):
+            raise ValueError("MoEExecutionConfig: `parallel_output_replay` must be a boolean.")
 
 
 @dataclass
@@ -3004,6 +3055,8 @@ def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> 
         execution_obj = MoEExecutionConfig(
             batch_size=execution.get("batch_size"),
             parallel_input_capture=execution.get("parallel_input_capture", True),
+            parallel_input_capture_streams=execution.get("parallel_input_capture_streams", 2),
+            parallel_output_replay=execution.get("parallel_output_replay", True),
         )
     else:
         raise ValueError("QuantizeConfig: `moe.execution` must be a MoEExecutionConfig, dict, or None.")

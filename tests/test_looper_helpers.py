@@ -50,6 +50,41 @@ def test_clone_module_for_cuda_devices_avoids_nccl_broadcast(monkeypatch):
     torch.cuda.synchronize()
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_clone_module_for_cuda_devices_preserves_lazy_meta_shells():
+    """Data-parallel replay must clone mixed live/meta layers without hydrating unused weights."""
+
+    devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+
+    class MixedShell(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.live = torch.nn.Linear(8, 8, bias=False)
+            self.unused = torch.nn.Linear(8, 8, bias=False, device="meta")
+
+        def forward(self, hidden_states):
+            return self.live(hidden_states)
+
+    torch.manual_seed(23)
+    module = MixedShell().to_empty(device=devices[0])
+    torch.nn.init.normal_(module.live.weight)
+    # ``to_empty`` also allocates the shell placeholder; restore the production
+    # mixed state where only the forward subset has real storage.
+    module.unused = torch.nn.Linear(8, 8, bias=False, device="meta")
+    held_out = torch.randn(3, 8)
+    with torch.inference_mode():
+        reference = module(held_out.to(devices[0])).cpu()
+
+    clones = looper_helpers.clone_module_for_devices(module, devices)
+
+    for device, replica in clones.items():
+        assert replica.live.weight.device == device
+        assert replica.unused.weight.is_meta
+        with torch.inference_mode():
+            actual = replica(held_out.to(device)).cpu()
+        torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+
+
 class _DummyProcessor:
     def __init__(self):
         self.current_batch_index = None
@@ -140,6 +175,32 @@ def test_forward_batch_worker_waits_for_device_before_future_completion(monkeypa
         ("forward", hidden_states.device),
         ("sync", hidden_states.device),
     ]
+
+
+def test_forward_batch_worker_seals_ordered_replay_before_completion():
+    events = []
+
+    class Processor(_DummyProcessor):
+        def seal_parallel_forward_batch(self, batch_index, device):
+            events.append(("seal", batch_index, device))
+
+    hidden_states = torch.randn(1, 2, 4)
+    looper_helpers.forward_batch_worker(
+        module=_RecordsForward(events),
+        processor=Processor(),
+        batch_index=3,
+        layer_input=[hidden_states],
+        layer_input_kwargs={},
+        attention_mask=None,
+        position_ids=None,
+        support_batch_quantize=True,
+        is_embeddings_module=False,
+        need_output=True,
+        reuse_kv=False,
+        prev_kv=None,
+    )
+
+    assert ("seal", 3, hidden_states.device) in events
 
 
 def test_forward_batch_worker_passes_none_attention_mask_when_module_requires_it():

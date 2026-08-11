@@ -63,6 +63,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-search-candidate-chunk-size", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--moe-batch-size", type=int, default=None)
+    parser.add_argument("--moe-capture-streams", type=int, default=2)
+    parser.add_argument("--moe-parallel-output-replay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--offload-path",
         type=Path,
@@ -80,6 +82,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=2.0)
     parser.add_argument("--idle-memory-mb", type=int, default=256)
+    parser.add_argument("--idle-max-utilization", type=int, default=0)
     parser.add_argument("--live-interval", type=float, default=60.0)
     parser.add_argument("--gpu-sample-interval", type=float, default=5.0)
     parser.add_argument("--diagnostics", choices=["off", "auto", "channel"], default="auto")
@@ -91,12 +94,16 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--layers must be positive")
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive")
+    if args.moe_capture_streams <= 0:
+        parser.error("--moe-capture-streams must be positive")
     if args.idle_samples < 3:
         parser.error("--idle-samples must be at least 3")
     if args.calibration_limit is not None and args.calibration_limit <= 0:
         parser.error("--calibration-limit must be positive")
     if args.live_interval <= 0 or args.gpu_sample_interval <= 0:
         parser.error("--live-interval and --gpu-sample-interval must be positive")
+    if not 0 <= args.idle_max_utilization <= 100:
+        parser.error("--idle-max-utilization must be between 0 and 100")
     if args.torch_profile and args.nvtx:
         parser.error("Use either --torch-profile or --nvtx in one run, not both")
     return args
@@ -186,6 +193,7 @@ def _idle_gate(
     samples: int,
     interval: float,
     memory_limit_mb: int,
+    utilization_limit_pct: int,
 ) -> list[GpuInfo]:
     accepted: list[GpuInfo] = []
     for sample_index in range(samples):
@@ -204,7 +212,7 @@ def _idle_gate(
                 f"uuid={info.uuid} util={info.utilization_pct}% memory={info.memory_used_mb}MiB",
                 flush=True,
             )
-            if info.utilization_pct != 0 or info.memory_used_mb > memory_limit_mb:
+            if info.utilization_pct > utilization_limit_pct or info.memory_used_mb > memory_limit_mb:
                 raise RuntimeError(
                     f"Physical GPU {info.physical_id} failed the idle gate: util={info.utilization_pct}%, "
                     f"memory={info.memory_used_mb}MiB (limit {memory_limit_mb}MiB)"
@@ -220,6 +228,7 @@ def _pre_timing_exclusivity_gate(
     *,
     samples: int,
     interval: float,
+    utilization_limit_pct: int,
 ) -> None:
     requested_uuids = {info.uuid for info in gpu_infos}
     for sample_index in range(samples):
@@ -238,6 +247,11 @@ def _pre_timing_exclusivity_gate(
                 f"util={current.utilization_pct}% memory={current.memory_used_mb}MiB foreign_processes=0",
                 flush=True,
             )
+            if current.utilization_pct > utilization_limit_pct:
+                raise RuntimeError(
+                    f"Physical GPU {current.physical_id} failed the pre-timing utilization gate: "
+                    f"util={current.utilization_pct}% (limit {utilization_limit_pct}%)"
+                )
             if current.utilization_pct != 0:
                 raise RuntimeError(
                     f"Physical GPU {current.physical_id} was active immediately before timing: "
@@ -543,6 +557,7 @@ def main() -> None:
         samples=args.idle_samples,
         interval=args.idle_interval,
         memory_limit_mb=args.idle_memory_mb,
+        utilization_limit_pct=args.idle_max_utilization,
     )
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(info.uuid for info in gpu_infos)
 
@@ -627,6 +642,8 @@ def main() -> None:
             execution=MoEExecutionConfig(
                 batch_size=args.moe_batch_size,
                 parallel_input_capture=True,
+                parallel_input_capture_streams=args.moe_capture_streams,
+                parallel_output_replay=args.moe_parallel_output_replay,
             ),
         ),
         auto_forward_data_parallel=True,
@@ -656,6 +673,7 @@ def main() -> None:
         gpu_infos,
         samples=args.idle_samples,
         interval=args.idle_interval,
+        utilization_limit_pct=args.idle_max_utilization,
     )
     reporter = LiveReporter(
         physical_ids=physical_ids,

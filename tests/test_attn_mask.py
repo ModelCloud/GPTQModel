@@ -1,72 +1,121 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+"""Numerical contracts for calibration attention-mask normalization."""
+
+import pytest
 import torch
 
-from gptqmodel.utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
+from gptqmodel.utils.attn_mask import (
+    apply_keep_mask_bt,
+    attention_mask_sequence_lengths,
+    input_id_sequence_lengths,
+    normalize_seq_mask,
+)
 
 
-def test_normalize_seq_mask_binary_mask():
-    mask = torch.tensor([[1, 0, 1]])
+@pytest.mark.parametrize("rank", [3, 4])
+@pytest.mark.parametrize("additive", [False, True])
+def test_normalize_causal_mask_retains_keys_seen_by_any_query(rank, additive):
+    """Causal query axes must collapse by union without resurrecting padded keys."""
 
-    keep = normalize_seq_mask(mask)
+    keep = torch.tensor([[True, True, True, False], [True, True, False, False]])
+    causal = keep[:, None, :] & torch.tril(torch.ones((4, 4), dtype=torch.bool))[None, :, :]
+    if rank == 4:
+        causal = causal.unsqueeze(1)
+    mask = torch.where(causal, 0.0, float("-inf")) if additive else causal
 
-    assert keep.dtype is torch.bool
-    assert keep.tolist() == [[True, False, True]]
+    actual = normalize_seq_mask(mask, seq_len=4)
 
-
-def test_normalize_seq_mask_additive_zero_keep():
-    mask = torch.tensor([[[[0.0, -10000.0, 0.0]]]])
-
-    keep = normalize_seq_mask(mask)
-
-    assert keep.dtype is torch.bool
-    assert keep.tolist() == [[True, False, True]]
-
-    values = torch.arange(6, dtype=torch.float32).view(1, 3, 2)
-    filtered = apply_keep_mask_bt(values, keep)
-
-    assert torch.equal(filtered, torch.tensor([[0.0, 1.0], [4.0, 5.0]]))
+    assert torch.equal(actual, keep)
 
 
-def test_normalize_seq_mask_accepts_multirow_2d():
-    mask = torch.tensor([[1, 0, 1], [0, 0, 1]])
+def test_normalize_all_zero_additive_mask_keeps_every_token():
+    """A floating extended mask with no negative bias represents an unmasked sequence."""
 
-    keep = normalize_seq_mask(mask)
+    mask = torch.zeros((2, 1, 1, 5), dtype=torch.float32)
 
-    torch.testing.assert_close(
-        keep,
-        torch.tensor([[True, False, True], [False, False, True]]),
-    )
+    assert torch.equal(normalize_seq_mask(mask, seq_len=5), torch.ones((2, 5), dtype=torch.bool))
 
 
-def test_normalize_seq_mask_squeezes_singleton_dims():
-    mask = torch.tensor([[[1, 0, 1]], [[0, 1, 1]]], dtype=torch.int)
+def test_normalize_binary_zero_mask_drops_every_token():
+    """A two-dimensional binary mask keeps the standard zero-means-padding contract."""
 
-    keep = normalize_seq_mask(mask)
+    mask = torch.zeros((2, 5), dtype=torch.float32)
 
-    torch.testing.assert_close(
-        keep,
-        torch.tensor([[True, False, True], [False, True, True]]),
-    )
+    assert torch.equal(normalize_seq_mask(mask, seq_len=5), torch.zeros((2, 5), dtype=torch.bool))
 
 
-def test_normalize_seq_mask_handles_causal_square():
-    batch = 2
-    seq_len = 5
-    causal = torch.tril(torch.ones((batch, 1, seq_len, seq_len), dtype=torch.bool))
+@pytest.mark.parametrize(
+    "mask",
+    [
+        torch.tensor([[1, 0, 1], [0, 1, 1]]),
+        torch.tensor([[[1, 0, 1]], [[0, 1, 1]]]),
+    ],
+)
+def test_normalize_binary_masks_preserves_each_batch_row(mask):
+    expected = torch.tensor([[True, False, True], [False, True, True]])
+    assert torch.equal(normalize_seq_mask(mask, seq_len=3), expected)
 
-    keep = normalize_seq_mask(causal)
 
-    assert keep.shape == (batch, seq_len)
-    torch.testing.assert_close(keep, torch.ones((batch, seq_len), dtype=torch.bool))
+def test_normalize_rejects_wrong_sequence_width_and_nan():
+    assert normalize_seq_mask(None) is None
+    with pytest.raises(ValueError, match="scalar"):
+        normalize_seq_mask(torch.tensor(1))
+    with pytest.raises(ValueError, match="sequence width"):
+        normalize_seq_mask(torch.ones((2, 4), dtype=torch.bool), seq_len=5)
+    with pytest.raises(ValueError, match="NaN"):
+        normalize_seq_mask(torch.tensor([[1.0, float("nan")]]), seq_len=2)
 
 
-def test_apply_keep_mask_bt_retains_order():
-    x = torch.arange(12, dtype=torch.float32).view(2, 3, 2)
+def test_apply_keep_mask_preserves_order_for_holes_and_empty_rows():
+    values = torch.arange(2 * 4 * 3).reshape(2, 4, 3)
+    keep = torch.tensor([[True, False, True, False], [False, False, False, False]])
+
+    actual = apply_keep_mask_bt(values, keep)
+
+    assert torch.equal(actual, values[0, [0, 2]])
+
+
+def test_apply_keep_mask_concatenates_selected_rows_across_batches():
+    values = torch.arange(2 * 3 * 2).reshape(2, 3, 2)
     keep = torch.tensor([[True, False, True], [False, True, True]])
+    expected = torch.stack([values[0, 0], values[0, 2], values[1, 1], values[1, 2]])
 
-    compact = apply_keep_mask_bt(x, keep)
+    assert torch.equal(apply_keep_mask_bt(values, keep), expected)
 
-    expected = torch.stack([x[0, 0], x[0, 2], x[1, 1], x[1, 2]])
-    torch.testing.assert_close(compact, expected)
+
+def test_apply_keep_mask_rejects_shape_mismatch():
+    with pytest.raises(AssertionError, match="does not match"):
+        apply_keep_mask_bt(torch.zeros((2, 4, 3)), torch.ones((1, 4), dtype=torch.bool))
+
+
+def test_sequence_length_helpers_share_normalized_mask_semantics():
+    causal_with_padding = torch.tensor(
+        [
+            [
+                [
+                    [0.0, -float("inf"), -float("inf")],
+                    [0.0, 0.0, -float("inf")],
+                    [0.0, 0.0, -float("inf")],
+                ]
+            ]
+        ]
+    )
+    assert attention_mask_sequence_lengths(causal_with_padding.tolist(), seq_len=3) == [2]
+    assert attention_mask_sequence_lengths([1, 0, 1], seq_len=3) == [2]
+    assert input_id_sequence_lengths([1, 2, 3]) == [3]
+    assert input_id_sequence_lengths([[1, 2, 3], [4, 5, 6]]) == [3, 3]
+
+
+def test_sequence_length_helpers_reject_malformed_inputs():
+    assert attention_mask_sequence_lengths(None) == []
+    assert input_id_sequence_lengths(None) == []
+    with pytest.raises(ValueError, match="rectangular"):
+        attention_mask_sequence_lengths([[1, 1], [1]])
+    with pytest.raises(ValueError, match="at least one dimension"):
+        input_id_sequence_lengths(torch.tensor(1))
+    with pytest.raises(ValueError, match=r"\[S\] or \[B, S\]"):
+        input_id_sequence_lengths(torch.ones((1, 2, 3), dtype=torch.long))
+    with pytest.raises(ValueError, match="batch size"):
+        attention_mask_sequence_lengths([[1, 1]], seq_len=2, batch_size=2)

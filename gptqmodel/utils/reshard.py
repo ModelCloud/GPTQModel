@@ -29,8 +29,8 @@ import shutil
 import struct
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import as_completed
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
@@ -218,6 +218,137 @@ def _pack_subgroups(
     return subgroups
 
 
+def _pack_routed_module_subgroups(
+    names: List[str],
+    tensor_sizes: Dict[str, int],
+    max_bytes: Optional[int],
+    *,
+    layer_group: str,
+    routed_module_templates: Iterable[str],
+) -> List[List[str]]:
+    """Pack routed modules atomically so one module's state is never split."""
+
+    if max_bytes is None or max_bytes <= 0:
+        return [names]
+
+    module_names: Dict[str, List[str]] = OrderedDict()
+    for name in names:
+        identity = _routed_module_identity(name, layer_group, routed_module_templates)
+        if identity is None:
+            raise RuntimeError(
+                f"Routed shard group for {layer_group!r} contains an untagged tensor: {name!r}"
+            )
+        module_names.setdefault(identity, []).append(name)
+
+    subgroups: List[List[str]] = []
+    current: List[str] = []
+    current_bytes = 0
+    for state_names in module_names.values():
+        module_bytes = sum(tensor_sizes.get(name, 0) for name in state_names)
+        if current and current_bytes + module_bytes > max_bytes:
+            subgroups.append(current)
+            current = []
+            current_bytes = 0
+        current.extend(state_names)
+        current_bytes += module_bytes
+    if current:
+        subgroups.append(current)
+    return subgroups
+
+
+def routed_module_templates_from_model_definition(model_cls: type) -> List[str]:
+    """Return routed projection templates declared explicitly by ``module_tree``."""
+    from ..models.base import MODULE_TREE_FLAG_ROUTED
+
+    model_cls.build_layer_modules(model_cls.module_tree)
+    metadata = model_cls._module_tree_metadata_cache.get(model_cls, {})
+    return sorted(path for path, item in metadata.items() if MODULE_TREE_FLAG_ROUTED in item.flags)
+
+
+def _match_module_template(relative_name: str, template: str) -> Optional[str]:
+    """Return the concrete module identity when a state key matches a template."""
+    name_parts = relative_name.split(".")
+    template_parts = template.split(".")
+    if len(name_parts) <= len(template_parts):
+        return None
+    for actual, expected in zip(name_parts, template_parts):
+        if expected in ("#", "{expert_index}"):
+            if not actual.isdigit():
+                return None
+        elif actual != expected:
+            return None
+    return ".".join(name_parts[: len(template_parts)])
+
+
+def _routed_module_identity(
+    tensor_name: str,
+    layer_group: str,
+    routed_module_templates: Iterable[str],
+) -> Optional[str]:
+    prefix = f"{layer_group}."
+    if not tensor_name.startswith(prefix):
+        return None
+    relative_name = tensor_name[len(prefix):]
+    for template in routed_module_templates:
+        identity = _match_module_template(relative_name, template)
+        if identity is not None:
+            return identity
+    return None
+
+
+def _group_per_layer_names(
+    names: Iterable[str],
+    *,
+    layer_prefixes: List[str],
+    strategy: ShardStrategy,
+    routed_module_templates: Optional[List[str]] = None,
+    moe_modules_per_shard: int = 128,
+) -> tuple[Dict[str, List[str]], Dict[str, bool]]:
+    """Build deterministic per-layer groups without inferring MoE roles from names."""
+    if moe_modules_per_shard < 1:
+        raise ValueError("moe_modules_per_shard must be positive")
+    if strategy is ShardStrategy.PER_LAYER_MOE and not routed_module_templates:
+        raise ValueError(
+            "PER_LAYER_MOE requires routed module templates from the model definition's module_tree"
+        )
+
+    layer_dense: Dict[str, List[str]] = OrderedDict()
+    layer_routed: Dict[str, Dict[str, List[str]]] = OrderedDict()
+    non_layer: List[str] = []
+    for name in sorted(names):
+        layer_group, is_layer = _resolve_layer_split_group(name, layer_prefixes)
+        if not is_layer:
+            non_layer.append(name)
+            continue
+        identity = None
+        if strategy is ShardStrategy.PER_LAYER_MOE:
+            identity = _routed_module_identity(name, layer_group, routed_module_templates or [])
+        if identity is None:
+            layer_dense.setdefault(layer_group, []).append(name)
+        else:
+            layer_routed.setdefault(layer_group, OrderedDict()).setdefault(identity, []).append(name)
+
+    group_names: Dict[str, List[str]] = OrderedDict()
+    group_is_layer: Dict[str, bool] = {}
+    layer_keys = sorted(set(layer_dense) | set(layer_routed), key=lambda s: _layer_sort_key(s, layer_prefixes))
+    for layer_group in layer_keys:
+        dense_names = layer_dense.get(layer_group, [])
+        if dense_names:
+            group_names[layer_group] = dense_names
+            group_is_layer[layer_group] = True
+        routed = layer_routed.get(layer_group, {})
+        identities = sorted(routed)
+        for start in range(0, len(identities), moe_modules_per_shard):
+            chunk = identities[start : start + moe_modules_per_shard]
+            group = f"{layer_group}.routed.{start // moe_modules_per_shard:04d}"
+            group_names[group] = [name for identity in chunk for name in routed[identity]]
+            group_is_layer[group] = True
+    if non_layer:
+        group_names["non_layer"] = non_layer
+        group_is_layer["non_layer"] = False
+    return group_names, group_is_layer
+
+
 def _copy_metadata_files(source_path: str, target_path: str) -> List[str]:
     """Copy non-safetensors config / tokenizer files to the target directory."""
     copied: List[str] = []
@@ -254,14 +385,15 @@ def reshard(
     overwrite: bool = False,
     progress: bool = True,
     num_write_workers: int = 8,
+    moe_modules_per_shard: int = 128,
 ) -> Dict[str, Any]:
     """Re-shard a safetensors checkpoint into a new directory.
 
     Args:
         source_path: directory containing the source safetensors checkpoint.
         target_path: directory to create with the new sharded checkpoint.
-        strategy: sharding strategy. Only ``ShardStrategy.PER_LAYER`` is
-            implemented today.
+        strategy: per-layer sharding strategy. ``PER_LAYER_MOE`` separates
+            dense/shared tensors from bounded routed-expert projection groups.
         layer_prefixes: optional layer node prefix(es) to match. Each prefix
             should be a dot-separated module path without a trailing dot (e.g.
             ``["model.layers"]`` or ``["language_model.model.layers"]``).
@@ -278,6 +410,9 @@ def reshard(
         num_write_workers: number of parallel threads used when merging partial
             files and writing the final output shards. Default is ``8``; set to
             ``1`` to recover the previous serial write behavior.
+        moe_modules_per_shard: maximum routed projection modules in each MoE
+            shard for ``PER_LAYER_MOE``. All state tensors for a module remain
+            together.
 
     Returns:
         A dictionary with ``output_files``, ``num_layers``, ``num_tensors``,
@@ -310,9 +445,6 @@ def reshard(
                 f"Pass overwrite=True to replace it."
             )
     os.makedirs(target_path, exist_ok=True)
-
-    if strategy != ShardStrategy.PER_LAYER:
-        raise NotImplementedError(f"Reshard strategy {strategy!r} is not implemented")
 
     max_bytes = None
     if max_shard_size_gb is not None and max_shard_size_gb > 0:
@@ -356,6 +488,17 @@ def reshard(
 
     # Determine layer prefixes from the model definition, or fall back to
     # name-based heuristics if no model definition is available.
+    model_cls = None
+    if strategy is ShardStrategy.PER_LAYER_MOE:
+        try:
+            from ..models.auto import check_and_get_model_definition
+
+            model_cls = check_and_get_model_definition(source_path, trust_remote_code=trust_remote_code)
+        except Exception as exc:
+            raise ValueError(
+                "PER_LAYER_MOE requires a supported model definition with explicit routed module-tree tags"
+            ) from exc
+
     if layer_prefixes is None:
         layer_prefixes = _detect_layer_prefixes(
             source_path,
@@ -373,15 +516,27 @@ def reshard(
     if not layer_prefixes or any(not isinstance(p, str) or not p for p in layer_prefixes):
         raise ValueError("layer_prefixes must be a non-empty string or list of non-empty strings")
 
-    # Group tensor names by layer / non-layer, preserving a stable order.
-    group_names: Dict[str, List[str]] = OrderedDict()
-    group_is_layer: Dict[str, bool] = {}
-    for name in sorted(weight_map):
-        group, is_layer = _resolve_layer_split_group(name, layer_prefixes)
-        if not is_layer:
-            group = "non_layer"
-        group_is_layer[group] = is_layer
-        group_names.setdefault(group, []).append(name)
+    routed_templates = (
+        routed_module_templates_from_model_definition(model_cls)
+        if model_cls is not None
+        else None
+    )
+    group_names, group_is_layer = _group_per_layer_names(
+        weight_map,
+        layer_prefixes=layer_prefixes,
+        strategy=strategy,
+        routed_module_templates=routed_templates,
+        moe_modules_per_shard=moe_modules_per_shard,
+    )
+    transformer_layer_keys = sorted(
+        {
+            group
+            for name in weight_map
+            for group, is_layer in [_resolve_layer_split_group(name, layer_prefixes)]
+            if is_layer
+        },
+        key=lambda s: _layer_sort_key(s, layer_prefixes),
+    )
 
     layer_keys = sorted(
         (k for k in group_names if group_is_layer.get(k)),
@@ -397,7 +552,8 @@ def reshard(
         )
 
     log.info(
-        "Reshard plan: %d layer group(s), %d non-layer tensor(s)",
+        "Reshard plan: %d transformer layer(s), %d layer-local shard group(s), %d non-layer tensor(s)",
+        len(transformer_layer_keys),
         len(layer_keys),
         len(group_names.get("non_layer", [])),
     )
@@ -412,7 +568,17 @@ def reshard(
     shard_counter = 1
     for group in ordered_groups:
         names = group_names[group]
-        subgroups = _pack_subgroups(names, tensor_sizes, max_bytes)
+        if strategy is ShardStrategy.PER_LAYER_MOE and ".routed." in group:
+            layer_group = group.rsplit(".routed.", 1)[0]
+            subgroups = _pack_routed_module_subgroups(
+                names,
+                tensor_sizes,
+                max_bytes,
+                layer_group=layer_group,
+                routed_module_templates=routed_templates or (),
+            )
+        else:
+            subgroups = _pack_subgroups(names, tensor_sizes, max_bytes)
         for subgroup_idx, subgroup_names in enumerate(subgroups):
             final_filename = f"model-{shard_counter:05d}-of-XXX.safetensors"
             output_plan.append((group, subgroup_names, final_filename))
@@ -424,11 +590,21 @@ def reshard(
     total_output_shards = len(output_plan)
     # Replace placeholder total shard count in the filenames.
     final_plan: List[Tuple[str, List[str], str]] = []
+    final_filename_by_subgroup: Dict[Tuple[str, int], str] = {}
     for group, names, placeholder in output_plan:
         # Extract the original counter from the placeholder.
         counter = int(placeholder.split("-")[1])
         final_filename = f"model-{counter:05d}-of-{total_output_shards:05d}.safetensors"
         final_plan.append((group, names, final_filename))
+        subgroup_idx = name_to_subgroup[names[0]][1]
+        final_filename_by_subgroup[(group, subgroup_idx)] = final_filename
+
+    subgroup_sources = {
+        subgroup_key: {weight_map[name] for name in names}
+        for group, names, _ in final_plan
+        for subgroup_key in [(group, name_to_subgroup[names[0]][1])]
+    }
+    direct_output_paths: Dict[Tuple[str, int], str] = {}
 
     # Staging area for partial files, kept under the target directory on the
     # same filesystem so rename is cheap and cleanup is simple.
@@ -478,13 +654,33 @@ def reshard(
                     for name in names:
                         subgroup_buffers[subgroup_key][name] = handler.get_tensor(name)
 
-            # Write each subgroup buffer to its own partial file in staging.
-            for subgroup_key, names in relevant.items():
+            def _write_source_subgroup(subgroup_key: Tuple[str, int]) -> Tuple[Tuple[str, int], str, bool]:
                 group, subgroup_idx = subgroup_key
+                if len(subgroup_sources[subgroup_key]) == 1:
+                    output_path = os.path.join(target_path, final_filename_by_subgroup[subgroup_key])
+                    save_file(subgroup_buffers[subgroup_key], output_path, metadata=output_metadata)
+                    return subgroup_key, output_path, True
                 partial_name = _partial_filename(group, subgroup_idx, source_idx)
                 partial_path = os.path.join(staging_dir, partial_name)
                 save_file(subgroup_buffers[subgroup_key], partial_path, metadata=output_metadata)
-                subgroup_partial_files[subgroup_key].append(partial_path)
+                return subgroup_key, partial_path, False
+
+            # Use the process-wide ThreadX loader lanes. Besides avoiding
+            # temporary executors, independent output files can drain the same
+            # source mmap concurrently instead of serializing dozens of MoE
+            # groups behind one Python thread.
+            from gptqmodel import DEVICE_THREAD_POOL
+
+            futures = {
+                DEVICE_THREAD_POOL.submit("model_loader:cpu", _write_source_subgroup, subgroup_key): subgroup_key
+                for subgroup_key in relevant
+            }
+            for future in as_completed(futures):
+                subgroup_key, output_path, is_direct = future.result()
+                if is_direct:
+                    direct_output_paths[subgroup_key] = output_path
+                else:
+                    subgroup_partial_files[subgroup_key].append(output_path)
                 del subgroup_buffers[subgroup_key]
 
             shard_size = os.path.getsize(shard_path)
@@ -529,7 +725,11 @@ def reshard(
             """Worker: merge partials for one output shard and write it."""
             group, subgroup_names, final_filename = args
             subgroup_idx = name_to_subgroup[subgroup_names[0]][1]
-            partial_paths = subgroup_partial_files[(group, subgroup_idx)]
+            subgroup_key = (group, subgroup_idx)
+            direct_path = direct_output_paths.get(subgroup_key)
+            if direct_path is not None:
+                return final_filename, os.path.getsize(direct_path), 0.0, subgroup_names
+            partial_paths = subgroup_partial_files[subgroup_key]
             merged: Dict[str, Any] = {}
             for partial_path in partial_paths:
                 merged.update(load_file(partial_path))
@@ -542,17 +742,16 @@ def reshard(
             del merged
             return final_filename, shard_size, write_elapsed, subgroup_names
 
-        with ThreadPoolExecutor(max_workers=num_write_workers) as executor:
+        # Bound outstanding work so ThreadX's shared loader lanes do not retain
+        # every merged shard buffer at once.
+        for plan_start in range(0, len(final_plan), max(1, num_write_workers)):
+            plan_batch = final_plan[plan_start : plan_start + max(1, num_write_workers)]
             futures = {
-                executor.submit(_write_output_shard, item): item
-                for item in final_plan
+                DEVICE_THREAD_POOL.submit("model_loader:cpu", _write_output_shard, item): item
+                for item in plan_batch
             }
             for future in as_completed(futures):
-                try:
-                    final_filename, shard_size, write_elapsed, subgroup_names = future.result()
-                except Exception:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise
+                final_filename, shard_size, write_elapsed, subgroup_names = future.result()
 
                 group = futures[future][0]
                 disk_telemetry.record_write(shard_size, write_elapsed)
@@ -602,10 +801,12 @@ def reshard(
         "target_path": target_path,
         "strategy": strategy.value,
         "is_sharded": is_sharded,
-        "num_layers": len(layer_keys),
+        "num_layers": len(transformer_layer_keys),
+        "num_layer_shard_groups": len(layer_keys),
         "num_non_layer_tensors": len(group_names.get("non_layer", [])),
         "num_tensors": len(new_weight_map),
         "num_shards": total_output_shards,
+        "moe_modules_per_shard": moe_modules_per_shard if strategy is ShardStrategy.PER_LAYER_MOE else None,
         "output_files": output_files,
         "copied_metadata": metadata_copied,
         "total_bytes": total_written,

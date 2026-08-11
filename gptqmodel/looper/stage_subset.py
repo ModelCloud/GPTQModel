@@ -987,6 +987,10 @@ def _run_single_subset_pass(
 
     forward_outputs = None
     if execute_forward:
+        lifecycle_hooks = getattr(looper.gptq_model, "moe_lifecycle_hooks", None)
+        prepare_input_replay = getattr(lifecycle_hooks, "prepare_input_replay", None)
+        if direct_moe_input_capture and callable(prepare_input_replay):
+            prepare_input_replay(subset, batch_count)
         try:
             # MoE lifecycle hooks need to know which subset is currently active.
             # Replay-only passes can disable that when they only need outputs.

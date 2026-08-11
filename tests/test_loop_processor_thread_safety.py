@@ -56,6 +56,19 @@ def _make_processor() -> LoopProcessor:
     return p
 
 
+def test_calibration_token_counts_normalize_masks_and_nested_input_ids():
+    dataset = [
+        {"input_ids": [[1, 2, 3], [4, 5, 6]], "attention_mask": [[1, 1, 0], [0, 1, 0]]},
+        {"input_ids": [7, 8, 9, 10]},
+    ]
+    assert LoopProcessor._compute_total_tokens(dataset) == 7
+    assert LoopProcessor._compute_max_padded_tokens(dataset) == 10
+    assert LoopProcessor._compute_max_padded_tokens([{"attention_mask": [1, 0, 1]}]) == 3
+    assert LoopProcessor._compute_max_padded_tokens([{"attention_mask": [[1, 0], [1, 1]]}]) == 4
+    with pytest.raises(ValueError, match="at least one dimension"):
+        LoopProcessor._compute_max_padded_tokens([{"attention_mask": 1}])
+
+
 def test_safe_dict_concurrent_read_write_iteration():
     """_SafeDict handles mixed concurrent operations without corruption."""
 

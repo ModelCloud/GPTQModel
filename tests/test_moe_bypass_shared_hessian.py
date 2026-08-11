@@ -4,6 +4,7 @@
 import copy
 import threading
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -69,7 +70,12 @@ def test_moe_execution_config_serialization_and_round_trip():
     serialized_moe = payload["meta"]["moe"]
     assert serialized_moe == {
         "routing": {"class": "ExpertsRoutingBypass"},
-        "execution": {"batch_size": 4, "parallel_input_capture": False},
+        "execution": {
+            "batch_size": 4,
+            "parallel_input_capture": False,
+            "parallel_input_capture_streams": 2,
+            "parallel_output_replay": True,
+        },
     }
     assert "moe_parallel_input_capture" not in payload["meta"]
 
@@ -77,6 +83,19 @@ def test_moe_execution_config_serialization_and_round_trip():
     assert isinstance(restored.moe.routing, ExpertsRoutingBypass)
     assert restored.moe.execution.batch_size == 4
     assert restored.moe.execution.parallel_input_capture is False
+    assert restored.moe.execution.parallel_input_capture_streams == 2
+    assert restored.moe.execution.parallel_output_replay is True
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2"])
+def test_moe_execution_capture_stream_count_must_be_positive_integer(value):
+    with pytest.raises(ValueError, match="parallel_input_capture_streams"):
+        MoEExecutionConfig(parallel_input_capture_streams=value)
+
+
+def test_moe_execution_parallel_output_replay_must_be_boolean():
+    with pytest.raises(ValueError, match="parallel_output_replay"):
+        MoEExecutionConfig(parallel_output_replay=1)
 
 
 def test_removed_moe_parallel_constructor_field_is_rejected():
@@ -504,6 +523,154 @@ def test_moe_bypass_gptq_skips_unused_projection_outputs():
     stats = processor.shared_hessian_stats()
     assert stats["batch_misses"] - stats_before["batch_misses"] == 2
     assert stats["batch_hits"] - stats_before["batch_hits"] == (len(gate_up_subset) - 1) * 2
+
+
+def test_moe_shared_input_fanout_uses_task_local_parallel_observations():
+    """Concurrent batch workers must not derive fanout counts from shared task totals."""
+
+    processor, full_subset = _make_moe_bypass_processor(
+        num_experts=2,
+        hidden_size=16,
+        intermediate_size=8,
+    )
+    subset = {
+        name: module
+        for name, module in full_subset.items()
+        if name.endswith((".gate_proj", ".up_proj"))
+    }
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    processor._mask_tls = threading.local()
+    source_name = next(iter(subset))
+    follower_names = [name for name in subset if name != source_name]
+    source_hook = processor.pre_process_fwd_hook(source_name)
+    both_sources_captured = threading.Barrier(2)
+    failures = []
+
+    def capture_and_fanout(batch_index: int, token_count: int) -> None:
+        try:
+            processor._set_current_batch_index(batch_index)
+            processor._mask_tls.value = torch.ones((1, token_count), dtype=torch.bool)
+            hidden = torch.randn(1, token_count, 16)
+            source_hook(subset[source_name].module, (hidden,), None)
+            # Reproduce the old race: both workers update the source task before
+            # either reads the observation used for follower accounting.
+            both_sources_captured.wait(timeout=5)
+            processor.record_moe_shared_input_followers(
+                source_name=source_name,
+                follower_names=follower_names,
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            processor._mask_tls.value = None
+            processor._set_current_batch_index(None)
+
+    workers = [
+        threading.Thread(target=capture_and_fanout, args=(0, 5)),
+        threading.Thread(target=capture_and_fanout, args=(1, 7)),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert not failures
+    assert all(not worker.is_alive() for worker in workers)
+    for name in subset:
+        task = processor.tasks[name]
+        assert task.nsamples == 12, f"{name} recorded {task.nsamples} samples"
+        assert task.fwd_counter == 2, f"{name} recorded {task.fwd_counter} observations"
+
+
+def test_shared_hessian_immediate_fallbacks_and_empty_observation(monkeypatch):
+    processor, subset = _make_moe_bypass_processor(num_experts=1)
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    gate = processor.tasks["mlp.experts.0.gate_proj"]
+    down = processor.tasks["mlp.experts.0.down_proj"]
+    hidden = torch.randn(1, 2, 16)
+
+    processor._enable_shared_hessian_cache = False
+    gate_add_batch = Mock(wraps=gate.add_batch)
+    monkeypatch.setattr(gate, "add_batch", gate_add_batch)
+    assert processor._add_batch_with_shared_hessian_immediate(
+        gate, hidden, None, batch_index=0, cache_source=hidden
+    ) is None
+    assert gate_add_batch.call_count == 1
+
+    processor._enable_shared_hessian_cache = True
+    down_add_batch = Mock(wraps=down.add_batch)
+    monkeypatch.setattr(down, "add_batch", down_add_batch)
+    down_hidden = torch.randn(1, 2, 12)
+    assert processor._add_batch_with_shared_hessian_immediate(
+        down, down_hidden, None, batch_index=0, cache_source=down_hidden
+    ) is None
+    assert down_add_batch.call_count == 1
+
+    down._shared_hessian_accum_key = ("missing-state",)
+    down._shared_hessian_state = None
+    assert processor._add_batch_with_shared_hessian_immediate(
+        down, down_hidden, None, batch_index=1, cache_source=down_hidden
+    ) is None
+    assert down_add_batch.call_count == 2
+
+    monkeypatch.setattr(gate, "process_batch", lambda _inp: (0, None, torch.device("cpu")))
+    assert processor._add_batch_with_shared_hessian_immediate(
+        gate, hidden, None, batch_index=1, cache_source=hidden
+    ) == (0, 0)
+
+
+def test_ordered_processor_replay_and_follower_fail_closed_paths():
+    processor, full_subset = _make_moe_bypass_processor(num_experts=1)
+    subset = {
+        name: module
+        for name, module in full_subset.items()
+        if name.endswith((".gate_proj", ".up_proj"))
+    }
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    source_name, follower_name = list(subset)
+
+    with pytest.raises(RuntimeError, match="Missing task-local"):
+        processor.record_moe_shared_input_followers(
+            source_name=source_name,
+            follower_names=[follower_name],
+        )
+
+    processor._mask_tls = threading.local()
+    processor._mask_tls.value = torch.ones((1, 3), dtype=torch.bool)
+    processor._set_current_batch_index(0)
+    processor.begin_parallel_forward_wave([0], torch.device("cpu"))
+    hidden = torch.randn(1, 3, 16)
+    processor.pre_process_fwd_hook(source_name)(subset[source_name].module, (hidden,), None)
+    processor.record_moe_shared_input_followers(
+        source_name=source_name,
+        follower_names=[follower_name],
+    )
+    processor.seal_parallel_forward_batch(0, torch.device("cpu"))
+    processor.flush_parallel_forward_wave()
+    processor.abort_parallel_forward_wave()
+
+    assert processor.tasks[source_name].nsamples == 3
+    assert processor.tasks[follower_name].nsamples == 3
+
+
+def test_masked_hook_skips_fully_padded_sample_without_fabricating_counts():
+    processor, full_subset = _make_moe_bypass_processor(num_experts=1)
+    subset = {
+        name: module
+        for name, module in full_subset.items()
+        if name.endswith((".gate_proj", ".up_proj"))
+    }
+    processor.prepare_subset(subset, subset_index=0, subset_total=1)
+    source_name = next(iter(subset))
+    processor._mask_tls = threading.local()
+    processor._mask_tls.value = torch.tensor(
+        [[False, False, False], [True, True, True]], dtype=torch.bool
+    )
+    hidden = torch.randn(2, 3, 16)
+
+    processor.pre_process_fwd_hook(source_name)(subset[source_name].module, (hidden,), None)
+
+    assert processor.tasks[source_name].nsamples == 3
 
 
 def test_moe_bypass_reuses_hidden_state_transfer_per_device(monkeypatch):

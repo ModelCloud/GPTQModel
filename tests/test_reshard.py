@@ -10,6 +10,12 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from gptqmodel import ShardStrategy, reshard
+from gptqmodel.utils.reshard import (
+    _group_per_layer_names,
+    _match_module_template,
+    _pack_routed_module_subgroups,
+    _routed_module_identity,
+)
 
 
 def _build_source_dir(tmp: str, *, prefix: str = "model.layers", config: dict = None) -> str:
@@ -236,6 +242,202 @@ def test_reshard_accepts_string_strategy():
 
         assert result["strategy"] == ShardStrategy.PER_LAYER.value
         assert result["num_shards"] == 3
+
+
+def test_per_layer_moe_planner_uses_explicit_templates_and_keeps_shared_dense():
+    names = {
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.mlp.shared_experts.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.up_proj.weight",
+        "model.layers.0.mlp.experts.1.gate_proj.weight",
+        # A misleading name is dense unless an explicit module-tree template declares it routed.
+        "model.layers.0.not_experts.0.gate_proj.weight",
+        "model.embed_tokens.weight",
+    }
+    groups, group_is_layer = _group_per_layer_names(
+        names,
+        layer_prefixes=["model.layers"],
+        strategy=ShardStrategy.PER_LAYER_MOE,
+        routed_module_templates=["mlp.experts.{expert_index}.gate_proj", "mlp.experts.{expert_index}.up_proj"],
+        moe_modules_per_shard=2,
+    )
+
+    assert groups["model.layers.0"] == [
+        "model.layers.0.mlp.shared_experts.gate_proj.weight",
+        "model.layers.0.not_experts.0.gate_proj.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+    ]
+    assert groups["model.layers.0.routed.0000"] == [
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.up_proj.weight",
+    ]
+    assert groups["model.layers.0.routed.0001"] == [
+        "model.layers.0.mlp.experts.1.gate_proj.weight",
+    ]
+    assert groups["non_layer"] == ["model.embed_tokens.weight"]
+    assert group_is_layer["model.layers.0.routed.0000"] is True
+    assert group_is_layer["non_layer"] is False
+
+
+def test_per_layer_moe_planner_rejects_missing_tags_and_invalid_bound():
+    names = ["model.layers.0.mlp.experts.0.gate_proj.weight"]
+    with pytest.raises(ValueError, match="module_tree"):
+        _group_per_layer_names(
+            names,
+            layer_prefixes=["model.layers"],
+            strategy=ShardStrategy.PER_LAYER_MOE,
+        )
+    with pytest.raises(ValueError, match="positive"):
+        _group_per_layer_names(
+            names,
+            layer_prefixes=["model.layers"],
+            strategy=ShardStrategy.PER_LAYER_MOE,
+            routed_module_templates=["mlp.experts.{expert_index}.gate_proj"],
+            moe_modules_per_shard=0,
+        )
+
+
+def test_routed_template_and_atomic_packer_fail_closed_corner_cases():
+    assert _match_module_template(
+        "mlp.experts.not_an_index.gate_proj.weight", "mlp.experts.#.gate_proj"
+    ) is None
+    assert _routed_module_identity(
+        "other.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0",
+        ["mlp.experts.#.gate_proj"],
+    ) is None
+    assert _pack_routed_module_subgroups(
+        [],
+        {},
+        64,
+        layer_group="model.layers.0",
+        routed_module_templates=["mlp.experts.#.gate_proj"],
+    ) == []
+    with pytest.raises(RuntimeError, match="untagged tensor"):
+        _pack_routed_module_subgroups(
+            ["model.layers.0.mlp.shared_experts.gate_proj.weight"],
+            {"model.layers.0.mlp.shared_experts.gate_proj.weight": 16},
+            64,
+            layer_group="model.layers.0",
+            routed_module_templates=["mlp.experts.#.gate_proj"],
+        )
+
+    groups, _ = _group_per_layer_names(
+        ["model.layers.0.mlp.experts.0.gate_proj.weight"],
+        layer_prefixes=["model.layers"],
+        strategy=ShardStrategy.PER_LAYER_MOE,
+        routed_module_templates=["mlp.experts.#.gate_proj"],
+    )
+    assert list(groups) == ["model.layers.0.routed.0000"]
+
+
+def test_reshard_per_layer_moe_rejects_model_definition_failure(monkeypatch):
+    from gptqmodel.models import auto
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _build_source_dir(tmp)
+        dst = os.path.join(tmp, "per-layer-moe")
+        monkeypatch.setattr(
+            auto,
+            "check_and_get_model_definition",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("unsupported")),
+        )
+        with pytest.raises(ValueError, match="supported model definition"):
+            reshard(src, dst, strategy=ShardStrategy.PER_LAYER_MOE, progress=False)
+
+
+def test_reshard_per_layer_moe_preserves_values_and_original(monkeypatch):
+    from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
+    from gptqmodel.models import auto
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "source")
+        dst = os.path.join(tmp, "per-layer-moe")
+        os.makedirs(src)
+        tensors = {
+            "model.layers.0.self_attn.q_proj.weight": torch.randn(2, 2),
+            "model.layers.0.mlp.shared_experts.gate_proj.weight": torch.randn(2, 2),
+        }
+        for expert in range(2):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                tensors[f"model.layers.0.mlp.experts.{expert}.{projection}.weight"] = torch.randn(2, 2)
+        source_file = os.path.join(src, "model.safetensors")
+        save_file(tensors, source_file)
+        with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fp:
+            json.dump({"model_type": "deepseek_v4"}, fp)
+        with open(source_file, "rb") as fp:
+            source_bytes = fp.read()
+        monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: DeepSeekV4QModel)
+
+        result = reshard(
+            src,
+            dst,
+            strategy=ShardStrategy.PER_LAYER_MOE,
+            moe_modules_per_shard=2,
+            progress=False,
+        )
+
+        assert result["strategy"] == "per_layer_moe"
+        assert result["num_shards"] == 4  # one dense/shared plus three routed shards
+        with open(source_file, "rb") as fp:
+            assert fp.read() == source_bytes
+        restored = _load_source_state_dict(dst)
+        assert set(restored) == set(tensors)
+        for name, original in tensors.items():
+            assert torch.equal(restored[name], original)
+
+        with open(os.path.join(dst, "model.safetensors.index.json"), encoding="utf-8") as fp:
+            weight_map = json.load(fp)["weight_map"]
+        dense_file = weight_map["model.layers.0.self_attn.q_proj.weight"]
+        assert weight_map["model.layers.0.mlp.shared_experts.gate_proj.weight"] == dense_file
+        assert all(
+            weight_map[name] != dense_file
+            for name in tensors
+            if ".mlp.experts." in name
+        )
+
+
+def test_reshard_per_layer_moe_max_size_keeps_module_state_atomic(monkeypatch):
+    from gptqmodel.models import auto
+    from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "source")
+        dst = os.path.join(tmp, "per-layer-moe")
+        os.makedirs(src)
+        tensors = {"model.layers.0.self_attn.q_proj.weight": torch.randn(2, 2)}
+        for expert in range(2):
+            prefix = f"model.layers.0.mlp.experts.{expert}.gate_proj"
+            tensors[f"{prefix}.qweight"] = torch.randint(0, 16, (4, 4), dtype=torch.int32)
+            tensors[f"{prefix}.scales"] = torch.randn(4, 2)
+            tensors[f"{prefix}.qzeros"] = torch.randint(0, 16, (4, 1), dtype=torch.int32)
+        save_file(tensors, os.path.join(src, "model.safetensors"))
+        with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fp:
+            json.dump({"model_type": "deepseek_v4"}, fp)
+        monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: DeepSeekV4QModel)
+
+        result = reshard(
+            src,
+            dst,
+            strategy=ShardStrategy.PER_LAYER_MOE,
+            moe_modules_per_shard=2,
+            max_shard_size_gb=64 / 1024**3,
+            progress=False,
+        )
+
+        assert result["num_shards"] == 3
+        with open(os.path.join(dst, "model.safetensors.index.json"), encoding="utf-8") as fp:
+            weight_map = json.load(fp)["weight_map"]
+        for expert in range(2):
+            prefix = f"model.layers.0.mlp.experts.{expert}.gate_proj"
+            assert len(
+                {
+                    weight_map[f"{prefix}.qweight"],
+                    weight_map[f"{prefix}.scales"],
+                    weight_map[f"{prefix}.qzeros"],
+                }
+            ) == 1
 
 
 def test_reshard_rejects_source_target_collision():

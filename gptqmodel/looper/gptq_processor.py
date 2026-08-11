@@ -14,6 +14,7 @@ from torch.nn import Module
 
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
+from ..looper.ordered_hessian_replay import GPTQOrderedHessianReplayAttachment
 from ..models import BaseQModel
 from ..models._const import CPU, DEVICE
 from ..models.writer import (
@@ -57,6 +58,7 @@ from ..quantization.diagnostics import (
     sample_reconstructed_quant_codes,
     summarize_quant_code_fingerprints,
 )
+from ..utils.attn_mask import attention_mask_sequence_lengths, input_id_sequence_lengths
 from ..utils.backend import BACKEND
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -294,6 +296,15 @@ class GPTQProcessor(LoopProcessor):
         # participate in this cache. Disabling the toggle restores the original
         # per-module accumulation and inverse lifecycle.
         self._shared_hessian_lock = threading.Lock()
+        # Direct MoE input capture fans one source hook observation out to many
+        # shared-Hessian followers.  Keep the exact observation produced by the
+        # current device worker in TLS; deriving it later from process-wide task
+        # counters races when independent calibration batches run concurrently.
+        self._hook_observation_tls = threading.local()
+        # Parallel batch-size-1 forwards retain one bounded wave of native-dtype
+        # activations here. Hessian updates are replayed on the canonical device
+        # in calibration order so multi-GPU execution preserves serial GPTQ math.
+        self._ordered_hessian_replay = GPTQOrderedHessianReplayAttachment(self)
         # Cache one processed calibration batch per shared group so later
         # modules only record sample ownership instead of recomputing XtX.
         self._shared_hessian_batch_cache = {}
@@ -422,34 +433,12 @@ class GPTQProcessor(LoopProcessor):
                 continue
             mask = row.get("attention_mask")
             if mask is not None:
-                if isinstance(mask, torch.Tensor):
-                    if mask.ndim == 0:
-                        continue
-                    if mask.ndim == 1:
-                        lengths.append(int(mask.sum().item()))
-                    else:
-                        for i in range(mask.shape[0]):
-                            lengths.append(int(mask[i].sum().item()))
-                else:
-                    for seq_mask in mask:
-                        try:
-                            lengths.append(int(sum(seq_mask)))
-                        except Exception:
-                            pass
+                input_lengths = input_id_sequence_lengths(row.get("input_ids"))
+                seq_len = input_lengths[0] if input_lengths and len(set(input_lengths)) == 1 else None
+                batch_size = len(input_lengths) if input_lengths else None
+                lengths.extend(attention_mask_sequence_lengths(mask, seq_len=seq_len, batch_size=batch_size))
                 continue
-            input_ids = row.get("input_ids")
-            if input_ids is None:
-                continue
-            if isinstance(input_ids, torch.Tensor):
-                if input_ids.dim() == 0:
-                    continue
-                if input_ids.dim() == 1:
-                    lengths.append(int(input_ids.numel()))
-                else:
-                    for i in range(input_ids.shape[0]):
-                        lengths.append(int(input_ids[i].numel()))
-            else:
-                lengths.append(len(input_ids))
+            lengths.extend(input_id_sequence_lengths(row.get("input_ids")))
         return lengths
 
     def _ensure_length_aware_materialized(self, qcfg: QuantizeConfig) -> None:
@@ -472,7 +461,7 @@ class GPTQProcessor(LoopProcessor):
             )
             hessian_cfg.length_aware = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
             return
-        hessian_cfg.length_aware = LengthAwareConfig.from_lengths(
+        resolved = LengthAwareConfig.from_lengths(
             self._calibration_sequence_lengths,
             mode=la.mode,
             min_length=la.min_length,
@@ -480,6 +469,23 @@ class GPTQProcessor(LoopProcessor):
             max_bucket_ratio=la.max_bucket_ratio,
             bucket_weight_exponent=la.bucket_weight_exponent,
             target_bucket_count=la.target_bucket_count,
+        )
+        hessian_cfg.length_aware = resolved
+
+        resolved_bucket_count = len(resolved.bucket_scales or [])
+        requested_bucket_count = la.target_bucket_count
+        length_count = len(self._calibration_sequence_lengths)
+        unique_length_count = len(set(self._calibration_sequence_lengths))
+        length_min = min(self._calibration_sequence_lengths)
+        length_max = max(self._calibration_sequence_lengths)
+        log.info(
+            "Length-aware Hessian resolved %s/%s bucket(s): sequences=%s unique_lengths=%s range=[%s,%s]",
+            resolved_bucket_count,
+            requested_bucket_count or resolved_bucket_count,
+            length_count,
+            unique_length_count,
+            length_min,
+            length_max,
         )
 
     @staticmethod
@@ -801,22 +807,22 @@ class GPTQProcessor(LoopProcessor):
                 completion.record(current_stream)
                 partial_events[dev] = completion
 
-    def _add_batch_with_shared_hessian(
+    def _add_batch_with_shared_hessian_immediate(
         self,
         task: GPTQ,
         inp: torch.Tensor,
-        out: torch.Tensor,
+        out: Optional[torch.Tensor],
         *,
         batch_index: Optional[int],
         cache_source: torch.Tensor,
         cache_extra: Optional[Tuple[object, ...]] = None,
-    ) -> None:
+    ) -> Optional[Tuple[int, int]]:
         """Record a GPTQ batch, reusing same-input Hessian work when possible."""
 
         self._capture_output_error_inputs(task, inp)
         if not self._enable_shared_hessian_cache:
             task.add_batch(inp, out, batch_index=batch_index)
-            return
+            return None
 
         cache_key = self._shared_hessian_cache_key(
             task,
@@ -826,12 +832,12 @@ class GPTQProcessor(LoopProcessor):
         )
         if cache_key is None:
             task.add_batch(inp, out, batch_index=batch_index)
-            return
+            return None
 
         shared_state = getattr(task, "_shared_hessian_state", None)
         if shared_state is None:
             task.add_batch(inp, out, batch_index=batch_index)
-            return
+            return None
 
         cached = None
         batch_token_size = 0
@@ -849,7 +855,7 @@ class GPTQProcessor(LoopProcessor):
                 # activation before either publishes its cache entry.
                 batch_token_size, xtx, device = task.process_batch(inp)
                 if batch_token_size == 0 or xtx is None:
-                    return
+                    return (0, 0)
 
                 sequence_count = getattr(task, "_last_batch_sequence_count", 1)
                 self._accumulate_shared_hessian_state(
@@ -871,10 +877,41 @@ class GPTQProcessor(LoopProcessor):
                 shared_state,
                 sequence_count=cached.get("sequence_count", 1),
             )
-            return
+            return (int(cached["batch_token_size"]), int(cached.get("sequence_count", 1)))
 
         task.record_shared_hessian_batch(
             batch_token_size, shared_state, sequence_count=sequence_count
+        )
+        return (int(batch_token_size), int(sequence_count))
+
+    def _add_batch_with_shared_hessian(
+        self,
+        task: GPTQ,
+        inp: torch.Tensor,
+        out: Optional[torch.Tensor],
+        *,
+        batch_index: Optional[int],
+        cache_source: torch.Tensor,
+        cache_extra: Optional[Tuple[object, ...]] = None,
+    ) -> Optional[Tuple[int, int]]:
+        """Record immediately or retain one wave for canonical ordered replay."""
+
+        replay = self._ordered_hessian_replay
+        if not replay.active:
+            return self._add_batch_with_shared_hessian_immediate(
+                task,
+                inp,
+                out,
+                batch_index=batch_index,
+                cache_source=cache_source,
+                cache_extra=cache_extra,
+            )
+        return replay.defer_batch(
+            task,
+            inp,
+            batch_index=batch_index,
+            cache_source=cache_source,
+            cache_extra=cache_extra,
         )
 
     def moe_shared_input_group_key(self, name: str):
@@ -892,8 +929,6 @@ class GPTQProcessor(LoopProcessor):
         *,
         source_name: str,
         follower_names: list[str],
-        source_nsamples_before: int,
-        source_fwd_counter_before: int,
     ) -> None:
         """Fan one logical MoE input observation out to shared-Hessian tasks.
 
@@ -904,9 +939,41 @@ class GPTQProcessor(LoopProcessor):
 
         if not follower_names:
             return
+        observations = getattr(self._hook_observation_tls, "value", None) or {}
+        observation = observations.pop(source_name, None)
+        if observation is None:
+            raise RuntimeError(f"Missing task-local shared MoE Hessian observation from `{source_name}`.")
+        batch_token_size, observation_count, sequence_count = observation
+        replay = self._ordered_hessian_replay
+        if replay.active:
+            replay.defer_followers(
+                source_name=source_name,
+                follower_names=follower_names,
+                batch_token_size=batch_token_size,
+                observation_count=observation_count,
+                sequence_count=sequence_count,
+            )
+            return
+        self._record_moe_shared_input_followers_immediate(
+            source_name=source_name,
+            follower_names=follower_names,
+            batch_token_size=batch_token_size,
+            observation_count=observation_count,
+            sequence_count=sequence_count,
+            batch_index=self.current_batch_index(),
+        )
+
+    def _record_moe_shared_input_followers_immediate(
+        self,
+        *,
+        source_name: str,
+        follower_names: list[str],
+        batch_token_size: int,
+        observation_count: int,
+        sequence_count: int,
+        batch_index: Optional[int],
+    ) -> None:
         source_task = self.tasks[source_name]
-        batch_token_size = int(source_task.nsamples) - int(source_nsamples_before)
-        observation_count = int(source_task.fwd_counter) - int(source_fwd_counter_before)
         shared_state = getattr(source_task, "_shared_hessian_state", None)
         group_key = getattr(source_task, "_shared_hessian_accum_key", None)
         if batch_token_size <= 0 or observation_count <= 0 or shared_state is None or group_key is None:
@@ -919,10 +986,10 @@ class GPTQProcessor(LoopProcessor):
             task.record_shared_hessian_batch(
                 batch_token_size,
                 shared_state,
+                sequence_count=sequence_count,
                 observation_count=observation_count,
             )
 
-        batch_index = self.current_batch_index()
         with self._shared_hessian_lock:
             stale_keys = [
                 key
@@ -934,6 +1001,22 @@ class GPTQProcessor(LoopProcessor):
             fanout_observations = len(follower_names) * observation_count
             self._shared_hessian_stats["batch_requests"] += fanout_observations
             self._shared_hessian_stats["batch_hits"] += fanout_observations
+
+    def begin_parallel_forward_wave(
+        self,
+        batch_indices: List[int],
+        canonical_device: torch.device,
+    ) -> None:
+        self._ordered_hessian_replay.begin_parallel_forward_wave(batch_indices, canonical_device)
+
+    def seal_parallel_forward_batch(self, batch_index: int, device: torch.device) -> None:
+        self._ordered_hessian_replay.seal_parallel_forward_batch(batch_index, device)
+
+    def flush_parallel_forward_wave(self) -> None:
+        self._ordered_hessian_replay.flush_parallel_forward_wave()
+
+    def abort_parallel_forward_wave(self) -> None:
+        self._ordered_hessian_replay.abort_parallel_forward_wave()
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Reports whether preprocessing omitted this module from GPTQ work."""
@@ -955,8 +1038,38 @@ class GPTQProcessor(LoopProcessor):
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+            observed_tokens = 0
+            observed_sequences = 0
+            observation_count = 0
 
             if (
+                isinstance(g.module, nn.Embedding)
+                and torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() == 2
+                and keep_mask.ndim == 2
+                and keep_mask.shape == inp_tensor.shape
+            ):
+                # Embedding inputs are [B, S] token IDs rather than [B, S, H].
+                # The mask, not token identity, is authoritative because pad and
+                # EOS commonly share an ID. Exclude masked IDs before building
+                # the embedding-frequency Hessian.
+                keep_on_input = keep_mask.to(device=inp_tensor.device)
+                selected_ids = inp_tensor[keep_on_input].contiguous()
+                if selected_ids.numel() > 0:
+                    self._add_batch_with_shared_hessian(
+                        g,
+                        selected_ids.data,
+                        None,
+                        batch_index=batch_idx,
+                        cache_source=inp_tensor,
+                        cache_extra=("embedding-mask", self._tensor_cache_fingerprint(keep_mask)),
+                    )
+                    observed_tokens = int(selected_ids.numel())
+                    observed_sequences = int(keep_mask.any(dim=1).sum().item())
+                    observation_count = 1
+                del selected_ids, keep_on_input
+            elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
                 and inp_tensor.dim() >= 3
@@ -964,23 +1077,36 @@ class GPTQProcessor(LoopProcessor):
                 and keep_mask.shape[:2] == inp_tensor.shape[:2]
             ):
                 out_tensor = out if torch.is_tensor(out) else None
+                metadata_tls = getattr(self, "_mask_metadata_tls", None)
+                if metadata_tls is None:
+                    metadata_tls = threading.local()
+                    self._mask_metadata_tls = metadata_tls
+                mask_metadata = getattr(metadata_tls, "value", None)
+                if mask_metadata is None or mask_metadata[0] is not keep_mask:
+                    mask_metadata = (keep_mask, keep_mask.sum(dim=1).tolist())
+                    metadata_tls.value = mask_metadata
+                sample_token_counts = mask_metadata[1]
                 # Keep per-sample boundaries here so batched calibration
                 # accumulates GPTQ stats with the same semantics as batch_size=1.
                 for sample_index, sample_keep in enumerate(keep_mask):
-                    if not bool(sample_keep.any().item()):
+                    valid_token_count = int(sample_token_counts[sample_index])
+                    if valid_token_count == 0:
                         continue
 
-                    # Ensure the boolean index is on the same device as the
-                    # activation tensor when multi-GPU balancing places inputs
-                    # on different devices than the attention mask.
-                    sample_keep_device = sample_keep.to(inp_tensor.device)
-
-                    sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
-                    if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
-                        sample_out = out_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
+                    if valid_token_count == sample_keep.numel():
+                        sample_inp = inp_tensor[sample_index : sample_index + 1].contiguous()
+                        if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
+                            sample_out = out_tensor[sample_index : sample_index + 1].contiguous()
+                        else:
+                            sample_out = out
                     else:
-                        sample_out = out
-                    self._add_batch_with_shared_hessian(
+                        sample_keep_device = sample_keep.to(inp_tensor.device)
+                        sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
+                        if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
+                            sample_out = out_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
+                        else:
+                            sample_out = out
+                    observation = self._add_batch_with_shared_hessian(
                         g,
                         sample_inp.data,
                         sample_out.data if torch.is_tensor(sample_out) else None,
@@ -990,21 +1116,34 @@ class GPTQProcessor(LoopProcessor):
                             "sample",
                             sample_index,
                             self._tensor_cache_fingerprint(sample_keep),
-                            int(sample_keep.sum().item()),
+                            valid_token_count,
                         ),
                     )
+                    if observation is not None:
+                        token_count, sequence_count = observation
+                        observed_tokens += token_count
+                        observed_sequences += sequence_count
+                        observation_count += int(token_count > 0)
             else:
                 # Flattened (2-D) activations have lost per-sequence membership, so
                 # length-aware normalization is unsafe. Disable it before accumulating.
                 g._disable_length_aware_for_flat_input(inp_tensor)
 
-                self._add_batch_with_shared_hessian(
+                observation = self._add_batch_with_shared_hessian(
                     g,
                     inp_tensor.data,
                     out.data if torch.is_tensor(out) else None,
                     batch_index=batch_idx,
                     cache_source=inp_tensor,
                 )
+                if observation is not None:
+                    observed_tokens, observed_sequences = observation
+                    observation_count = int(observed_tokens > 0)
+            observations = getattr(self._hook_observation_tls, "value", None)
+            if observations is None:
+                observations = {}
+                self._hook_observation_tls.value = observations
+            observations[name] = (observed_tokens, observation_count, observed_sequences)
             del inp, out
         return tmp
 
@@ -1784,6 +1923,12 @@ class GPTQProcessor(LoopProcessor):
                         if output_error_records
                         else None
                     ),
+                    "mean_module_logit_kid_polynomial_mmd2": (
+                        sum(float(item["logit_kid_polynomial_mmd2"]) for item in output_error_records)
+                        / len(output_error_records)
+                        if output_error_records
+                        else None
+                    ),
                     "records": output_error_records,
                     "top": output_error_records[:5],
                 }
@@ -1791,13 +1936,14 @@ class GPTQProcessor(LoopProcessor):
                     worst_output = output_error_records[0]
                     log.info(
                         "Post-quant output error: layer=%s module=%s samples=%d mean_abs=%.6g "
-                        "relative_l2=%.6g softmax_kld_mean=%.6g top1_agreement=%.2f%%",
+                        "relative_l2=%.6g softmax_kld_mean=%.6g logit_kid_mmd2=%.6g top1_agreement=%.2f%%",
                         worst_output[PROCESS_LOG_LAYER],
                         worst_output[PROCESS_LOG_MODULE],
                         worst_output["sample_count"],
                         worst_output["mean_absolute_error"],
                         worst_output["relative_l2_error"],
                         worst_output["softmax_kld_mean"],
+                        worst_output["logit_kid_polynomial_mmd2"],
                         100.0 * worst_output["top1_agreement"],
                     )
                 channel_records = sorted(

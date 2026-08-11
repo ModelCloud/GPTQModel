@@ -14,6 +14,7 @@ from gptqmodel.utils.data import collate_data
 
 class _StubTokenizer:
     pad_token_id = 0
+    eos_token_id = 2
 
     def __call__(self, text, return_tensors="pt", add_special_tokens=True):
         if isinstance(text, list):
@@ -361,5 +362,174 @@ def test_prepare_dataset_trims_left_padded_rows_from_the_left_edge():
     )
 
     assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[11, 12, 13, 14]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 1]]
+
+
+def test_prepare_dataset_filters_multirow_items_by_valid_tokens_per_row():
+    """A short first row must not retain itself or discard a valid sibling row."""
+
+    qmodel = _make_qmodel()
+    dataset = [
+        {
+            "input_ids": [[1, 2, 0, 0], [3, 4, 5, 0]],
+            "attention_mask": [[1, 1, 0, 0], [1, 1, 1, 0]],
+        }
+    ]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_sort=None,
+        batch_size=2,
+        calibration_data_min_length=2,
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[3, 4, 5, 0]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 0]]
+
+
+def test_prepare_dataset_concat_compacts_every_valid_multirow_token():
+    """Concatenation must consume mask-selected tokens from every row, not padded width."""
+
+    qmodel = _make_qmodel()
+    dataset = [
+        {
+            "input_ids": [[1, 2, 0, 0], [3, 4, 5, 0]],
+            "attention_mask": [[1, 1, 0, 0], [1, 1, 1, 0]],
+        }
+    ]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=4,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    assert [batch["input_ids"].tolist() for batch in batches] == [
+        [[1, 2, 3, 4]],
+        [[5, 0, 0, 0]],
+    ]
+    assert [batch["attention_mask"].int().tolist() for batch in batches] == [
+        [[1, 1, 1, 1]],
+        [[1, 0, 0, 0]],
+    ]
+
+
+def test_prepare_dataset_pad_equals_eos_uses_mask_as_point_of_truth():
+    """A valid EOS and padding may share an ID; only the attention mask distinguishes them."""
+
+    qmodel = _make_qmodel()
+    qmodel.tokenizer.pad_token_id = qmodel.tokenizer.eos_token_id
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[
+            {
+                "input_ids": [[11, qmodel.tokenizer.eos_token_id]],
+                "attention_mask": [[1, 1]],
+            },
+            {"input_ids": [[12]], "attention_mask": [[1]]},
+        ],
+        calibration_dataset_sort=None,
+        batch_size=2,
+        calibration_data_min_length=0,
+    )
+
+    assert batches[0]["input_ids"].tolist() == [[11, 2], [12, 2]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1], [1, 0]]
+
+
+def test_prepare_dataset_rejects_no_usable_tokens_after_filtering():
+    qmodel = _make_qmodel()
+
+    with pytest.raises(ValueError, match="no usable rows"):
+        qmodel.prepare_dataset(
+            calibration_dataset=[{"input_ids": [[0, 0]], "attention_mask": [[0, 0]]}],
+            calibration_dataset_sort=None,
+            batch_size=1,
+            calibration_data_min_length=0,
+        )
+
+
+def test_prepare_dataset_no_mask_model_compacts_padding_before_dropping_mask():
+    """Models that reject attention masks must receive unpadded batch-1 token rows."""
+
+    qmodel = _make_qmodel()
+    qmodel.support_batch_quantize = False
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[
+            {"input_ids": [[0, 11, 12, 0]], "attention_mask": [[0, 1, 1, 0]]},
+        ],
+        calibration_dataset_sort=None,
+        batch_size=4,
+        calibration_data_min_length=0,
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[11, 12]]
+    assert "attention_mask" not in batches[0]
+
+
+def test_prepare_dataset_uses_eos_as_local_pad_when_tokenizer_has_no_pad():
+    """Calibration may reuse EOS storage for padding while its mask preserves semantics."""
+
+    qmodel = _make_qmodel()
+    qmodel.tokenizer.pad_token_id = None
+    qmodel.tokenizer.eos_token_id = 9
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[[11, 12], [13]],
+        calibration_dataset_sort=None,
+        batch_size=2,
+        calibration_data_min_length=0,
+    )
+
+    assert batches[0]["input_ids"].tolist() == [[11, 12], [13, 9]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1], [1, 0]]
+
+
+def test_prepare_dataset_without_tokenizer_uses_local_zero_padding():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer = None
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[[11, 12], [13]],
+        calibration_dataset_sort=None,
+        batch_size=2,
+        calibration_data_min_length=0,
+    )
+
+    assert batches[0]["input_ids"].tolist() == [[11, 12], [13, 0]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1], [1, 0]]
+
+
+def test_prepare_dataset_rejects_tokenizer_without_pad_or_eos():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer.pad_token_id = None
+    qmodel.tokenizer.eos_token_id = None
+
+    with pytest.raises(ValueError, match="integer pad_token_id or eos_token_id"):
+        qmodel.prepare_dataset(
+            calibration_dataset=[[11, 12]],
+            calibration_dataset_sort=None,
+            batch_size=1,
+            calibration_data_min_length=0,
+        )
+
+
+def test_prepare_dataset_trims_right_padded_rows_from_the_right_edge():
+    qmodel = _make_qmodel()
+    qmodel.model.config.max_position_embeddings = 4
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[{"input_ids": [[11, 12, 13, 14, 0, 0]], "attention_mask": [[1, 1, 1, 1, 0, 0]]}],
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
     assert batches[0]["input_ids"].tolist() == [[11, 12, 13, 14]]
     assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 1]]

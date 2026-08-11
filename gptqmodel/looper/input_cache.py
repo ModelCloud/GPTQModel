@@ -15,8 +15,8 @@ class InputCache:
 
     layer_inputs: List[List[torch.Tensor]]
     layer_input_kwargs: List[Dict[str, torch.Tensor]]
-    position_ids: List[torch.Tensor]
-    attention_masks: List[torch.Tensor]
+    position_ids: List[Optional[torch.Tensor]]
+    attention_masks: List[Optional[torch.Tensor]]
     src_inputs: Optional[List[List[torch.Tensor]]] = None
 
     def __post_init__(self):

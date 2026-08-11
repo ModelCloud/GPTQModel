@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.looper.gptq_processor import GPTQProcessor, clone_gptq_config_for_module
 from gptqmodel.quantization import gptq as gptq_impl
 from gptqmodel.quantization.config import (
     HessianConfig,
@@ -25,7 +26,6 @@ from gptqmodel.quantization.config import (
     LengthAwareMode,
     QuantizeConfig,
 )
-from gptqmodel.looper.gptq_processor import GPTQProcessor, clone_gptq_config_for_module
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from gptqmodel.utils.logger import render_table
@@ -1060,6 +1060,44 @@ def test_length_aware_bucket_boundaries_avoid_identical_run_split():
         assert config.bucket_weights == pytest.approx(expected_weights, rel=1e-9)
 
 
+def test_targeted_length_buckets_balance_sequence_counts():
+    """A requested bucket count uses calibration quantiles rather than geometric length ranges."""
+
+    lengths = list(range(1, 513))
+    config = LengthAwareConfig.from_lengths(
+        lengths,
+        mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
+        min_bucket_size=16,
+        bucket_weight_exponent=0.2,
+        target_bucket_count=6,
+    )
+
+    runtime_counts = [0] * len(config.bucket_scales)
+    for length in lengths:
+        bucket = bisect.bisect_right(config.bucket_boundaries, length) - 1
+        runtime_counts[bucket] += 1
+
+    assert len(runtime_counts) == 6
+    assert sum(runtime_counts) == 512
+    assert max(runtime_counts) - min(runtime_counts) <= 1
+    assert runtime_counts == [85, 86, 85, 85, 86, 85]
+
+
+def test_targeted_length_buckets_report_sample_count_collapse():
+    """A failed target reports the largest feasible bucket count, not a generic error."""
+
+    with pytest.raises(
+        ValueError,
+        match=r"target_bucket_count=6.*resolved_bucket_count=4.*64 sequence\(s\).*64 unique length\(s\).*min_bucket_size=16",
+    ):
+        LengthAwareConfig.from_lengths(
+            list(range(1, 65)),
+            mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
+            min_bucket_size=16,
+            target_bucket_count=6,
+        )
+
+
 def test_length_aware_from_lengths_string_mode():
     """String mode arguments must be normalized before bucket weights are computed."""
     lengths = [3, 7, 7]
@@ -1145,6 +1183,34 @@ def test_extract_calibration_sequence_lengths_uses_attention_mask():
     assert lengths == [6, 8, 4, 9, 7]
 
 
+def test_extract_calibration_sequence_lengths_normalizes_python_and_additive_masks():
+    """Length-aware bucketing must use the same mask semantics as Hessian collection."""
+    dataset = [
+        {"input_ids": [1, 2, 3, 4], "attention_mask": [1, 0, 1, 0]},
+        {
+            "input_ids": [[1, 2, 3], [4, 5, 6]],
+            "attention_mask": [
+                [
+                    [
+                        [0.0, -float("inf"), -float("inf")],
+                        [0.0, 0.0, -float("inf")],
+                        [0.0, 0.0, -float("inf")],
+                    ]
+                ],
+                [
+                    [
+                        [0.0, -float("inf"), -float("inf")],
+                        [0.0, 0.0, -float("inf")],
+                        [0.0, 0.0, 0.0],
+                    ]
+                ],
+            ],
+        },
+        {"input_ids": [[7, 8], [9, 10]]},
+    ]
+    assert GPTQProcessor._extract_calibration_sequence_lengths(dataset) == [2, 2, 3, 2, 2]
+
+
 def test_ensure_length_aware_materialized_for_dynamic_override():
     """An EQUAL_PER_BUCKET_WEIGHT override without boundaries must be materialized from calibration lengths."""
     qcfg = QuantizeConfig(
@@ -1153,7 +1219,15 @@ def test_ensure_length_aware_materialized_for_dynamic_override():
         hessian=HessianConfig(length_aware=False),
     )
     qcfg.dynamic = {
-        ".*": {"hessian": {"length_aware": {"mode": "equal_per_bucket_weight", "target_bucket_count": 2}}},
+        ".*": {
+            "hessian": {
+                "length_aware": {
+                    "mode": "equal_per_bucket_weight",
+                    "target_bucket_count": 2,
+                    "min_bucket_size": 1,
+                }
+            }
+        },
     }
     cloned = clone_gptq_config_for_module(qcfg, "model.layers.0.self_attn.q_proj")
     assert cloned is not None
@@ -1168,6 +1242,29 @@ def test_ensure_length_aware_materialized_for_dynamic_override():
     assert la.bucket_boundaries is not None
     assert la.bucket_weights is not None
     assert len(la.bucket_boundaries) == len(la.bucket_weights) + 1
+
+
+def test_length_aware_materialization_rejects_collapsed_identical_lengths():
+    """A requested target cannot fabricate distinct buckets for one repeated length value."""
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        hessian=HessianConfig(
+            length_aware=LengthAwareConfig(
+                mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
+                target_bucket_count=6,
+                bucket_weight_exponent=0.2,
+            )
+        ),
+    )
+    processor = object.__new__(GPTQProcessor)
+    processor._calibration_sequence_lengths = [512] * 256
+
+    with pytest.raises(ValueError, match=r"target_bucket_count=6.*resolved_bucket_count=1.*unique length\(s\)"):
+        processor._ensure_length_aware_materialized(qcfg)
+
+    assert qcfg.hessian.length_aware.bucket_boundaries is None
 
 
 def test_gptq_disables_unresolved_equal_per_bucket_weight():
