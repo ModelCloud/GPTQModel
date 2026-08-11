@@ -41,6 +41,30 @@ class Quantizer(nn.Module):
     def requires_groupwise_processing(self) -> bool:
         return False
 
+    def _search_adjacent_zero_points(self) -> bool:
+        """Return whether range search should optimize the 2-bit affine orientation."""
+
+        return (
+            int(self.maxq.item()) == 3
+            and not self.qcfg.sym
+            and not self.requires_groupwise_processing()
+        )
+
+    @staticmethod
+    def _adjacent_zero_point(
+        xmin: torch.Tensor,
+        scale: torch.Tensor,
+        primary: torch.Tensor,
+        *,
+        maxq: int,
+    ) -> torch.Tensor:
+        """Return the other integer neighboring the ideal affine zero point."""
+
+        ideal = -xmin / scale
+        lower = torch.floor(ideal).clamp_(0, maxq)
+        upper = torch.ceil(ideal).clamp_(0, maxq)
+        return torch.where(primary == lower, upper, lower)
+
     # FIXME, optimum shouldn't call this directly, it should call hf_configure
     def configure(
         self,
@@ -117,6 +141,8 @@ class Quantizer(nn.Module):
         mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
         if mse > 0.0:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
+            search_adjacent_zero_points = self._search_adjacent_zero_points()
+            maxq_value = int(self.maxq.item()) if search_adjacent_zero_points else 0
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
                 xmin1 = p * xmin
@@ -127,16 +153,33 @@ class Quantizer(nn.Module):
                     else (xmax1 - xmin1) / self.maxq
                 )
                 zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
-                q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.requires_groupwise_processing())
-                q -= x
-                q.abs_()
-                q.pow_(mse)
-                err = torch.sum(q, 1)
-                tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    self.scale[tmp] = scale1[tmp]
-                    self.zero[tmp] = zero1[tmp]
+                zero_candidates = (zero1,)
+                if search_adjacent_zero_points:
+                    alternate_zero = self._adjacent_zero_point(
+                        xmin1,
+                        scale1,
+                        zero1,
+                        maxq=maxq_value,
+                    )
+                    zero_candidates = (zero1, alternate_zero)
+
+                for zero_candidate in zero_candidates:
+                    q = quantize(
+                        x,
+                        scale1.unsqueeze(1),
+                        zero_candidate.unsqueeze(1),
+                        self.maxq,
+                        self.requires_groupwise_processing(),
+                    )
+                    q -= x
+                    q.abs_()
+                    q.pow_(mse)
+                    err = torch.sum(q, 1)
+                    tmp = err < best
+                    if torch.any(tmp):
+                        best[tmp] = err[tmp]
+                        self.scale[tmp] = scale1[tmp]
+                        self.zero[tmp] = zero_candidate[tmp]
         if not self.perchannel:
             if weight:
                 tmp = shape[0]

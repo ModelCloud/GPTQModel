@@ -18,6 +18,7 @@ from models.model_test import ModelTest
 from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.quantization.quantizer import Quantizer
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -146,6 +147,28 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
 
     with pytest.raises(ValueError, match="group_size > 0"):
         GPTQ(layer, qcfg=qcfg)
+
+
+@torch.inference_mode()
+def test_two_bit_asymmetric_mse_search_optimizes_zero_point_orientation(monkeypatch):
+    weights = torch.tensor([[-1.0, 0.9, 0.9, 0.9, 0.9]], dtype=torch.float32)
+    qcfg = QuantizeConfig(bits=2, group_size=-1, sym=False, mse=2.0)
+
+    optimized = Quantizer(qcfg)
+    optimized.configure(perchannel=True)
+    optimized.find_params(weights, weight=True)
+
+    legacy = Quantizer(qcfg)
+    legacy.configure(perchannel=True)
+    monkeypatch.setattr(legacy, "_search_adjacent_zero_points", lambda: False)
+    legacy.find_params(weights, weight=True)
+
+    optimized_loss = (optimized.quantize(weights) - weights).square().sum()
+    legacy_loss = (legacy.quantize(weights) - weights).square().sum()
+
+    assert optimized.zero.item() == 1.0
+    assert legacy.zero.item() == 2.0
+    assert optimized_loss < legacy_loss
 
 
 class TestGPTQAddBatchCPU(ModelTest):
