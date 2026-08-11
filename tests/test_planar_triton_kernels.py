@@ -16,6 +16,8 @@ Verifies against the Torch planar reference (`planar_unpack_rows/cols` +
 5. `TritonV2Linear.forward` matches the Torch planar reference forward
 """
 
+import gc
+
 import pytest
 import torch
 import torch.nn as nn
@@ -32,13 +34,25 @@ PLANAR_KERNEL_BITS = (3, 5, 6, 7)
 
 
 def _make_inputs(bits: int, in_features: int, out_features: int, group_size: int,
-                 desc_act: bool = False, seed: int = 0):
+                 desc_act: bool = False, sym: bool = False, seed: int = 0):
     torch.manual_seed(seed + bits)
     maxq = (1 << bits) - 1
     groups = in_features // group_size
     linear = nn.Linear(in_features, out_features, bias=True)
     scales = torch.rand(out_features, groups) * 0.01 + 0.005
-    zeros = torch.randint(0, maxq + 1, (out_features, groups)).float()
+    if sym:
+        zeros = torch.full((out_features, groups), (maxq + 1) // 2).float()
+    else:
+        # Every output tile includes zero, midpoint, maximum, and varying
+        # affine zero points so asymmetric coverage cannot pass accidentally
+        # through symmetric-looking random data.
+        output = torch.arange(out_features, dtype=torch.int32).unsqueeze(1)
+        group = torch.arange(groups, dtype=torch.int32).unsqueeze(0)
+        zeros = (output * 29 + group * 17 + 3) % (maxq + 1)
+        zeros[0::32] = 0
+        zeros[1::32] = maxq
+        zeros[2::32] = (maxq + 1) // 2
+        zeros = zeros.float()
     if desc_act:
         perm = torch.randperm(in_features)
         g_idx = (perm // group_size).to(torch.int32)
@@ -55,7 +69,7 @@ def _packed_module(bits: int, in_features: int = 256, out_features: int = 128,
 
     module_cls = cls or TorchLinear
     linear, scales, zeros, g_idx = _make_inputs(
-        bits, in_features, out_features, group_size, desc_act=desc_act, seed=seed
+        bits, in_features, out_features, group_size, desc_act=desc_act, sym=sym, seed=seed
     )
     module = module_cls(
         bits=bits,
@@ -295,6 +309,66 @@ def test_pangolin_gemv_matches_reference_large_k(bits: int, dtype: torch.dtype, 
     assert torch.allclose(out.cpu().float(), ref.float(), atol=tol, rtol=1e-2)
 
 
+@pytest.mark.parametrize(
+    ("dtype", "batch", "max_abs_limit", "rmse_limit", "rel_l2_limit", "kld_limit"),
+    [
+        (torch.bfloat16, 4, 1e-2, 1e-3, 2e-3, 1e-6),
+        (torch.float16, 8, 5e-2, 7e-3, 2e-2, 1e-4),
+    ],
+)
+def test_pangolin_gemv_work_balanced_split_matches_reference(
+    dtype: torch.dtype,
+    batch: int,
+    max_abs_limit: float,
+    rmse_limit: float,
+    rel_l2_limit: float,
+    kld_limit: float,
+):
+    """Exercise the sm_80 4096-square split gate and its distribution accuracy."""
+    if not _pangolin_available():
+        pytest.skip("pangolin native CUDA extension unavailable")
+    if torch.cuda.get_device_capability() != (8, 0):
+        pytest.skip("work-balanced split is gated to sm_80")
+    from gptqmodel.utils.pangolin import pangolin_gemv
+
+    module = _packed_module(7, in_features=4096, out_features=4096, group_size=128, sym=False)
+    ref_w = _reference_dequant(module).to(dtype)
+    _to_cuda(module)
+    scales = module.scales.to(dtype)
+
+    torch.manual_seed(711 + batch)
+    x = (torch.randn(batch, module.in_features, dtype=dtype) * 0.5).cuda()
+    ref = (x.cpu().float() @ ref_w.float()).to(dtype)
+    out = pangolin_gemv(
+        x, module.qweight, scales, module.qzeros, module.g_idx, module.bits
+    )
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(out).all()
+    out_cpu = out.cpu().float()
+    ref_float = ref.float()
+    diff = (out_cpu - ref_float).abs()
+    rmse = diff.square().mean().sqrt()
+    rel_l2 = torch.linalg.vector_norm(diff) / torch.linalg.vector_norm(ref_float)
+    assert diff.max().item() < max_abs_limit
+    assert rmse.item() < rmse_limit
+    assert rel_l2.item() < rel_l2_limit
+
+    ref_log_probs = torch.log_softmax(ref.double(), dim=-1)
+    out_log_probs = torch.log_softmax(out_cpu.double(), dim=-1)
+    forward_kld = (ref_log_probs.exp() * (ref_log_probs - out_log_probs)).sum(dim=-1).mean()
+    top1 = (ref.argmax(dim=-1) == out_cpu.argmax(dim=-1)).float().mean()
+    assert 0.0 <= forward_kld.item() < kld_limit
+    assert top1.item() == 1.0
+
+    for _ in range(10):
+        repeated = pangolin_gemv(
+            x, module.qweight, scales, module.qzeros, module.g_idx, module.bits
+        )
+        torch.cuda.synchronize()
+        assert torch.equal(repeated, out)
+
+
 @pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)
 def test_pangolin_gemv_sym_metadata(bits: int):
     if not _pangolin_available():
@@ -311,6 +385,37 @@ def test_pangolin_gemv_sym_metadata(bits: int):
 
     out = pangolin_gemv(x, module.qweight, module.scales, module.qzeros, module.g_idx, module.bits)
     assert torch.allclose(out.cpu().float(), ref.float(), atol=2e-2, rtol=1e-2)
+
+
+def test_pangolin_gemv_does_not_retain_call_scratch():
+    """Split-K workspace must stop being live when one inference call ends."""
+    if not _pangolin_available():
+        pytest.skip("pangolin native CUDA extension unavailable")
+    from gptqmodel.utils.pangolin import pangolin_gemv
+
+    module = _packed_module(7, in_features=4096, out_features=256, group_size=128, sym=False)
+    _to_cuda(module)
+    x = torch.randn(16, module.in_features, dtype=torch.float16, device="cuda")
+
+    warmup = pangolin_gemv(
+        x, module.qweight, module.scales, module.qzeros, module.g_idx, module.bits
+    )
+    torch.cuda.synchronize()
+    del warmup
+    gc.collect()
+    torch.cuda.synchronize()
+    allocated_before = torch.cuda.memory_allocated()
+
+    for _ in range(5):
+        out = pangolin_gemv(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx, module.bits
+        )
+        torch.cuda.synchronize()
+        del out
+
+    gc.collect()
+    torch.cuda.synchronize()
+    assert torch.cuda.memory_allocated() == allocated_before
 
 
 @pytest.mark.parametrize("bits", PLANAR_KERNEL_BITS)

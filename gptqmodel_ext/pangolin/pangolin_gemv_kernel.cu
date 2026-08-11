@@ -274,12 +274,22 @@ __global__ __launch_bounds__(Warps * kWarpSize) void pangolin_gemv_kernel(
 
     // Every lane needs all 32 activations of the block: each lane loads one
     // (coalesced) and the unrolled loop broadcasts them with warp shuffles.
-    // For the vector decode path we keep the activation in the native dtype and
-    // shuffle it as a 16-bit value; the scalar path converts to float once.
-    Scalar x_lane_s[SizeM];
+    // The half2 path keeps native FP16. At M >= 8, other paths convert once at
+    // load time; converting after every shuffled value repeated the same exact
+    // cast up to 32 * SizeM times per lane. Keep the original native shuffle at
+    // lower M, where the extra float registers do not repay their occupancy cost.
+    constexpr bool kPreconvertInput = !kHalf2FastPath && SizeM >= 8;
+    using InputArray = typename std::conditional<
+        kPreconvertInput, float[SizeM], Scalar[SizeM]>::type;
+    InputArray x_lane;
 #pragma unroll
     for (int m = 0; m < SizeM; ++m) {
-      x_lane_s[m] = ldg(input + static_cast<int64_t>(m) * size_k + row0 + lane);
+      const Scalar value = ldg(input + static_cast<int64_t>(m) * size_k + row0 + lane);
+      if constexpr (kPreconvertInput) {
+        x_lane[m] = ScalarTraits<Scalar>::to_float(value);
+      } else {
+        x_lane[m] = value;
+      }
     }
 
     // Decode/compute weights once and reuse them for all 32 activations.
@@ -311,7 +321,7 @@ __global__ __launch_bounds__(Warps * kWarpSize) void pangolin_gemv_kernel(
               code2, scale2, ScalarTraits<Scalar>::neg2(zero_scale2));
 #pragma unroll
           for (int m = 0; m < SizeM; ++m) {
-            const Scalar activation = ScalarTraits<Scalar>::shfl(x_lane_s[m], k);
+            const Scalar activation = ScalarTraits<Scalar>::shfl(x_lane[m], k);
             const AccScalar2 act2 = ScalarTraits<Scalar>::make2(activation);
             acc[m] = ScalarTraits<Scalar>::fma2(act2, weight2, acc[m]);
           }
@@ -337,19 +347,19 @@ __global__ __launch_bounds__(Warps * kWarpSize) void pangolin_gemv_kernel(
           const float weight1 = __fmaf_rn(static_cast<float>(code1), scale1, -z1s);
 #pragma unroll
           for (int m = 0; m < SizeM; ++m) {
-            const Scalar activation = ScalarTraits<Scalar>::shfl(x_lane_s[m], k);
-            const float act_f = ScalarTraits<Scalar>::to_float(activation);
-            acc[m][0] = __fmaf_rn(act_f, weight0, acc[m][0]);
-            acc[m][1] = __fmaf_rn(act_f, weight1, acc[m][1]);
+            float activation;
+            if constexpr (kPreconvertInput) {
+              activation = __shfl_sync(0xffffffffu, x_lane[m], k);
+            } else {
+              activation = ScalarTraits<Scalar>::to_float(
+                  ScalarTraits<Scalar>::shfl(x_lane[m], k));
+            }
+            acc[m][0] = __fmaf_rn(activation, weight0, acc[m][0]);
+            acc[m][1] = __fmaf_rn(activation, weight1, acc[m][1]);
           }
         }
       }
     } else {
-      float x_lane[SizeM];
-#pragma unroll
-      for (int m = 0; m < SizeM; ++m) {
-        x_lane[m] = ScalarTraits<Scalar>::to_float(x_lane_s[m]);
-      }
 #pragma unroll
       for (int k = 0; k < 32; ++k) {
         float weight[ColsPerLane];
@@ -366,7 +376,13 @@ __global__ __launch_bounds__(Warps * kWarpSize) void pangolin_gemv_kernel(
         }
 #pragma unroll
         for (int m = 0; m < SizeM; ++m) {
-          const float activation = __shfl_sync(0xffffffffu, x_lane[m], k);
+          float activation;
+          if constexpr (kPreconvertInput) {
+            activation = __shfl_sync(0xffffffffu, x_lane[m], k);
+          } else {
+            activation = ScalarTraits<Scalar>::to_float(
+                ScalarTraits<Scalar>::shfl(x_lane[m], k));
+          }
 #pragma unroll
           for (int c = 0; c < ColsPerLane; ++c) {
             acc[m][c] = __fmaf_rn(activation, weight[c], acc[m][c]);
@@ -518,7 +534,29 @@ int launch_cols(
   // Size split-k to fill one resident wave of blocks per SM. Small batches can
   // launch additional waves when the k-block budget allows, but that is selected
   // by the Warps choice in launch_size_m rather than a blanket multiplier here.
-  const int split_k = std::min(effective_split_cap, wanted);
+  const int occupancy_split = std::min(effective_split_cap, wanted);
+  int split_k = occupancy_split;
+  // On local sm_80, the 4096-square 7-bit BF16 M=4 and FP16 M=8 templates are
+  // faster with the smallest split that preserves the longest per-warp work.
+  // Other shapes/dtypes regress when generalized, so keep this deliberately
+  // narrow. For K=4096, 4 warps need 16 splits for two K-blocks per warp; the
+  // occupancy-only result of 17 adds workspace/reduction work without
+  // shortening that chain.
+  constexpr bool kUseWorkBalancedSplit = Bits == 7 &&
+      ((std::is_same_v<Scalar, nv_bfloat16> && SizeM == 4) ||
+       (std::is_same_v<Scalar, half> && SizeM == 8));
+  if constexpr (kUseWorkBalancedSplit) {
+    if (size_k == 4096 && size_n == 4096) {
+      const cudaDeviceProp* properties = at::cuda::getDeviceProperties(input.get_device());
+      if (properties->major == 8 && properties->minor == 0) {
+        const int num_k_blocks = size_k / 32;
+        const int blocks_per_warp =
+            (num_k_blocks + occupancy_split * Warps - 1) / (occupancy_split * Warps);
+        split_k = std::max(
+            1, (num_k_blocks + blocks_per_warp * Warps - 1) / (blocks_per_warp * Warps));
+      }
+    }
+  }
   if (dry_run) {
     return split_k;
   }

@@ -49,6 +49,18 @@ def _parse_args() -> argparse.Namespace:
             "mode=equal_per_bucket_weight, target_bucket_count=6, bucket_weight_exponent=0.2."
         ),
     )
+    parser.add_argument(
+        "--hessian-target-bucket-count",
+        type=int,
+        default=6,
+        help="Target number of length buckets for length-aware Hessian normalization (default: 6).",
+    )
+    parser.add_argument(
+        "--hessian-min-bucket-size",
+        type=int,
+        default=16,
+        help="Minimum number of calibration sequences per length-aware bucket (default: 16).",
+    )
     return parser.parse_args()
 
 

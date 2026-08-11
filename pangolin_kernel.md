@@ -1870,3 +1870,285 @@ partial zero-initialization.
 Verification:
 - `pytest -q tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference tests/test_planar_triton_kernels.py::test_pangolin_gemv_matches_reference_large_k` — 72 passed.
 - `ruff check` and `git diff --check` clean.
+
+### Round 15: Ampere small-M optimization campaign (in progress)
+
+Scope and starting point (2026-08-11):
+
+- Base commit: `e55fcdb913dca66cc4a43d62f648fab421d82461` (`origin/main`).
+- Devices: PCI-ordered GPUs 6 and 7, both NVIDIA PG506-230, compute
+  capability 8.0, 124 SMs, and 96 GiB VRAM. Live discovery is authoritative;
+  older host notes that identify these ordinals as RTX 4090s are stale.
+- Runtime: Python 3.14.6 free-threading, `PYTHON_GIL=0`, PyTorch
+  2.13.0+cu130, CUDA 13.0.
+- Target rows: `M in {1, 2, 4, 8, 16, 32}`. Independent benchmark and
+  correctness jobs run concurrently on physical GPUs 6 and 7.
+
+Non-negotiable correctness and memory contracts:
+
+- Every optimized output is compared with the full dense FP32 dequantized
+  reference. Performance changes are rejected if they loosen the existing
+  numerical contract.
+- Affine `sym=False` is a first-class test path: use non-midpoint, per-group,
+  per-column zero points and verify `(code - zero) * scale` exactly follows
+  GPTQ-P v2 zero semantics.
+- Dense dequantized weights, decoded zero points, and workspaces may exist only
+  inside one inference call. No module-level or process-level dequant cache is
+  allowed; persistent dense caching would defeat quantized-model VRAM savings.
+- Benchmark gates are per architecture, dtype, bit width, shape, and M. A
+  candidate is enabled only where repeated measurements beat the current
+  optimized Pangolin kernel without accuracy loss.
+
+Planned baseline matrix:
+
+```
++---------+-------------+----------------+----------------+-------------------+
+| GPU     | primary job | symmetry       | dtype          | M                 |
++---------+-------------+----------------+----------------+-------------------+
+| 6       | latency     | sym=True       | fp16 and bf16  | 1,2,4,8,16,32     |
+| 7       | accuracy    | sym=False      | fp16 and bf16  | 1,2,4,8,16,32     |
++---------+-------------+----------------+----------------+-------------------+
+```
+
+The first implementation milestone is to make the benchmark itself encode
+these contracts (repeat statistics, dense-reference errors, and transient
+memory accounting) before changing launch geometry or kernel math.
+
+#### Round 15 baseline harness and smoke measurement
+
+`scripts/benchmark_pangolin_m.py` now reports p10/median/p90 CUDA-event
+latency, FP32-reference max/MAE/RMSE/relative-L2 errors, nonfinite counts, and
+peak live temporary allocation. Its affine zero-point generator forces every
+32-column tile to include zero, midpoint, maximum, and group/column-varying
+values. The symmetric mode fixes every zero point at the integer midpoint.
+
+Parallel smoke run (FP16, K=N=4096, group size 128, 5 warmups, 10 measured
+iterations, seed 0; GPU 6 symmetric 3-bit and GPU 7 affine 7-bit):
+
+```
++--------+------+-----------+-----------+-----------+---------+----------+----------+-----------+----+----------+
+| mode   | M    | median_ms | p10_ms    | p90_ms    | max_abs | RMSE     | rel_L2   | speedup   | nf | temp_MiB |
++--------+------+-----------+-----------+-----------+---------+----------+----------+-----------+----+----------+
+| sym b3 | 1    | 0.0481    | 0.0451    | 0.0707    | 2.61e-3 | 6.34e-4 | 8.42e-4 | 12.48x    | 0  | 0.31     |
+| sym b3 | 2    | 0.0466    | 0.0461    | 0.0594    | 2.63e-3 | 6.51e-4 | 8.38e-4 | 12.90x    | 0  | 0.61     |
+| sym b3 | 4    | 0.0471    | 0.0461    | 0.0584    | 2.80e-3 | 6.44e-4 | 8.32e-4 | 12.74x    | 0  | 1.22     |
+| sym b3 | 8    | 0.0553    | 0.0553    | 0.0584    | 2.96e-3 | 6.47e-4 | 8.35e-4 | 10.99x    | 0  | 2.19     |
+| sym b3 | 16   | 0.0952    | 0.0942    | 0.0993    | 9.74e-4 | 1.63e-4 | 2.08e-4 | 6.37x     | 0  | 2.38     |
+| sym b3 | 32   | 0.1720    | 0.1700    | 1.4305    | 9.77e-4 | 1.63e-4 | 2.08e-4 | 3.49x     | 0  | 0.25     |
+| aff b7 | 1    | 0.0451    | 0.0430    | 0.0707    | 6.51e-2 | 1.64e-2 | 7.59e-4 | 13.34x    | 0  | 0.27     |
+| aff b7 | 2    | 0.0440    | 0.0420    | 0.0532    | 7.02e-2 | 1.67e-2 | 9.54e-4 | 13.63x    | 0  | 0.55     |
+| aff b7 | 4    | 0.0461    | 0.0451    | 0.0502    | 8.51e-2 | 1.62e-2 | 9.24e-4 | 13.04x    | 0  | 1.09     |
+| aff b7 | 8    | 0.0614    | 0.0604    | 0.0655    | 7.59e-2 | 1.66e-2 | 8.99e-4 | 9.88x     | 0  | 1.94     |
+| aff b7 | 16   | 0.1009    | 0.0993    | 0.1044    | 3.10e-2 | 3.68e-3 | 2.08e-4 | 6.01x     | 0  | 2.38     |
+| aff b7 | 32   | 0.1792    | 0.1782    | 0.1843    | 3.12e-2 | 3.78e-3 | 2.08e-4 | 3.36x     | 0  | 0.25     |
++--------+------+-----------+-----------+-----------+---------+----------+----------+-----------+----+----------+
+```
+
+The M=32 symmetric p90 outlier is not used as a baseline claim; the median and
+p10 remain consistent with the prior 50-iteration run. Optimization A/B runs
+will use at least 50 iterations and multiple repetitions. The temporary-memory
+column includes the returned output plus split-K scratch. It is live-call
+memory, not retained dequantized-weight memory.
+
+The harness also reports forward KLD and top-1 agreement over output logits.
+KLD uses FP64 `log_softmax` so floating-point roundoff cannot report a negative
+divergence. The affine 7-bit smoke rerun produced KLD from `1.05e-7` to
+`2.89e-5` and top-1 agreement `1.000` at every target M.
+
+Rejected experiment: instantiate the dormant `ColsPerLane=4` path at M=32 to
+raise the 4096-wide grid from 64 blocks/split-K=1 to a fuller occupancy-derived
+grid. It preserved every error metric and top-1 result, but regressed both
+tested modes and increased live temporary memory:
+
+```
++------------+-------------+--------------+----------+---------------+----------------+-------------+
+| mode       | baseline_ms | candidate_ms | delta    | baseline_temp | candidate_temp | disposition |
++------------+-------------+--------------+----------+---------------+----------------+-------------+
+| sym 3-bit  | 0.1700      | 0.1823       | +7.2%    | 0.25 MiB      | 1.75 MiB       | rejected    |
+| aff 7-bit  | 0.1792      | 0.1905       | +6.3%    | 0.25 MiB      | 1.75 MiB       | rejected    |
++------------+-------------+--------------+----------+---------------+----------------+-------------+
+```
+
+The candidate kernel was removed. Extra split-K exposed more blocks but added
+workspace traffic and final reduction overhead; the original single-split
+paired-column path is faster and materially leaner.
+
+#### Exact cached-library A/B and contiguous-K rejection
+
+The benchmark accepts `--extension /path/to/gptqmodel_pangolin_ops.so` so two
+already-built kernels can be loaded in separate processes without source-hash
+rebuilds or wrapper/JIT ambiguity. This exposed the initial contiguous-K
+metadata-cache result as noise. Exact affine 7-bit FP16 A/B on seeds 0 and 2
+(50 iterations each; the seed-1 process correctly aborted after its preflight
+saw residual GPU utilization) was:
+
+```
++------+--------+-------------+--------------+----------+---------------+----------------+
+| M    | seed   | baseline_ms | candidate_ms | delta    | baseline_temp | candidate_temp |
++------+--------+-------------+--------------+----------+---------------+----------------+
+| 1    | 0      | 0.0420      | 0.0430       | +2.4%    | 0.27 MiB      | 0.24 MiB       |
+| 1    | 2      | 0.0415      | 0.0425       | +2.4%    | 0.27 MiB      | 0.24 MiB       |
+| 2    | 0      | 0.0399      | 0.0430       | +7.8%    | 0.55 MiB      | 0.48 MiB       |
+| 2    | 2      | 0.0410      | 0.0420       | +2.4%    | 0.55 MiB      | 0.48 MiB       |
+| 4    | 0      | 0.0451      | 0.0492       | +9.1%    | 1.09 MiB      | 0.97 MiB       |
+| 4    | 2      | 0.0440      | 0.0481       | +9.3%    | 1.09 MiB      | 0.97 MiB       |
+| 8    | 0      | 0.0594      | 0.0594       |  0.0%    | 1.94 MiB      | 1.69 MiB       |
+| 8    | 2      | 0.0584      | 0.0584       |  0.0%    | 1.94 MiB      | 1.69 MiB       |
+| 16   | 0      | 0.0993      | 0.1060       | +6.7%    | 2.38 MiB      | 1.88 MiB       |
+| 16   | 2      | 0.0983      | 0.1055       | +7.3%    | 2.38 MiB      | 1.88 MiB       |
+| 32   | 0      | 0.1782      | 0.1792       | +0.6%    | 0.25 MiB      | 0.25 MiB       |
+| 32   | 2      | 0.1782      | 0.1772       | -0.6%    | 0.25 MiB      | 0.25 MiB       |
++------+--------+-------------+--------------+----------+---------------+----------------+
+```
+
+Contiguous K ranges reduce occupancy-selected scratch by at most 0.50 MiB but
+regress latency materially at M=1/2/4/16. That is neither a speed win nor a
+meaningful model-VRAM saving, so the kernel change was removed.
+
+#### Rejected accumulator ILP and accepted activation-conversion hoist
+
+Dual and quad accumulator chains were tested to expose independent FMAs in the
+M=1/2 loop. They improved the dense-reference error slightly by changing the
+reduction order, but a long same-device A/B showed that both were slower. The
+cross-device result that initially looked positive was measurement noise, so
+the accumulator changes were removed:
+
+```
++----------------+-----------+--------------+----------+-------------+
+| affine 3-bit   | chains    | median_ms    | delta    | disposition |
++----------------+-----------+--------------+----------+-------------+
+| M=1            | baseline  | 0.0369       | --       | retained    |
+| M=1            | dual      | 0.0379       | +2.7%    | rejected    |
+| M=1            | quad      | 0.0389       | +5.4%    | rejected    |
++----------------+-----------+--------------+----------+-------------+
+```
+
+The accepted optimization instead converts each native BF16/FP16 activation
+to FP32 once before its 32 shuffle broadcasts. Previously the scalar path
+repeated the same exact conversion after every shuffle. Conversion and the
+bitwise warp shuffle commute, so this does not change the reduction order or
+arithmetic. Long-run A/B showed that the extra FP32 registers pay off at
+`M >= 8`; M=1/2/4 deliberately retain the original native shuffle path. FP16
+M=1/2/4/8 also retains its existing half2 path.
+
+Exact cached-library A/B below used affine `sym=False`, K=N=4096, group size
+128, 100 warmups, 1,000 timed iterations, and one PG506-230 (sm_80) per run.
+The BF16 optimized result is 4.9-8.7% faster in the replicated stable
+measurements; one BF16 M=32 repetition reached 12.2% but is not used as the
+headline claim. FP16 M=16/32 improves by 8.0% and 9.5%, respectively.
+
+```
++---------+------+-------------+--------------+----------+--------------+----------+
+| dtype   | M    | baseline_ms | optimized_ms | speedup  | path         | temp_MiB |
++---------+------+-------------+--------------+----------+--------------+----------+
+| bf16    | 1    | 0.0399      | 0.0399       | 1.000x   | unchanged    | 0.27     |
+| bf16    | 2    | n/a         | n/a          | 1.000x   | unchanged    | 0.55     |
+| bf16    | 4    | n/a         | n/a          | 1.000x   | unchanged    | 0.97     |
+| bf16    | 8    | 0.0635      | 0.0604       | 1.051x   | preconvert   | 1.69     |
+| bf16    | 16   | 0.0952      | 0.0901       | 1.057x   | preconvert   | 2.38     |
+| bf16    | 32   | 0.1772      | 0.1628       | 1.088x   | preconvert   | 0.25     |
+| fp16    | 1-8  | n/a         | n/a          | 1.000x   | unchanged    | varies   |
+| fp16    | 16   | 0.0973      | 0.0901       | 1.080x   | preconvert   | 2.38     |
+| fp16    | 32   | 0.1772      | 0.1618       | 1.095x   | preconvert   | 0.25     |
++---------+------+-------------+--------------+----------+--------------+----------+
+```
+
+Accuracy is measured against full dense FP32 dequantization and matmul. Every
+listed metric, including forward KLD and top-1, was bit-for-bit unchanged
+between the two kernels:
+
+```
++---------+------+----------+----------+----------+----------+----------+-------+----+
+| dtype   | M    | max_abs  | MAE      | RMSE     | rel_L2   | fwd_KLD  | top-1 | nf |
++---------+------+----------+----------+----------+----------+----------+-------+----+
+| bf16    | 1    | 2.42e-1  | 2.45e-2  | 3.58e-2  | 1.70e-3  | 1.69e-3  | 0.000 | 0  |
+| bf16    | 2    | 2.47e-1  | 2.23e-2  | 3.34e-2  | 1.65e-3  | 3.81e-5  | 1.000 | 0  |
+| bf16    | 4    | 2.40e-1  | 2.04e-2  | 3.06e-2  | 1.67e-3  | 2.52e-3  | 1.000 | 0  |
+| bf16    | 8    | 2.29e-1  | 2.06e-2  | 3.02e-2  | 1.67e-3  | 8.99e-4  | 1.000 | 0  |
+| bf16    | 16   | 2.45e-1  | 2.12e-2  | 3.14e-2  | 1.65e-3  | 8.06e-4  | 1.000 | 0  |
+| bf16    | 32   | 2.50e-1  | 1.98e-2  | 2.95e-2  | 1.67e-3  | 5.20e-4  | 1.000 | 0  |
+| fp16    | 16   | 2.99e-2  | 2.40e-3  | 3.55e-3  | 2.06e-4  | 3.36e-6  | 1.000 | 0  |
+| fp16    | 32   | 3.12e-2  | 2.57e-3  | 3.82e-3  | 2.07e-4  | 5.00e-6  | 1.000 | 0  |
++---------+------+----------+----------+----------+----------+----------+-------+----+
+```
+
+The single-row BF16 affine fixture has top-1 disagreement against FP32 in both
+baseline and optimized kernels; it is not an optimization regression. KLD is
+also exactly the same. The benchmark now accepts an explicit `--batches` list
+and reports both distribution metrics for every requested M.
+
+Coverage improvements make affine zero points adversarial rather than merely
+random: each output tile contains zero, midpoint, maximum, and varying
+group/column values. Symmetric tests use the real midpoint encoding. A new
+lifetime test repeats M=16 calls and asserts CUDA live allocation returns
+exactly to its pre-call value, proving split-K scratch and decoded state are not
+retained as a dequant cache.
+
+Verification on Python 3.14.6 free-threading with `PYTHON_GIL=0`:
+
+- 77 focused Pangolin cases passed across bits 3/5/6/7, FP16/BF16,
+  M=1/2/4/8/16/32, long-K, symmetric metadata, and scratch lifetime.
+- The full `tests/test_planar_triton_kernels.py` suite passed: 226 tests.
+
+#### Profiler-guided split-K work balancing
+
+An NCU capture of affine 7-bit BF16 M=1 at 4096x4096 showed the kernel itself
+takes 23.49 us inside a roughly 41 us Python/operator call. The launch used a
+64x17 grid, 128 threads/block, 53 registers/thread, and only 0.97 waves over
+124 SMs. Theoretical occupancy was 56.25%, achieved occupancy was 38.43%, SM
+throughput was 53.17%, and DRAM throughput was 26.35%.
+
+The occupancy heuristic selected 17 split-K blocks per column block. With 128
+K-blocks and four warps, however, split 16 already gives every warp exactly two
+K-blocks. Split 17 cannot shorten the longest warp chain; it only adds 64 grid
+blocks, final-reduction work, and workspace.
+
+A generic rule that chose the smallest split with the same longest-warp work
+was rejected. It helped selected 4096-square paths but regressed other real
+projection shapes. Long same-device runs (200 warmups, 2,000 iterations) were:
+
+```
++---------+------+-----------+-------------+--------------+----------+-------------+
+| dtype   | M    | K x N     | baseline_ms | generic_ms   | delta    | disposition |
++---------+------+-----------+-------------+--------------+----------+-------------+
+| bf16 b3 | 4    | 1536x5120 | 0.0389      | 0.0399       | +2.6%    | rejected    |
+| fp16 b7 | 8    | 5120x160  | 0.0379      | 0.0389       | +2.6%    | rejected    |
+| bf16 b7 | 4    | 5120x5120 | 0.0584      | 0.0594       | +1.7%    | rejected    |
+| fp16 b7 | 8    | 5120x5120 | 0.0645      | 0.0696       | +7.9%    | rejected    |
++---------+------+-----------+-------------+--------------+----------+-------------+
+```
+
+The accepted rule is therefore intentionally gated to local sm_80, 7-bit,
+4096x4096, and only the two dtype/M instantiations with replicated wins. Every
+other architecture, shape, bit width, dtype, and batch keeps the occupancy
+launch unchanged:
+
+```
++-------+------+-------------+--------------+----------+---------------+----------------+-------------+
+| dtype | M    | baseline_ms | optimized_ms | speedup  | baseline_temp | optimized_temp | temp_delta  |
++-------+------+-------------+--------------+----------+---------------+----------------+-------------+
+| bf16  | 4    | 0.0512      | 0.0492       | 1.041x   | 0.97 MiB      | 0.72 MiB       | -25.8%      |
+| fp16  | 8    | 0.0584      | 0.0563       | 1.037x   | 1.94 MiB      | 1.44 MiB       | -25.8%      |
++-------+------+-------------+--------------+----------+---------------+----------------+-------------+
+```
+
+Exact cached-library A/B on an independent adversarial affine fixture confirms
+that FP16 output is bit-identical. BF16 changes only the reduction rounding and
+slightly improves every aggregate error metric:
+
+```
++-------+-----------+----------+-------------+-------------+-------------+-------------+--------------+--------------+
+| dtype | kernel    | max_abs  | MAE         | RMSE        | rel_L2      | fwd_KLD     | top-1       | finite       |
++-------+-----------+----------+-------------+-------------+-------------+-------------+--------------+--------------+
+| bf16  | baseline  | 3.906e-3 | 1.01454e-4  | 3.68385e-4  | 1.25699e-3 | 6.99466e-8  | 1.000        | yes          |
+| bf16  | optimized | 3.906e-3 | 1.01424e-4  | 3.68365e-4  | 1.25692e-3 | 6.99390e-8  | 1.000        | yes          |
+| fp16  | baseline  | 3.198e-2 | 3.72014e-3  | 4.88651e-3  | 1.63509e-2 | 1.19072e-5  | 1.000        | yes          |
+| fp16  | optimized | 3.198e-2 | 3.72014e-3  | 4.88651e-3  | 1.63509e-2 | 1.19072e-5  | 1.000        | yes          |
++-------+-----------+----------+-------------+-------------+-------------+-------------+--------------+--------------+
+```
+
+Two direct 4096-square tests exercise the gated branches against dense
+references, validate finite/max/RMSE/relative-L2/KLD/top-1 contracts, and
+require bitwise stability across ten repeated launches. The full Python 3.14.6
+free-threaded suite now passes 228 tests with `PYTHON_GIL=0`. No dequant state is
+cached; reducing split count lowers only live-call workspace.

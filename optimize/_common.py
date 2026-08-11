@@ -273,7 +273,8 @@ def build_quantize_config(args: argparse.Namespace):
         if args.hessian_length_aware:
             length_aware = LengthAwareConfig(
                 mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
-                target_bucket_count=6,
+                target_bucket_count=getattr(args, "hessian_target_bucket_count", 6),
+                min_bucket_size=getattr(args, "hessian_min_bucket_size", 16),
                 bucket_weight_exponent=0.2,
             )
         qcfg_kwargs["hessian"] = HessianConfig(
