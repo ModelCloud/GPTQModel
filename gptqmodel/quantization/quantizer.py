@@ -604,6 +604,34 @@ class Quantizer(nn.Module):
             return maxq_value.bit_length() + 1
         return (maxq_value + 1).bit_length() - 1
 
+    def _search_adjacent_zero_points(self, maxq_value: int) -> bool:
+        """Return whether scale search should optimize the 2-bit affine orientation.
+
+        A 2-bit affine grid has four codes and an integer zero point.  For a
+        range spanning zero, rounding the ideal zero point commits the grid to
+        either two negative levels and one positive level or the opposite.
+        This asymmetry is material at 2 bits, so asymmetric quantization scores
+        both adjacent legal zero points instead of letting tie-to-even rounding
+        choose the orientation independently of the configured objective.
+        """
+
+        return maxq_value == 3 and not self.qcfg.sym and not self.requires_groupwise_processing()
+
+    @staticmethod
+    def _adjacent_zero_point_candidates(
+        xmin: torch.Tensor,
+        scale: torch.Tensor,
+        primary: torch.Tensor,
+        *,
+        maxq_value: int,
+    ) -> torch.Tensor:
+        """Return the other integer neighboring the ideal affine zero point."""
+
+        ideal = -xmin / scale
+        lower = torch.floor(ideal).clamp_(0, maxq_value)
+        upper = torch.ceil(ideal).clamp_(0, maxq_value)
+        return torch.where(primary == lower, upper, lower)
+
     def _quantize_scale_search_candidates(
         self,
         x: torch.Tensor,
@@ -965,7 +993,6 @@ class Quantizer(nn.Module):
                     best = torch.full([x.shape[0]], float("inf"), device=dev)
                     candidate_count = int(self.maxshrink * self.grid)
 
-                    chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
                     # Preserve the original scalar candidate values while
                     # evaluating all rows and candidates in vectorized chunks.
                     shrink = self._cached_scale_search_shrink_factors(candidate_count, self.grid, dev)
@@ -982,6 +1009,18 @@ class Quantizer(nn.Module):
                         zero_all = self.zero.unsqueeze(0).expand_as(scale_all)
                     else:
                         zero_all = torch.round(-xmin_all / scale_all)
+                        if self._search_adjacent_zero_points(maxq_value):
+                            alternate_zero = self._adjacent_zero_point_candidates(
+                                xmin_all,
+                                scale_all,
+                                zero_all,
+                                maxq_value=maxq_value,
+                            )
+                            scale_all = torch.cat((scale_all, scale_all), dim=0)
+                            zero_all = torch.cat((zero_all, alternate_zero), dim=0)
+                            candidate_count = scale_all.shape[0]
+
+                    chunk_size = self._scale_search_candidate_chunk_size(x, candidate_count, method)
 
                     group_size = x.shape[1]
                     x_batch = x.unsqueeze(0)
@@ -1306,6 +1345,16 @@ class Quantizer(nn.Module):
                         zero_all = zero.unsqueeze(0).expand(candidate_count, -1, -1)
                     else:
                         zero_all = torch.round(-xmin_all / scale_all)
+                        if self._search_adjacent_zero_points(maxq_value):
+                            alternate_zero = self._adjacent_zero_point_candidates(
+                                xmin_all,
+                                scale_all,
+                                zero_all,
+                                maxq_value=maxq_value,
+                            )
+                            scale_all = torch.cat((scale_all, scale_all), dim=0)
+                            zero_all = torch.cat((zero_all, alternate_zero), dim=0)
+                            candidate_count = scale_all.shape[0]
                 else:
                     scale_all = scale.unsqueeze(0)
                     zero_all = zero.unsqueeze(0)

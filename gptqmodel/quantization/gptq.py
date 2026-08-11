@@ -3252,7 +3252,17 @@ class GPTQ:
                             and batched_group_count == count // group_size
                             and not use_online_group_damping
                         )
-                        if mps_block_eligible and _USE_GPTQ_MPS_FUSED_PARAMS and not use_adaptive_clipping:
+                        if (
+                            mps_block_eligible
+                            and _USE_GPTQ_MPS_FUSED_PARAMS
+                            and not use_adaptive_clipping
+                            # The fused Metal parameter search currently scores
+                            # only one rounded affine zero point.  Keep using the
+                            # Metal GPTQ block with externally searched params for
+                            # asymmetric 2-bit weights so it cannot disagree with
+                            # the canonical dual-orientation objective.
+                            and not (self.qcfg.bits == 2 and not self.qcfg.sym)
+                        ):
                             mps_method = scale_search
                             if mps_method is None and mps_scale_search_mse > 0.0:
                                 mps_method = ScaleSearchConfig.MSE

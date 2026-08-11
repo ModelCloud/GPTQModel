@@ -1371,7 +1371,8 @@ def test_gptq_cpu_block_no_duplicate_scales_for_large_group_size(
     assert torch.equal(g_ref, g_cpu)
 
 
-def test_find_params_batched_cpu_extension_matches_eager():
+@pytest.mark.parametrize("bits", [2, 4])
+def test_find_params_batched_cpu_extension_matches_eager(bits):
     """The compiled CPU scale-search fallback returns the same scale/zero as the eager fallback."""
     from gptqmodel.nn_modules.qlinear.pack_block_ext import find_params_batched_cpu
     from gptqmodel.quantization.config import ScaleSearchConfig
@@ -1381,9 +1382,14 @@ def test_find_params_batched_cpu_extension_matches_eager():
     rows, num_groups, group_size = 32, 2, 32
     # Disable adaptive clipping so this test compares the CPU scale-search
     # extension against the eager scale-search path, not the clipping fallback.
-    qcfg = QuantizeConfig(bits=4, group_size=group_size, adaptive_clipping=None)
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        sym=False,
+        adaptive_clipping=None,
+    )
     quantizer = Quantizer(qcfg=qcfg)
-    quantizer.configure(perchannel=True, sym=True)
+    quantizer.configure(perchannel=True)
 
     x = torch.randn(rows, num_groups, group_size, dtype=torch.float32)
     hessian = torch.rand(num_groups, group_size, dtype=torch.float32) + 0.1
@@ -1410,7 +1416,7 @@ def test_find_params_batched_cpu_extension_matches_eager():
         importance,
         quantizer.grid,
         quantizer.maxshrink,
-        int(quantizer.maxq.item()),
+        (1 << bits) - 1,
         qcfg.sym,
         quantizer.requires_groupwise_processing(),
         ScaleSearchConfig.ACTIVATION.value,
@@ -1418,6 +1424,41 @@ def test_find_params_batched_cpu_extension_matches_eager():
     )
     assert torch.equal(scale_ext, scale_ref)
     assert torch.equal(zero_ext, zero_ref)
+
+
+@torch.inference_mode()
+def test_two_bit_asymmetric_scale_search_optimizes_zero_point_orientation(monkeypatch):
+    """Activation search must choose grid orientation from its objective, not tie-to-even rounding."""
+    from gptqmodel.quantization.quantizer import Quantizer, quantize
+
+    monkeypatch.setenv("GPTQMODEL_SCALE_SEARCH_CPU", "0")
+    weights = torch.tensor([[-1.0, -0.2, 0.2, 1.0]], dtype=torch.float32)
+    importance = torch.tensor([1.0, 1.0, 1.0, 10.0], dtype=torch.float32)
+    qcfg = QuantizeConfig(
+        bits=2,
+        group_size=4,
+        sym=False,
+        scale_search=ScaleSearchConfig.ACTIVATION,
+        adaptive_clipping=None,
+    )
+    quantizer = Quantizer(qcfg=qcfg)
+    quantizer.configure(perchannel=True)
+
+    quantizer.find_params(weights, weight=True, hessian=importance)
+
+    assert quantizer.zero.item() == 1.0
+    selected = quantizer.quantize(weights)
+    midpoint_zero = torch.tensor([[2.0]])
+    midpoint = quantize(
+        weights,
+        quantizer.scale,
+        midpoint_zero,
+        3,
+        requires_groupwise_processing=False,
+    )
+    selected_loss = ((selected - weights).square() * importance).sum()
+    midpoint_loss = ((midpoint - weights).square() * importance).sum()
+    assert selected_loss < midpoint_loss
 
 
 class TestGPTQHessian:

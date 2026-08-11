@@ -2022,6 +2022,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> find_params_batched_cpu_topk(
     at::parallel_for(0, rows * num_groups, 64, [&](int64_t start, int64_t end) {
         std::array<int64_t, TOPK_CAPACITY> best_idx{};
         std::array<float, TOPK_CAPACITY> best_loss{};
+        std::array<float, TOPK_CAPACITY> best_zero{};
 
         for (int64_t rg = start; rg < end; ++rg) {
             const int64_t row = rg / num_groups;
@@ -2034,6 +2035,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> find_params_batched_cpu_topk(
             for (int64_t ti = 0; ti < topk; ++ti) {
                 best_loss[ti] = std::numeric_limits<float>::infinity();
                 best_idx[ti] = 0;
+                best_zero[ti] = 0.0f;
             }
 
             for (int64_t c = 0; c < candidate_count; ++c) {
@@ -2050,31 +2052,45 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> find_params_batched_cpu_topk(
                     zero_c = sym ? const_zero_sym : round_half_to_even(-xmin_p / scale_c);
                 }
 
-                float loss = 0.0f;
-                for (int64_t j = 0; j < group_size; ++j) {
-                    const float q_val = quantize_gptq(x_rowg[j], scale_c, zero_c, maxq_f, groupwise);
-                    const float error = q_val - x_rowg[j];
-                    float w;
-                    if (has_importance) {
-                        // Activation scale search always uses squared error weighted
-                        // by the per-element importance (the mse field is ignored).
-                        w = error * error * imp_g[j];
-                    } else if (mse_is_two) {
-                        w = error * error;
-                    } else {
-                        w = std::pow(std::abs(error), mse_f);
+                const int zero_candidate_count = (!sym && !groupwise && maxq == 3) ? 2 : 1;
+                for (int zero_candidate = 0; zero_candidate < zero_candidate_count; ++zero_candidate) {
+                    float candidate_zero = zero_c;
+                    if (zero_candidate == 1) {
+                        const float ideal_zero = -xmin_p / scale_c;
+                        const float lower_zero = std::clamp(std::floor(ideal_zero), 0.0f, maxq_f);
+                        const float upper_zero = std::clamp(std::ceil(ideal_zero), 0.0f, maxq_f);
+                        candidate_zero = zero_c == lower_zero ? upper_zero : lower_zero;
                     }
-                    loss += w;
-                }
 
-                if (loss < best_loss[topk - 1]) {
-                    int64_t pos = topk - 1;
-                    best_loss[pos] = loss;
-                    best_idx[pos] = c;
-                    while (pos > 0 && best_loss[pos] < best_loss[pos - 1]) {
-                        std::swap(best_loss[pos], best_loss[pos - 1]);
-                        std::swap(best_idx[pos], best_idx[pos - 1]);
-                        --pos;
+                    float loss = 0.0f;
+                    for (int64_t j = 0; j < group_size; ++j) {
+                        const float q_val = quantize_gptq(
+                            x_rowg[j], scale_c, candidate_zero, maxq_f, groupwise);
+                        const float error = q_val - x_rowg[j];
+                        float w;
+                        if (has_importance) {
+                            // Activation scale search always uses squared error weighted
+                            // by the per-element importance (the mse field is ignored).
+                            w = error * error * imp_g[j];
+                        } else if (mse_is_two) {
+                            w = error * error;
+                        } else {
+                            w = std::pow(std::abs(error), mse_f);
+                        }
+                        loss += w;
+                    }
+
+                    if (loss < best_loss[topk - 1]) {
+                        int64_t pos = topk - 1;
+                        best_loss[pos] = loss;
+                        best_idx[pos] = c;
+                        best_zero[pos] = candidate_zero;
+                        while (pos > 0 && best_loss[pos] < best_loss[pos - 1]) {
+                            std::swap(best_loss[pos], best_loss[pos - 1]);
+                            std::swap(best_idx[pos], best_idx[pos - 1]);
+                            std::swap(best_zero[pos], best_zero[pos - 1]);
+                            --pos;
+                        }
                     }
                 }
             }
@@ -2093,7 +2109,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> find_params_batched_cpu_topk(
                     zero_out[ti] = 0.0f;
                 } else {
                     scale_out[ti] = (xmax_p - xmin_p) / maxq_f;
-                    zero_out[ti] = sym ? const_zero_sym : round_half_to_even(-xmin_p / scale_out[ti]);
+                    zero_out[ti] = best_zero[ti];
                 }
             }
         }

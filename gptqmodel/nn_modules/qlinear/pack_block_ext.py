@@ -130,20 +130,12 @@ def find_params_batched_cpu(
     # arithmetic used by the eager fallback / Triton recompute, and return the
     # single best (scale, zero) per (row, group).
     x_f = x.float()
-    maxq_t = torch.tensor(float(maxq), device=x_f.device, dtype=torch.float32)
     maxq_f = float(maxq)
-    p = 1.0 - topk_idx.float() / grid
-    xmin_k = xmin.unsqueeze(-1) * p
-    xmax_k = xmax.unsqueeze(-1) * p
-    if groupwise:
-        scale_k = xmax_k / maxq_t
-        zero_k = torch.zeros_like(scale_k)
-    else:
-        scale_k = (xmax_k - xmin_k) / maxq_t
-        if sym:
-            zero_k = torch.full_like(scale_k, (maxq_t + 1.0) / 2.0)
-        else:
-            zero_k = torch.round(-xmin_k / scale_k)
+    # The native shortlist includes the exact zero-point orientation selected
+    # for each shrink candidate.  In particular, asymmetric 2-bit search may
+    # return the same shrink index twice with the two adjacent integer zeros.
+    scale_k = topk_scale
+    zero_k = topk_zero
 
     k = topk_idx.size(-1)
     x_exp = x_f.unsqueeze(2).expand(-1, -1, k, -1)
