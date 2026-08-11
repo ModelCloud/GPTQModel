@@ -68,10 +68,24 @@ class PangolinQuantLinear(TritonV2Linear):
 
     @classmethod
     def validate(cls, **args):
-        valid, error = super().validate(**args)
+        device = args.get("device")
+        # TritonV2's generic fused 3-bit path requires symmetric weights, but
+        # Pangolin Metal consumes the stored qzeros and supports affine GPTQ-P.
+        # Device is absent during construction and is validated explicitly by
+        # the loader before construction, as with Apple-only 2/4/8-bit support.
+        apple_asymmetric_3bit = (
+            args.get("bits") == 3
+            and args.get("format") == FORMAT.GPTQ_P
+            and args.get("sym") is False
+            and device in (None, DEVICE.MPS)
+        )
+        if apple_asymmetric_3bit:
+            valid, error = cls._validate(**args)
+        else:
+            valid, error = super().validate(**args)
         if not valid:
             return valid, error
-        if args.get("device") == DEVICE.MPS:
+        if device == DEVICE.MPS:
             if args.get("pack_dtype") != torch.int32:
                 return False, NotImplementedError(
                     "Pangolin Metal currently supports int32 packed words only."
@@ -87,7 +101,7 @@ class PangolinQuantLinear(TritonV2Linear):
         # Constructor-time validation does not carry the selected device. The
         # loader performs the device-aware validation before construction, so
         # reject this combination only when a non-MPS device is explicit.
-        elif args.get("device") is not None and args.get("bits") in (2, 4, 8):
+        elif device is not None and args.get("bits") in (2, 4, 8):
             return False, NotImplementedError(
                 "Pangolin CUDA supports split-plane 3/5/6/7-bit weights; "
                 "2/4/8-bit Pangolin is currently Apple Metal only."
@@ -122,7 +136,7 @@ class PangolinQuantLinear(TritonV2Linear):
             getattr(self, "_pangolin_g_idx_ref", lambda: None)() is self.g_idx
             and getattr(self, "_pangolin_g_idx_version", -1) == self.g_idx._version
             and getattr(self, "_pangolin_g_idx_block_uniform", False)
-            and not (x_flat.shape[0] == 1 and self.bits in (2, 3))
+            and not (x_flat.shape[0] == 1 and self.bits == 2)
         )
         out = pangolin_mps_gemv(
             x_flat.contiguous(),

@@ -68,6 +68,43 @@ def test_pangolin_mlx_rejects_out_of_bounds_group_index():
         pangolin_mlx_gemv(x, qweight, scales, qzeros, g_idx, bits, planar=False)
 
 
+@pytest.mark.parametrize("bits", (2, 3, 4, 5, 6))
+@pytest.mark.parametrize("m", (1, 3))
+def test_pangolin_mlx_asymmetric_group128_matches_reference(bits, m):
+    generator = torch.Generator().manual_seed(12800 + bits * 10 + m)
+    k, n, groups = 256, 64, 2
+    codes = torch.randint(0, 1 << bits, (k, n), generator=generator, dtype=torch.int32)
+    zeros = torch.randint(
+        0, 1 << bits, (groups, n), generator=generator, dtype=torch.int32
+    )
+    scales = (torch.rand((groups, n), generator=generator) * 0.2 + 0.01).half()
+    x = torch.randn((m, k), generator=generator).half()
+    g_idx = torch.arange(k, dtype=torch.int32) // 128
+    reference = (
+        x.float()
+        @ ((codes - zeros[g_idx.long()]).float() * scales[g_idx.long()].float())
+    ).half()
+
+    result = pangolin_mlx_gemv(
+        *map(
+            _mlx,
+            (
+                x,
+                planar_pack_rows(codes, bits),
+                scales,
+                planar_pack_cols(zeros, bits),
+                g_idx,
+            ),
+        ),
+        bits,
+        planar=bits in (3, 5, 6),
+        _g_idx_validated=True,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result), reference.numpy(), rtol=1e-3, atol=1e-3
+    )
+
+
 @pytest.mark.parametrize("m", (9, 16, 17, 32))
 def test_pangolin_mlx_multirow_device_guard_prevents_oob(m):
     bits = 4
@@ -143,6 +180,32 @@ def test_pangolin_mlx_multirow_call_does_not_retain_operands():
     refs = [weakref.ref(value) for value in operands]
 
     result = pangolin_mlx_gemv(*operands, bits, planar=True)
+    mx.eval(result)
+    del result, operands, x, qweight, scales, qzeros, g_idx
+    gc.collect()
+
+    assert all(ref() is None for ref in refs)
+
+
+@pytest.mark.parametrize("bits", (2, 3, 4, 5, 6))
+def test_pangolin_mlx_n4_call_does_not_retain_operands(bits):
+    m, k, n, groups = 3, 64, 64, 2
+    x = mx.ones((m, k), dtype=mx.float16)
+    qweight_rows = (k // 32) * bits if bits in (3, 5, 6) else k // (32 // bits)
+    qzero_cols = (n // 32) * bits if bits in (3, 5, 6) else n // (32 // bits)
+    qweight = mx.zeros((qweight_rows, n), dtype=mx.int32)
+    scales = mx.ones((groups, n), dtype=mx.float16)
+    qzeros = mx.zeros((groups, qzero_cols), dtype=mx.int32)
+    g_idx = mx.zeros((k,), dtype=mx.int32)
+    operands = (x, qweight, scales, qzeros, g_idx)
+    refs = [weakref.ref(value) for value in operands]
+
+    result = pangolin_mlx_gemv(
+        *operands,
+        bits,
+        planar=bits in (3, 5, 6),
+        _g_idx_validated=True,
+    )
     mx.eval(result)
     del result, operands, x, qweight, scales, qzeros, g_idx
     gc.collect()

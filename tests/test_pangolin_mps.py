@@ -8,6 +8,7 @@ import weakref
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.pangolin import PangolinQuantLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.pangolin_mps import (
@@ -35,6 +36,7 @@ def _case(
     seed=0,
     negative_idx=False,
     block_uniform=False,
+    group_size=32,
 ):
     generator = torch.Generator().manual_seed(seed)
     codes = torch.randint(0, 1 << bits, (k, n), generator=generator, dtype=torch.int32)
@@ -46,7 +48,7 @@ def _case(
     )
     x = torch.randn((m, k), generator=generator).to(torch.float16)
     g_idx = (
-        torch.arange(k, dtype=torch.int32) // 32
+        torch.arange(k, dtype=torch.int32) // group_size
         if block_uniform
         else torch.arange(k, dtype=torch.int32) % groups
     )
@@ -132,6 +134,20 @@ def test_small_m_vector_path_device_guard_prevents_oob(m):
         planar=False,
         _g_idx_validated=True,
         _g_idx_block_uniform=False,
+    ).cpu()
+    assert torch.isnan(result).all()
+
+
+@pytest.mark.parametrize("m", (1, 2, 3))
+def test_small_m_planar_uniform_device_guard_prevents_oob(m):
+    operands, _ = _case(3, m=m, block_uniform=True)
+    operands[-1].fill_(99)
+    result = pangolin_mps_gemv(
+        *operands,
+        3,
+        planar=True,
+        _g_idx_validated=True,
+        _g_idx_block_uniform=True,
     ).cpu()
     assert torch.isnan(result).all()
 
@@ -247,7 +263,7 @@ def test_quant_linear_constructor_and_forward_integration(bits):
     layer = PangolinQuantLinear(
         bits=bits,
         group_size=32,
-        sym=True,
+        sym=False,
         desc_act=False,
         in_features=64,
         out_features=64,
@@ -262,6 +278,63 @@ def test_quant_linear_constructor_and_forward_integration(bits):
     layer.g_idx.copy_(g_idx)
     layer.post_init()
     layer.eval()
+    torch.testing.assert_close(layer(x).cpu(), reference, rtol=1e-3, atol=1e-3)
+
+
+def test_asymmetric_3bit_contract_is_apple_only():
+    args = {
+        "bits": 3,
+        "group_size": 32,
+        "sym": False,
+        "desc_act": False,
+        "in_features": 64,
+        "out_features": 64,
+        "pack_dtype": torch.int32,
+        "format": FORMAT.GPTQ_P,
+        "dtype": torch.float16,
+        "trainable": False,
+    }
+    valid, error = PangolinQuantLinear.validate(**args, device=DEVICE.MPS)
+    assert valid and error is None
+
+    valid, error = PangolinQuantLinear.validate(**args, device=DEVICE.CUDA)
+    assert not valid
+    assert "sym=True" in str(error)
+
+
+@pytest.mark.parametrize("bits", (2, 3, 4, 5, 6))
+@pytest.mark.parametrize("m", (1, 3))
+def test_asymmetric_group128_quant_linear_matches_reference(bits, m):
+    operands, reference = _case(
+        bits,
+        m=m,
+        k=256,
+        n=64,
+        groups=2,
+        seed=12800 + bits * 10 + m,
+        block_uniform=True,
+        group_size=128,
+    )
+    x, qweight, scales, qzeros, g_idx = operands
+    layer = PangolinQuantLinear(
+        bits=bits,
+        group_size=128,
+        sym=False,
+        desc_act=False,
+        in_features=256,
+        out_features=64,
+        bias=False,
+        format=FORMAT.GPTQ_P,
+        dtype=torch.float16,
+        trainable=False,
+    ).to("mps")
+    layer.qweight.copy_(qweight)
+    layer.scales.copy_(scales)
+    layer.qzeros.copy_(qzeros)
+    layer.g_idx.copy_(g_idx)
+    layer.post_init()
+    layer.eval()
+
     torch.testing.assert_close(layer(x).cpu(), reference, rtol=1e-3, atol=1e-3)
 
 

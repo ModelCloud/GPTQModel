@@ -177,6 +177,46 @@ kernel void pangolin_fp16_m3_n4(
   }
 }
 
+kernel void pangolin_fp16_m3_n4_planar_uniform(
+    device const half* x [[buffer(0)]], device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]], device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]], device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]],
+    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint groups_n = N / 4;
+  const uint m = group / groups_n;
+  const uint n = (group - m * groups_n) * 4;
+  float4 sum = 0.0f;
+  bool valid = true;
+  for (uint k = lane; k < K; k += 32) {
+    int gi = lane == 0 ? g_idx[k] : 0;
+    gi = simd_broadcast_first(gi);
+    if (gi < 0) gi += int(groups);
+    if (gi < 0 || gi >= int(groups)) { valid = false; break; }
+    const uint g = uint(gi);
+    const uint4 code = planar_code4(qweight, k, n, N, bits);
+    uint4 zero = 0;
+    float4 scale = 0.0f;
+    if (lane == 0) {
+      zero = planar_zero4(qzeros, g, n, N, bits);
+      scale = float4(*reinterpret_cast<device const half4*>(scales + g * N + n));
+    }
+    zero.x = simd_broadcast_first(zero.x); zero.y = simd_broadcast_first(zero.y);
+    zero.z = simd_broadcast_first(zero.z); zero.w = simd_broadcast_first(zero.w);
+    scale.x = simd_broadcast_first(scale.x); scale.y = simd_broadcast_first(scale.y);
+    scale.z = simd_broadcast_first(scale.z); scale.w = simd_broadcast_first(scale.w);
+    sum += float(x[m * K + k]) * (float4(int4(code) - int4(zero)) * scale);
+  }
+  valid = simd_all(valid);
+  sum.x = simd_sum(sum.x); sum.y = simd_sum(sum.y);
+  sum.z = simd_sum(sum.z); sum.w = simd_sum(sum.w);
+  if (lane == 0) {
+    *reinterpret_cast<device half4*>(output + m * N + n) = valid ? half4(sum) : half4(NAN);
+  }
+}
+
 kernel void pangolin_fp16(
     device const half* x [[buffer(0)]],
     device const int* qweight [[buffer(1)]],
@@ -534,23 +574,40 @@ def pangolin_mps_gemv(
         qweight.storage_offset() % 4 == 0 and scales.storage_offset() % 4 == 0
     )
     if m <= 3 and (bits != 2 or k >= 2048) and vector_loads_aligned:
-        library.pangolin_fp16_m3_n4(
-            x,
-            qweight,
-            scales,
-            qzeros,
-            g_idx,
-            output,
-            m,
-            k,
-            n,
-            groups,
-            bits,
-            int(planar),
-            int(_g_idx_block_uniform),
-            threads=m * (n // 4) * 32,
-            group_size=32,
-        )
+        if planar and _g_idx_block_uniform:
+            library.pangolin_fp16_m3_n4_planar_uniform(
+                x,
+                qweight,
+                scales,
+                qzeros,
+                g_idx,
+                output,
+                m,
+                k,
+                n,
+                groups,
+                bits,
+                threads=m * (n // 4) * 32,
+                group_size=32,
+            )
+        else:
+            library.pangolin_fp16_m3_n4(
+                x,
+                qweight,
+                scales,
+                qzeros,
+                g_idx,
+                output,
+                m,
+                k,
+                n,
+                groups,
+                bits,
+                int(planar),
+                int(_g_idx_block_uniform),
+                threads=m * (n // 4) * 32,
+                group_size=32,
+            )
         return output
     # Sharing amortizes its two barriers per K block from M >= 4. For M=1/2/3
     # independent SIMD groups are faster because there is too little reuse.

@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import functools
 import threading
 from typing import Any
 
 PANGOLIN_MLX_BITS = (2, 3, 4, 5, 6, 7, 8)
 _KERNEL: Any | None = None
+_KERNEL_N4: Any | None = None
 _KERNEL_M8: Any | None = None
 _KERNEL_MULTIROW: Any | None = None
 _KERNEL_ERRORS: dict[int, str] = {}
@@ -44,6 +46,23 @@ inline uint pq(constant const int* p, uint k, uint n, uint N, uint b, bool rows)
 inline uint cq(constant const int* p,uint outer,uint axis,uint width,uint b,uint stride){
   uint pf=32/b,w=as_type<uint>(p[outer*width+(axis/pf)*stride]);return(w>>(b*(axis%pf)))&((1u<<b)-1u);
 }
+
+#define PANGOLIN_VECTOR_HELPERS(address_space) \
+inline uint4 load4(address_space const int* p,uint i){return as_type<uint4>(*reinterpret_cast<address_space const int4*>(p+i));} \
+inline uint4 pq4(address_space const int* p,uint k,uint n,uint N,uint b,bool rows){ \
+  uint w0,w1,w2=0;if(b==3){w0=2;w1=1;}else if(b==5){w0=4;w1=1;}else if(b==6){w0=4;w1=2;}else{w0=4;w1=2;w2=1;} \
+  if(rows){uint block=k>>5,lane=k&31,base=block*b,pf0=32/w0,pf1=32/w1;uint4 a=load4(p,(base+lane/pf0)*N+n); \
+    uint4 c=load4(p,(base+w0+lane/pf1)*N+n);uint4 v=((a>>(w0*(lane%pf0)))&((1u<<w0)-1u))|(((c>>(w1*(lane%pf1)))&((1u<<w1)-1u))<<w0); \
+    if(w2){uint pf2=32/w2;uint4 d=load4(p,(base+w0+w1+lane/pf2)*N+n);v|=((d>>(w2*(lane%pf2)))&1u)<<(w0+w1);}return v;} \
+  uint block=n>>5,lane=n&31,words=(N>>5)*b,base=k*words+block*b,pf0=32/w0,pf1=32/w1;uint4 lanes=uint4(lane)+uint4(0,1,2,3); \
+  uint a=as_type<uint>(p[base+lane/pf0]),c=as_type<uint>(p[base+w0+lane/pf1]);uint4 v=((uint4(a)>>(w0*(lanes%pf0)))&((1u<<w0)-1u))|(((uint4(c)>>(w1*(lanes%pf1)))&((1u<<w1)-1u))<<w0); \
+  if(w2){uint d=as_type<uint>(p[base+w0+w1+lane/32]);v|=((uint4(d)>>(lanes&31))&1u)<<(w0+w1);}return v;} \
+inline uint4 cqw4(address_space const int* p,uint k,uint n,uint N,uint b){uint pf=32/b;uint4 w=load4(p,(k/pf)*N+n);return(w>>(b*(k%pf)))&((1u<<b)-1u);} \
+inline uint4 cqz4(address_space const int* p,uint g,uint n,uint N,uint b){uint pf=32/b,words=N/pf,w=as_type<uint>(p[g*words+n/pf]);uint4 shifts=b*(uint4(n%pf)+uint4(0,1,2,3));return(uint4(w)>>shifts)&((1u<<b)-1u);}
+
+PANGOLIN_VECTOR_HELPERS(device)
+PANGOLIN_VECTOR_HELPERS(constant)
+#undef PANGOLIN_VECTOR_HELPERS
 """
 
 _SOURCE = r"""
@@ -56,6 +75,22 @@ if(group<M*N){uint m=group/N,n=group-m*N; float sum=0.0f; bool valid=true;
     uint zero=planar?pq(qzeros,g,n,N,b,false):cq(qzeros,g,n,N/(32/b),b,1);
     sum+=float(x[m*K+k])*(float(int(code)-int(zero))*float(scales[g*N+n]));}
   valid=simd_all(valid);sum=simd_sum(sum);if(lane==0)out[group]=valid?T(sum):T(NAN);}
+"""
+
+_SOURCE_N4 = r"""
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint K=dims[1],N=dims[2],G=dims[3],b=dims[4];bool planar=dims[5]!=0;
+uint groups_n=N/4,m=group/groups_n,n=(group-m*groups_n)*4;float4 sum=0.0f;bool valid=true;
+for(uint k=lane;k<K;k+=32){int gi=gidx[k];if(gi<0)gi+=int(G);uint g=uint(gi);
+  if(gi<0||gi>=int(G)){valid=false;break;}
+  uint4 code=planar?pq4(qweight,k,n,N,b,true):cqw4(qweight,k,n,N,b);
+  uint4 zero=planar?pq4(qzeros,g,n,N,b,false):cqz4(qzeros,g,n,N,b);
+  float4 scale=float4(scales[g*N+n],scales[g*N+n+1],scales[g*N+n+2],scales[g*N+n+3]);
+  sum+=float(x[m*K+k])*(float4(int4(code)-int4(zero))*scale);}
+valid=simd_all(valid);sum.x=simd_sum(sum.x);sum.y=simd_sum(sum.y);
+sum.z=simd_sum(sum.z);sum.w=simd_sum(sum.w);
+if(lane==0){half4 value=valid?half4(sum):half4(NAN);out[m*N+n]=value.x;out[m*N+n+1]=value.y;
+  out[m*N+n+2]=value.z;out[m*N+n+3]=value.w;}
 """
 
 _SOURCE_M8 = r"""
@@ -102,11 +137,13 @@ if(lane==0){bool ok=atomic_load_explicit(&valid,memory_order_relaxed);
 
 
 def _kernel(*, mode: int = 1):
-    global _KERNEL, _KERNEL_M8, _KERNEL_MULTIROW
-    if mode not in (1, 8, 32):
+    global _KERNEL, _KERNEL_N4, _KERNEL_M8, _KERNEL_MULTIROW
+    if mode not in (1, 4, 8, 32):
         raise ValueError(f"invalid Pangolin MLX kernel mode: {mode}")
     if mode == 1:
         kernel = _KERNEL
+    elif mode == 4:
+        kernel = _KERNEL_N4
     elif mode == 8:
         kernel = _KERNEL_M8
     else:
@@ -115,6 +152,8 @@ def _kernel(*, mode: int = 1):
         with _KERNEL_LOCK:
             if mode == 1:
                 kernel = _KERNEL
+            elif mode == 4:
+                kernel = _KERNEL_N4
             elif mode == 8:
                 kernel = _KERNEL_M8
             else:
@@ -128,6 +167,7 @@ def _kernel(*, mode: int = 1):
                     kernel = mx.fast.metal_kernel(
                         name={
                             1: "gptqmodel_pangolin",
+                            4: "gptqmodel_pangolin_n4",
                             8: "gptqmodel_pangolin_m8",
                             32: "gptqmodel_pangolin_multirow",
                         }[mode],
@@ -141,20 +181,29 @@ def _kernel(*, mode: int = 1):
                         ],
                         output_names=["out"],
                         header=_HEADER,
-                        source={1: _SOURCE, 8: _SOURCE_M8, 32: _SOURCE_MULTIROW}[mode],
+                        source={1: _SOURCE, 4: _SOURCE_N4, 8: _SOURCE_M8, 32: _SOURCE_MULTIROW}[mode],
                         ensure_row_contiguous=True,
                     )
                 except Exception as exc:
                     error = f"Pangolin MLX kernel creation failed: {exc}"
                     _KERNEL_ERRORS[mode] = error
                     raise RuntimeError(error) from exc
-                if mode == 8:
+                if mode == 4:
+                    _KERNEL_N4 = kernel
+                elif mode == 8:
                     _KERNEL_M8 = kernel
                 elif mode == 32:
                     _KERNEL_MULTIROW = kernel
                 else:
                     _KERNEL = kernel
     return kernel
+
+
+@functools.lru_cache(maxsize=128)
+def _dims_array(m: int, k: int, n: int, groups: int, bits: int, planar: bool, row_stride: int):
+    import mlx.core as mx
+
+    return mx.array([m, k, n, groups, bits, int(planar), row_stride], dtype=mx.uint32)
 
 
 def pangolin_mlx_gemv(
@@ -218,18 +267,24 @@ def pangolin_mlx_gemv(
         if lo < -groups or hi >= groups:
             raise ValueError("g_idx contains an out-of-bounds group index")
     row_stride = 4 if m <= 16 else 8
-    dims = mx.array([m, k, n, groups, bits, int(planar), row_stride], dtype=mx.uint32)
+    dims = _dims_array(m, k, n, groups, bits, planar, row_stride)
     # MLX launch overhead differs slightly from PyTorch's: planar decode wins
     # from M=4, while the cheaper continuous formats need more row reuse.
     shared = m <= 8 and (
         (planar and m >= 4) or (bits == 2 and m >= 6) or (bits in (4, 8) and m >= 5)
     )
-    mode = 32 if 9 <= m <= 32 else (8 if shared else 1)
+    mode = 4 if m <= 3 else (32 if 9 <= m <= 32 else (8 if shared else 1))
     group_size = 128 if 9 <= m <= 16 else (256 if mode in (8, 32) else 32)
+    if mode in (8, 32):
+        grid_size = n * group_size
+    elif mode == 4:
+        grid_size = m * (n // 4) * 32
+    else:
+        grid_size = m * n * 32
     return _kernel(mode=mode)(
         inputs=[x, qweight, scales, qzeros, g_idx, dims],
         template=[("T", mx.float16)],
-        grid=(n * group_size if mode in (8, 32) else m * n * 32, 1, 1),
+        grid=(grid_size, 1, 1),
         threadgroup=(group_size, 1, 1),
         output_shapes=[(m, n)],
         output_dtypes=[mx.float16],
