@@ -69,6 +69,16 @@ class PangolinQuantLinear(TritonV2Linear):
     @classmethod
     def validate(cls, **args):
         device = args.get("device")
+        if device == DEVICE.MPS:
+            from ...utils.pangolin_mps import pangolin_mps_supported
+
+            if not pangolin_mps_supported():
+                return False, NotImplementedError(
+                    "Pangolin Metal requires torch.mps.compile_shader support."
+                )
+        valid, error = cls.cached_validate_once()
+        if not valid:
+            return valid, error
         # TritonV2's generic fused 3-bit path requires symmetric weights, but
         # Pangolin Metal consumes the stored qzeros and supports affine GPTQ-P.
         # Device is absent during construction and is validated explicitly by

@@ -10,16 +10,18 @@ import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.humming import HummingAwqLinear, HummingGptqLinear
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
-from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from gptqmodel.nn_modules.qlinear.pangolin import PangolinQuantLinear
+from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
@@ -105,20 +107,44 @@ def _pick_sym(cls):
     return values[0] if values else True
 
 
-def _pick_bits(cls):
-    supported_bits = list(getattr(cls, "SUPPORTS_BITS", []))
+def _pick_bits(cls, fmt, *, device, group_size, desc_act, sym, pack_dtype, dtype):
+    supported_bits = list(cls.supported_bits(fmt))
     for candidate in supported_bits:
-        if candidate in {2, 3, 4, 5, 6, 8}:
+        if candidate not in {2, 3, 4, 5, 6, 8}:
+            continue
+        valid, _ = cls.validate(
+            bits=candidate,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=None,
+            device=device,
+            trainable=False,
+            format=fmt,
+        )
+        if valid:
             return candidate
     return None
 
 
 def _force_auto_candidates_valid(monkeypatch, method, fmt):
+    # These are selector contract tests, not hardware probes. Simulate a
+    # capable CUDA runtime so they do not depend on the host running pytest.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_args: (9, 0))
     for cls in set(AUTO_BACKEND_KERNEL_MAPPING[method][fmt].values()):
         monkeypatch.setattr(
             cls,
             "cached_validate_once",
             classmethod(lambda qlinear_cls: (True, None)),
+        )
+        monkeypatch.setattr(
+            cls,
+            "validate_device",
+            classmethod(lambda _cls, _device: None),
         )
 
 
@@ -130,6 +156,100 @@ def _disable_humming(monkeypatch):
             "cached_validate_once",
             classmethod(lambda _cls: (False, None)),
         )
+
+
+def test_pangolin_validation_checks_its_runtime(monkeypatch):
+    runtime_error = ImportError("Pangolin runtime unavailable")
+    monkeypatch.setattr(
+        PangolinQuantLinear,
+        "cached_validate_once",
+        classmethod(lambda _cls: (False, runtime_error)),
+    )
+
+    valid, error = PangolinQuantLinear.validate(
+        bits=3,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        dynamic=None,
+        device=DEVICE.CUDA,
+        trainable=False,
+        format=FORMAT.GPTQ_P,
+    )
+
+    assert valid is False
+    assert error is runtime_error
+
+
+def test_pangolin_mps_validation_rejects_missing_metal_runtime(monkeypatch):
+    monkeypatch.setattr(
+        PangolinQuantLinear,
+        "cached_validate_once",
+        classmethod(lambda _cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.utils.pangolin_mps.pangolin_mps_supported",
+        lambda: False,
+    )
+
+    valid, error = PangolinQuantLinear.validate(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        dynamic=None,
+        device=DEVICE.MPS,
+        trainable=False,
+        format=FORMAT.GPTQ_P,
+    )
+
+    assert valid is False
+    assert isinstance(error, NotImplementedError)
+    assert "compile_shader" in str(error)
+
+
+def test_pangolin_mps_selection_requires_fp16_dtype(monkeypatch):
+    monkeypatch.setattr(
+        PangolinQuantLinear,
+        "cached_validate_once",
+        classmethod(lambda _cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.utils.pangolin_mps.pangolin_mps_supported",
+        lambda: True,
+    )
+    kwargs = {
+        "bits": 4,
+        "group_size": 32,
+        "desc_act": False,
+        "sym": True,
+        "device": DEVICE.MPS,
+        "backend": BACKEND.GPTQ_PANGOLIN,
+        "format": FORMAT.GPTQ_P,
+        "quant_method": METHOD.GPTQ,
+        "pack_dtype": torch.int32,
+    }
+
+    assert select_quant_linear(**kwargs, dtype=torch.float16) is PangolinQuantLinear
+    with pytest.raises(ValueError, match="float16 inference only"):
+        select_quant_linear(**kwargs, dtype=None)
+
+
+@pytest.mark.parametrize(
+    ("kernel_cls", "fmt", "bits"),
+    [
+        (SwordfishLinear, FORMAT.GPTQ, (4, 8)),
+        (AwqSwordfishLinear, FORMAT.GEMM, (4,)),
+    ],
+)
+def test_swordfish_declares_complete_format_bit_contract(kernel_cls, fmt, bits):
+    kernel_cls.verify_supports_params()
+
+    assert kernel_cls.supported_bits(fmt) == bits
 
 
 def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch):
@@ -173,6 +293,29 @@ def test_auto_select_normalizes_torch_device_before_device_prefilter(monkeypatch
     assert qlinear_cls is CudaKernel
 
 
+def test_explicit_select_tolerates_kernel_without_legacy_shard_capability(monkeypatch):
+    class MinimalKernel:
+        @classmethod
+        def validate(cls, **_kwargs):
+            return True, None
+
+    monkeypatch.setattr(importer, "get_kernel_for_backend", lambda *_args: MinimalKernel)
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.QQQ_TORCH,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is MinimalKernel
+
+
 @pytest.mark.parametrize("fmt", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
 def test_auto_select_excludes_embedding_only_kernel(fmt):
     candidates = AUTO_BACKEND_KERNEL_MAPPING[METHOD.GPTQ][fmt].values()
@@ -202,12 +345,22 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
         pytest.skip(f"{kernel_cls.__name__} unavailable: {err}")
 
     pack_dtype = kernel_cls.SUPPORTS_PACK_DTYPES[0]
-    bits = _pick_bits(kernel_cls)
-    if bits is None:
-        pytest.skip(f"No selector-compatible bit-width available for {kernel_cls.__name__}.")
     group_size = _pick_group_size(kernel_cls)
     desc_act = _pick_desc_act(kernel_cls)
     sym = _pick_sym(kernel_cls)
+    dtype = kernel_cls.SUPPORTS_DTYPES[0] if kernel_cls.SUPPORTS_DTYPES else None
+    bits = _pick_bits(
+        kernel_cls,
+        fmt,
+        device=device,
+        group_size=group_size,
+        desc_act=desc_act,
+        sym=sym,
+        pack_dtype=pack_dtype,
+        dtype=dtype,
+    )
+    if bits is None:
+        pytest.skip(f"No selector-compatible bit-width available for {kernel_cls.__name__}.")
 
     qlinear_cls = select_quant_linear(
         bits=bits,
@@ -219,6 +372,7 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
         format=fmt,
         quant_method=method,
         pack_dtype=pack_dtype,
+        dtype=dtype,
     )
 
     assert qlinear_cls is kernel_cls
@@ -851,13 +1005,15 @@ def test_select_quant_linear_multi_select_expands_dynamic_contracts(monkeypatch)
         dynamic=dynamic,
         multi_select=True,
     )
-    # 4-bit contract enables Marlin/Exllama; base 3-bit enables Trilin; Triton/Torch cover all.
+    # 4-bit contract enables Swordfish/Marlin/Exllama; base 3-bit enables
+    # Trilin; Triton/Torch cover all contracts.
+    assert SwordfishLinear in candidates
     assert MarlinLinear in candidates
     assert ExllamaV2Linear in candidates
     assert TrilinLinear in candidates
     assert TritonV2Linear in candidates
     assert TorchLinear in candidates
-    assert candidates[0] is MarlinLinear
+    assert candidates[0] is SwordfishLinear
 
 
 def test_select_quant_linear_single_select_stays_model_wide_compatible(monkeypatch):
@@ -890,6 +1046,10 @@ def test_select_quant_linear_single_select_stays_model_wide_compatible(monkeypat
 
 
 def test_create_quant_layer_selects_marlin_for_4bit_and_trilin_for_3bit(monkeypatch):
+    monkeypatch.setattr(
+        "gptqmodel.nn_modules.qlinear.marlin.marlin_import_exception",
+        None,
+    )
     for cls in (MarlinLinear, TrilinLinear, TritonV2Linear, TorchLinear):
         monkeypatch.setattr(
             cls,

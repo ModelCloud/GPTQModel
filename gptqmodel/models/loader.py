@@ -67,7 +67,6 @@ from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
-from ..utils.swordfish import _validate_swordfish_device_support
 from ..utils.model import (
     _checkpoint_tensor_keys,
     auto_dtype,
@@ -89,6 +88,7 @@ from ..utils.moe_dispatch import (
     enable_grouped_dispatch_for_model,
     register_linear_loop_experts,
 )
+from ..utils.swordfish import _validate_swordfish_device_support
 from ._const import DEVICE, HAS_NPU, normalize_device
 
 
@@ -1910,6 +1910,7 @@ def ModelLoader(cls):
                 quant_method=export_quant_method,
                 device=device,
                 pack_dtype=qcfg.pack_dtype,
+                dtype=dtype,
                 is_sharded=is_sharded,
             )
 

@@ -13,13 +13,12 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear, GPTQQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, FormatSupport, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
-
 from ...utils.rocm import IS_ROCM
 from ...utils.swordfish import (
     _validate_swordfish_device_support,
@@ -32,14 +31,16 @@ from ...utils.swordfish import (
     swordfish_runtime_error,
 )
 
+
 log = setup_logger()
 
 
 class SwordfishLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GPTQ_SWORDFISH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 101}
-    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GPTQ: FormatSupport(priority=101, bits=(4, 8)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -397,8 +398,9 @@ def _undo_awq_interleave(values: torch.Tensor, num_bits: int) -> torch.Tensor:
 class AwqSwordfishLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_SWORDFISH]
     SUPPORTS_METHODS = [METHOD.AWQ]
-    SUPPORTS_FORMATS = {FORMAT.GEMM: 101}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_FORMAT_BIT_MAP = {
+        FORMAT.GEMM: FormatSupport(priority=101, bits=(4,)),
+    }
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True, False]
