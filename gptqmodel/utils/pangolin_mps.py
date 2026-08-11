@@ -104,9 +104,12 @@ inline uint4 planar_code4(device const int* packed, uint k, uint n, uint N, uint
 }
 
 inline uint4 continuous_row_code4(device const int* packed, uint k, uint n, uint N, uint bits) {
-  const uint pf = 32 / bits;
-  const uint4 word = load_uint4(packed, (k / pf) * N + n);
-  return (word >> (bits * (k % pf))) & ((1u << bits) - 1u);
+  uint word_row, shift;
+  if (bits == 2) { word_row = k >> 4; shift = (k & 15) << 1; }
+  else if (bits == 4) { word_row = k >> 3; shift = (k & 7) << 2; }
+  else { word_row = k >> 2; shift = (k & 3) << 3; }
+  const uint4 word = load_uint4(packed, word_row * N + n);
+  return (word >> shift) & ((1u << bits) - 1u);
 }
 
 inline uint4 planar_zero4(device const int* packed, uint g, uint n, uint N, uint bits) {
@@ -131,10 +134,13 @@ inline uint4 planar_zero4(device const int* packed, uint g, uint n, uint N, uint
 }
 
 inline uint4 continuous_zero4(device const int* packed, uint g, uint n, uint N, uint bits) {
-  const uint pf = 32 / bits, words = N / pf;
-  const uint word = as_type<uint>(packed[g * words + n / pf]);
-  const uint4 lanes = uint4(n % pf) + uint4(0, 1, 2, 3);
-  return (uint4(word) >> (bits * lanes)) & ((1u << bits) - 1u);
+  uint words, word_col, lane, lane_shift;
+  if (bits == 2) { words = N >> 4; word_col = n >> 4; lane = n & 15; lane_shift = 1; }
+  else if (bits == 4) { words = N >> 3; word_col = n >> 3; lane = n & 7; lane_shift = 2; }
+  else { words = N >> 2; word_col = n >> 2; lane = n & 3; lane_shift = 3; }
+  const uint word = as_type<uint>(packed[g * words + word_col]);
+  const uint4 shifts = (uint4(lane) + uint4(0, 1, 2, 3)) << lane_shift;
+  return (uint4(word) >> shifts) & ((1u << bits) - 1u);
 }
 
 kernel void pangolin_fp16_m3_n4(
@@ -273,6 +279,75 @@ kernel void pangolin_fp16_m8(
       output[simd * N + n] = atomic_load_explicit(&valid, memory_order_relaxed) != 0
           ? half(sum) : half(NAN);
     }
+  }
+}
+
+// Four SIMD-groups share each decoded K lane across up to sixteen rows. This
+// keeps all 128 threads useful for M=9..16 and avoids two independent M8
+// launches (and two packed-weight decodes) for the same output column.
+kernel void pangolin_fp16_m16(
+    device const half* x [[buffer(0)]],
+    device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]],
+    device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]],
+    device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]], constant uint& planar [[buffer(11)]],
+    constant uint& block_uniform [[buffer(12)]],
+    uint n [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]]) {
+  threadgroup float decoded[32];
+  threadgroup atomic_uint valid;
+  if (tid == 0) atomic_store_explicit(&valid, 1u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+  const uint row0 = simd, row1 = simd + 4, row2 = simd + 8, row3 = simd + 12;
+  for (uint base = 0; base < K; base += 32) {
+    if (simd == 0) {
+      const uint k = base + lane;
+      int gi = g_idx[block_uniform ? base : k];
+      if (gi < 0) gi += int(groups);
+      if (gi < 0 || gi >= int(groups)) {
+        atomic_store_explicit(&valid, 0u, memory_order_relaxed);
+        decoded[lane] = 0.0f;
+      } else {
+        const uint g = uint(gi);
+        const uint code = planar ? planar_code(qweight, k, n, N, bits)
+                                 : continuous_row_code(qweight, k, n, N, bits);
+        uint zero = 0;
+        float scale = 0.0f;
+        if (!block_uniform || lane == 0) {
+          zero = planar ? planar_zero(qzeros, g, n, N, bits)
+                        : continuous_zero(qzeros, g, n, N, bits);
+          scale = float(scales[g * N + n]);
+        }
+        if (block_uniform) {
+          zero = simd_broadcast_first(zero);
+          scale = simd_broadcast_first(scale);
+        }
+        decoded[lane] = float(int(code) - int(zero)) * scale;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float value = decoded[lane];
+    if (row0 < M) sum0 += float(x[row0 * K + base + lane]) * value;
+    if (row1 < M) sum1 += float(x[row1 * K + base + lane]) * value;
+    if (row2 < M) sum2 += float(x[row2 * K + base + lane]) * value;
+    if (row3 < M) sum3 += float(x[row3 * K + base + lane]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  sum0 = simd_sum(sum0); sum1 = simd_sum(sum1);
+  sum2 = simd_sum(sum2); sum3 = simd_sum(sum3);
+  if (lane == 0) {
+    const bool is_valid = atomic_load_explicit(&valid, memory_order_relaxed) != 0;
+    if (row0 < M) output[row0 * N + n] = is_valid ? half(sum0) : half(NAN);
+    if (row1 < M) output[row1 * N + n] = is_valid ? half(sum1) : half(NAN);
+    if (row2 < M) output[row2 * N + n] = is_valid ? half(sum2) : half(NAN);
+    if (row3 < M) output[row3 * N + n] = is_valid ? half(sum3) : half(NAN);
   }
 }
 
@@ -498,7 +573,26 @@ def pangolin_mps_gemv(
             group_size=256,
         )
         return output
-    if 9 <= m < 24:
+    if 9 <= m <= 16:
+        library.pangolin_fp16_m16(
+            x,
+            qweight,
+            scales,
+            qzeros,
+            g_idx,
+            output,
+            m,
+            k,
+            n,
+            groups,
+            bits,
+            int(planar),
+            int(_g_idx_block_uniform),
+            threads=n * 128,
+            group_size=128,
+        )
+        return output
+    if 17 <= m < 24:
         for start in range(0, m, 8):
             width = min(8, m - start)
             library.pangolin_fp16_m8(

@@ -8,10 +8,17 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
 import time
+from pathlib import Path
 
 import torch
 from torch import nn
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) in sys.path:
+    sys.path.remove(str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
 
 import gptqmodel.quantization.gptq as gptq_module
 from gptqmodel.quantization.config import QuantizeConfig

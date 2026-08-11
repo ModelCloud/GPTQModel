@@ -67,6 +67,7 @@ _USE_GPTQ_CUDA_BLOCK = env_flag("GPTQMODEL_CUDA_BLOCK", default=True)
 _USE_GPTQ_MPS_BLOCK = env_flag("GPTQMODEL_MPS_BLOCK", default=True)
 _USE_GPTQ_MPS_FUSED_PARAMS = env_flag("GPTQMODEL_MPS_FUSED_PARAMS", default=True)
 _USE_GPTQ_MPS_FAST_HESSIAN = env_flag("GPTQMODEL_MPS_FAST_HESSIAN", default=True)
+_USE_GPTQ_MPS_ASYNC_HESSIAN = env_flag("GPTQMODEL_MPS_ASYNC_HESSIAN", default=True)
 
 
 log = setup_logger()
@@ -1006,7 +1007,17 @@ class GPTQ:
                 out.addmm_(mat32.T, mat32, beta=1.0, alpha=length_aware_scale)
                 xtx = out
             del mat32
-            if not _hessian_sync_deferred():
+            # MPS exposes a single ordered command stream.  The unchunked path
+            # owns no reusable staging workspace, so returning the on-device
+            # tensor asynchronously is safe and lets consecutive calibration
+            # batches queue without a host barrier after every X^T X. PyTorch's
+            # command buffer retains operand storage through completion, even if
+            # the corresponding Python temporaries are released. Keep the existing
+            # synchronization contract for multi-stream accelerators; the chunked
+            # path below also retains it because its leased staging buffers may be
+            # reused by the next caller.
+            requires_sync = matrix.device.type != "mps" or not _USE_GPTQ_MPS_ASYNC_HESSIAN
+            if requires_sync and not _hessian_sync_deferred():
                 torch_sync(device=xtx.device)
             return xtx
 

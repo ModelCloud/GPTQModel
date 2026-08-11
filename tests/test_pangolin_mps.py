@@ -76,8 +76,9 @@ def test_all_bits_shapes_and_signed_group_indices(bits, m, negative_idx):
 
 
 @pytest.mark.parametrize("bits", PANGOLIN_MPS_BITS)
-def test_deterministic_across_repeated_launches(bits):
-    operands, _ = _case(bits, m=5, seed=9000 + bits)
+@pytest.mark.parametrize("m", (5, 16, 32))
+def test_deterministic_across_repeated_launches(bits, m):
+    operands, _ = _case(bits, m=m, seed=9000 + bits + m)
     outputs = [
         pangolin_mps_gemv(*operands, bits, planar=bits in (3, 5, 6, 7)).cpu()
         for _ in range(3)
@@ -87,7 +88,7 @@ def test_deterministic_across_repeated_launches(bits):
 
 
 @pytest.mark.parametrize("bits", PANGOLIN_MPS_BITS)
-@pytest.mark.parametrize("m", (1, 4, 32))
+@pytest.mark.parametrize("m", (1, 4, 16, 32))
 def test_block_uniform_fast_path_matches_reference(bits, m):
     operands, reference = _case(bits, m=m, seed=3000 + bits + m, block_uniform=True)
     result = pangolin_mps_gemv(
@@ -100,7 +101,7 @@ def test_block_uniform_fast_path_matches_reference(bits, m):
     torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("m", (5, 32))
+@pytest.mark.parametrize("m", (5, 9, 16, 32))
 def test_device_guard_prevents_oob_when_prevalidated_g_idx_is_mutated(m):
     operands, _ = _case(4, m=m, block_uniform=True)
     operands[-1].fill_(99)
