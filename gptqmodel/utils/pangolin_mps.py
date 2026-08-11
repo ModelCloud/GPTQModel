@@ -217,6 +217,49 @@ kernel void pangolin_fp16_m3_n4_planar_uniform(
   }
 }
 
+// The common contiguous GPTQ group layout gives every lane in a K block the
+// same zero point and scale. Load those values once for continuous 2/4/8-bit
+// packing and broadcast them while retaining the four-column vector decode.
+kernel void pangolin_fp16_m3_n4_continuous_uniform(
+    device const half* x [[buffer(0)]], device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]], device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]], device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]],
+    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint groups_n = N / 4;
+  const uint m = group / groups_n;
+  const uint n = (group - m * groups_n) * 4;
+  float4 sum = 0.0f;
+  bool valid = true;
+  for (uint k = lane; k < K; k += 32) {
+    int gi = lane == 0 ? g_idx[k] : 0;
+    gi = simd_broadcast_first(gi);
+    if (gi < 0) gi += int(groups);
+    if (gi < 0 || gi >= int(groups)) { valid = false; break; }
+    const uint g = uint(gi);
+    const uint4 code = continuous_row_code4(qweight, k, n, N, bits);
+    uint4 zero = 0;
+    float4 scale = 0.0f;
+    if (lane == 0) {
+      zero = continuous_zero4(qzeros, g, n, N, bits);
+      scale = float4(*reinterpret_cast<device const half4*>(scales + g * N + n));
+    }
+    zero.x = simd_broadcast_first(zero.x); zero.y = simd_broadcast_first(zero.y);
+    zero.z = simd_broadcast_first(zero.z); zero.w = simd_broadcast_first(zero.w);
+    scale.x = simd_broadcast_first(scale.x); scale.y = simd_broadcast_first(scale.y);
+    scale.z = simd_broadcast_first(scale.z); scale.w = simd_broadcast_first(scale.w);
+    sum += float(x[m * K + k]) * (float4(int4(code) - int4(zero)) * scale);
+  }
+  valid = simd_all(valid);
+  sum.x = simd_sum(sum.x); sum.y = simd_sum(sum.y);
+  sum.z = simd_sum(sum.z); sum.w = simd_sum(sum.w);
+  if (lane == 0) {
+    *reinterpret_cast<device half4*>(output + m * N + n) = valid ? half4(sum) : half4(NAN);
+  }
+}
+
 kernel void pangolin_fp16(
     device const half* x [[buffer(0)]],
     device const int* qweight [[buffer(1)]],
@@ -322,6 +365,159 @@ kernel void pangolin_fp16_m8(
   }
 }
 
+// Vectorize four adjacent output columns and share their decoded values across
+// up to eight activation rows. This combines coalesced packed-weight loads with
+// row reuse while retaining one float32 accumulation and one half conversion
+// per output element.
+kernel void pangolin_fp16_m8_n4(
+    device const half* x [[buffer(0)]],
+    device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]],
+    device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]],
+    device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]], constant uint& planar [[buffer(11)]],
+    constant uint& block_uniform [[buffer(12)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]]) {
+  const uint n = group * 4;
+  threadgroup float4 decoded[32];
+  threadgroup atomic_uint valid;
+  if (tid == 0) atomic_store_explicit(&valid, 1u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float4 sum = 0.0f;
+  const bool active = simd < M;
+  for (uint base = 0; base < K; base += 32) {
+    if (simd == 0) {
+      const uint k = base + lane;
+      int gi = g_idx[block_uniform ? base : k];
+      if (gi < 0) gi += int(groups);
+      if (gi < 0 || gi >= int(groups)) {
+        atomic_store_explicit(&valid, 0u, memory_order_relaxed);
+        decoded[lane] = 0.0f;
+      } else {
+        const uint g = uint(gi);
+        const uint4 code = planar ? planar_code4(qweight, k, n, N, bits)
+                                  : continuous_row_code4(qweight, k, n, N, bits);
+        uint4 zero = 0;
+        float4 scale = 0.0f;
+        if (!block_uniform || lane == 0) {
+          zero = planar ? planar_zero4(qzeros, g, n, N, bits)
+                        : continuous_zero4(qzeros, g, n, N, bits);
+          scale = float4(*reinterpret_cast<device const half4*>(scales + g * N + n));
+        }
+        if (block_uniform) {
+          zero.x = simd_broadcast_first(zero.x); zero.y = simd_broadcast_first(zero.y);
+          zero.z = simd_broadcast_first(zero.z); zero.w = simd_broadcast_first(zero.w);
+          scale.x = simd_broadcast_first(scale.x); scale.y = simd_broadcast_first(scale.y);
+          scale.z = simd_broadcast_first(scale.z); scale.w = simd_broadcast_first(scale.w);
+        }
+        decoded[lane] = float4(int4(code) - int4(zero)) * scale;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (active) sum += float(x[simd * K + base + lane]) * decoded[lane];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (active) {
+    sum.x = simd_sum(sum.x); sum.y = simd_sum(sum.y);
+    sum.z = simd_sum(sum.z); sum.w = simd_sum(sum.w);
+    if (lane == 0) {
+      const bool is_valid = atomic_load_explicit(&valid, memory_order_relaxed) != 0;
+      *reinterpret_cast<device half4*>(output + simd * N + n) =
+          is_valid ? half4(sum) : half4(NAN);
+    }
+  }
+}
+
+// Process eight adjacent output columns per group. Two float4 accumulators
+// halve the N4 launch count without changing any per-output reduction order.
+kernel void pangolin_fp16_m8_n8(
+    device const half* x [[buffer(0)]],
+    device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]],
+    device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]],
+    device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]], constant uint& planar [[buffer(11)]],
+    constant uint& block_uniform [[buffer(12)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]]) {
+  const uint n = group * 8;
+  threadgroup float4 decoded0[32], decoded1[32];
+  threadgroup atomic_uint valid;
+  if (tid == 0) atomic_store_explicit(&valid, 1u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float4 sum0 = 0.0f, sum1 = 0.0f;
+  const bool active = simd < M;
+  for (uint base = 0; base < K; base += 32) {
+    if (simd == 0) {
+      const uint k = base + lane;
+      int gi = g_idx[block_uniform ? base : k];
+      if (gi < 0) gi += int(groups);
+      if (gi < 0 || gi >= int(groups)) {
+        atomic_store_explicit(&valid, 0u, memory_order_relaxed);
+        decoded0[lane] = 0.0f; decoded1[lane] = 0.0f;
+      } else {
+        const uint g = uint(gi);
+        const uint4 code0 = planar ? planar_code4(qweight, k, n, N, bits)
+                                   : continuous_row_code4(qweight, k, n, N, bits);
+        const uint4 code1 = planar ? planar_code4(qweight, k, n + 4, N, bits)
+                                   : continuous_row_code4(qweight, k, n + 4, N, bits);
+        uint4 zero0 = 0, zero1 = 0;
+        float4 scale0 = 0.0f, scale1 = 0.0f;
+        if (!block_uniform || lane == 0) {
+          zero0 = planar ? planar_zero4(qzeros, g, n, N, bits)
+                         : continuous_zero4(qzeros, g, n, N, bits);
+          zero1 = planar ? planar_zero4(qzeros, g, n + 4, N, bits)
+                         : continuous_zero4(qzeros, g, n + 4, N, bits);
+          scale0 = float4(*reinterpret_cast<device const half4*>(scales + g * N + n));
+          scale1 = float4(*reinterpret_cast<device const half4*>(scales + g * N + n + 4));
+        }
+        if (block_uniform) {
+          zero0.x = simd_broadcast_first(zero0.x); zero0.y = simd_broadcast_first(zero0.y);
+          zero0.z = simd_broadcast_first(zero0.z); zero0.w = simd_broadcast_first(zero0.w);
+          zero1.x = simd_broadcast_first(zero1.x); zero1.y = simd_broadcast_first(zero1.y);
+          zero1.z = simd_broadcast_first(zero1.z); zero1.w = simd_broadcast_first(zero1.w);
+          scale0.x = simd_broadcast_first(scale0.x); scale0.y = simd_broadcast_first(scale0.y);
+          scale0.z = simd_broadcast_first(scale0.z); scale0.w = simd_broadcast_first(scale0.w);
+          scale1.x = simd_broadcast_first(scale1.x); scale1.y = simd_broadcast_first(scale1.y);
+          scale1.z = simd_broadcast_first(scale1.z); scale1.w = simd_broadcast_first(scale1.w);
+        }
+        decoded0[lane] = float4(int4(code0) - int4(zero0)) * scale0;
+        decoded1[lane] = float4(int4(code1) - int4(zero1)) * scale1;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (active) {
+      const float value = float(x[simd * K + base + lane]);
+      sum0 += value * decoded0[lane]; sum1 += value * decoded1[lane];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (active) {
+    sum0.x = simd_sum(sum0.x); sum0.y = simd_sum(sum0.y);
+    sum0.z = simd_sum(sum0.z); sum0.w = simd_sum(sum0.w);
+    sum1.x = simd_sum(sum1.x); sum1.y = simd_sum(sum1.y);
+    sum1.z = simd_sum(sum1.z); sum1.w = simd_sum(sum1.w);
+    if (lane == 0) {
+      const bool is_valid = atomic_load_explicit(&valid, memory_order_relaxed) != 0;
+      *reinterpret_cast<device half4*>(output + simd * N + n) =
+          is_valid ? half4(sum0) : half4(NAN);
+      *reinterpret_cast<device half4*>(output + simd * N + n + 4) =
+          is_valid ? half4(sum1) : half4(NAN);
+    }
+  }
+}
+
 // Four SIMD-groups share each decoded K lane across up to sixteen rows. This
 // keeps all 128 threads useful for M=9..16 and avoids two independent M8
 // launches (and two packed-weight decodes) for the same output column.
@@ -388,6 +584,166 @@ kernel void pangolin_fp16_m16(
     if (row1 < M) output[row1 * N + n] = is_valid ? half(sum1) : half(NAN);
     if (row2 < M) output[row2 * N + n] = is_valid ? half(sum2) : half(NAN);
     if (row3 < M) output[row3 * N + n] = is_valid ? half(sum3) : half(NAN);
+  }
+}
+
+// Eight SIMD-groups each accumulate two rows and four adjacent columns. The
+// 256-thread group keeps register pressure bounded while reducing both packed
+// decode work and total launched threads for M=9..16.
+kernel void pangolin_fp16_m16_n4(
+    device const half* x [[buffer(0)]], device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]], device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]], device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]], constant uint& planar [[buffer(11)]],
+    constant uint& block_uniform [[buffer(12)]],
+    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint tid [[thread_index_in_threadgroup]]) {
+  const uint n = group * 4;
+  const uint row0 = simd, row1 = simd + 8;
+  threadgroup float4 decoded[32];
+  threadgroup atomic_uint valid;
+  if (tid == 0) atomic_store_explicit(&valid, 1u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float4 sum0 = 0.0f, sum1 = 0.0f;
+  for (uint base = 0; base < K; base += 32) {
+    if (simd == 0) {
+      const uint k = base + lane;
+      int gi = g_idx[block_uniform ? base : k];
+      if (gi < 0) gi += int(groups);
+      if (gi < 0 || gi >= int(groups)) {
+        atomic_store_explicit(&valid, 0u, memory_order_relaxed);
+        decoded[lane] = 0.0f;
+      } else {
+        const uint g = uint(gi);
+        const uint4 code = planar ? planar_code4(qweight, k, n, N, bits)
+                                  : continuous_row_code4(qweight, k, n, N, bits);
+        uint4 zero = 0;
+        float4 scale = 0.0f;
+        if (!block_uniform || lane == 0) {
+          zero = planar ? planar_zero4(qzeros, g, n, N, bits)
+                        : continuous_zero4(qzeros, g, n, N, bits);
+          scale = float4(*reinterpret_cast<device const half4*>(scales + g * N + n));
+        }
+        if (block_uniform) {
+          zero.x = simd_broadcast_first(zero.x); zero.y = simd_broadcast_first(zero.y);
+          zero.z = simd_broadcast_first(zero.z); zero.w = simd_broadcast_first(zero.w);
+          scale.x = simd_broadcast_first(scale.x); scale.y = simd_broadcast_first(scale.y);
+          scale.z = simd_broadcast_first(scale.z); scale.w = simd_broadcast_first(scale.w);
+        }
+        decoded[lane] = float4(int4(code) - int4(zero)) * scale;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float4 value = decoded[lane];
+    sum0 += float(x[row0 * K + base + lane]) * value;
+    if (row1 < M) sum1 += float(x[row1 * K + base + lane]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  sum0.x = simd_sum(sum0.x); sum0.y = simd_sum(sum0.y);
+  sum0.z = simd_sum(sum0.z); sum0.w = simd_sum(sum0.w);
+  sum1.x = simd_sum(sum1.x); sum1.y = simd_sum(sum1.y);
+  sum1.z = simd_sum(sum1.z); sum1.w = simd_sum(sum1.w);
+  if (lane == 0) {
+    const bool is_valid = atomic_load_explicit(&valid, memory_order_relaxed) != 0;
+    *reinterpret_cast<device half4*>(output + row0 * N + n) =
+        is_valid ? half4(sum0) : half4(NAN);
+    if (row1 < M) {
+      *reinterpret_cast<device half4*>(output + row1 * N + n) =
+          is_valid ? half4(sum1) : half4(NAN);
+    }
+  }
+}
+
+// Eight SIMD-groups each accumulate two rows and eight adjacent columns.
+// This halves launch count for the largest decode projections; the N4 kernel
+// remains preferable where the extra accumulators reduce occupancy.
+kernel void pangolin_fp16_m16_n8(
+    device const half* x [[buffer(0)]], device const int* qweight [[buffer(1)]],
+    device const half* scales [[buffer(2)]], device const int* qzeros [[buffer(3)]],
+    device const int* g_idx [[buffer(4)]], device half* output [[buffer(5)]],
+    constant uint& M [[buffer(6)]], constant uint& K [[buffer(7)]],
+    constant uint& N [[buffer(8)]], constant uint& groups [[buffer(9)]],
+    constant uint& bits [[buffer(10)]], constant uint& planar [[buffer(11)]],
+    constant uint& block_uniform [[buffer(12)]],
+    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint tid [[thread_index_in_threadgroup]]) {
+  const uint n = group * 8;
+  const uint row0 = simd, row1 = simd + 8;
+  threadgroup float4 decoded0[32], decoded1[32];
+  threadgroup atomic_uint valid;
+  if (tid == 0) atomic_store_explicit(&valid, 1u, memory_order_relaxed);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float4 sum00 = 0.0f, sum01 = 0.0f, sum10 = 0.0f, sum11 = 0.0f;
+  for (uint base = 0; base < K; base += 32) {
+    if (simd == 0) {
+      const uint k = base + lane;
+      int gi = g_idx[block_uniform ? base : k];
+      if (gi < 0) gi += int(groups);
+      if (gi < 0 || gi >= int(groups)) {
+        atomic_store_explicit(&valid, 0u, memory_order_relaxed);
+        decoded0[lane] = 0.0f; decoded1[lane] = 0.0f;
+      } else {
+        const uint g = uint(gi);
+        const uint4 code0 = planar ? planar_code4(qweight, k, n, N, bits)
+                                   : continuous_row_code4(qweight, k, n, N, bits);
+        const uint4 code1 = planar ? planar_code4(qweight, k, n + 4, N, bits)
+                                   : continuous_row_code4(qweight, k, n + 4, N, bits);
+        uint4 zero0 = 0, zero1 = 0;
+        float4 scale0 = 0.0f, scale1 = 0.0f;
+        if (!block_uniform || lane == 0) {
+          zero0 = planar ? planar_zero4(qzeros, g, n, N, bits)
+                         : continuous_zero4(qzeros, g, n, N, bits);
+          zero1 = planar ? planar_zero4(qzeros, g, n + 4, N, bits)
+                         : continuous_zero4(qzeros, g, n + 4, N, bits);
+          scale0 = float4(*reinterpret_cast<device const half4*>(scales + g * N + n));
+          scale1 = float4(*reinterpret_cast<device const half4*>(scales + g * N + n + 4));
+        }
+        if (block_uniform) {
+          zero0.x = simd_broadcast_first(zero0.x); zero0.y = simd_broadcast_first(zero0.y);
+          zero0.z = simd_broadcast_first(zero0.z); zero0.w = simd_broadcast_first(zero0.w);
+          zero1.x = simd_broadcast_first(zero1.x); zero1.y = simd_broadcast_first(zero1.y);
+          zero1.z = simd_broadcast_first(zero1.z); zero1.w = simd_broadcast_first(zero1.w);
+          scale0.x = simd_broadcast_first(scale0.x); scale0.y = simd_broadcast_first(scale0.y);
+          scale0.z = simd_broadcast_first(scale0.z); scale0.w = simd_broadcast_first(scale0.w);
+          scale1.x = simd_broadcast_first(scale1.x); scale1.y = simd_broadcast_first(scale1.y);
+          scale1.z = simd_broadcast_first(scale1.z); scale1.w = simd_broadcast_first(scale1.w);
+        }
+        decoded0[lane] = float4(int4(code0) - int4(zero0)) * scale0;
+        decoded1[lane] = float4(int4(code1) - int4(zero1)) * scale1;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float4 value0 = decoded0[lane], value1 = decoded1[lane];
+    const float x0 = float(x[row0 * K + base + lane]);
+    sum00 += x0 * value0; sum01 += x0 * value1;
+    if (row1 < M) {
+      const float x1 = float(x[row1 * K + base + lane]);
+      sum10 += x1 * value0; sum11 += x1 * value1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  sum00.x = simd_sum(sum00.x); sum00.y = simd_sum(sum00.y);
+  sum00.z = simd_sum(sum00.z); sum00.w = simd_sum(sum00.w);
+  sum01.x = simd_sum(sum01.x); sum01.y = simd_sum(sum01.y);
+  sum01.z = simd_sum(sum01.z); sum01.w = simd_sum(sum01.w);
+  sum10.x = simd_sum(sum10.x); sum10.y = simd_sum(sum10.y);
+  sum10.z = simd_sum(sum10.z); sum10.w = simd_sum(sum10.w);
+  sum11.x = simd_sum(sum11.x); sum11.y = simd_sum(sum11.y);
+  sum11.z = simd_sum(sum11.z); sum11.w = simd_sum(sum11.w);
+  if (lane == 0) {
+    const bool is_valid = atomic_load_explicit(&valid, memory_order_relaxed) != 0;
+    *reinterpret_cast<device half4*>(output + row0 * N + n) =
+        is_valid ? half4(sum00) : half4(NAN);
+    *reinterpret_cast<device half4*>(output + row0 * N + n + 4) =
+        is_valid ? half4(sum01) : half4(NAN);
+    if (row1 < M) {
+      *reinterpret_cast<device half4*>(output + row1 * N + n) =
+          is_valid ? half4(sum10) : half4(NAN);
+      *reinterpret_cast<device half4*>(output + row1 * N + n + 4) =
+          is_valid ? half4(sum11) : half4(NAN);
+    }
   }
 }
 
@@ -571,11 +927,29 @@ def pangolin_mps_gemv(
     output = torch.empty((m, n), dtype=x.dtype, device=x.device)
     library = _library()
     vector_loads_aligned = (
-        qweight.storage_offset() % 4 == 0 and scales.storage_offset() % 4 == 0
+        qweight.storage_offset() % 4 == 0
+        and scales.storage_offset() % 4 == 0
+        and qzeros.storage_offset() % 4 == 0
     )
     if m <= 3 and (bits != 2 or k >= 2048) and vector_loads_aligned:
         if planar and _g_idx_block_uniform:
             library.pangolin_fp16_m3_n4_planar_uniform(
+                x,
+                qweight,
+                scales,
+                qzeros,
+                g_idx,
+                output,
+                m,
+                k,
+                n,
+                groups,
+                bits,
+                threads=m * (n // 4) * 32,
+                group_size=32,
+            )
+        elif _g_idx_block_uniform:
+            library.pangolin_fp16_m3_n4_continuous_uniform(
                 x,
                 qweight,
                 scales,
@@ -612,7 +986,15 @@ def pangolin_mps_gemv(
     # Sharing amortizes its two barriers per K block from M >= 4. For M=1/2/3
     # independent SIMD groups are faster because there is too little reuse.
     if 4 <= m <= 8:
-        library.pangolin_fp16_m8(
+        vectorize_columns = not planar and vector_loads_aligned
+        vector_width = 8 if vectorize_columns and k >= 4096 and n >= 4096 else 4
+        if vector_width == 8:
+            kernel = library.pangolin_fp16_m8_n8
+        elif vectorize_columns:
+            kernel = library.pangolin_fp16_m8_n4
+        else:
+            kernel = library.pangolin_fp16_m8
+        kernel(
             x,
             qweight,
             scales,
@@ -626,12 +1008,25 @@ def pangolin_mps_gemv(
             bits,
             int(planar),
             int(_g_idx_block_uniform),
-            threads=n * 256,
+            threads=(n // vector_width if vectorize_columns else n) * 256,
             group_size=256,
         )
         return output
     if 9 <= m <= 16:
-        library.pangolin_fp16_m16(
+        vectorize_columns = vector_loads_aligned
+        use_n8 = (
+            vectorize_columns
+            and k >= 2048
+            and ((not planar and n >= 2048) or (planar and n >= 4096))
+        )
+        vector_width = 8 if use_n8 else 4
+        if use_n8:
+            kernel = library.pangolin_fp16_m16_n8
+        elif vectorize_columns:
+            kernel = library.pangolin_fp16_m16_n4
+        else:
+            kernel = library.pangolin_fp16_m16
+        kernel(
             x,
             qweight,
             scales,
@@ -645,8 +1040,8 @@ def pangolin_mps_gemv(
             bits,
             int(planar),
             int(_g_idx_block_uniform),
-            threads=n * 128,
-            group_size=128,
+            threads=(n // vector_width) * 256 if vectorize_columns else n * 128,
+            group_size=256 if vectorize_columns else 128,
         )
         return output
     if 17 <= m < 24:

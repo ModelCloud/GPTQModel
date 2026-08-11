@@ -8,6 +8,7 @@ import weakref
 import pytest
 import torch
 
+import gptqmodel.utils.pangolin_mps as pangolin_mps_module
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.pangolin import PangolinQuantLinear
 from gptqmodel.quantization import FORMAT
@@ -65,6 +66,56 @@ def _case(
     ), reference.half()
 
 
+def _run_m8_n8(operands, bits):
+    x, qweight, scales, qzeros, g_idx = operands
+    m, k = x.shape
+    groups, n = scales.shape
+    output = torch.empty((m, n), dtype=x.dtype, device=x.device)
+    pangolin_mps_module._library().pangolin_fp16_m8_n8(
+        x,
+        qweight,
+        scales,
+        qzeros,
+        g_idx,
+        output,
+        m,
+        k,
+        n,
+        groups,
+        bits,
+        0,
+        1,
+        threads=(n // 8) * 256,
+        group_size=256,
+    )
+    return output
+
+
+def _run_m16_n8(operands, bits):
+    x, qweight, scales, qzeros, g_idx = operands
+    m, k = x.shape
+    groups, n = scales.shape
+    output = torch.empty((m, n), dtype=x.dtype, device=x.device)
+    pangolin_mps_module._library().pangolin_fp16_m16_n8(
+        x,
+        qweight,
+        scales,
+        qzeros,
+        g_idx,
+        output,
+        m,
+        k,
+        n,
+        groups,
+        bits,
+        int(bits in (3, 5, 6, 7)),
+        1,
+        threads=(n // 8) * 256,
+        group_size=256,
+    )
+    return output
+
+
 @pytest.mark.parametrize("bits", PANGOLIN_MPS_BITS)
 @pytest.mark.parametrize("m", (1, 2, 3, 4, 8, 9, 16, 23, 24, 31, 32))
 @pytest.mark.parametrize("negative_idx", (False, True))
@@ -101,6 +152,124 @@ def test_block_uniform_fast_path_matches_reference(bits, m):
         _g_idx_block_uniform=True,
     ).cpu()
     torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("bits", (2, 4, 8))
+@pytest.mark.parametrize("m", (1, 2, 3))
+def test_small_m_continuous_uniform_path_is_exact_and_deterministic(bits, m):
+    for seed in range(3):
+        operands, reference = _case(
+            bits,
+            m=m,
+            k=256,
+            n=64,
+            groups=2,
+            seed=41000 + bits * 100 + m * 10 + seed,
+            negative_idx=seed == 2,
+            block_uniform=True,
+            group_size=128,
+        )
+        for _ in range(10):
+            result = pangolin_mps_gemv(
+                *operands,
+                bits,
+                planar=False,
+                _g_idx_validated=True,
+                _g_idx_block_uniform=True,
+            ).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("bits", (2, 4, 8))
+@pytest.mark.parametrize("m", (4, 8))
+def test_m8_n4_path_is_exact_and_deterministic(bits, m):
+    for seed in range(3):
+        operands, reference = _case(
+            bits,
+            m=m,
+            k=256,
+            n=64,
+            groups=2,
+            seed=43000 + bits * 100 + m * 10 + seed,
+            negative_idx=seed == 2,
+            block_uniform=True,
+            group_size=128,
+        )
+        for _ in range(10):
+            result = pangolin_mps_gemv(
+                *operands,
+                bits,
+                planar=False,
+                _g_idx_validated=True,
+                _g_idx_block_uniform=True,
+            ).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("bits", (2, 4, 8))
+@pytest.mark.parametrize("m", (4, 8))
+def test_m8_n8_kernel_is_exact_and_deterministic(bits, m):
+    for seed in range(3):
+        operands, reference = _case(
+            bits,
+            m=m,
+            k=256,
+            n=64,
+            groups=2,
+            seed=47000 + bits * 100 + m * 10 + seed,
+            negative_idx=seed == 2,
+            block_uniform=True,
+            group_size=128,
+        )
+        for _ in range(10):
+            result = _run_m8_n8(operands, bits).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("bits", PANGOLIN_MPS_BITS)
+@pytest.mark.parametrize("m", (9, 16))
+def test_m16_n4_path_is_exact_and_deterministic(bits, m):
+    for seed in range(3):
+        operands, reference = _case(
+            bits,
+            m=m,
+            k=256,
+            n=64,
+            groups=2,
+            seed=45000 + bits * 100 + m * 10 + seed,
+            negative_idx=seed == 2,
+            block_uniform=True,
+            group_size=128,
+        )
+        for _ in range(10):
+            result = pangolin_mps_gemv(
+                *operands,
+                bits,
+                planar=bits in (3, 5, 6, 7),
+                _g_idx_validated=True,
+                _g_idx_block_uniform=True,
+            ).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("bits", PANGOLIN_MPS_BITS)
+@pytest.mark.parametrize("m", (9, 16))
+def test_m16_n8_kernel_is_exact_and_deterministic(bits, m):
+    for seed in range(3):
+        operands, reference = _case(
+            bits,
+            m=m,
+            k=256,
+            n=64,
+            groups=2,
+            seed=55000 + bits * 100 + m * 10 + seed,
+            negative_idx=seed == 2,
+            block_uniform=True,
+            group_size=128,
+        )
+        for _ in range(10):
+            result = _run_m16_n8(operands, bits).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("m", (5, 9, 16, 32))
@@ -152,8 +321,41 @@ def test_small_m_planar_uniform_device_guard_prevents_oob(m):
     assert torch.isnan(result).all()
 
 
-def test_misaligned_contiguous_views_use_safe_scalar_loads():
-    operands, reference = _case(4, m=3, seed=40404)
+@pytest.mark.parametrize("m", (1, 2, 3))
+def test_small_m_continuous_uniform_device_guard_prevents_oob(m):
+    operands, _ = _case(4, m=m, block_uniform=True)
+    operands[-1].fill_(99)
+    result = pangolin_mps_gemv(
+        *operands,
+        4,
+        planar=False,
+        _g_idx_validated=True,
+        _g_idx_block_uniform=True,
+    ).cpu()
+    assert torch.isnan(result).all()
+
+
+def test_m8_n8_device_guard_prevents_oob():
+    operands, _ = _case(
+        4, m=8, k=256, n=32, groups=2, block_uniform=True, group_size=128
+    )
+    operands[-1].fill_(99)
+    result = _run_m8_n8(operands, 4).cpu()
+    assert torch.isnan(result).all()
+
+
+def test_m16_n8_device_guard_prevents_oob():
+    operands, _ = _case(
+        5, m=16, k=256, n=32, groups=2, block_uniform=True, group_size=128
+    )
+    operands[-1].fill_(99)
+    result = _run_m16_n8(operands, 5).cpu()
+    assert torch.isnan(result).all()
+
+
+@pytest.mark.parametrize("m", (3, 4, 8, 9, 16))
+def test_misaligned_contiguous_views_use_safe_scalar_loads(m):
+    operands, reference = _case(4, m=m, seed=40404 + m)
     x, qweight, scales, qzeros, g_idx = operands
     qweight_storage = torch.empty(
         qweight.numel() + 1, dtype=qweight.dtype, device=qweight.device
@@ -165,12 +367,27 @@ def test_misaligned_contiguous_views_use_safe_scalar_loads():
     )
     misaligned_scales = scale_storage[1:].view_as(scales)
     misaligned_scales.copy_(scales)
-    assert misaligned_qweight.is_contiguous() and misaligned_scales.is_contiguous()
+    qzero_storage = torch.empty(
+        qzeros.numel() + 1, dtype=qzeros.dtype, device=qzeros.device
+    )
+    misaligned_qzeros = qzero_storage[1:].view_as(qzeros)
+    misaligned_qzeros.copy_(qzeros)
+    assert all(
+        tensor.is_contiguous()
+        for tensor in (misaligned_qweight, misaligned_scales, misaligned_qzeros)
+    )
     assert misaligned_qweight.storage_offset() == 1
     assert misaligned_scales.storage_offset() == 1
+    assert misaligned_qzeros.storage_offset() == 1
 
     result = pangolin_mps_gemv(
-        x, misaligned_qweight, misaligned_scales, qzeros, g_idx, 4, planar=False
+        x,
+        misaligned_qweight,
+        misaligned_scales,
+        misaligned_qzeros,
+        g_idx,
+        4,
+        planar=False,
     ).cpu()
     torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
 
@@ -206,10 +423,134 @@ def test_launches_are_thread_safe():
     assert errors == []
 
 
+def test_m8_n8_launches_are_thread_safe():
+    cases = [
+        (
+            bits,
+            *_case(
+                bits,
+                m=8,
+                k=256,
+                n=64,
+                groups=2,
+                seed=51000 + bits,
+                block_uniform=True,
+                group_size=128,
+            ),
+        )
+        for bits in (2, 8)
+    ]
+    errors = []
+
+    def run(bits, operands, reference):
+        try:
+            result = _run_m8_n8(operands, bits).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+        except (AssertionError, RuntimeError, ValueError) as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=case) for case in cases]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+
+
+def test_m16_n8_launches_are_thread_safe():
+    cases = [
+        (
+            bits,
+            *_case(
+                bits,
+                m=16,
+                k=256,
+                n=64,
+                groups=2,
+                seed=56000 + bits,
+                block_uniform=True,
+                group_size=128,
+            ),
+        )
+        for bits in (4, 5)
+    ]
+    errors = []
+
+    def run(bits, operands, reference):
+        try:
+            result = _run_m16_n8(operands, bits).cpu()
+            torch.testing.assert_close(result, reference, rtol=1e-3, atol=1e-3)
+        except (AssertionError, RuntimeError, ValueError) as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=case) for case in cases]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+
+
 def test_call_does_not_retain_operand_tensors():
     operands, _ = _case(5)
     refs = [weakref.ref(tensor) for tensor in operands]
     result = pangolin_mps_gemv(*operands, 5, planar=True)
+    torch.mps.synchronize()
+    del result, operands
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_m8_n4_call_does_not_retain_operand_tensors():
+    operands, _ = _case(4, m=8, block_uniform=True)
+    refs = [weakref.ref(tensor) for tensor in operands]
+    result = pangolin_mps_gemv(
+        *operands,
+        4,
+        planar=False,
+        _g_idx_validated=True,
+        _g_idx_block_uniform=True,
+    )
+    torch.mps.synchronize()
+    del result, operands
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_m8_n8_call_does_not_retain_operand_tensors():
+    operands, _ = _case(
+        4, m=8, k=256, n=64, groups=2, block_uniform=True, group_size=128
+    )
+    refs = [weakref.ref(tensor) for tensor in operands]
+    result = _run_m8_n8(operands, 4)
+    torch.mps.synchronize()
+    del result, operands
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_m16_n4_call_does_not_retain_operand_tensors():
+    operands, _ = _case(5, m=16, block_uniform=True)
+    refs = [weakref.ref(tensor) for tensor in operands]
+    result = pangolin_mps_gemv(
+        *operands,
+        5,
+        planar=True,
+        _g_idx_validated=True,
+        _g_idx_block_uniform=True,
+    )
+    torch.mps.synchronize()
+    del result, operands
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_m16_n8_call_does_not_retain_operand_tensors():
+    operands, _ = _case(
+        5, m=16, k=256, n=64, groups=2, block_uniform=True, group_size=128
+    )
+    refs = [weakref.ref(tensor) for tensor in operands]
+    result = _run_m16_n8(operands, 5)
     torch.mps.synchronize()
     del result, operands
     gc.collect()
