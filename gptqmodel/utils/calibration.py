@@ -11,6 +11,7 @@ import os
 import random
 import re
 from typing import Any, Dict, List, Optional, Sequence, Union
+from urllib.parse import urlsplit, urlunsplit
 
 import torch
 
@@ -56,6 +57,7 @@ def batched(iterable, batch_size: int, process_func=None):
 
 # Remote dataset identifiers (https://..., hf://..., s3://..., etc.) that are not arbitrary text.
 _CALIBRATION_URI_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+$")
+_CALIBRATION_URI_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 # Filesystem path heuristics used before we pay for an os.path.exists() syscall.
 _KNOWN_FILE_EXTS = (
@@ -102,7 +104,20 @@ def _resolve_calibration_path(value: Any) -> Optional[str]:
     if re.search(r"\s", value):
         return None
     if _CALIBRATION_URI_RE.match(value):
-        return value
+        try:
+            parsed = urlsplit(value)
+            if parsed.hostname is None:
+                return None
+            # Accessing ``port`` validates malformed values that ``urlsplit``
+            # otherwise leaves unchecked until the attribute is read.
+            _ = parsed.port
+            # Dataset URLs can contain basic-auth credentials, signed query
+            # parameters, or private fragments. They are not needed for saved
+            # provenance and must never be persisted in model metadata.
+            safe_netloc = parsed.netloc.rsplit("@", 1)[-1]
+            return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
+        except ValueError:
+            return None
     if not _looks_like_path(value):
         return None
 
@@ -113,11 +128,6 @@ def _resolve_calibration_path(value: Any) -> Optional[str]:
         pass
 
     return None
-
-
-def _is_path_like(value: Any) -> bool:
-    """Return True if ``value`` is an actual filesystem path or a valid dataset URI."""
-    return _resolve_calibration_path(value) is not None
 
 
 def _extract_calibration_paths(calibration_dataset: Any) -> List[str]:
@@ -141,9 +151,12 @@ def _extract_calibration_paths(calibration_dataset: Any) -> List[str]:
             else:
                 path = None
             if path:
-                # Cache paths are absolute and may contain local usernames/dirs;
-                # keep only the filename to avoid leaking local filesystem layout.
-                path = os.path.basename(path)
+                if isinstance(path, str) and _CALIBRATION_URI_PREFIX_RE.match(path.strip()):
+                    path = _resolve_calibration_path(path)
+                else:
+                    # Cache paths are absolute and may contain local usernames/dirs;
+                    # keep only the filename to avoid leaking local filesystem layout.
+                    path = os.path.basename(path)
                 if path and path not in seen:
                     seen.add(path)
                     paths.append(path)
@@ -153,9 +166,25 @@ def _extract_calibration_paths(calibration_dataset: Any) -> List[str]:
         if info is not None:
             for name_attr in ("dataset_name", "builder_name"):
                 val = getattr(info, name_attr, None)
-                if isinstance(val, str) and val and val not in seen and ("/" in val or _is_path_like(val)):
-                    seen.add(val)
-                    paths.append(val)
+                resolved = _resolve_calibration_path(val)
+                # URI-looking metadata is security-sensitive provenance.  If
+                # parsing fails, drop it instead of falling back to a raw value
+                # that may contain credentials or signed query parameters.
+                if (
+                    resolved is None
+                    and isinstance(val, str)
+                    and _CALIBRATION_URI_PREFIX_RE.match(val.strip())
+                ):
+                    continue
+                normalized = resolved if resolved is not None else val
+                if (
+                    isinstance(val, str)
+                    and val
+                    and normalized not in seen
+                    and ("/" in val or resolved is not None)
+                ):
+                    seen.add(normalized)
+                    paths.append(normalized)
             break
 
     return paths

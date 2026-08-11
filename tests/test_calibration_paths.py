@@ -45,6 +45,88 @@ class TestCalibrationPaths(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_extract_redacts_uri_credentials_query_and_fragment(self):
+        cases = (
+            (
+                "https://user:secret@example.com:8443/data/train.jsonl?token=signed-secret#private",
+                "https://example.com:8443/data/train.jsonl",
+            ),
+            (
+                "s3://access:secret@bucket/data.jsonl?signature=signed-secret#private",
+                "s3://bucket/data.jsonl",
+            ),
+            (
+                "https://user:secret@[2001:db8::1]:8443/data.jsonl?token=signed-secret",
+                "https://[2001:db8::1]:8443/data.jsonl",
+            ),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_extract_calibration_paths(value), [expected])
+
+        dataset = SimpleNamespace(
+            cache_files=[],
+            info=SimpleNamespace(
+                dataset_name="https://user:secret@example.com/private.json?token=signed-secret",
+                builder_name=None,
+            ),
+        )
+        self.assertEqual(
+            _extract_calibration_paths(dataset),
+            ["https://example.com/private.json"],
+        )
+
+        duplicate_dataset = SimpleNamespace(
+            cache_files=[],
+            info=SimpleNamespace(
+                dataset_name="https://first:secret@example.com/private.json?token=first",
+                builder_name="https://second:secret@example.com/private.json?token=second",
+            ),
+        )
+        self.assertEqual(
+            _extract_calibration_paths(duplicate_dataset),
+            ["https://example.com/private.json"],
+        )
+
+        malformed_uri_dataset = SimpleNamespace(
+            cache_files=[],
+            info=SimpleNamespace(
+                dataset_name="https://user:secret@[invalid-host/private.json",
+                builder_name=None,
+            ),
+        )
+        self.assertEqual(_extract_calibration_paths(malformed_uri_dataset), [])
+
+        whitespace_uri_dataset = SimpleNamespace(
+            cache_files=[],
+            info=SimpleNamespace(
+                dataset_name="https://user:sec ret@example.com/private.json",
+                builder_name=None,
+            ),
+        )
+        self.assertEqual(_extract_calibration_paths(whitespace_uri_dataset), [])
+
+    def test_extract_redacts_or_rejects_cache_file_uris(self):
+        dataset = SimpleNamespace(
+            cache_files=[
+                {"filename": "https://user:secret@example.com/data.arrow?token=signed-secret#private"},
+                {"filename": "https://user:secret@[invalid-host/data.arrow?token=signed-secret"},
+            ],
+            info=None,
+        )
+        self.assertEqual(_extract_calibration_paths(dataset), ["https://example.com/data.arrow"])
+
+    def test_extract_rejects_incomplete_or_invalid_uris(self):
+        cases = (
+            "https:///user:secret@example.com/private.json",
+            "https://user:secret@example.com:not-a-port/private.json",
+            "https://user:secret@[invalid-host/private.json",
+            "https://user:sec ret@example.com/private.json",
+        )
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertEqual(_extract_calibration_paths(value), [])
+
     def test_extract_existing_directory_basename(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(_extract_calibration_paths(tmp), [os.path.basename(tmp)])
