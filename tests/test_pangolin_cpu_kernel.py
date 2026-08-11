@@ -17,11 +17,19 @@ from gptqmodel.quantization.config import FORMAT
 from gptqmodel.utils.pangolin import (
     PANGOLIN_SUPPORTED_M,
     ensure_pangolin_cpu_runtime_available,
+    g_idx_block_uniform,
     pangolin_gemv,
 )
 
 
 pytestmark = [pytest.mark.cpu]
+
+
+def test_g_idx_block_uniform_cache_tracks_in_place_mutation():
+    g_idx = torch.zeros(64, dtype=torch.int32)
+    assert g_idx_block_uniform(g_idx)
+    g_idx[1] = 1
+    assert not g_idx_block_uniform(g_idx)
 
 
 @contextmanager

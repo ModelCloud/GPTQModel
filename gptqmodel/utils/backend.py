@@ -29,7 +29,7 @@ class BACKEND(str, Enum):
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     GPTQ_HUMMING = "gptq_humming"  # InclusionAI Humming JIT kernel for GPTQ
-    GPTQ_PANGOLIN = "gptq_pangolin"  # native CUDA planar GEMV kernel
+    GPTQ_PANGOLIN = "gptq_pangolin"  # fused CUDA/Apple Metal packed GEMV
 
     # MXFP4 CPU kernel
     MXFP4_CPU = "mxfp4_cpu"

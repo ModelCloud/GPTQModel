@@ -422,11 +422,12 @@ def g_idx_block_uniform(g_idx: torch.Tensor) -> bool:
     if g_idx.numel() % 32 != 0:
         return False
     cached = _G_IDX_BLOCK_UNIFORM_CACHE.get(g_idx)
-    if cached is None:
+    version = g_idx._version
+    if cached is None or cached[0] != version:
         blocks = g_idx.reshape(-1, 32)
-        cached = bool((blocks == blocks[:, :1]).all().item())
+        cached = (version, bool((blocks == blocks[:, :1]).all().item()))
         _G_IDX_BLOCK_UNIFORM_CACHE[g_idx] = cached
-    return cached
+    return cached[1]
 
 
 _g_idx_block_uniform = g_idx_block_uniform
@@ -465,6 +466,13 @@ def pangolin_gemv(
         x = x.contiguous()
     if x.is_cuda:
         return _gemv_op()(x, qweight, scales, qzeros, g_idx, bits)
+    if x.device.type == "mps":
+        from .pangolin_mps import pangolin_mps_gemv
+
+        return pangolin_mps_gemv(
+            x, qweight, scales, qzeros, g_idx, bits,
+            planar=bits in (3, 5, 6, 7),
+        )
     if not ensure_pangolin_cpu_runtime_available():
         raise RuntimeError(pangolin_cpu_runtime_error())
     M = x.size(0)
