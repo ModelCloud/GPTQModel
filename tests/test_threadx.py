@@ -1318,6 +1318,26 @@ def test_virtual_pool_raises_when_exceeding_parent_capacity():
         )
 
 
+def test_device_iterable_is_materialized_before_affinity_planning():
+    """A one-shot device iterable must still be available when workers are built."""
+
+    devices = (device for device in (torch.device("cpu"),))
+    pool = DeviceThreadPool(
+        devices=devices,
+        include_cuda=False,
+        include_xpu=False,
+        include_npu=False,
+        include_mps=False,
+        include_cpu=True,
+        empty_cache_every_n=0,
+    )
+    try:
+        # assert tuple(pool._devices_by_key) == ("cpu",)
+        assert pool.submit("cpu", lambda: "generator-ok").result(timeout=1) == "generator-ok"
+    finally:
+        pool.shutdown(wait=True)
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_virtual_pool_cuda_is_rejected():

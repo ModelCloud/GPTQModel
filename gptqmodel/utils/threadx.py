@@ -722,6 +722,11 @@ class DeviceThreadPool:
                 discovered.append(torch.device("cpu"))
             devices = discovered
 
+        # ``devices`` accepts any iterable, including one-shot generators. It
+        # is traversed once for affinity planning and again to create workers,
+        # so materialize it before either pass.
+        devices = tuple(devices)
+
         # Locks and device registry (keyed by "type[:index]" strings like 'cuda:0').
         self._locks: Dict[str, _RWLock] = {}
         self._devices_by_key: Dict[str, torch.device] = {}
