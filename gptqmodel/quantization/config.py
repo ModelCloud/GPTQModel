@@ -8,7 +8,9 @@ import json
 import math
 import os.path
 import tempfile
+import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from functools import total_ordering
@@ -21,9 +23,11 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
-from .diagnostics import QuantizationDiagnosticsMode, normalize_quantization_diagnostics_mode
+from .diagnostics import (
+    QuantizationDiagnosticsMode,
+    normalize_quantization_diagnostics_mode,
+)
 from .fused_forward_config import FusedForwardConfig
-
 
 log = setup_logger()
 
@@ -2265,17 +2269,25 @@ DYNAMIC_FIELD_SYNONYMS = {}
 # Sentinel used by the dynamic override cache to indicate no pattern matched.
 _DYNAMIC_NO_MATCH = object()
 
-# Global caches for dynamic override resolution.  The `dynamic` dict is treated
-# as immutable after config construction, so caching by `id(dynamic)` is safe
-# and lets cloned configs share compiled patterns and override lookups.
-_DYNAMIC_PATTERN_CACHE: Dict[int, List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]] = {}
-_DYNAMIC_OVERRIDE_CACHE: Dict[int, Dict[str, Any]] = {}
-# Exact-literal fast-path caches: a per-dynamic dict mapping literal module names
-# to their resolved override, and whether every pattern is an exact literal.
-_DYNAMIC_EXACT_LOOKUP_CACHE: Dict[int, Dict[str, Tuple[int, Union[Dict[str, Any], bool]]]] = {}
-_DYNAMIC_ALL_EXACT_CACHE: Dict[int, bool] = {}
-# Pre-separated regex patterns for mixed dynamic configs.
-_DYNAMIC_REGEX_PATTERN_CACHE: Dict[int, List[Tuple[int, bool, Any, Dict[str, Any]]]] = {}
+@dataclass
+class _DynamicResolutionCacheEntry:
+    # Keep the owner alive while its id is a cache key. Without this reference,
+    # CPython may recycle the id for an unrelated config and return stale rules.
+    dynamic: Dict[str, Dict[str, Any]]
+    patterns: List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]
+    exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]]
+    all_exact: bool
+    regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]]
+    override_cache: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+
+
+# Dynamic rules are shared by deep-copied per-module configs. Bound both cache
+# dimensions so repeated model/config lifecycles cannot retain memory forever.
+_DYNAMIC_CACHE_MAX_CONFIGS = 256
+_DYNAMIC_CACHE_MAX_OVERRIDES = 65_536
+_DYNAMIC_CACHE_LOCK = threading.RLock()
+_DYNAMIC_CACHE: OrderedDict[int, _DynamicResolutionCacheEntry] = OrderedDict()
+_DYNAMIC_CACHE_OVERRIDE_COUNT = 0
 
 def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     """If `raw` is a regex that matches a single literal string, return that string."""
@@ -2312,40 +2324,79 @@ def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     return "".join(out)
 
 
-def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]:
-    """Return compiled PCRE patterns (plus optional exact literal) for a dynamic dict, caching by object id."""
-
-    cache_key = id(dynamic)
-    patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
-    if patterns is not None:
-        return patterns
-
+def _build_dynamic_cache_entry(dynamic: Dict[str, Dict[str, Any]]) -> _DynamicResolutionCacheEntry:
     patterns = []
     exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
     regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
     all_exact = True
-    if dynamic is not None:
-        for index, (pattern, overrides) in enumerate(dynamic.items()):
-            is_negative = pattern.startswith("-:")
-            raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
-            exact_literal = _extract_literal_regex_pattern(raw)
-            if exact_literal is None:
-                all_exact = False
-                try:
-                    compiled = pcre.compile(raw)
-                except Exception as exc:
-                    raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
-                regex_patterns.append((index, is_negative, compiled, overrides))
-            else:
-                compiled = None
-                if exact_literal not in exact_lookup:
-                    exact_lookup[exact_literal] = (index, False if is_negative else dict(overrides))
-            patterns.append((is_negative, compiled, overrides, exact_literal, index))
-    _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
-    _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
-    _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
-    _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
-    return patterns
+    for index, (pattern, source_overrides) in enumerate(list(dynamic.items())):
+        overrides = dict(source_overrides)
+        is_negative = pattern.startswith("-:")
+        raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
+        exact_literal = _extract_literal_regex_pattern(raw)
+        if exact_literal is None:
+            all_exact = False
+            try:
+                compiled = pcre.compile(raw)
+            except Exception as exc:
+                raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
+            regex_patterns.append((index, is_negative, compiled, overrides))
+        else:
+            compiled = None
+            if exact_literal not in exact_lookup:
+                exact_lookup[exact_literal] = (index, False if is_negative else overrides)
+        patterns.append((is_negative, compiled, overrides, exact_literal, index))
+    return _DynamicResolutionCacheEntry(
+        dynamic=dynamic,
+        patterns=patterns,
+        exact_lookup=exact_lookup,
+        all_exact=all_exact,
+        regex_patterns=regex_patterns,
+    )
+
+
+def _trim_dynamic_cache_locked() -> None:
+    global _DYNAMIC_CACHE_OVERRIDE_COUNT
+
+    while len(_DYNAMIC_CACHE) > _DYNAMIC_CACHE_MAX_CONFIGS:
+        _, evicted = _DYNAMIC_CACHE.popitem(last=False)
+        _DYNAMIC_CACHE_OVERRIDE_COUNT -= len(evicted.override_cache)
+
+    while _DYNAMIC_CACHE_OVERRIDE_COUNT > _DYNAMIC_CACHE_MAX_OVERRIDES:
+        _, oldest = next(iter(_DYNAMIC_CACHE.items()))
+        if oldest.override_cache:
+            oldest.override_cache.popitem(last=False)
+            _DYNAMIC_CACHE_OVERRIDE_COUNT -= 1
+        else:
+            _DYNAMIC_CACHE.move_to_end(id(oldest.dynamic))
+
+
+def _get_dynamic_cache_entry(dynamic: Dict[str, Dict[str, Any]]) -> _DynamicResolutionCacheEntry:
+    """Return the bounded, identity-safe cache entry for one dynamic config."""
+
+    cache_key = id(dynamic)
+    with _DYNAMIC_CACHE_LOCK:
+        cached = _DYNAMIC_CACHE.get(cache_key)
+        if cached is not None and cached.dynamic is dynamic:
+            _DYNAMIC_CACHE.move_to_end(cache_key)
+            return cached
+
+    candidate = _build_dynamic_cache_entry(dynamic)
+    with _DYNAMIC_CACHE_LOCK:
+        cached = _DYNAMIC_CACHE.get(cache_key)
+        if cached is not None and cached.dynamic is dynamic:
+            _DYNAMIC_CACHE.move_to_end(cache_key)
+            return cached
+        _DYNAMIC_CACHE[cache_key] = candidate
+        _DYNAMIC_CACHE.move_to_end(cache_key)
+        _trim_dynamic_cache_locked()
+        return candidate
+
+
+def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]:
+    """Return compiled PCRE patterns (plus optional exact literals)."""
+
+    return _get_dynamic_cache_entry(dynamic).patterns
 
 def _resolve_dynamic_override(
     dynamic: Dict[str, Dict[str, Any]],
@@ -2356,35 +2407,44 @@ def _resolve_dynamic_override(
     if dynamic is None:
         return None
 
+    global _DYNAMIC_CACHE_OVERRIDE_COUNT
     cache_key = id(dynamic)
-    override_cache = _DYNAMIC_OVERRIDE_CACHE.setdefault(cache_key, {})
-    cached = override_cache.get(module_name, _DYNAMIC_NO_MATCH)
-    if cached is not _DYNAMIC_NO_MATCH:
-        return cached
-
-    _get_dynamic_patterns(dynamic)
+    entry = _get_dynamic_cache_entry(dynamic)
+    with _DYNAMIC_CACHE_LOCK:
+        cached = entry.override_cache.get(module_name, _DYNAMIC_NO_MATCH)
+        if cached is not _DYNAMIC_NO_MATCH:
+            entry.override_cache.move_to_end(module_name)
+            return cached
 
     # Fast path: every pattern is an exact literal module name.
-    if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
-        exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
+    if entry.all_exact:
+        exact_entry = entry.exact_lookup.get(module_name)
         matched = exact_entry[1] if exact_entry is not None else None
-        override_cache[module_name] = matched
-        return matched
+    else:
+        # Mixed fallback: find the earliest matching pattern among exact
+        # literals (O(1) lookup) and ordered regex patterns.
+        exact_entry = entry.exact_lookup.get(module_name)
+        best_index = exact_entry[0] if exact_entry is not None else None
+        matched = exact_entry[1] if exact_entry is not None else None
 
-    # Mixed fallback: find the earliest matching pattern among exact literals
-    # (O(1) lookup) and ordered regex patterns.
-    exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
-    best_index = exact_entry[0] if exact_entry is not None else None
-    matched = exact_entry[1] if exact_entry is not None else None
+        for index, is_negative, compiled, overrides in entry.regex_patterns:
+            if best_index is not None and index > best_index:
+                break
+            if compiled.match(module_name):
+                matched = False if is_negative else dict(overrides)
+                break
 
-    for index, is_negative, compiled, overrides in _DYNAMIC_REGEX_PATTERN_CACHE[cache_key]:
-        if best_index is not None and index > best_index:
-            break
-        if compiled.match(module_name):
-            matched = False if is_negative else dict(overrides)
-            break
-
-    override_cache[module_name] = matched
+    with _DYNAMIC_CACHE_LOCK:
+        if _DYNAMIC_CACHE.get(cache_key) is entry:
+            existing = entry.override_cache.get(module_name, _DYNAMIC_NO_MATCH)
+            if existing is _DYNAMIC_NO_MATCH:
+                entry.override_cache[module_name] = matched
+                _DYNAMIC_CACHE_OVERRIDE_COUNT += 1
+            else:
+                matched = existing
+                entry.override_cache.move_to_end(module_name)
+            _DYNAMIC_CACHE.move_to_end(cache_key)
+            _trim_dynamic_cache_locked()
     return matched
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -3840,19 +3900,20 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return sub_value
 
     def _invalidate_dynamic_cache(self) -> None:
-        """Clear the global dynamic-resolution caches keyed by the current `dynamic` dict.
+        """Clear the dynamic-resolution cache keyed by the current `dynamic` dict.
 
         Call this before replacing `self.dynamic` with a new dict, so a recycled
         object id does not return stale compiled patterns or override lookups.
         """
         if self.dynamic is None:
             return
+        global _DYNAMIC_CACHE_OVERRIDE_COUNT
         cache_key = id(self.dynamic)
-        _DYNAMIC_PATTERN_CACHE.pop(cache_key, None)
-        _DYNAMIC_OVERRIDE_CACHE.pop(cache_key, None)
-        _DYNAMIC_EXACT_LOOKUP_CACHE.pop(cache_key, None)
-        _DYNAMIC_ALL_EXACT_CACHE.pop(cache_key, None)
-        _DYNAMIC_REGEX_PATTERN_CACHE.pop(cache_key, None)
+        with _DYNAMIC_CACHE_LOCK:
+            cached = _DYNAMIC_CACHE.get(cache_key)
+            if cached is not None and cached.dynamic is self.dynamic:
+                _DYNAMIC_CACHE.pop(cache_key)
+                _DYNAMIC_CACHE_OVERRIDE_COUNT -= len(cached.override_cache)
 
     def meta_set_versionable(self, key: str, value: List[str]):
         self.meta_set(key, value)

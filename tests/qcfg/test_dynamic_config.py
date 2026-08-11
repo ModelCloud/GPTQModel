@@ -6,23 +6,15 @@ from unittest.mock import patch
 import pcre
 import pytest
 
-from gptqmodel.quantization.config import (
-    _DYNAMIC_ALL_EXACT_CACHE,
-    _DYNAMIC_EXACT_LOOKUP_CACHE,
-    _DYNAMIC_OVERRIDE_CACHE,
-    _DYNAMIC_PATTERN_CACHE,
-    _DYNAMIC_REGEX_PATTERN_CACHE,
-    QuantizeConfig,
-)
+import gptqmodel.quantization.config as config_module
+from gptqmodel.quantization.config import QuantizeConfig
 
 
 def _clear_dynamic_caches():
     """Drop the global dynamic pattern/override caches so tests are independent."""
-    _DYNAMIC_PATTERN_CACHE.clear()
-    _DYNAMIC_EXACT_LOOKUP_CACHE.clear()
-    _DYNAMIC_REGEX_PATTERN_CACHE.clear()
-    _DYNAMIC_OVERRIDE_CACHE.clear()
-    _DYNAMIC_ALL_EXACT_CACHE.clear()
+    with config_module._DYNAMIC_CACHE_LOCK:
+        config_module._DYNAMIC_CACHE.clear()
+        config_module._DYNAMIC_CACHE_OVERRIDE_COUNT = 0
 
 
 @pytest.fixture(autouse=True)
