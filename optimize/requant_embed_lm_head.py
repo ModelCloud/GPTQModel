@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Post-quantization embed+lm_head requantization CLI.
 
-Loads an existing GPTQ checkpoint, overrides ``model.embed_tokens`` and
-``lm_head`` with a per-module bits/group_size config, and requantizes only
-the embedding / output projection tensors.
+Loads an existing GPTQ checkpoint, resolves its actual input/output embedding
+paths, applies per-module bits/group_size overrides, and requantizes only the
+selected embedding tensors.
 
 Example:
     python -m optimize.requant_embed_lm_head \
-        --model-path /monster/data/model/DeepSeek-V4-Flash-0731-W4G64-GAR-activation \
+        --model-path /path/to/quantized-model \
         --gpus 0,1 \
         --calibration-parquet /path/to/calibration.parquet \
         --bits 4 --group-size 64 --embed-quant-mode both
@@ -37,10 +37,6 @@ from optimize._common import (
 
 set_env()
 
-import torch  # noqa: E402
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization.config import QuantizeEmbed  # noqa: E402
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -56,6 +52,10 @@ def _parse_args() -> argparse.Namespace:
 
 def requant_embed_lm_head(args: argparse.Namespace) -> Path:
     """Run embed+lm_head requantization; caller is responsible for GPU visibility."""
+    import torch
+    from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.quantization.config import QuantizeEmbed
+
     set_torch_threads()
     faulthandler.enable(file=sys.stderr, all_threads=True)
     try:
@@ -63,6 +63,7 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
     except (AttributeError, ValueError):
         pass
 
+    mode = QuantizeEmbed(args.embed_quant_mode)
     print(f"[requant] Loading quantized checkpoint {args.model_path} ...", flush=True)
     model = GPTQModel.load(
         args.model_path,
@@ -70,6 +71,19 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
         trust_remote_code=args.trust_remote_code,
         backend=BACKEND.AUTO,
     )
+
+    target_names: list[str] = []
+    if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+        input_name = model.get_input_embeddings_name()
+        if not isinstance(input_name, str) or not input_name:
+            raise ValueError("Could not resolve the model input-embedding path for requantization.")
+        target_names.append(input_name)
+    if mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+        output_name = model.get_output_embeddings_name() or getattr(model, "lm_head", None)
+        if not isinstance(output_name, str) or not output_name:
+            raise ValueError("Could not resolve the model output-embedding path for requantization.")
+        if output_name not in target_names:
+            target_names.append(output_name)
 
     # GPTQModel.load ignores a caller quantize_config for already-quantized
     # checkpoints, so apply the embed/lm_head overrides after loading.
@@ -86,9 +100,9 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
     }
     if model.quantize_config.dynamic is None:
         model.quantize_config.dynamic = {}
-    model.quantize_config.dynamic["model.embed_tokens"] = dict(embed_cfg)
-    model.quantize_config.dynamic["lm_head"] = dict(embed_cfg)
-    for name in ("model.embed_tokens", "lm_head"):
+    for name in target_names:
+        model.quantize_config.dynamic[name] = dict(embed_cfg)
+    for name in target_names:
         effective = model.quantize_config.dynamic_get(name, default=None)
         assert effective == embed_cfg, f"dynamic override for {name} not effective: {effective}"
     print(f"[requant] effective dynamic overrides: {model.quantize_config.dynamic}", flush=True)
@@ -101,7 +115,6 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
         dataset_size=args.dataset_size,
     )
 
-    mode = QuantizeEmbed(args.embed_quant_mode.upper())
     print(f"[requant] Requantizing embed/lm_head with mode={mode} ...", flush=True)
     start = time.time()
     model.requantize(

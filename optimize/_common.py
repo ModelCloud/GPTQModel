@@ -51,7 +51,23 @@ def set_torch_threads() -> None:
 
 def parse_gpus(gpu_arg: str) -> list[int]:
     """Parse a comma-separated physical GPU id string."""
-    return [int(g.strip()) for g in gpu_arg.split(",") if g.strip()]
+    if not isinstance(gpu_arg, str):
+        raise ValueError(f"Invalid physical GPU list: {gpu_arg!r}")
+
+    gpu_tokens = [token.strip() for token in gpu_arg.split(",")]
+    if any(not token for token in gpu_tokens):
+        raise ValueError(f"Invalid physical GPU list: {gpu_arg!r}")
+
+    try:
+        physical_gpus = [int(token) for token in gpu_tokens]
+    except ValueError as exc:
+        raise ValueError(f"Invalid physical GPU list: {gpu_arg!r}") from exc
+
+    if any(gpu < 0 for gpu in physical_gpus):
+        raise ValueError(f"Physical GPU ids must be nonnegative: {physical_gpus}")
+    if len(set(physical_gpus)) != len(physical_gpus):
+        raise ValueError(f"Physical GPU ids must be unique: {physical_gpus}")
+    return physical_gpus
 
 
 def idle_gate(
