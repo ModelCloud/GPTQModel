@@ -89,6 +89,32 @@ def test_hessian_inverse_rejects_non_finite_inverse_result(gptq, monkeypatch):
     assert used_damp == 1.0
 
 
+@pytest.mark.skipif(not _HAS_PACK_BLOCK_EXT, reason="pack_block_ext not available")
+def test_hessian_inverse_stops_when_damp_increment_is_below_dtype_resolution(monkeypatch):
+    """A positive increment that rounds to zero must not create an infinite recovery loop."""
+    calls = 0
+
+    def _always_fail_hessian_inverse(H, diag_delta):
+        nonlocal calls
+        calls += 1
+        return torch.empty_like(H), torch.tensor(False)
+
+    monkeypatch.setattr(
+        pack_block_ext,
+        "hessian_inverse_cholesky_cpu",
+        _always_fail_hessian_inverse,
+    )
+    qcfg = QuantizeConfig(damp_percent=0.05, damp_auto_increment=1e-50)
+    quantizer = GPTQ(nn.Linear(2, 1, bias=False), qcfg=qcfg)
+    quantizer.name = "tiny-damp-step"
+
+    actual, used_damp = quantizer._compute_hessian_inverse_uncached(torch.eye(2))
+
+    assert actual is None
+    assert used_damp == 1.0
+    assert calls == 7
+
+
 @pytest.mark.mps
 @pytest.mark.skipif(not MPS_AVAILABLE, reason="MPS is not available")
 @pytest.mark.parametrize(("size", "seed"), [(8, 37), (64, 701), (128, 2027)])

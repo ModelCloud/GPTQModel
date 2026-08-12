@@ -2137,7 +2137,15 @@ class GPTQ:
                                     f"Quantization: Module `{self.name}` -> Starting damp recovery at "
                                     f"`damp_percent={recovery_initial_damp:.5f}`, increment step `{damp_cfg.step:.5f}`."
                                 )
-                            damp_per_col = damp_per_col + damp_cfg.step
+                            next_damp = damp_per_col + damp_cfg.step
+                            if torch.equal(next_damp, damp_per_col):
+                                log.warn(
+                                    f"Quantization: Module `{self.name}` -> Damp recovery increment "
+                                    f"`{damp_cfg.step}` is below {damp_per_col.dtype} resolution; "
+                                    "stopping this recovery attempt."
+                                )
+                                break
+                            damp_per_col = next_damp
                             recovery_last_damp = float(damp_per_col.mean().item())
                         else:
                             log.warn(
@@ -2310,7 +2318,15 @@ class GPTQ:
                             f"Quantization: Module `{self.name}` -> Starting damp recovery at "
                             f"`damp_percent={recovery_initial_damp:.5f}`, increment step `{damp_cfg.step:.5f}`."
                         )
-                    damp_per_col = damp_per_col + damp_cfg.step
+                    next_damp = damp_per_col + damp_cfg.step
+                    if torch.equal(next_damp, damp_per_col):
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Damp recovery increment "
+                            f"`{damp_cfg.step}` is below {damp_per_col.dtype} resolution; "
+                            "stopping this recovery attempt."
+                        )
+                        break
+                    damp_per_col = next_damp
                     recovery_last_damp = float(damp_per_col.mean().item())
                 else:
                     log.warn(
