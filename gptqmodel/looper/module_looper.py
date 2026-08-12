@@ -934,53 +934,67 @@ class ModuleLooper():
         if not device_map:
             return previous
 
-        for name, target in device_map.items():
-            named_module = subset.get(name)
-            module_ref = None
-            if named_module is None and fallback_modules is not None:
-                module_ref = fallback_modules.get(name)
-                named_module = module_ref
-            elif named_module is not None:
-                module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
-            if module_ref is None:
-                continue
-            try:
-                current = get_device(module_ref)
-            except Exception:
-                current = None
+        try:
+            for name, target in device_map.items():
+                named_module = subset.get(name)
+                module_ref = None
+                if named_module is None and fallback_modules is not None:
+                    module_ref = fallback_modules.get(name)
+                    named_module = module_ref
+                elif named_module is not None:
+                    module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
+                if module_ref is None:
+                    continue
+                try:
+                    current = get_device(module_ref)
+                except Exception:
+                    current = None
 
-            if skip_meta_modules and current == META:
-                # Direct MoE input capture invokes the shell's hook without
-                # executing its projection. Keep a deliberately deferred
-                # routed leaf on meta until the quantization batch loads it on
-                # the final assigned device.
-                continue
+                if skip_meta_modules and current == META:
+                    # Direct MoE input capture invokes the shell's hook without
+                    # executing its projection. Keep a deliberately deferred
+                    # routed leaf on meta until the quantization batch loads it on
+                    # the final assigned device.
+                    continue
 
-            if target is None or (current is not None and current == target):
-                continue
+                if target is None or (current is not None and current == target):
+                    continue
 
-            if current is not None:
-                previous[name] = current
+                if current is not None:
+                    previous[name] = current
 
-            emit_device_telemetry(
-                "forward_override_apply",
-                module=getattr(named_module, "full_name", name) if named_module is not None else name,
-                current_device=current,
-                target_device=target,
-            )
-            timer = getattr(self.gptq_model, "quant_region_timer", None)
-            move_start = time.perf_counter() if timer is not None else None
-            move_to(module_ref, device=target)
-            rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
-            if timer is not None and move_start is not None:
-                timer.record(
-                    "module_move",
-                    time.perf_counter() - move_start,
-                    source=f"forward_override_apply {getattr(named_module, 'full_name', name)} {current}->{target}",
+                emit_device_telemetry(
+                    "forward_override_apply",
+                    module=getattr(named_module, "full_name", name) if named_module is not None else name,
+                    current_device=current,
+                    target_device=target,
                 )
-            if isinstance(named_module, NamedModule):
-                setattr(named_module, "target_device", target)
-            setattr(module_ref, "target_device", target)
+                timer = getattr(self.gptq_model, "quant_region_timer", None)
+                move_start = time.perf_counter() if timer is not None else None
+                move_to(module_ref, device=target)
+                rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
+                if timer is not None and move_start is not None:
+                    timer.record(
+                        "module_move",
+                        time.perf_counter() - move_start,
+                        source=(
+                            f"forward_override_apply {getattr(named_module, 'full_name', name)} "
+                            f"{current}->{target}"
+                        ),
+                    )
+                if isinstance(named_module, NamedModule):
+                    setattr(named_module, "target_device", target)
+                setattr(module_ref, "target_device", target)
+        except Exception:
+            try:
+                self._restore_forward_device_overrides(
+                    subset,
+                    previous,
+                    fallback_modules=fallback_modules,
+                )
+            except Exception:
+                log.error("Failed to restore partially applied forward device overrides.", exc_info=True)
+            raise
 
         return previous
 
@@ -1480,8 +1494,17 @@ class ModuleLooper():
     def loop(self, fallback=None, **kwargs):
         """Run the quantization loop under the TF32 guard."""
 
-        with tf32_high_precision_guard():
-            return self._loop_impl(fallback=fallback, **kwargs)
+        config = self.gptq_model.model.config
+        had_use_cache = hasattr(config, "use_cache")
+        original_use_cache = getattr(config, "use_cache", None)
+        try:
+            with tf32_high_precision_guard():
+                return self._loop_impl(fallback=fallback, **kwargs)
+        finally:
+            if had_use_cache:
+                config.use_cache = original_use_cache
+            elif hasattr(config, "use_cache"):
+                delattr(config, "use_cache")
 
     @torch.inference_mode()
     def _loop_impl(self, fallback=None, **kwargs):

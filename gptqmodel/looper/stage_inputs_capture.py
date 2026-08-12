@@ -281,10 +281,10 @@ class StageInputsCapture:
             )
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-
-        self.gptq_model.pre_quantize_generate_hook_start()
-
+        generate_hook_started = False
         try:
+            self.gptq_model.pre_quantize_generate_hook_start()
+            generate_hook_started = True
             for batch_index, example in enumerate(calibration_data, start=1):
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     data_device = self.gptq_model.quantize_config.device
@@ -343,10 +343,15 @@ class StageInputsCapture:
                             subtitle += f" rows {processed_rows}"
                         cache_forward_pb.subtitle(subtitle).draw()
         finally:
-            if cache_forward_pb is not None:
-                cache_forward_pb.close()
-            self.gptq_model.pre_quantize_generate_hook_end()
-            handle.remove()
+            try:
+                if cache_forward_pb is not None:
+                    cache_forward_pb.close()
+            finally:
+                try:
+                    if generate_hook_started:
+                        self.gptq_model.pre_quantize_generate_hook_end()
+                finally:
+                    handle.remove()
 
         # In offload_to_disk mode the input embedding is no longer needed once
         # hidden-state inputs are cached. Move it to disk (unless it is tied

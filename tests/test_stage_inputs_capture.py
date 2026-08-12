@@ -171,6 +171,27 @@ class TestStageInputsCapture(unittest.TestCase):
         self.assertIn("model.layers.42", message)
         self.assertIn("legacy.path.layer_0", message)
 
+    def test_cache_inputs_removes_capture_hook_when_generate_hook_start_fails(self):
+        layer = FakeLayer()
+        capture, layers, _, gptq_model = self._make_capture(layer)
+        gptq_model.pre_quantize_generate_hook_start.side_effect = RuntimeError("start failed")
+
+        with self.assertRaisesRegex(RuntimeError, "start failed"):
+            capture.cache_inputs(layers=layers, calibration_data=[], use_cache=False)
+
+        self.assertEqual(len(layer._forward_pre_hooks), 0)
+        gptq_model.pre_quantize_generate_hook_end.assert_not_called()
+
+    def test_cache_inputs_removes_capture_hook_when_generate_hook_end_fails(self):
+        layer = FakeLayer()
+        capture, layers, _, gptq_model = self._make_capture(layer)
+        gptq_model.pre_quantize_generate_hook_end.side_effect = RuntimeError("end failed")
+
+        with self.assertRaisesRegex(RuntimeError, "end failed"):
+            capture.cache_inputs(layers=layers, calibration_data=[], use_cache=False)
+
+        self.assertEqual(len(layer._forward_pre_hooks), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

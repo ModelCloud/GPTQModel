@@ -30,6 +30,157 @@ from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.config import QuantizeConfig
 
 
+@pytest.mark.parametrize("has_use_cache", [True, False])
+@pytest.mark.parametrize("raises", [True, False])
+def test_module_looper_restores_use_cache_after_loop(monkeypatch, has_use_cache, raises):
+    config = types.SimpleNamespace()
+    if has_use_cache:
+        config.use_cache = True
+    looper = object.__new__(ModuleLooper)
+    looper.gptq_model = types.SimpleNamespace(model=types.SimpleNamespace(config=config))
+
+    def run_loop(**_kwargs):
+        config.use_cache = False
+        if raises:
+            raise RuntimeError("quantization failed")
+        return "completed"
+
+    monkeypatch.setattr(looper, "_loop_impl", run_loop)
+
+    if raises:
+        with pytest.raises(RuntimeError, match="quantization failed"):
+            looper.loop()
+    else:
+        assert looper.loop() == "completed"
+
+    assert hasattr(config, "use_cache") is has_use_cache
+    if has_use_cache:
+        assert config.use_cache is True
+
+
+@pytest.mark.parametrize("failure_site", ["registration", "event", "forward"])
+def test_subset_forward_failure_removes_registered_and_inline_hooks(failure_site):
+    registered = torch.nn.Linear(1, 1, bias=False)
+    inline = torch.nn.Linear(1, 1, bias=False)
+    inline.forward_hook = None
+    inline.forward_hook_last = False
+    modules = {
+        "registered": NamedModule(registered, "registered", "layer.registered", 0),
+        "inline": NamedModule(inline, "inline", "layer.inline", 0),
+    }
+    plan = SubsetPlan(
+        modules=modules,
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=False,
+        forward_mode="parallel",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={},
+        forward_device_map={},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[modules],
+    )
+
+    class DummyProgress:
+        def manual(self):
+            return self
+
+        def set(self, **_kwargs):
+            return self
+
+        def title(self, *_args):
+            return self
+
+        def subtitle(self, *_args):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return None
+
+    class DummyLogger:
+        def pb(self, _iterable):
+            return DummyProgress()
+
+    class DummyProcessor:
+        execution_config = ExecutionConfig(
+            require_fwd=True,
+            fwd_replay_after_process=False,
+            fwd_all_modules_in_single_pass=False,
+        )
+        moe_input_capture_without_forward = False
+
+        def prepare_subset(self, *_args, **_kwargs):
+            return None
+
+        def cleanup_subset(self, *_args, **_kwargs):
+            return None
+
+        def pre_process_fwd_hook(self, name):
+            if failure_site == "registration" and name == "inline":
+                raise RuntimeError("registration failed")
+            return lambda *_args, **_kwargs: None
+
+    class DummyLooper:
+        embed_quant_mode = None
+        gptq_model = types.SimpleNamespace(
+            quantize_config=types.SimpleNamespace(moe_routing_bypass=lambda: False)
+        )
+
+        def _prepare_named_module_for_forward(self, **_kwargs):
+            return None
+
+        def _masked_hook_wrapper(self, _processor, hook, _source):
+            return hook
+
+        _masked_pre_hook_wrapper = _masked_hook_wrapper
+
+        def _run_forward_batches(self, **_kwargs):
+            raise RuntimeError(f"{failure_site} failed")
+
+    def subset_event_cb(*, stage, **_kwargs):
+        if stage == "forward_start" and failure_site == "event":
+            raise RuntimeError("event failed")
+
+    with pytest.raises(RuntimeError, match=f"{failure_site} failed"):
+        stage_subset_module._run_single_subset_pass(
+            DummyLooper(),
+            DummyProcessor(),
+            torch.nn.Identity(),
+            plan,
+            layer_inputs=[[torch.ones(1, 1)]],
+            layer_input_kwargs=[{}],
+            position_ids=[],
+            attention_masks=[],
+            cur_layer_device=torch.device("cpu"),
+            is_lm_head_module=False,
+            layer_descriptor="layer",
+            layer_title="layer",
+            layer_index=0,
+            full=modules,
+            fallback=True,
+            shared_kv_cache_dict={},
+            pb=None,
+            logger=DummyLogger(),
+            is_awq_processor=False,
+            subset_event_cb=subset_event_cb,
+        )
+
+    assert not registered._forward_hooks
+    assert inline.forward_hook is None
+    assert inline.forward_hook_last is False
+
+
 def test_pre_quantize_defer_plan_uses_routed_module_tree_flags():
     flags_by_name = {
         "mlp.route_bank.0.gate_proj": frozenset({"routed", "gate"}),
@@ -183,6 +334,40 @@ def test_forward_device_override_keeps_direct_capture_shell_on_meta():
 
     assert previous == {}
     assert named_module.module.weight.device.type == "meta"
+
+
+def test_forward_device_override_restores_partial_moves_on_failure(monkeypatch):
+    looper = object.__new__(ModuleLooper)
+    looper.gptq_model = types.SimpleNamespace(quant_region_timer=None)
+    first = torch.nn.Linear(1, 1, bias=False)
+    second = torch.nn.Linear(1, 1, bias=False)
+    first.marker_device = torch.device("cpu")
+    second.marker_device = torch.device("cpu")
+    modules = {
+        "first": NamedModule(first, "first", "layer.first", 0),
+        "second": NamedModule(second, "second", "layer.second", 0),
+    }
+
+    monkeypatch.setattr("gptqmodel.looper.module_looper.move_to", lambda *_args, **_kwargs: None)
+
+    def fake_rehome(module, device, **_kwargs):
+        module.marker_device = device
+        if module is second and device.type == "cuda":
+            raise RuntimeError("second move failed")
+
+    monkeypatch.setattr("gptqmodel.looper.module_looper.rehome_module_to_device", fake_rehome)
+
+    with pytest.raises(RuntimeError, match="second move failed"):
+        looper._apply_forward_device_overrides(
+            modules,
+            {
+                "first": torch.device("cuda:0"),
+                "second": torch.device("cuda:0"),
+            },
+        )
+
+    assert first.marker_device == torch.device("cpu")
+    assert second.marker_device == torch.device("cpu")
 
 
 class _DummyQModel:

@@ -857,6 +857,17 @@ def _run_single_subset_pass(
     handle = []
     subset_size = len(subset_names)
 
+    def clear_forward_hooks() -> None:
+        for hook_handle in handle:
+            hook_handle.remove()
+        if execute_forward:
+            for module_name in subset_names:
+                if module_name not in subset:
+                    continue
+                if hasattr(subset[module_name], 'forward_hook'):
+                    subset[module_name].forward_hook = None
+                    subset[module_name].forward_hook_last = False
+
     direct_moe_input_capture = bool(
         execute_forward
         and getattr(processor, "moe_input_capture_without_forward", False)
@@ -883,115 +894,135 @@ def _run_single_subset_pass(
                 )
 
     quant_embeddings_only = getattr(looper, "embed_quant_mode", None) is not None
-    if execute_forward and (not quant_embeddings_only or is_embeddings_module):
-        for idx, name in enumerate(subset_names):
-            m = subset[name]
-            # Register the forward hook that captures activations for quantization.
-            # The final module optionally flips a flag so processors can trigger
-            # once-per-subset logic after the forward pass.
-            is_last = (idx == subset_size - 1)
-            hook_source = getattr(m, "full_name", None)
-            if hook_source is None:
-                hook_source = getattr(m, "name", name)
-            if hook_source is None:
-                hook_source = str(name)
+    try:
+        if execute_forward and (not quant_embeddings_only or is_embeddings_module):
+            for idx, name in enumerate(subset_names):
+                m = subset[name]
+                # Register the forward hook that captures activations for quantization.
+                # The final module optionally flips a flag so processors can trigger
+                # once-per-subset logic after the forward pass.
+                is_last = (idx == subset_size - 1)
+                hook_source = getattr(m, "full_name", None)
+                if hook_source is None:
+                    hook_source = getattr(m, "name", name)
+                if hook_source is None:
+                    hook_source = str(name)
 
-            is_moe_module = module_tree_flags_are_moe(
-                m.state.get("module_tree_flags", frozenset())
-            )
-
-            if hasattr(subset[name], 'forward_hook'):
-                original_hook = processor.pre_process_fwd_hook(name)
-                # Use pre-hook for MoE modules to fire before StopForward
-                if is_moe_module:
-                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
-                else:
-                    subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                enable_stop = (
-                    execution_config.fwd_replay_after_process
-                    or execution_config.subset_forward_early_stop
+                is_moe_module = module_tree_flags_are_moe(
+                    m.state.get("module_tree_flags", frozenset())
                 )
-                if is_last and enable_stop:
-                    subset[name].forward_hook_last = True
-            else:
-                original_hook = processor.pre_process_fwd_hook(name)
-                # Use pre-hook registration for MoE modules
-                if is_moe_module:
-                    handle.append(subset[name].register_forward_hook(
-                        looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
-                    ))
+
+                if hasattr(subset[name], 'forward_hook'):
+                    original_hook = processor.pre_process_fwd_hook(name)
+                    # Use pre-hook for MoE modules to fire before StopForward
+                    if is_moe_module:
+                        subset[name].forward_hook = looper._masked_pre_hook_wrapper(
+                            processor, original_hook, hook_source
+                        )
+                    else:
+                        subset[name].forward_hook = looper._masked_hook_wrapper(
+                            processor, original_hook, hook_source
+                        )
+                    enable_stop = (
+                        execution_config.fwd_replay_after_process
+                        or execution_config.subset_forward_early_stop
+                    )
+                    if is_last and enable_stop:
+                        subset[name].forward_hook_last = True
                 else:
-                    handle.append(subset[name].register_forward_hook(
-                        looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                    ))
-    elif quant_embeddings_only and not is_embeddings_module:
-        for name in list(subset.keys()):
-            _pop_task(name, processor, subset)
+                    original_hook = processor.pre_process_fwd_hook(name)
+                    # Use pre-hook registration for MoE modules
+                    if is_moe_module:
+                        handle.append(subset[name].register_forward_hook(
+                            looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
+                        ))
+                    else:
+                        handle.append(subset[name].register_forward_hook(
+                            looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                        ))
+        elif quant_embeddings_only and not is_embeddings_module:
+            for name in list(subset.keys()):
+                _pop_task(name, processor, subset)
+    except Exception:
+        clear_forward_hooks()
+        raise
 
-    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
-        if is_awq_processor:
-            logger.debug(
-                "StageSubset[awq]: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
-                layer_index,
-                subset_index + 1,
-                subset_total,
-                len(subset),
-            )
-        else:
-            logger.debug(
-                "StageSubset: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
-                layer_index,
-                subset_index + 1,
-                subset_total,
-                getattr(processor, "name", type(processor).__name__),
-                len(subset),
-            )
-
-    capture_layer_forward_context = execute_forward and execution_config.capture_layer_forward_context
-    if capture_layer_forward_context:
-        subset_capture_override = getattr(processor, "capture_layer_forward_context_during_subset", None)
-        if callable(subset_capture_override):
-            capture_layer_forward_context = bool(subset_capture_override())
-    need_outputs = execute_forward and (plan.need_forward_outputs or capture_layer_forward_context)
+    capture_layer_forward_context = False
+    need_outputs = False
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
-    if execute_forward:
-        if subset_event_cb:
-            subset_event_cb(stage="forward_start", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=subset_names, processor=getattr(processor, "name", type(processor).__name__))
-
-        fwd_start = time.perf_counter()
-        reuse_kv = bool(getattr(module, "reuse_kv", False))
-        forward_msg = (
-            "Forward: "
-            f"Layer=`{layer_descriptor}`, subset={subset_index + 1}/{subset_total}, "
-            f"batches={batch_count}"
-        )
-        forward_pb = (
-            logger.pb(range(plan.forward_total_rows))
-               .manual()
-               .set(show_left_steps=False)
-        )
-        forward_pb.title(forward_msg).subtitle(
-            f"Row 0/{plan.forward_total_rows}"
-        ).draw()
-
     previous_forward_devices: Dict[str, torch.device] = {}
     preserve_devices = plan.preserve_module_devices
-    if forward_device_map:
-        previous_forward_devices = looper._apply_forward_device_overrides(
-            subset,
-            forward_device_map,
-            fallback_modules=full,
-            skip_meta_modules=direct_moe_input_capture,
-        )
-
     forward_outputs = None
-    if execute_forward:
-        lifecycle_hooks = getattr(looper.gptq_model, "moe_lifecycle_hooks", None)
-        prepare_input_replay = getattr(lifecycle_hooks, "prepare_input_replay", None)
-        if direct_moe_input_capture and callable(prepare_input_replay):
-            prepare_input_replay(subset, batch_count)
-        try:
+    forward_completed = False
+    forward_pb = None
+    forward_msg = None
+    reuse_kv = False
+    try:
+        if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+            if is_awq_processor:
+                logger.debug(
+                    "StageSubset[awq]: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
+                    layer_index,
+                    subset_index + 1,
+                    subset_total,
+                    len(subset),
+                )
+            else:
+                logger.debug(
+                    "StageSubset: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
+                    layer_index,
+                    subset_index + 1,
+                    subset_total,
+                    getattr(processor, "name", type(processor).__name__),
+                    len(subset),
+                )
+
+        capture_layer_forward_context = execute_forward and execution_config.capture_layer_forward_context
+        if capture_layer_forward_context:
+            subset_capture_override = getattr(processor, "capture_layer_forward_context_during_subset", None)
+            if callable(subset_capture_override):
+                capture_layer_forward_context = bool(subset_capture_override())
+        need_outputs = execute_forward and (plan.need_forward_outputs or capture_layer_forward_context)
+
+        if execute_forward:
+            if subset_event_cb:
+                subset_event_cb(
+                    stage="forward_start",
+                    layer_idx=layer_index,
+                    subset_index=subset_index,
+                    subset_total=subset_total,
+                    module_names=subset_names,
+                    processor=getattr(processor, "name", type(processor).__name__),
+                )
+
+            fwd_start = time.perf_counter()
+            reuse_kv = bool(getattr(module, "reuse_kv", False))
+            forward_msg = (
+                "Forward: "
+                f"Layer=`{layer_descriptor}`, subset={subset_index + 1}/{subset_total}, "
+                f"batches={batch_count}"
+            )
+            forward_pb = (
+                logger.pb(range(plan.forward_total_rows))
+                .manual()
+                .set(show_left_steps=False)
+            )
+            forward_pb.title(forward_msg).subtitle(f"Row 0/{plan.forward_total_rows}").draw()
+
+        if execute_forward and forward_device_map:
+            previous_forward_devices = looper._apply_forward_device_overrides(
+                subset,
+                forward_device_map,
+                fallback_modules=full,
+                skip_meta_modules=direct_moe_input_capture,
+            )
+
+        if execute_forward:
+            lifecycle_hooks = getattr(looper.gptq_model, "moe_lifecycle_hooks", None)
+            prepare_input_replay = getattr(lifecycle_hooks, "prepare_input_replay", None)
+            if direct_moe_input_capture and callable(prepare_input_replay):
+                prepare_input_replay(subset, batch_count)
             # MoE lifecycle hooks need to know which subset is currently active.
             # Replay-only passes can disable that when they only need outputs.
             if disable_moe_hooks:
@@ -1022,15 +1053,23 @@ def _run_single_subset_pass(
                 force_serial=plan.subset_forward_serial,
                 preserve_module_devices=preserve_devices,
             )
-        finally:
-            if forward_device_map and plan.restore_forward_device_overrides:
+            forward_completed = True
+    finally:
+        try:
+            if execute_forward and forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
                     subset,
                     previous_forward_devices,
                     fallback_modules=full,
                 )
-            if forward_pb is not None:
-                forward_pb.close()
+        finally:
+            try:
+                if forward_pb is not None:
+                    forward_pb.close()
+            finally:
+                clear_forward_hooks()
+                if execute_forward and not forward_completed:
+                    looper._current_subset = None
 
     returned_outputs = None
     if execute_forward and capture_layer_forward_context:
@@ -1073,20 +1112,6 @@ def _run_single_subset_pass(
             fwd_time,
             source=forward_source,
         )
-
-    for h in handle:
-        # Detach temporary hooks to avoid leaking state into future passes.
-        h.remove()
-
-    if execute_forward:
-        for name in subset_names:
-            if name not in subset:
-                continue
-            # Reset inline hook attributes on NamedModule wrappers so future passes
-            # do not reuse state from this subset run.
-            if hasattr(subset[name], 'forward_hook'):
-                subset[name].forward_hook = None
-                subset[name].forward_hook_last = False
 
     forward_flush_device = _resolve_forward_flush_device(plan, cur_layer_device)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
