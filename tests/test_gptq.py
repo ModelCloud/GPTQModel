@@ -1329,6 +1329,78 @@ def test_gptq_cpu_block_matches_serial_quantize(bits, group_size, monkeypatch):
     assert torch.equal(g_ref, g_cpu)
 
 
+def test_gptq_cpu_block_skips_ternary_quantization(monkeypatch):
+    """The integer-code CPU block kernel must not replace the ternary formula."""
+    torch.manual_seed(731)
+    base_layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    base_layer.weight.data.copy_(torch.randn_like(base_layer.weight))
+    calibration = torch.randn(1, 4, 8)
+
+    def _run(block_cpu: str):
+        monkeypatch.setenv("GPTQMODEL_BLOCK_CPU", block_cpu)
+        layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+        layer.weight.data.copy_(base_layer.weight)
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=4,
+            desc_act=False,
+            act_group_aware=False,
+            offload_to_disk=False,
+        )
+        gptq = GPTQ(layer, qcfg=qcfg)
+        gptq.quantizer.configure(perchannel=True, trits=True)
+        assert gptq.quantizer._maxq_value == -1
+        gptq.add_batch(calibration, None)
+        return gptq.quantize(blocksize=4)
+
+    eager_output = _run("0")
+    cpu_block_calls = 0
+    real_cpu_block = gptq_mod.gptq_block_cpu
+
+    def _counted_cpu_block(*args, **kwargs):
+        nonlocal cpu_block_calls
+        cpu_block_calls += 1
+        return real_cpu_block(*args, **kwargs)
+
+    monkeypatch.setattr(gptq_mod, "gptq_block_cpu", _counted_cpu_block)
+    block_enabled_output = _run("1")
+
+    assert cpu_block_calls == 0
+    for eager, block_enabled in zip(eager_output[:4], block_enabled_output[:4]):
+        assert torch.equal(eager, block_enabled)
+    assert block_enabled_output[5:] == eager_output[5:]
+
+
+def test_gptq_cpu_block_uses_legacy_maxq_tensor_when_scalar_is_missing(monkeypatch):
+    """Older quantizer state without the cached scalar still enables integer blocks."""
+    torch.manual_seed(907)
+    layer = nn.Linear(8, 6, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        desc_act=False,
+        act_group_aware=False,
+        offload_to_disk=False,
+    )
+    gptq = GPTQ(layer, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    del gptq.quantizer._maxq_value
+    gptq.add_batch(torch.randn(1, 4, 8), None)
+    monkeypatch.setenv("GPTQMODEL_BLOCK_CPU", "1")
+
+    observed_maxq = []
+    real_cpu_block = gptq_mod.gptq_block_cpu
+
+    def _recorded_cpu_block(*args, **kwargs):
+        observed_maxq.append(args[4])
+        return real_cpu_block(*args, **kwargs)
+
+    monkeypatch.setattr(gptq_mod, "gptq_block_cpu", _recorded_cpu_block)
+    gptq.quantize(blocksize=4)
+
+    assert observed_maxq == [15, 15]
+
+
 @pytest.mark.parametrize("bits", [2, 3, 4, 8])
 @pytest.mark.parametrize(
     "group_size,in_features,blocksize",

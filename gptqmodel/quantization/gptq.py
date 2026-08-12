@@ -3188,6 +3188,13 @@ class GPTQ:
                         )
 
                 group_size = self.qcfg.group_size
+                block_maxq_value = getattr(self.quantizer, "_maxq_value", None)
+                if block_maxq_value is None:
+                    block_maxq_value = int(self.quantizer.maxq.item())
+                # Native block kernels implement bounded integer-code GPTQ.
+                # Ternary quantization uses the negative maxq sentinel and must
+                # retain the distinct eager formula in the serial path below.
+                integer_block_quantization = 0 < block_maxq_value <= 255
                 batched_scale = batched_zero = None
                 batched_group_count = 0
                 batched_first_global_idx = 0
@@ -3244,6 +3251,7 @@ class GPTQ:
                             )
                         mps_block_eligible = (
                             _USE_GPTQ_MPS_BLOCK
+                            and integer_block_quantization
                             and Hinv is not None
                             and W1.device.type == "mps"
                             and gptq_block_mps_supported()
@@ -3311,6 +3319,7 @@ class GPTQ:
                 cuda_block_done = False
                 if (
                     _USE_GPTQ_CUDA_BLOCK
+                    and integer_block_quantization
                     and Hinv is not None
                     and W1.is_cuda
                     and count <= 128
@@ -3321,17 +3330,12 @@ class GPTQ:
                     and not use_online_group_damping
                 ):
                     try:
-                        maxq_value = (
-                            2 ** (self.qcfg.bits - 1) - 1
-                            if self.quantizer.requires_groupwise_processing()
-                            else 2 ** self.qcfg.bits - 1
-                        )
                         Q1, Err1 = gptq_block_cuda(
                             W1,
                             Hinv1,
                             batched_scale,
                             batched_zero,
-                            maxq_value,
+                            block_maxq_value,
                             group_size,
                             groupwise=self.quantizer.requires_groupwise_processing(),
                             out=(Q1, Err1),
@@ -3355,17 +3359,12 @@ class GPTQ:
                 mps_block_done = False
                 if mps_block_eligible:
                     try:
-                        maxq_value = (
-                            2 ** (self.qcfg.bits - 1) - 1
-                            if self.quantizer.requires_groupwise_processing()
-                            else 2 ** self.qcfg.bits - 1
-                        )
                         Q1, Err1 = gptq_block_mps(
                             W1,
                             Hinv1,
                             batched_scale,
                             batched_zero,
-                            maxq_value,
+                            block_maxq_value,
                             group_size,
                             groupwise=self.quantizer.requires_groupwise_processing(),
                             find_params=mps_find_params,
@@ -3404,6 +3403,7 @@ class GPTQ:
                 if (
                     not use_online_group_damping
                     and os.environ.get("GPTQMODEL_BLOCK_CPU", "1") != "0"
+                    and integer_block_quantization
                     and not cuda_block_done
                     and not mps_block_done
                     and gptq_block_cpu is not None
@@ -3426,11 +3426,6 @@ class GPTQ:
                     )
                 ):
                     try:
-                        maxq_value = (
-                            2 ** (self.qcfg.bits - 1) - 1
-                            if self.quantizer.requires_groupwise_processing()
-                            else 2 ** self.qcfg.bits - 1
-                        )
                         groupwise = self.quantizer.requires_groupwise_processing()
 
                         if group_size == -1:
@@ -3497,7 +3492,7 @@ class GPTQ:
                             Hinv1,
                             cpu_scale,
                             cpu_zero,
-                            maxq_value,
+                            block_maxq_value,
                             cpu_group_size,
                             groupwise=groupwise,
                         )

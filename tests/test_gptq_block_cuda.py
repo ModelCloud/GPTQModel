@@ -403,6 +403,7 @@ def _run_gptq_quantize(
     act_group_aware=True,
     static_groups=False,
     cuda_failure=False,
+    trits=False,
 ):
     """Run one production GPTQ layer and return its quantization outputs."""
     env_key = "GPTQMODEL_CUDA_BLOCK"
@@ -428,7 +429,7 @@ def _run_gptq_quantize(
             scale_search=ScaleSearchConfig.ACTIVATION,
         )
         quantizer = gptq_module.GPTQ(layer, qcfg=qcfg)
-        quantizer.quantizer.configure(perchannel=True)
+        quantizer.quantizer.configure(perchannel=True, trits=trits)
         calibration = torch.randn(8, 512, dtype=dtype, device=device)
         quantizer.add_batch(calibration, None)
         cuda_launches = 0
@@ -950,6 +951,27 @@ def test_gptq_cuda_block_launch_failure_falls_back_without_output_drift():
     torch.testing.assert_close(eager_zero, fallback_zero, atol=0, rtol=0)
     torch.testing.assert_close(eager_g_idx, fallback_g_idx, atol=0, rtol=0)
     assert eager_loss == fallback_loss
+
+
+@requires_cuda
+def test_gptq_cuda_block_ternary_quantization_uses_eager_fallback():
+    """The CUDA integer kernel must not reinterpret ternary quantization as bitwise GPTQ."""
+    options = {
+        "bits": 4,
+        "sym": False,
+        "dtype": torch.float16,
+        "desc_act": False,
+        "act_group_aware": False,
+        "trits": True,
+    }
+    _, eager, eager_launches = _run_gptq_quantize(64, False, **options)
+    _, candidate, candidate_launches = _run_gptq_quantize(64, True, **options)
+
+    assert eager_launches == 0
+    assert candidate_launches == 0
+    for eager_value, candidate_value in zip(eager[:4], candidate[:4]):
+        torch.testing.assert_close(candidate_value, eager_value, atol=0, rtol=0)
+    assert candidate[5:] == eager[5:]
 
 
 @requires_cuda

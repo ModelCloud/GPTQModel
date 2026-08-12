@@ -251,7 +251,7 @@ def test_async_mps_hessian_survives_input_deletion_and_fresh_output_gc(monkeypat
 
 
 def _quantize_mps_layer(
-    use_mps_block, *, bits=4, group_size=32, sym=False, desc_act=False
+    use_mps_block, *, bits=4, group_size=32, sym=False, desc_act=False, trits=False
 ):
     gptq_module._USE_GPTQ_MPS_BLOCK = use_mps_block
     torch.manual_seed(617)
@@ -269,7 +269,7 @@ def _quantize_mps_layer(
             offload_to_disk=False,
         ),
     )
-    gptq.quantizer.configure(perchannel=True)
+    gptq.quantizer.configure(perchannel=True, trits=trits)
     gptq.add_batch(torch.randn(4, 128, device=device), None)
     output = gptq.quantize(blocksize=128)
     torch.mps.synchronize()
@@ -320,6 +320,33 @@ def test_native_mps_block_matches_eager_gptq_end_to_end(
     eager_projection = heldout @ eager_output[0].T
     native_projection = heldout @ native_output[0].T
     torch.testing.assert_close(native_projection, eager_projection, atol=0, rtol=0)
+
+
+@pytest.mark.mps
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(), reason="MPS is not available"
+)
+@pytest.mark.skipif(
+    not hasattr(torch.mps, "compile_shader"),
+    reason="Metal shader runtime is not available",
+)
+def test_native_mps_block_skips_ternary_quantization(monkeypatch):
+    eager_output = _quantize_mps_layer(use_mps_block=False, trits=True)
+    launches = 0
+    native_block = gptq_module.gptq_block_mps
+
+    def counted_block(*args, **kwargs):
+        nonlocal launches
+        launches += 1
+        return native_block(*args, **kwargs)
+
+    monkeypatch.setattr(gptq_module, "gptq_block_mps", counted_block)
+    block_enabled_output = _quantize_mps_layer(use_mps_block=True, trits=True)
+
+    assert launches == 0
+    for eager, block_enabled in zip(eager_output[:4], block_enabled_output[:4]):
+        torch.testing.assert_close(block_enabled, eager, atol=0, rtol=0)
+    assert block_enabled_output[5:] == eager_output[5:]
 
 
 @pytest.mark.mps
