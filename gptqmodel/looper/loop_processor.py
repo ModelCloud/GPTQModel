@@ -571,8 +571,16 @@ class LoopProcessor:
             if mask is not None:
                 input_lengths = input_id_sequence_lengths(row.get("input_ids"))
                 seq_len = input_lengths[0] if input_lengths and len(set(input_lengths)) == 1 else None
+                sequence_lengths = input_lengths if input_lengths and seq_len is None else None
                 batch_size = len(input_lengths) if input_lengths else None
-                total += sum(attention_mask_sequence_lengths(mask, seq_len=seq_len, batch_size=batch_size))
+                total += sum(
+                    attention_mask_sequence_lengths(
+                        mask,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        sequence_lengths=sequence_lengths,
+                    )
+                )
                 continue
             total += sum(input_id_sequence_lengths(row.get("input_ids")))
         return total

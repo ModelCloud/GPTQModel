@@ -1302,6 +1302,37 @@ def test_gptq_block_cpu_extension_matches_eager(bits, group_size, groupwise):
     assert torch.equal(Err_ext, Err_ref)
 
 
+def test_gptq_serial_quantize_uses_cached_scalar_maxq(monkeypatch):
+    """The serial column loop must not synchronize maxq from the device for every column."""
+    monkeypatch.setenv("GPTQMODEL_BLOCK_CPU", "0")
+    torch.manual_seed(0)
+    layer = nn.Linear(4, 3, bias=False, dtype=torch.float32).eval()
+    gptq = GPTQ(
+        layer,
+        qcfg=QuantizeConfig(
+            bits=4,
+            group_size=4,
+            act_group_aware=False,
+            offload_to_disk=False,
+        ),
+    )
+    gptq.quantizer.configure(perchannel=True)
+    maxq = gptq.quantizer.maxq
+    tensor_item = torch.Tensor.item
+
+    def _guarded_item(tensor, *args, **kwargs):
+        if tensor is maxq:
+            raise AssertionError("serial quantization read maxq with Tensor.item()")
+        return tensor_item(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "item", _guarded_item)
+    gptq.add_batch(torch.randn(4, 4), None)
+
+    quantized, *_ = gptq.quantize(blocksize=4)
+
+    assert torch.isfinite(quantized).all()
+
+
 @pytest.mark.parametrize("bits", [2, 3, 4, 8])
 @pytest.mark.parametrize("group_size", [1, 2, 4, 8, 16, 32, 64, 128, 160, 256])
 def test_gptq_cpu_block_matches_serial_quantize(bits, group_size, monkeypatch):

@@ -108,14 +108,31 @@ def test_sequence_length_helpers_share_normalized_mask_semantics():
     assert input_id_sequence_lengths([[1, 2, 3], [4, 5, 6]]) == [3, 3]
 
 
+def test_sequence_length_helpers_support_ragged_python_batches():
+    assert attention_mask_sequence_lengths(
+        [[1, 1], [1, 0, 1]],
+        sequence_lengths=[2, 3],
+    ) == [2, 2]
+    assert input_id_sequence_lengths([[1, 2], [3, 4, 5]]) == [2, 3]
+    assert input_id_sequence_lengths([torch.tensor([1]), torch.tensor([2, 3])]) == [1, 2]
+
+
 def test_sequence_length_helpers_reject_malformed_inputs():
     assert attention_mask_sequence_lengths(None) == []
     assert input_id_sequence_lengths(None) == []
     with pytest.raises(ValueError, match="rectangular"):
-        attention_mask_sequence_lengths([[1, 1], [1]])
+        attention_mask_sequence_lengths([[1, 1], 1])
+    with pytest.raises(ValueError, match="rectangular"):
+        input_id_sequence_lengths([[1, 2], 3])
     with pytest.raises(ValueError, match="at least one dimension"):
         input_id_sequence_lengths(torch.tensor(1))
     with pytest.raises(ValueError, match=r"\[S\] or \[B, S\]"):
         input_id_sequence_lengths(torch.ones((1, 2, 3), dtype=torch.long))
     with pytest.raises(ValueError, match="batch size"):
         attention_mask_sequence_lengths([[1, 1]], seq_len=2, batch_size=2)
+    with pytest.raises(ValueError, match="sequence width"):
+        attention_mask_sequence_lengths([[1, 1], [1, 0]], sequence_lengths=[2, 3])
+    with pytest.raises(ValueError, match="batch size"):
+        attention_mask_sequence_lengths([[1], [1, 0]], sequence_lengths=[1])
+    with pytest.raises(ValueError, match="either seq_len or sequence_lengths"):
+        attention_mask_sequence_lengths([1], seq_len=1, sequence_lengths=[1])

@@ -61,6 +61,49 @@ def test_adaptive_damping_config_round_trip():
     assert cfg.to_dict()["meta"]["adaptive_damping"] == cfg.adaptive_damping.to_dict()
 
 
+@pytest.mark.parametrize(
+    ("damp_percent", "adaptive_damping"),
+    [
+        (0.06, {"enabled": False}),
+        (0.02, {"enabled": False, "base_percdamp": 0.07}),
+    ],
+)
+def test_disabled_adaptive_damping_round_trip_preserves_fixed_damp_percent(
+    damp_percent,
+    adaptive_damping,
+):
+    """Disabled adaptive metadata must not reset a non-default fixed damping value."""
+    cfg = QuantizeConfig(
+        method="gptq",
+        damp_percent=damp_percent,
+        damp_auto_increment=0.004,
+        adaptive_damping=adaptive_damping,
+    )
+
+    restored = QuantizeConfig.from_quant_config(cfg.to_dict())
+
+    assert restored.damp.min == pytest.approx(damp_percent)
+    assert restored.damp.max == pytest.approx(damp_percent)
+    assert restored.damp.step == pytest.approx(0.004)
+    assert restored.damp_percent == pytest.approx(damp_percent)
+
+
+def test_disabled_adaptive_damping_legacy_payload_uses_persisted_baseline():
+    """Legacy payloads without fixed scalars retain their only persisted damping baseline."""
+    payload = QuantizeConfig(
+        method="gptq",
+        adaptive_damping={"enabled": False, "base_percdamp": 0.07},
+    ).to_dict()
+    payload["meta"].pop("damp_percent")
+    payload["meta"].pop("damp_auto_increment")
+
+    restored = QuantizeConfig.from_quant_config(payload)
+
+    assert restored.damp_percent == pytest.approx(0.07)
+    assert restored.damp.min == pytest.approx(0.07)
+    assert restored.damp.max == pytest.approx(0.07)
+
+
 def test_adaptive_damping_defaults_preserve_canonical_gptq_correction():
     """Only calibration-Hessian damping is enabled by the safe adaptive defaults."""
     cfg = AdaptiveDampingConfig()
@@ -791,6 +834,97 @@ def test_adaptive_damping_eigen_estimator_finite(device, method):
     assert lambda_max is not None
     assert math.isfinite(lambda_max) and lambda_max > 0
     assert lambda_min == 0.0
+
+
+def test_adaptive_damping_lanczos_supports_two_column_hessian():
+    """The Lanczos option must support layers below torch.lobpcg's 3*k size floor."""
+    cfg = QuantizeConfig(method="gptq", adaptive_damping={"enabled": True, "method": "lanczos"})
+    q = GPTQ(nn.Linear(2, 2, bias=False), qcfg=cfg)
+    hessian = torch.tensor([[2.0, 0.3], [0.3, 1.0]])
+
+    actual, lambda_min = q._estimate_hessian_eigen_spectrum(hessian, "lanczos", 10)
+    expected = torch.linalg.eigvalsh(hessian).amax().item()
+
+    assert actual == pytest.approx(expected, rel=1e-6)
+    assert lambda_min == 0.0
+
+
+@pytest.mark.parametrize("device", [
+    "cpu",
+    pytest.param(
+        "cuda",
+        marks=[
+            pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available"),
+            pytest.mark.gpu,
+        ],
+    ),
+])
+def test_adaptive_damping_lanczos_two_column_hessian_avoids_finite_overflow(device):
+    """The closed-form 2x2 eigenvalue must not square large finite FP32 values."""
+    q = GPTQ(nn.Linear(2, 2, bias=False).to(device), qcfg=QuantizeConfig(method="gptq"))
+    hessian = torch.diag(torch.tensor([1e20, 1e10], dtype=torch.float32, device=device))
+
+    actual, _ = q._estimate_hessian_eigen_spectrum(hessian, "lanczos", 10)
+
+    assert math.isfinite(actual)
+    assert actual == pytest.approx(1e20, rel=1e-6)
+
+
+def test_adaptive_damping_lanczos_is_deterministic_without_global_rng_side_effects():
+    """Lanczos must use the same dimension-local probe contract as power iteration."""
+    torch.manual_seed(2026)
+    hessian = _make_spd_matrix(8, "cpu")
+    q = GPTQ(nn.Linear(8, 8, bias=False), qcfg=QuantizeConfig(method="gptq"))
+    rng_state = torch.get_rng_state().clone()
+
+    first, _ = q._estimate_hessian_eigen_spectrum(hessian, "lanczos", 20)
+    second, _ = q._estimate_hessian_eigen_spectrum(hessian, "lanczos", 20)
+
+    assert first == second
+    assert torch.equal(torch.get_rng_state(), rng_state)
+
+
+def test_adaptive_damping_probe_is_generated_on_cpu_before_backend_transfer(monkeypatch):
+    """Backends such as MPS must not require a device-local torch.Generator."""
+    calls = {}
+
+    class _FakeGenerator:
+        def __init__(self, device):
+            calls["generator_device"] = device
+
+        def manual_seed(self, seed):
+            calls["seed"] = seed
+            return self
+
+    class _FakeProbe:
+        def to(self, *, device):
+            calls["target_device"] = device
+            return self
+
+    probe = _FakeProbe()
+
+    def _fake_randn(shape, *, generator, dtype, device):
+        calls["shape"] = shape
+        calls["randn_generator"] = generator
+        calls["dtype"] = dtype
+        calls["randn_device"] = device
+        return probe
+
+    monkeypatch.setattr(torch, "Generator", _FakeGenerator)
+    monkeypatch.setattr(torch, "randn", _fake_randn)
+
+    actual = GPTQ._stable_probe_tensor(
+        (8, 1),
+        dtype=torch.float32,
+        device=torch.device("mps"),
+    )
+
+    assert actual is probe
+    assert calls["generator_device"] == "cpu"
+    assert calls["randn_device"] == "cpu"
+    assert calls["target_device"] == torch.device("mps")
+    assert calls["shape"] == (8, 1)
+    assert calls["dtype"] is torch.float32
 
 
 @pytest.mark.parametrize("device", [

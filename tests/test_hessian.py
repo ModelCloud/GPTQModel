@@ -1153,6 +1153,54 @@ def test_length_aware_config_bool():
     assert HessianConfig(length_aware=True).length_aware
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"bucket_boundaries": [0]},
+        {"bucket_boundaries": [0, 10, 5, None]},
+        {"bucket_boundaries": [0, None, 10]},
+        {"bucket_boundaries": [0, 10, 10, None]},
+        {"bucket_scales": [4.0]},
+        {"bucket_weights": [1.0]},
+    ],
+)
+def test_length_aware_rejects_malformed_bucket_geometry(kwargs):
+    """Invalid buckets must fail at config load instead of misrouting lengths later."""
+    with pytest.raises(ValueError, match="bucket_boundaries"):
+        LengthAwareConfig(**kwargs)
+
+
+def test_length_aware_allows_clamped_finite_custom_boundaries():
+    """Custom boundaries need not span all lengths because runtime lookup clamps both tails."""
+    config = LengthAwareConfig(
+        bucket_boundaries=[10, 100, 200],
+        bucket_scales=[50.0, 150.0],
+    )
+    qcfg = QuantizeConfig(hessian=HessianConfig(length_aware=config))
+    quantizer = GPTQ(torch.nn.Linear(4, 2, bias=False), qcfg=qcfg)
+
+    assert quantizer._lookup_length_bucket(1) == 0
+    assert quantizer._lookup_length_bucket(1000) == 1
+
+
+def test_length_aware_fractional_boundaries_round_trip_without_bucket_drift():
+    """Serialization must not truncate a fractional split and remap integer lengths."""
+    config = LengthAwareConfig(
+        bucket_boundaries=[0, 5.5, None],
+        bucket_scales=[4.0, 7.0],
+    )
+
+    payload = config.to_dict()
+    restored = LengthAwareConfig(**payload)
+
+    assert payload["bucket_boundaries"] == [0, 5.5, None]
+    assert restored.bucket_boundaries == config.bucket_boundaries
+    assert bisect.bisect_right(restored.bucket_boundaries, 5) == bisect.bisect_right(
+        config.bucket_boundaries,
+        5,
+    )
+
+
 def test_length_aware_named_constants_are_removed():
     """Class constants must not silently replace an enum/factory and disable the feature."""
     for attr in ("SINGLE", "EQUAL_PER_BUCKET_WEIGHT", "DISABLED"):
@@ -1209,6 +1257,21 @@ def test_extract_calibration_sequence_lengths_normalizes_python_and_additive_mas
         {"input_ids": [[7, 8], [9, 10]]},
     ]
     assert GPTQProcessor._extract_calibration_sequence_lengths(dataset) == [2, 2, 3, 2, 2]
+
+
+def test_extract_calibration_sequence_lengths_supports_ragged_python_sequences():
+    """JSON-style ragged batches must retain one length per original sequence."""
+    dataset = [
+        {"input_ids": [[40, 41], [50, 51, 52]], "attention_mask": [[1, 1], [1, 1, 1]]},
+        {"input_ids": [[70, 71], [80, 81, 82]]},
+    ]
+
+    assert GPTQProcessor._extract_calibration_sequence_lengths(dataset) == [2, 3, 2, 3]
+
+    with pytest.raises(ValueError, match="row 1 length 3"):
+        GPTQProcessor._extract_calibration_sequence_lengths(
+            [{"input_ids": [[1, 2], [3, 4, 5]], "attention_mask": [[1, 1], [1, 1]]}]
+        )
 
 
 def test_ensure_length_aware_materialized_for_dynamic_override():

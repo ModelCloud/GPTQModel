@@ -19,6 +19,26 @@ def _as_tensor(value, *, name: str) -> torch.Tensor:
         raise ValueError(f"{name} must be a rectangular tensor or sequence.") from exc
 
 
+def _ragged_rows(value, *, name: str) -> list[torch.Tensor]:
+    """Normalize a Python ragged batch into validated one-dimensional rows."""
+
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError(f"{name} must be a rectangular tensor or sequence.")
+
+    rows = []
+    for row in value:
+        if isinstance(row, torch.Tensor):
+            row_tensor = row
+        elif isinstance(row, (list, tuple)):
+            row_tensor = _as_tensor(row, name=name)
+        else:
+            raise ValueError(f"{name} must be a rectangular tensor or sequence.")
+        if row_tensor.ndim != 1:
+            raise ValueError(f"{name} ragged rows must be one-dimensional sequences.")
+        rows.append(row_tensor)
+    return rows
+
+
 def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) -> torch.Tensor | None:
     """
     Normalize a variety of HF attention mask formats to a boolean keep-mask [B, S].
@@ -71,16 +91,53 @@ def attention_mask_sequence_lengths(
     mask,
     seq_len: int | None = None,
     batch_size: int | None = None,
+    sequence_lengths: list[int] | tuple[int, ...] | None = None,
 ) -> list[int]:
     """Return one valid-token count per sequence using normalized mask semantics."""
 
     if mask is None:
         return []
-    keep = cast(torch.Tensor, normalize_seq_mask(_as_tensor(mask, name="attention_mask"), seq_len=seq_len))
+    if seq_len is not None and sequence_lengths is not None:
+        raise ValueError("Specify either seq_len or sequence_lengths, not both.")
+    try:
+        mask_tensor = _as_tensor(mask, name="attention_mask")
+    except ValueError:
+        rows = _ragged_rows(mask, name="attention_mask")
+        if batch_size is not None and len(rows) != batch_size:
+            raise ValueError(
+                f"attention_mask batch size {len(rows)} does not match input_ids batch size {batch_size}."
+            )
+        if sequence_lengths is not None and len(rows) != len(sequence_lengths):
+            raise ValueError(
+                f"attention_mask batch size {len(rows)} does not match input_ids batch size {len(sequence_lengths)}."
+            )
+        lengths = []
+        for index, row in enumerate(rows):
+            expected_length = sequence_lengths[index] if sequence_lengths is not None else seq_len
+            keep = cast(torch.Tensor, normalize_seq_mask(row, seq_len=expected_length))
+            lengths.extend(int(length) for length in keep.sum(dim=1, dtype=torch.int64).tolist())
+        return lengths
+
+    keep = cast(torch.Tensor, normalize_seq_mask(mask_tensor, seq_len=seq_len))
     if batch_size is not None and keep.shape[0] != batch_size:
         raise ValueError(
             f"attention_mask batch size {keep.shape[0]} does not match input_ids batch size {batch_size}."
         )
+    if sequence_lengths is not None:
+        if keep.shape[0] != len(sequence_lengths):
+            raise ValueError(
+                f"attention_mask batch size {keep.shape[0]} does not match input_ids batch size "
+                f"{len(sequence_lengths)}."
+            )
+        mismatched_row = next(
+            (index for index, expected in enumerate(sequence_lengths) if keep.shape[1] != expected),
+            None,
+        )
+        if mismatched_row is not None:
+            raise ValueError(
+                f"attention_mask sequence width {keep.shape[1]} does not match input_ids row "
+                f"{mismatched_row} length {sequence_lengths[mismatched_row]}."
+            )
     return [int(length) for length in keep.sum(dim=1, dtype=torch.int64).tolist()]
 
 
@@ -89,7 +146,10 @@ def input_id_sequence_lengths(input_ids) -> list[int]:
 
     if input_ids is None:
         return []
-    ids = _as_tensor(input_ids, name="input_ids")
+    try:
+        ids = _as_tensor(input_ids, name="input_ids")
+    except ValueError:
+        return [int(row.numel()) for row in _ragged_rows(input_ids, name="input_ids")]
     if ids.ndim == 0:
         raise ValueError("input_ids must have at least one dimension.")
     if ids.ndim == 1:

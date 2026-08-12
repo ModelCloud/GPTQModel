@@ -1399,10 +1399,21 @@ class LengthAwareConfig:
                 else:
                     raise ValueError("LengthAwareConfig: `bucket_boundaries` must be non-negative numbers or None.")
             self.bucket_boundaries = normalized_boundaries
+            if len(self.bucket_boundaries) < 2:
+                raise ValueError("LengthAwareConfig: `bucket_boundaries` must define at least one bucket.")
+            if any(
+                left >= right
+                for left, right in zip(self.bucket_boundaries, self.bucket_boundaries[1:])
+            ):
+                raise ValueError("LengthAwareConfig: `bucket_boundaries` must be strictly increasing.")
             if self.bucket_scales is not None and len(self.bucket_scales) != len(self.bucket_boundaries) - 1:
                 raise ValueError("LengthAwareConfig: `bucket_scales` length must match `bucket_boundaries`.")
             if self.bucket_weights is not None and len(self.bucket_weights) != len(self.bucket_boundaries) - 1:
                 raise ValueError("LengthAwareConfig: `bucket_weights` length must match `bucket_boundaries`.")
+        elif self.bucket_scales is not None or self.bucket_weights is not None:
+            raise ValueError(
+                "LengthAwareConfig: `bucket_boundaries` are required when bucket scales or weights are provided."
+            )
         if self.bucket_scales is not None and not all(isinstance(s, (int, float)) and s > 0 for s in self.bucket_scales):
             raise ValueError("LengthAwareConfig: `bucket_scales` must be positive numbers.")
         if self.bucket_weights is not None and not all(isinstance(w, (int, float)) and w > 0 for w in self.bucket_weights):
@@ -1618,7 +1629,10 @@ class LengthAwareConfig:
     def to_dict(self) -> Dict[str, Any]:
         bucket_boundaries = None
         if self.bucket_boundaries is not None:
-            bucket_boundaries = [None if b == float("inf") else int(b) for b in self.bucket_boundaries]
+            bucket_boundaries = [
+                None if b == float("inf") else int(b) if b.is_integer() else b
+                for b in self.bucket_boundaries
+            ]
         return {
             "mode": self.mode.value,
             "min_length": self.min_length,
@@ -4521,6 +4535,11 @@ class GPTQConfig(PreProcessorConfig):
                     if raw_damp_auto_increment is not None
                     else self._damp_auto_increment_user_value
                 )
+            if not self.adaptive_damping.enabled and raw_damp_percent is None:
+                # A disabled adaptive config without a separate legacy damp_percent
+                # field (including older serialized configs) has only base_percdamp
+                # available for the fixed damping path.
+                self._damp_percent_user_value = self.adaptive_damping.base_percdamp
         else:
             # Legacy scalar options remain authoritative for the default static
             # damping path. Keep the normalized config synchronized so callers
@@ -4741,6 +4760,8 @@ class GPTQConfig(PreProcessorConfig):
         meta_payload["scale_search"] = self.scale_search.value if self.scale_search is not None else None
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["damp_percent"] = self.damp_percent
+        meta_payload["damp_auto_increment"] = self.damp_auto_increment
         if self.adjacent_model is None:
             meta_payload.pop("adjacent_model", None)
         else:

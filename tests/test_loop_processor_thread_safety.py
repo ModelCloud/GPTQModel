@@ -65,6 +65,9 @@ def test_calibration_token_counts_normalize_masks_and_nested_input_ids():
     assert LoopProcessor._compute_max_padded_tokens(dataset) == 10
     assert LoopProcessor._compute_max_padded_tokens([{"attention_mask": [1, 0, 1]}]) == 3
     assert LoopProcessor._compute_max_padded_tokens([{"attention_mask": [[1, 0], [1, 1]]}]) == 4
+    assert LoopProcessor._compute_total_tokens(
+        [{"input_ids": [[1, 2], [3, 4, 5]], "attention_mask": [[1, 1], [1, 0, 1]]}]
+    ) == 4
     with pytest.raises(ValueError, match="at least one dimension"):
         LoopProcessor._compute_max_padded_tokens([{"attention_mask": 1}])
 

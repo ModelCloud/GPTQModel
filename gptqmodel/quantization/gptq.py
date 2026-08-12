@@ -1669,6 +1669,25 @@ class GPTQ:
 
         return (0x9E3779B9 ^ int(dim)) & 0xFFFFFFFF
 
+    @classmethod
+    def _stable_probe_tensor(
+        cls,
+        shape: Tuple[int, ...],
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Draw a deterministic local probe on CPU, then move it to the Hessian device.
+
+        MPS does not support constructing a device-local ``torch.Generator``.
+        A CPU generator also gives every backend the same probe values without
+        consuming the process-global RNG stream.
+        """
+
+        seed = cls._stable_probe_seed(shape[0])
+        gen = torch.Generator(device="cpu").manual_seed(seed)
+        return torch.randn(shape, generator=gen, dtype=dtype, device="cpu").to(device=device)
+
     @staticmethod
     def _lambda_max_kernel(H: torch.Tensor, v0: torch.Tensor, n_iter: int):
         """Pure-tensor power iteration for the largest eigenvalue only."""
@@ -1695,12 +1714,22 @@ class GPTQ:
                 )
         return cls._lambda_max_kernel_compiled
 
-    @staticmethod
-    def _lanczos_eigen_max(H: torch.Tensor, n_iter: int):
+    @classmethod
+    def _lanczos_eigen_max(cls, H: torch.Tensor, n_iter: int):
         """Fast Lanczos estimate of the largest eigenvalue of ``H`` via ``torch.lobpcg``."""
 
         A = H.contiguous()
-        largest_vals, _ = torch.lobpcg(A, k=1, largest=True, niter=n_iter)
+        if A.shape[0] == 1:
+            return A[0, 0]
+        if A.shape[0] == 2:
+            # torch.lobpcg requires rows >= 3 * k. Use the closed-form
+            # eigenvalue of a symmetric 2x2 matrix for tiny GPTQ layers.
+            a, c = A[0, 0], A[1, 1]
+            b = (A[0, 1] + A[1, 0]) * 0.5
+            return a * 0.5 + c * 0.5 + torch.hypot(a - c, 2 * b) * 0.5
+
+        X = cls._stable_probe_tensor((A.shape[0], 1), dtype=A.dtype, device=A.device)
+        largest_vals, _ = torch.lobpcg(A, k=1, X=X, largest=True, niter=n_iter)
         return largest_vals[0]
 
     @torch.inference_mode()
@@ -1715,10 +1744,11 @@ class GPTQ:
 
         Only ``lambda_max`` is returned; ``lambda_min`` is treated as 0 in the
         damping formula, giving the safe upper bound ``lambda >= lambda_max / (K-1)``.
-        Probe vectors are drawn from a dimension-seeded local generator so estimates
-        depend only on mathematical inputs and do not perturb the global RNG stream. The power iteration
-        loop is compiled when ``torch.compile`` is available to reduce kernel-launch
-        overhead.
+        Probe vectors are drawn from a dimension-seeded local CPU generator and
+        moved to the Hessian device, so estimates depend only on mathematical inputs,
+        work on backends without device-local generators, and do not perturb the
+        global RNG stream. The power iteration loop is compiled when ``torch.compile``
+        is available to reduce kernel-launch overhead.
 
         For ``method="diagonal"``, ``effective_diag`` (the diagonal of the matrix
         actually being factorized, including any applied floor) is used as a fast
@@ -1745,9 +1775,7 @@ class GPTQ:
         if n_iter <= 0:
             return None, None
 
-        seed = self._stable_probe_seed(d)
-        gen = torch.Generator(device=H.device).manual_seed(seed)
-        v0 = torch.randn(d, generator=gen, dtype=H.dtype, device=H.device)
+        v0 = self._stable_probe_tensor((d,), dtype=H.dtype, device=H.device)
         lambda_max_t = self._compiled_lambda_max_kernel()(H, v0, n_iter)
         return lambda_max_t.item(), 0.0
 
@@ -3585,7 +3613,9 @@ class GPTQ:
                         # column loop in pure eager tensor dispatch.
                         q_scale = self.quantizer.scale
                         q_zero = self.quantizer.zero
-                        q_maxq = getattr(self.quantizer, "_maxq_value", int(self.quantizer.maxq.item()))
+                        q_maxq = getattr(self.quantizer, "_maxq_value", None)
+                        if q_maxq is None:
+                            q_maxq = int(self.quantizer.maxq.item())
                         q_requires_groupwise = self.quantizer.requires_groupwise_processing()
                         w_col = w.unsqueeze(1)
                         if q_maxq < 0:
