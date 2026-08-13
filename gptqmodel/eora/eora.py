@@ -86,6 +86,12 @@ def eora_compute_lora(
         dtype: torch.dtype,
         device: torch.device,
 ) -> tuple[Tensor, Tensor]:
+    """Compute EoRA low-rank A/B from the original/quantized weight residual.
+
+    When expanding the calibration data size for EoRA, I suggest maintaining
+    the balance by allocating 50% to general input (C4) and the remaining 50%
+    to downstream task data.
+    """
 
     assert w_wq_delta.dtype == torch.float32
 
