@@ -132,6 +132,8 @@ def yaqa_real_fisher_loss(
     probabilities = F.softmax(valid_logits.detach().float(), dim=-1)
     sampled_tokens = torch.multinomial(probabilities, num_samples=1, generator=generator).squeeze(-1)
     loss = F.cross_entropy(valid_logits.float(), sampled_tokens, reduction="sum")
+    if not torch.isfinite(loss):
+        raise ValueError("YAQA full-model score loss overflowed")
     return loss, sampled_tokens.numel()
 
 
@@ -239,12 +241,18 @@ def capture_yaqa_sketch_b(
             raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
         input_update = torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0)
         output_update = torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0)
+        if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
+            raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
         if module_name in input_accumulators:
             input_accumulators[module_name].add_(input_update)
             output_accumulators[module_name].add_(output_update)
         else:
             input_accumulators[module_name] = input_update
             output_accumulators[module_name] = output_update
+        if not torch.isfinite(input_accumulators[module_name]).all() or not torch.isfinite(
+            output_accumulators[module_name]
+        ).all():
+            raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B accumulator")
         sequence_counts[module_name] += per_sequence_gradient.shape[0]
 
     for name, module in modules.items():

@@ -724,6 +724,12 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
   TORCH_CHECK(sequences.device() == codebook.device(), "sequences and codebook must share one CUDA device");
   TORCH_CHECK(sequences.is_contiguous() && codebook.is_contiguous(),
               "sequences and codebook must be contiguous");
+  const uintptr_t sequence_alignment = VectorSize == 4 ? 16 : 4;
+  const uintptr_t codebook_alignment = VectorSize == 4 && codebook.scalar_type() == at::kFloat ? 16 : 4;
+  TORCH_CHECK(
+      reinterpret_cast<uintptr_t>(sequences.data_ptr()) % sequence_alignment == 0 &&
+          reinterpret_cast<uintptr_t>(codebook.data_ptr()) % codebook_alignment == 0,
+      "sequences and codebook do not satisfy the native vector-load alignment contract");
   TORCH_CHECK(transition_bits >= 2 && transition_bits <= 16,
               "transition_bits must be in [2, 16]");
   if constexpr (VectorSize == 4) {
@@ -744,7 +750,6 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
   TORCH_CHECK(batch <= std::numeric_limits<int>::max() &&
                   steps <= std::numeric_limits<int>::max(),
               "Viterbi dimensions exceed the int32 kernel limit");
-
   const int launch_batch = batch * static_cast<int>(bank_count);
   const at::Tensor overlap_tensor = constrained ? *overlap : at::Tensor();
   if (constrained) {
@@ -773,6 +778,22 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
                     step_weights_tensor.ge(0).all().item<bool>(),
                 "step_weights must be finite and nonnegative");
   }
+  // The emission uses the expanded squared-distance identity in FP32.  A
+  // finite input can still make ||x||^2 or ||c||^2 overflow, after which
+  // inf - inf becomes NaN and fmaxf can silently turn every state into a
+  // false zero-cost tie.  The recurrence also accumulates every weighted
+  // step, so include the worst-case number and weight of terms.  Reject that
+  // domain at the native boundary instead of clamping and corrupting state
+  // selection.
+  const double maximum_weight = weighted ? step_weights_tensor.abs().amax().item<double>() : 1.0;
+  const double accumulation_terms = std::max(1.0, static_cast<double>(steps) * maximum_weight);
+  const double safe_magnitude = std::sqrt(static_cast<double>(std::numeric_limits<float>::max()) /
+                                           accumulation_terms) /
+      (2.0 * std::sqrt(static_cast<double>(VectorSize)));
+  TORCH_CHECK(
+      sequences.abs().amax().item<double>() <= safe_magnitude &&
+          codebook.abs().amax().item<double>() <= safe_magnitude,
+      "sequences and codebook magnitudes are too large for finite FP32 squared-distance arithmetic");
 
   const c10::cuda::CUDAGuard device_guard(sequences.device());
   cudaDeviceProp properties{};
@@ -910,8 +931,8 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_banked_cuda_impl(
     int64_t transition_bits,
     const c10::optional<at::Tensor>& overlap,
     const c10::optional<at::Tensor>& step_weights) {
-  TORCH_CHECK(codebooks.dim() == 3 && codebooks.size(0) == 4,
-              "banked V4 Viterbi requires exactly four codebooks");
+  TORCH_CHECK(codebooks.dim() == 3 && codebooks.size(0) >= 1 && codebooks.size(0) <= 4,
+              "banked V4 Viterbi requires between one and four codebooks");
   return qvq_viterbi_cuda_impl<VectorSize>(
       sequences, codebooks, transition_bits, overlap, step_weights, codebooks.size(0));
 }

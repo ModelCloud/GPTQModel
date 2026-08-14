@@ -514,6 +514,21 @@ def test_qvq_v4_banked_viterbi_matches_four_serial_reference_runs():
     assert torch.equal(banked_error, torch.stack(serial_error))
 
 
+def test_qvq_v4_banked_viterbi_supports_three_active_propagation_banks():
+    generator = torch.Generator(device="cpu").manual_seed(20260820)
+    sequences = torch.randn((5, 19, 4), generator=generator, dtype=torch.float32).cuda()
+    banks = torch.randn((3, 1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
+
+    banked_states, banked_error = qvq_cuda_viterbi_banked(sequences, banks, bits=2.0)
+    serial = [
+        qvq_cuda_viterbi(sequences, banks[bank], bits=2.0, vector_size=4)
+        for bank in range(3)
+    ]
+    torch.cuda.synchronize()
+    assert torch.equal(banked_states, torch.stack([result[0] for result in serial]))
+    assert torch.equal(banked_error, torch.stack([result[1] for result in serial]))
+
+
 def test_qvq_v4_banked_memoryless_w4_matches_serial_runs():
     generator = torch.Generator(device="cpu").manual_seed(20260815)
     sequences = torch.randn((3, 9, 4), generator=generator, dtype=torch.float32).cuda()
@@ -910,6 +925,7 @@ def test_qvq_cuda_viterbi_contract_guards():
     negative_step_weights[0, 0] = -1
     nonfinite_step_weights = step_weights.clone()
     nonfinite_step_weights[0, 0] = torch.nan
+    extreme_sequences = torch.full_like(sequences, 1.0e20)
     cases = [
         ((sequences, codebook, True), {}, TypeError, "rate"),
         ((sequences, codebook, 9), {}, ValueError, "rate"),
@@ -917,6 +933,7 @@ def test_qvq_cuda_viterbi_contract_guards():
         ((sequences, codebook[:10], 4), {}, ValueError, "65536"),
         ((sequences.cpu(), codebook, 4), {}, ValueError, "one CUDA device"),
         ((sequences.to(torch.float16), codebook, 4), {}, TypeError, "float32"),
+        ((extreme_sequences, codebook, 4), {}, ValueError, "magnitudes"),
         (
             (_noncontiguous_viterbi_tensor(sequences), codebook, 4),
             {},

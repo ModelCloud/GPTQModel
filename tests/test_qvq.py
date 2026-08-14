@@ -1346,6 +1346,49 @@ def test_scalar_weighted_viterbi_rejects_non_vector_step_weights():
         )
 
 
+def test_viterbi_float64_reference_preserves_near_tie_ordering():
+    codebook = torch.tensor(
+        [[1.0e8, 0.0], [1.0e8 + 1.0, 0.0], [2.0e8, 0.0], [3.0e8, 0.0]], dtype=torch.float64
+    )
+    sequences = torch.tensor([[[1.0e8 + 0.75, 0.0]]], dtype=torch.float64)
+
+    result = batched_viterbi_quantize(sequences, codebook, bits=1.0)
+
+    assert result.states.tolist() == [[1]]
+    torch.testing.assert_close(result.squared_error, torch.tensor([0.0625], dtype=torch.float64), rtol=0, atol=0)
+
+
+def test_viterbi_rejects_finite_values_that_overflow_distance_arithmetic():
+    sequences = torch.tensor([[[1.0e20, -1.0e20]]], dtype=torch.float32)
+    codebook = torch.tensor(
+        [[1.0e20, -1.0e20], [1.1e20, -1.1e20], [2.0e20, -2.0e20], [3.0e20, -3.0e20]],
+        dtype=torch.float32,
+    )
+
+    with pytest.raises(ValueError, match="squared-distance arithmetic"):
+        batched_viterbi_quantize(sequences, codebook, bits=1.0)
+
+
+def test_viterbi_rejects_finite_values_that_overflow_accumulated_distance():
+    sequences = torch.full((1, 64, 2), 1e18)
+    codebook = torch.zeros((4, 2))
+
+    with pytest.raises(ValueError, match="squared-distance arithmetic"):
+        batched_viterbi_quantize(sequences, codebook, bits=1.0)
+
+
+@pytest.mark.parametrize(
+    ("overlap", "exception"),
+    ((torch.zeros(2, dtype=torch.int64), ValueError), (torch.zeros(1, dtype=torch.float32), TypeError)),
+)
+def test_viterbi_rejects_invalid_zero_overlap_metadata(overlap, exception):
+    sequences = torch.zeros((1, 1, 2), dtype=torch.float32)
+    codebook = torch.zeros((4, 2), dtype=torch.float32)
+
+    with pytest.raises(exception, match="overlap"):
+        batched_viterbi_quantize(sequences, codebook, bits=1.0, overlap=overlap)
+
+
 @pytest.mark.parametrize(
     ("step_weights", "exception", "message"),
     (
@@ -2489,6 +2532,17 @@ def test_yaqa_proxy_rejects_malformed_inputs(
     message,
 ):
     with pytest.raises(exception, match=message):
+        yaqa_proxy_loss(weight, reconstructed, input_hessian, output_hessian)
+
+
+def test_yaqa_proxy_rejects_fp64_values_that_narrow_to_fp32_inf():
+    weight = torch.zeros((2, 2), dtype=torch.float64)
+    reconstructed = weight.clone()
+    input_hessian = torch.eye(2, dtype=torch.float64)
+    output_hessian = torch.eye(2, dtype=torch.float64)
+    weight[0, 0] = 1e40
+
+    with pytest.raises(ValueError, match="finite FP32"):
         yaqa_proxy_loss(weight, reconstructed, input_hessian, output_hessian)
 
 

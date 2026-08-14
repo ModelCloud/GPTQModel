@@ -743,6 +743,42 @@ def viterbi_quantize(
     )
 
 
+def _validate_viterbi_distance_range(
+    sequences: torch.Tensor,
+    codebook: torch.Tensor,
+    *,
+    work_dtype: torch.dtype,
+    step_weights: torch.Tensor | None = None,
+) -> None:
+    """Reject finite values whose squared-distance arithmetic would overflow.
+
+    The Viterbi recurrence compares squared distances.  Saturating an overflowed
+    distance would turn distinct states into artificial ties, while the expanded
+    ``||x||² + ||c||² - 2 x·c`` form can otherwise produce ``inf - inf``.  The
+    bound is conservative: it guarantees that every coordinate difference and
+    the sum of all vector coordinates fit in ``work_dtype``.
+    """
+
+    vector_size = sequences.shape[-1]
+    dtype_limit = torch.finfo(work_dtype).max
+    maximum_weight = 1.0 if step_weights is None else float(step_weights.detach().abs().amax().item())
+    accumulation_terms = max(1.0, max(1, int(sequences.shape[1])) * maximum_weight)
+    safe_bound = math.sqrt(dtype_limit / accumulation_terms) / (2.0 * math.sqrt(vector_size))
+    maximum = torch.maximum(sequences.detach().abs().amax(), codebook.detach().abs().amax())
+    if bool(maximum > safe_bound):
+        raise ValueError(
+            "QVQ Viterbi sequence/codebook magnitudes are too large for finite squared-distance arithmetic; "
+            "rescale the inputs instead of relying on clamped losses"
+        )
+
+
+def _validate_fp32_representable(tensor: torch.Tensor, *, name: str) -> None:
+    """Reject finite higher-precision values that would narrow to FP32 infinity."""
+
+    if tensor.dtype != torch.float32 and not torch.isfinite(tensor.to(torch.float32)).all():
+        raise ValueError(f"{name} cannot be represented as finite FP32 values")
+
+
 def batched_viterbi_quantize(
     sequences: torch.Tensor,
     codebook: torch.Tensor,
@@ -795,15 +831,31 @@ def batched_viterbi_quantize(
         trellis_window=trellis_window,
     )
 
+    use_float64 = sequences.device.type != "mps" and any(
+        tensor.dtype == torch.float64 for tensor in (sequences, codebook, step_weights) if tensor is not None
+    )
+    work_dtype = torch.float64 if use_float64 else torch.float32
+    _validate_viterbi_distance_range(sequences, codebook, work_dtype=work_dtype, step_weights=step_weights)
+
     batch_size, step_count, _ = sequences.shape
     overlap_bits = trellis_window - shift
     overlap_i64 = None
     if overlap is not None:
+        if overlap.device != sequences.device:
+            raise ValueError("QVQ tail-biting overlap must share the sequence device.")
+        if overlap.dtype not in (
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        ):
+            raise TypeError("QVQ tail-biting overlap must use an integer dtype.")
+        if overlap.ndim != 1 or overlap.shape[0] != batch_size:
+            raise ValueError("QVQ tail-biting overlap must have shape `[batch]`.")
         if overlap_bits == 0:
             overlap_i64 = torch.zeros(batch_size, dtype=torch.long, device=sequences.device)
         else:
-            if overlap.ndim != 1 or overlap.shape[0] != batch_size:
-                raise ValueError("QVQ tail-biting overlap must have shape `[batch]`.")
             overlap_i64 = overlap.to(device=sequences.device, dtype=torch.long)
             overlap_limit = 1 << overlap_bits
             if torch.any((overlap_i64 < 0) | (overlap_i64 >= overlap_limit)):
@@ -857,21 +909,27 @@ def batched_viterbi_quantize(
         )
         return TrellisQuantizationResult(states=states, values=codebook[states], squared_error=squared_error)
 
-    work_sequence = sequences.to(torch.float32)
-    work_codebook = codebook.to(torch.float32)
-    work_step_weights = None if step_weights is None else step_weights.to(torch.float32)
+    work_sequence = sequences.to(work_dtype)
+    work_codebook = codebook.to(work_dtype)
+    work_step_weights = None if step_weights is None else step_weights.to(work_dtype)
     state_ids = torch.arange(state_count, dtype=torch.long, device=sequences.device)
     codebook_norm = work_codebook.square().sum(dim=-1)
 
     def emission(step: int) -> torch.Tensor:
         target = work_sequence[:, step]
-        # Clamp only the tiny negative roundoff possible in the quadratic
-        # expansion; this is algebraically the same squared Euclidean metric.
-        distance = (
-            target.square().sum(dim=-1, keepdim=True)
-            + codebook_norm.unsqueeze(0)
-            - 2 * target @ work_codebook.transpose(0, 1)
-        ).clamp_min_(0)
+        if work_dtype == torch.float64:
+            # The expanded quadratic form catastrophically cancels for large
+            # finite values even in FP64.  Float64 is the explicit precision
+            # contract for this fallback, so compute the distance directly.
+            distance = (target.unsqueeze(1) - work_codebook.unsqueeze(0)).square().sum(dim=-1)
+        else:
+            # Clamp only the tiny negative roundoff possible in the quadratic
+            # expansion; this is algebraically the same squared Euclidean metric.
+            distance = (
+                target.square().sum(dim=-1, keepdim=True)
+                + codebook_norm.unsqueeze(0)
+                - 2 * target @ work_codebook.transpose(0, 1)
+            ).clamp_min_(0)
         if work_step_weights is not None:
             distance = distance * work_step_weights[:, step].unsqueeze(1)
         return distance
@@ -1113,20 +1171,28 @@ def _tail_biting_overlap_scores(
             _trusted_inputs=True,
         )
 
-    work_sequence = sequences.to(torch.float32)
-    work_codebook = codebook.to(torch.float32)
-    work_step_weights = None if step_weights is None else step_weights.to(torch.float32)
+    use_float64 = sequences.device.type != "mps" and any(
+        tensor.dtype == torch.float64 for tensor in (sequences, codebook, step_weights) if tensor is not None
+    )
+    work_dtype = torch.float64 if use_float64 else torch.float32
+    _validate_viterbi_distance_range(sequences, codebook, work_dtype=work_dtype, step_weights=step_weights)
+    work_sequence = sequences.to(work_dtype)
+    work_codebook = codebook.to(work_dtype)
+    work_step_weights = None if step_weights is None else step_weights.to(work_dtype)
     batch_size = sequences.shape[0]
     state_ids = torch.arange(state_count, dtype=torch.long, device=sequences.device)
     codebook_norm = work_codebook.square().sum(dim=-1)
 
     def emission(step: int) -> torch.Tensor:
         target = work_sequence[:, step]
-        distance = (
-            target.square().sum(dim=-1, keepdim=True)
-            + codebook_norm.unsqueeze(0)
-            - 2 * target @ work_codebook.transpose(0, 1)
-        ).clamp_min_(0)
+        if work_dtype == torch.float64:
+            distance = (target.unsqueeze(1) - work_codebook.unsqueeze(0)).square().sum(dim=-1)
+        else:
+            distance = (
+                target.square().sum(dim=-1, keepdim=True)
+                + codebook_norm.unsqueeze(0)
+                - 2 * target @ work_codebook.transpose(0, 1)
+            ).clamp_min_(0)
         if work_step_weights is not None:
             distance = distance * work_step_weights[:, step].unsqueeze(1)
         return distance
@@ -1186,6 +1252,8 @@ def yaqa_sketch_b(weight_gradients: torch.Tensor) -> tuple[torch.Tensor, torch.T
     output_hessian = torch.einsum("soi,spi->op", gradients, gradients)
     input_hessian /= sequence_count * out_features
     output_hessian /= sequence_count * in_features
+    if not torch.isfinite(input_hessian).all() or not torch.isfinite(output_hessian).all():
+        raise ValueError("YAQA Sketch B Gram accumulation overflowed")
     return input_hessian, output_hessian
 
 
@@ -1870,8 +1938,7 @@ def select_banked_tiles_by_output_error(
         raise ValueError("banked candidate selection requires finite tensors.")
 
     selected = candidate_weights[0].clone()
-    current_output = inputs @ selected
-    residual = target_output - current_output
+    residual = target_output - inputs @ selected
     bank_ids = torch.zeros(
         (in_features // tile_rows) * (out_features // tile_cols),
         dtype=torch.uint8,
@@ -1885,14 +1952,12 @@ def select_banked_tiles_by_output_error(
             output_slice = slice(output_start, output_start + tile_cols)
             current_tile = selected[input_slice, output_slice]
             candidate_tiles = candidate_weights[:, input_slice, output_slice]
-            old_output = input_chunk @ current_tile
             deltas = input_chunk.unsqueeze(0) @ (candidate_tiles - current_tile)
             candidate_residual = residual[:, output_slice].unsqueeze(0) - deltas
             losses = candidate_residual.square().sum(dim=(1, 2))
             winner = int(losses.argmin().item())
             selected[input_slice, output_slice] = candidate_tiles[winner]
             residual[:, output_slice] = candidate_residual[winner]
-            current_output[:, output_slice] = current_output[:, output_slice] - old_output + input_chunk @ candidate_tiles[winner]
             bank_ids[tile_index] = winner
             tile_index += 1
     return selected, bank_ids, residual
@@ -1967,8 +2032,21 @@ def yaqa_inner(
         raise ValueError("YAQA codebook must be a non-empty matrix.")
     if not codebook.is_floating_point():
         raise TypeError("YAQA codebook must use a floating-point dtype.")
-    if not torch.isfinite(codebook).all():
+    if bank_codebooks is not None:
+        if any(not torch.isfinite(bank).all() for bank in bank_codebooks):
+            raise ValueError("YAQA bank codebooks must contain only finite values.")
+    elif not torch.isfinite(codebook).all():
         raise ValueError("YAQA codebook must contain only finite values.")
+    for name, tensor in (
+        ("YAQA inner weight", inner_weight),
+        ("YAQA input Hessian", input_hessian),
+        ("YAQA output Hessian", output_hessian),
+        ("YAQA codebook", codebook),
+    ):
+        _validate_fp32_representable(tensor, name=name)
+    if bank_codebooks is not None:
+        for bank_index, bank in enumerate(bank_codebooks[1:], start=1):
+            _validate_fp32_representable(bank, name=f"YAQA bank codebook {bank_index}")
     if (
         inner_weight.device != input_hessian.device
         or inner_weight.device != output_hessian.device
@@ -2031,6 +2109,14 @@ def yaqa_inner(
     # those factors directly with FP32 errors otherwise rejects einsum.
     input_hessian_fp32 = input_hessian.to(torch.float32)
     output_hessian_fp32 = output_hessian.to(torch.float32)
+    input_hessian_blocks = torch.stack(
+        [input_hessian_fp32[index : index + tile_rows, index : index + tile_rows]
+         for index in range(0, in_features, tile_rows)]
+    )
+    output_hessian_blocks = torch.stack(
+        [output_hessian_fp32[index : index + tile_cols, index : index + tile_cols]
+         for index in range(0, out_features, tile_cols)]
+    )
     quantized = torch.zeros_like(source)
     input_blocks = in_features // tile_rows
     output_blocks = out_features // tile_cols
@@ -2070,7 +2156,8 @@ def yaqa_inner(
                 + error[input_start:input_stop, output_start:] @ right_feedback
             )
 
-        sequences = torch.stack(corrected_tiles).reshape(len(coordinates), steps_per_tile, codebook.shape[1])
+        corrected_tile_stack = torch.stack(corrected_tiles)
+        sequences = corrected_tile_stack.reshape(len(coordinates), steps_per_tile, codebook.shape[1])
         candidate_values, candidate_states = [], []
         if bank_codebooks is not None and sequences.device.type == "cuda" and tail_biting_candidates == 1:
             # Banked V4 YAQA has independent banks for each tile on an
@@ -2124,19 +2211,18 @@ def yaqa_inner(
             winners = torch.zeros(len(coordinates), dtype=torch.long, device=source.device)
         else:
             candidates = torch.stack(candidate_values).to(torch.float32)
+            tile_errors = corrected_tile_stack.unsqueeze(0) - candidates
             losses = []
-            for candidate in candidates:
+            for candidate_index in range(candidates.shape[0]):
                 candidate_losses = []
                 for index, (input_block, output_block) in enumerate(coordinates):
-                    input_slice = slice(input_block * tile_rows, (input_block + 1) * tile_rows)
-                    output_slice = slice(output_block * tile_cols, (output_block + 1) * tile_cols)
                     # Score against the exact corrected tile supplied to the
                     # YAQA recurrence, not the untouched source tile. The
                     # distinction matters after an earlier anti-diagonal has
                     # committed quantized error.
-                    tile_error = corrected_tiles[index] - candidate[index]
-                    input_block_hessian = input_hessian_fp32[input_slice, input_slice]
-                    output_block_hessian = output_hessian_fp32[output_slice, output_slice]
+                    tile_error = tile_errors[candidate_index, index]
+                    input_block_hessian = input_hessian_blocks[input_block]
+                    output_block_hessian = output_hessian_blocks[output_block]
                     candidate_losses.append(torch.einsum(
                         "ij,ik,kl,lj->",
                         tile_error,
@@ -2196,6 +2282,9 @@ def rht_preprocess_weight(
         raise ValueError("QVQ weight and RHT signs must share one device.")
     if not torch.isfinite(weight).all() or not torch.isfinite(SU).all() or not torch.isfinite(SV).all():
         raise ValueError("QVQ weight and RHT signs must contain only finite values.")
+    _validate_fp32_representable(weight, name="QVQ weight")
+    _validate_fp32_representable(SU, name="QVQ input signs")
+    _validate_fp32_representable(SV, name="QVQ output signs")
 
     work = weight.transpose(0, 1).to(torch.float32) * SU.to(torch.float32).unsqueeze(1)
     work = matmul_hadU(work.transpose(0, 1)).transpose(0, 1)
@@ -2212,6 +2301,8 @@ def rht_preprocess_hessian(H: torch.Tensor, SU: torch.Tensor) -> torch.Tensor:
         raise ValueError("QVQ input signs must match the Hessian width and device.")
     if not torch.isfinite(H).all() or not torch.isfinite(SU).all():
         raise ValueError("QVQ Hessian and input signs must contain only finite values.")
+    _validate_fp32_representable(H, name="QVQ Hessian")
+    _validate_fp32_representable(SU, name="QVQ input signs")
 
     signs = SU.to(torch.float32)
     transformed = H.to(torch.float32) * signs.unsqueeze(0) * signs.unsqueeze(1)
@@ -2235,6 +2326,9 @@ def rht_reconstruct_weight(
         raise ValueError("QVQ inner weight and RHT scales must share one device.")
     if not torch.isfinite(inner_weight).all() or not torch.isfinite(SU).all() or not torch.isfinite(SV).all():
         raise ValueError("QVQ inner weight and RHT scales must contain only finite values.")
+    _validate_fp32_representable(inner_weight, name="QVQ inner weight")
+    _validate_fp32_representable(SU, name="QVQ input signs")
+    _validate_fp32_representable(SV, name="QVQ output signs")
 
     work = matmul_hadU(inner_weight.transpose(0, 1), transpose=True).transpose(0, 1)
     work = work * SU.to(work.dtype).unsqueeze(1)
@@ -2259,6 +2353,9 @@ def qvq_proxy_loss(weight: torch.Tensor, reconstructed_weight: torch.Tensor, H: 
         or not torch.isfinite(H).all()
     ):
         raise ValueError("QVQ proxy-loss tensors must contain only finite values.")
+    _validate_fp32_representable(weight, name="QVQ weight")
+    _validate_fp32_representable(reconstructed_weight, name="QVQ reconstructed weight")
+    _validate_fp32_representable(H, name="QVQ Hessian")
 
     return _qvq_proxy_loss_unchecked(weight, reconstructed_weight, H)
 
@@ -2289,11 +2386,20 @@ def yaqa_proxy_loss(
         raise TypeError("YAQA proxy-loss tensors must use floating-point dtypes.")
     if any(not torch.isfinite(tensor).all() for tensor in tensors):
         raise ValueError("YAQA proxy-loss tensors must contain only finite values.")
+    for name, tensor in zip(
+        ("YAQA weight", "YAQA reconstructed weight", "YAQA input Hessian", "YAQA output Hessian"),
+        tensors,
+        strict=True,
+    ):
+        _validate_fp32_representable(tensor, name=name)
 
     error = reconstructed_weight.to(torch.float32) - weight.to(torch.float32)
     input_fp32 = input_hessian.to(torch.float32)
     output_fp32 = output_hessian.to(torch.float32)
-    return (error @ input_fp32 @ error.transpose(0, 1) * output_fp32.transpose(0, 1)).sum()
+    loss = (error @ input_fp32 @ error.transpose(0, 1) * output_fp32.transpose(0, 1)).sum()
+    if not torch.isfinite(loss):
+        raise ValueError("YAQA proxy-loss arithmetic overflowed FP32")
+    return loss
 
 
 def _qvq_proxy_loss_unchecked(
@@ -2305,7 +2411,10 @@ def _qvq_proxy_loss_unchecked(
 
     error = reconstructed_weight.to(torch.float32) - weight.to(torch.float32)
     H_fp32 = H.to(torch.float32)
-    return (error @ H_fp32 * error).sum()
+    loss = (error @ H_fp32 * error).sum()
+    if not torch.isfinite(loss):
+        raise ValueError("QVQ proxy-loss arithmetic overflowed FP32")
+    return loss
 
 
 def optimize_qvq_output_channel_scales(
@@ -2536,6 +2645,10 @@ def quantize_qvq_linear(
         raise ValueError("QVQ weight and Hessian must contain only finite values.")
     if output_hessian is not None and not torch.isfinite(output_hessian).all():
         raise ValueError("YAQA output Hessian must contain only finite values.")
+    _validate_fp32_representable(weight, name="QVQ weight")
+    _validate_fp32_representable(H, name="QVQ Hessian")
+    if output_hessian is not None:
+        _validate_fp32_representable(output_hessian, name="YAQA output Hessian")
     if bias is not None:
         if not bias.is_floating_point():
             raise TypeError("QVQ bias must use a floating-point dtype.")

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 from collections.abc import Callable
@@ -35,6 +36,28 @@ _QVQ_CUDA_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V4_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_BANKED_OP: Callable | None = None
+
+
+def _validate_viterbi_distance_range(
+    sequences: torch.Tensor,
+    codebook: torch.Tensor,
+    *,
+    vector_size: int,
+    step_weights: torch.Tensor | None = None,
+) -> None:
+    """Reject finite inputs whose native FP32 emission arithmetic can overflow."""
+
+    if sequences.numel() == 0:
+        return
+    maximum_weight = 1.0 if step_weights is None else float(step_weights.detach().abs().amax().item())
+    accumulation_terms = max(1.0, max(1, int(sequences.shape[-2])) * maximum_weight)
+    safe_magnitude = math.sqrt(torch.finfo(torch.float32).max / accumulation_terms) / (2.0 * math.sqrt(vector_size))
+    maximum = torch.maximum(sequences.detach().abs().amax(), codebook.detach().abs().amax())
+    if bool(maximum > safe_magnitude):
+        raise ValueError(
+            "QVQ CUDA Viterbi sequence/codebook magnitudes are too large for finite FP32 "
+            "squared-distance arithmetic"
+        )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
 _PGC16_LEVELS: dict[tuple[torch.device, str], torch.Tensor] = {}
@@ -167,8 +190,16 @@ def qvq_cuda_viterbi(
         raise TypeError("QVQ CUDA Viterbi requires float32 sequences and float16 or float32 codebook")
     if any(not tensor.is_contiguous() for tensor in (sequences, codebook)):
         raise ValueError("QVQ CUDA Viterbi tensors must be contiguous")
+    sequence_alignment = 16 if vector_size == 4 else 4
+    codebook_alignment = 16 if vector_size == 4 and codebook.dtype == torch.float32 else 4
+    if sequences.data_ptr() % sequence_alignment or codebook.data_ptr() % codebook_alignment:
+        raise ValueError(
+            "QVQ CUDA Viterbi tensors must satisfy the native vector-load alignment contract "
+            f"(sequence={sequence_alignment}, codebook={codebook_alignment} bytes)"
+        )
     if not torch.isfinite(sequences).all() or not torch.isfinite(codebook).all():
         raise ValueError("QVQ CUDA Viterbi sequences and codebook must be finite")
+    _validate_viterbi_distance_range(sequences, codebook, vector_size=vector_size, step_weights=step_weights)
     if overlap is not None and (
         overlap.device != sequences.device or overlap.dtype != torch.int64 or not overlap.is_contiguous()
     ):
@@ -201,7 +232,12 @@ def qvq_cuda_viterbi_banked(
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run one native V4 Viterbi launch over all banks and source sequences."""
+    """Run one native V4 Viterbi launch over all active banks and source sequences.
+
+    The normal YAQA path supplies four banks. Propagation candidate generation
+    may intentionally supply only banks 1--3 because canonical bank 0 is
+    retained as a separately computed oracle.
+    """
 
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=4)
@@ -211,16 +247,23 @@ def qvq_cuda_viterbi_banked(
         raise ValueError("QVQ banked Viterbi expects sequences with shape [batch, steps, 4] or [banks, batch, steps, 4]")
     if sequences.ndim == 4 and sequences.shape[0] != codebooks.shape[0]:
         raise ValueError("bank-specific QVQ sequences must have one batch per codebook bank")
-    if codebooks.ndim != 3 or codebooks.shape[0] != 4 or tuple(codebooks.shape[1:]) != (1 << 16, 4):
-        raise ValueError("QVQ banked Viterbi expects exactly four codebooks with shape [4, 65536, 4]")
+    if codebooks.ndim != 3 or codebooks.shape[0] not in (1, 2, 3, 4) or tuple(codebooks.shape[1:]) != (1 << 16, 4):
+        raise ValueError("QVQ banked Viterbi expects one to four codebooks with shape [banks, 65536, 4]")
     if sequences.device.type != "cuda" or codebooks.device != sequences.device:
         raise ValueError("QVQ banked Viterbi tensors must share one CUDA device")
     if sequences.dtype != torch.float32 or codebooks.dtype not in (torch.float16, torch.float32):
         raise TypeError("QVQ banked Viterbi requires float32 sequences and float16 or float32 codebooks")
     if not sequences.is_contiguous() or not codebooks.is_contiguous():
         raise ValueError("QVQ banked Viterbi tensors must be contiguous")
+    codebook_alignment = 16 if codebooks.dtype == torch.float32 else 4
+    if sequences.data_ptr() % 16 or codebooks.data_ptr() % codebook_alignment:
+        raise ValueError(
+            "QVQ banked Viterbi tensors must satisfy the native vector-load alignment contract "
+            f"(sequence=16, codebooks={codebook_alignment} bytes)"
+        )
     if not torch.isfinite(sequences).all() or not torch.isfinite(codebooks).all():
         raise ValueError("QVQ banked Viterbi sequences and codebooks must be finite")
+    _validate_viterbi_distance_range(sequences, codebooks, vector_size=4, step_weights=step_weights)
     bank_count = codebooks.shape[0]
     batch = sequences.shape[1] if sequences.ndim == 4 else sequences.shape[0]
     steps = sequences.shape[2] if sequences.ndim == 4 else sequences.shape[1]
