@@ -40,6 +40,7 @@ from ..quantization.config import ExpertsRoutingBypass, QuantizeConfig
 from ..utils.attn_mask import attention_mask_sequence_lengths, input_id_sequence_lengths
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
+from ..utils.nvml import cuda_memory_used_snapshot
 from ..utils.random_str import get_random_string
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
 
@@ -520,6 +521,8 @@ class LoopProcessor:
                     allowed.add(max_padded)
                 if observed_max > 0 and observed_max not in allowed:
                     allowed.add(observed_max)
+                extra_allowed = getattr(self, "_additional_calibration_sample_counts", {}).get(name, ())
+                allowed.update(int(value) for value in extra_allowed if int(value) >= 0)
             else:
                 # Native-routed MoE: any subset up to the observed position count.
                 if observed_max > 0 and nsamples > observed_max:
@@ -848,8 +851,11 @@ class LoopProcessor:
         """Creates Device-SMI handles for all discovered accelerator devices."""
 
         handles: Dict[str, Device] = {}
+        nvml_snapshot = cuda_memory_used_snapshot()
 
         for device_id in self._discover_accelerator_devices():
+            if device_id.startswith("cuda:") and nvml_snapshot is not None:
+                continue
             try:
                 handles[device_id] = Device(device_id)
             except Exception as exc:  # pragma: no cover - defensive, external tool
@@ -915,7 +921,15 @@ class LoopProcessor:
 
         with self._device_smi_lock:
             snapshot: Dict[str, float] = {}
+            # NVIDIA sampling uses one process-wide, one-second NVML snapshot.
+            # This avoids spawning one `nvidia-smi` subprocess per GPU for
+            # every module row across concurrent lifecycle processors.
+            nvml_snapshot = cuda_memory_used_snapshot()
+            if nvml_snapshot is not None:
+                snapshot.update({device_id: used / (1024**3) for device_id, used in nvml_snapshot.items()})
             for device_id, handle in self._device_smi_handles.items():
+                if device_id.startswith("cuda:") and nvml_snapshot is not None and isinstance(handle, Device):
+                    continue
                 metrics = self._safe_query_metric(device_id, handle)
                 if metrics is None:
                     continue

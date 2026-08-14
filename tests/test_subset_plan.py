@@ -513,6 +513,47 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
     assert list(plans[0].modules.keys()) == ["self_attn.q_proj", "mlp.down_proj"]
 
 
+def test_build_layer_subset_plans_accepts_processor_group_refinement_before_planning():
+    looper = _make_looper()
+    requested_name_groups = []
+
+    def _create_named_modules(
+        module,
+        full,
+        is_lm_head_module,
+        layer_index,
+        layers_prefix,
+        names,
+        processor,
+        fallback,
+        layer_module=None,
+    ):
+        requested_name_groups.append(list(names))
+        return {name: _make_named_module(name, layer_index=layer_index) for name in names}
+
+    looper.create_named_modules.side_effect = _create_named_modules
+    processor = _StubProcessor(ExecutionConfig(require_fwd=True, fwd_replay_after_process=True))
+    processor.refine_subset_module_groups = lambda groups: [[name] for group in groups for name in group]
+
+    plans = build_layer_subset_plans(
+        looper,
+        processor=processor,
+        module=torch.nn.Linear(4, 4),
+        layer_modules=[["q", "k"], ["o"]],
+        planning_layer_modules=_planning_blocks(("q", "k", "o")),
+        layer_inputs=[[torch.zeros(1, 4)]],
+        full={},
+        is_lm_head_module=False,
+        layer_index=3,
+        layers_prefix="model.layers",
+        fallback=True,
+    )
+
+    assert requested_name_groups == [["q"], ["k"], ["o"]]
+    assert [plan.subset_index for plan in plans] == [0, 1, 2]
+    assert all(plan.subset_total == 3 for plan in plans)
+
+
 def test_emit_moe_parallel_quant_subset_telemetry_reports_gil_and_worker_fanout(monkeypatch):
     emitted = []
     stage_subset_module = sys.modules[build_subset_plan.__module__]

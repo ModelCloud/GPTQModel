@@ -11,11 +11,13 @@ from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 
+from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import (
     HFGPTQModelLoadContext,
+    _checkpoint_quantized_module_names,
     hf_gptqmodel_post_init_for_load,
     hf_gptqmodel_prepare_model_for_load,
 )
@@ -108,6 +110,74 @@ def test_hf_load_bridge_leaves_legacy_optimum_checkpoint_to_existing_path(tmp_pa
 
     assert context is None
     assert isinstance(model.model.layers[0].self_attn.q_proj, torch.nn.Linear)
+
+
+def test_hf_load_bridge_discovers_qvq_modules_from_trellis_payload(tmp_path):
+    config = {
+        "bits": 2,
+        "group_size": -1,
+        "desc_act": False,
+        "sym": True,
+        "format": "qvq",
+        "method": "qvq",
+    }
+    (tmp_path / "quantize_config.json").write_text(json.dumps(config), encoding="utf-8")
+    prefix = "model.layers.0.self_attn.q_proj"
+    save_file(
+        {
+            f"{prefix}.trellis": torch.zeros((16, 16), dtype=torch.int32),
+            f"{prefix}.SU": torch.ones(128, dtype=torch.float16),
+            f"{prefix}.SV": torch.ones(32, dtype=torch.float16),
+        },
+        tmp_path / "model.safetensors",
+    )
+    model = _Model(tmp_path)
+
+    context = hf_gptqmodel_prepare_model_for_load(
+        model,
+        checkpoint_files=[tmp_path / "model.safetensors"],
+        device_map={"": "cpu"},
+        backend=BACKEND.QVQ,
+        dtype=torch.float16,
+    )
+
+    q_proj = model.model.layers[0].self_attn.q_proj
+    assert isinstance(q_proj, QVQLinear)
+    assert q_proj.trellis.device.type == "meta"
+    assert isinstance(model.model.layers[0].self_attn.g_proj, torch.nn.Linear)
+    assert context.quant_linear is QVQLinear
+    assert context.quantize_config.format.value == "qvq"
+
+
+def test_checkpoint_module_discovery_uses_format_owned_weight_payload():
+    qvq_config = QuantizeConfig(method="qvq", format="qvq", bits=2)
+    gptq_config = QuantizeConfig(method="gptq", format="gptq", bits=4)
+    awq_config = QuantizeConfig(method="awq", format="gemm", bits=4)
+    keys = {
+        "model.q_proj.trellis",
+        "model.q_proj.SU",
+        "model.q_proj.SV",
+        "model.k_proj.qweight",
+    }
+
+    assert _checkpoint_quantized_module_names(keys, qvq_config) == ("model.q_proj",)
+    assert _checkpoint_quantized_module_names(keys, gptq_config) == ("model.k_proj",)
+    assert _checkpoint_quantized_module_names(keys, awq_config) == ("model.k_proj",)
+    assert _checkpoint_quantized_module_names(
+        keys,
+        gptq_config,
+        candidates={"model.q_proj", "model.k_proj", "model.dense"},
+    ) == ("model.k_proj",)
+    assert _checkpoint_quantized_module_names(
+        keys,
+        awq_config,
+        candidates={"model.q_proj", "model.k_proj", "model.dense"},
+    ) == ("model.k_proj",)
+    assert _checkpoint_quantized_module_names(
+        keys,
+        qvq_config,
+        candidates={"model.k_proj"},
+    ) == ()
 
 
 def test_hf_load_bridge_fails_when_checkpoint_module_is_missing_after_conversion(tmp_path):

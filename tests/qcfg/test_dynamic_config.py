@@ -58,6 +58,18 @@ def test_dynamic_negative_exact_pattern_bypasses_pcre_match():
         mock_match.assert_not_called()
 
 
+def test_dynamic_false_value_is_a_negative_override_for_layer_scope():
+    """Layer-scoped quantization emits False values and they must resolve as exclusions."""
+    dynamic = {
+        r".*model\.layers\.1\..*": False,
+        r".*model\.layers\.0\.mlp\.down_proj": {"bits": 2},
+    }
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+
+    assert cfg.dynamic_get("model.layers.1.mlp.down_proj", "bits", cfg.bits) is False
+    assert cfg.dynamic_get("model.layers.0.mlp.down_proj", "bits", cfg.bits) == 2
+
+
 def test_dynamic_mixed_uses_pcre_only_for_regex_patterns():
     """Mixed exact + regex configs should only call match for regex patterns."""
     dynamic = {

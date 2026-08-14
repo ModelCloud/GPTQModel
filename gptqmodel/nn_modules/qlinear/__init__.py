@@ -48,7 +48,7 @@ class FormatSupport(NamedTuple):
     """
 
     priority: int
-    bits: Tuple[int, ...]
+    bits: Tuple[float, ...]
 
 
 # Packed quantized weights are unpacked through shift operations in several
@@ -123,7 +123,7 @@ class BaseQuantLinear(nn.Module):
             cls.SUPPORTS_BITS = sorted({b for fs in fbm.values() for b in fs.bits})
 
     @classmethod
-    def supported_bits(cls, format: Optional[FORMAT] = None) -> Tuple[int, ...]:
+    def supported_bits(cls, format: Optional[FORMAT] = None) -> Tuple[float, ...]:
         """Bits supported for `format`; the union across formats when `format` is None/unknown."""
         fbm = cls.SUPPORTS_FORMAT_BIT_MAP
         if fbm and format is not None and format in fbm:

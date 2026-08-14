@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any
 
 
 class BACKEND(str, Enum):
@@ -30,6 +30,9 @@ class BACKEND(str, Enum):
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     GPTQ_HUMMING = "gptq_humming"  # InclusionAI Humming JIT kernel for GPTQ
     GPTQ_PANGOLIN = "gptq_pangolin"  # fused CUDA/Apple Metal packed GEMV
+
+    # QVQ kernels
+    QVQ = "qvq"
 
     # MXFP4 CPU kernel
     MXFP4_CPU = "mxfp4_cpu"
@@ -172,7 +175,7 @@ _PROFILE_BY_INDEX = {
 }
 
 
-def _normalize_method(method: Optional[Union[str, Any]]) -> Optional[str]:
+def _normalize_method(method: str | Any | None) -> str | None:
     if method is None:
         return None
     value = getattr(method, "value", method)
@@ -180,10 +183,10 @@ def _normalize_method(method: Optional[Union[str, Any]]) -> Optional[str]:
 
 
 def normalize_backend(
-    backend: Optional[Union[str, BACKEND]],
+    backend: str | BACKEND | None,
     *,
-    quant_method: Optional[Union[str, Any]] = None,
-) -> Optional[BACKEND]:
+    quant_method: str | Any | None = None,
+) -> BACKEND | None:
     if backend is None:
         return None
 
@@ -207,7 +210,7 @@ def normalize_backend(
     return _CANONICAL_BACKEND_ALIASES.get(resolved, resolved)
 
 
-def normalize_profile(profile: Optional[Union[str, int, PROFILE]]) -> PROFILE:
+def normalize_profile(profile: str | int | PROFILE | None) -> PROFILE:
     if profile is None:
         return PROFILE.AUTO
 

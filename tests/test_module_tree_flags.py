@@ -64,6 +64,7 @@ def test_llama_build_layer_modules_caches_module_tree_flags():
     assert LlamaQModel.get_module_tree_flags("self_attn.q_proj") == frozenset({"q"})
     assert LlamaQModel.get_module_tree_flags("self_attn.k_proj") == frozenset({"k"})
     assert LlamaQModel.get_module_tree_flags("self_attn.v_proj") == frozenset({"v"})
+    assert LlamaQModel.get_module_tree_flags("self_attn.o_proj") == frozenset({"o"})
     assert LlamaQModel.get_module_tree_flags("mlp.gate_proj") == frozenset({"gate"})
     assert LlamaQModel.get_module_tree_flags("mlp.up_proj") == frozenset({"up"})
     assert LlamaQModel.get_module_tree_flags("mlp.down_proj") == frozenset({"down"})

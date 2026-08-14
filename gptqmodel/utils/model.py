@@ -761,8 +761,9 @@ def create_quant_module(
                         overrides.get("compress_statistics", overrides.get("bnb_compress_statistics"))
                     )
 
-    validate_bits = quant_bits_width(tmp_bits)
-    constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
+    preserve_rate = getattr(linear_cls, "QUANT_TYPE", None) in {"gguf", "qvq"}
+    validate_bits = tmp_bits if preserve_rate else quant_bits_width(tmp_bits)
+    constructor_bits = tmp_bits if preserve_rate else validate_bits
 
     # GPTQ modules need the checkpoint format to select between the continuous
     # (gptq/gptq_v2) and planar (gptq_p) packed layouts.
@@ -954,8 +955,34 @@ def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
     return (
         "gptqmodel" in uri
         or bool(qcfg.dynamic)
-        or resolve_quant_format(qcfg.format, qcfg.method) in (FORMAT.GPTQ_V2, FORMAT.GPTQ_P)
+        or resolve_quant_format(qcfg.format, qcfg.method) in (FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.QVQ, FORMAT.QVQ_V4)
     )
+
+
+def _quantized_weight_suffix(qcfg: QuantizeConfig) -> str:
+    """Return the authoritative module-discovery tensor for one native format."""
+
+    format_code = resolve_quant_format(qcfg.format, qcfg.method)
+    return ".trellis" if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4) else ".qweight"
+
+
+def _checkpoint_quantized_module_names(
+    tensor_keys: set[str],
+    qcfg: QuantizeConfig,
+    *,
+    candidates: set[str] | None = None,
+) -> tuple[str, ...]:
+    """Discover modules from the serialized weight tensor owned by the format."""
+
+    weight_suffix = _quantized_weight_suffix(qcfg)
+    names = {
+        key.removesuffix(weight_suffix)
+        for key in tensor_keys
+        if key.endswith(weight_suffix)
+    }
+    if candidates is not None:
+        names.intersection_update(candidates)
+    return tuple(sorted(names))
 
 
 def _hf_checkpoint_tensor_keys(checkpoint_path: str, checkpoint_files) -> set[str]:
@@ -1026,14 +1053,14 @@ def hf_gptqmodel_prepare_model_for_load(
     if not _hf_is_native_gptqmodel_config(qcfg):
         return None
 
-    # Serialized qweights are authoritative; dynamic rules may also name dense modules.
+    # Serialized format-owned weights are authoritative; dynamic rules may also
+    # name dense modules. QVQ has no qweight by design: its payload is trellis.
     tensor_keys = _hf_checkpoint_tensor_keys(checkpoint_path, checkpoint_files)
-    quantized_module_names = tuple(
-        sorted(key.removesuffix(".qweight") for key in tensor_keys if key.endswith(".qweight"))
-    )
+    weight_suffix = _quantized_weight_suffix(qcfg)
+    quantized_module_names = _checkpoint_quantized_module_names(tensor_keys, qcfg)
     if not quantized_module_names:
         raise ValueError(
-            "The GPTQModel checkpoint does not expose any `.qweight` tensors in its checkpoint manifest."
+            f"The GPTQModel checkpoint does not expose any `{weight_suffix}` tensors in its checkpoint manifest."
         )
 
     import defuser

@@ -65,9 +65,23 @@ _EXTENSION_SPECS = (
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.gptq_block", "gptq_block_cuda_error")(),
     ),
     _ExtensionSpec(
+        name="qvq_cuda",
+        aliases=("qvq_gemv",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qvq_cuda", "_QVQ_CUDA_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.qvq_cuda", "qvq_cuda_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.qvq_cuda", "qvq_cuda_error")(),
+    ),
+    _ExtensionSpec(
         name="floatx_cpu",
         aliases=("floatx", "quant_dtype_cpu"),
         resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_floatx_cpu_extension"),
+    ),
+    _ExtensionSpec(
+        name="diagnostic_metrics_cpu",
+        aliases=("metrics_cpu",),
+        resolve=lambda: _resolve_extension_attr(
+            "gptqmodel.utils.diagnostic_metrics", "_DIAGNOSTIC_METRICS_CPU_EXTENSION"
+        ),
     ),
     _ExtensionSpec(
         name="awq",

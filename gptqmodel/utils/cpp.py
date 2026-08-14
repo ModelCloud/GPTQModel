@@ -57,9 +57,9 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
 _NVCC_RELEASE_PATTERN = pcre.compile(r"release\s+(\d+)\.(\d+)")
 _NVCC_VERSION_LOCK = threading.Lock()
 _NVCC_VERSION_CACHE: tuple[int, int] | None = None
-# Default NVCC internal threading for JIT builds. This is based on clean-build
-# timings collected on an AMD Zen 3 CPU running at 2.2 GHz, where 8 threads was
-# the best overall tradeoff across Marlin, AWQ, QQQ, ExLlama, and ParoQuant.
+# Default NVCC internal threading for general JIT builds. QVQ overrides this
+# locally because its unusually large translation unit multiplies cicc's peak
+# working set when several device compiler workers are enabled.
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
@@ -615,6 +615,10 @@ def default_jit_cuda_cflags(
     include_fatbin_compression: bool = False,
     include_diag_suppress: bool = False,
     nvcc_threads: str | int | None = None,
+    include_split_compile: bool = False,
+    split_compile: str | int | None = None,
+    include_fast_compile: bool = False,
+    fast_compile: str | None = None,
 ) -> list[str]:
     """Return the common NVCC flags for torch.ops JIT CUDA extensions."""
 
@@ -633,6 +637,27 @@ def default_jit_cuda_cflags(
                 resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
             )
             flags.append(f"--optimize={optimization_level}")
+    if include_split_compile and nvcc_version_at_least(12, 1):
+        resolved_split_compile = (
+            str(split_compile)
+            if split_compile is not None
+            else os.getenv("GPTQMODEL_NVCC_SPLIT_COMPILE", "8")
+        )
+        if resolved_split_compile:
+            try:
+                split_value = int(resolved_split_compile)
+            except ValueError as exc:
+                raise ValueError("CUDA split compile must be a non-negative integer") from exc
+            if split_value < 0:
+                raise ValueError("CUDA split compile must be a non-negative integer")
+            if split_value:
+                flags.append(f"--split-compile={split_value}")
+    if include_fast_compile:
+        resolved_fast_compile = fast_compile or os.getenv("GPTQMODEL_NVCC_FAST_COMPILE")
+        if resolved_fast_compile:
+            if resolved_fast_compile not in {"min", "mid", "max"}:
+                raise ValueError("CUDA fast compile must be one of: min, mid, max")
+            flags.append(f"--Ofast-compile={resolved_fast_compile}")
     if include_ptxas_optimizations:
         ptxas_flags = ["-v"] if include_ptxas_verbosity else []
         if resolved_opt_level is not None:

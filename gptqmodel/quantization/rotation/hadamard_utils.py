@@ -94,6 +94,35 @@ def matmul_hadU(X, transpose=False):
     return input.view(X.shape) / torch.tensor(n).sqrt()
 
 
+def matmul_hadU_stable(X, transpose=False):
+    """Apply the normalized Hadamard while bounding low-precision butterfly range.
+
+    Moving the existing ``1 / sqrt(n)`` normalization before the butterflies
+    is mathematically equivalent to applying it after them. The early scaling
+    prevents an otherwise finite FP16 result from overflowing in an
+    unnormalized intermediate and, unlike scaling every butterfly stage,
+    introduces only one additional low-precision rounding step.
+    """
+
+    n = X.shape[-1]
+    hadK, K = get_hadK(n, transpose)
+    input = (X / X.new_tensor(float(n)).sqrt()).view(-1, n, 1)
+    output = input.clone()
+    while input.shape[1] > K:
+        input = input.view(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
+        output = output.view(input.shape)
+        output[:, :, 0, :] = input[:, :, 0, :] + input[:, :, 1, :]
+        output[:, :, 1, :] = input[:, :, 0, :] - input[:, :, 1, :]
+        output = output.view(input.shape[0], input.shape[1], -1)
+        (input, output) = (output, input)
+    del output
+
+    if K > 1:
+        input = hadK.view(1, K, K).to(input) @ input
+
+    return input.view(X.shape)
+
+
 def matmul_hadUt(X):
     return matmul_hadU(X, transpose=True)
 

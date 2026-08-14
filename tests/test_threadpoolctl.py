@@ -1,16 +1,93 @@
 # SPDX-FileCopyrightText: 2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GPU=-1
+import importlib.util
+import os
+import subprocess
+import sys
 import time
-from typing import Dict, List
+from pathlib import Path
 
+import pytest
 import torch
 
 from gptqmodel.utils.safe import THREADPOOLCTL
 from gptqmodel.utils.threadx import DeviceThreadPool
 
+_MAX_PYTEST_CPU_THREADS = 16
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
 
-def _run_thread_limit(pool: DeviceThreadPool, limit: int) -> Dict[str, float]:
+
+def _load_cpu_test_runner():
+    runner_path = (
+        Path(__file__).resolve().parents[1]
+        / ".codex"
+        / "skills"
+        / "limit-python-test-threads"
+        / "scripts"
+        / "run_cpu_tests.py"
+    )
+    spec = importlib.util.spec_from_file_location("run_cpu_tests", runner_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_pytest_native_thread_pools_are_capped():
+    for name in _THREAD_ENV_VARS:
+        assert 1 <= int(os.environ[name]) <= _MAX_PYTEST_CPU_THREADS
+    assert 1 <= torch.get_num_threads() <= _MAX_PYTEST_CPU_THREADS
+    for pool in THREADPOOLCTL.threadpool_info():
+        threads = pool.get("num_threads", 0)
+        if threads:
+            assert threads <= _MAX_PYTEST_CPU_THREADS
+
+
+def test_pytest_thread_cap_subprocess_probe():
+    if os.environ.get("GPTQMODEL_PYTEST_THREAD_CAP_PROBE") != "1":
+        pytest.skip("subprocess-only thread-cap probe")
+    for name in _THREAD_ENV_VARS:
+        assert os.environ[name] == str(_MAX_PYTEST_CPU_THREADS)
+    assert torch.get_num_threads() <= _MAX_PYTEST_CPU_THREADS
+    for pool in THREADPOOLCTL.threadpool_info():
+        threads = pool.get("num_threads", 0)
+        if threads:
+            assert threads <= _MAX_PYTEST_CPU_THREADS
+
+
+def test_pytest_clamps_oversized_inherited_native_thread_limits():
+    env = os.environ.copy()
+    env.update({name: "64" for name in _THREAD_ENV_VARS})
+    env["GPTQMODEL_PYTEST_THREAD_CAP_PROBE"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", f"{__file__}::test_pytest_thread_cap_subprocess_probe", "-q"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cpu_test_runner_clamps_oversized_limit_and_preserves_lower_limit():
+    runner = _load_cpu_test_runner()
+
+    assert runner.effective_limit(64) == _MAX_PYTEST_CPU_THREADS
+    assert runner.effective_limit(6) == 6
+    for name in _THREAD_ENV_VARS:
+        assert runner.limited_env(64)[name] == str(_MAX_PYTEST_CPU_THREADS)
+        assert runner.limited_env(6)[name] == "6"
+
+
+def _run_thread_limit(pool: DeviceThreadPool, limit: int) -> dict[str, float]:
     d_cpu = torch.device("cpu")
     futures = []
 
@@ -60,8 +137,9 @@ def test_threadpool_limits_inside_device_threadpool():
     )
 
     try:
-        limits = [1, 2, 4, 8, 16, 32]
-        results: List[Dict[str, float]] = []
+        session_limit = int(os.environ["OMP_NUM_THREADS"])
+        limits = sorted({limit for limit in (1, 2, 4, 8, 16, session_limit) if limit <= session_limit})
+        results: list[dict[str, float]] = []
 
         for limit in limits:
             result = _run_thread_limit(pool, limit)

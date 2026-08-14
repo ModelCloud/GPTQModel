@@ -16,7 +16,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.quantization import FORMAT
+from gptqmodel.quantization import FORMAT, HessianConfig
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -100,6 +100,7 @@ def test_per_layer_quant_and_requant():
             desc_act=False,
             sym=True,
             format=FORMAT.GPTQ,
+            hessian=HessianConfig(length_aware=False),
             offload_to_disk=False,
         )
 
@@ -118,6 +119,7 @@ def test_per_layer_quant_and_requant():
             desc_act=False,
             sym=True,
             format=FORMAT.GPTQ,
+            hessian=HessianConfig(length_aware=False),
             offload_to_disk=False,
         )
 

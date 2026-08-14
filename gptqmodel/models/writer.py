@@ -95,6 +95,17 @@ def _current_quantize_timestamp() -> str:
     """Return the current UTC date/hour/minute as an ISO-like timestamp."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
 
+
+def _loaded_checkpoint_requires_shell_rebuild(load_quantized_model: bool, runtime_format: FORMAT) -> bool:
+    """Return whether save must reconstruct a shell from the source checkpoint.
+
+    QVQ and EXL3 already store their runtime payloads directly. Rebuilding
+    either format discards live auxiliary updates; rebuilding a partial QVQ
+    checkpoint also mistakes its remaining dense modules for missing trellises.
+    """
+
+    return load_quantized_model and runtime_format not in (FORMAT.EXL3, FORMAT.QVQ, FORMAT.QVQ_V4)
+
 PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
 PROCESS_LOG_MODULE = "module"
@@ -1393,7 +1404,7 @@ def ModelWriter(cls):
             quantize_config.tensor_storage = tensor_storage
             self.quantize_config.tensor_storage = copy.deepcopy(tensor_storage)
 
-        if self.load_quantized_model and runtime_format != FORMAT.EXL3:
+        if _loaded_checkpoint_requires_shell_rebuild(self.load_quantized_model, runtime_format):
             self.model = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,

@@ -31,7 +31,83 @@ For architecture-specific work, use `$gptqmodel-ampere-kernels` or `$gptqmodel-h
 
 Respect JIT fingerprints and cache behavior in `gptqmodel/utils/cpp.py`. Use `GPTQMODEL_KERNEL_REBUILD`, a supported per-extension rebuild variable, or `TORCH_CUDA_ARCH_LIST` only for isolated build/debug runs; do not force rebuilds during normal imports.
 
+## Control template and generated-IR growth
+
+Treat CUDA template expansion as a build-performance and maintainability constraint before adding a specialization.
+The source line count is not a useful proxy: a small launch switch can generate hundreds of large device entry points,
+and `cicc` optimization can become strongly superlinear after force-inlining and loop unrolling inflate the IR.
+
+Before implementing or approving templated CUDA dispatch:
+
+1. Write the specialization-count formula across every dimension: rates or transition widths, dtypes, output dtypes,
+   tile/row shapes, vector formats, split modes, feature flags, and architectures. Report both host launch sites and
+   unique device kernel specializations.
+2. Prove every generated combination is reachable through the public runtime contract. Do not use a generic template
+   switch that instantiates rates, layouts, dtypes, or features which validation later rejects. Restrict each format's
+   compile-time dispatch to its legal set.
+3. Include nested `#pragma unroll`, recursive `__forceinline__` helpers, compile-time array sizes, and duplicated kernel
+   bodies in the expansion estimate. Multipliers compose: `rates * dtypes * row shapes * formats * kernel families`,
+   while unroll factors multiply each generated body.
+4. Preserve specialized kernels only where measurements justify them. Prefer a generic runtime fallback or a small
+   low/mid/high specialization bucket for cold combinations instead of materializing a complete Cartesian product.
+5. Split large independent kernel families or rate/type buckets into separate `.cu` translation units with a small
+   registration/dispatch unit. This lets Ninja schedule multiple `cicc` processes across CPU cores and lowers peak
+   memory per compiler process. Merely moving the same all-inclusive template switch into a header used by every
+   translation unit duplicates work and is not a valid split.
+6. Keep common device logic shared when doing so does not harm the measured hot path. Avoid cloning nearly identical
+   normal, split-K, banked, or output-conversion kernels solely for compile-time convenience.
+7. Re-audit the matrix whenever adding a rate, dtype, vector format, tile shape, or unroll variant. Record the before
+   and after specialization counts in the change notes; do not accept unexplained compile-time or object-size growth.
+
+For example, a dispatch with 15 transition widths, four row shapes, two vector formats, five normal dtype pairs, and
+three split-K input dtypes already requests `15 * 4 * 2 * (5 + 3) = 960` scalar device kernels before WMMA, reducers,
+architecture targets, or unrolled-body growth. If one format legally supports only seven widths, generating all 15 is
+dead compiler work even when runtime validation prevents those kernels from launching.
+
+## Keep CUDA builds host-safe
+
+Use the Ninja binary from the active local environment and an extension-specific build
+root. Do not share a build directory between agents or manually kill unrelated
+`ninja`, `nvcc`, or `cicc` processes. Before a CUDA compile, set explicit parallelism
+limits through the environment:
+
+```bash
+export PATH=/root/vm314-codex-one/bin:$PATH
+export MAX_JOBS=8
+export NINJAFLAGS=-j8
+export CMAKE_BUILD_PARALLEL_LEVEL=8
+export NVCC_THREADS=2
+```
+
+`MAX_JOBS`, `NINJAFLAGS`, and `CMAKE_BUILD_PARALLEL_LEVEL` cap Ninja/build-system
+workers at eight; `NVCC_THREADS=2` keeps the aggregate compiler thread budget at
+ sixteen per build. Verify `command -v ninja` and `ninja --version` before starting,
+and use a local build root such as `/tmp/qvq-jit-current/<fingerprint>` so concurrent
+extensions do not contend for generated objects or locks.
+
 ## Validate correctness
+
+### QVQ accuracy contract
+
+Treat QVQ quantization and QVQ inference as separate numerical contracts:
+
+- **Quantization kernels:** require 100% algorithmic accuracy against the trusted
+  PyTorch/CPU reference. The selected trellis states, packed words, bank IDs,
+  and quantization metadata must match exactly (`torch.equal`/bitwise equality
+  wherever the reference is deterministic). A faster result with a changed
+  path, code, or packed representation is a correctness failure; do not use an
+  error tolerance to waive a quantization mismatch.
+- **Inference kernels:** compare the CUDA output with the dequantized/reference
+  inference output for the identical packed tensors, inputs, dtype, shape, and
+  stream. The maximum absolute output drift must be `<= 2e-3` for every tested
+  case. Report max-absolute, mean-absolute, relative-L2, and the tested dtype,
+  shape, batch/token regime, and GPU. A case over `2e-3` fails even if aggregate
+  metrics or generated text appear acceptable.
+- Test both contracts on deterministic seeds, adversarial signs/magnitudes,
+  long reductions, smallest legal dimensions, non-divisible M/N/K tails, every
+  supported bit/layout branch, repeated calls, and each target architecture.
+  Quantization exactness is checked before inference drift; never hide a
+  quantization mismatch behind the inference tolerance.
 
 Cover:
 

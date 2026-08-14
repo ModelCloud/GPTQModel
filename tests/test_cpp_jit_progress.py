@@ -62,6 +62,37 @@ def test_default_jit_cuda_cflags_explicit_nvcc_threads_takes_precedence(monkeypa
     assert flags[flags.index("--threads") + 1] == "16"
 
 
+def test_default_jit_cuda_cflags_adds_cuda13_split_compile(monkeypatch):
+    monkeypatch.setattr("gptqmodel.utils.cpp.nvcc_version_at_least", lambda major, minor: True)
+    monkeypatch.delenv("GPTQMODEL_NVCC_SPLIT_COMPILE", raising=False)
+    flags = default_jit_cuda_cflags(include_split_compile=True)
+    assert "--split-compile=8" in flags
+
+
+def test_default_jit_cuda_cflags_skips_cuda13_flags_on_older_nvcc(monkeypatch):
+    monkeypatch.setattr("gptqmodel.utils.cpp.nvcc_version_at_least", lambda major, minor: False)
+    flags = default_jit_cuda_cflags(include_split_compile=True)
+    assert not any(flag.startswith("--split-compile=") for flag in flags)
+
+
+def test_default_jit_cuda_cflags_fast_compile_is_explicit(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_NVCC_FAST_COMPILE", "min")
+    flags = default_jit_cuda_cflags(include_fast_compile=True)
+    assert "--Ofast-compile=min" in flags
+
+
+def test_default_jit_cuda_cflags_rejects_invalid_split_compile(monkeypatch):
+    monkeypatch.setattr("gptqmodel.utils.cpp.nvcc_version_at_least", lambda major, minor: True)
+    monkeypatch.setenv("GPTQMODEL_NVCC_SPLIT_COMPILE", "many")
+    with pytest.raises(ValueError, match="non-negative integer"):
+        default_jit_cuda_cflags(include_split_compile=True)
+
+
+def test_default_jit_cuda_cflags_rejects_invalid_fast_compile():
+    with pytest.raises(ValueError, match="min, mid, max"):
+        default_jit_cuda_cflags(include_fast_compile=True, fast_compile="huge")
+
+
 class _FakeProgress:
     def __init__(self):
         self.current_iter_step = 0

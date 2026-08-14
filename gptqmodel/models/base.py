@@ -218,6 +218,10 @@ MODULE_TREE_FLAG_DOWN = "down"
 MODULE_TREE_FLAG_Q = "q"
 MODULE_TREE_FLAG_K = "k"
 MODULE_TREE_FLAG_V = "v"
+MODULE_TREE_FLAG_O = "o"
+MODULE_TREE_ATTENTION_FLAGS = frozenset(
+    {MODULE_TREE_FLAG_Q, MODULE_TREE_FLAG_K, MODULE_TREE_FLAG_V, MODULE_TREE_FLAG_O}
+)
 MODULE_TREE_EXPERT_FLAGS = frozenset({MODULE_TREE_FLAG_ROUTED, MODULE_TREE_FLAG_SHARED})
 MODULE_TREE_MOE_FLAGS = frozenset({MODULE_TREE_FLAG_MOE, *MODULE_TREE_EXPERT_FLAGS})
 MODULE_TREE_PROJECTION_FLAGS = frozenset(
@@ -966,6 +970,9 @@ class BaseQModel(nn.Module):
         validation_calibration: Optional[
             Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
         ] = None,
+        yaqa_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
         freeze_others: bool = True,
     ) -> Dict[str, List[Dict[str, str]]]:
@@ -974,6 +981,11 @@ class BaseQModel(nn.Module):
         `layer_scope` may be a layer index, slice, regex, or list of indices/regexes.
         Non-matching layers are frozen (excluded) so one layer can be quantized,
         saved, and later resumed via `requant` with a different config or calibration.
+
+        For QVQ YAQA rounding, `yaqa_calibration` optionally supplies an independent
+        dataset for the full-model Fisher/Sketch-B pass. If omitted, YAQA reuses
+        `calibration`; the ordinary activation-Hessian and replay stream is never
+        replaced by this YAQA-only dataset.
         """
 
         # Layer-scope dynamic overrides are temporary. Snapshot the original map so
@@ -1000,6 +1012,7 @@ class BaseQModel(nn.Module):
                 embed_quant_config=embed_quant_config,
                 embed_quant_mode=embed_quant_mode,
                 validation_calibration=validation_calibration,
+                yaqa_calibration=yaqa_calibration,
                 layer_scope=layer_scope,
                 freeze_others=freeze_others,
             )
@@ -1044,6 +1057,9 @@ class BaseQModel(nn.Module):
         embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         validation_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
+        yaqa_calibration: Optional[
             Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
         ] = None,
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
@@ -1135,6 +1151,8 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
                 preferred_backend = BACKEND.EXL3_EXLLAMA_V3
+            elif self.quantize_config.method == METHOD.QVQ:
+                preferred_backend = BACKEND.QVQ
             elif self.quantize_config.method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
             elif self.quantize_config.method == METHOD.FP8:
@@ -1144,10 +1162,12 @@ class BaseQModel(nn.Module):
             else:
                 preferred_backend = BACKEND.GPTQ_TORCH
 
-        if self.quantize_config.method == METHOD.EXL3:
+        if self.quantize_config.method == METHOD.QVQ:
+            if preferred_backend not in (BACKEND.AUTO, BACKEND.QVQ):
+                raise ValueError("QVQ quantization only supports BACKEND.AUTO or BACKEND.QVQ.")
+        elif self.quantize_config.method == METHOD.EXL3:
             if preferred_backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3):
                 raise ValueError("EXL3 quantization only supports BACKEND.AUTO or BACKEND.EXL3_EXLLAMA_V3.")
-
             if not torch.cuda.is_available():
                 raise ValueError("EXL3 quantization requires CUDA/HIP.")
 
@@ -1201,6 +1221,10 @@ class BaseQModel(nn.Module):
 
         if self.quantize_config.method == METHOD.EXL3:
             self.qlinear_kernel = ExllamaV3Linear
+        elif self.quantize_config.method == METHOD.QVQ:
+            from ..nn_modules.qlinear.qvq import QVQLinear
+
+            self.qlinear_kernel = QVQLinear
         else:
             self.qlinear_kernel = select_quant_linear(
                     bits=self.quantize_config.runtime_bits,
@@ -1271,6 +1295,7 @@ class BaseQModel(nn.Module):
             result = self._quantize_with_calibration(
                 calibration=calibration,
                 validation_calibration=validation_calibration,
+                yaqa_calibration=yaqa_calibration,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
                 batch_size=batch_size,
@@ -1605,7 +1630,6 @@ class BaseQModel(nn.Module):
             freeze_others=freeze_others,
         )
 
-
     def _capture_quantized_layer_dynamic(
         self,
     ) -> Dict[str, Dict[str, Any]]:
@@ -1640,7 +1664,12 @@ class BaseQModel(nn.Module):
 
             # Build effective config from the actual quantized module.
             override: Dict[str, Any] = {}
-            bits = int(getattr(module, "bits", base.bits))
+            # Preserve the installed module's public bit/rate contract exactly.
+            # Most quantizers expose integer bit widths, but QVQ also supports
+            # half-step rates (for example W2.5).  Coercing those rates to int
+            # corrupts the dynamic metadata used to allocate checkpoint
+            # buffers on reload.
+            bits = getattr(module, "bits", base.bits)
             group_size = int(getattr(module, "requested_group_size", getattr(module, "group_size", base.group_size)))
             desc_act = bool(getattr(module, "desc_act", base.desc_act))
             sym = bool(getattr(module, "sym", base.sym))
@@ -1683,6 +1712,7 @@ class BaseQModel(nn.Module):
         *,
         calibration,
         validation_calibration,
+        yaqa_calibration,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
@@ -1712,6 +1742,12 @@ class BaseQModel(nn.Module):
             "calculate_w_wq_diff": needs_lora,
         }
 
+        if yaqa_calibration is not None:
+            if self.quantize_config.method != METHOD.QVQ:
+                raise ValueError("`yaqa_calibration` is only supported for QVQ quantization.")
+            if self.quantize_config.rounding != "yaqa":
+                raise ValueError("`yaqa_calibration` requires QVQ `rounding='yaqa'`.")
+
         configured_preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
         analysis_enabled = any(isinstance(item, AnalysisConfig) for item in configured_preprocessors)
         planning_preprocessors = [item for item in configured_preprocessors if not isinstance(item, AnalysisConfig)]
@@ -1722,7 +1758,34 @@ class BaseQModel(nn.Module):
         if analysis_enabled:
             preprocessors.append(AnalysisProcessor(**args))
 
-        if self.quantize_config.method == METHOD.EXL3:
+        if self.quantize_config.method == METHOD.QVQ:
+            from ..looper.qvq_processor import QVQProcessor
+
+            if needs_lora:
+                raise NotImplementedError("QVQ quantization does not support adapter/EoRA generation.")
+            qvq_args = {
+                "tokenizer": self.tokenizer,
+                "qcfg": self.quantize_config,
+                "calibration": calibration,
+                "prepare_dataset_func": self.prepare_dataset,
+                "calibration_concat_size": calibration_concat_size,
+                "calibration_sort": calibration_sort,
+                "calibration_concat_separator": calibration_concat_separator,
+                "batch_size": batch_size,
+            }
+            if yaqa_calibration is not None:
+                qvq_args["yaqa_calibration"] = self.prepare_dataset(
+                    calibration_dataset=yaqa_calibration,
+                    calibration_dataset_concat_size=calibration_concat_size,
+                    calibration_dataset_sort=calibration_sort,
+                    batch_size=batch_size,
+                    calibration_data_min_length=10,
+                    calibration_concat_separator=calibration_concat_separator,
+                )
+            qvq_processor = QVQProcessor(**qvq_args)
+            qvq_processor.prepare_yaqa(self)
+            quantize_processor = preprocessors + [qvq_processor]
+        elif self.quantize_config.method == METHOD.EXL3:
             from ..looper.exllamav3_processor import EXL3Processor
 
             if needs_lora:
@@ -1833,10 +1896,11 @@ class BaseQModel(nn.Module):
         )
 
         with gc_context:
-            return module_looper.loop(
+            quant_log = module_looper.loop(
                 backend=backend,
                 fallback=self.quantize_config.fallback,
             )
+            return quant_log
 
     def _quantize_weight_only(
         self,
@@ -4222,10 +4286,18 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.EXL3, METHOD.PARO}:
+        if quant_method not in {
+            METHOD.GPTQ,
+            METHOD.GGUF,
+            METHOD.FP8,
+            METHOD.BITSANDBYTES,
+            METHOD.EXL3,
+            METHOD.QVQ,
+            METHOD.PARO,
+        }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/QVQ/PAROQUANT"
             )
             return None
 

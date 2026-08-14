@@ -18,6 +18,7 @@ import copy
 import logging
 import time
 from concurrent.futures import as_completed
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 import torch
@@ -433,24 +434,31 @@ def _capture_pristine_group_context(
         )
 
     pristine_replay_module = pristine_module if pristine_module is not None else module
-    pristine_outputs = _replay_layer_outputs(
-        looper,
-        module=pristine_replay_module,
-        processor=processor,
-        layer_inputs=clean_layer_inputs,
-        layer_input_kwargs=layer_input_kwargs,
-        position_ids=position_ids,
-        attention_masks=attention_masks,
-        cur_layer_device=cur_layer_device,
-        is_lm_head_module=is_lm_head_module,
-        shared_kv_cache_dict=shared_kv_cache_dict,
-        layer_index=layer_index,
-        layer_descriptor=layer_descriptor,
-        full=full,
-        log=log,
-        region_timer=region_timer,
-        replay_plan=None,
+    pristine_capture = getattr(processor, "pristine_quant_input_capture", None)
+    pristine_capture_context = (
+        pristine_capture(layer_index=layer_index)
+        if callable(pristine_capture)
+        else nullcontext()
     )
+    with pristine_capture_context:
+        pristine_outputs = _replay_layer_outputs(
+            looper,
+            module=pristine_replay_module,
+            processor=processor,
+            layer_inputs=clean_layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            layer_descriptor=layer_descriptor,
+            full=full,
+            log=log,
+            region_timer=region_timer,
+            replay_plan=None,
+        )
     receive_clean_layer_inputs = getattr(processor, "receive_clean_layer_inputs", None)
     if callable(receive_clean_layer_inputs):
         receive_clean_layer_inputs(

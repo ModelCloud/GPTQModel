@@ -21,6 +21,8 @@
 
 ## Latest News
 
+* 08/12/2026 `main`: Experimental QVQ adds clean-room YAQA v3 two-sided rounding, Sketch-B reference math, a diagnostic full-model real-Fisher collector, and a wider non-regressing tail-biting overlap search without changing planar payloads or inference kernels. YAQA was introduced by Albert Tseng, Zhaofeng Sun, and Christopher De Sa in [Model-Preserving Adaptive Rounding](https://arxiv.org/abs/2505.22988). Processor lifecycle integration remains guarded; see [the QVQ design](docs/qvq.md).
+* 08/11/2026 `main`: Experimental QVQ foundation for 1--8 bits: the QTIP reference math plus GPT-QModel's planar PGC16 codec, fixed production compander, and Torch/MPS/MLX/CUDA inference paths. QTIP is the trellis-coded quantization method introduced by Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa in the [NeurIPS 2024 Spotlight paper](https://arxiv.org/abs/2406.11235). The guarded RHT + BlockLDLQ/YAQA processor lifecycle is integrated; model-quality promotion gates remain pending. See [the QVQ design and attribution notes](docs/qvq.md).
 * 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
 * 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 08/03/2026 7.3.1 `main`: ⚡ Added AVX-512/AVX2 host-CPU Pangolin planar GEMV kernel for 3/5/6/7-bit `gptq_p` inference; see `pangolin_kernel_cpu.md` for design and benchmarks.
@@ -294,6 +296,7 @@ For an end-to-end example producing a public-dataset 128K-token mix, see
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
+* 🧪 Experimental QVQ W1--W8 foundation: QTIP reference math with a planar PGC16 codec, fixed production compander, YAQA v3 two-sided rounding, guarded full-model Sketch-B collection, and Torch/MPS/MLX/CUDA inference. QTIP was introduced by Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa in [QTIP: Quantization with Trellises and Incoherence Processing](https://arxiv.org/abs/2406.11235); YAQA was introduced by Albert Tseng, Zhaofeng Sun, and Christopher De Sa in [Model-Preserving Adaptive Rounding](https://arxiv.org/abs/2505.22988). The dedicated processor lifecycle is integrated, while model-quality promotion gates remain pending; see [docs/qvq.md](docs/qvq.md) for status, attribution, and the clean-room boundary.
 * ✨ Prism Bonsai `Q1_0_g128`, canonical `Q2_0`, and `PQ2_0` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPT-QModel normalizes the GGUF artifact internally for HF Transformers via its native GGUF runtime, and does not support Prism Bonsai quantization or export.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
@@ -391,7 +394,7 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, Torch |
-| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native Metal GPTQ quantization, Torch, FP8 Torch, MLX via conversion |
+| 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Native Metal GPTQ quantization, experimental planar QVQ MPS/MLX inference, Torch, FP8 Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
@@ -404,6 +407,16 @@ the eager MPS path for diagnosis.
 Set `GPTQMODEL_MPS_FUSED_PARAMS=0` to keep the Metal correction kernel while diagnosing fused scale discovery.
 Healthy MPS Hessian inverse-Cholesky factorization avoids redundant host status synchronizations and measures
 1.2–1.3x faster for 128–1024 columns with bitwise-identical factors. Set `GPTQMODEL_MPS_FAST_HESSIAN=0` for A/B diagnosis.
+
+The experimental QVQ Torch/MPS/MLX/CUDA paths implement QTIP-derived inference with GPT-QModel's planar PGC16 codec,
+optional learned model-level compander, and quantization-only YAQA v3 rounding. QTIP is the trellis-coded method
+introduced by Albert Tseng, Qingyao Sun, David Hou, and Christopher De Sa in the
+[QTIP paper](https://arxiv.org/abs/2406.11235). YAQA's full-model adaptive rounding was introduced by Albert Tseng,
+Zhaofeng Sun, and Christopher De Sa in [Model-Preserving Adaptive Rounding](https://arxiv.org/abs/2505.22988).
+GPT-QModel's planar checkpoint layout and Apple kernels are independent implementation choices. The diagnostic can
+collect full-model per-sequence real-Fisher factors while targeting only early layers. The guarded collector and
+dedicated RHT/rounding/trellis lifecycle are connected to the processor; model-quality promotion gates remain pending; see
+[docs/qvq.md](docs/qvq.md).
 
 
 ## Install

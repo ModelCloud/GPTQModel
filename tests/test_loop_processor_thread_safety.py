@@ -243,6 +243,27 @@ def test_device_memory_report_is_thread_safe():
     assert all("cuda" in r and "2G" in r for r in reports)
 
 
+def test_nvml_snapshot_prevents_cuda_device_smi_handle_subprocesses(monkeypatch):
+    """Direct NVML ownership must bypass Device-SMI's per-CUDA subprocess handles."""
+
+    p = _make_processor()
+    monkeypatch.setattr(p, "_discover_accelerator_devices", lambda: ["cuda:0", "cuda:1", "xpu:0"])
+    monkeypatch.setattr(
+        "gptqmodel.looper.loop_processor.cuda_memory_used_snapshot",
+        lambda: {"cuda:0": 1, "cuda:1": 2},
+    )
+    created = []
+
+    def fake_device(device_id):
+        created.append(device_id)
+        return MagicMock()
+
+    monkeypatch.setattr("gptqmodel.looper.loop_processor.Device", fake_device)
+    handles = p._init_device_smi_handles()
+    assert created == ["xpu:0"]
+    assert list(handles) == ["xpu:0"]
+
+
 def test_input_cache_methods_are_thread_safe():
     """receive_input_cache, receive_layer_inputs, and clear_cache_data are safe."""
 

@@ -18,6 +18,7 @@ recursive-include gptqmodel/exllamav3/util/hadamard_data *.txt
 include licenses/*
 include gptqmodel_ext/pack_block_cpu.cpp
 include gptqmodel_ext/floatx_cpu.cpp
+include gptqmodel_ext/diagnostic_metrics_cpu.cpp
 include gptqmodel_ext/marlin/generate_kernels.py
 include gptqmodel_ext/machete/generate.py
 recursive-exclude gptqmodel_ext __pycache__ *.pyc

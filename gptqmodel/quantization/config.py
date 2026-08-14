@@ -28,8 +28,36 @@ from .diagnostics import (
     normalize_quantization_diagnostics_mode,
 )
 from .fused_forward_config import FusedForwardConfig
+from .qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
+from .qvq_rates import QVQ_BITS, normalize_qvq_rate
+from .qvq_yaqa import YAQA_PAPER_MINIMUM_SEQUENCES, YAQA_PAPER_REGULARIZATION
+
 
 log = setup_logger()
+
+
+@dataclass
+class YaqaConfig:
+    """YAQA-v3 full-model Fisher collection controls."""
+
+    seed: int = 0
+    regularization: float = YAQA_PAPER_REGULARIZATION
+    minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
+
+    def __post_init__(self) -> None:
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise TypeError("YaqaConfig: `seed` must be an integer.")
+        if isinstance(self.regularization, bool) or not isinstance(self.regularization, (int, float)):
+            raise TypeError("YaqaConfig: `regularization` must be a real scalar.")
+        self.regularization = float(self.regularization)
+        if not math.isfinite(self.regularization) or self.regularization < 0:
+            raise ValueError("YaqaConfig: `regularization` must be finite and nonnegative.")
+        if (
+            isinstance(self.minimum_sequences, bool)
+            or not isinstance(self.minimum_sequences, int)
+            or self.minimum_sequences < 1
+        ):
+            raise ValueError("YaqaConfig: `minimum_sequences` must be a positive integer.")
 
 
 class _SharedTemporaryDirectory:
@@ -55,6 +83,7 @@ class _SharedTemporaryDirectory:
 
 def _create_temp_offload_dir() -> _SharedTemporaryDirectory:
     return _SharedTemporaryDirectory(prefix="gptqmodel_")
+
 
 _DECODER_TARGET_DTYPE_MAP = {
     "float16": torch.float16,
@@ -115,6 +144,7 @@ META_FIELD_FOEM_ENABLED = "foem"
 
 ADAPTER_FIELD = "adapter"
 
+
 # saved formats
 class FORMAT(str, Enum):
     """Checkpoint and runtime tensor layout identifiers."""
@@ -132,6 +162,8 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     QQQ = "qqq"
     EXL3 = "exl3"
+    QVQ = "qvq"
+    QVQ_V4 = "qvq_v4"
     MXFP4 = "mxfp4"
 
     GEMM = "gemm"
@@ -152,6 +184,7 @@ class METHOD(str, Enum):
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
+    QVQ = "qvq"
     PARO = "paroquant"
     MXFP4 = "mxfp4"
 
@@ -666,11 +699,19 @@ def _normalize_gguf_config_spec(
     return normalized_bits, normalized_format, bits_spec
 
 
-def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
+def _normalize_quant_bits(
+    bits: Union[int, float, str, GGUFBits],
+    format_value: Optional[Union[str, FORMAT]] = None,
+) -> Union[int, float, GGUFBits]:
     """Normalize generic bit fields into ints or structured GGUF specs."""
 
     if isinstance(format_value, str):
         format_value = _normalize_format(format_value)
+
+    if format_value in {FORMAT.QVQ, FORMAT.QVQ_V4}:
+        if isinstance(bits, GGUFBits):
+            raise ValueError("QuantizeConfig: GGUF bit encodings require `format=gguf`.")
+        return normalize_qvq_rate(bits)
 
     if isinstance(bits, GGUFBits):
         normalized = bits
@@ -695,6 +736,8 @@ def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: 
         raise ValueError(f"QuantizeConfig: `bits` must resolve to one of `{valid_bit_widths}`.")
 
     if format_value == FORMAT.GGUF and not isinstance(normalized, GGUFBits):
+        if not isinstance(normalized_width, int):
+            raise ValueError("QuantizeConfig: GGUF bit widths must be integers.")
         default_alias = _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH.get(normalized_width)
         if default_alias is None:
             raise ValueError(
@@ -729,6 +772,8 @@ def resolve_quant_format(
         return FORMAT.BITSANDBYTES
     if method == METHOD.EXL3:
         return FORMAT.EXL3
+    if method == METHOD.QVQ:
+        return FORMAT.QVQ
     if method == METHOD.PARO:
         return FORMAT.PAROQUANT
     if method == METHOD.MXFP4:
@@ -765,7 +810,7 @@ def _looks_like_gguf_bits(bits: Any) -> bool:
     return normalized in _GGUF_BITS_ALIAS_INFO
 
 
-def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
+def quant_bits_width(bits: Union[int, float, str, GGUFBits]) -> int:
     """Return the integer width represented by a quant bits field."""
 
     if isinstance(bits, float):
@@ -773,10 +818,14 @@ def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
             raise ValueError("QuantizeConfig: EXL3 bits per weight must be greater than 0.")
         return max(1, int(math.floor(bits)))
     normalized = _normalize_quant_bits(bits)
-    return normalized.bits if isinstance(normalized, GGUFBits) else normalized
+    if isinstance(normalized, GGUFBits):
+        return normalized.bits
+    if isinstance(normalized, float):
+        return max(1, int(math.floor(normalized)))
+    return normalized
 
 
-def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
+def serialize_quant_bits(bits: Union[int, float, str, GGUFBits]) -> Union[int, float, str]:
     """Serialize a quant bits field for JSON-compatible output payloads."""
 
     if isinstance(bits, float):
@@ -952,6 +1001,7 @@ def _normalize_bitsandbytes_block_size(value: Optional[int]) -> int:
             f"BitsAndBytesConfig: `block_size` must be one of {{{supported}}}, got `{value}`."
         )
     return normalized
+
 
 @dataclass
 class SmoothMethod:
@@ -1646,9 +1696,6 @@ class LengthAwareConfig:
         }
 
 
-
-
-
 @dataclass
 class HessianConfig:
     """Controls for chunked Hessian accumulation during GPTQ calibration."""
@@ -2164,6 +2211,10 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.EXL3: {
         FORMAT.EXL3,
     },
+    METHOD.QVQ: {
+        FORMAT.QVQ,
+        FORMAT.QVQ_V4,
+    },
     METHOD.GGUF: {
         FORMAT.GGUF,
     },
@@ -2220,6 +2271,7 @@ BITSANDBYTES_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 EXL3_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.EXL3,
 )
+QVQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (FORMAT.QVQ, FORMAT.QVQ_V4)
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
@@ -2240,6 +2292,8 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.FP8: METHOD.FP8,
     FORMAT.BITSANDBYTES: METHOD.BITSANDBYTES,
     FORMAT.EXL3: METHOD.EXL3,
+    FORMAT.QVQ: METHOD.QVQ,
+    FORMAT.QVQ_V4: METHOD.QVQ,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
@@ -2251,7 +2305,8 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.MXFP4: METHOD.MXFP4,
 }
 
-# inference only methods should go here
+# Inference-only methods should go here. QVQ owns a dedicated calibration
+# processor and must never be routed through the affine GPTQ processor.
 QUANTIZE_BLACK_LIST = {}
 
 # compat
@@ -2283,6 +2338,7 @@ DYNAMIC_FIELD_SYNONYMS = {}
 # Sentinel used by the dynamic override cache to indicate no pattern matched.
 _DYNAMIC_NO_MATCH = object()
 
+
 @dataclass
 class _DynamicResolutionCacheEntry:
     # Keep the owner alive while its id is a cache key. Without this reference,
@@ -2302,6 +2358,7 @@ _DYNAMIC_CACHE_MAX_OVERRIDES = 65_536
 _DYNAMIC_CACHE_LOCK = threading.RLock()
 _DYNAMIC_CACHE: OrderedDict[int, _DynamicResolutionCacheEntry] = OrderedDict()
 _DYNAMIC_CACHE_OVERRIDE_COUNT = 0
+
 
 def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     """If `raw` is a regex that matches a single literal string, return that string."""
@@ -2338,14 +2395,24 @@ def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     return "".join(out)
 
 
-def _build_dynamic_cache_entry(dynamic: Dict[str, Dict[str, Any]]) -> _DynamicResolutionCacheEntry:
+def _build_dynamic_cache_entry(
+    dynamic: Dict[str, Dict[str, Any]],
+) -> _DynamicResolutionCacheEntry:
     patterns = []
     exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
     regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
     all_exact = True
     for index, (pattern, source_overrides) in enumerate(list(dynamic.items())):
-        overrides = dict(source_overrides)
-        is_negative = pattern.startswith("-:")
+        is_negative = pattern.startswith("-:") or source_overrides is False
+        if source_overrides is False:
+            overrides = {}
+        elif isinstance(source_overrides, dict):
+            overrides = dict(source_overrides)
+        else:
+            raise TypeError(
+                f"QuantizeConfig: dynamic override `{pattern}` must be a dictionary or False, "
+                f"got {type(source_overrides).__name__}."
+            )
         raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
         exact_literal = _extract_literal_regex_pattern(raw)
         if exact_literal is None:
@@ -2358,7 +2425,10 @@ def _build_dynamic_cache_entry(dynamic: Dict[str, Dict[str, Any]]) -> _DynamicRe
         else:
             compiled = None
             if exact_literal not in exact_lookup:
-                exact_lookup[exact_literal] = (index, False if is_negative else overrides)
+                exact_lookup[exact_literal] = (
+                    index,
+                    False if is_negative else overrides,
+                )
         patterns.append((is_negative, compiled, overrides, exact_literal, index))
     return _DynamicResolutionCacheEntry(
         dynamic=dynamic,
@@ -2412,6 +2482,7 @@ def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool
 
     return _get_dynamic_cache_entry(dynamic).patterns
 
+
 def _resolve_dynamic_override(
     dynamic: Dict[str, Dict[str, Any]],
     module_name: str,
@@ -2460,6 +2531,7 @@ def _resolve_dynamic_override(
             _DYNAMIC_CACHE.move_to_end(cache_key)
             _trim_dynamic_cache_locked()
     return matched
+
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
@@ -2682,6 +2754,7 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
 
     return sub_value
 
+
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     if isinstance(value, str):
         value = value.lower()
@@ -2695,6 +2768,10 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.BITSANDBYTES
         if value == FORMAT.EXL3:
             return METHOD.EXL3
+        if value == FORMAT.QVQ:
+            return METHOD.QVQ
+        if value == FORMAT.QVQ_V4:
+            return METHOD.QVQ
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
         if value == FORMAT.MXFP4:
@@ -3332,6 +3409,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.EXL3:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.EXL3}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
+    elif target_cls is QVQConfig:
+        expected_method = METHOD.QVQ
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format not in {FORMAT.QVQ, FORMAT.QVQ_V4}:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QVQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.QVQ
     elif target_cls is ParoConfig:
         expected_method = METHOD.PARO
         # ParoQuant does not implement GPTQ activation ordering. Accept legacy
@@ -3706,6 +3796,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     def default_desc_act(self) -> bool:
         return True
 
+    def _bits_in_choices(self, valid_bits: List[Union[int, float]]) -> bool:
+        """Return whether the normalized bit field belongs to this format's choices."""
+
+        return quant_bits_width(self.bits) in valid_bits
+
     def _ensure_offload_temp_dir(self) -> None:
         if self.offload_to_disk and not self.offload_to_disk_path:
             self._offload_temp_dir = _create_temp_offload_dir()
@@ -3727,39 +3822,42 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             )
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM, FORMAT.BITBLAS, FORMAT.LLM_AWQ]:
+        if self.quant_method == METHOD.AWQ and self.format not in [
+            FORMAT.MARLIN,
+            FORMAT.GEMV,
+            FORMAT.GEMV_FAST,
+            FORMAT.GEMM,
+            FORMAT.BITBLAS,
+            FORMAT.LLM_AWQ,
+        ]:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
             format_family = self._resolve_checkpoint_format()
 
         valid_formats = self.supported_export_formats()
         if format_family not in valid_formats:
-            raise ValueError(
-                f"{self.__class__.__name__}: unsupported export `format` `{format_family}`."
-            )
+            raise ValueError(f"{self.__class__.__name__}: unsupported export `format` `{format_family}`.")
 
         self.fallback = _normalize_fallback(self.fallback)
 
         valid_bit_widths = fields_info[0].metadata["choices"]
-        if quant_bits_width(self.bits) not in valid_bit_widths:
+        if not self._bits_in_choices(valid_bit_widths):
             raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
 
         # 5/6/7-bit GPTQ only exists in the planar (split-plane) layout, which is
         # a distinct checkpoint format from the continuous gptq/gptq_v2 layouts.
         # Per-layer dynamic bit overrides count too: one 5/6/7-bit layer makes
         # the checkpoint planar.
-        planar_only_bits = quant_bits_width(self.bits) in (5, 6, 7)
-        if not planar_only_bits and self.dynamic is not None:
-            planar_only_bits = any(
-                isinstance(layer_dict, dict) and quant_bits_width(layer_dict.get("bits", self.bits)) in (5, 6, 7)
-                for layer, layer_dict in self.dynamic.items()
-                if not layer.startswith('-')
-            )
-        if (
-            self.method == METHOD.GPTQ
-            and format_family in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
-            and planar_only_bits
-        ):
+        planar_only_bits = False
+        if self.method == METHOD.GPTQ:
+            planar_only_bits = quant_bits_width(self.bits) in (5, 6, 7)
+            if not planar_only_bits and self.dynamic is not None:
+                planar_only_bits = any(
+                    isinstance(layer_dict, dict) and quant_bits_width(layer_dict.get("bits", self.bits)) in (5, 6, 7)
+                    for layer, layer_dict in self.dynamic.items()
+                    if not layer.startswith("-")
+                )
+        if format_family in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and planar_only_bits:
             log.info(
                 f"QuantizeConfig: 5/6/7-bit layers use the planar layout; auto fix `format` to `{FORMAT.GPTQ_P}`."
             )
@@ -3768,8 +3866,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         if self.dynamic is not None:
             self.dynamic = {
-                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},
-                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
+                **{k: v for k, v in self.dynamic.items() if k.startswith("-")},
+                **{k: v for k, v in self.dynamic.items() if not k.startswith("-")},
             }
 
             for layer, layer_dict in self.dynamic.items():
@@ -3803,7 +3901,9 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
         if self.rotation and self.offload_to_disk:
-            log.warn(f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload.")
+            log.warn(
+                f"{self.__class__.__name__}: `rotation` is incompatible with `offload_to_disk`; disabling disk offload."
+            )
             self.offload_to_disk = False
 
         self._ensure_offload_temp_dir()
@@ -3825,7 +3925,9 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             try:
                 self.weight_only_quant_threads = int(self.weight_only_quant_threads)
             except (TypeError, ValueError) as exc:
-                raise ValueError("QuantizeConfig: `weight_only_quant_threads` must be a positive integer or None.") from exc
+                raise ValueError(
+                    "QuantizeConfig: `weight_only_quant_threads` must be a positive integer or None."
+                ) from exc
             if self.weight_only_quant_threads < 1:
                 raise ValueError("QuantizeConfig: `weight_only_quant_threads` must be a positive integer or None.")
 
@@ -3837,10 +3939,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 else:
                     # Import here to avoid circular import
                     from ..utils.looper_helpers import _canonical_device
+
                     self.calibration_data_device = _canonical_device(torch.device(self.calibration_data_device))
             elif isinstance(self.calibration_data_device, torch.device):
                 # Also normalize when passed as torch.device object
                 from ..utils.looper_helpers import _canonical_device
+
                 self.calibration_data_device = _canonical_device(self.calibration_data_device)
 
     def __deepcopy__(self, memo):
@@ -4001,7 +4105,9 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 if format not in valid_formats:
                     raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
             if checkpoint_format_hint is not None or serialized_format is not None:
-                raise ValueError("QuantizeConfig: Conflicting quantization format passed in manually and also exists in model config.")
+                raise ValueError(
+                    "QuantizeConfig: Conflicting quantization format passed in manually and also exists in model config."
+                )
         elif checkpoint_format_hint is None and serialized_format is None:
             format_auto_inferred = True
 
@@ -4071,7 +4177,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                         )
                     except ValueError:
                         format_hint = None
-                if serialized_format_hint in {FORMAT.GGUF, FORMAT.FP8, FORMAT.BITSANDBYTES} or format_hint in {
+                if serialized_format_hint in {
+                    FORMAT.GGUF,
+                    FORMAT.FP8,
+                    FORMAT.BITSANDBYTES,
+                } or format_hint in {
                     FORMAT.GGUF,
                     FORMAT.FP8,
                     FORMAT.BITSANDBYTES,
@@ -4167,12 +4277,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 if normalized_key not in normalized and meta_key in meta_payload:
                     normalized[normalized_key] = meta_payload.get(meta_key)
 
-        target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
+        target_cls = (
+            cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
+        )
         target_field_names = {config_field.name for config_field in fields(target_cls) if config_field.init}
         if normalized.get("adjacent_model") is not None and "adjacent_model" not in target_field_names:
-            raise ValueError(
-                "QuantizeConfig: `adjacent_model` currently supports GPTQ and AWQ quantization only."
-            )
+            raise ValueError("QuantizeConfig: `adjacent_model` currently supports GPTQ and AWQ quantization only.")
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
         if target_cls is RTNConfig:
             normalized = _normalize_rtn_kwargs(normalized)
@@ -4195,7 +4305,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         if resolved_format_family in {FORMAT.BITBLAS, FORMAT.BITSANDBYTES}:
             normalized["desc_act"] = False
 
-        if "sym" not in normalized and target_cls not in {GGUFConfig, FP8Config, BitsAndBytesConfig, EXL3Config}:
+        if "sym" not in normalized and target_cls not in {
+            GGUFConfig,
+            FP8Config,
+            BitsAndBytesConfig,
+            EXL3Config,
+            QVQConfig,
+        }:
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
@@ -5221,6 +5337,7 @@ class FP8Config(PreProcessorConfig):
     def uses_weight_only_lifecycle(self) -> bool:
         return True
 
+
 @dataclass
 class BitsAndBytesConfig(PreProcessorConfig):
     bits: int = field(default=4, metadata={"choices": [4, 8]})
@@ -5348,6 +5465,7 @@ class BitsAndBytesConfig(PreProcessorConfig):
     @bnb_compress_statistics.setter
     def bnb_compress_statistics(self, value: bool) -> None:
         self.compress_statistics = bool(value)
+
 
 @dataclass
 class EXL3Config(BaseQuantizeConfig):
@@ -5508,6 +5626,327 @@ class EXL3Config(BaseQuantizeConfig):
             head_bits,
         )
 
+
+@dataclass
+class OutputAlignConfig:
+    """Offline decoder-layer output alignment for fixed QVQ trellises.
+
+    Supplying this object opts into the additional calibration stage. ``None``
+    on :class:`QVQConfig` is the default-disabled control and remains bitwise
+    identical to the normal QVQ lifecycle.
+    """
+
+    learning_rate: float = 1e-5
+    epochs: int = 1
+    optimizer: str = "adam"
+    weight_decay: float = 0.0
+    maximum_train_batches: int = 32
+    maximum_validation_batches: int = 16
+    validation_fraction: float = 0.2
+    minimum_relative_improvement: float = 0.0
+    # QTIP derives every input Hessian from the untouched dense model before
+    # committing blockwise corrections. Keep that contract inside the
+    # default-disabled output-alignment experiment instead of mixing later
+    # layers with activations already perturbed by earlier QVQ layers.
+    pristine_hessian: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pristine_hessian, bool):
+            raise TypeError("QVQ output alignment `pristine_hessian` must be a boolean.")
+
+        if isinstance(self.learning_rate, bool) or not isinstance(self.learning_rate, (int, float)):
+            raise TypeError("QVQ output alignment `learning_rate` must be a real scalar.")
+        self.learning_rate = float(self.learning_rate)
+        if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("QVQ output alignment `learning_rate` must be finite and positive.")
+
+        if not isinstance(self.optimizer, str):
+            raise TypeError("QVQ output alignment `optimizer` must be a string.")
+        self.optimizer = self.optimizer.strip().lower()
+        if self.optimizer not in {"adam", "adamw"}:
+            raise ValueError("QVQ output alignment `optimizer` must be `adam` or `adamw`.")
+        if isinstance(self.weight_decay, bool) or not isinstance(self.weight_decay, (int, float)):
+            raise TypeError("QVQ output alignment `weight_decay` must be a real scalar.")
+        self.weight_decay = float(self.weight_decay)
+        if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
+            raise ValueError("QVQ output alignment `weight_decay` must be finite and nonnegative.")
+
+        for field_name in ("epochs", "maximum_train_batches", "maximum_validation_batches"):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"QVQ output alignment `{field_name}` must be a positive integer.")
+
+        for field_name, upper_bound in (
+            ("validation_fraction", 1.0),
+            ("minimum_relative_improvement", None),
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"QVQ output alignment `{field_name}` must be a real scalar.")
+            value = float(value)
+            if not math.isfinite(value) or value < 0 or (upper_bound is not None and (value <= 0 or value >= upper_bound)):
+                bound = " in `(0, 1)`" if upper_bound is not None else " finite and nonnegative"
+                raise ValueError(f"QVQ output alignment `{field_name}` must be{bound}.")
+            setattr(self, field_name, value)
+
+
+def _normalize_qvq_output_alignment_config(
+    value: Optional[Union[OutputAlignConfig, Dict[str, Any]]],
+) -> Optional[OutputAlignConfig]:
+    if value is None:
+        return None
+    if isinstance(value, OutputAlignConfig):
+        value.__post_init__()
+        return value
+    if isinstance(value, dict):
+        return OutputAlignConfig(**value)
+    raise TypeError("QVQConfig: `output_alignment` must be an OutputAlignConfig, dictionary, or None.")
+
+
+@dataclass
+class QVQConfig(BaseQuantizeConfig):
+    """QVQ trellis-code configuration.
+
+    The planar-only contract uses GPT-QModel's versioned PGC16 state decoder.
+    It is deliberately separate from GPTQ's affine groupwise tensor layout:
+    ``bits`` is the trellis rate K, not an integer weight code.
+    """
+
+    bits: float = field(default=2, metadata={"choices": list(QVQ_BITS)})
+    method: METHOD = field(default=METHOD.QVQ)
+    format: FORMAT = field(default=FORMAT.QVQ)
+    group_size: int = field(default=-1)
+    # Remove GPTQ activation ordering from QVQ's dataclass/config schema. Some
+    # generic loader paths still read the class-level fixed-false capability.
+    desc_act: ClassVar[bool] = False
+    sym: bool = field(default=True)
+    pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
+
+    codebook: str = field(default=PGC16_CODEBOOK_VERSION)
+    trellis_window: int = field(default=16)
+    vector_size: int = field(default=2)
+    # Opt-in V4 bank count. Four rate-keyed banks add a per-tile selector to
+    # the serialized payload; the default remains the single canonical bank.
+    bank_count: int = field(default=1)
+    # Explicit held-out propagation gate. Callers must provide disjoint
+    # module inputs/targets through the lifecycle attachment; never inferred
+    # from calibration or benchmark rows.
+    # None means use the processor's default automatic gate for banked V4
+    # Block-LDLQ. False is an explicit opt-out for A/B comparisons; True is an
+    # explicit request and still requires a supplied/derived gate.
+    propagated_bank_selection: Optional[bool] = field(default=None)
+    tile_rows: int = field(default=16)
+    tile_cols: int = field(default=16)
+    rounding: str = field(default="block_ldlq")
+    yaqa: YaqaConfig = field(default_factory=YaqaConfig)
+    incoherence: str = field(default="rht")
+    module_scale_search: bool = field(default=False)
+    output_channel_scale_optimization: bool = field(default=False)
+    viterbi_objective: str = field(default="euclidean")
+    tail_biting_candidates: int = field(default=1)
+    viterbi_minimum_proxy_improvement: float = field(default=0.0)
+    output_alignment: Optional[OutputAlignConfig] = field(default=None)
+    tensor_storage: Optional[Dict[str, Any]] = field(default=None)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.QVQ,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return QVQ_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def _bits_in_choices(self, valid_bits: List[Union[int, float]]) -> bool:
+        """Validate the exact planar rate instead of its floored storage width."""
+
+        return self.bits in valid_bits
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        if not isinstance(layer_dict, dict):
+            return
+
+        del valid_bit_widths, checkpoint_format
+        unsupported = set(layer_dict) - {"bits"}
+        if unsupported:
+            raise ValueError(
+                f"QVQConfig: layer `{layer_name}` only supports a `bits` override; got {sorted(unsupported)}."
+            )
+        if "bits" in layer_dict:
+            layer_bits = _normalize_quant_bits(layer_dict["bits"], format_value=FORMAT.QVQ)
+            if layer_bits not in QVQ_BITS:
+                raise ValueError(
+                    f"QVQConfig: layer `{layer_name}` only supports integer or half-integer rates from 1 through 8."
+                )
+            if self.format == FORMAT.QVQ_V4 and layer_bits > 4:
+                raise ValueError(
+                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v4` only supports rates W1 through W4."
+                )
+            layer_dict["bits"] = layer_bits
+
+    def __post_init__(self):
+        requested_group_size = self.group_size
+        requested_sym = self.sym
+        requested_pack_dtype = _normalize_pack_dtype(self.pack_dtype)
+        super().__post_init__()
+
+        if self.bits not in QVQ_BITS:
+            raise ValueError(
+                "QVQConfig: `bits` must be an integer or half-integer in `[1, 8]` for the PGC16 bitshift trellis."
+            )
+        if requested_group_size != -1:
+            raise ValueError("QVQConfig: `group_size` is not part of the trellis format; keep it at `-1`.")
+        if requested_sym is not True:
+            raise ValueError("QVQConfig: affine asymmetric quantization is not part of the QVQ format.")
+        if requested_pack_dtype != torch.int32:
+            raise ValueError("QVQConfig: the planar trellis stream requires `pack_dtype=torch.int32`.")
+
+        if self.format == FORMAT.QVQ_V4:
+            if self.bits > 4:
+                raise ValueError("QVQConfig: `format=qvq_v4` supports only rates W1 through W4.")
+            self.vector_size = 4
+
+        self.codebook = str(self.codebook).strip().lower()
+        pgc16_levels_for_version(self.codebook)
+        if not isinstance(self.rounding, str):
+            raise TypeError("QVQConfig: `rounding` must be a string.")
+        self.rounding = self.rounding.strip().lower()
+        if self.rounding not in {"block_ldlq", "yaqa"}:
+            raise ValueError("QVQConfig: `rounding` must be `block_ldlq` or `yaqa`.")
+        if isinstance(self.yaqa, dict):
+            self.yaqa = YaqaConfig(**self.yaqa)
+        elif isinstance(self.yaqa, YaqaConfig):
+            self.yaqa.__post_init__()
+        else:
+            raise TypeError("QVQConfig: `yaqa` must be a YaqaConfig or dictionary.")
+        self.incoherence = str(self.incoherence).strip().lower()
+        if not isinstance(self.module_scale_search, bool):
+            raise TypeError("QVQConfig: `module_scale_search` must be boolean.")
+        if not isinstance(self.output_channel_scale_optimization, bool):
+            raise TypeError("QVQConfig: `output_channel_scale_optimization` must be boolean.")
+        if not isinstance(self.viterbi_objective, str):
+            raise TypeError("QVQConfig: `viterbi_objective` must be a string.")
+        self.viterbi_objective = self.viterbi_objective.strip().lower()
+        if self.viterbi_objective not in {"euclidean", "hessian_diagonal"}:
+            raise ValueError("QVQConfig: `viterbi_objective` must be `euclidean` or `hessian_diagonal`.")
+        if (
+            isinstance(self.tail_biting_candidates, bool)
+            or not isinstance(self.tail_biting_candidates, int)
+            or self.tail_biting_candidates < 1
+        ):
+            raise ValueError("QVQConfig: `tail_biting_candidates` must be a positive integer.")
+        if isinstance(self.viterbi_minimum_proxy_improvement, bool) or not isinstance(
+            self.viterbi_minimum_proxy_improvement, (int, float)
+        ):
+            raise TypeError("QVQConfig: `viterbi_minimum_proxy_improvement` must be a real scalar.")
+        self.viterbi_minimum_proxy_improvement = float(self.viterbi_minimum_proxy_improvement)
+        if not math.isfinite(self.viterbi_minimum_proxy_improvement) or self.viterbi_minimum_proxy_improvement < 0:
+            raise ValueError("QVQConfig: `viterbi_minimum_proxy_improvement` must be finite and nonnegative.")
+        if self.viterbi_minimum_proxy_improvement > 0 and self.viterbi_objective != "hessian_diagonal":
+            raise ValueError("QVQConfig: `viterbi_minimum_proxy_improvement` requires `hessian_diagonal` objective.")
+        self.output_alignment = _normalize_qvq_output_alignment_config(self.output_alignment)
+        if self.output_alignment is not None and self.lm_head:
+            raise ValueError("QVQ output alignment currently supports decoder layers, not `lm_head` quantization.")
+        if self.rounding == "yaqa" and self.output_channel_scale_optimization:
+            raise ValueError("QVQConfig: YAQA does not support independent output-channel scale optimization.")
+        if self.rounding == "yaqa" and self.module_scale_search:
+            raise ValueError("QVQConfig: YAQA does not support input-Hessian-only module-scale search.")
+        if self.rounding == "yaqa" and self.viterbi_objective != "euclidean":
+            raise ValueError("QVQConfig: YAQA requires `viterbi_objective='euclidean'`.")
+        if self.rounding == "yaqa" and self.lm_head:
+            raise ValueError("QVQConfig: YAQA does not support quantizing the language-model head.")
+        canonical_fields = {
+            "trellis_window": (self.trellis_window, 16),
+            "tile_rows": (self.tile_rows, 16),
+            "tile_cols": (self.tile_cols, 16),
+            "incoherence": (self.incoherence, "rht"),
+        }
+        for field_name, (actual, expected) in canonical_fields.items():
+            if actual != expected:
+                raise ValueError(
+                    f"QVQConfig: QVQ integration requires `{field_name}={expected!r}`, got `{actual!r}`."
+                )
+        if self.vector_size not in (2, 4) or (self.vector_size == 4 and self.format != FORMAT.QVQ_V4):
+            raise ValueError("QVQConfig: `vector_size=4` requires `format=qvq_v4`.")
+        if self.vector_size == 4 and self.bits > 4:
+            raise ValueError("QVQConfig: `vector_size=4` supports only rates W1 through W4.")
+        if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 4):
+            raise ValueError("QVQConfig: `bank_count` must be 1 or 4.")
+        if self.bank_count == 4 and self.format != FORMAT.QVQ_V4:
+            raise ValueError("QVQConfig: `bank_count=4` requires `format=qvq_v4`.")
+        if self.bank_count == 4 and (self.module_scale_search or self.output_channel_scale_optimization):
+            raise ValueError("QVQConfig: four-bank selection currently excludes scale-search controls.")
+        if self.propagated_bank_selection is not None and not isinstance(self.propagated_bank_selection, bool):
+            raise TypeError("QVQConfig: `propagated_bank_selection` must be boolean or None.")
+        if self.propagated_bank_selection is True and self.bank_count != 4:
+            raise ValueError("QVQConfig: propagated bank selection requires `bank_count=4`.")
+        if self.propagated_bank_selection is True and self.rounding != "block_ldlq":
+            raise ValueError("QVQConfig: propagated bank selection requires `rounding='block_ldlq'`.")
+
+        if self.tensor_storage is not None:
+            if not isinstance(self.tensor_storage, dict):
+                raise ValueError("QVQConfig: `tensor_storage` must be a dictionary when provided.")
+            allowed_tensors = {"trellis", "SU", "SV", "bias", "bank_ids"}
+            for module_name, tensors in self.tensor_storage.items():
+                if not isinstance(tensors, dict):
+                    raise ValueError(f"QVQConfig: tensor storage for `{module_name}` must be a dictionary.")
+                unexpected = set(tensors) - allowed_tensors
+                if unexpected:
+                    raise ValueError(
+                        f"QVQConfig: tensor storage for `{module_name}` has unexpected tensors: {sorted(unexpected)}."
+                    )
+                has_selector = "bank_ids" in tensors
+                if self.bank_count == 4 and not has_selector:
+                    raise ValueError(f"QVQConfig: banked module `{module_name}` is missing `bank_ids` selectors.")
+                if self.bank_count == 1 and has_selector:
+                    raise ValueError(f"QVQConfig: canonical module `{module_name}` cannot contain `bank_ids` selectors.")
+
+        self.group_size = -1
+        self.sym = True
+        self.pack_dtype = torch.int32
+
+    def calculate_bits_per_weight(self):
+        log.info(
+            "Estimated Quantization BPW (bits per weight): %s bpw for the QVQ planar transition payload",
+            self.bits,
+        )
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out.pop("desc_act", None)
+        out["sym"] = True
+        out["codebook"] = self.codebook
+        out["trellis_window"] = self.trellis_window
+        out["vector_size"] = self.vector_size
+        out["bank_count"] = self.bank_count
+        out["propagated_bank_selection"] = self.propagated_bank_selection
+        out["tile_rows"] = self.tile_rows
+        out["tile_cols"] = self.tile_cols
+        out["rounding"] = self.rounding
+        out["yaqa"] = None if self.yaqa is None else asdict(self.yaqa)
+        out["incoherence"] = self.incoherence
+        out["module_scale_search"] = self.module_scale_search
+        out["output_channel_scale_optimization"] = self.output_channel_scale_optimization
+        out["viterbi_objective"] = self.viterbi_objective
+        out["tail_biting_candidates"] = self.tail_biting_candidates
+        out["viterbi_minimum_proxy_improvement"] = self.viterbi_minimum_proxy_improvement
+        out["output_alignment"] = None if self.output_alignment is None else asdict(self.output_alignment)
+        out["tensor_storage"] = self.tensor_storage
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "codebook_version": self.codebook,
+            "vector_size": self.vector_size,
+            "bank_count": self.bank_count,
+        }
+
+
 @dataclass
 class RTNConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.GPTQ)
@@ -5657,6 +6096,7 @@ class GGUFConfig(PreProcessorConfig):
 
     def uses_weight_only_lifecycle(self) -> bool:
         return True
+
 
 def clone_weight_only_config_for_module(
     qcfg: Union[RTNConfig, GGUFConfig, FP8Config, BitsAndBytesConfig],
@@ -5915,10 +6355,16 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return RTNConfig
     if method == METHOD.FP8 or format_value == FORMAT.FP8 or _looks_like_fp8_fmt(fp8_storage_fmt):
         return FP8Config
-    if method == METHOD.BITSANDBYTES or format_value == FORMAT.BITSANDBYTES or _looks_like_bitsandbytes_format(raw_format_value):
+    if (
+        method == METHOD.BITSANDBYTES
+        or format_value == FORMAT.BITSANDBYTES
+        or _looks_like_bitsandbytes_format(raw_format_value)
+    ):
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3Config
+    if method == METHOD.QVQ or format_value in (FORMAT.QVQ, FORMAT.QVQ_V4):
+        return QVQConfig
     if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
         return ParoConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
@@ -5947,6 +6393,7 @@ def _known_quantize_config_field_names() -> set[str]:
         FP8Config,
         BitsAndBytesConfig,
         EXL3Config,
+        QVQConfig,
         RTNConfig,
         GGUFConfig,
         MXFP4Config,

@@ -1492,17 +1492,18 @@ class ModuleLooper():
         )
 
     def loop(self, fallback=None, **kwargs):
-        """Run the quantization loop under the TF32 guard."""
+        """Run quantization while transactionally restoring model cache policy."""
 
         config = self.gptq_model.model.config
         had_use_cache = hasattr(config, "use_cache")
-        original_use_cache = getattr(config, "use_cache", None)
+        previous_use_cache = getattr(config, "use_cache", None)
+        config.use_cache = False
         try:
             with tf32_high_precision_guard():
                 return self._loop_impl(fallback=fallback, **kwargs)
         finally:
             if had_use_cache:
-                config.use_cache = original_use_cache
+                config.use_cache = previous_use_cache
             elif hasattr(config, "use_cache"):
                 delattr(config, "use_cache")
 
@@ -1563,8 +1564,6 @@ class ModuleLooper():
             elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default=None) is None:
                 self.gptq_model.quantize_config.dynamic[self.gptq_model.lm_head] = lm_head_quant_config
 
-        forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
-        self.gptq_model.model.config.use_cache = False
         layers, layer_names = get_layers_with_prefixes(
             self.gptq_model.model,
             self.gptq_model.extract_layers_node(),
@@ -1759,8 +1758,6 @@ class ModuleLooper():
 
         if region_timer is not None:
             region_timer.flush()
-
-        self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         return total_log
 

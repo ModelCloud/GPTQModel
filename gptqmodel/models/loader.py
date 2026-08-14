@@ -68,7 +68,9 @@ from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
 from ..utils.model import (
+    _checkpoint_quantized_module_names,
     _checkpoint_tensor_keys,
+    _quantized_weight_suffix,
     auto_dtype,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
@@ -116,6 +118,14 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
         return
     supported = ", ".join(f"FORMAT.{item.name}" for item in sorted(supported_formats, key=lambda item: item.name))
     raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
+
+
+def _external_preload_backend(backend: BACKEND, method: METHOD, format_code: FORMAT) -> BACKEND:
+    """Select the Torch shell that owns checkpoint tensors before external conversion."""
+
+    if backend == BACKEND.MLX and method == METHOD.QVQ and format_code in (FORMAT.QVQ, FORMAT.QVQ_V4):
+        return BACKEND.QVQ
+    return backend
 
 
 def _external_runtime_device_kwargs(
@@ -488,6 +498,18 @@ def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype
 
     log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
     return torch.float16
+
+
+def _checkpoint_load_dtype(*, format_code: FORMAT, dtype):
+    """Choose Accelerate's checkpoint coercion policy for a quantized format."""
+
+    if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4):
+        # QVQ checkpoints intentionally mix FP32 SU/SV codec auxiliaries with
+        # model-dtype dense tensors and bias. Passing one global dtype to
+        # Accelerate destroys that contract; the already typed model shell is
+        # the point of truth for every checkpoint tensor instead.
+        return None
+    return dtype
 
 
 _SGLANG_SUPPORTED_QUANTIZATION = frozenset(
@@ -1246,6 +1268,7 @@ def ModelLoader(cls):
             dtype = torch.float16
 
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        checkpoint_load_dtype = _checkpoint_load_dtype(format_code=format_code, dtype=dtype)
 
         # inject adapter into qcfg
         if adapter is not None:
@@ -1499,26 +1522,37 @@ def ModelLoader(cls):
                 # Partial GPTQ/AWQ checkpoints mix quantized modules (qweight present)
                 # with dense modules (weight present). Remove dense modules here so
                 # make_quant only replaces already-quantized modules with QLinear.
+                # QVQ uses trellis as its authoritative weight payload.
                 # QQQ stores weights as `B`, not `qweight`, so it is excluded from
                 # this probe; EXL3 is handled above.
-                if qcfg.method in (METHOD.GPTQ, METHOD.AWQ):
+                if qcfg.method in (METHOD.GPTQ, METHOD.AWQ, METHOD.QVQ):
                     checkpoint_keys = _checkpoint_tensor_keys(model_save_name)
                     if checkpoint_keys is not None:
-                        qweight_names = {
-                            name for name in modules
-                            if f"{name}.qweight" in checkpoint_keys
-                        }
-                        if 0 < len(qweight_names) < len(modules):
+                        payload_names = set(
+                            _checkpoint_quantized_module_names(
+                                checkpoint_keys,
+                                qcfg,
+                                candidates=set(modules),
+                            )
+                        )
+                        weight_suffix = _quantized_weight_suffix(qcfg)
+                        if 0 < len(payload_names) < len(modules):
                             for name in list(modules.keys()):
-                                if name not in qweight_names:
+                                if name not in payload_names:
                                     log.info(
-                                        "Partial checkpoint: `%s` has no qweight, leaving dense.",
+                                        "Partial checkpoint: `%s` has no %s payload, leaving dense.",
                                         name,
+                                        weight_suffix,
                                     )
                                     del modules[name]
-                        elif qweight_names:
-                            # Full quantized checkpoint: every module has a qweight.
+                        elif payload_names:
+                            # Full quantized checkpoint: every module has its format-owned weight payload.
                             pass
+                        elif qcfg.method == METHOD.QVQ:
+                            raise ValueError(
+                                "QVQ checkpoint has no `.trellis` tensors; refusing to replace dense modules "
+                                "with empty quantized buffers."
+                            )
                         else:
                             log.warn(
                                 "Checkpoint for %s method has no `.qweight` keys; "
@@ -1530,7 +1564,7 @@ def ModelLoader(cls):
                     model,
                     qcfg=qcfg,
                     quant_result=modules,
-                    backend=backend,
+                    backend=_external_preload_backend(backend, qcfg.method, format_code),
                     lm_head_name=cls.lm_head,
                     device=device,
                     dtype=dtype,
@@ -1864,7 +1898,7 @@ def ModelLoader(cls):
         ]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=dtype,
+                dtype=checkpoint_load_dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
@@ -1990,23 +2024,32 @@ def ModelLoader(cls):
                 from mlx_lm import load
                 from mlx_lm.utils import save_config, save_model
 
-                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
+                from ..utils.mlx import (
+                    convert_gptq_to_mlx_weights,
+                    convert_qvq_to_mlx_model,
+                    mlx_generate,
+                )
             except ModuleNotFoundError as exception:
                 raise type(exception)(
                     "GPT-QModel load mlx model required dependencies are not installed.",
                     "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
                 )
 
-            with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
+            if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4):
+                model = convert_qvq_to_mlx_model(model_id_or_path, model, cls.lm_head)
+            else:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    mlx_weights, mlx_config = convert_gptq_to_mlx_weights(
+                        model_id_or_path, model, qcfg.to_dict(), cls.lm_head
+                    )
 
-                save_model(temp_dir, mlx_weights, donate_model=True)
-                save_config(mlx_config, config_path=temp_dir + "/config.json")
-                tokenizer.save_pretrained(temp_dir)
+                    save_model(temp_dir, mlx_weights, donate_model=True)
+                    save_config(mlx_config, config_path=temp_dir + "/config.json")
+                    tokenizer.save_pretrained(temp_dir)
 
-                model, _ = load(temp_dir)
+                    model, _ = load(temp_dir)
 
-                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
+            cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
 
 
         instance = cls(

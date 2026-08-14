@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from gptqmodel.models.writer import ModelWriter
+from gptqmodel.models.writer import (
+    ModelWriter,
+    _loaded_checkpoint_requires_shell_rebuild,
+)
 from gptqmodel.quantization.config import FORMAT, METHOD
 
 
@@ -125,3 +128,10 @@ def test_save_quantized_strips_attention_before_serialization(tmp_path, monkeypa
 
     assert writer.model.config.attn_implementation == "flash_attention_2"
     assert writer.model.config._attn_implementation == "flash_attention_2"
+
+
+def test_loaded_runtime_payload_formats_save_live_model_without_shell_rebuild():
+    assert _loaded_checkpoint_requires_shell_rebuild(True, FORMAT.QVQ) is False
+    assert _loaded_checkpoint_requires_shell_rebuild(True, FORMAT.EXL3) is False
+    assert _loaded_checkpoint_requires_shell_rebuild(True, FORMAT.GPTQ) is True
+    assert _loaded_checkpoint_requires_shell_rebuild(False, FORMAT.GPTQ) is False

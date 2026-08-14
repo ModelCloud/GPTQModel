@@ -1,11 +1,52 @@
+# ruff: noqa: I001
 import os
 import random
 import sys
 from pathlib import Path
 
+
+_MAX_PYTEST_CPU_THREADS = 16
+_NATIVE_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def _pytest_cpu_thread_limit() -> int:
+    requested = []
+    for name in _NATIVE_THREAD_ENV_VARS:
+        raw_value = os.environ.get(name)
+        if raw_value is None:
+            continue
+        try:
+            value = int(raw_value)
+        except ValueError:
+            continue
+        if value > 0:
+            requested.append(value)
+    return min(_MAX_PYTEST_CPU_THREADS, *requested) if requested else _MAX_PYTEST_CPU_THREADS
+
+
+# Apply the environment limit before importing NumPy or Torch so native runtimes
+# observe it during initialization. Use one effective limit to prevent a lower
+# explicit request for one runtime from being defeated by another runtime.
+_PYTEST_CPU_THREAD_LIMIT = _pytest_cpu_thread_limit()
+for _thread_env_name in _NATIVE_THREAD_ENV_VARS:
+    os.environ[_thread_env_name] = str(_PYTEST_CPU_THREAD_LIMIT)
+
 import numpy
 import pytest
 import torch
+from threadpoolctl import threadpool_limits
+
+
+_PYTEST_THREADPOOL_LIMITER = threadpool_limits(limits=_PYTEST_CPU_THREAD_LIMIT)
+_PYTEST_THREADPOOL_LIMITER.__enter__()
+torch.set_num_threads(_PYTEST_CPU_THREAD_LIMIT)
 
 
 def pytest_addoption(parser):
@@ -24,6 +65,11 @@ def pytest_addoption(parser):
         default=os.environ.get("DEVIN_API_BASE", "https://api.devin.ai"),
         help="Devin API base URL (default: https://api.devin.ai)",
     )
+
+
+def pytest_unconfigure(config):
+    del config
+    _PYTEST_THREADPOOL_LIMITER.__exit__(None, None, None)
 
 
 # Reduce logbar progress noise for pytest runs unless a caller explicitly

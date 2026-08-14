@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Split-plane (planar) bit packing for the GPTQ `gptq_p` checkpoint format.
+"""Split-plane packing shared by GPTQ ``gptq_p`` and QVQ trellis streams.
 
 A logical `b`-bit code is stored as word-aligned bit planes whose widths each
 divide 32, so every packed word contains whole fields and no code straddles a
 word boundary (unlike the continuous 3-bit layout):
 
+- 1-bit = single 1-bit plane (QVQ only; ``gptq_p`` still starts at W2)
 - 2-bit = single 2-bit plane (bit-identical to the continuous 2-bit layout)
 - 3-bit = 2-bit low plane + 1-bit high plane
 - 4-bit = single 4-bit plane (bit-identical to the continuous 4-bit layout)
@@ -16,6 +17,8 @@ word boundary (unlike the continuous 3-bit layout):
 - 6-bit = 4-bit low plane + 2-bit high plane
 - 7-bit = 4-bit low plane + 2-bit mid plane + 1-bit top plane
 - 8-bit = single 8-bit plane (bit-identical to the continuous 8-bit layout)
+- 9..15-bit = an 8-bit low plane plus the binary decomposition of the remainder
+- 16-bit = single 16-bit plane
 
 For every 32 consecutive logical codes the planes are stored adjacently as
 `bits` int32 words: first the low-plane words, then the higher planes. Within a
@@ -25,27 +28,30 @@ packers. The layout fills exactly `ceil(n * bits / 32)` words, so qweight and
 qzeros keep their standard GPTQ shapes.
 """
 
-from typing import Tuple
-
 import torch
 
-
 # Bit widths that have no continuous layout and are always stored planar.
-PLANAR_BITS: Tuple[int, ...] = (5, 6, 7)
+PLANAR_BITS: tuple[int, ...] = (5, 6, 7)
 # All bit widths the planar (gptq_p) layout supports.
-PLANAR_FORMAT_BITS: Tuple[int, ...] = (2, 3, 4, 5, 6, 7, 8)
+PLANAR_FORMAT_BITS: tuple[int, ...] = (2, 3, 4, 5, 6, 7, 8)
 
-# bits -> ((plane_width, bit_offset), ...) ordered low to high. Single-plane
-# widths (2/4/8) produce words bit-identical to the continuous layout.
-_PLANES = {
-    2: ((2, 0),),
-    3: ((2, 0), (1, 2)),
-    4: ((4, 0),),
-    5: ((4, 0), (1, 4)),
-    6: ((4, 0), (2, 4)),
-    7: ((4, 0), (2, 4), (1, 6)),
-    8: ((8, 0),),
-}
+# bits -> ((plane_width, bit_offset), ...) ordered low to high. Every plane
+# width divides 32. The public GPTQ_P contract remains 2..8; QVQ additionally
+# uses 1 and 9..16 for complete transition labels.
+def _planes_for_width(bits: int) -> tuple[tuple[int, int], ...]:
+    remaining = bits
+    offset = 0
+    planes = []
+    while remaining:
+        width = 1 << (remaining.bit_length() - 1)
+        planes.append((width, offset))
+        remaining -= width
+        offset += width
+    return tuple(planes)
+
+
+_PLANES = {bits: _planes_for_width(bits) for bits in range(1, 17)}
+_PLANAR_PACKING_BITS = tuple(_PLANES)
 
 _WORD_BITS = 32
 _MASK32 = (1 << 32) - 1
@@ -53,7 +59,7 @@ _MASK32 = (1 << 32) - 1
 
 def _require_planar_bits(bits: int) -> None:
     if bits not in _PLANES:
-        raise ValueError(f"planar packing supports bits {PLANAR_FORMAT_BITS}, got bits={bits}")
+        raise ValueError(f"planar packing supports bits {_PLANAR_PACKING_BITS}, got bits={bits}")
 
 
 def _require_int32_words(pack_dtype: torch.dtype) -> None:
@@ -71,18 +77,22 @@ def planar_pack_rows(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype
     if n % _WORD_BITS != 0:
         raise ValueError(f"planar packing expects rows divisible by 32, got shape {tuple(values.shape)}")
 
+    if values.dtype == torch.bool or values.is_floating_point() or values.is_complex():
+        raise TypeError("planar packing expects integer logical codes")
+    values_i64 = values.to(torch.int64)
+    if torch.any((values_i64 < 0) | (values_i64 > (1 << bits) - 1)):
+        raise ValueError(f"planar {bits}-bit logical codes must be in `[0, {(1 << bits) - 1}]`")
+
     blocks = n // _WORD_BITS
-    x = values.to(torch.int64).reshape(blocks, _WORD_BITS, cols)
+    x = values_i64.reshape(blocks, _WORD_BITS, cols)
     out = torch.empty((blocks, bits, cols), dtype=torch.int64, device=values.device)
     row = 0
     for width, offset in _PLANES[bits]:
         pack_factor = _WORD_BITS // width
         plane = (x >> offset) & ((1 << width) - 1)
         reshaped = plane.reshape(blocks, width, pack_factor, cols)
-        shifts = (
-            torch.arange(pack_factor, dtype=torch.int64, device=values.device).view(1, 1, pack_factor, 1) * width
-        )
-        out[:, row:row + width] = (reshaped << shifts).sum(dim=2, dtype=torch.int64)
+        shifts = torch.arange(pack_factor, dtype=torch.int64, device=values.device).view(1, 1, pack_factor, 1) * width
+        out[:, row : row + width] = (reshaped << shifts).sum(dim=2, dtype=torch.int64)
         row += width
     return ((out & _MASK32).reshape(blocks * bits, cols)).to(pack_dtype)
 
@@ -116,7 +126,7 @@ def planar_pack_cols(values: torch.Tensor, bits: int, *, pack_dtype: torch.dtype
     """Pack `[rows, n]` logical codes along dim 1 into `[rows, n * bits // 32]` int32 words."""
     _require_planar_bits(bits)
     _require_int32_words(pack_dtype)
-    rows, n = values.shape
+    _, n = values.shape
     if n % _WORD_BITS != 0:
         raise ValueError(f"planar packing expects columns divisible by 32, got shape {tuple(values.shape)}")
     packed = planar_pack_rows(values.transpose(0, 1).contiguous(), bits, pack_dtype=pack_dtype)
@@ -127,7 +137,7 @@ def planar_unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
     """Unpack `[rows, n * bits // 32]` int32 words back to `[rows, n]` int32 logical codes."""
     _require_planar_bits(bits)
     _require_int32_words(packed.dtype)
-    rows, cols = packed.shape
+    _, cols = packed.shape
     if cols % bits != 0:
         raise ValueError(
             f"planar {bits}-bit qzeros expects columns divisible by {bits}, got shape {tuple(packed.shape)}"

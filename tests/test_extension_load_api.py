@@ -17,9 +17,10 @@ import gptqmodel.utils.amplin as amplin_utils
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cannoe as cannoe_utils
 import gptqmodel.utils.cpp as cpp_utils
+import gptqmodel.utils.diagnostic_metrics as diagnostic_metrics_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
-import gptqmodel.utils.grasshopper as grasshopper_utils
 import gptqmodel.utils.gptq_block as gptq_block_utils
+import gptqmodel.utils.grasshopper as grasshopper_utils
 import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
@@ -28,6 +29,7 @@ import gptqmodel.utils.marlin_moe as marlin_moe_utils
 import gptqmodel.utils.pangolin as pangolin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
+import gptqmodel.utils.qvq_cuda as qvq_cuda_utils
 import gptqmodel.utils.swordfish as swordfish_utils
 import gptqmodel.utils.trilin as trilin_utils
 import gptqmodel_ext.planar as planar_api
@@ -77,7 +79,9 @@ def _install_fake_extensions(monkeypatch):
         "adjacent_exact": _FakeExtension("AdjacentExact CUDA"),
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
         "gptq_block": _FakeExtension("GPTQ CUDA block quantization"),
+        "qvq_cuda": _FakeExtension("QVQ planar CUDA GEMV"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
+        "diagnostic_metrics_cpu": _FakeExtension("diagnostic_metrics_cpu"),
         "awq": _FakeExtension("AWQ"),
         "qqq": _FakeExtension("QQQ"),
         "exllamav2": _FakeExtension("ExLlamaV2 GPTQ"),
@@ -115,7 +119,14 @@ def _install_fake_extensions(monkeypatch):
         fakes["gptq_block"],
     )
     monkeypatch.setattr(gptq_block_utils, "gptq_block_cuda_supported", lambda: True)
+    monkeypatch.setattr(qvq_cuda_utils, "_QVQ_CUDA_TORCH_OPS_EXTENSION", fakes["qvq_cuda"])
+    monkeypatch.setattr(qvq_cuda_utils, "qvq_cuda_supported", lambda: True)
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
+    monkeypatch.setattr(
+        diagnostic_metrics_utils,
+        "_DIAGNOSTIC_METRICS_CPU_EXTENSION",
+        fakes["diagnostic_metrics_cpu"],
+    )
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
     monkeypatch.setattr(qqq_utils, "_QQQ_TORCH_OPS_EXTENSION", fakes["qqq"])
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION", fakes["exllamav2"])
@@ -204,6 +215,23 @@ def test_load_gptq_block_cuda_alias_builds_native_extension(monkeypatch):
     assert fakes["gptq_block"].load_calls == 1
 
 
+def test_load_qvq_gemv_alias_builds_native_extension(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+
+    result = extension_api.load(name="qvq_gemv")
+
+    assert result == {"qvq_cuda": True}
+    assert fakes["qvq_cuda"].load_calls == 1
+
+
+def test_qvq_extension_exposes_no_legacy_alias():
+    legacy_name = "q" + "tip"
+
+    assert legacy_name not in extension_api.available_extensions()
+    with pytest.raises(ValueError, match="Unknown extension"):
+        extension_api.load(name=f"{legacy_name}_cuda")
+
+
 def test_load_defaults_to_all_extensions(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
 
@@ -213,7 +241,9 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "adjacent_exact": True,
         "pack_block_cpu": True,
         "gptq_block": True,
+        "qvq_cuda": True,
         "floatx_cpu": True,
+        "diagnostic_metrics_cpu": True,
         "awq": True,
         "qqq": True,
         "exllamav2": True,

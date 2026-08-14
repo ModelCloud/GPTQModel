@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Union
-
 import torch
 from transformers import PreTrainedModel
 
@@ -14,7 +12,6 @@ from ..quantization import FORMAT
 from ..quantization.config import resolve_quant_format
 from .logger import setup_logger
 from .torch import torch_empty_cache
-
 
 try:
     import mlx.core as mx
@@ -29,7 +26,94 @@ except ImportError:
 
 log = setup_logger()
 
-def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseQModel], gptq_config: dict, lm_head_name: str):
+
+def _qvq_mlx_linear_from_torch(module):
+    """Copy one loaded QVQLinear payload into the format-native MLX module."""
+
+    import mlx.core as mx
+
+    from ..nn_modules.qlinear.qvq import QVQLinear
+    from .qvq_mlx import QVQMLXLinear
+
+    if not isinstance(module, QVQLinear):
+        raise TypeError("QVQ MLX conversion requires a QVQLinear source module")
+
+    def copy_array(tensor):
+        if tensor is None:
+            return None
+        copied = tensor.detach().cpu().contiguous()
+        if copied.dtype == torch.bfloat16:
+            copied = copied.float()
+        return mx.array(copied.numpy())
+
+    return QVQMLXLinear(
+        bits=module.bits,
+        in_features=module.in_features,
+        out_features=module.out_features,
+        trellis=copy_array(module.trellis),
+        SU=copy_array(module.SU),
+        SV=copy_array(module.SV),
+        bias=copy_array(module.bias),
+        codebook_version=module.codebook_version,
+        vector_size=module.vector_size,
+        bank_ids=copy_array(module.bank_ids),
+    )
+
+
+def convert_qvq_to_mlx_model(
+    model_id_or_path: str,
+    model: PreTrainedModel | BaseQModel,
+    lm_head_name: str,
+):
+    """Build an in-memory MLX model whose quantized linears retain QVQ payloads.
+
+    Unlike the legacy GPTQ MLX bridge, QVQ must not dequantize and feed its
+    weights through MLX's unrelated affine quantizer.  Replace matching MLX
+    linears with :class:`QVQMLXLinear` and keep trellis/bank metadata native.
+    """
+
+    if not MLX_AVAILABLE:
+        raise ValueError("MLX is not installed. Install `gptqmodel[mlx]` to load a QVQ model with MLX.")
+
+    import mlx.core as mx
+    from mlx.utils import tree_unflatten
+
+    from ..nn_modules.qlinear.qvq import QVQLinear
+
+    model_path, _ = get_model_path(model_id_or_path)
+    config = load_config(model_path)
+    torch_model = model.model if isinstance(model, BaseQModel) else model
+    model_class, model_args_class = _get_classes(config=config)
+    mlx_model = model_class(model_args_class.from_dict(config))
+
+    replacements = []
+    weights = []
+    tied_embeddings = bool(config.get("tie_word_embeddings", False))
+    pb = log.pb(list(torch_model.named_modules())).title("Format: Converting QVQ to native MLX ->").manual()
+    for name, module in pb:
+        pb.subtitle(f"{name}").draw()
+        if isinstance(module, QVQLinear):
+            replacements.append((name, _qvq_mlx_linear_from_torch(module)))
+            continue
+        if hasattr(module, "weight") and not (tied_embeddings and name == lm_head_name):
+            weights.append(
+                (f"{name}.weight", mx.array(module.weight.detach().to("cpu", torch.float16).numpy()))
+            )
+        if getattr(module, "bias", None) is not None:
+            weights.append(
+                (f"{name}.bias", mx.array(module.bias.detach().to("cpu", torch.float16).numpy()))
+            )
+
+    if not replacements:
+        raise ValueError("QVQ MLX conversion found no QVQLinear modules in the loaded checkpoint")
+    mlx_model.update_modules(tree_unflatten(replacements), strict=True)
+    mlx_model.load_weights(weights, strict=False)
+    mx.eval(mlx_model.parameters())
+    torch_empty_cache()
+    return mlx_model
+
+
+def convert_gptq_to_mlx_weights(model_id_or_path: str, model: PreTrainedModel | BaseQModel, gptq_config: dict, lm_head_name: str):
     if not MLX_AVAILABLE:
         raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
@@ -41,10 +125,9 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
 
     if gptq_config.get("dynamic") is not None:
         print(gptq_config["dynamic"])
-        for _, config in gptq_config["dynamic"].items():
-            if config != {}:
-                if config["bits"] not in [2, 3, 4, 8]:
-                    raise ValueError(f'Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]')
+        for config in gptq_config["dynamic"].values():
+            if config != {} and config["bits"] not in [2, 3, 4, 8]:
+                raise ValueError(f'Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]')
 
     # mlx does not support group_size = -1, 16, so we need to convert it to 64, 64 is the default group_size for mlx
     if gptq_config["group_size"] in [-1, 16]:
@@ -82,11 +165,10 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
 
             n += 1
 
-        if hasattr(module, "bias"):
-            if module.bias is not None:
-                weights[f"{name}.bias"] = mx.array(
-                    module.bias.detach().to("cpu", torch.float16).numpy()
-                )
+        if hasattr(module, "bias") and module.bias is not None:
+            weights[f"{name}.bias"] = mx.array(
+                module.bias.detach().to("cpu", torch.float16).numpy()
+            )
 
     del model.model
     torch_empty_cache()

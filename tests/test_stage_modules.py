@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import threading
 import types
@@ -14,6 +15,7 @@ from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.qvq_processor import QVQProcessor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import (
     _build_pre_quantize_defer_plan,
@@ -27,6 +29,8 @@ from gptqmodel.looper.stage_layer import (
 )
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.nn_modules.hooked_linear import HookedLinear, StopForward
+from gptqmodel.quantization import QVQConfig
 from gptqmodel.quantization.config import QuantizeConfig
 
 
@@ -179,6 +183,229 @@ def test_subset_forward_failure_removes_registered_and_inline_hooks(failure_site
     assert not registered._forward_hooks
     assert inline.forward_hook is None
     assert inline.forward_hook_last is False
+
+
+def test_qvq_execution_contract_carries_reconstructed_error_between_subsets():
+    """Later QVQ subsets must capture inputs produced by already reconstructed projections."""
+
+    class TwoProjectionLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            first = torch.nn.Linear(2, 2, bias=False)
+            second = torch.nn.Linear(2, 2, bias=False)
+            with torch.no_grad():
+                first.weight.copy_(torch.eye(2))
+                second.weight.copy_(torch.eye(2))
+            self.first = HookedLinear.from_linear(first)
+            self.second = HookedLinear.from_linear(second)
+
+        def forward(self, hidden_states):
+            return self.second(self.first(hidden_states))
+
+    class DummyProgress:
+        def manual(self):
+            return self
+
+        def set(self, **_kwargs):
+            return self
+
+        def title(self, *_args):
+            return self
+
+        def subtitle(self, *_args):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return None
+
+    class DummyLogger:
+        def pb(self, _iterable):
+            return DummyProgress()
+
+        def isEnabledFor(self, _level):
+            return False
+
+    class ReplayProcessor:
+        execution_config = QVQProcessor(
+            tokenizer=None,
+            qcfg=QVQConfig(bits=2, device="cpu", offload_to_disk=False),
+            calibration=[{"input_ids": torch.tensor([[1]]), "attention_mask": torch.tensor([[1]])}],
+            prepare_dataset_func=lambda **kwargs: kwargs["calibration_dataset"],
+            calibration_concat_size=None,
+            calibration_sort=None,
+            batch_size=1,
+        ).execution_config
+
+        def __init__(self):
+            self.tasks = {"first": object(), "second": object()}
+            self.captured = {}
+            self.qcfg = QVQConfig(bits=2, device="cpu", offload_to_disk=False)
+
+        def prepare_subset(self, *_args, **_kwargs):
+            return None
+
+        def cleanup_subset(self, *_args, **_kwargs):
+            return None
+
+        def pre_process_fwd_hook(self, name):
+            def capture(_module, inputs, _output):
+                self.captured[name] = inputs[0].detach().clone()
+
+            return capture
+
+        def process(self, module, **_kwargs):
+            multiplier = 2.0 if module.name == "first" else 3.0
+            with torch.no_grad():
+                module.module.weight.copy_(torch.eye(2) * multiplier)
+
+        def has_captured_input_ids(self, name):
+            return name in self.captured
+
+        def set_fwd_time(self, _duration):
+            return None
+
+        @staticmethod
+        def name():
+            return "qvq-replay-contract"
+
+    class DummyQModel:
+        def __init__(self):
+            self.quantize_config = QVQConfig(bits=2, device="cpu", offload_to_disk=False)
+            self.quant_region_timer = None
+            self.moe_lifecycle_hooks = None
+
+        @staticmethod
+        def lazy_turtle_batch_materialize_submodules(_requests):
+            return None
+
+    class DummyLooper:
+        embed_quant_mode = None
+
+        def __init__(self):
+            self.gptq_model = DummyQModel()
+            self._current_subset = None
+
+        @staticmethod
+        def _prepare_named_module_for_forward(**_kwargs):
+            return None
+
+        @staticmethod
+        def _masked_hook_wrapper(_processor, hook, _source):
+            return hook
+
+        _masked_pre_hook_wrapper = _masked_hook_wrapper
+
+        @staticmethod
+        def _assign_quant_device_for_module(_named_module, *, fallback_device):
+            return fallback_device
+
+        @staticmethod
+        def _prepare_named_module_for_quantization(*, named_module, fallback_device, **_kwargs):
+            named_module.target_device = fallback_device
+            named_module.module.target_device = fallback_device
+            return fallback_device
+
+        @staticmethod
+        def _run_forward_batches(*, module, layer_inputs, need_outputs, **_kwargs):
+            outputs = []
+            for batch in layer_inputs:
+                try:
+                    output = module(batch[0])
+                except StopForward:
+                    continue
+                if need_outputs:
+                    outputs.append([output])
+            return outputs
+
+    layer = TwoProjectionLayer()
+    processor = ReplayProcessor()
+    looper = DummyLooper()
+    source = torch.tensor([[[1.0, -2.0]]])
+    assert processor.execution_config.require_fwd is True
+    assert processor.execution_config.fwd_replay_after_process is True
+    assert processor.execution_config.subset_forward_early_stop is True
+    policy = CalibrationCoveragePolicy(
+        validate_input_coverage=True,
+        fallback_enabled=False,
+        prune_uncovered_modules=False,
+        record_dynamic_exclusions=False,
+    )
+    named = {
+        "first": NamedModule(layer.first, "first", "layer.first", 0),
+        "second": NamedModule(layer.second, "second", "layer.second", 0),
+    }
+
+    def plan(name, index):
+        modules = {name: named[name]}
+        return SubsetPlan(
+            modules=modules,
+            subset_index=index,
+            subset_total=2,
+            execute_forward=True,
+            replay_after_process=True,
+            forward_mode="serial",
+            batch_count=1,
+            forward_row_counts=[1],
+            forward_total_rows=1,
+            moe_groups={},
+            forward_device_map={},
+            calibration_coverage_policy=policy,
+            module_chunks=[modules],
+            forward_early_stop=True,
+        )
+
+    first_result, _, _ = stage_subset_module._run_single_subset_pass(
+        looper=looper,
+        processor=processor,
+        module=layer,
+        plan=plan("first", 0),
+        layer_inputs=[[source]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        layer_descriptor="layer",
+        layer_title="layer",
+        layer_index=0,
+        full=named,
+        fallback=False,
+        shared_kv_cache_dict={},
+        pb=None,
+        logger=DummyLogger(),
+        is_awq_processor=False,
+    )
+    stage_subset_module._run_single_subset_pass(
+        looper=looper,
+        processor=processor,
+        module=layer,
+        plan=plan("second", 1),
+        layer_inputs=[[source]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        layer_descriptor="layer",
+        layer_title="layer",
+        layer_index=0,
+        full=named,
+        fallback=False,
+        shared_kv_cache_dict={},
+        pb=None,
+        logger=DummyLogger(),
+        is_awq_processor=False,
+        previous_processed_subset=first_result,
+    )
+
+    torch.testing.assert_close(processor.captured["first"], source)
+    torch.testing.assert_close(processor.captured["second"], source * 2.0)
+    # This is the exact final layer replay value handed to the next decoder
+    # layer: both reconstructed projections, in declared subset order.
+    torch.testing.assert_close(layer(source), source * 6.0)
 
 
 def test_pre_quantize_defer_plan_uses_routed_module_tree_flags():
@@ -2874,6 +3101,14 @@ def test_capture_pristine_group_context_preserves_untouched_layer_io(monkeypatch
         def uses_grouped_optimization(self):
             return True
 
+        @contextlib.contextmanager
+        def pristine_quant_input_capture(self, *, layer_index):
+            observed["capture_enter"] = layer_index
+            try:
+                yield
+            finally:
+                observed["capture_exit"] = layer_index
+
         def receive_layer_forward_context(self, **kwargs):
             observed["receive_kwargs"] = kwargs
 
@@ -2924,6 +3159,8 @@ def test_capture_pristine_group_context_preserves_untouched_layer_io(monkeypatch
     assert observed["receive_kwargs"]["layer_inputs"] == [[tensor]]
     assert observed["receive_kwargs"]["layer_input_kwargs"] == [{}]
     assert observed["receive_kwargs"]["subset_total"] == 1
+    assert observed["capture_enter"] == 0
+    assert observed["capture_exit"] == 0
 
 
 def test_masked_hook_wrapper_trims_left_padded_inputs_before_add_batch():

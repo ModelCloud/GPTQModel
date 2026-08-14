@@ -672,6 +672,10 @@ def build_layer_subset_plans(
     else:
         module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
+    refine_module_groups = getattr(processor, "refine_subset_module_groups", None)
+    if callable(refine_module_groups):
+        module_name_groups = refine_module_groups(module_name_groups)
+
     if execution_config.fwd_all_modules_in_single_pass:
         # Native-style processors consume one merged replay over the whole layer.
         # Build one plan up front so the layer stage does not keep re-deriving

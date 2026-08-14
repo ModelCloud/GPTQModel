@@ -83,7 +83,9 @@ def _iter_dynamic_contracts(
 
         contract_bits = overrides.get("bits", bits)
         if contract_bits is not None:
-            contract_bits = quant_bits_width(_normalize_quant_bits(contract_bits, format_value=format_value))
+            contract_bits = _normalize_quant_bits(contract_bits, format_value=format_value)
+            if format_value not in (FORMAT.QVQ, FORMAT.QVQ_V4):
+                contract_bits = quant_bits_width(contract_bits)
         else:
             contract_bits = bits
 
@@ -520,7 +522,9 @@ def select_quant_linear(
         if device == DEVICE.CUDA and IS_ROCM:
             device = DEVICE.ROCM
 
-    bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
+    bits = _normalize_quant_bits(bits, format_value=format)
+    if format not in (FORMAT.QVQ, FORMAT.QVQ_V4):
+        bits = quant_bits_width(bits)
 
     supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
     if supported_formats is None:
