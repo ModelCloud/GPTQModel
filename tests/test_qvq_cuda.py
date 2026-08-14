@@ -18,6 +18,7 @@ from gptqmodel.quantization.qvq import (
     _canonical_qvq_v4_banks,
     batched_viterbi_quantize,
     block_ldlq_inner,
+    block_ldlq_inner_banked,
     block_ldlq_inner_banked_candidates,
     optimize_qvq_output_channel_scales,
     pack_trellis_states,
@@ -664,6 +665,45 @@ def test_qvq_propagated_banked_candidates_parallel_matches_serial():
     torch.cuda.synchronize()
     assert torch.equal(parallel_weights, serial_weights)
     assert torch.equal(parallel_states, serial_states)
+
+
+def test_qvq_v4_banked_block_ldlq_native_matches_cpu_selection_and_oracle():
+    """Native bank-loss reuse must preserve mixed selectors and bank-0 rollback."""
+
+    generator = torch.Generator(device="cpu").manual_seed(20260822)
+    cpu_weight = torch.randn((32, 32), generator=generator, dtype=torch.float32)
+    hessian_source = torch.randn((32, 32), generator=generator, dtype=torch.float32)
+    cpu_hessian = hessian_source @ hessian_source.T + torch.eye(32) * 0.5
+    cpu_stack = torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float32).contiguous()
+    cpu_banks = tuple(cpu_stack[bank] for bank in range(4))
+    cpu_result = block_ldlq_inner_banked(
+        cpu_weight,
+        cpu_hessian,
+        cpu_banks,
+        bits=2.0,
+        tile_rows=16,
+        tile_cols=16,
+        trellis_batch_size=1,
+        return_bank0_oracle=True,
+    )
+    cuda_stack = cpu_stack.cuda()
+    cuda_result = block_ldlq_inner_banked(
+        cpu_weight.cuda(),
+        cpu_hessian.cuda(),
+        tuple(cuda_stack[bank] for bank in range(4)),
+        bank_codebook_stack=cuda_stack,
+        bits=2.0,
+        tile_rows=16,
+        tile_cols=16,
+        trellis_batch_size=1,
+        return_bank0_oracle=True,
+    )
+    torch.cuda.synchronize()
+    for cpu_value, cuda_value in zip(cpu_result, cuda_result, strict=True):
+        if cpu_value.dtype in (torch.float16, torch.float32, torch.float64):
+            torch.testing.assert_close(cuda_value.cpu(), cpu_value, rtol=0, atol=0)
+        else:
+            assert torch.equal(cuda_value.cpu(), cpu_value)
 
 
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])

@@ -1480,13 +1480,16 @@ def block_ldlq_inner_banked(
             from ..utils.qvq_cuda import qvq_cuda_viterbi_banked
 
             transition_bits = qvq_transition_bits(bits, vector_size=codebooks[0].shape[1])
+            banked_paths = None
+            banked_losses = None
+            sequence_offset = 0
             for chunk in sequences.split(trellis_batch_size):
                 chunk_weights = None
                 if viterbi_objective == "hessian_diagonal":
                     chunk_weights = diagonal.repeat_interleave(tile_cols // codebooks[0].shape[1]).unsqueeze(0)
                     chunk_weights = chunk_weights.expand(chunk.shape[0], -1).contiguous()
                 if transition_bits == 16:
-                    states, _ = qvq_cuda_viterbi_banked(
+                    states, chunk_losses = qvq_cuda_viterbi_banked(
                         chunk.contiguous(), banked_codebooks, bits, step_weights=chunk_weights
                     )
                     recurrence_passes = 1
@@ -1500,7 +1503,7 @@ def block_ldlq_inner_banked(
                     overlap_bits = 16 - transition_bits
                     overlap_mask = (1 << overlap_bits) - 1
                     overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
-                    states, _ = qvq_cuda_viterbi_banked(
+                    states, chunk_losses = qvq_cuda_viterbi_banked(
                         chunk.contiguous(), banked_codebooks, bits, overlap=overlaps, step_weights=chunk_weights
                     )
                     recurrence_passes = 2
@@ -1508,10 +1511,21 @@ def block_ldlq_inner_banked(
                     telemetry.count("tail_biting_chunks")
                     telemetry.count("viterbi_recurrence_passes", recurrence_passes)
                     telemetry.count("native_viterbi_launches", recurrence_passes)
-                candidate_paths.append(states)
-            banked_paths = torch.cat(candidate_paths, dim=1)
-            candidate_paths = [banked_paths[bank] for bank in range(4)]
-            candidate_values = [codebooks[bank][candidate_paths[bank]] for bank in range(4)]
+                if banked_paths is None:
+                    banked_paths = torch.empty(
+                        (states.shape[0], sequences.shape[0], states.shape[2]),
+                        dtype=states.dtype,
+                        device=states.device,
+                    )
+                    banked_losses = torch.empty(
+                        (chunk_losses.shape[0], sequences.shape[0]),
+                        dtype=chunk_losses.dtype,
+                        device=chunk_losses.device,
+                    )
+                chunk_size = chunk.shape[0]
+                banked_paths[:, sequence_offset : sequence_offset + chunk_size] = states
+                banked_losses[:, sequence_offset : sequence_offset + chunk_size] = chunk_losses
+                sequence_offset += chunk_size
         else:
             for codebook in codebooks:
                 values, paths = [], []
@@ -1533,22 +1547,33 @@ def block_ldlq_inner_banked(
                     paths.append(result.states)
                 candidate_values.append(torch.cat(values, dim=0))
                 candidate_paths.append(torch.cat(paths, dim=0))
-        candidates = torch.stack(candidate_values).to(torch.float32)
-        candidate_error = candidates - sequences.unsqueeze(0)
-        if viterbi_objective == "hessian_diagonal":
-            row_weights = diagonal.repeat_interleave(tile_cols // codebooks[0].shape[1])
-            losses = candidate_error.square().sum(dim=3).mul(row_weights).sum(dim=2)
+        if banked_codebooks is not None:
+            # Native Viterbi has already accumulated the exact Euclidean or
+            # diagonal-weighted emission loss for every bank and tile. Reuse
+            # it instead of gathering all four codebooks and materializing a
+            # second [bank, tile, step, vector] FP32 error tensor.
+            losses = banked_losses
+            winners = losses.argmin(dim=0)
+            output_indices = torch.arange(output_tiles, device=source.device)
+            selected_states_block = banked_paths[winners, output_indices]
+            selected_block = banked_codebooks[winners[:, None], selected_states_block]
         else:
-            losses = candidate_error.square().sum(dim=(2, 3))
-        winners = losses.argmin(dim=0)
-        selected_block = candidates[winners, torch.arange(output_tiles, device=source.device)]
+            candidates = torch.stack(candidate_values).to(torch.float32)
+            candidate_error = candidates - sequences.unsqueeze(0)
+            if viterbi_objective == "hessian_diagonal":
+                row_weights = diagonal.repeat_interleave(tile_cols // codebooks[0].shape[1])
+                losses = candidate_error.square().sum(dim=3).mul(row_weights).sum(dim=2)
+            else:
+                losses = candidate_error.square().sum(dim=(2, 3))
+            winners = losses.argmin(dim=0)
+            output_indices = torch.arange(output_tiles, device=source.device)
+            selected_states_block = torch.stack(candidate_paths, dim=0)[winners, output_indices]
+            selected_block = candidates[winners, output_indices]
         selected_weight[start:stop] = selected_block.permute(1, 0, 2).reshape(tile_rows, -1)
         selected_error[start:stop] = source[start:stop] - selected_weight[start:stop]
         tile_base = block * output_tiles
         bank_ids[tile_base : tile_base + output_tiles] = winners.to(torch.uint8)
-        selected_states[block] = torch.stack(candidate_paths, dim=0)[
-            winners, torch.arange(output_tiles, device=source.device)
-        ]
+        selected_states[block] = selected_states_block
     # Bank decisions are provisional.  The independent bank paths have
     # different Block-LDLQ histories, so local tile SSE can produce a mixed
     # path that is worse under the actual input Hessian.  Never emit such a
