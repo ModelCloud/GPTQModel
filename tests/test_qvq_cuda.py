@@ -574,9 +574,9 @@ def test_qvq_v4_banked_weighted_constrained_non_default_stream_matches_serial():
 
 
 def test_qvq_banked_viterbi_norm_cache_uses_versioned_codebooks():
-    codebook = torch.arange(4 * (1 << 16) * 4, dtype=torch.float16, device="cuda").reshape(
-        4, 1 << 16, 4
-    )
+    codebook = torch.linspace(-1, 1, 4 * (1 << 16) * 4, dtype=torch.float32, device="cuda").to(
+        torch.float16
+    ).reshape(4, 1 << 16, 4)
     sequences = torch.zeros((4, 8, 4), dtype=torch.float32, device="cuda")
 
     original_states, _ = qvq_cuda_viterbi_banked(sequences, codebook, bits=2.0)
@@ -603,6 +603,28 @@ def test_qvq_viterbi_accepts_inference_mode_codebooks():
         states, error = qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
     assert states.shape == (2, 7)
     assert torch.isfinite(error).all()
+
+
+def test_qvq_viterbi_inference_mode_codebook_mutation_rebuilds_norms():
+    generator = torch.Generator(device="cpu").manual_seed(20260823)
+    sequences = torch.randn((2, 9, 4), generator=generator, dtype=torch.float32).cuda()
+    source = torch.randn((1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
+    with torch.inference_mode():
+        codebook = source.clone()
+        qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
+        codebook[0, 0].add_(1.0)
+        mutated_states, mutated_error = qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
+        fresh_states, fresh_error = qvq_cuda_viterbi(sequences, codebook.clone(), bits=2.0, vector_size=4)
+    torch.cuda.synchronize()
+    assert torch.equal(mutated_states, fresh_states)
+    torch.testing.assert_close(mutated_error, fresh_error, rtol=0, atol=0)
+
+
+def test_qvq_native_banked_viterbi_rejects_mismatched_sequence_bank_count():
+    sequences = torch.zeros((3, 2, 5, 4), device="cuda", dtype=torch.float32)
+    codebooks = torch.zeros((4, 1 << 16, 4), device="cuda", dtype=torch.float16)
+    with pytest.raises(RuntimeError, match="bank_count"):
+        torch.ops.gptqmodel_qvq.viterbi_banked(sequences, codebooks, 4)
 
 
 def test_qvq_norm_cache_eviction_waits_for_cross_stream_consumer():
@@ -907,7 +929,7 @@ def test_qvq_cuda_viterbi_contract_guards():
             ValueError,
             "contiguous int64",
         ),
-        ((sequences, codebook, 4, overlap[:1]), {}, RuntimeError, "shape"),
+        ((sequences, codebook, 4, overlap[:1]), {}, ValueError, "shape"),
         ((sequences[:, :0], codebook, 4), {}, RuntimeError, "at least one"),
         (
             (sequences, codebook, 4),

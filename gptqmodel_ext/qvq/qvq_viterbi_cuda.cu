@@ -215,14 +215,35 @@ void record_norm_cache_use(const at::Tensor& codebook, const at::Tensor& norm, c
 }
 
 template <int VectorSize, typename CodebookScalar>
+at::Tensor build_codebook_norm(const at::Tensor& codebook, int bank_count, cudaStream_t stream) {
+  at::Tensor norm;
+  if (bank_count == 1) {
+    norm = at::empty({kStateCount}, codebook.options().dtype(at::kFloat));
+  } else {
+    norm = at::empty({bank_count, kStateCount}, codebook.options().dtype(at::kFloat));
+  }
+  qvq_codebook_norm_kernel<VectorSize, CodebookScalar>
+      <<<256 * bank_count, 256, 0, stream>>>(
+          reinterpret_cast<const CodebookScalar*>(codebook.const_data_ptr()),
+          norm.mutable_data_ptr<float>(), bank_count);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return norm;
+}
+
+template <int VectorSize, typename CodebookScalar>
 at::Tensor cached_codebook_norm(const at::Tensor& codebook, cudaStream_t stream) {
   std::lock_guard<std::mutex> lock(g_norm_cache_mutex);
   const int device = codebook.get_device();
   const void* pointer = codebook.data_ptr();
   auto* codebook_impl = const_cast<c10::TensorImpl*>(codebook.unsafeGetTensorImpl());
-  const uint32_t codebook_version = codebook_impl->is_inference()
-      ? 0
-      : codebook_impl->version_counter().current_version();
+  // Inference tensors deliberately do not maintain a useful version counter.
+  // They can still be mutated inside an inference_mode() block, so caching by
+  // pointer would make a later call consume stale norms.  Keep this path
+  // uncached; the caller retains the returned tensor through the Viterbi call.
+  if (codebook_impl->is_inference()) {
+    return build_codebook_norm<VectorSize, CodebookScalar>(codebook, 1, stream);
+  }
+  const uint32_t codebook_version = codebook_impl->version_counter().current_version();
   for (const auto& entry : g_norm_cache) {
     if (entry.device == device && entry.vector_size == VectorSize && entry.scalar_type == codebook.scalar_type() &&
         entry.bank_count == 1 && entry.codebook_version == codebook_version &&
@@ -234,16 +255,13 @@ at::Tensor cached_codebook_norm(const at::Tensor& codebook, cudaStream_t stream)
 
   NormCacheEntry entry;
   entry.codebook = codebook;
-  entry.norm = at::empty({kStateCount}, codebook.options().dtype(at::kFloat));
+  entry.norm = build_codebook_norm<VectorSize, CodebookScalar>(codebook, 1, stream);
   entry.device = device;
   entry.vector_size = VectorSize;
   entry.scalar_type = codebook.scalar_type();
   entry.bank_count = 1;
   entry.codebook_version = codebook_version;
   C10_CUDA_CHECK(cudaEventCreateWithFlags(&entry.ready, cudaEventDisableTiming));
-  qvq_codebook_norm_kernel<VectorSize, CodebookScalar><<<256, 256, 0, stream>>>(
-      reinterpret_cast<const CodebookScalar*>(codebook.const_data_ptr()), entry.norm.mutable_data_ptr<float>(), 1);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
   C10_CUDA_CHECK(cudaEventRecord(entry.ready, stream));
   at::Tensor result = entry.norm;
   evict_norm_cache_entry();
@@ -258,9 +276,10 @@ at::Tensor cached_banked_codebook_norm(const at::Tensor& codebook, cudaStream_t 
   const void* pointer = codebook.data_ptr();
   const int bank_count = static_cast<int>(codebook.size(0));
   auto* codebook_impl = const_cast<c10::TensorImpl*>(codebook.unsafeGetTensorImpl());
-  const uint32_t codebook_version = codebook_impl->is_inference()
-      ? 0
-      : codebook_impl->version_counter().current_version();
+  if (codebook_impl->is_inference()) {
+    return build_codebook_norm<VectorSize, CodebookScalar>(codebook, bank_count, stream);
+  }
+  const uint32_t codebook_version = codebook_impl->version_counter().current_version();
   for (const auto& entry : g_norm_cache) {
     if (entry.device == device && entry.vector_size == VectorSize && entry.scalar_type == codebook.scalar_type() &&
         entry.bank_count == bank_count && entry.codebook_version == codebook_version &&
@@ -272,18 +291,13 @@ at::Tensor cached_banked_codebook_norm(const at::Tensor& codebook, cudaStream_t 
 
   NormCacheEntry entry;
   entry.codebook = codebook;
-  entry.norm = at::empty({bank_count, kStateCount}, codebook.options().dtype(at::kFloat));
+  entry.norm = build_codebook_norm<VectorSize, CodebookScalar>(codebook, bank_count, stream);
   entry.device = device;
   entry.vector_size = VectorSize;
   entry.scalar_type = codebook.scalar_type();
   entry.bank_count = bank_count;
   entry.codebook_version = codebook_version;
   C10_CUDA_CHECK(cudaEventCreateWithFlags(&entry.ready, cudaEventDisableTiming));
-  qvq_codebook_norm_kernel<VectorSize, CodebookScalar>
-      <<<256 * bank_count, 256, 0, stream>>>(
-          reinterpret_cast<const CodebookScalar*>(codebook.const_data_ptr()),
-          entry.norm.mutable_data_ptr<float>(), bank_count);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
   C10_CUDA_CHECK(cudaEventRecord(entry.ready, stream));
   at::Tensor result = entry.norm;
   evict_norm_cache_entry();
@@ -695,6 +709,10 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
                   (bank_count > 1 && sequences.dim() == 4 && sequences.size(3) == VectorSize),
               "sequences have an invalid vector size");
   TORCH_CHECK(bank_count >= 1, "bank_count must be positive");
+  if (bank_count > 1 && sequences.dim() == 4) {
+    TORCH_CHECK(sequences.size(0) == bank_count,
+                "bank-specific sequences must have shape [bank_count, batch, steps, vector_size]");
+  }
   TORCH_CHECK(
       (bank_count == 1 && codebook.sizes() == at::IntArrayRef({kStateCount, VectorSize})) ||
           (bank_count > 1 && codebook.dim() == 3 && codebook.size(0) == bank_count &&
