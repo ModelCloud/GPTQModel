@@ -694,6 +694,50 @@ both history-preserving arms recover substantial error relative to L16/V4. Dual-
 V2, however, and its W2.5 Top-1 moves opposite to MSE/KL/Top-5. This is screening evidence only. The format must be
 selected by propagated held-out recovery, not by this local table.
 
+##### Lesson learned: capacity must be usable by the quantizer
+
+Decoder state or codebook cardinality is not, by itself, effective quantization capacity. Let
+
+```text
+C_format = every reconstruction representable by the serialized format
+C_search(x) = reconstructions the quantizer actually compares for source x
+C_useful(x) = candidates compared under an objective aligned with propagated model loss
+```
+
+Only `C_useful` can improve post-quantization recovery. A larger `C_format` does not help when the quantizer cannot
+reach, compare, or correctly score the additional reconstructions.
+
+Dual-V2 is the concrete warning. Over four weights, ordinary V2 already appends two `2R`-bit edges and therefore
+has `2**(4R)` two-edge choices. Dual-V2 redistributes those same two edges across independent parity chains; it
+does not add edge entropy over the fair four-weight span. Even under the favorable interpretation that its two
+16-bit histories provide a larger conceptual joint context, the implemented objective factorizes:
+
+```text
+argmin_(path_A, path_B) [loss_A(path_A) + loss_B(path_B)]
+  = (argmin_path_A loss_A(path_A), argmin_path_B loss_B(path_B))
+```
+
+No survivor, emission, or loss term lets an A-chain choice alter the B-chain decision. The split therefore removes
+ordinary V2's consecutive A-to-B conditioning instead of giving the optimizer a jointly usable four-weight
+correction space. Cross-device four-layer measurements confirmed the consequence: the regression exists in the
+dense reconstructed weight before packing or backend inference.
+
+Future low-rate format proposals must pass all of these gates before implementation:
+
+1. Compare capacity over the same number of weights and payload bits.
+2. Prove that the new representable set contains the canonical V2 baseline or serialize an exact baseline selector.
+3. Show that quantization actually enumerates or searches the added degrees of freedom; do not sum independent
+   state sizes and call the result jointly searchable capacity.
+4. Include the coupling terms needed to exploit joint capacity, or explicitly classify the design as a factored
+   product code with no cross-component correction.
+5. Preserve a byte-exact V2 fallback and select alternatives using propagated search plus independent confirmation;
+   local MSE/KL may shortlist candidates but cannot accept them below W3.
+6. Report both theoretical format cardinality and measured effective search diversity: unique candidates evaluated,
+   path churn, winner distribution, and downstream gains per added byte.
+
+The resulting principle is: **increase usable, propagation-scored capacity—not merely decoder cardinality or the
+sum of independent histories.**
+
 #### All-rate storage and compute consequences
 
 Pure `L16/V4` is defined only through W4. Its transition width is `E=4R`, and a bitshift trellis requires `E <= L`.
