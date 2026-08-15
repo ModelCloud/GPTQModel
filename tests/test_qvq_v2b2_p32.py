@@ -52,6 +52,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
 )
 from scripts.validate_qvq_p4_live_prefix import (
     _capture_target_inputs,
+    _install_prefix_artifacts,
     _localized_summary,
     _passes_confirmation,
     _validate_disjoint_splits,
@@ -430,6 +431,66 @@ def test_qvq_p4_live_prefix_splits_reject_overlap_and_capture_stops_at_target():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert model.after_calls == 0
     assert not model.target._forward_pre_hooks
+
+
+def test_qvq_p4_multiple_prefixes_install_atomically_and_reject_duplicate_or_mixed_contract(tmp_path):
+    generator = torch.Generator().manual_seed(20260818)
+
+    def quantized(bits):
+        return quantize_qvq_linear(
+            torch.randn((16, 16), generator=generator) * 0.1,
+            torch.eye(16),
+            bits=bits,
+            bank_count=2,
+            v2b2_p32=True,
+            trellis_batch_size=1,
+        )
+
+    model_path = tmp_path / "model-snapshot"
+    model_path.mkdir()
+    first_path = tmp_path / "first.safetensors"
+    second_path = tmp_path / "second.safetensors"
+    mixed_path = tmp_path / "mixed.safetensors"
+    provenance = {"model": str(model_path.resolve())}
+    _save_qvq_prefix_artifact(first_path, module_results={"first": quantized(2)}, bits=2, provenance=provenance)
+    _save_qvq_prefix_artifact(second_path, module_results={"second": quantized(2)}, bits=2, provenance=provenance)
+    _save_qvq_prefix_artifact(mixed_path, module_results={"second": quantized(1)}, bits=1, provenance=provenance)
+
+    model = torch.nn.Module()
+    model.first = torch.nn.Linear(16, 16, bias=False)
+    model.second = torch.nn.Linear(16, 16, bias=False)
+    manifests, replacements = _install_prefix_artifacts(
+        model,
+        paths=(first_path, second_path),
+        model_path=model_path,
+    )
+    assert len(manifests) == 2
+    assert set(replacements) == {"first", "second"}
+    assert isinstance(model.first, QVQLinear)
+    assert isinstance(model.second, QVQLinear)
+
+    duplicate_model = torch.nn.Module()
+    duplicate_model.first = torch.nn.Linear(16, 16, bias=False)
+    duplicate_first = duplicate_model.first
+    with pytest.raises(ValueError, match="duplicate modules"):
+        _install_prefix_artifacts(
+            duplicate_model,
+            paths=(first_path, first_path),
+            model_path=model_path,
+        )
+    assert duplicate_model.first is duplicate_first
+
+    mixed_model = torch.nn.Module()
+    mixed_model.first = torch.nn.Linear(16, 16, bias=False)
+    mixed_model.second = torch.nn.Linear(16, 16, bias=False)
+    mixed_first = mixed_model.first
+    with pytest.raises(ValueError, match="one exact codec contract"):
+        _install_prefix_artifacts(
+            mixed_model,
+            paths=(first_path, mixed_path),
+            model_path=model_path,
+        )
+    assert mixed_model.first is mixed_first
 
 
 def test_qvq_p4_confirmation_requires_kl_improvement_and_bounded_topn():

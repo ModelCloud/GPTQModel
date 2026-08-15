@@ -36,7 +36,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--prefix-artifact", type=Path, required=True)
+    parser.add_argument(
+        "--prefix-artifact",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="One or more compatible packed prefix artifacts installed atomically in the listed order.",
+    )
     parser.add_argument("--yaqa-factor-cache", type=Path, required=True)
     parser.add_argument("--yaqa-metadata", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -201,6 +207,59 @@ def _replace_target_with_result(
     return replacement
 
 
+def _install_prefix_artifacts(
+    model: torch.nn.Module,
+    *,
+    paths: Sequence[Path],
+    model_path: Path,
+    excluded_module: str | None = None,
+) -> tuple[tuple[dict[str, object], ...], dict[str, QVQLinear]]:
+    """Validate and atomically install a compatible set of packed prefixes."""
+
+    if not paths:
+        raise ValueError("P4 requires at least one packed prefix artifact")
+    manifests = []
+    combined_tensors = {}
+    combined_modules = {}
+    fixed_contract = None
+    resolved_model = model_path.resolve()
+    for path in paths:
+        manifest, tensors = _load_qvq_prefix_artifact(path)
+        provenance = manifest.get("provenance")
+        if not isinstance(provenance, Mapping):
+            raise TypeError(f"packed prefix provenance must be an object: {path}")
+        source_snapshot = provenance.get("source_snapshot")
+        provenance_model = provenance.get("model")
+        if source_snapshot is not None and resolved_model.name != source_snapshot:
+            raise ValueError(f"packed prefix source snapshot does not match --model: {path}")
+        if source_snapshot is None and provenance_model is not None and Path(str(provenance_model)).resolve() != resolved_model:
+            raise ValueError(f"packed prefix model does not match --model: {path}")
+        contract = tuple(manifest.get(name) for name in ("format", "bits", "vector_size", "trellis_window", "bank_count", "codebook_version"))
+        if fixed_contract is None:
+            fixed_contract = contract
+        elif contract != fixed_contract:
+            raise ValueError("packed prefix artifacts must share one exact codec contract")
+        modules = manifest["modules"]
+        overlap = set(combined_modules).intersection(modules)
+        if overlap:
+            raise ValueError(f"packed prefix artifacts contain duplicate modules: {sorted(overlap)}")
+        if excluded_module is not None and excluded_module in modules:
+            raise ValueError(f"P4 target `{excluded_module}` must remain dense before refinement")
+        combined_modules.update(modules)
+        combined_tensors.update(tensors)
+        manifests.append(manifest)
+
+    combined_manifest = dict(manifests[0])
+    combined_manifest["modules"] = combined_modules
+    combined_manifest["provenance"] = {"component_artifacts": [str(path.resolve()) for path in paths]}
+    replacements = _install_qvq_prefix_artifact(
+        model,
+        manifest=combined_manifest,
+        module_tensors=combined_tensors,
+    )
+    return tuple(manifests), replacements
+
+
 def _localized_summary(
     result: QVQLinearQuantizationResult,
     callback_report: Mapping[str, object],
@@ -252,14 +311,12 @@ def main() -> None:
         local_files_only=True,
     ).eval().to(device)
 
-    prefix_manifest, prefix_tensors = _load_qvq_prefix_artifact(args.prefix_artifact)
-    prefix_provenance = prefix_manifest.get("provenance")
-    if not isinstance(prefix_provenance, Mapping):
-        raise TypeError("packed prefix provenance must be an object")
-    prefix_snapshot = prefix_provenance.get("source_snapshot")
-    if prefix_snapshot and args.model.resolve().name != prefix_snapshot:
-        raise ValueError("packed prefix source snapshot does not match --model")
-    _install_qvq_prefix_artifact(student_model, manifest=prefix_manifest, module_tensors=prefix_tensors)
+    prefix_manifests, prefix_modules = _install_prefix_artifacts(
+        student_model,
+        paths=args.prefix_artifact,
+        model_path=args.model,
+        excluded_module=args.target,
+    )
     target = student_model.get_submodule(args.target)
     dense_target = dense_model.get_submodule(args.target)
     if not isinstance(target, torch.nn.Linear) or not isinstance(dense_target, torch.nn.Linear):
@@ -357,7 +414,8 @@ def main() -> None:
 
     provenance = {
         "model": str(args.model.resolve()),
-        "prefix_artifact": str(args.prefix_artifact.resolve()),
+        "prefix_artifacts": [str(path.resolve()) for path in args.prefix_artifact],
+        "prefix_modules": sorted(prefix_modules),
         "target": args.target,
         "bits": args.bits,
         "seed": args.seed,
@@ -376,6 +434,7 @@ def main() -> None:
             **provenance,
             "source_layers": source_layers,
             "tested_layers": args.layers,
+            "prefix_manifest_count": len(prefix_manifests),
             "device": str(device),
             "torch": torch.__version__,
             "python": platform.python_version(),
