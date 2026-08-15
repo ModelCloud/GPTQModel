@@ -201,6 +201,123 @@ all seven decoder projections per layer: Q/K/V/O plus MLP gate/up/down. The expa
 the LM head, records the scope in the report, uses generic `local_modules`/`live_modules` metrics, and creates a
 distinct YAQA factor-cache contract. For all 16 Llama 3.2 1B layers, add `--layers 16 --module-scope all-linear`.
 
+## Sketch-B scaling plan for large dense and MoE models
+
+Sketch-B is exact enough for the current Llama 3.2 1B experiments, but its collection architecture does not scale to
+200B+ dense or sparsely routed MoE models. For every independent sequence and target linear, the current collector
+forms the FP32 per-sequence weight gradient
+
+```text
+G_s = gradient_s^T @ activation_s                         [out_features, in_features]
+H_I = sum_s(G_s^T @ G_s) / (sequences * out_features)   [in_features, in_features]
+H_O = sum_s(G_s @ G_s^T) / (sequences * in_features)    [out_features, out_features]
+```
+
+It currently materializes `G` for the whole Sketch-B batch and batched input/output Gram tensors, keeps every
+module's dense FP32 factors resident on the GPU for the complete collection pass, performs repeated finite checks
+that can synchronize the host, and runs a full teacher forward/backward with activation checkpoint recomputation.
+Batching improves throughput, but increases the `G` transient linearly and does not reduce persistent factor memory.
+For an `[8192, 2048]` MLP projection at batch 8, `G` alone is 512 MiB; its dense input and output factors add 16 MiB
+and 256 MiB. Dense factors across all seven linears of all 16 Llama 3.2 1B layers are already roughly 14--15 GiB.
+Applying the same design independently to hundreds of MoE experts can require hundreds of GiB or more.
+
+The work should proceed in accuracy-first phases. Each phase must retain the existing collector as an A/B oracle
+until its numerical and downstream gates pass.
+
+### P0: telemetry and reproducible baselines
+
+- Report forward, backward, per-sequence-gradient, Gram-accumulation, transfer, and factor-finalization time.
+- Report peak transient VRAM separately from persistent accumulator VRAM, host RAM, transferred bytes, cache size,
+  valid token counts, independent sequence counts, and per-expert routed sequence/token counts.
+- Add NVTX ranges around collection stages and record factor convergence at configurable row checkpoints.
+- Benchmark collection throughput and quality at Sketch-B batches 1, 2, 4, and 8 rather than assuming the largest
+  batch is optimal for every module shape.
+
+### P1: exact, workspace-bounded single-GPU collection
+
+- Replace materialized `[batch, in, in]` and `[batch, out, out]` Gram batches with direct FP32 accumulation into the
+  two output factors. Use a fused CUDA operator or workspace-bounded cuBLAS schedule that consumes sequence-gradient
+  tiles and updates both factors without retaining all intermediate Grams.
+- Bound and reuse the `G` workspace. Stream sequence or output tiles when a complete `[batch, out, in]` allocation
+  exceeds the allocator-aware budget; never select batch size from a fixed constant alone.
+- Fuse padding exclusion, FP32 conversion, and layout preparation where profitable. Padding must contribute exactly
+  zero, and one gradient sample must still represent one independent unpadded sequence.
+- Replace per-module `.all().item()` finite checks with device-side error flags and at most one host synchronization
+  per collection batch.
+- Bucket independent full-length sequences by length and use asynchronous pinned-memory transfers. Do not concatenate
+  rows or truncate sequence lengths to improve utilization.
+- Avoid materializing full `[batch, tokens, vocabulary]` logits when only the teacher loss is needed. Evaluate a
+  fused or streamed exact cross-entropy/log-softmax path before accepting an approximation.
+- Make activation checkpointing and saved-tensor policy memory-budget-aware. Benchmark recomputation against a
+  bounded layer window and CUDA graphs per stable length bucket.
+
+These changes should preserve the current FP32 estimator and accumulation contract first. Any changed reduction
+order must be tested against the reference factors and against final serialized QVQ states/selectors, not only text
+generation.
+
+### P2: exact distributed and streamed collection
+
+- Accumulate factors where each tensor-parallel, pipeline-parallel, or expert-parallel module is owned. Do not gather
+  full per-sequence weight gradients to one device.
+- Data-parallel workers should process disjoint independent sequences and reduce only finalized FP32 factor sums and
+  integer counts. Perform one deterministic final normalization.
+- Keep only a bounded module or layer window resident. Asynchronously spill completed factors to pinned CPU memory or
+  NVMe and overlap collection, stabilization, quantization, and eviction.
+- Make factor caches self-describing: model revision, tokenizer, ordered dataset rows, valid-token masks, seed,
+  module scope, module geometry, dtype, shard topology, route counts, and collector version must all participate in
+  the cache contract.
+
+### P3: sparse-MoE correctness and efficiency
+
+The current dense-model invariant that every target module executes once per batch is invalid for routed experts.
+The MoE collector must:
+
+- accumulate only the experts actually selected by the router and maintain independent per-expert sequence/token
+  counts;
+- avoid allocating dense workspaces or factors for inactive experts in a batch;
+- define minimum effective-sample and convergence thresholds, with targeted or stratified calibration for rare
+  experts;
+- support a fail-closed shared or cluster factor for experts that cannot meet the threshold;
+- keep shared experts and routed experts separate, and reduce route-aware statistics without changing sequence
+  weighting semantics.
+
+### P4: opt-in structured factors for 200B+ MoE
+
+Exact dense factors scale as `O(sum(in_features^2 + out_features^2))` and eventually become mathematically
+impractical regardless of kernel speed. Add an explicit scalable mode that evaluates:
+
+- 16x16-aligned block-diagonal factors;
+- block-diagonal plus low-rank corrections;
+- diagonal plus low-rank factors, `H ~= D + U @ U.T`, with measured ranks such as 32--256;
+- one shared factor per expert cluster plus a small expert-specific correction;
+- online randomized sketches or Frequent-Directions-style compression that never materializes a dense expert factor.
+
+Structured modes must remain opt-in until they pass factor/subspace error, YAQA proxy, serialized round-trip,
+held-out layer/final-logit KL, Top-1/5/10, selector/family churn, and rollback gates. Full dense factors remain the
+reference mode for small and medium models.
+
+### P5: adaptive sample allocation
+
+Replace a universal fixed row count with deterministic convergence criteria: relative factor change, principal-
+subspace angle, YAQA proxy stability, selector/family Hamming churn, and serialized-state stability. Stop collection
+for stable modules and redirect rows to unstable or rarely routed experts. Report the stopping reason and effective
+sample count for every factor.
+
+The intended user-visible modes are:
+
+| Mode | Target | Contract |
+|:---|:---|:---|
+| `exact` | Small/medium models | Current dense FP32 estimator with workspace and synchronization optimizations |
+| `distributed_exact` | Large dense models | Same estimator, sharded accumulation, bounded residency, deterministic reduction |
+| `scalable_moe` | 200B+ MoE | Route-aware structured factors with explicit quality gates and exact fallback where feasible |
+
+Before merging any performance implementation, record a full A/B table containing wall time, sequences and valid
+tokens per second, peak VRAM, host RAM, transfer volume, cache size, factor error, YAQA proxy, exact state/selector
+parity where required, final KL, and Top-1/5/10. The immediate highest-return implementation is the exact fused,
+workspace-bounded `G` plus dual-Gram accumulation and device-side finite flag; the architectural follow-up is
+route-aware distributed accumulation. Structured factors are required, not optional optimization polish, for the
+eventual 200B+ MoE target.
+
 ## Already validated and pushed
 
 - QVQ is the QTIP-derived quantizer plus this repository's planar PGC16 and backend upgrades. `pgc16-v1` uses the
