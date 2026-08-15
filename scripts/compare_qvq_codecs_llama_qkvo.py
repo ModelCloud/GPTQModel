@@ -48,6 +48,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="mps")
+    parser.add_argument("--layers", type=int, default=1)
     parser.add_argument("--rates", nargs="+", type=float, default=(1, 1.5, 2, 2.5))
     parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=tuple(ARM_CONFIG))
     parser.add_argument("--calibration-rows", type=int, default=8)
@@ -59,14 +60,15 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _qkvo_modules(model: torch.nn.Module) -> dict[str, torch.nn.Linear]:
+def _qkvo_modules(model: torch.nn.Module, *, layer_count: int) -> dict[str, torch.nn.Linear]:
     modules = {
         name: module
         for name, module in model.named_modules()
         if isinstance(module, torch.nn.Linear) and name.endswith(QKVO_SUFFIXES)
     }
-    if len(modules) != len(QKVO_SUFFIXES):
-        raise ValueError(f"expected four QKVO modules in one decoder layer, found {tuple(modules)}")
+    expected = layer_count * len(QKVO_SUFFIXES)
+    if len(modules) != expected:
+        raise ValueError(f"expected {expected} QKVO modules in {layer_count} decoder layers, found {tuple(modules)}")
     return modules
 
 
@@ -94,6 +96,8 @@ def _mean(values: list[float]) -> float:
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.layers < 1:
+        raise ValueError("layer count must be positive")
     if args.evaluation_row_offset < args.calibration_rows:
         raise ValueError("evaluation rows must be disjoint from calibration rows")
     rates = tuple(normalize_qvq_rate(rate) for rate in args.rates)
@@ -107,7 +111,7 @@ def main() -> None:
 
     config = AutoConfig.from_pretrained(args.model, local_files_only=True)
     source_layers = int(config.num_hidden_layers)
-    config.num_hidden_layers = 1
+    config.num_hidden_layers = args.layers
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         config=config,
@@ -135,7 +139,7 @@ def main() -> None:
         max_length=args.max_length,
     )
     evaluation = {name: value.to(device) for name, value in evaluation.items()}
-    modules = _qkvo_modules(model)
+    modules = _qkvo_modules(model, layer_count=args.layers)
     module_names = tuple(modules)
 
     print("Capturing QKVO calibration Hessians", flush=True)
@@ -146,7 +150,7 @@ def main() -> None:
         evaluation,
         modules,
         capture_inputs=True,
-        layer_count=1,
+        layer_count=args.layers,
     )
     dense_qkvo = _joined(dense_outputs, module_names)
     original_weights = {name: module.weight.detach().cpu().float().clone() for name, module in modules.items()}
@@ -155,7 +159,7 @@ def main() -> None:
         "settings": {
             "model": str(args.model),
             "source_layers": source_layers,
-            "tested_layers": 1,
+            "tested_layers": args.layers,
             "modules": list(module_names),
             "module_shapes": {name: list(module.weight.shape) for name, module in modules.items()},
             "rates": list(rates),
@@ -204,7 +208,8 @@ def main() -> None:
                 bias = None if module.bias is None else module.bias.detach().cpu().float()
                 local_outputs[name] = F.linear(dense_inputs[name], reconstruction, bias)
                 print(
-                    f"W{rate:g} {arm}: {index}/4 {name} in {time.perf_counter() - module_started:.2f}s",
+                    f"W{rate:g} {arm}: {index}/{len(modules)} {name} "
+                    f"in {time.perf_counter() - module_started:.2f}s",
                     flush=True,
                 )
 
@@ -216,7 +221,7 @@ def main() -> None:
                 evaluation,
                 modules,
                 capture_inputs=False,
-                layer_count=1,
+                layer_count=args.layers,
             )
             local_qkvo = _joined(local_outputs, module_names)
             live_qkvo = _joined(live_outputs, module_names)
@@ -231,8 +236,8 @@ def main() -> None:
                 "local_qkvo": tensor_metrics(dense_qkvo, local_qkvo, normalize_distribution=True),
                 "live_qkvo": tensor_metrics(dense_qkvo, live_qkvo, normalize_distribution=True),
                 "layer": tensor_metrics(
-                    dense_outputs["layer.0.hidden"],
-                    live_outputs["layer.0.hidden"],
+                    dense_outputs[f"layer.{args.layers - 1}.hidden"],
+                    live_outputs[f"layer.{args.layers - 1}.hidden"],
                     normalize_distribution=True,
                 ),
                 "logits": tensor_metrics(dense_logits, quantized_logits, normalize_distribution=False),
