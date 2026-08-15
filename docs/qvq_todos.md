@@ -34,15 +34,33 @@ banks times 128 predecessor prefixes require nine bits.
 - **complete -- spectral P3 reference:** recover the truncated post-YAQA residual through triangular solves, use it
   only as a Viterbi rounding-target push, retain original-weight feedback and original-Kronecker acceptance, expose
   continuous-oracle/absorption/churn telemetry, and serialize only the exact ordinary V2B2-P32 payload;
-- **complete -- spectral P3 gate:** W2 fixed-family rank 16 with `alpha={0.25,0.5,1.0}` used 512 full calibration
-  rows, disjoint evaluation rows `[512,1024)`, and disjoint YAQA rows `[1024,1536)`. Every one of the 16 Q/K/V/O
-  modules rejected every pushed candidate under the original Kronecker objective: selected modules `0/16`, selector
-  churn `0`, and discrete absorption efficiency `0`. The serialized result therefore remained the exact baseline
-  artifact. Its final KL was `0.0575069`, Top-1 `74.4203%`, Top-5 overlap `77.6291%`, and Top-10 overlap `78.4969%`;
-  the independently executed B2-P32+YAQA baseline was `0.0575036`, `74.4098%`, `77.6175%`, and `78.4741%`.
-  Differences at that scale are cross-run numerical noise, not spectral recovery. Do not expand P3 to more ranks,
-  rates, or family reselection. Retain the default-off reference and prioritize live-prefix propagation-aware
-  candidate generation/scoring instead. Raw result: `artifacts/qvq_spectral_p3_gate/w2_rank16_push.json`.
+- **complete -- spectral P3 gates:** the first W2 fixed-family rank-16 gate with `alpha={0.25,0.5,1.0}` used 512
+  full calibration rows, disjoint evaluation rows `[512,1024)`, and disjoint YAQA rows `[1024,1536)`. Every one of
+  the 16 Q/K/V/O modules rejected every pushed candidate under the original Kronecker objective. The accepted
+  artifact consequently had zero selector churn and zero discrete absorption. Its final KL was `0.0575069`, Top-1
+  `74.4203%`, Top-5 overlap `77.6291%`, and Top-10 overlap `78.4969%`; the independently executed B2-P32+YAQA
+  baseline was `0.0575036`, `74.4098%`, `77.6175%`, and `78.4741%`. Differences at that scale are cross-run
+  numerical noise, not spectral recovery.
+- **complete -- rejected-candidate P3 sweep:** telemetry added in commit `07ce3e25` distinguishes an unchanged
+  proposal from an alternate path rejected by exact rollback. A matched rerun swept ranks `{8,16,32}` and
+  `alpha={0.5,1,2,4}`. All `192` module/candidate proposals changed selectors, with mean selector churn
+  `49.65--50.02%` and mean state-path churn `99.63--99.96%`. Nevertheless, zero candidates improved the original
+  YAQA proxy and zero candidates were selected. Mean original-proxy regressions were:
+
+  | Rank | alpha 0.5 | alpha 1 | alpha 2 | alpha 4 |
+  |---:|---:|---:|---:|---:|
+  | 8 | +6.42% | +27.89% | +105.82% | +352.03% |
+  | 16 | +11.39% | +46.46% | +174.96% | +558.00% |
+  | 32 | +19.43% | +76.67% | +267.10% | +838.26% |
+
+  The full 512-row result remained exactly at final KL `0.0575069`, Top-1 `74.4203%`, Top-5 overlap `77.6291%`,
+  and Top-10 overlap `78.4969%`. P3 therefore failed because a dense global spectral push creates a near-total
+  trellis path avalanche whose error is worse under the original objective, not because the push was too weak to
+  cross discrete boundaries. Retire global P3 push as a promotion path. Preserve it as a default-off diagnostic and
+  use the lesson to constrain any successor to sparse/localized proposals, explicit trust regions, or live-prefix
+  propagation-aware candidate generation and scoring. Raw results:
+  `artifacts/qvq_spectral_p3_gate/w2_rank16_push.json` and
+  `artifacts/qvq_spectral_p3_gate/w2_r8_r16_r32_a05_a1_a2_a4.json`.
 
 The module alternative ID is physically one serialized byte. Exact artifact accounting must include it even though
 its amortized BPW is negligible for real projection matrices.

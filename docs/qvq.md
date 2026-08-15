@@ -882,6 +882,14 @@ the fixed arm is the first causal gate, while reselection is justified only if t
 benefit. Local or Kronecker improvement alone cannot promote P3; disjoint live-prefix/final-logit confirmation is
 still required below W3.
 
+The strict W2 experiment rejects this global-push form. Across 16 real Llama 3.2 1B Q/K/V/O modules and all
+`rank={8,16,32}` by `alpha={0.5,1,2,4}` combinations, all 192 candidates changed selectors and almost every V2
+state, but none improved the original YAQA objective. Selector churn averaged about 50% and state churn exceeded
+99.6%; increasing either rank or alpha monotonically worsened the original proxy. Exact rollback therefore retained
+the baseline artifact and final logits. The failure is a path avalanche, not insufficient proposal movement. Keep P3
+default-off as a diagnostic; future spectral proposals must localize the correction or impose an explicit trust
+region before they warrant another propagated gate.
+
 #### V2B4-P64 implementation slice
 
 `format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W3.5. It keeps the canonical L16/V2
