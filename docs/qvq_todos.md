@@ -134,6 +134,13 @@ acceptance objective.
 - Pending: real-model disjoint search/confirmation gate, four-layer final KL and Top-1/5/10, multiple YAQA seeds,
   callback acceptance rate, and comparison against unchanged V2B2-P32+YAQA.
 
+The first Apple P-core real-data microgate used Llama 3.2 1B layer-0 `q_proj`, its real `out[0:16],in[0:16]`
+weight tile, cached YAQA512 factors, 602 valid-token search rows from dataset rows `[1536,1540)`, and 2,100
+valid-token confirmation rows from `[1540,1544)`. At W2 the localized search proposed a changed state path without
+selector churn. Confirmation MSE regressed from `2.7109018e-5` to `2.7253496e-5`, so the independent gate restored
+the baseline exactly. This is a successful rollback/lifecycle check, not evidence of quality recovery and not a
+substitute for the pending full-width live-prefix/final-logit gate.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

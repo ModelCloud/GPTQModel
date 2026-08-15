@@ -1234,6 +1234,9 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
     )
 
     assert len(callback_pairs) == 1
+    assert rejected.yaqa_spectral_selected is False
+    assert callback_error.yaqa_spectral_selected is False
+    assert accepted.yaqa_spectral_selected is True
     torch.testing.assert_close(callback_pairs[0][1], baseline.weight, rtol=0, atol=0)
     torch.testing.assert_close(callback_pairs[0][0], accepted.weight, rtol=0, atol=0)
     for name in ("trellis", "bank_ids", "bank_alt_id"):

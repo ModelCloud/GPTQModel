@@ -5640,6 +5640,10 @@ def quantize_qvq_linear(
             reconstructed_weight = rollback_weight
             proxy_loss = rollback_proxy_loss
             optimized_channels = rollback_optimized_channels
+            yaqa_bank_diagnostics["spectral_selected"] = False
+            yaqa_bank_diagnostics["spectral_selected_loss"] = yaqa_bank_diagnostics["spectral_original_loss"]
+        yaqa_bank_diagnostics["localized_propagation_proposed"] = proposal_changed
+        yaqa_bank_diagnostics["localized_propagation_accepted"] = accepted
         if telemetry is not None:
             telemetry.count("localized_propagation_proposal_changed", int(proposal_changed))
             telemetry.count("localized_propagation_accepted", int(accepted))
