@@ -96,6 +96,32 @@ W3.5 does not support V2B2-P32, so it compares canonical V2 with V2+YAQA. Both a
 At W3.5, YAQA reduces Layer KL by 56.86% and Final KL by 55.20%, while improving Top-1 agreement by 4.42
 percentage points.
 
+## Consolidated full comparison
+
+This table merges every completed arm into one historical view. Lower is better for relative L2 and KL; higher is
+better for Top-N agreement. V2B2-P32 is defined only through W2.5.
+
+| Rate | Arm | BPW | Weight rel-L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Wall time |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1.5 | V2 | 1.50000 | 0.462584 | 0.006305 | 0.017484 | 0.079240 | 0.270476 | 51.52% | 56.17% | 56.73% | 512.46 s* |
+| W1.5 | V2+YAQA | 1.50000 | 0.625811 | 0.091006 | 0.098095 | 0.039655 | 0.150286 | 62.03% | 66.14% | 67.13% | 672.29 s* |
+| W1.5 | V2B2-P32+YAQA | 1.53125 | 0.614660 | 0.074820 | 0.080649 | 0.035609 | 0.138015 | 63.15% | 67.24% | 68.25% | 1012.80 s |
+| W2 | V2 | 2.00000 | 0.332410 | 0.002197 | 0.006116 | 0.036377 | 0.131938 | 62.39% | 67.24% | 68.29% | 523.77 s* |
+| W2 | V2+YAQA | 2.00000 | 0.477162 | 0.018192 | 0.020307 | 0.014350 | 0.061103 | 73.59% | 76.97% | 77.84% | 688.51 s* |
+| W2 | V2B2-P32+YAQA | 2.03125 | 0.467218 | 0.016472 | 0.018225 | 0.013133 | 0.056970 | 74.55% | 77.59% | 78.66% | 980.17 s |
+| W2.5 | V2 | 2.50000 | 0.237991 | 0.000945 | 0.003080 | 0.015032 | 0.060171 | 73.41% | 76.83% | 77.87% | 509.46 s* |
+| W2.5 | V2+YAQA | 2.50000 | 0.357409 | 0.006466 | 0.007221 | 0.005933 | 0.027478 | 81.60% | 83.75% | 84.59% | 666.13 s* |
+| W2.5 | V2B2-P32+YAQA | 2.53125 | 0.348671 | 0.006070 | 0.006788 | 0.005581 | 0.025907 | 81.84% | 84.28% | 85.02% | 967.36 s |
+| W3 | V2 | 3.00000 | 0.170854 | 0.000470 | 0.001348 | 0.006415 | 0.029238 | 80.62% | 83.11% | 83.94% | 566.15 s* |
+| W3 | V2+YAQA | 3.00000 | 0.262786 | 0.003194 | 0.003539 | 0.002793 | 0.013363 | 86.68% | 88.24% | 88.94% | 742.48 s* |
+| W3 | V2B2-P32+YAQA | unsupported | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| W3.5 | V2 | 3.50000 | 0.123013 | 0.000241 | 0.000633 | 0.003223 | 0.015064 | 85.85% | 87.49% | 88.12% | 374.04 s |
+| W3.5 | V2+YAQA | 3.50000 | 0.190856 | 0.001605 | 0.001774 | 0.001390 | 0.006748 | 90.27% | 91.27% | 91.83% | 430.78 s |
+| W3.5 | V2B2-P32+YAQA | unsupported | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+
+An asterisk marks timing measured while the W1.5--W3 V2/V2+YAQA workers contended on physical GPU 0. Those
+accuracy measurements remain valid, but their wall times are not dedicated-GPU benchmarks.
+
 ## RAM-fix validation
 
 The original evaluation implementation retained every full-vocabulary row and grew each worker to 335--364 GiB
