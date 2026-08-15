@@ -835,6 +835,7 @@ def main() -> None:
                     "svd_device": result.yaqa_spectral_svd_device,
                     "concentration": result.yaqa_spectral_concentration,
                     "oracle_losses": result.yaqa_spectral_oracle_losses,
+                    "candidates": result.yaqa_spectral_candidates,
                     "absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
                     "selector_churn": result.yaqa_spectral_selector_churn,
                     "family_changed": result.yaqa_spectral_family_changed,

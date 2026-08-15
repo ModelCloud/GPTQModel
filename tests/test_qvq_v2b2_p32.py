@@ -593,6 +593,12 @@ def test_qvq_v2b2_p32_yaqa_spectral_push_uses_low_rank_target_and_original_proxy
 
     def fake_candidate(_weight, _input, _output, *_args, **kwargs):
         rounding_biases.append(kwargs["_rounding_bias"].clone())
+        kwargs["diagnostics"].update(
+            {
+                "fallback_to_v2": False,
+                "family_candidates": {"1": {"fallback_to_bank0": False}},
+            }
+        )
         value = 0.5 if len(rounding_biases) == 1 else 2.0
         return (
             torch.eye(8) * value,
@@ -631,8 +637,90 @@ def test_qvq_v2b2_p32_yaqa_spectral_push_uses_low_rank_target_and_original_proxy
     assert diagnostics["spectral_selected_loss"] < diagnostics["spectral_original_loss"]
     assert diagnostics["spectral_selector_churn"] == 1.0
     assert diagnostics["spectral_family_changed"] is True
+    assert set(diagnostics["spectral_candidates"]) == {"r8_a0.5", "r8_a1"}
+    selected = diagnostics["spectral_candidates"]["r8_a0.5"]
+    assert selected["selected"] is True
+    assert selected["relative_improvement"] > 0
+    assert selected["state_churn"] == 0.0
+    assert selected["selector_churn"] == 1.0
+    assert selected["family_changed"] is True
+    assert selected["fallback_to_v2"] is False
+    assert selected["family_candidates"]["1"]["fallback_to_bank0"] is False
+    assert diagnostics["spectral_candidates"]["r8_a1"]["selected"] is False
     torch.testing.assert_close(rounding_biases[0], -0.5 * torch.eye(8), rtol=0, atol=1e-6)
     torch.testing.assert_close(rounding_biases[1], -torch.eye(8), rtol=0, atol=1e-6)
+
+
+def test_qvq_v2b2_p32_yaqa_spectral_push_preserves_rejected_candidate_diagnostics():
+    source = torch.zeros((8, 8))
+    baseline_weight = torch.eye(8)
+    baseline_states = torch.zeros((1, 32), dtype=torch.long)
+    baseline_selectors = torch.zeros(8, dtype=torch.uint8)
+    baseline_alt_id = torch.tensor([1], dtype=torch.uint8)
+    baseline = baseline_weight, baseline_states, baseline_selectors, baseline_alt_id
+    codebooks = tuple(torch.full((1,), index, dtype=torch.float32) for index in range(4))
+    calls = 0
+
+    def rejected_candidate(_weight, _input, _output, *_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        internally_rolled_back = calls == 2
+        kwargs["diagnostics"].update(
+            {
+                "fallback_to_v2": internally_rolled_back,
+                "family_candidates": {
+                    "1": {
+                        "fallback_to_bank0": internally_rolled_back,
+                        "pre_fallback_selector_churn": 0.75,
+                        "pre_fallback_state_churn": 0.5,
+                    }
+                },
+            }
+        )
+        if internally_rolled_back:
+            return baseline
+        return (
+            torch.eye(8) * 2,
+            torch.ones_like(baseline_states),
+            torch.ones_like(baseline_selectors),
+            torch.tensor([2], dtype=torch.uint8),
+        )
+
+    diagnostics = {}
+    with (
+        patch(
+            "gptqmodel.eora.eora._eora_compute_svd",
+            side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+        ),
+        patch("gptqmodel.quantization.qvq.yaqa_inner_v2b2_p32", side_effect=rejected_candidate),
+    ):
+        actual = yaqa_spectral_push_v2b2_p32(
+            source,
+            torch.eye(8),
+            torch.eye(8),
+            codebooks,
+            baseline,
+            ranks=(8,),
+            alphas=(0.5, 1.0),
+            bits=2,
+            diagnostics=diagnostics,
+        )
+
+    assert all(torch.equal(left, right) for left, right in zip(actual, baseline, strict=True))
+    assert diagnostics["spectral_selected"] is False
+    assert diagnostics["spectral_absorption_efficiency"] == 0.0
+    changed = diagnostics["spectral_candidates"]["r8_a0.5"]
+    assert changed["relative_improvement"] < 0
+    assert changed["state_churn"] == 1.0
+    assert changed["selector_churn"] == 1.0
+    assert changed["family_changed"] is True
+    assert changed["fallback_to_v2"] is False
+    rolled_back = diagnostics["spectral_candidates"]["r8_a1"]
+    assert rolled_back["relative_improvement"] == 0.0
+    assert rolled_back["state_churn"] == 0.0
+    assert rolled_back["selector_churn"] == 0.0
+    assert rolled_back["fallback_to_v2"] is True
+    assert rolled_back["family_candidates"]["1"]["pre_fallback_selector_churn"] == 0.75
 
 
 def test_qvq_v2b2_p32_yaqa_spectral_push_rejects_invalid_controls():
@@ -753,6 +841,19 @@ def test_qvq_v2b2_p32_yaqa_spectral_push_is_serialization_neutral_and_nonregress
     assert pushed.yaqa_spectral_alpha is None or pushed.yaqa_spectral_alpha in (0.25, 0.5)
     assert set(pushed.yaqa_spectral_concentration) == {"1"}
     assert set(pushed.yaqa_spectral_oracle_losses) == {"1"}
+    assert set(pushed.yaqa_spectral_candidates) == {"r1_a0.25", "r1_a0.5"}
+    for candidate in pushed.yaqa_spectral_candidates.values():
+        assert set(candidate) >= {
+            "loss",
+            "relative_improvement",
+            "state_churn",
+            "selector_churn",
+            "spectral_alignment",
+            "fallback_to_v2",
+            "family_candidates",
+            "selected",
+        }
+        assert candidate["family_candidates"] is not None
     assert set(pushed.serialized_tensors()) == set(baseline.serialized_tensors())
     decoded = reconstruct_qvq_inner_weight(
         pushed.trellis,
@@ -985,12 +1086,23 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
         )
 
     assert int(family.item()) == expected_family
+    family_candidates = diagnostics.pop("family_candidates")
     assert diagnostics == {
         "fallback_to_v2": False,
         "selector_churn": float((selectors != block_selectors).to(torch.float32).mean()),
         "family_changed": expected_changed,
         "block_family_id": 2,
     }
+    expected_ids = {"2"} if family_mode == "fixed_block_ldlq" else {"1", "2", "3"}
+    assert set(family_candidates) == expected_ids
+    for candidate in family_candidates.values():
+        assert candidate == {
+            "fallback_to_bank0": False,
+            "mixed_loss_before_fallback": None,
+            "bank0_loss": None,
+            "pre_fallback_selector_churn": None,
+            "pre_fallback_state_churn": None,
+        }
 
 
 def test_qvq_v2b2_p32_reuses_one_canonical_block_ldlq_oracle():

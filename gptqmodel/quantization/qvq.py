@@ -287,6 +287,7 @@ class QVQLinearQuantizationResult:
     yaqa_spectral_svd_device: str | None = None
     yaqa_spectral_concentration: dict[str, float] | None = None
     yaqa_spectral_oracle_losses: dict[str, float] | None = None
+    yaqa_spectral_candidates: dict[str, dict[str, object]] | None = None
     yaqa_spectral_absorption_efficiency: float | None = None
     yaqa_spectral_selector_churn: float | None = None
     yaqa_spectral_family_changed: bool | None = None
@@ -3446,6 +3447,16 @@ def yaqa_inner(
             "ij,ik,kl,lj->", bank0_error, input_hessian_fp32, bank0_error, output_hessian_fp32
         )
         fallback_to_bank0 = not torch.isfinite(mixed_loss) or mixed_loss >= bank0_loss
+        if _diagnostics is not None:
+            bank0_states = bank0_reference_states.reshape_as(tile_states)
+            _diagnostics["mixed_loss_before_fallback"] = float(mixed_loss.item())
+            _diagnostics["bank0_loss"] = float(bank0_loss.item())
+            _diagnostics["pre_fallback_selector_churn"] = float(
+                (bank_ids != 0).to(torch.float32).mean().item()
+            )
+            _diagnostics["pre_fallback_state_churn"] = float(
+                (tile_states != bank0_states).to(torch.float32).mean().item()
+            )
         if fallback_to_bank0:
             quantized = bank0_reference.to(dtype=inner_weight.dtype)
             tile_states = bank0_reference_states.reshape(input_blocks, output_blocks, steps_per_tile)
@@ -3572,6 +3583,7 @@ def yaqa_inner_v2b2_p32(
     selected_banked_candidate = False
     oracle = canonical_weight, canonical_states
     alternative_ids = (block_alt_id,) if family_mode == "fixed_block_ldlq" else range(1, 4)
+    family_diagnostics: dict[str, dict[str, object]] = {}
     for alt_id in alternative_ids:
         pair_stack = (
             torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
@@ -3579,6 +3591,7 @@ def yaqa_inner_v2b2_p32(
             else bank_codebook_pair_stacks[alt_id - 1]
         )
         pair_codebooks = tuple(pair_stack[bank] for bank in range(2))
+        inner_diagnostics: dict[str, object] = {}
         candidate_weight, candidate_states, candidate_selectors = yaqa_inner(
             inner_weight,
             input_hessian,
@@ -3588,9 +3601,17 @@ def yaqa_inner_v2b2_p32(
             segmented_bank_stack=pair_stack,
             v2b2_p32=True,
             _bank0_oracle=oracle,
+            _diagnostics=inner_diagnostics,
             **kwargs,
         )
         candidate_loss = full_loss(candidate_weight)
+        family_diagnostics[str(alt_id)] = {
+            "fallback_to_bank0": bool(inner_diagnostics.get("fallback_to_bank0", False)),
+            "mixed_loss_before_fallback": inner_diagnostics.get("mixed_loss_before_fallback"),
+            "bank0_loss": inner_diagnostics.get("bank0_loss"),
+            "pre_fallback_selector_churn": inner_diagnostics.get("pre_fallback_selector_churn"),
+            "pre_fallback_state_churn": inner_diagnostics.get("pre_fallback_state_churn"),
+        }
         if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
             best_weight = candidate_weight
             best_states = candidate_states
@@ -3606,6 +3627,7 @@ def yaqa_inner_v2b2_p32(
             )
         diagnostics["family_changed"] = bool(selected_banked_candidate and best_alt_id != block_alt_id)
         diagnostics["block_family_id"] = block_alt_id
+        diagnostics["family_candidates"] = family_diagnostics
     return (
         best_weight,
         best_states,
@@ -3842,6 +3864,7 @@ def yaqa_spectral_push_v2b2_p32(
     best_candidate_diagnostics: dict[str, object] | None = None
     concentrations = {}
     oracle_losses = {}
+    candidate_records: dict[str, dict[str, object]] = {}
     top_energies = {}
     for rank in usable_ranks:
         top_energy = singular_values[:rank].square().sum()
@@ -3879,18 +3902,52 @@ def yaqa_spectral_push_v2b2_p32(
                 **kwargs,
             )
             candidate_loss = original_loss(candidate[0])
-            if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
+            delta = candidate[0].to(torch.float32) - baseline_weight.to(torch.float32)
+            whitened_delta = input_root.transpose(0, 1) @ delta @ output_root
+            alignment_denominator = whitened_delta.norm() * whitened_correction.norm()
+            alignment = (
+                0.0
+                if float(alignment_denominator.item()) <= eps
+                else float((whitened_delta * whitened_correction).sum().div(alignment_denominator).item())
+            )
+            candidate_key = f"r{rank}_a{float(alpha):g}"
+            candidate_is_finite = bool(torch.isfinite(candidate_loss).item())
+            candidate_loss_value = float(candidate_loss.item()) if candidate_is_finite else None
+            relative_improvement = (
+                float(((baseline_loss - candidate_loss) / baseline_loss.abs().clamp_min(eps)).item())
+                if candidate_is_finite
+                else None
+            )
+            candidate_records[candidate_key] = {
+                "rank": int(rank),
+                "alpha": float(alpha),
+                "finite": candidate_is_finite,
+                "loss": candidate_loss_value,
+                "relative_improvement": relative_improvement,
+                "state_churn": float((candidate[1] != baseline[1]).to(torch.float32).mean().item()),
+                "selector_churn": float((candidate[2] != baseline_selectors).to(torch.float32).mean().item()),
+                "family_changed": bool(int(candidate[3].item()) != int(baseline_alt_id.item())),
+                "spectral_alignment": alignment,
+                "fallback_to_v2": bool(candidate_diagnostics.get("fallback_to_v2", False)),
+                "family_candidates": candidate_diagnostics.get("family_candidates"),
+                "selected": False,
+            }
+            if candidate_is_finite and candidate_loss < best_loss:
                 best = candidate
                 best_loss = candidate_loss
                 best_rank = rank
                 best_alpha = float(alpha)
                 best_candidate_diagnostics = candidate_diagnostics
 
+    if best_rank is not None and best_alpha is not None:
+        candidate_records[f"r{best_rank}_a{best_alpha:g}"]["selected"] = True
+
     if diagnostics is not None:
         diagnostics["spectral_method"] = "push"
         diagnostics["spectral_svd_device"] = spectral_device.type
         diagnostics["spectral_concentration"] = concentrations
         diagnostics["spectral_oracle_losses"] = oracle_losses
+        diagnostics["spectral_candidates"] = candidate_records
         diagnostics["spectral_selected"] = best_rank is not None
         diagnostics["spectral_rank"] = best_rank
         diagnostics["spectral_lambda"] = None
@@ -5311,6 +5368,13 @@ def quantize_qvq_linear(
             else {
                 str(rank): float(value)
                 for rank, value in dict(yaqa_bank_diagnostics["spectral_oracle_losses"]).items()
+            }
+        ),
+        yaqa_spectral_candidates=(
+            None if "spectral_candidates" not in yaqa_bank_diagnostics
+            else {
+                str(candidate): dict(values)
+                for candidate, values in dict(yaqa_bank_diagnostics["spectral_candidates"]).items()
             }
         ),
         yaqa_spectral_absorption_efficiency=(

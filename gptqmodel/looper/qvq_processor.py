@@ -914,6 +914,7 @@ class QVQProcessor(LoopProcessor):
                 "yaqa_spectral_svd_device": result.yaqa_spectral_svd_device,
                 "yaqa_spectral_concentration": result.yaqa_spectral_concentration,
                 "yaqa_spectral_oracle_losses": result.yaqa_spectral_oracle_losses,
+                "yaqa_spectral_candidates": result.yaqa_spectral_candidates,
                 "yaqa_spectral_absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
                 "yaqa_spectral_selector_churn": result.yaqa_spectral_selector_churn,
                 "yaqa_spectral_family_changed": result.yaqa_spectral_family_changed,
