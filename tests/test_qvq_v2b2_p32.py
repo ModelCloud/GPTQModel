@@ -37,6 +37,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
     _aggregate_qvq_telemetry,
+    _all_linear_dependency_stages,
     _install_qvq_prefix_artifact,
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
@@ -146,11 +147,26 @@ def test_qvq_p4_baseline_only_is_explicit_and_default_off():
     assert _p4_parser().parse_args((*required, "--baseline-only")).baseline_only
 
 
+class _SwiGLUHessianHarness(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(4, 8, bias=False)
+        self.up_proj = torch.nn.Linear(4, 8, bias=False)
+        self.down_proj = torch.nn.Linear(8, 4, bias=False)
+
+    def forward(self, input_ids, attention_mask, use_cache=False):
+        del attention_mask, use_cache
+        hidden = input_ids.float()
+        gated = torch.nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden)
+        return self.down_proj(gated)
+
+
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert DEFAULT_ARMS == ("v2", "v2b2-p32")
     args = _parser().parse_args(("--model", "model", "--dataset", "dataset", "--output", "report.json"))
     assert args.layers == 4
     assert args.module_scope == "qkvo"
+    assert args.all_linear_hessian_mode == "staged"
     assert args.calibration_rows == 64
     assert args.evaluation_rows == 64
     assert args.evaluation_row_offset == 64
@@ -197,6 +213,14 @@ def test_qvq_comparison_harness_can_select_every_decoder_linear_projection():
     with pytest.raises(ValueError, match="unsupported module scope"):
         _quantized_linear_modules(model, layer_count=2, module_scope="everything")
 
+    stages = _all_linear_dependency_stages(model, all_linear)
+    assert stages == (
+        tuple(f"model.layers.{layer}.self_attn.{role}" for layer in range(2) for role in ("q_proj", "k_proj", "v_proj")),
+        tuple(f"model.layers.{layer}.self_attn.o_proj" for layer in range(2)),
+        tuple(f"model.layers.{layer}.mlp.{role}" for layer in range(2) for role in ("gate_proj", "up_proj")),
+        tuple(f"model.layers.{layer}.mlp.down_proj" for layer in range(2)),
+    )
+
 
 def test_qvq_comparison_shared_input_groups_cover_qkv_and_gate_up_only():
     model = torch.nn.Module()
@@ -234,6 +258,36 @@ def test_shared_hessian_capture_matches_independent_and_aliases_storage():
     assert shared_counts == independent_counts == {"q": 2, "k": 2, "v": 2}
     assert all(torch.equal(shared[name], independent[name]) for name in modules)
     assert shared["q"].data_ptr() == shared["k"].data_ptr() == shared["v"].data_ptr()
+
+
+def test_swiglu_down_hessian_must_be_recaptured_after_gate_up_change():
+    torch.manual_seed(19)
+    model = _SwiGLUHessianHarness()
+    modules = {"down": model.down_proj}
+    batches = [
+        {
+            "input_ids": torch.randn((2, 3, 4)),
+            "attention_mask": torch.tensor([[1, 1, 1], [1, 1, 0]]),
+        }
+    ]
+    dense_hessians, counts = capture_calibration_hessians(
+        model,
+        batches,
+        modules,
+        device=torch.device("cpu"),
+    )
+    with torch.no_grad():
+        model.gate_proj.weight.zero_()
+    replayed_hessians, replayed_counts = capture_calibration_hessians(
+        model,
+        batches,
+        modules,
+        device=torch.device("cpu"),
+    )
+
+    assert counts == replayed_counts == {"down": 5}
+    assert dense_hessians["down"].abs().max() > 0
+    assert torch.equal(replayed_hessians["down"], torch.zeros_like(replayed_hessians["down"]))
 
 
 def test_qvq_shared_input_factorization_is_exact_reused_and_provenance_checked():

@@ -165,6 +165,15 @@ def _parser() -> argparse.ArgumentParser:
         default="qkvo",
         help="Quantize attention Q/K/V/O only, or every Q/K/V/O and gate/up/down projection.",
     )
+    parser.add_argument(
+        "--all-linear-hessian-mode",
+        choices=("staged", "dense-frozen"),
+        default="staged",
+        help=(
+            "For all-linear sweeps, recapture downstream geometry after installing QKV, O, and gate/up "
+            "reconstructions, or retain the legacy dense-frozen diagnostic control."
+        ),
+    )
     parser.add_argument("--rates", nargs="+", type=float, default=(1, 1.5, 2, 2.5))
     parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=DEFAULT_ARMS)
     parser.add_argument("--calibration-rows", type=int, default=64)
@@ -616,6 +625,47 @@ def _shared_input_hessian_groups(
     return tuple(groups)
 
 
+def _all_linear_dependency_stages(
+    model: torch.nn.Module,
+    selected_modules: dict[str, torch.nn.Linear],
+) -> tuple[tuple[str, ...], ...]:
+    """Return Llama-style producer/consumer stages from the instantiated module tree.
+
+    Q/K/V share the layer input, O consumes their attention result, gate/up
+    share the post-attention input, and down consumes the gated product.  The
+    stages are global across decoder layers so each calibration replay updates
+    every consumer from all already-installed producer reconstructions.
+    """
+
+    selected_names_by_id = {id(module): name for name, module in selected_modules.items()}
+    stages: list[list[str]] = [[], [], [], []]
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        raise ValueError("all-linear staged replay requires decoder layers at model.layers")
+    for layer in layers:
+        attention = getattr(layer, "self_attn", None)
+        mlp = getattr(layer, "mlp", None)
+        role_groups = (
+            (attention, ("q_proj", "k_proj", "v_proj")),
+            (attention, ("o_proj",)),
+            (mlp, ("gate_proj", "up_proj")),
+            (mlp, ("down_proj",)),
+        )
+        for stage, (parent, roles) in zip(stages, role_groups, strict=True):
+            if not isinstance(parent, torch.nn.Module):
+                raise ValueError("all-linear staged replay requires self_attn and mlp module groups")
+            for role in roles:
+                child = getattr(parent, role, None)
+                name = selected_names_by_id.get(id(child))
+                if not isinstance(child, torch.nn.Linear) or name is None:
+                    raise ValueError(f"all-linear staged replay is missing selected projection `{role}`")
+                stage.append(name)
+    flattened = tuple(name for stage in stages for name in stage)
+    if len(flattened) != len(set(flattened)) or set(flattened) != set(selected_modules):
+        raise ValueError("all-linear staged replay did not cover the selected projections exactly once")
+    return tuple(tuple(stage) for stage in stages)
+
+
 def _joined(outputs: dict[str, torch.Tensor], names: tuple[str, ...]) -> torch.Tensor:
     rows = {outputs[name].shape[0] for name in names}
     if len(rows) != 1:
@@ -944,8 +994,19 @@ def main() -> None:
     yaqa_input_hessians = {}
     yaqa_output_hessians = {}
     yaqa_stats = None
+    yaqa_batches = None
     if yaqa_enabled:
         cache_metadata = _yaqa_cache_metadata(args, module_shapes, yaqa_row_offset)
+        staged_yaqa_replay = args.module_scope == "all-linear" and args.all_linear_hessian_mode == "staged"
+        if staged_yaqa_replay or args.yaqa_factor_cache is None or not args.yaqa_factor_cache.is_file():
+            yaqa_encoded, yaqa_data_stats = load_nm_evaluation_batch(
+                tokenizer,
+                dataset_path=args.dataset,
+                row_offset=yaqa_row_offset,
+                rows=args.yaqa_rows,
+                max_length=args.max_length,
+            )
+            yaqa_batches = _padded_batch_chunks(yaqa_encoded, batch_size=args.yaqa_batch_size)
         if args.yaqa_factor_cache is not None and args.yaqa_factor_cache.is_file():
             yaqa_input_hessians, yaqa_output_hessians, yaqa_stats = _load_yaqa_factor_cache(
                 args.yaqa_factor_cache,
@@ -956,14 +1017,7 @@ def main() -> None:
             yaqa_stats["cache_path"] = str(args.yaqa_factor_cache)
             print(f"Loaded validated YAQA Sketch-B factors from {args.yaqa_factor_cache}", flush=True)
         else:
-            yaqa_encoded, yaqa_data_stats = load_nm_evaluation_batch(
-                tokenizer,
-                dataset_path=args.dataset,
-                row_offset=yaqa_row_offset,
-                rows=args.yaqa_rows,
-                max_length=args.max_length,
-            )
-            yaqa_batches = _padded_batch_chunks(yaqa_encoded, batch_size=args.yaqa_batch_size)
+            assert yaqa_batches is not None
             print(
                 f"Capturing YAQA Sketch B from rows {yaqa_row_offset}:{yaqa_row_offset + args.yaqa_rows} "
                 f"in {len(yaqa_batches)} batches",
@@ -1003,6 +1057,13 @@ def main() -> None:
                 )
                 yaqa_stats["cache_path"] = str(args.yaqa_factor_cache)
                 print(f"Saved YAQA Sketch-B factors to {args.yaqa_factor_cache}", flush=True)
+        if staged_yaqa_replay:
+            initial_yaqa_names = _all_linear_dependency_stages(model, modules)[0]
+            yaqa_input_hessians = {name: yaqa_input_hessians[name] for name in initial_yaqa_names}
+            yaqa_output_hessians = {name: yaqa_output_hessians[name] for name in initial_yaqa_names}
+            yaqa_stats = dict(yaqa_stats)
+            yaqa_stats["retained_initial_stage"] = "qkv"
+            yaqa_stats["retained_initial_modules"] = len(initial_yaqa_names)
     if args.prepare_yaqa_only:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
@@ -1034,14 +1095,23 @@ def main() -> None:
     evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
 
     print(f"Capturing {args.module_scope} calibration Hessians", flush=True)
-    shared_hessian_groups = _shared_input_hessian_groups(model, modules)
-    hessians, sample_counts = capture_calibration_hessians(
-        model,
-        calibration,
-        modules,
-        device=device,
-        shared_input_groups=shared_hessian_groups,
-    )
+    staged_all_linear = args.module_scope == "all-linear" and args.all_linear_hessian_mode == "staged"
+    initial_hessian_modules = modules
+    if staged_all_linear:
+        first_stage = _all_linear_dependency_stages(model, modules)[0]
+        has_block_ldlq_arm = any(ARM_CONFIG[arm].get("rounding", "block_ldlq") != "yaqa" for arm in args.arms)
+        initial_hessian_modules = {name: modules[name] for name in first_stage} if has_block_ldlq_arm else {}
+    shared_hessian_groups = _shared_input_hessian_groups(model, initial_hessian_modules)
+    if initial_hessian_modules:
+        hessians, sample_counts = capture_calibration_hessians(
+            model,
+            calibration,
+            initial_hessian_modules,
+            device=device,
+            shared_input_groups=shared_hessian_groups,
+        )
+    else:
+        hessians, sample_counts = {}, {}
     original_weights = {name: module.weight.detach().cpu().float().clone() for name, module in modules.items()}
     print("Loading an immutable dense replay model for row-streamed metrics", flush=True)
     dense_model = AutoModelForCausalLM.from_pretrained(
@@ -1063,6 +1133,7 @@ def main() -> None:
             "source_layers": source_layers,
             "tested_layers": args.layers,
             "module_scope": args.module_scope,
+            "all_linear_hessian_mode": args.all_linear_hessian_mode,
             "modules": list(module_names),
             "module_shapes": module_shapes,
             "rates": list(rates),
@@ -1075,6 +1146,9 @@ def main() -> None:
             "calibration": calibration_stats,
             "calibration_execution": "independent full rows; batch=1; no sequence concatenation",
             "calibration_samples": sample_counts,
+            "calibration_hessian_capture": (
+                "staged producer/consumer replay" if staged_all_linear else "one dense-frozen model replay"
+            ),
             "shared_input_hessian_groups": [list(group) for group in shared_hessian_groups],
             "evaluation": evaluation_stats,
             "evaluation_batch_size": 1,
@@ -1118,95 +1192,165 @@ def main() -> None:
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
             alternative_bank_histogram = [0, 0, 0, 0]
-            shared_hessian_totals = Counter(id(hessians[name]) for name in module_names)
-            shared_hessian_remaining = shared_hessian_totals.copy()
-            device_hessians: dict[int, torch.Tensor] = {}
-            input_preparations = {}
+            staged_replay = args.module_scope == "all-linear" and args.all_linear_hessian_mode == "staged"
+            dependency_stages = (
+                _all_linear_dependency_stages(model, modules) if staged_replay else (module_names,)
+            )
+            stage_reports = []
+            completed_modules = 0
             print(f"Starting W{rate:g} {arm} with trellis batch {batch_size}", flush=True)
-            for index, (name, module) in enumerate(modules.items(), start=1):
-                module_started = time.perf_counter()
-                module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
-                if rounding == "yaqa":
-                    quantization_hessian = yaqa_input_hessians[name].to(device)
-                    input_preparation = None
-                else:
-                    source_hessian = hessians[name]
-                    source_key = id(source_hessian)
-                    quantization_hessian = device_hessians.get(source_key)
-                    if quantization_hessian is None:
-                        quantization_hessian = source_hessian.to(device)
-                        if shared_hessian_totals[source_key] > 1:
-                            device_hessians[source_key] = quantization_hessian
-                    input_preparation = input_preparations.get(source_key)
-                    if input_preparation is None and shared_hessian_totals[source_key] > 1:
-                        input_preparation = prepare_qvq_input_hessian(
-                            quantization_hessian,
-                            seed=args.seed,
-                            damp_percent=0.01,
+            for stage_index, stage_names in enumerate(dependency_stages):
+                stage_started = time.perf_counter()
+                stage_modules = {name: modules[name] for name in stage_names}
+                stage_label = ("qkv", "o", "gate_up", "down")[stage_index] if staged_replay else "dense_frozen"
+                stage_sample_counts = {name: sample_counts[name] for name in stage_names if name in sample_counts}
+                stage_yaqa_stats = None
+                if rounding == "yaqa" and staged_replay and stage_index > 0:
+                    if yaqa_batches is None:
+                        raise RuntimeError("staged all-linear YAQA replay requires the disjoint Sketch-B rows")
+
+                    def stage_sketch_progress(stats, label=stage_label):
+                        print(
+                            f"W{rate:g} {arm} staged Sketch-B {label}: "
+                            f"{stats['completed_batches']}/{stats['total_batches']} batches, "
+                            f"{stats['completed_sequences']}/{args.yaqa_rows} rows",
+                            flush=True,
                         )
-                        input_preparations[source_key] = input_preparation
-                result = quantize_qvq_linear(
-                    original_weights[name].to(device),
-                    quantization_hessian,
-                    bits=rate,
-                    output_hessian=(
-                        yaqa_output_hessians[name].to(device) if rounding == "yaqa" else None
-                    ),
-                    seed=args.seed,
-                    trellis_batch_size=batch_size,
-                    input_hessian_preparation=input_preparation,
-                    telemetry=module_telemetry,
-                    **geometry,
-                )
-                if rounding != "yaqa":
-                    shared_hessian_remaining[source_key] -= 1
-                    if shared_hessian_remaining[source_key] == 0:
-                        device_hessians.pop(source_key, None)
-                        input_preparations.pop(source_key, None)
-                reconstruction = result.weight.detach().cpu().float()
-                reconstructions[name] = reconstruction
-                weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
-                weight_metrics[name]["shape"] = list(original_weights[name].shape)
-                weight_metrics[name]["parameter_count"] = original_weights[name].numel()
-                weight_metrics[name]["qvq_telemetry"] = result.telemetry
-                weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
-                weight_metrics[name]["kronecker_proxy_loss"] = (
-                    None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss)
-                )
-                weight_metrics[name]["yaqa_spectral"] = {
-                    "selected": result.yaqa_spectral_selected,
-                    "method": result.yaqa_spectral_method,
-                    "rank": result.yaqa_spectral_rank,
-                    "lambda": result.yaqa_spectral_lambda,
-                    "alpha": result.yaqa_spectral_alpha,
-                    "svd_device": result.yaqa_spectral_svd_device,
-                    "concentration": result.yaqa_spectral_concentration,
-                    "oracle_losses": result.yaqa_spectral_oracle_losses,
-                    "candidates": result.yaqa_spectral_candidates,
-                    "absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
-                    "selector_churn": result.yaqa_spectral_selector_churn,
-                    "family_changed": result.yaqa_spectral_family_changed,
-                }
-                if result.bank_ids is not None:
-                    counts = torch.bincount(result.bank_ids.to(torch.int64).cpu(), minlength=4)
-                    selector_histogram = [
-                        current + int(count)
-                        for current, count in zip(selector_histogram, counts.tolist(), strict=True)
-                    ]
-                if result.bank_alt_id is not None:
-                    alternative_bank_histogram[int(result.bank_alt_id.item())] += 1
-                print(
-                    f"W{rate:g} {arm}: {index}/{len(modules)} {name} "
-                    f"in {time.perf_counter() - module_started:.2f}s",
-                    flush=True,
-                )
-                if result.telemetry is not None:
-                    phase_times = ", ".join(
-                        f"{phase}={values['gpu_ms']:.1f}ms"
-                        for phase, values in result.telemetry["phases"].items()
-                        if values["gpu_ms"] is not None
+
+                    stage_input_hessians, stage_output_hessians, stage_yaqa_stats = capture_yaqa_sketch_b(
+                        model,
+                        yaqa_batches,
+                        stage_modules,
+                        device=device,
+                        seed=args.yaqa_seed,
+                        minimum_sequences=args.yaqa_rows,
+                        checkpoint_modules=tuple(model.model.layers),
+                        progress_callback=stage_sketch_progress,
                     )
-                    print(f"  QVQ telemetry [{list(original_weights[name].shape)}]: {phase_times}", flush=True)
+                else:
+                    stage_input_hessians = yaqa_input_hessians
+                    stage_output_hessians = yaqa_output_hessians
+                if rounding != "yaqa":
+                    if staged_replay and stage_index > 0:
+                        stage_shared_groups = _shared_input_hessian_groups(model, stage_modules)
+                        stage_hessians, stage_sample_counts = capture_calibration_hessians(
+                            model,
+                            calibration,
+                            stage_modules,
+                            device=device,
+                            shared_input_groups=stage_shared_groups,
+                        )
+                    else:
+                        stage_hessians = hessians
+                    shared_hessian_totals = Counter(id(stage_hessians[name]) for name in stage_names)
+                    shared_hessian_remaining = shared_hessian_totals.copy()
+                    device_hessians: dict[int, torch.Tensor] = {}
+                    input_preparations = {}
+
+                for name in stage_names:
+                    module = modules[name]
+                    completed_modules += 1
+                    module_started = time.perf_counter()
+                    module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
+                    if rounding == "yaqa":
+                        quantization_hessian = stage_input_hessians[name].to(device)
+                        input_preparation = None
+                    else:
+                        source_hessian = stage_hessians[name]
+                        source_key = id(source_hessian)
+                        quantization_hessian = device_hessians.get(source_key)
+                        if quantization_hessian is None:
+                            quantization_hessian = source_hessian.to(device)
+                            if shared_hessian_totals[source_key] > 1:
+                                device_hessians[source_key] = quantization_hessian
+                        input_preparation = input_preparations.get(source_key)
+                        if input_preparation is None and shared_hessian_totals[source_key] > 1:
+                            input_preparation = prepare_qvq_input_hessian(
+                                quantization_hessian,
+                                seed=args.seed,
+                                damp_percent=0.01,
+                            )
+                            input_preparations[source_key] = input_preparation
+                    result = quantize_qvq_linear(
+                        original_weights[name].to(device),
+                        quantization_hessian,
+                        bits=rate,
+                        output_hessian=(
+                            stage_output_hessians[name].to(device) if rounding == "yaqa" else None
+                        ),
+                        seed=args.seed,
+                        trellis_batch_size=batch_size,
+                        input_hessian_preparation=input_preparation,
+                        telemetry=module_telemetry,
+                        **geometry,
+                    )
+                    if rounding != "yaqa":
+                        shared_hessian_remaining[source_key] -= 1
+                        if shared_hessian_remaining[source_key] == 0:
+                            device_hessians.pop(source_key, None)
+                            input_preparations.pop(source_key, None)
+                    reconstruction = result.weight.detach().cpu().float()
+                    reconstructions[name] = reconstruction
+                    weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
+                    weight_metrics[name]["shape"] = list(original_weights[name].shape)
+                    weight_metrics[name]["parameter_count"] = original_weights[name].numel()
+                    weight_metrics[name]["qvq_telemetry"] = result.telemetry
+                    weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
+                    weight_metrics[name]["kronecker_proxy_loss"] = (
+                        None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss)
+                    )
+                    weight_metrics[name]["yaqa_spectral"] = {
+                        "selected": result.yaqa_spectral_selected,
+                        "method": result.yaqa_spectral_method,
+                        "rank": result.yaqa_spectral_rank,
+                        "lambda": result.yaqa_spectral_lambda,
+                        "alpha": result.yaqa_spectral_alpha,
+                        "svd_device": result.yaqa_spectral_svd_device,
+                        "concentration": result.yaqa_spectral_concentration,
+                        "oracle_losses": result.yaqa_spectral_oracle_losses,
+                        "candidates": result.yaqa_spectral_candidates,
+                        "absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
+                        "selector_churn": result.yaqa_spectral_selector_churn,
+                        "family_changed": result.yaqa_spectral_family_changed,
+                    }
+                    if result.bank_ids is not None:
+                        counts = torch.bincount(result.bank_ids.to(torch.int64).cpu(), minlength=4)
+                        selector_histogram = [
+                            current + int(count)
+                            for current, count in zip(selector_histogram, counts.tolist(), strict=True)
+                        ]
+                    if result.bank_alt_id is not None:
+                        alternative_bank_histogram[int(result.bank_alt_id.item())] += 1
+                    print(
+                        f"W{rate:g} {arm}: {completed_modules}/{len(modules)} {name} "
+                        f"in {time.perf_counter() - module_started:.2f}s",
+                        flush=True,
+                    )
+                    if result.telemetry is not None:
+                        phase_times = ", ".join(
+                            f"{phase}={values['gpu_ms']:.1f}ms"
+                            for phase, values in result.telemetry["phases"].items()
+                            if values["gpu_ms"] is not None
+                        )
+                        print(f"  QVQ telemetry [{list(original_weights[name].shape)}]: {phase_times}", flush=True)
+
+                with torch.no_grad():
+                    for name in stage_names:
+                        module = modules[name]
+                        module.weight.copy_(reconstructions[name].to(device=device, dtype=module.weight.dtype))
+                stage_reports.append(
+                    {
+                        "name": stage_label,
+                        "modules": list(stage_names),
+                        "sample_counts": stage_sample_counts,
+                        "yaqa_sketch_b": stage_yaqa_stats,
+                        "seconds": time.perf_counter() - stage_started,
+                    }
+                )
+                if rounding == "yaqa":
+                    del stage_input_hessians, stage_output_hessians
+                elif staged_replay and stage_index > 0:
+                    del stage_hessians
 
             with torch.no_grad():
                 for name, module in modules.items():
@@ -1226,6 +1370,8 @@ def main() -> None:
                 "seconds": time.perf_counter() - started,
                 "trellis_batch_size": batch_size,
                 "rounding": rounding,
+                "hessian_mode": args.all_linear_hessian_mode if args.module_scope == "all-linear" else "dense-frozen",
+                "quantization_stages": stage_reports,
                 "effective_bpw": rate + (2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0),
                 "bank_selectors": _selector_metrics(selector_histogram),
                 "module_alternative_bank_histogram": (
