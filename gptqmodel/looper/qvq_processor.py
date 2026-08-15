@@ -818,6 +818,7 @@ class QVQProcessor(LoopProcessor):
                 viterbi_objective=module_qcfg.viterbi_objective,
                 tail_biting_candidates=module_qcfg.tail_biting_candidates,
                 rounding=module_qcfg.rounding,
+                yaqa_v2b2_family_mode=module_qcfg.yaqa.v2b2_family_mode,
                 viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
                 telemetry=telemetry,
                 bank_count=module_qcfg.bank_count,
@@ -852,6 +853,19 @@ class QVQProcessor(LoopProcessor):
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
             loss = float(result.proxy_loss.item())
+            selector_entropy = None
+            selector_nonzero_fraction = None
+            if result.bank_ids is not None and result.bank_ids.numel() > 0:
+                selector_counts = torch.bincount(
+                    result.bank_ids.to(device="cpu", dtype=torch.long),
+                    minlength=module_qcfg.bank_count,
+                ).to(torch.float64)
+                selector_probabilities = selector_counts / selector_counts.sum()
+                positive_probabilities = selector_probabilities[selector_probabilities > 0]
+                selector_entropy = float(
+                    -(positive_probabilities * torch.log2(positive_probabilities)).sum().item()
+                )
+                selector_nonzero_fraction = float((1.0 - selector_probabilities[0]).item())
             stat = {
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: module.layer_index,
@@ -878,6 +892,20 @@ class QVQProcessor(LoopProcessor):
                 "yaqa_sequence_loss_reduction": self._yaqa_stats.get("sequence_loss_reduction"),
                 "yaqa_activation_checkpointing": self._yaqa_stats.get("activation_checkpointing"),
                 "yaqa_checkpointed_modules": self._yaqa_stats.get("checkpointed_modules"),
+                "yaqa_v2b2_family_mode": (
+                    module_qcfg.yaqa.v2b2_family_mode
+                    if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
+                    else None
+                ),
+                "yaqa_bank_fallback_to_v2": result.yaqa_bank_fallback_to_v2,
+                "yaqa_selector_churn": result.yaqa_selector_churn,
+                "yaqa_family_changed": result.yaqa_family_changed,
+                "yaqa_block_family_id": result.yaqa_block_family_id,
+                "bank_selected_family_id": (
+                    None if result.bank_alt_id is None else int(result.bank_alt_id.reshape(-1)[0].item())
+                ),
+                "bank_selector_entropy_bits": selector_entropy,
+                "bank_selector_nonzero_fraction": selector_nonzero_fraction,
                 "yaqa_kronecker_proxy_loss": (
                     None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss.item())
                 ),

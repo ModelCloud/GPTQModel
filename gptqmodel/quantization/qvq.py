@@ -223,6 +223,10 @@ class QVQLinearQuantizationResult:
     bank_ids: torch.Tensor | None = None
     bank_selector_bits: int = 2
     bank_alt_id: torch.Tensor | None = None
+    yaqa_bank_fallback_to_v2: bool | None = None
+    yaqa_selector_churn: float | None = None
+    yaqa_family_changed: bool | None = None
+    yaqa_block_family_id: int | None = None
 
     def serialized_tensors(self) -> dict[str, torch.Tensor]:
         """Return checkpoint tensors, rejecting research-only codebooks."""
@@ -2877,7 +2881,11 @@ def yaqa_inner(
     bank_codebooks: tuple[torch.Tensor, ...] | None = None,
     bank_codebook_stack: torch.Tensor | None = None,
     dual_v2: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    v2b4_p64: bool = False,
+    v2b2_p32: bool = False,
+    _bank0_oracle: tuple[torch.Tensor, torch.Tensor] | None = None,
+    _diagnostics: dict[str, object] | None = None,
+) -> tuple[torch.Tensor, ...]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
 
     This is the paper's two-sided fixed point transposed into QVQ runtime
@@ -2885,12 +2893,12 @@ def yaqa_inner(
 
     ``A + L_I'.T E L_O' + L_I'.T E + E L_O'``.
 
-    Strictly block-lower feedback makes tiles on one anti-diagonal
-    independent, so every tile is quantized exactly once from bottom-right to
-    top-left. With ``bank_codebooks``, each anti-diagonal tile evaluates all
-    four rate-keyed V4 banks under the two-sided Hessian objective, commits
-    the winner immediately, and feeds its error into later diagonals. PGC16,
-    planar packing, and inference are unchanged.
+    Strictly block-lower feedback makes tiles on one anti-diagonal independent,
+    so every tile is quantized exactly once from bottom-right to top-left.
+    V4 banks select one complete decoder per tile. Segmented V2 banks instead
+    run the exact additive P32/P64 recurrence on the YAQA-corrected tile and
+    retain its complete selector schedule. Both paths feed the committed error
+    into later anti-diagonals; checkpoint packing and inference are unchanged.
     """
 
     if inner_weight.ndim != 2 or not inner_weight.is_floating_point():
@@ -2901,16 +2909,27 @@ def yaqa_inner(
         raise ValueError("YAQA tile rows must be a positive integer.")
     if isinstance(tile_cols, bool) or not isinstance(tile_cols, int) or tile_cols < 1:
         raise ValueError("YAQA tile columns must be a positive integer.")
-    if not isinstance(dual_v2, bool):
-        raise TypeError("YAQA dual_v2 must be a bool.")
+    if not all(isinstance(flag, bool) for flag in (dual_v2, v2b4_p64, v2b2_p32)):
+        raise TypeError("YAQA format flags must be bools.")
+    if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
+        raise ValueError("YAQA Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive.")
+    segmented_v2 = v2b4_p64 or v2b2_p32
     if dual_v2 and bank_codebooks is not None:
         raise ValueError("YAQA Dual-V2 does not use V4 bank codebooks.")
     if bank_codebooks is not None:
-        if len(bank_codebooks) != 4 or any(tuple(bank.shape) != (1 << 16, 4) for bank in bank_codebooks):
-            raise ValueError("YAQA banked mode requires four [65536, 4] codebooks.")
+        expected_banks = 2 if v2b2_p32 else 4
+        expected_vector_size = 2 if segmented_v2 else 4
+        if len(bank_codebooks) != expected_banks or any(
+            tuple(bank.shape) != (1 << 16, expected_vector_size) for bank in bank_codebooks
+        ):
+            raise ValueError(
+                f"YAQA banked mode requires {expected_banks} [65536, {expected_vector_size}] codebooks."
+            )
         if any(bank.device != inner_weight.device or not bank.is_floating_point() for bank in bank_codebooks):
             raise ValueError("YAQA bank codebooks must share the weight device and use floating point.")
         codebook = bank_codebooks[0]
+        if segmented_v2 and bank_codebook_stack is not None:
+            raise ValueError("YAQA segmented-V2 uses the native tile quantizer and rejects a V4 bank stack.")
         if bank_codebook_stack is not None and tuple(bank_codebook_stack.shape) != (4, 1 << 16, 4):
             raise ValueError("YAQA bank codebook stack must have shape [4, 65536, 4].")
         if bank_codebook_stack is not None and (
@@ -2991,18 +3010,21 @@ def yaqa_inner(
         # Tilewise YAQA scores only see diagonal Hessian blocks. Keep an exact
         # canonical-bank run so cross-tile Kronecker terms cannot make the
         # mixed-bank result worse overall.
-        bank0_reference, bank0_reference_states = yaqa_inner(
-            inner_weight,
-            input_hessian,
-            output_hessian,
-            bank_codebooks[0],
-            bits=bits,
-            tile_rows=tile_rows,
-            tile_cols=tile_cols,
-            trellis_batch_size=trellis_batch_size,
-            tail_biting_candidates=tail_biting_candidates,
-            bank_codebooks=None,
-        )
+        if _bank0_oracle is None:
+            bank0_reference, bank0_reference_states = yaqa_inner(
+                inner_weight,
+                input_hessian,
+                output_hessian,
+                bank_codebooks[0],
+                bits=bits,
+                tile_rows=tile_rows,
+                tile_cols=tile_cols,
+                trellis_batch_size=trellis_batch_size,
+                tail_biting_candidates=tail_biting_candidates,
+                bank_codebooks=None,
+            )
+        else:
+            bank0_reference, bank0_reference_states = _bank0_oracle
 
     input_L, _ = block_ldl_factor(input_hessian.to(torch.float32), block_size=tile_rows)
     output_L, _ = block_ldl_factor(output_hessian.to(torch.float32), block_size=tile_cols)
@@ -3033,12 +3055,29 @@ def yaqa_inner(
         dtype=torch.long,
         device=inner_weight.device,
     )
-    bank_ids = torch.zeros(input_blocks * output_blocks, dtype=torch.uint8, device=inner_weight.device)
+    segments_per_tile = (
+        QVQ_V2B2_P32_SEGMENTS_PER_TILE
+        if v2b2_p32
+        else QVQ_V2B4_P64_SEGMENTS_PER_TILE
+        if v2b4_p64
+        else 1
+    )
+    bank_ids = torch.zeros(
+        input_blocks * output_blocks * segments_per_tile,
+        dtype=torch.uint8,
+        device=inner_weight.device,
+    )
     error = source.clone()
     active_banks = bank_codebooks if bank_codebooks is not None else (codebook,)
+    segmented_bank_stack = torch.stack(active_banks).contiguous() if segmented_v2 else None
     banked_codebooks = (
         bank_codebook_stack if bank_codebook_stack is not None else torch.stack(active_banks).contiguous()
-        if bank_codebooks is not None and source.device.type == "cuda" and tail_biting_candidates == 1
+        if (
+            bank_codebooks is not None
+            and not segmented_v2
+            and source.device.type == "cuda"
+            and tail_biting_candidates == 1
+        )
         else None
     )
 
@@ -3069,7 +3108,29 @@ def yaqa_inner(
         if dual_v2:
             sequences = _dual_v2_split(sequences)
         candidate_values, candidate_states = [], []
-        if bank_codebooks is not None and sequences.device.type == "cuda" and tail_biting_candidates == 1:
+        segmented_selectors = None
+        if segmented_v2:
+            assert segmented_bank_stack is not None
+            values, states_for_chunks, selectors = [], [], []
+            segment_steps = (
+                QVQ_V2B2_P32_STEPS_PER_SEGMENT if v2b2_p32 else QVQ_V2B4_P64_STEPS_PER_SEGMENT
+            )
+            for chunk in sequences.split(trellis_batch_size):
+                result = _tail_biting_v2_banked_quantize(
+                    chunk,
+                    segmented_bank_stack,
+                    bits=bits,
+                    segment_steps=segment_steps,
+                    candidate_count=tail_biting_candidates,
+                )
+                values.append(result.values)
+                states_for_chunks.append(result.states)
+                selectors.append(result.segment_bank_ids)
+            reconstructed = torch.cat(values).reshape(len(coordinates), tile_rows, tile_cols)
+            states = torch.cat(states_for_chunks)
+            segmented_selectors = torch.cat(selectors)
+            winners = torch.zeros(len(coordinates), dtype=torch.long, device=source.device)
+        elif bank_codebooks is not None and sequences.device.type == "cuda" and tail_biting_candidates == 1:
             # Banked V4 YAQA has independent banks for each tile on an
             # anti-diagonal. Batch those banks into two native launches
             # (rotated provisional path plus constrained final path) instead
@@ -3120,7 +3181,9 @@ def yaqa_inner(
                     candidate_state = _dual_v2_merge(candidate_state, logical_batch_size)
                 candidate_values.append(candidate_value.reshape(len(coordinates), tile_rows, tile_cols))
                 candidate_states.append(candidate_state)
-        if bank_codebooks is None:
+        if segmented_v2:
+            pass
+        elif bank_codebooks is None:
             reconstructed = candidate_values[0]
             states = candidate_states[0]
             winners = torch.zeros(len(coordinates), dtype=torch.long, device=source.device)
@@ -3161,7 +3224,11 @@ def yaqa_inner(
                 - reconstructed[coordinate_index]
             )
             tile_states[input_block, output_block] = states[coordinate_index]
-            if bank_codebooks is not None:
+            if segmented_v2:
+                tile_index = input_block * output_blocks + output_block
+                selector_start = tile_index * segments_per_tile
+                bank_ids[selector_start : selector_start + segments_per_tile] = segmented_selectors[coordinate_index]
+            elif bank_codebooks is not None:
                 bank_ids[input_block * output_blocks + output_block] = winners[coordinate_index].to(torch.uint8)
 
     if bank_codebooks is not None:
@@ -3173,12 +3240,148 @@ def yaqa_inner(
         bank0_loss = torch.einsum(
             "ij,ik,kl,lj->", bank0_error, input_hessian_fp32, bank0_error, output_hessian_fp32
         )
-        if not torch.isfinite(mixed_loss) or mixed_loss >= bank0_loss:
+        fallback_to_bank0 = not torch.isfinite(mixed_loss) or mixed_loss >= bank0_loss
+        if fallback_to_bank0:
             quantized = bank0_reference.to(dtype=inner_weight.dtype)
             tile_states = bank0_reference_states.reshape(input_blocks, output_blocks, steps_per_tile)
             bank_ids.zero_()
+        if _diagnostics is not None:
+            _diagnostics["fallback_to_bank0"] = bool(fallback_to_bank0)
     result = (quantized.to(dtype=inner_weight.dtype), tile_states.reshape(-1, steps_per_tile))
     return (*result, bank_ids) if bank_codebooks is not None else result
+
+
+def yaqa_inner_v2b4_p64(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    codebooks: tuple[torch.Tensor, ...],
+    block_input_hessian: torch.Tensor | None = None,
+    diagnostics: dict[str, object] | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run YAQA corrected-target rounding with four P64 V2 banks."""
+
+    if len(codebooks) != 4:
+        raise ValueError("YAQA V2B4-P64 requires four codebooks.")
+    _, _, block_selectors = block_ldlq_inner_v2b4_p64(
+        inner_weight,
+        input_hessian if block_input_hessian is None else block_input_hessian,
+        codebooks,
+        bits=kwargs["bits"],
+        tile_rows=kwargs.get("tile_rows", 16),
+        tile_cols=kwargs.get("tile_cols", 16),
+        trellis_batch_size=kwargs.get("trellis_batch_size", 16),
+        viterbi_objective="euclidean",
+        tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
+    )
+    local_diagnostics: dict[str, object] = {}
+    weight, states, selectors = yaqa_inner(
+        inner_weight,
+        input_hessian,
+        output_hessian,
+        codebooks[0],
+        bank_codebooks=codebooks,
+        v2b4_p64=True,
+        _diagnostics=local_diagnostics,
+        **kwargs,
+    )
+    if diagnostics is not None:
+        diagnostics["fallback_to_v2"] = bool(local_diagnostics.get("fallback_to_bank0", False))
+        diagnostics["selector_churn"] = float((selectors != block_selectors).to(torch.float32).mean().item())
+    return weight, states, selectors
+
+
+def yaqa_inner_v2b2_p32(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    codebook_library: tuple[torch.Tensor, ...],
+    family_mode: str = "reselect",
+    block_input_hessian: torch.Tensor | None = None,
+    diagnostics: dict[str, object] | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Select one complementary V2 family per module under YAQA's full proxy."""
+
+    if len(codebook_library) != 4:
+        raise ValueError("YAQA V2B2-P32 requires canonical V2 plus three complementary candidates.")
+    if family_mode not in {"fixed_block_ldlq", "reselect"}:
+        raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
+    _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
+        inner_weight,
+        input_hessian if block_input_hessian is None else block_input_hessian,
+        codebook_library,
+        bits=kwargs["bits"],
+        tile_rows=kwargs.get("tile_rows", 16),
+        tile_cols=kwargs.get("tile_cols", 16),
+        trellis_batch_size=kwargs.get("trellis_batch_size", 16),
+        viterbi_objective="euclidean",
+        tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
+    )
+    block_alt_id = int(block_alt_id_tensor.item())
+    canonical_weight, canonical_states = yaqa_inner(
+        inner_weight,
+        input_hessian,
+        output_hessian,
+        codebook_library[0],
+        **kwargs,
+    )
+    source = inner_weight.to(torch.float32)
+    input_hessian_fp32 = input_hessian.to(torch.float32)
+    output_hessian_fp32 = output_hessian.to(torch.float32)
+
+    def full_loss(candidate: torch.Tensor) -> torch.Tensor:
+        error = candidate.to(torch.float32) - source
+        return torch.einsum("ij,ik,kl,lj->", error, input_hessian_fp32, error, output_hessian_fp32)
+
+    best_weight = canonical_weight
+    best_states = canonical_states
+    best_selectors = torch.zeros(
+        canonical_states.shape[0] * QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+        dtype=torch.uint8,
+        device=inner_weight.device,
+    )
+    # The family ID remains the Block-LDLQ choice when YAQA falls back to
+    # canonical V2. This makes fixed-family mode a strict experiment over one
+    # unchanged codec candidate space; selectors alone become all zero.
+    best_alt_id = block_alt_id
+    best_loss = full_loss(canonical_weight)
+    selected_banked_candidate = False
+    oracle = canonical_weight, canonical_states
+    alternative_ids = (block_alt_id,) if family_mode == "fixed_block_ldlq" else range(1, 4)
+    for alt_id in alternative_ids:
+        candidate_weight, candidate_states, candidate_selectors = yaqa_inner(
+            inner_weight,
+            input_hessian,
+            output_hessian,
+            codebook_library[0],
+            bank_codebooks=(codebook_library[0], codebook_library[alt_id]),
+            v2b2_p32=True,
+            _bank0_oracle=oracle,
+            **kwargs,
+        )
+        candidate_loss = full_loss(candidate_weight)
+        if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
+            best_weight = candidate_weight
+            best_states = candidate_states
+            best_selectors = candidate_selectors
+            best_alt_id = alt_id
+            best_loss = candidate_loss
+            selected_banked_candidate = True
+    if diagnostics is not None:
+        diagnostics["fallback_to_v2"] = not selected_banked_candidate
+        diagnostics["selector_churn"] = float(
+            (best_selectors != block_selectors).to(torch.float32).mean().item()
+        )
+        diagnostics["family_changed"] = bool(selected_banked_candidate and best_alt_id != block_alt_id)
+        diagnostics["block_family_id"] = block_alt_id
+    return (
+        best_weight,
+        best_states,
+        best_selectors,
+        torch.tensor([best_alt_id], dtype=torch.uint8, device=inner_weight.device),
+    )
 
 
 def rht_preprocess_weight(
@@ -3516,6 +3719,7 @@ def quantize_qvq_linear(
     viterbi_objective: str = "euclidean",
     tail_biting_candidates: int = 1,
     rounding: str = "block_ldlq",
+    yaqa_v2b2_family_mode: str = "reselect",
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
     trellis_window: int = 16,
@@ -3608,6 +3812,11 @@ def quantize_qvq_linear(
     rounding = rounding.strip().lower()
     if rounding not in {"block_ldlq", "yaqa"}:
         raise ValueError("QVQ rounding must be `block_ldlq` or `yaqa`.")
+    if not isinstance(yaqa_v2b2_family_mode, str):
+        raise TypeError("QVQ YAQA V2B2 family mode must be a string.")
+    yaqa_v2b2_family_mode = yaqa_v2b2_family_mode.strip().lower()
+    if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
+        raise ValueError("QVQ YAQA V2B2 family mode must be `fixed_block_ldlq` or `reselect`.")
     if damp_percent is None:
         damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
@@ -3641,12 +3850,8 @@ def quantize_qvq_linear(
             raise ValueError("YAQA does not support input-Hessian-only module-scale search.")
         if viterbi_objective != "euclidean":
             raise ValueError("YAQA requires the Euclidean PGC16 tile objective.")
-    if v2b4_p64 and rounding != "block_ldlq":
-        raise ValueError("QVQ V2B4-P64 initially supports Block-LDLQ rounding only.")
-    if v2b2_p32 and rounding != "block_ldlq":
-        raise ValueError("QVQ V2B2-P32 initially supports Block-LDLQ rounding only.")
     if v2b2_p32 and viterbi_objective != "euclidean":
-        raise ValueError("QVQ V2B2-P32 initially supports the Euclidean Viterbi objective only.")
+        raise ValueError("QVQ V2B2-P32 supports the Euclidean Viterbi objective only.")
     if bank_count == 4 and vector_size != 4 and not v2b4_p64:
         raise ValueError("QVQ four-bank selection requires V4 or V2B4-P64.")
     if bank_count == 4 and (module_scale_search or output_channel_scale_optimization):
@@ -3702,6 +3907,14 @@ def quantize_qvq_linear(
         transformed_H = rht_preprocess_hessian(H.to(device=device), SU)
         transformed_H = (transformed_H + transformed_H.transpose(0, 1)) * 0.5
         mean_diagonal = transformed_H.diagonal().abs().mean()
+        block_ldlq_control_H = None
+        if rounding == "yaqa" and (v2b4_p64 or v2b2_p32):
+            block_ldlq_control_H = transformed_H.clone()
+            block_control_damping = torch.maximum(
+                mean_diagonal * 0.01,
+                torch.tensor(torch.finfo(torch.float32).eps, device=device),
+            )
+            block_ldlq_control_H.diagonal().add_(block_control_damping)
         damping = torch.maximum(
             mean_diagonal * damp_percent,
             torch.tensor(torch.finfo(torch.float32).eps, device=device),
@@ -3784,6 +3997,7 @@ def quantize_qvq_linear(
     needs_bank0_oracle = (
         bank_codebooks is not None and rounding == "block_ldlq" and not v2b4_p64 and not v2b2_p32
     )
+    yaqa_bank_diagnostics: dict[str, object] = {}
     def encode_at_scale(
         candidate_scale: torch.Tensor,
         *,
@@ -3793,6 +4007,33 @@ def quantize_qvq_linear(
         normalized_weight = transformed_weight / candidate_scale
         if rounding == "yaqa":
             assert transformed_output_hessian is not None
+            if v2b4_p64:
+                assert bank_codebooks is not None
+                return yaqa_inner_v2b4_p64(
+                    normalized_weight,
+                    transformed_H,
+                    transformed_output_hessian,
+                    bank_codebooks,
+                    block_input_hessian=block_ldlq_control_H,
+                    bits=bits,
+                    trellis_batch_size=trellis_batch_size,
+                    tail_biting_candidates=tail_biting_candidates,
+                    diagnostics=yaqa_bank_diagnostics,
+                )
+            if v2b2_p32:
+                assert bank_codebooks is not None
+                return yaqa_inner_v2b2_p32(
+                    normalized_weight,
+                    transformed_H,
+                    transformed_output_hessian,
+                    bank_codebooks,
+                    block_input_hessian=block_ldlq_control_H,
+                    bits=bits,
+                    trellis_batch_size=trellis_batch_size,
+                    tail_biting_candidates=tail_biting_candidates,
+                    family_mode=yaqa_v2b2_family_mode,
+                    diagnostics=yaqa_bank_diagnostics,
+                )
             return yaqa_inner(
                 normalized_weight,
                 transformed_H,
@@ -4364,6 +4605,18 @@ def quantize_qvq_linear(
         bank_ids=None if selected_bank_ids is None else selected_bank_ids.detach().clone(),
         bank_selector_bits=1 if v2b2_p32 else 2,
         bank_alt_id=None if selected_bank_alt_id is None else selected_bank_alt_id.detach().clone(),
+        yaqa_bank_fallback_to_v2=(
+            None if "fallback_to_v2" not in yaqa_bank_diagnostics else bool(yaqa_bank_diagnostics["fallback_to_v2"])
+        ),
+        yaqa_selector_churn=(
+            None if "selector_churn" not in yaqa_bank_diagnostics else float(yaqa_bank_diagnostics["selector_churn"])
+        ),
+        yaqa_family_changed=(
+            None if "family_changed" not in yaqa_bank_diagnostics else bool(yaqa_bank_diagnostics["family_changed"])
+        ),
+        yaqa_block_family_id=(
+            None if "block_family_id" not in yaqa_bank_diagnostics else int(yaqa_bank_diagnostics["block_family_id"])
+        ),
     )
 
 

@@ -765,17 +765,50 @@ The initial reference implementation deliberately separates codec validation fro
 4. Accept only a finite strict improvement; otherwise emit the independent V2 path, all-zero selectors, and a
    deterministic alternative-family ID.
 
-This proves non-regression only for the full input-Hessian proxy. It does **not** justify low-rate quality promotion:
-local/proxy improvements below W3 have repeatedly regressed live downstream metrics. YAQA candidate generation and
-live-prefix propagation-aware search/confirmation therefore remain required follow-ups. Until those are integrated,
-V2B2-P32 is an A/B reference format whose main purpose is to test whether finer binary switching creates useful
-candidate diversity.
+YAQA level 1 now feeds each two-sided corrected tile through the same exact segmented recurrence. It evaluates all
+three complementary families as complete YAQA artifacts, selects one family per module under the complete Kronecker
+proxy, and retains an independently encoded canonical V2+YAQA oracle for atomic rollback. On Apple, those corrected
+tiles automatically use the native MLX segmented-V2 recurrence. This still does **not** justify low-rate quality
+promotion: local and Kronecker-proxy improvements below W3 have repeatedly regressed live downstream metrics.
+Live-prefix propagation-aware search and disjoint confirmation remain the promotion gate.
+
+B2-P32 YAQA has two explicit experimental modes because its selection is hierarchical:
+
+```text
+module
+  +-- choose one complementary family from IDs 1, 2, 3
+  `-- choose canonical bank 0 or that family every 32 weights
+```
+
+- `yaqa.v2b2_family_mode="fixed_block_ldlq"` freezes the family chosen by a matched Block-LDLQ pass and lets YAQA
+  change only the V2 path and binary P32 schedule. The family control uses Block-LDLQ's ordinary `0.01` input-Hessian
+  damping rather than YAQA's `1e-4` damping, so it reproduces the matched baseline selection geometry. This isolates
+  YAQA on an unchanged codec candidate space.
+- `yaqa.v2b2_family_mode="reselect"` (default) evaluates all three family IDs as complete YAQA module artifacts and
+  retains the strict best full-Kronecker result. This measures the combined ceiling because an input-Hessian winner
+  need not be the winner under the two-sided YAQA objective.
+
+Both modes independently encode canonical V2+YAQA. A non-finite, tied, or worse banked candidate restores that exact
+artifact and all-zero selectors. The result reports fallback, selector churn, Block-LDLQ family ID, and family change;
+selector entropy and selected family are derivable from the serialized selectors and `bank_alt_id`.
+
+The matched factorial is V2, B2-P32, and B4-P64 under both Block-LDLQ and YAQA. For a lower-is-better loss `L`, report
+the interaction
+
+```text
+I_B = (L_V2,YAQA - L_B,YAQA) - (L_V2,Block - L_B,Block).
+```
+
+Positive interaction means YAQA exploits the added bank space especially well; zero means approximately additive;
+negative means overlap or ineffective candidate ranking. Promotion still depends on `L_B,YAQA < L_V2,YAQA` under
+propagated held-out metrics, not on the sign of the interaction alone.
 
 Current status:
 
 - complete: exact P32 dynamic program, binary selector packing, module-selected alternative ID, independent V2
   rollback, format/config/processor/QVQLinear lifecycle, Torch reconstruction, strict reload, and focused math tests;
-- pending: YAQA, propagated selection on disjoint search/confirmation prompts, native CUDA/MPS/MLX decode, and
+- complete: YAQA corrected-target integration, full Kronecker rollback, and native MLX corrected-tile dispatch;
+- pending: propagated selection on disjoint search/confirmation prompts, native CUDA/MPS decode, and
   four-layer final-KL/Top-N/task evidence;
 - baseline comparison: `scripts/compare_qvq_codecs_llama_qkvo.py` defaults to matched `v2` and `v2b2-p32` arms.
 
@@ -829,8 +862,10 @@ Current implementation status:
 - complete: format/config lifecycle, rate-keyed graph banks, exact Torch P64 Viterbi, Block-LDLQ integration,
   planar selector serialization, save/load-compatible `QVQLinear`, dense Torch inference, exhaustive bank-zero/V2
   parity, and full-proxy rollback tests;
-- deliberately pending: learned table portfolios, YAQA bank scoring, propagation-aware bank refinement, native
-  CUDA/MPS/MLX kernels, and model-level KLD/Top-N/task recovery gates;
+- complete: YAQA corrected-target P64 search, independent V2+YAQA oracle, complete Kronecker rollback, and native
+  MLX corrected-tile dispatch;
+- deliberately pending: learned table portfolios, propagation-aware bank refinement, native CUDA/MPS decode, and
+  model-level KLD/Top-N/task recovery gates;
 - rejected as a claim: four graph banks alone are not yet evidence of a 50% recovery improvement. They are the
   baseline-safe search substrate on which propagation-aware selection and learned portfolios can be tested.
 

@@ -18,8 +18,15 @@ CUDA inference remains separate work.
   a matched four-layer comparison-driver arm;
 - **run now:** `v2` versus `v2b2-p32`, W1/W1.5/W2/W2.5, real Llama 3.2 1B layers 0--3 Q/K/V/O, 64 full
   calibration rows and disjoint rows `[64,128)`, batch 1, no concatenation or length cap;
-- **P1 -- YAQA:** generate/select banks inside the two-sided objective while retaining an independently encoded
-  canonical-V2 YAQA oracle. Do not accept from Kronecker/local proxy alone;
+- **complete -- YAQA level 1:** generate/select P32 schedules from YAQA-corrected tiles, choose the module's
+  complementary family under the complete Kronecker proxy, and retain an independently encoded canonical-V2 YAQA
+  oracle. Apple quantization automatically dispatches corrected tiles to the native MLX segmented recurrence;
+- **run both B2 YAQA controls:** `fixed_block_ldlq` freezes the Block-LDLQ family ID and searches only YAQA path/P32
+  selectors; `reselect` evaluates all three complementary families and is the default combined-ceiling arm. Record
+  selector churn, family-ID churn, selector entropy, independent V2+YAQA fallback count, and seed-to-seed spread;
+- **factorial gate:** compare V2, B2-P32, and B4-P64 under matched Block-LDLQ and YAQA. Report whether the banked
+  advantage grows under YAQA, but promote only when banked+YAQA beats independently encoded V2+YAQA on propagated,
+  disjoint final-KL/Top-N/task gates;
 - **P1 -- propagation:** use live-prefix candidate generation, disjoint replay search, and independent confirmation.
   This is the quality gate that can promote a low-rate selector map; it is not implemented in the base slice;
 - **P2 -- native inference:** add CUDA/MPS/MLX binary P32 decode only after Torch reconstruction and model-level
@@ -42,10 +49,10 @@ acceptance objective.
 - **P0 safety gate:** bank zero must remain bit-exact V2; packed selectors must reload exactly; V2B4-P64's complete
   full-Hessian proxy must never exceed the independently quantized V2 artifact because the implementation restores
   V2 on ties, non-finite scores, or regressions. Model-level metrics are measurements, not implied by that proxy.
-- **P1 -- YAQA integration:** extend the coupled P64 recurrence to the two-sided YAQA/Sketch-B path. Keep all four
-  banks exposed during each 64-weight decision, use the YAQA tile objective without factorizing the chain, and retain
-  a complete canonical-V2 YAQA rollback artifact. Validate with an independent Fisher dataset and the same disjoint
-  downstream gate; do not promote on local Kronecker loss alone.
+- **complete -- YAQA level 1:** the two-sided corrected tile enters the exact coupled P64 recurrence without resetting
+  V2 state at segment boundaries. The complete candidate is compared with an independently encoded canonical-V2
+  YAQA artifact under the full Kronecker proxy. Apple quantization uses the native MLX recurrence. Independent Fisher
+  data and a disjoint downstream gate are still required before promotion; local Kronecker loss is insufficient.
 - **P1 -- propagated bank selection:** start from the exact serialized local V2B4-P64 baseline, propose bounded
   fixed-trellis P64 bank changes, score them using live downstream replay, and confirm the selected map on a second
   disjoint prompt split. Any failure, non-finite output, confirmation regression, or replay omission serializes the

@@ -13,6 +13,7 @@ from gptqmodel.quantization.qvq import (
     batched_viterbi_quantize,
     pack_qvq_bank_ids,
     pack_qvq_binary_bank_ids,
+    quantize_qvq_linear,
     reconstruct_qvq_inner_weight,
     tail_biting_v2b2_p32_quantize,
     tail_biting_v2b4_p64_quantize,
@@ -586,6 +587,55 @@ def test_qvq_mps_banked_v2_quantization_auto_dispatches_to_mlx(monkeypatch, kind
     assert torch.equal(actual.states.cpu(), expected.states)
     assert torch.equal(actual.segment_bank_ids.cpu(), expected.segment_bank_ids)
     torch.testing.assert_close(actual.squared_error.cpu(), expected.squared_error, rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
+def test_qvq_mps_banked_v2_yaqa_auto_dispatches_corrected_tiles_to_mlx(monkeypatch, kind):
+    from gptqmodel.utils import qvq_mlx
+
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    generator = torch.Generator().manual_seed(32200 + len(kind))
+    width = 32
+    weight = (torch.randn((width, width), generator=generator) * 0.1).to("mps")
+    input_samples = torch.randn((47, width), generator=generator)
+    output_samples = torch.randn((53, width), generator=generator)
+    input_hessian = (input_samples.T @ input_samples / input_samples.shape[0]).to("mps")
+    output_hessian = (output_samples.T @ output_samples / output_samples.shape[0]).to("mps")
+    original = qvq_mlx.qvq_mlx_v2_banked_viterbi_from_torch_mps
+    launches = []
+
+    def counted(*args, **kwargs):
+        launches.append(kwargs["segment_steps"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "qvq_mlx_v2_banked_viterbi_from_torch_mps", counted)
+    canonical = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        trellis_batch_size=1,
+    )
+    result = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2 if kind == "v2b2_p32" else 4,
+        v2b2_p32=kind == "v2b2_p32",
+        v2b4_p64=kind == "v2b4_p64",
+        trellis_batch_size=1,
+    )
+
+    assert launches
+    assert set(launches) == ({16} if kind == "v2b2_p32" else {32})
+    assert result.rounding == "yaqa"
+    assert result.bank_ids is not None
+    assert torch.isfinite(result.kronecker_proxy_loss)
+    assert result.kronecker_proxy_loss <= canonical.kronecker_proxy_loss
 
 
 def _assert_dense_accuracy_metrics(actual: np.ndarray, reference: torch.Tensor) -> None:

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization.config import FORMAT, QVQConfig
+from gptqmodel.quantization.config import FORMAT, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
     block_ldlq_inner,
@@ -18,6 +18,7 @@ from gptqmodel.quantization.qvq import (
     tail_biting_v2b2_p32_quantize,
     tail_biting_viterbi_quantize,
     unpack_qvq_binary_bank_ids,
+    yaqa_inner_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
 from scripts.compare_qvq_codecs_llama_qkvo import ARM_CONFIG, DEFAULT_ARMS, _parser
@@ -65,11 +66,11 @@ def test_qvq_v2b2_p32_config_round_trip(bits):
     assert reloaded.quant_linear_init_kwargs()["v2b2_p32"] is True
 
 
-def test_qvq_v2b2_p32_config_rejects_unimplemented_objectives():
+def test_qvq_v2b2_p32_config_accepts_yaqa_and_rejects_unimplemented_objectives():
     with pytest.raises(ValueError, match="W1 through W2.5"):
         QVQConfig(bits=3, format=FORMAT.QVQ_V2B2_P32, offload_to_disk=False)
-    with pytest.raises(ValueError, match="Block-LDLQ"):
-        QVQConfig(bits=2, format=FORMAT.QVQ_V2B2_P32, rounding="yaqa", offload_to_disk=False)
+    config = QVQConfig(bits=2, format=FORMAT.QVQ_V2B2_P32, rounding="yaqa", offload_to_disk=False)
+    assert config.rounding == "yaqa"
     with pytest.raises(ValueError, match="one tail-biting candidate"):
         QVQConfig(
             bits=2,
@@ -84,6 +85,26 @@ def test_qvq_v2b2_p32_config_rejects_unimplemented_objectives():
             propagated_bank_selection=True,
             offload_to_disk=False,
         )
+
+
+@pytest.mark.parametrize("family_mode", ("fixed_block_ldlq", "reselect"))
+def test_qvq_v2b2_p32_yaqa_family_mode_config_round_trip(family_mode):
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(v2b2_family_mode=family_mode),
+        offload_to_disk=False,
+    )
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+    assert reloaded.yaqa.v2b2_family_mode == family_mode
+
+
+@pytest.mark.parametrize("family_mode", (None, "unknown"))
+def test_qvq_v2b2_p32_rejects_invalid_yaqa_family_mode(family_mode):
+    error = TypeError if family_mode is None else ValueError
+    with pytest.raises(error, match="v2b2_family_mode"):
+        YaqaConfig(v2b2_family_mode=family_mode)
 
 
 def test_qvq_v2b2_p32_binary_selector_round_trip_and_validation():
@@ -204,6 +225,143 @@ def test_qvq_v2b2_p32_full_proxy_cannot_regress_independent_v2_oracle():
     assert banked.proxy_loss <= canonical.proxy_loss
     assert banked.bank_ids is not None
     assert banked.bank_alt_id is not None
+
+
+def test_qvq_v2b2_p32_yaqa_pack_reload_and_full_proxy_cannot_regress_v2_yaqa():
+    generator = torch.Generator().manual_seed(20260818)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_hessian = torch.eye(16)
+    output_hessian = torch.eye(16)
+    canonical = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        trellis_batch_size=1,
+    )
+    banked = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    block_control = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    assert banked.kronecker_proxy_loss <= canonical.kronecker_proxy_loss
+    assert banked.bank_ids is not None and banked.bank_ids.numel() == 8
+    assert banked.bank_alt_id is not None
+    assert isinstance(banked.yaqa_bank_fallback_to_v2, bool)
+    assert banked.yaqa_selector_churn is not None and 0.0 <= banked.yaqa_selector_churn <= 1.0
+    assert isinstance(banked.yaqa_family_changed, bool)
+    assert banked.yaqa_block_family_id in {1, 2, 3}
+    decoded = reconstruct_qvq_inner_weight(
+        banked.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=banked.serialized_tensors()["bank_ids"],
+        v2b2_p32=True,
+        bank_alt_id=banked.bank_alt_id,
+    )
+    torch.testing.assert_close(decoded, banked.inner_weight, rtol=0, atol=0)
+    assert torch.equal(banked.trellis, block_control.trellis)
+    assert torch.equal(banked.bank_ids, block_control.bank_ids)
+    assert torch.equal(banked.bank_alt_id, block_control.bank_alt_id)
+
+
+def test_qvq_v2b2_p32_fixed_yaqa_uses_matched_block_ldlq_damping_for_family():
+    generator = torch.Generator().manual_seed(20260819)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_samples = torch.randn((41, 16), generator=generator)
+    output_samples = torch.randn((43, 16), generator=generator)
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    block = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    fixed = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        yaqa_v2b2_family_mode="fixed_block_ldlq",
+        trellis_batch_size=1,
+    )
+
+    expected_family = int(block.bank_alt_id.item())
+    assert fixed.yaqa_block_family_id == expected_family
+    assert int(fixed.bank_alt_id.item()) == expected_family
+
+
+@pytest.mark.parametrize(
+    ("family_mode", "expected_family", "expected_changed"),
+    (("fixed_block_ldlq", 2, False), ("reselect", 3, True)),
+)
+def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
+    family_mode,
+    expected_family,
+    expected_changed,
+):
+    weight = torch.zeros((16, 16))
+    hessian = torch.eye(16)
+    states = torch.zeros((1, 128), dtype=torch.long)
+    block_selectors = torch.tensor([0, 1, 0, 1, 0, 1, 0, 1], dtype=torch.uint8)
+    codebooks = tuple(torch.full((1,), family_id, dtype=torch.float32) for family_id in range(4))
+
+    def fake_block(*args, **kwargs):
+        del args, kwargs
+        return weight, states, block_selectors, torch.tensor([2], dtype=torch.uint8)
+
+    def fake_yaqa(*args, bank_codebooks=None, **kwargs):
+        del args, kwargs
+        if bank_codebooks is None:
+            return torch.ones_like(weight), states
+        family_id = int(bank_codebooks[1].item())
+        candidate = torch.full_like(weight, {1: 0.3, 2: 0.2, 3: 0.1}[family_id])
+        selectors = torch.full((8,), family_id & 1, dtype=torch.uint8)
+        return candidate, states, selectors
+
+    diagnostics = {}
+    with (
+        patch("gptqmodel.quantization.qvq.block_ldlq_inner_v2b2_p32", side_effect=fake_block),
+        patch("gptqmodel.quantization.qvq.yaqa_inner", side_effect=fake_yaqa),
+    ):
+        _, _, selectors, family = yaqa_inner_v2b2_p32(
+            weight,
+            hessian,
+            hessian,
+            codebooks,
+            bits=2,
+            family_mode=family_mode,
+            diagnostics=diagnostics,
+        )
+
+    assert int(family.item()) == expected_family
+    assert diagnostics == {
+        "fallback_to_v2": False,
+        "selector_churn": float((selectors != block_selectors).to(torch.float32).mean()),
+        "family_changed": expected_changed,
+        "block_family_id": 2,
+    }
 
 
 def test_qvq_v2b2_p32_reuses_one_canonical_block_ldlq_oracle():

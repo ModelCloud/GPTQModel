@@ -71,8 +71,8 @@ def test_qvq_v2b4_p64_config_round_trip(bits):
 def test_qvq_v2b4_p64_config_rejects_unsupported_math():
     with pytest.raises(ValueError, match="W1 through W2.5"):
         QVQConfig(bits=3, format=FORMAT.QVQ_V2B4_P64, offload_to_disk=False)
-    with pytest.raises(ValueError, match="Block-LDLQ"):
-        QVQConfig(bits=2, format=FORMAT.QVQ_V2B4_P64, rounding="yaqa", offload_to_disk=False)
+    config = QVQConfig(bits=2, format=FORMAT.QVQ_V2B4_P64, rounding="yaqa", offload_to_disk=False)
+    assert config.rounding == "yaqa"
     with pytest.raises(ValueError, match="one tail-biting candidate"):
         QVQConfig(
             bits=2,
@@ -211,6 +211,56 @@ def test_qvq_v2b4_p64_full_proxy_cannot_regress_canonical_v2():
         v2b4_p64=True,
     )
     torch.testing.assert_close(decoded, banked.inner_weight, rtol=0, atol=0)
+
+
+def test_qvq_v2b4_p64_yaqa_pack_reload_and_full_proxy_cannot_regress_v2_yaqa():
+    generator = torch.Generator().manual_seed(20260817)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_hessian = torch.eye(16)
+    output_hessian = torch.eye(16)
+    canonical = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        trellis_batch_size=1,
+    )
+    banked = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=4,
+        v2b4_p64=True,
+        trellis_batch_size=1,
+    )
+    block_control = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        bank_count=4,
+        v2b4_p64=True,
+        trellis_batch_size=1,
+    )
+    assert banked.kronecker_proxy_loss <= canonical.kronecker_proxy_loss
+    assert banked.bank_ids is not None and banked.bank_ids.numel() == 4
+    assert isinstance(banked.yaqa_bank_fallback_to_v2, bool)
+    assert banked.yaqa_selector_churn is not None and 0.0 <= banked.yaqa_selector_churn <= 1.0
+    assert banked.yaqa_family_changed is None
+    assert banked.yaqa_block_family_id is None
+    decoded = reconstruct_qvq_inner_weight(
+        banked.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=banked.serialized_tensors()["bank_ids"],
+        v2b4_p64=True,
+    )
+    torch.testing.assert_close(decoded, banked.inner_weight, rtol=0, atol=0)
+    assert torch.equal(banked.trellis, block_control.trellis)
+    assert torch.equal(banked.bank_ids, block_control.bank_ids)
 
 
 def test_qvq_v2b4_p64_rejects_invalid_selector_payload():

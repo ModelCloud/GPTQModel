@@ -43,6 +43,7 @@ class YaqaConfig:
     seed: int = 0
     regularization: float = YAQA_PAPER_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
+    v2b2_family_mode: str = "reselect"
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -58,6 +59,13 @@ class YaqaConfig:
             or self.minimum_sequences < 1
         ):
             raise ValueError("YaqaConfig: `minimum_sequences` must be a positive integer.")
+        if not isinstance(self.v2b2_family_mode, str):
+            raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
+        self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()
+        if self.v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
+            raise ValueError(
+                "YaqaConfig: `v2b2_family_mode` must be `fixed_block_ldlq` or `reselect`."
+            )
 
 
 class _SharedTemporaryDirectory:
@@ -5946,12 +5954,8 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: YAQA requires `viterbi_objective='euclidean'`.")
         if self.rounding == "yaqa" and self.lm_head:
             raise ValueError("QVQConfig: YAQA does not support quantizing the language-model head.")
-        if self.format == FORMAT.QVQ_V2B4_P64 and self.rounding != "block_ldlq":
-            raise ValueError("QVQConfig: `format=qvq_v2b4_p64` initially supports Block-LDLQ only.")
         if self.format == FORMAT.QVQ_V2B4_P64 and self.tail_biting_candidates != 1:
             raise ValueError("QVQConfig: `format=qvq_v2b4_p64` initially requires one tail-biting candidate.")
-        if self.format == FORMAT.QVQ_V2B2_P32 and self.rounding != "block_ldlq":
-            raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially supports Block-LDLQ only.")
         if self.format == FORMAT.QVQ_V2B2_P32 and self.tail_biting_candidates != 1:
             raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially requires one tail-biting candidate.")
         if self.format == FORMAT.QVQ_V2B2_P32 and self.viterbi_objective != "euclidean":
