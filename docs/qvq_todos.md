@@ -34,10 +34,15 @@ banks times 128 predecessor prefixes require nine bits.
 - **complete -- spectral P3 reference:** recover the truncated post-YAQA residual through triangular solves, use it
   only as a Viterbi rounding-target push, retain original-weight feedback and original-Kronecker acceptance, expose
   continuous-oracle/absorption/churn telemetry, and serialize only the exact ordinary V2B2-P32 payload;
-- **run now -- spectral P3 gate:** W2 fixed-family first with rank 16 and `alpha={0.25,0.5,1.0}` on the strict
-  512/512/512 split. Expand ranks, rates, or family reselection only if held-out final KL improves without a
-  material Top-1/5/10 regression. Otherwise retire the spectral path and prioritize live-prefix propagation-aware
-  selector scoring.
+- **complete -- spectral P3 gate:** W2 fixed-family rank 16 with `alpha={0.25,0.5,1.0}` used 512 full calibration
+  rows, disjoint evaluation rows `[512,1024)`, and disjoint YAQA rows `[1024,1536)`. Every one of the 16 Q/K/V/O
+  modules rejected every pushed candidate under the original Kronecker objective: selected modules `0/16`, selector
+  churn `0`, and discrete absorption efficiency `0`. The serialized result therefore remained the exact baseline
+  artifact. Its final KL was `0.0575069`, Top-1 `74.4203%`, Top-5 overlap `77.6291%`, and Top-10 overlap `78.4969%`;
+  the independently executed B2-P32+YAQA baseline was `0.0575036`, `74.4098%`, `77.6175%`, and `78.4741%`.
+  Differences at that scale are cross-run numerical noise, not spectral recovery. Do not expand P3 to more ranks,
+  rates, or family reselection. Retain the default-off reference and prioritize live-prefix propagation-aware
+  candidate generation/scoring instead. Raw result: `artifacts/qvq_spectral_p3_gate/w2_rank16_push.json`.
 
 The module alternative ID is physically one serialized byte. Exact artifact accounting must include it even though
 its amortized BPW is negligible for real projection matrices.
