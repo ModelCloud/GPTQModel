@@ -30,13 +30,19 @@ log = setup_logger()
 def _qvq_mlx_linear_from_torch(module):
     """Copy one loaded QVQLinear payload into the format-native MLX module."""
 
-    import mlx.core as mx
-
     from ..nn_modules.qlinear.qvq import QVQLinear
-    from .qvq_mlx import QVQMLXLinear
 
     if not isinstance(module, QVQLinear):
         raise TypeError("QVQ MLX conversion requires a QVQLinear source module")
+    if module.v2b2_p32:
+        raise NotImplementedError(
+            "QVQ V2B2-P32 native MLX conversion is pending binary P32 selector and alternative-bank support; "
+            "load with the QVQ backend to use the exact Torch reference path."
+        )
+
+    import mlx.core as mx
+
+    from .qvq_mlx import QVQMLXLinear
 
     def copy_array(tensor):
         if tensor is None:

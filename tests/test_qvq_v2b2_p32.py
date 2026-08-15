@@ -37,6 +37,14 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     }
 
 
+def test_qvq_v2b2_p32_native_mlx_conversion_fails_closed_until_selector_support_exists():
+    from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
+
+    layer = QVQLinear(bits=2, in_features=16, out_features=16, bank_count=2, v2b2_p32=True)
+    with pytest.raises(NotImplementedError, match="binary P32 selector"):
+        _qvq_mlx_linear_from_torch(layer)
+
+
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
 def test_qvq_v2b2_p32_config_round_trip(bits):
     config = QVQConfig(bits=bits, format=FORMAT.QVQ_V2B2_P32, offload_to_disk=False)
