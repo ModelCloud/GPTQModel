@@ -3490,6 +3490,7 @@ def yaqa_inner_v2b2_p32(
     bank_codebook_pair_stacks: tuple[torch.Tensor, ...] | None = None,
     family_mode: str = "reselect",
     block_input_hessian: torch.Tensor | None = None,
+    block_family_id: int | None = None,
     diagnostics: dict[str, object] | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -3504,18 +3505,24 @@ def yaqa_inner_v2b2_p32(
         raise ValueError("YAQA V2B2-P32 pair stacks must contain three [2, 65536, 2] tensors.")
     if family_mode not in {"fixed_block_ldlq", "reselect"}:
         raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
-    _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
-        inner_weight,
-        input_hessian if block_input_hessian is None else block_input_hessian,
-        codebook_library,
-        bits=kwargs["bits"],
-        tile_rows=kwargs.get("tile_rows", 16),
-        tile_cols=kwargs.get("tile_cols", 16),
-        trellis_batch_size=kwargs.get("trellis_batch_size", 16),
-        viterbi_objective="euclidean",
-        tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
-    )
-    block_alt_id = int(block_alt_id_tensor.item())
+    if block_family_id is None:
+        _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
+            inner_weight,
+            input_hessian if block_input_hessian is None else block_input_hessian,
+            codebook_library,
+            bits=kwargs["bits"],
+            tile_rows=kwargs.get("tile_rows", 16),
+            tile_cols=kwargs.get("tile_cols", 16),
+            trellis_batch_size=kwargs.get("trellis_batch_size", 16),
+            viterbi_objective="euclidean",
+            tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
+        )
+        block_alt_id = int(block_alt_id_tensor.item())
+    else:
+        if isinstance(block_family_id, bool) or not isinstance(block_family_id, int) or block_family_id not in (1, 2, 3):
+            raise ValueError("YAQA V2B2-P32 cached Block-LDLQ family ID must be 1, 2, or 3.")
+        block_alt_id = block_family_id
+        block_selectors = None
     canonical_weight, canonical_states = yaqa_inner(
         inner_weight,
         input_hessian,
@@ -3574,9 +3581,10 @@ def yaqa_inner_v2b2_p32(
             selected_banked_candidate = True
     if diagnostics is not None:
         diagnostics["fallback_to_v2"] = not selected_banked_candidate
-        diagnostics["selector_churn"] = float(
-            (best_selectors != block_selectors).to(torch.float32).mean().item()
-        )
+        if block_selectors is not None:
+            diagnostics["selector_churn"] = float(
+                (best_selectors != block_selectors).to(torch.float32).mean().item()
+            )
         diagnostics["family_changed"] = bool(selected_banked_candidate and best_alt_id != block_alt_id)
         diagnostics["block_family_id"] = block_alt_id
     return (
@@ -3598,6 +3606,7 @@ def yaqa_output_spectral_refine_v2b2_p32(
     lambdas: tuple[float, ...],
     family_mode: str = "reselect",
     block_input_hessian: torch.Tensor | None = None,
+    block_family_id: int | None = None,
     factorization: tuple[BlockLDLFactorization, BlockLDLFactorization] | None = None,
     diagnostics: dict[str, object] | None = None,
     **kwargs,
@@ -3691,6 +3700,7 @@ def yaqa_output_spectral_refine_v2b2_p32(
                 codebook_library,
                 family_mode=family_mode,
                 block_input_hessian=block_input_hessian,
+                block_family_id=block_family_id,
                 diagnostics=candidate_diagnostics,
                 factorization=candidate_factorization,
                 **kwargs,
@@ -4571,6 +4581,7 @@ def quantize_qvq_linear(
                 lambdas=yaqa_spectral_lambdas,
                 family_mode=yaqa_v2b2_family_mode,
                 block_input_hessian=block_ldlq_control_H,
+                block_family_id=int(yaqa_bank_diagnostics["block_family_id"]),
                 factorization=prepared_yaqa_factorization,
                 diagnostics=yaqa_bank_diagnostics,
                 bits=bits,

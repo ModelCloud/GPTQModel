@@ -592,6 +592,39 @@ def test_qvq_v2b2_p32_yaqa_randomized_spectral_subspace_matches_exact_control():
     torch.testing.assert_close(approximate_boosted[0], exact_boosted[0], rtol=2e-3, atol=2e-3)
 
 
+def test_qvq_v2b2_p32_spectral_candidates_reuse_the_baseline_block_family():
+    generator = torch.Generator().manual_seed(20260823)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_samples = torch.randn((29, 16), generator=generator)
+    output_samples = torch.randn((31, 16), generator=generator)
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+
+    from gptqmodel.quantization import qvq as qvq_module
+
+    with patch.object(
+        qvq_module,
+        "block_ldlq_inner_v2b2_p32",
+        wraps=qvq_module.block_ldlq_inner_v2b2_p32,
+    ) as block_family_search:
+        result = quantize_qvq_linear(
+            weight,
+            input_hessian,
+            bits=2,
+            rounding="yaqa",
+            output_hessian=output_hessian,
+            bank_count=2,
+            v2b2_p32=True,
+            yaqa_spectral_refinement=True,
+            yaqa_spectral_ranks=(1,),
+            yaqa_spectral_lambdas=(0.25,),
+            trellis_batch_size=1,
+        )
+
+    assert block_family_search.call_count == 1
+    assert result.yaqa_block_family_id in (1, 2, 3)
+
+
 def test_qvq_v2b2_p32_fixed_yaqa_uses_matched_block_ldlq_damping_for_family():
     generator = torch.Generator().manual_seed(20260819)
     weight = torch.randn((16, 16), generator=generator) * 0.1
