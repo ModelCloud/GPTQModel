@@ -341,6 +341,152 @@ def _capture_forward_rows(
     )
 
 
+class _WeightedMetricAccumulator:
+    """Merge row metrics without retaining full-vocabulary tensors."""
+
+    def __init__(self) -> None:
+        self.weight = 0
+        self.template = None
+        self.totals: dict[tuple[str, ...], float] = {}
+        self.maxima: dict[tuple[str, ...], float] = {}
+        self.booleans: dict[tuple[str, ...], bool] = {}
+        self.shape: list[int] | None = None
+
+    def add(self, metrics: dict, *, rows: int) -> None:
+        if rows < 1:
+            raise ValueError("streamed metric rows must be positive")
+        if self.template is None:
+            self.template = metrics
+        self.weight += rows
+
+        def visit(value, path: tuple[str, ...]):
+            if isinstance(value, dict):
+                for name, child in value.items():
+                    visit(child, (*path, name))
+            elif path == ("shape",):
+                if self.shape is None:
+                    self.shape = list(value)
+                else:
+                    if self.shape[1:] != list(value)[1:]:
+                        raise ValueError("streamed metric feature shapes do not match")
+                    self.shape[0] += int(value[0])
+            elif isinstance(value, bool):
+                self.booleans[path] = self.booleans.get(path, True) and value
+            elif isinstance(value, (int, float)):
+                if path[-1] in {"max", "max_abs_error"}:
+                    self.maxima[path] = max(self.maxima.get(path, -math.inf), float(value))
+                else:
+                    self.totals[path] = self.totals.get(path, 0.0) + float(value) * rows
+
+        visit(metrics, ())
+
+    def result(self) -> dict:
+        if self.template is None or self.weight < 1:
+            raise ValueError("streamed metric accumulator is empty")
+
+        def build(value, path: tuple[str, ...]):
+            if isinstance(value, dict):
+                return {name: build(child, (*path, name)) for name, child in value.items()}
+            if path == ("shape",):
+                return self.shape
+            if isinstance(value, bool):
+                return self.booleans[path]
+            if isinstance(value, (int, float)):
+                if path[-1] in {"max", "max_abs_error"}:
+                    return self.maxima[path]
+                return self.totals[path] / self.weight
+            return value
+
+        result = build(self.template, ())
+        result["aggregation"] = "exact token-weighted means; row-weighted auxiliary quantiles"
+        result["streamed_rows"] = self.weight
+        return result
+
+    def mean(self, *path: str) -> float | None:
+        key = tuple(path)
+        return None if self.weight == 0 or key not in self.totals else self.totals[key] / self.weight
+
+
+@torch.inference_mode()
+def _streaming_compare_models(
+    dense_model: torch.nn.Module,
+    quantized_model: torch.nn.Module,
+    rows: tuple[dict[str, torch.Tensor], ...],
+    dense_modules: dict[str, torch.nn.Linear],
+    quantized_modules: dict[str, torch.nn.Linear],
+    reconstructions: dict[str, torch.Tensor],
+    *,
+    layer_count: int,
+    progress_label: str,
+) -> dict:
+    module_names = tuple(dense_modules)
+    local_accumulator = _WeightedMetricAccumulator()
+    live_accumulator = _WeightedMetricAccumulator()
+    layer_accumulators = {index: _WeightedMetricAccumulator() for index in range(layer_count)}
+    logit_accumulator = _WeightedMetricAccumulator()
+    for row_index, row in enumerate(rows, start=1):
+        dense_logits, dense_inputs, dense_outputs = capture_forward(
+            dense_model,
+            row,
+            dense_modules,
+            capture_inputs=True,
+            layer_count=layer_count,
+        )
+        quantized_logits, _, live_outputs = capture_forward(
+            quantized_model,
+            row,
+            quantized_modules,
+            capture_inputs=False,
+            layer_count=layer_count,
+        )
+        token_count = dense_logits.shape[0]
+        local_outputs = {
+            name: F.linear(
+                dense_inputs[name],
+                reconstructions[name],
+                None if dense_modules[name].bias is None else dense_modules[name].bias.detach().cpu().float(),
+            )
+            for name in module_names
+        }
+        dense_qkvo = _joined(dense_outputs, module_names)
+        local_accumulator.add(
+            tensor_metrics(dense_qkvo, _joined(local_outputs, module_names), normalize_distribution=True),
+            rows=token_count,
+        )
+        live_accumulator.add(
+            tensor_metrics(dense_qkvo, _joined(live_outputs, module_names), normalize_distribution=True),
+            rows=token_count,
+        )
+        for layer_index, accumulator in layer_accumulators.items():
+            accumulator.add(
+                tensor_metrics(
+                    dense_outputs[f"layer.{layer_index}.hidden"],
+                    live_outputs[f"layer.{layer_index}.hidden"],
+                    normalize_distribution=True,
+                ),
+                rows=token_count,
+            )
+        logit_accumulator.add(
+            tensor_metrics(dense_logits, quantized_logits, normalize_distribution=False, include_top10=True),
+            rows=token_count,
+        )
+        if row_index % 16 == 0 or row_index == len(rows):
+            print(
+                f"{progress_label}: eval {row_index}/{len(rows)} rows, "
+                f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
+                f"top1={logit_accumulator.mean('top1_agreement'):.4f} "
+                f"top5={logit_accumulator.mean('top5_overlap', 'mean'):.4f} "
+                f"top10={logit_accumulator.mean('top10_overlap', 'mean'):.4f}",
+                flush=True,
+            )
+    return {
+        "local_qkvo": local_accumulator.result(),
+        "live_qkvo": live_accumulator.result(),
+        "layers": {str(index): accumulator.result() for index, accumulator in layer_accumulators.items()},
+        "logits": logit_accumulator.result(),
+    }
+
+
 def main() -> None:
     args = _parser().parse_args()
     if args.layers < 1:
@@ -479,16 +625,16 @@ def main() -> None:
 
     print("Capturing QKVO calibration Hessians", flush=True)
     hessians, sample_counts = capture_calibration_hessians(model, calibration, modules, device=device)
-    print("Capturing dense held-out QKVO/layer/logit outputs", flush=True)
-    dense_logits, dense_inputs, dense_outputs = _capture_forward_rows(
-        model,
-        evaluation_rows,
-        modules,
-        capture_inputs=True,
-        layer_count=args.layers,
-    )
-    dense_qkvo = _joined(dense_outputs, module_names)
     original_weights = {name: module.weight.detach().cpu().float().clone() for name, module in modules.items()}
+    print("Loading an immutable dense replay model for row-streamed metrics", flush=True)
+    dense_model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        config=config,
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        local_files_only=True,
+    ).eval().to(device)
+    dense_modules = _qkvo_modules(dense_model, layer_count=args.layers)
 
     report = {
         "settings": {
@@ -537,7 +683,6 @@ def main() -> None:
                 trellis_window=geometry["trellis_window"],
             )
             reconstructions: dict[str, torch.Tensor] = {}
-            local_outputs: dict[str, torch.Tensor] = {}
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
             alternative_bank_histogram = [0, 0, 0, 0]
@@ -570,8 +715,6 @@ def main() -> None:
                     ]
                 if result.bank_alt_id is not None:
                     alternative_bank_histogram[int(result.bank_alt_id.item())] += 1
-                bias = None if module.bias is None else module.bias.detach().cpu().float()
-                local_outputs[name] = F.linear(dense_inputs[name], reconstruction, bias)
                 print(
                     f"W{rate:g} {arm}: {index}/{len(modules)} {name} "
                     f"in {time.perf_counter() - module_started:.2f}s",
@@ -581,15 +724,16 @@ def main() -> None:
             with torch.no_grad():
                 for name, module in modules.items():
                     module.weight.copy_(reconstructions[name].to(device=device, dtype=module.weight.dtype))
-            quantized_logits, _, live_outputs = _capture_forward_rows(
+            streamed_metrics = _streaming_compare_models(
+                dense_model,
                 model,
                 evaluation_rows,
+                dense_modules,
                 modules,
-                capture_inputs=False,
+                reconstructions,
                 layer_count=args.layers,
+                progress_label=f"W{rate:g} {arm}",
             )
-            local_qkvo = _joined(local_outputs, module_names)
-            live_qkvo = _joined(live_outputs, module_names)
             arm_report = {
                 "seconds": time.perf_counter() - started,
                 "trellis_batch_size": batch_size,
@@ -604,22 +748,7 @@ def main() -> None:
                     "mean_mse": _mean([metric["mse"] for metric in weight_metrics.values()]),
                     "mean_relative_l2": _mean([metric["relative_l2"] for metric in weight_metrics.values()]),
                 },
-                "local_qkvo": tensor_metrics(dense_qkvo, local_qkvo, normalize_distribution=True),
-                "live_qkvo": tensor_metrics(dense_qkvo, live_qkvo, normalize_distribution=True),
-                "layers": {
-                    str(layer_index): tensor_metrics(
-                        dense_outputs[f"layer.{layer_index}.hidden"],
-                        live_outputs[f"layer.{layer_index}.hidden"],
-                        normalize_distribution=True,
-                    )
-                    for layer_index in range(args.layers)
-                },
-                "logits": tensor_metrics(
-                    dense_logits,
-                    quantized_logits,
-                    normalize_distribution=False,
-                    include_top10=True,
-                ),
+                **streamed_metrics,
             }
             report["results"][str(rate)][arm] = arm_report
             logits = arm_report["logits"]
@@ -642,7 +771,7 @@ def main() -> None:
                     module.weight.copy_(original_weights[name].to(device=device, dtype=module.weight.dtype))
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            del reconstructions, local_outputs, quantized_logits, live_outputs
+            del reconstructions, streamed_metrics
             gc.collect()
             if device.type == "mps":
                 torch.mps.empty_cache()

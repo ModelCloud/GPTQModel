@@ -24,11 +24,13 @@ from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
+    _WeightedMetricAccumulator,
     _load_yaqa_factor_cache,
     _padded_batch_chunks,
     _parser,
     _save_yaqa_factor_cache,
 )
+from scripts.analyze_gptq_low_bit_grid import tensor_metrics
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
@@ -93,6 +95,41 @@ def test_qvq_banked_yaqa_factor_cache_is_atomic_and_validated(tmp_path):
     assert not tuple(tmp_path.glob(".*.tmp"))
     with pytest.raises(ValueError, match="metadata does not match"):
         _load_yaqa_factor_cache(path, expected_metadata={**metadata, "version": 2})
+
+
+def test_qvq_streamed_metrics_match_monolithic_kl_and_topn_means():
+    generator = torch.Generator().manual_seed(20260820)
+    dense = torch.randn((11, 37), generator=generator)
+    quantized = dense + torch.randn((11, 37), generator=generator) * 0.1
+    expected = tensor_metrics(dense, quantized, normalize_distribution=False, include_top10=True)
+    accumulator = _WeightedMetricAccumulator()
+    for start, stop in ((0, 3), (3, 8), (8, 11)):
+        accumulator.add(
+            tensor_metrics(
+                dense[start:stop],
+                quantized[start:stop],
+                normalize_distribution=False,
+                include_top10=True,
+            ),
+            rows=stop - start,
+        )
+    actual = accumulator.result()
+
+    assert actual["shape"] == [11, 37]
+    for path in (
+        ("kl_forward", "mean"),
+        ("kl_reverse", "mean"),
+        ("jensen_shannon", "mean"),
+        ("top5_overlap", "mean"),
+        ("top10_overlap", "mean"),
+        ("top1_agreement",),
+    ):
+        expected_value = expected
+        actual_value = actual
+        for name in path:
+            expected_value = expected_value[name]
+            actual_value = actual_value[name]
+        assert actual_value == pytest.approx(expected_value, abs=1e-7, rel=1e-7)
 
 
 def test_qvq_v2b2_p32_native_mlx_conversion_preserves_selector_payload():
