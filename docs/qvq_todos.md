@@ -52,6 +52,59 @@ acceptance objective.
 - **P2 -- native inference:** add CUDA/MPS/MLX P64 selector decode only after Torch pack/reload and model-level
   evidence pass. Native kernels must match the serialized Torch reconstruction before performance comparisons.
 
+### Completed four-layer V2B4-P64 reference run
+
+Historical result captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. V2B4-P64 improved the measured
+local metrics at every rate and improved the reported downstream point estimates at W1, W1.5, and W2.5. W2 is the
+important counterexample: weight error, Block-LDLQ proxy, local QKVO KL, and live QKVO KL all improved, while layer
+KL worsened by 11.22%, final-logit KL worsened by 0.21%, and Top-1/5/10 agreement fell. Therefore local selection is
+not a sufficient unconditional acceptance rule below W3.
+
+| Rate | Arm | EBPW | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Time |
+|---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | V2 | 1.00000 | 0.659996 | 0.042760 | 0.074643 | 0.263296 | 0.733819 | 34.18% | 36.83% | 36.74% | 33.46s |
+| W1 | V2B4-P64 | 1.03125 | 0.646150 | 0.036563 | 0.065726 | 0.262046 | 0.706435 | 35.00% | 37.78% | 37.63% | 435.46s |
+| W1.5 | V2 | 1.50000 | 0.477342 | 0.007191 | 0.017653 | 0.096077 | 0.310906 | 49.63% | 54.11% | 54.49% | 30.41s |
+| W1.5 | V2B4-P64 | 1.53125 | 0.465909 | 0.006031 | 0.015189 | 0.094804 | 0.283900 | 50.96% | 55.80% | 56.38% | 418.19s |
+| W2 | V2 | 2.00000 | 0.343255 | 0.002360 | 0.006637 | 0.029056 | 0.130507 | 64.23% | 67.98% | 68.94% | 33.87s |
+| W2 | V2B4-P64 | 2.03125 | 0.334940 | 0.002250 | 0.006151 | 0.032317 | 0.130783 | 63.64% | 67.79% | 68.78% | 410.22s |
+| W2.5 | V2 | 2.50000 | 0.245716 | 0.001032 | 0.003082 | 0.016850 | 0.063957 | 72.79% | 76.24% | 77.33% | 31.42s |
+| W2.5 | V2B4-P64 | 2.53125 | 0.238943 | 0.000992 | 0.002831 | 0.016822 | 0.063667 | 73.22% | 76.47% | 77.35% | 409.71s |
+
+Matched V2B4-P64 deltas relative to V2:
+
+| Rate | Weight MSE | Proxy loss | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Time |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | -4.27% | -9.20% | -14.49% | -11.95% | -0.47% | -3.73% | +0.82pp | +0.95pp | +0.89pp | 13.02x |
+| W1.5 | -4.81% | -6.98% | -16.13% | -13.96% | -1.32% | -8.69% | +1.33pp | +1.69pp | +1.88pp | 13.75x |
+| W2 | -4.79% | -5.51% | -4.68% | -7.32% | +11.22% | +0.21% | -0.58pp | -0.19pp | -0.16pp | 12.11x |
+| W2.5 | -5.54% | -5.86% | -3.89% | -8.13% | -0.16% | -0.45% | +0.43pp | +0.23pp | +0.03pp | 13.04x |
+
+Selector usage confirms that the mixed arm did not collapse to canonical bank zero:
+
+| Rate | Nonzero selectors | Entropy (bits) | Bank histogram 0 / 1 / 2 / 3 |
+|---:|---:|---:|:---|
+| W1 | 73.21% | 1.996100 | 175570 / 152492 / 151130 / 176168 |
+| W1.5 | 72.68% | 1.993749 | 179069 / 179071 / 149378 / 147842 |
+| W2 | 66.47% | 1.973751 | 219761 / 145758 / 145371 / 144470 |
+| W2.5 | 71.87% | 1.989493 | 184323 / 182805 / 145263 / 142969 |
+
+Run contract:
+
+- real Llama 3.2 1B Instruct; decoder layers 0--3; all 16 Q/K/V/O projections;
+- 64 independent full calibration rows with 27,455 valid tokens;
+- disjoint evaluation rows 64--127 with 20,384 valid tokens;
+- batch 1, no concatenation, no length limit, Block-LDLQ, and YAQA/propagation disabled;
+- Torch 2.13.0, CUDA 13.0, A100-class SM80 physical GPUs 4--7;
+- focused tests 15/15 passed; all four workers exited successfully.
+
+Original artifacts:
+
+- `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w1_gpu4.json`
+- `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w1p5_gpu5.json`
+- `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w2_gpu6.json`
+- `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w2p5_gpu7.json`
+
 The comparison driver `scripts/compare_qvq_codecs_llama_qkvo.py` now defaults to only `v2` and `v2b2-p32` so the
 base result is available quickly. Its other defaults encode the P0 contract above: four layers, rates W1--W2.5,
 64 calibration rows, 64 evaluation rows at offset 64, batch 1, and full row lengths. Dual-V2, V4, and L18/V4 remain
