@@ -167,11 +167,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--all-linear-hessian-mode",
-        choices=("staged", "dense-frozen"),
+        choices=("staged", "layerwise", "dense-frozen"),
         default="staged",
         help=(
-            "For all-linear sweeps, recapture downstream geometry after installing QKV, O, and gate/up "
-            "reconstructions, or retain the legacy dense-frozen diagnostic control."
+            "For all-linear sweeps, recapture downstream geometry in four global producer/consumer stages, "
+            "replay every layer exactly, or retain the legacy dense-frozen diagnostic control."
         ),
     )
     parser.add_argument("--rates", nargs="+", type=float, default=(1, 1.5, 2, 2.5))
@@ -628,6 +628,8 @@ def _shared_input_hessian_groups(
 def _all_linear_dependency_stages(
     model: torch.nn.Module,
     selected_modules: dict[str, torch.nn.Linear],
+    *,
+    layerwise: bool = False,
 ) -> tuple[tuple[str, ...], ...]:
     """Return Llama-style producer/consumer stages from the instantiated module tree.
 
@@ -638,7 +640,7 @@ def _all_linear_dependency_stages(
     """
 
     selected_names_by_id = {id(module): name for name, module in selected_modules.items()}
-    stages: list[list[str]] = [[], [], [], []]
+    stages: list[list[str]] = [] if layerwise else [[], [], [], []]
     layers = getattr(getattr(model, "model", None), "layers", None)
     if layers is None:
         raise ValueError("all-linear staged replay requires decoder layers at model.layers")
@@ -651,7 +653,8 @@ def _all_linear_dependency_stages(
             (mlp, ("gate_proj", "up_proj")),
             (mlp, ("down_proj",)),
         )
-        for stage, (parent, roles) in zip(stages, role_groups, strict=True):
+        layer_stages: list[list[str]] = [[], [], [], []] if layerwise else stages
+        for stage, (parent, roles) in zip(layer_stages, role_groups, strict=True):
             if not isinstance(parent, torch.nn.Module):
                 raise ValueError("all-linear staged replay requires self_attn and mlp module groups")
             for role in roles:
@@ -660,6 +663,8 @@ def _all_linear_dependency_stages(
                 if not isinstance(child, torch.nn.Linear) or name is None:
                     raise ValueError(f"all-linear staged replay is missing selected projection `{role}`")
                 stage.append(name)
+        if layerwise:
+            stages.extend(layer_stages)
     flattened = tuple(name for stage in stages for name in stage)
     if len(flattened) != len(set(flattened)) or set(flattened) != set(selected_modules):
         raise ValueError("all-linear staged replay did not cover the selected projections exactly once")
@@ -997,7 +1002,7 @@ def main() -> None:
     yaqa_batches = None
     if yaqa_enabled:
         cache_metadata = _yaqa_cache_metadata(args, module_shapes, yaqa_row_offset)
-        staged_yaqa_replay = args.module_scope == "all-linear" and args.all_linear_hessian_mode == "staged"
+        staged_yaqa_replay = args.module_scope == "all-linear" and args.all_linear_hessian_mode != "dense-frozen"
         if staged_yaqa_replay or args.yaqa_factor_cache is None or not args.yaqa_factor_cache.is_file():
             yaqa_encoded, yaqa_data_stats = load_nm_evaluation_batch(
                 tokenizer,
@@ -1058,7 +1063,11 @@ def main() -> None:
                 yaqa_stats["cache_path"] = str(args.yaqa_factor_cache)
                 print(f"Saved YAQA Sketch-B factors to {args.yaqa_factor_cache}", flush=True)
         if staged_yaqa_replay:
-            initial_yaqa_names = _all_linear_dependency_stages(model, modules)[0]
+            initial_yaqa_names = _all_linear_dependency_stages(
+                model,
+                modules,
+                layerwise=args.all_linear_hessian_mode == "layerwise",
+            )[0]
             yaqa_input_hessians = {name: yaqa_input_hessians[name] for name in initial_yaqa_names}
             yaqa_output_hessians = {name: yaqa_output_hessians[name] for name in initial_yaqa_names}
             yaqa_stats = dict(yaqa_stats)
@@ -1095,10 +1104,14 @@ def main() -> None:
     evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
 
     print(f"Capturing {args.module_scope} calibration Hessians", flush=True)
-    staged_all_linear = args.module_scope == "all-linear" and args.all_linear_hessian_mode == "staged"
+    staged_all_linear = args.module_scope == "all-linear" and args.all_linear_hessian_mode != "dense-frozen"
     initial_hessian_modules = modules
     if staged_all_linear:
-        first_stage = _all_linear_dependency_stages(model, modules)[0]
+        first_stage = _all_linear_dependency_stages(
+            model,
+            modules,
+            layerwise=args.all_linear_hessian_mode == "layerwise",
+        )[0]
         has_block_ldlq_arm = any(ARM_CONFIG[arm].get("rounding", "block_ldlq") != "yaqa" for arm in args.arms)
         initial_hessian_modules = {name: modules[name] for name in first_stage} if has_block_ldlq_arm else {}
     shared_hessian_groups = _shared_input_hessian_groups(model, initial_hessian_modules)
@@ -1109,6 +1122,7 @@ def main() -> None:
             initial_hessian_modules,
             device=device,
             shared_input_groups=shared_hessian_groups,
+            stop_after_module=initial_hessian_modules[first_stage[-1]] if staged_all_linear else None,
         )
     else:
         hessians, sample_counts = {}, {}
@@ -1147,7 +1161,13 @@ def main() -> None:
             "calibration_execution": "independent full rows; batch=1; no sequence concatenation",
             "calibration_samples": sample_counts,
             "calibration_hessian_capture": (
-                "staged producer/consumer replay" if staged_all_linear else "one dense-frozen model replay"
+                (
+                    "exact layerwise producer/consumer replay"
+                    if args.all_linear_hessian_mode == "layerwise"
+                    else "staged producer/consumer replay"
+                )
+                if staged_all_linear
+                else "one dense-frozen model replay"
             ),
             "shared_input_hessian_groups": [list(group) for group in shared_hessian_groups],
             "evaluation": evaluation_stats,
@@ -1192,9 +1212,15 @@ def main() -> None:
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
             alternative_bank_histogram = [0, 0, 0, 0]
-            staged_replay = args.module_scope == "all-linear" and args.all_linear_hessian_mode == "staged"
+            staged_replay = args.module_scope == "all-linear" and args.all_linear_hessian_mode != "dense-frozen"
             dependency_stages = (
-                _all_linear_dependency_stages(model, modules) if staged_replay else (module_names,)
+                _all_linear_dependency_stages(
+                    model,
+                    modules,
+                    layerwise=args.all_linear_hessian_mode == "layerwise",
+                )
+                if staged_replay
+                else (module_names,)
             )
             stage_reports = []
             completed_modules = 0
@@ -1202,7 +1228,15 @@ def main() -> None:
             for stage_index, stage_names in enumerate(dependency_stages):
                 stage_started = time.perf_counter()
                 stage_modules = {name: modules[name] for name in stage_names}
-                stage_label = ("qkv", "o", "gate_up", "down")[stage_index] if staged_replay else "dense_frozen"
+                if staged_replay:
+                    role = ("qkv", "o", "gate_up", "down")[stage_index % 4]
+                    stage_label = (
+                        f"layer_{stage_index // 4}_{role}"
+                        if args.all_linear_hessian_mode == "layerwise"
+                        else role
+                    )
+                else:
+                    stage_label = "dense_frozen"
                 stage_sample_counts = {name: sample_counts[name] for name in stage_names if name in sample_counts}
                 stage_yaqa_stats = None
                 if rounding == "yaqa" and staged_replay and stage_index > 0:
@@ -1239,6 +1273,7 @@ def main() -> None:
                             stage_modules,
                             device=device,
                             shared_input_groups=stage_shared_groups,
+                            stop_after_module=stage_modules[stage_names[-1]],
                         )
                     else:
                         stage_hessians = hessians

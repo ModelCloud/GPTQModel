@@ -588,8 +588,20 @@ def capture_calibration_hessians(
     *,
     device: torch.device,
     shared_input_groups: tuple[tuple[str, ...], ...] = (),
+    stop_after_module: nn.Module | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
-    """Stream calibration batches and accumulate X.T@X from valid token rows only."""
+    """Stream calibration batches and accumulate X.T@X from valid token rows only.
+
+    ``stop_after_module`` may terminate each forward immediately after the last
+    required activation has been observed.  This is useful for staged replay:
+    later decoder work cannot affect an already-captured input Hessian.
+    """
+
+    class _CalibrationCaptureComplete(Exception):
+        pass
+
+    if stop_after_module is not None and stop_after_module not in set(modules.values()):
+        raise ValueError("stop_after_module must be one of the selected calibration modules")
 
     grouped_members: set[str] = set()
     representative_for: dict[str, str] = {}
@@ -637,6 +649,14 @@ def capture_calibration_hessians(
 
         handles.append(module.register_forward_hook(module_hook))
 
+    if stop_after_module is not None:
+        def stop_hook(_module, _args, _output):
+            raise _CalibrationCaptureComplete
+
+        # Registered after the accumulation hooks so the selected module's
+        # activation is always included before its forward is terminated.
+        handles.append(stop_after_module.register_forward_hook(stop_hook))
+
     try:
         for batch in batches:
             if "attention_mask" not in batch:
@@ -646,7 +666,10 @@ def capture_calibration_hessians(
                 raise ValueError("calibration batch contains no valid tokens")
             encoded = {name: value.to(device) for name, value in batch.items()}
             active_mask = encoded["attention_mask"]
-            backbone(**encoded, use_cache=False)
+            try:
+                backbone(**encoded, use_cache=False)
+            except _CalibrationCaptureComplete:
+                pass
     finally:
         active_mask = None
         for handle in handles:

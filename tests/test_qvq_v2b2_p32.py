@@ -86,8 +86,8 @@ class _EarlyStopHarness(torch.nn.Module):
         self.target = torch.nn.Linear(4, 4, bias=False)
         self.after_calls = 0
 
-    def forward(self, input_ids, attention_mask):
-        del attention_mask
+    def forward(self, input_ids, attention_mask, use_cache=False):
+        del attention_mask, use_cache
         hidden = self.before(input_ids.float())
         hidden = self.target(hidden)
         self.after_calls += 1
@@ -287,6 +287,16 @@ def test_qvq_comparison_harness_can_select_every_decoder_linear_projection():
         tuple(f"model.layers.{layer}.mlp.{role}" for layer in range(2) for role in ("gate_proj", "up_proj")),
         tuple(f"model.layers.{layer}.mlp.down_proj" for layer in range(2)),
     )
+    assert _all_linear_dependency_stages(model, all_linear, layerwise=True) == tuple(
+        stage
+        for layer in range(2)
+        for stage in (
+            tuple(f"model.layers.{layer}.self_attn.{role}" for role in ("q_proj", "k_proj", "v_proj")),
+            (f"model.layers.{layer}.self_attn.o_proj",),
+            tuple(f"model.layers.{layer}.mlp.{role}" for role in ("gate_proj", "up_proj")),
+            (f"model.layers.{layer}.mlp.down_proj",),
+        )
+    )
 
 
 def test_qvq_comparison_shared_input_groups_cover_qkv_and_gate_up_only():
@@ -325,6 +335,45 @@ def test_shared_hessian_capture_matches_independent_and_aliases_storage():
     assert shared_counts == independent_counts == {"q": 2, "k": 2, "v": 2}
     assert all(torch.equal(shared[name], independent[name]) for name in modules)
     assert shared["q"].data_ptr() == shared["k"].data_ptr() == shared["v"].data_ptr()
+
+
+def test_hessian_capture_can_stop_after_last_required_module():
+    model = _EarlyStopHarness().eval()
+    batches = [
+        {
+            "input_ids": torch.randn((1, 5, 4), generator=torch.Generator().manual_seed(17)),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 0]]),
+        }
+    ]
+    expected, expected_counts = capture_calibration_hessians(
+        model,
+        batches,
+        {"target": model.target},
+        device=torch.device("cpu"),
+    )
+    assert model.after_calls == 1
+    model.after_calls = 0
+    actual, actual_counts = capture_calibration_hessians(
+        model,
+        batches,
+        {"target": model.target},
+        device=torch.device("cpu"),
+        stop_after_module=model.target,
+    )
+
+    assert actual_counts == expected_counts == {"target": 4}
+    torch.testing.assert_close(actual["target"], expected["target"], rtol=0, atol=0)
+    assert model.after_calls == 0
+    assert not model.target._forward_hooks
+
+    with pytest.raises(ValueError, match="must be one of"):
+        capture_calibration_hessians(
+            model,
+            batches,
+            {"target": model.target},
+            device=torch.device("cpu"),
+            stop_after_module=model.before,
+        )
 
 
 def test_swiglu_down_hessian_must_be_recaptured_after_gate_up_change():
