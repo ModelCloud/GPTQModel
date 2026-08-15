@@ -213,6 +213,29 @@ reconstructed weights on two untouched rows, packed MPS inference had mean KL `6
 tensor drift: every saved tensor is checksum- and bit-validated before installation. The generated artifact remains
 an untracked experiment output, not a production full-model checkpoint.
 
+The first gate driven directly from that artifact targeted layer-1 `q_proj` at W2 with YAQA seed 1. It used eight
+full search rows `[1602,1610)` (1,406 live-prefix input tokens), eight confirmation rows `[1610,1618)`, and eight
+untouched evaluation rows `[1618,1626)`. All rows were batch 1, untruncated, and disjoint from ordinary calibration
+and YAQA rows. The localized ranks `{8,16,32}` search took 335.53 seconds, changed the state path without changing
+the P32 selector map, and passed the fail-closed confirmation gate.
+
+| Split | Arm | Final-logit KL | Top-1 | Top-5 | Top-10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| confirmation | rollback | 0.0090825312 | 90.6784% | 90.9517% | 91.2762% |
+| confirmation | serialized proposal reconstruction | 0.0090807002 | 90.7760% | 90.9370% | 91.2811% |
+| untouched evaluation | rollback | 0.0102990087 | 88.9154% | 89.7946% | 90.1529% |
+| untouched evaluation | selected dense reconstruction | 0.0102970986 | 88.8199% | 89.7659% | 90.2198% |
+| untouched evaluation | selected packed MPS | 0.0102969826 | 89.0110% | 89.7754% | 90.1768% |
+
+Confirmation KL improved by 0.0202%, with Top-1 +0.0976 percentage points, Top-5 -0.0146 points, and Top-10
++0.0049 points. Untouched dense-reconstruction KL improved by 0.0185%, but Top-1 and Top-5 declined by 0.0956 and
+0.0287 points while Top-10 improved by 0.0669 points. Packed MPS remained finite and closely matched the selected
+dense reconstruction in KL, but accumulation-order drift moved Top-1/5/10 by +0.1911/+0.0096/-0.0430 points.
+This is another accepted, reproducible small-KL proposal, not promotion evidence: the effect is tiny, selector churn
+is zero, Top-N is mixed, and one target/split cannot establish task recovery. The validated driver is
+`scripts/validate_qvq_p4_live_prefix.py`; raw JSON and the one-module selected artifact remain under the untracked
+`artifacts/qvq_p4_promotion/` directory.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
