@@ -98,15 +98,17 @@ Add an explicit preparation operation rather than overloading `quantize()` with 
 
 ```python
 preparation = model.prepare_quantization(
-    calibration=calibration,
-    validation_calibration=validation_calibration,
-    yaqa_calibration=yaqa_calibration,
-    calibration_concat_size=None,
-    calibration_sort="desc",
-    batch_size=1,
-    layer_scope=None,
-    mode="auto",
-    cache_dir=None,
+    QVQPrepareConfig(
+        calibration=calibration,
+        validation_calibration=validation_calibration,
+        yaqa_calibration=yaqa_calibration,
+        calibration_concat_size=None,
+        calibration_sort="desc",
+        batch_size=1,
+        layer_scope=None,
+        execution=ExecutionConfig.AUTO,
+        cache_dir=None,
+    )
 )
 
 model.quantize(
@@ -237,12 +239,26 @@ The compatibility profile's expected parity is exact for:
 Inference may differ only within the established packed-kernel contract: quantization output is exact, while packed
 inference must remain finite and within `2e-3` drift from the dense decoded-weight reference.
 
-## Preparation execution modes
+## Preparation execution
 
-### `dense_resident`
+Preparation exposes only the memory/materialization schedule. Device count and parallel placement are orthogonal and
+remain automatic:
 
-Use for small models that fit comfortably on one device. This mode reproduces the current research harness most
-directly:
+```python
+class ExecutionConfig(str, Enum):
+    AUTO = "auto"
+    DENSE = "dense"
+    PER_LAYER = "per_layer"
+```
+
+Do not add `DISTRIBUTED` or backend-specific values. Assigning multiple GPUs does not change preparation math or
+materialization semantics; the existing model-tree and subset planner automatically distribute ready work over the
+assigned devices.
+
+### `ExecutionConfig.DENSE`
+
+Use when the complete dense source model fits comfortably across the assigned device plan. This mode reproduces the
+current research harness most directly:
 
 1. keep an untouched dense source model resident;
 2. capture all requested pristine input Hessians in a single forward traversal;
@@ -253,7 +269,10 @@ directly:
 
 No module may be quantized before pristine capture completes.
 
-### `streamed_pristine`
+When multiple GPUs are assigned, the lifecycle may shard or parallelize dense preparation automatically. The caller
+does not select a separate distributed mode.
+
+### `ExecutionConfig.PER_LAYER`
 
 Use for checkpoints that require a LazyTurtle/meta shell. For each decoder layer:
 
@@ -270,10 +289,17 @@ This preserves untouched-dense capture without materializing the entire model. T
 CPU/disk spillable, and padding-aware. Existing `shell_module_materialize()` and LazyTurtle alias resolution remain
 the only checkpoint materialization authority.
 
-### `distributed_pristine`
+Multiple assigned GPUs automatically process independent ready layers/subsets when dependencies and memory permit.
+The execution value remains `PER_LAYER` because the materialization boundary is still one layer.
 
-Use for multi-GPU dense models and large MoE checkpoints. The model tree and `SubsetPlan` assign complete preparation
-units to devices. A unit owns its materialized source tensors, input rows, hooks, captures, factorization, and cleanup.
+### `ExecutionConfig.AUTO`
+
+Select `DENSE` when the source model is already dense-resident and measured memory headroom is sufficient. Select
+`PER_LAYER` for a LazyTurtle/meta shell or when the dense preparation memory estimate exceeds the configured budget.
+Report the selected execution value and reason.
+
+After that selection, the model tree and `SubsetPlan` assign complete preparation units over every assigned device. A
+unit owns its materialized source tensors, input rows, hooks, captures, factorization, and cleanup.
 
 Requirements:
 
@@ -284,9 +310,6 @@ Requirements:
 - cross-device artifacts are copied only after producer events complete;
 - per-device memory budgets and spill thresholds are explicit;
 - a multi-GPU plan that benchmarks slower than the matched single-GPU plan automatically falls back.
-
-`mode="auto"` selects among these modes from checkpoint/materialization state, model-tree structure, device inventory,
-and memory estimates. It must report the selected mode and reason.
 
 ## Hessian and factorization ownership
 
@@ -460,7 +483,7 @@ shared across concurrent workers.
 Every stage emits structured events with a stable run/arm/module identity:
 
 - dataset load/tokenization and row IDs;
-- preparation mode and reason;
+- requested and selected `ExecutionConfig`, assigned devices, and selection reason;
 - source materialization and release;
 - Hessian capture tokens, bytes, and elapsed time;
 - shared-group reuse count;
@@ -497,7 +520,7 @@ new correctness stages to one side of the A/B.
 - factor provenance, block-size mismatch, damping retry, and factorization call count;
 - global and module-derived seed policies;
 - pristine versus sequential geometry separation;
-- dense, streamed, and distributed preparation parity on a tiny model;
+- dense versus per-layer preparation parity on a tiny model;
 - LazyTurtle materialization/release and bounded source ownership;
 - YAQA sequence semantics, masks, batching, cache reuse, and failure cleanup;
 - V2, V2B2-P32 fixed/reselected, and V2B4-P64 YAQA paths;
@@ -596,14 +619,14 @@ Exit: Llama 3.2 1B dense-resident lifecycle matches the standalone tensors exact
 
 Exit: all existing QVQ sweep arms run without direct `quantize_qvq_linear()` or dense weight mutation in the script.
 
-### Phase 3: streamed pristine preparation
+### Phase 3: per-layer pristine preparation
 
 - integrate preparation units with LazyTurtle materialization;
 - maintain bounded pristine layer inputs independently of quantized replay;
 - add spill, cleanup, and interrupted-run recovery;
 - validate dense-resident versus streamed exactness.
 
-Exit: a sharded model can prepare and quantize without full dense CPU/GPU residency.
+Exit: `ExecutionConfig.PER_LAYER` can prepare and quantize a sharded model without full dense CPU/GPU residency.
 
 ### Phase 4: YAQA preparation scaling
 
@@ -614,12 +637,12 @@ Exit: a sharded model can prepare and quantize without full dense CPU/GPU reside
 
 Exit: YAQA no longer requires an unbounded single-device dense lifecycle for supported dense models.
 
-### Phase 5: distributed preparation and quantization
+### Phase 5: automatic multi-GPU preparation and quantization
 
 - map preparation units through model-tree subset planning;
 - add deterministic reductions and event-safe ownership;
 - benchmark single versus multi-GPU on A100-class and RTX 4090 devices where available;
-- automatically choose the faster valid plan.
+- automatically choose the faster valid plan without introducing a separate execution value.
 
 Exit: multi-GPU improves matched wall time without accuracy or memory regression.
 
