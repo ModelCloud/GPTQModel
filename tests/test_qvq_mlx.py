@@ -510,7 +510,7 @@ def test_qvq_mlx_viterbi_rejects_invalid_numeric_inputs():
 
 
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
-@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_mlx_banked_v2_tail_biting_matches_torch_oracle(kind, bits):
     generator = torch.Generator().manual_seed(32000 + int(bits * 10) + len(kind))
     sequences = torch.randn((1, 128, 2), generator=generator)
@@ -783,7 +783,7 @@ def test_qvq_v4_banked_mlx_matches_dense_reference(bits, m):
 
 
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
-@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("m", (1, 4, 17))
 def test_qvq_v2_banked_mlx_matches_dense_reference(kind, bits, m):
     (x, trellis, bank_ids), bank_alt_id, reference = _v2_banked_case(bits, m, kind=kind)

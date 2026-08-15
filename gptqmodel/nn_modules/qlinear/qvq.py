@@ -179,8 +179,8 @@ class QVQLinear(BaseQuantLinear):
         FORMAT.QVQ_V4: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 4)),
         FORMAT.QVQ_V4_L18: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
         FORMAT.QVQ_DUAL_V2: FormatSupport(priority=100, bits=QVQ_BITS),
-        FORMAT.QVQ_V2B4_P64: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
-        FORMAT.QVQ_V2B2_P32: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
+        FORMAT.QVQ_V2B4_P64: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 3.5)),
+        FORMAT.QVQ_V2B2_P32: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 3.5)),
     }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
@@ -291,11 +291,11 @@ class QVQLinear(BaseQuantLinear):
         if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_count != 1):
             raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and bank_count=1")
         self.dual_v2 = dual_v2
-        if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_count != 4 or self.bits > 2.5):
-            raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank_count=4, and W1-W2.5")
+        if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_count != 4 or self.bits > 3.5):
+            raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank_count=4, and W1-W3.5")
         self.v2b4_p64 = v2b4_p64
-        if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or self.bits > 2.5):
-            raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W2.5")
+        if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or self.bits > 3.5):
+            raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5")
         self.v2b2_p32 = v2b2_p32
         if isinstance(bank_count, bool) or not isinstance(bank_count, int) or bank_count not in (1, 2, 4):
             raise ValueError("QVQ bank_count must be 1, 2, or 4")
@@ -324,7 +324,9 @@ class QVQLinear(BaseQuantLinear):
         self._dtype_cache: dict[tuple, tuple] = {}
         self._qvq_mps_bank_ids_cache: tuple[torch.Tensor, int, torch.device, torch.Tensor] | None = None
         # Dense selectors are launch metadata, not a dequantized weight cache.
-        self._qvq_cuda_bank_cache: tuple[torch.Tensor, int, torch.device, torch.Tensor] | None = None
+        self._qvq_cuda_bank_cache: (
+            tuple[torch.Tensor, int, torch.device, torch.Tensor | None, int, torch.Tensor, int] | None
+        ) = None
         self._qvq_cuda_bank_cache_lock = threading.Lock()
         pgc16_levels_for_version(self.codebook_version)
 
@@ -734,16 +736,16 @@ class QVQLinear(BaseQuantLinear):
             if (
                 self.trellis_window != 16
                 or self.dual_v2
-                or self.v2b4_p64
-                or self.v2b2_p32
                 or x.dtype == torch.float32
             ):
                 return self._reference_inner_forward(x)
 
             cuda_bank_ids = None
+            cuda_bank_alt_id = 0
             if self.bank_ids is not None:
                 with self._qvq_cuda_bank_cache_lock:
                     source_object = self.bank_ids
+                    alt_source_object = self.bank_alt_id if self.v2b2_p32 else None
                     if source_object is None:
                         self._qvq_cuda_bank_cache = None
                         cuda_bank_ids = None
@@ -760,10 +762,13 @@ class QVQLinear(BaseQuantLinear):
                         and cached[0] is source_object
                         and cached[1] == current_version
                         and cached[2] == x.device
+                        and cached[3] is alt_source_object
+                        and cached[4] == (-1 if alt_source_object is None else alt_source_object._version)
                         and self.bank_ids is source_object
                         and source_object._version == current_version
                     ):
-                        cuda_bank_ids = cached[3]
+                        cuda_bank_ids = cached[5]
+                        cuda_bank_alt_id = cached[6]
                         cached = None
                     if cuda_bank_ids is None:
                         # Clone between two version reads. If a free-threaded
@@ -784,14 +789,41 @@ class QVQLinear(BaseQuantLinear):
                         if source is None:
                             raise RuntimeError("QVQ CUDA bank selector mutated during snapshot")
                         tile_count = (self.in_features // 16) * (self.out_features // 16)
-                        selector_count = tile_count * 4 if self.v2b4_p64 else tile_count
-                        cuda_bank_ids = unpack_qvq_bank_ids(source, selector_count).to(device=x.device)
+                        if self.v2b2_p32:
+                            selector_count = tile_count * 8
+                            cuda_bank_ids = pack_qvq_binary_bank_ids(
+                                unpack_qvq_binary_bank_ids(source, selector_count)
+                            ).to(device=x.device)
+                        elif self.v2b4_p64:
+                            selector_count = tile_count * 4
+                            cuda_bank_ids = pack_qvq_bank_ids(
+                                unpack_qvq_bank_ids(source, selector_count)
+                            ).to(device=x.device)
+                        else:
+                            cuda_bank_ids = unpack_qvq_bank_ids(source, tile_count).to(device=x.device)
+                        alt_version = -1
+                        if alt_source_object is not None:
+                            alt_version = alt_source_object._version
+                            cuda_bank_alt_id = int(alt_source_object.detach().item())
+                            if (
+                                alt_source_object is not self.bank_alt_id
+                                or alt_version != alt_source_object._version
+                                or not 1 <= cuda_bank_alt_id <= 3
+                            ):
+                                raise RuntimeError("QVQ CUDA alternative-bank metadata changed during snapshot")
                         if self.bank_ids is not source_object:
                             raise RuntimeError("QVQ CUDA bank selector replaced during snapshot")
-                        self._qvq_cuda_bank_cache = (source_object, source_version, x.device, cuda_bank_ids)
+                        self._qvq_cuda_bank_cache = (
+                            source_object,
+                            source_version,
+                            x.device,
+                            alt_source_object,
+                            alt_version,
+                            cuda_bank_ids,
+                            cuda_bank_alt_id,
+                        )
             if (
                 not qvq_cuda_device_supported(x.device)
-                or (cuda_bank_ids is not None and self.vector_size != 4)
             ):
                 return self._reference_inner_forward(x)
 
@@ -804,6 +836,9 @@ class QVQLinear(BaseQuantLinear):
                 output_fp32=x.dtype in (torch.float16, torch.bfloat16),
                 vector_size=self.vector_size,
                 bank_ids=cuda_bank_ids,
+                v2b4_p64=self.v2b4_p64,
+                v2b2_p32=self.v2b2_p32,
+                bank_alt_id=cuda_bank_alt_id,
             )
         return self._reference_inner_forward(x)
 

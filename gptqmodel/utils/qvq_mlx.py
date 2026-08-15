@@ -100,9 +100,9 @@ def _qvq_v4_bank_masks_metal(name: str) -> str:
 def _qvq_v2_bank_masks_metal(name: str) -> str:
     rows = (
         "  {" + ",".join(f"0x{mask:04x}u" for mask in PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS[bits]) + "},"
-        for bits in range(2, 6)
+        for bits in range(2, 8)
     )
-    return f"constant ushort {name}[4][4]={{\n" + "\n".join(rows) + "\n};"
+    return f"constant ushort {name}[6][4]={{\n" + "\n".join(rows) + "\n};"
 
 
 _QVQ_V4_BANK_MASKS_METAL = _qvq_v4_bank_masks_metal("qbank_masks")
@@ -613,20 +613,20 @@ threadgroup_barrier(mem_flags::mem_device);
 for(uint step=1;step<steps;++step){ulong target_offset=sb+ulong(step)*2u;
   float2 target=float2(sequences[target_offset],sequences[target_offset+1u]);
   float sw=weighted?step_weights[ulong(batch)*steps+step]:1.0f;bool boundary=(step%segment_steps)==0u;
-  if(boundary){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){float best=current[suffix];uchar bp=0;
+  if(boundary){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){float best=current[suffix];uint bp=0;
       for(uint bank=0;bank<bank_count;++bank){for(uint prefix=0;prefix<prefix_count;++prefix){
         if(bank==0u&&prefix==0u)continue;float v=current[ulong(bank)*state_count+ulong(prefix)*suffix_count+suffix];
-        if(v<best){best=v;bp=uchar(bank*prefix_count+prefix);}}}
+        if(v<best){best=v;bp=bank*prefix_count+prefix;}}}
       for(uint next_bank=0;next_bank<bank_count;++next_bank){
         backpointers[pb+(ulong(step-1u)*bank_count+next_bank)*suffix_count+suffix]=bp;
         for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
           following[ulong(next_bank)*state_count+state]=best+
             qvq_emit_banked(target,codebooks,codebook_norms,next_bank,state,sw);}}}}
   else{for(uint bank=0;bank<bank_count;++bank){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){
-      float best=current[ulong(bank)*state_count+suffix];uchar bp=0;
+      float best=current[ulong(bank)*state_count+suffix];uint bp=0;
       for(uint prefix=1;prefix<prefix_count;++prefix){
         float v=current[ulong(bank)*state_count+ulong(prefix)*suffix_count+suffix];
-        if(v<best){best=v;bp=uchar(prefix);}}
+        if(v<best){best=v;bp=prefix;}}
       backpointers[pb+(ulong(step-1u)*bank_count+bank)*suffix_count+suffix]=bp;
       for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
         following[ulong(bank)*state_count+state]=best+
@@ -642,9 +642,9 @@ if(tid==0){for(uint lane=1;lane<256u;++lane){float v=rcost[lane];uint flat=rflat
   squared_error[batch]=best;uint bank=best_flat/state_count,state=best_flat%state_count;
   states[stb+steps-1u]=state;segment_bank_ids[bb+(steps-1u)/segment_steps]=uchar(bank);
   for(uint step=steps-1u;step>0u;--step){uint suffix=state>>EdgeBits;
-    uchar pointer=backpointers[pb+(ulong(step-1u)*bank_count+bank)*suffix_count+suffix];
-    if((step%segment_steps)==0u)bank=uint(pointer)/prefix_count;
-    uint prefix=uint(pointer)%prefix_count;state=prefix*suffix_count+suffix;states[stb+step-1u]=state;
+    uint pointer=uint(backpointers[pb+(ulong(step-1u)*bank_count+bank)*suffix_count+suffix]);
+    if((step%segment_steps)==0u)bank=pointer/prefix_count;
+    uint prefix=pointer%prefix_count;state=prefix*suffix_count+suffix;states[stb+step-1u]=state;
     if(((step-1u)%segment_steps)==0u)segment_bank_ids[bb+(step-1u)/segment_steps]=uchar(bank);}}
 """
 
@@ -1279,8 +1279,8 @@ def qvq_mlx_v2_banked_viterbi(
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits)
     segment_steps = _integer_argument(segment_steps, "segment_steps")
-    if transition_bits > 5:
-        raise ValueError("QVQ MLX banked-V2 Viterbi supports only W1 through W2.5")
+    if transition_bits > 7:
+        raise ValueError("QVQ MLX banked-V2 Viterbi supports only W1 through W3.5")
     if sequences.ndim != 3 or sequences.shape[2] != 2:
         raise ValueError("QVQ MLX banked-V2 sequences must have shape [batch, steps, 2]")
     if codebooks.ndim != 3 or codebooks.shape[0] not in (2, 4) or codebooks.shape[1:] != (1 << 16, 2):
@@ -1337,7 +1337,14 @@ def qvq_mlx_v2_banked_viterbi(
             (batch, segment_count),
             (batch,),
         ],
-        output_dtypes=[mx.float32, mx.float32, mx.uint8, mx.uint32, mx.uint8, mx.float32],
+        output_dtypes=[
+            mx.float32,
+            mx.float32,
+            mx.uint16 if transition_bits == 7 else mx.uint8,
+            mx.uint32,
+            mx.uint8,
+            mx.float32,
+        ],
     )
     return outputs[3], outputs[4], outputs[5]
 
@@ -1644,9 +1651,9 @@ def qvq_mlx_gemv(
     if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
         raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
     if (v2b4_p64 or v2b2_p32) and (
-        vector_size != 2 or trellis_window != 16 or bits > 2.5 or bank_ids is None
+        vector_size != 2 or trellis_window != 16 or bits > 3.5 or bank_ids is None
     ):
-        raise ValueError("QVQ MLX banked-V2 formats require L16/V2, packed selectors, and W1 through W2.5")
+        raise ValueError("QVQ MLX banked-V2 formats require L16/V2, packed selectors, and W1 through W3.5")
     if v2b2_p32:
         if bank_alt_id is None or bank_alt_id.dtype != mx.uint8 or bank_alt_id.shape != (1,):
             raise ValueError("QVQ MLX V2B2-P32 requires one uint8 alternative-bank ID")
@@ -1944,9 +1951,9 @@ if _mlx_nn is not None:
             if self.dual_v2 and (self.vector_size != 2 or self.trellis_window != 16 or bank_ids is not None):
                 raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
             if (self.v2b4_p64 or self.v2b2_p32) and (
-                self.vector_size != 2 or self.trellis_window != 16 or self.bits > 2.5 or bank_ids is None
+                self.vector_size != 2 or self.trellis_window != 16 or self.bits > 3.5 or bank_ids is None
             ):
-                raise ValueError("QVQ MLX banked-V2 formats require L16/V2, selectors, and W1 through W2.5")
+                raise ValueError("QVQ MLX banked-V2 formats require L16/V2, selectors, and W1 through W3.5")
             self.trellis = trellis.astype(mx.int32)
             self.SU = SU.astype(mx.float32)
             self.SV = SV.astype(mx.float32)

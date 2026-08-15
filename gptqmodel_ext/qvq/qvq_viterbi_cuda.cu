@@ -705,7 +705,7 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
 // then the lowest prefix win exact ties.  Costs remain in global workspace so
 // W1's four-bank 4x65536 state frontier does not exceed A100 shared memory;
 // one persistent CTA per sequence removes the 128 Python/Torch launch chain.
-template <int Shift, typename CodebookScalar>
+template <int Shift, typename CodebookScalar, typename BackpointerScalar>
 __global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
     const float* __restrict__ sequences,
     const CodebookScalar* __restrict__ codebooks,
@@ -715,7 +715,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
     float* __restrict__ costs_a,
     float* __restrict__ costs_b,
     float* __restrict__ reduced,
-    uint8_t* __restrict__ backpointers,
+    BackpointerScalar* __restrict__ backpointers,
     int64_t* __restrict__ states,
     uint8_t* __restrict__ segment_bank_ids,
     float* __restrict__ squared_error,
@@ -798,7 +798,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
       batch_reduced[flat] = best;
       backpointers[pointer_base +
                    static_cast<int64_t>(step - 1) * bank_suffix_count + flat] =
-          static_cast<uint8_t>(best_pointer);
+          static_cast<BackpointerScalar>(best_pointer);
     }
     __syncthreads();
 
@@ -862,15 +862,15 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
     }
     for (int step = steps - 1; step > 0; --step) {
       const int predecessor_suffix = current_state >> shift;
-      const uint8_t pointer = backpointers[
+      const int pointer = static_cast<int>(backpointers[
           pointer_base + static_cast<int64_t>(step - 1) * bank_suffix_count +
-          current_bank * suffix_count + predecessor_suffix];
+          current_bank * suffix_count + predecessor_suffix]);
       int prefix;
       if (step % segment_steps == 0) {
-        current_bank = static_cast<int>(pointer) / prefix_count;
-        prefix = static_cast<int>(pointer) % prefix_count;
+        current_bank = pointer / prefix_count;
+        prefix = pointer % prefix_count;
       } else {
-        prefix = static_cast<int>(pointer);
+        prefix = pointer;
       }
       current_state = prefix * suffix_count + predecessor_suffix;
       states[state_base + step - 1] = current_state;
@@ -1150,8 +1150,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   const int bank_count = static_cast<int>(codebooks.size(0));
   constexpr int steps = 128;
   TORCH_CHECK(batch > 0, "segmented-bank V2 sequences must contain at least one batch");
-  TORCH_CHECK(transition_bits >= 2 && transition_bits <= 5,
-              "segmented-bank V2 transition_bits must be in [2, 5]");
+  TORCH_CHECK(transition_bits >= 2 && transition_bits <= 7,
+              "segmented-bank V2 transition_bits must be in [2, 7]");
   TORCH_CHECK((bank_count == 2 && segment_steps == 16) ||
                   (bank_count == 4 && segment_steps == 32),
               "segmented-bank V2 requires two P32 banks or four P64 banks");
@@ -1217,8 +1217,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   at::Tensor costs_a = at::empty({batch, bank_count, kStateCount}, float_options);
   at::Tensor costs_b = at::empty_like(costs_a);
   at::Tensor reduced = at::empty({batch, bank_count, suffix_count}, float_options);
+  // Four banks at E=7 have 4 * 128 = 512 boundary predecessors, so the
+  // flattened deterministic traceback pointer needs nine bits. Keep the
+  // compact byte workspace for E<=6, where the largest pointer is 255.
   at::Tensor backpointers = at::empty(
-      {batch, steps - 1, bank_count, suffix_count}, sequences.options().dtype(at::kByte));
+      {batch, steps - 1, bank_count, suffix_count},
+      sequences.options().dtype(transition_bits == 7 ? at::kShort : at::kByte));
   at::Tensor states = at::empty({batch, steps}, sequences.options().dtype(at::kLong));
   at::Tensor segment_bank_ids = at::empty({batch, segments}, sequences.options().dtype(at::kByte));
   at::Tensor squared_error = at::empty({batch}, float_options);
@@ -1228,27 +1232,30 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   const int64_t* overlap_ptr = constrained ? overlap_tensor.const_data_ptr<int64_t>() : nullptr;
   const float* weight_ptr = weighted ? step_weights_tensor.const_data_ptr<float>() : nullptr;
 
-#define QVQ_V2_SEGMENT_LAUNCH(BITS, CODEBOOK_TYPE, CODEBOOK_POINTER)                                  \
-  qvq_v2_segment_banked_kernel<BITS, CODEBOOK_TYPE><<<batch, kThreads, 0, stream>>>(                  \
+#define QVQ_V2_SEGMENT_LAUNCH(BITS, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)                    \
+  qvq_v2_segment_banked_kernel<BITS, CODEBOOK_TYPE, POINTER_TYPE><<<batch, kThreads, 0, stream>>>(    \
       sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),     \
       overlap_ptr, weight_ptr, costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),   \
-      reduced.mutable_data_ptr<float>(), backpointers.mutable_data_ptr<uint8_t>(),                     \
+      reduced.mutable_data_ptr<float>(), backpointers.mutable_data_ptr<POINTER_TYPE>(),                \
       states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),                \
       squared_error.mutable_data_ptr<float>(), steps, bank_count, static_cast<int>(segment_steps),     \
       constrained, weighted)
-#define QVQ_V2_SEGMENT_DISPATCH(BITS)                                                                  \
+#define QVQ_V2_SEGMENT_DISPATCH(BITS, POINTER_TYPE)                                                    \
   do {                                                                                                 \
     if (codebooks.scalar_type() == at::kHalf) {                                                        \
-      QVQ_V2_SEGMENT_LAUNCH(BITS, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()));    \
+      QVQ_V2_SEGMENT_LAUNCH(                                                                           \
+          BITS, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()), POINTER_TYPE);        \
     } else {                                                                                           \
-      QVQ_V2_SEGMENT_LAUNCH(BITS, float, codebooks.const_data_ptr<float>());                           \
+      QVQ_V2_SEGMENT_LAUNCH(BITS, float, codebooks.const_data_ptr<float>(), POINTER_TYPE);             \
     }                                                                                                  \
   } while (0)
   switch (transition_bits) {
-    case 2: QVQ_V2_SEGMENT_DISPATCH(2); break;
-    case 3: QVQ_V2_SEGMENT_DISPATCH(3); break;
-    case 4: QVQ_V2_SEGMENT_DISPATCH(4); break;
-    case 5: QVQ_V2_SEGMENT_DISPATCH(5); break;
+    case 2: QVQ_V2_SEGMENT_DISPATCH(2, uint8_t); break;
+    case 3: QVQ_V2_SEGMENT_DISPATCH(3, uint8_t); break;
+    case 4: QVQ_V2_SEGMENT_DISPATCH(4, uint8_t); break;
+    case 5: QVQ_V2_SEGMENT_DISPATCH(5, uint8_t); break;
+    case 6: QVQ_V2_SEGMENT_DISPATCH(6, uint8_t); break;
+    case 7: QVQ_V2_SEGMENT_DISPATCH(7, int16_t); break;
   }
 #undef QVQ_V2_SEGMENT_DISPATCH
 #undef QVQ_V2_SEGMENT_LAUNCH

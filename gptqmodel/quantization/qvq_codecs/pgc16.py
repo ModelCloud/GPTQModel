@@ -26,6 +26,8 @@ PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS = {
     3: (0x0000, 0xA5A5, 0x9696, 0x6969),
     4: (0x0000, 0x5A5A, 0x3C3C, 0xC3C3),
     5: (0x0000, 0x9696, 0x3C3C, 0xC3C3),
+    6: (0x0000, 0x6969, 0x5A5A, 0x3C3C),
+    7: (0x0000, 0xC3C3, 0x9696, 0x5A5A),
 }
 PGC16_V4_BANK_XOR_MASKS = (0xA5A5, 0x5A5A, 0x3C3C, 0xC3C3)
 PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS = {
@@ -422,7 +424,7 @@ def pgc16_decode_states_v2_banked(
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     masks_for_rate = PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS.get(transition_bits)
     if masks_for_rate is None:
-        raise ValueError("PGC16 V2B4 decoding supports only rates W1 through W2.5.")
+        raise ValueError("PGC16 V2B4 decoding supports only rates W1 through W3.5.")
     masks = torch.tensor(masks_for_rate, dtype=torch.int64, device=states.device)
     mixed = pgc16_mix_states(states.to(torch.int64) ^ masks[bank_ids_i64])
     indices = torch.stack((mixed >> 8, mixed & 0xFF), dim=-1)

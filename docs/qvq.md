@@ -740,7 +740,7 @@ sum of independent histories.**
 
 #### V2B2-P32 first implementation slice
 
-`format="qvq_v2b2_p32"` is the first low-rate banked-V2 prototype at W1--W2.5. It preserves the canonical L16/V2
+`format="qvq_v2b2_p32"` is a banked-V2 prototype at W1--W3.5. It preserves the canonical L16/V2
 recurrence and spends one selector bit every 32 weights:
 
 ```text
@@ -807,8 +807,9 @@ Current status:
 
 - complete: exact P32 dynamic program, binary selector packing, module-selected alternative ID, independent V2
   rollback, format/config/processor/QVQLinear lifecycle, Torch reconstruction, strict reload, and focused math tests;
-- complete: YAQA corrected-target integration, full Kronecker rollback, and native MLX corrected-tile dispatch;
-- pending: propagated selection on disjoint search/confirmation prompts, native CUDA/MPS decode, and
+- complete: YAQA corrected-target integration, full Kronecker rollback, native CUDA quantization and packed
+  inference, and native MLX corrected-tile quantization/inference through W3.5;
+- pending: propagated selection on disjoint search/confirmation prompts, native MPS decode, and
   four-layer final-KL/Top-N/task evidence;
 - baseline comparison: `scripts/compare_qvq_codecs_llama_qkvo.py` defaults to matched `v2` and `v2b2-p32` arms.
 
@@ -883,7 +884,7 @@ still required below W3.
 
 #### V2B4-P64 implementation slice
 
-`format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W2.5. It keeps the canonical L16/V2
+`format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W3.5. It keeps the canonical L16/V2
 state recurrence and adds a two-bit decoder-bank selector for each contiguous 64-weight segment:
 
 ```text
@@ -931,9 +932,9 @@ Current implementation status:
 - complete: format/config lifecycle, rate-keyed graph banks, exact Torch P64 Viterbi, Block-LDLQ integration,
   planar selector serialization, save/load-compatible `QVQLinear`, dense Torch inference, exhaustive bank-zero/V2
   parity, and full-proxy rollback tests;
-- complete: YAQA corrected-target P64 search, independent V2+YAQA oracle, complete Kronecker rollback, and native
-  MLX corrected-tile dispatch;
-- deliberately pending: learned table portfolios, propagation-aware bank refinement, native CUDA/MPS decode, and
+- complete: YAQA corrected-target P64 search, independent V2+YAQA oracle, complete Kronecker rollback, native CUDA
+  quantization and packed inference, and native MLX corrected-tile quantization/inference through W3.5;
+- deliberately pending: learned table portfolios, propagation-aware bank refinement, native MPS decode, and
   model-level KLD/Top-N/task recovery gates;
 - rejected as a claim: four graph banks alone are not yet evidence of a 50% recovery improvement. They are the
   baseline-safe search substrate on which propagation-aware selection and learned portfolios can be tested.

@@ -325,8 +325,8 @@ def qvq_cuda_viterbi_v2_segment_banked(
 
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
-    if transition_bits not in (2, 3, 4, 5):
-        raise ValueError("QVQ segmented-bank CUDA V2 supports only rates W1 through W2.5")
+    if transition_bits not in (2, 3, 4, 5, 6, 7):
+        raise ValueError("QVQ segmented-bank CUDA V2 supports only rates W1 through W3.5")
     if tuple(sequences.shape[1:]) != (128, 2) or sequences.ndim != 3:
         raise ValueError("QVQ segmented-bank V2 expects sequences with shape [batch, 128, 2]")
     if codebooks.ndim != 3 or codebooks.shape[0] not in (2, 4) or tuple(codebooks.shape[1:]) != (1 << 16, 2):
@@ -504,6 +504,9 @@ def qvq_cuda_gemv(
     output_fp32: bool = False,
     vector_size: int = 2,
     bank_ids: torch.Tensor | None = None,
+    v2b4_p64: bool = False,
+    v2b2_p32: bool = False,
+    bank_alt_id: int = 0,
 ) -> torch.Tensor:
     """Multiply transformed activations by planar QVQ tiles on the current CUDA stream.
 
@@ -513,9 +516,24 @@ def qvq_cuda_gemv(
     bits = normalize_qvq_rate(bits)
     if vector_size not in (2, 4):
         raise ValueError("QVQ CUDA vector_size must be 2 or 4")
-    if bank_ids is not None and vector_size != 4:
-        raise ValueError("QVQ V4 bank selectors require vector_size=4")
+    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
+        raise TypeError("QVQ CUDA segmented-bank format flags must be bools")
+    if v2b4_p64 and v2b2_p32:
+        raise ValueError("QVQ CUDA V2B4-P64 and V2B2-P32 are mutually exclusive")
+    if (v2b4_p64 or v2b2_p32) and vector_size != 2:
+        raise ValueError("QVQ CUDA segmented-bank formats require vector_size=2")
+    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32):
+        raise ValueError("QVQ CUDA bank selectors require V4 or a segmented-bank V2 format")
+    if vector_size == 2 and (v2b4_p64 or v2b2_p32) != (bank_ids is not None):
+        raise ValueError("QVQ CUDA segmented-bank formats require exactly one packed selector byte per tile")
+    bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
+    if v2b2_p32 and not 1 <= bank_alt_id <= 3:
+        raise ValueError("QVQ CUDA V2B2-P32 bank_alt_id must be in [1, 3]")
+    if not v2b2_p32 and bank_alt_id != 0:
+        raise ValueError("QVQ CUDA bank_alt_id is valid only for V2B2-P32")
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
+    if (v2b4_p64 or v2b2_p32) and transition_bits > 7:
+        raise ValueError("QVQ CUDA segmented-bank V2 inference supports only rates W1 through W3.5")
     out_features = _integer_argument("out_features", out_features)
     if x.ndim != 2 or trellis.ndim != 2:
         raise ValueError("QVQ CUDA expects 2D x and trellis tensors")
@@ -539,10 +557,13 @@ def qvq_cuda_gemv(
         raise TypeError("QVQ CUDA output_fp32 must be boolean")
     if bank_ids is not None:
         if bank_ids.device != x.device or bank_ids.dtype != torch.uint8:
-            raise TypeError("QVQ V4 bank selectors must be contiguous uint8 on the input CUDA device")
-        if tuple(bank_ids.shape) != (expected[0],) or not bank_ids.is_contiguous():
-            raise ValueError(f"QVQ V4 bank selectors must have contiguous shape {(expected[0],)}")
-        if torch.any(bank_ids > 3):
+            raise TypeError("QVQ CUDA bank selectors must be contiguous uint8 on the input CUDA device")
+        if not bank_ids.is_contiguous():
+            raise ValueError("QVQ CUDA bank selectors must be contiguous")
+        expected_selectors = expected[0] if (v2b4_p64 or v2b2_p32) else expected[0]
+        if tuple(bank_ids.shape) != (expected_selectors,):
+            raise ValueError(f"QVQ CUDA bank selectors must have shape {(expected_selectors,)}")
+        if vector_size == 4 and torch.any(bank_ids > 3):
             raise ValueError("QVQ V4 bank selectors must be in [0, 3]")
     levels = _pgc16_levels(x.device, codebook_version)
     if m == 0:
@@ -552,9 +573,12 @@ def qvq_cuda_gemv(
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA requires a compute capability >= 8.0 device")
     op = _qvq_cuda_op()
-    return (torch.ops.gptqmodel_qvq.gemv_v4 if vector_size == 4 else op)(
-        x, trellis, levels, transition_bits, n, output_fp32, bank_ids
-    )
+    if vector_size == 4:
+        return torch.ops.gptqmodel_qvq.gemv_v4(
+            x, trellis, levels, transition_bits, n, output_fp32, bank_ids
+        )
+    bank_mode = 2 if v2b4_p64 else 3 if v2b2_p32 else 0
+    return op(x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_mode, bank_alt_id)
 
 
 __all__ = [

@@ -22,6 +22,8 @@ from gptqmodel.quantization.qvq import (
     block_ldlq_inner_banked,
     block_ldlq_inner_banked_candidates,
     optimize_qvq_output_channel_scales,
+    pack_qvq_bank_ids,
+    pack_qvq_binary_bank_ids,
     pack_trellis_states,
     quantize_qvq_linear,
     qvq_proxy_loss,
@@ -291,11 +293,23 @@ def test_qvq_cuda_bfloat16_input_keeps_canonical_pgc16_levels_in_float16():
     trellis = torch.zeros((1, qvq_words_per_tile(2.5)), device="cuda", dtype=torch.int32)
     captured = {}
 
-    def fake_op(input_tensor, trellis_tensor, levels, transition_bits, out_features, output_fp32, bank_ids=None):
+    def fake_op(
+        input_tensor,
+        trellis_tensor,
+        levels,
+        transition_bits,
+        out_features,
+        output_fp32,
+        bank_ids=None,
+        bank_mode=0,
+        bank_alt_id=0,
+    ):
         del trellis_tensor, bank_ids
         captured["levels"] = levels
         captured["transition_bits"] = transition_bits
         captured["output_fp32"] = output_fp32
+        captured["bank_mode"] = bank_mode
+        captured["bank_alt_id"] = bank_alt_id
         return torch.empty(
             (input_tensor.shape[0], out_features),
             dtype=input_tensor.dtype,
@@ -310,6 +324,8 @@ def test_qvq_cuda_bfloat16_input_keeps_canonical_pgc16_levels_in_float16():
     assert torch.equal(levels.cpu().view(torch.int16), canonical_pgc16_levels().view(torch.int16))
     assert captured["transition_bits"] == 5
     assert captured["output_fp32"] is False
+    assert captured["bank_mode"] == 0
+    assert captured["bank_alt_id"] == 0
 
 
 def test_qvq_cuda_fp32_inner_output_preserves_accumulator_range_and_accuracy():
@@ -493,7 +509,7 @@ def test_qvq_cuda_viterbi_uses_current_non_default_stream():
     assert torch.equal(actual[1], expected[1])
 
 
-@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5))
+@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
 @pytest.mark.parametrize("constrained,weighted", ((False, False), (True, False), (True, True)))
 def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
@@ -569,21 +585,22 @@ def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(bank_count, segme
     assert torch.count_nonzero(bank_ids) == 0
 
 
-def test_qvq_cuda_v2_segment_banked_uses_current_non_default_stream():
-    generator = torch.Generator(device="cuda").manual_seed(20260816)
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+def test_qvq_cuda_v2_segment_banked_w3_5_uses_current_non_default_stream(bank_count, segment_steps):
+    generator = torch.Generator(device="cuda").manual_seed(20260816 + bank_count)
     sequences = torch.randn((3, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
-        tuple(pgc16_codebook_v2_bank(bank, bits=2.5, dtype=torch.float32) for bank in range(4))
+        tuple(pgc16_codebook_v2_bank(bank, bits=3.5, dtype=torch.float32) for bank in range(bank_count))
     ).cuda()
     weights = (0.1 + torch.rand((3, 128), generator=generator, device="cuda")).contiguous()
-    overlap = torch.randint(0, 1 << 11, (3,), generator=generator, device="cuda", dtype=torch.int64)
+    overlap = torch.randint(0, 1 << 9, (3,), generator=generator, device="cuda", dtype=torch.int64)
     expected = qvq_cuda_viterbi_v2_segment_banked(
-        sequences, codebooks, 2.5, 32, overlap, weights
+        sequences, codebooks, 3.5, segment_steps, overlap, weights
     )
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         actual = qvq_cuda_viterbi_v2_segment_banked(
-            sequences, codebooks, 2.5, 32, overlap, weights
+            sequences, codebooks, 3.5, segment_steps, overlap, weights
         )
         completion = torch.cuda.Event()
         completion.record(stream)
@@ -948,7 +965,7 @@ def _nontrivial_yaqa_fixture(seed: int):
     return weight, input_hessian, output_hessian
 
 
-@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5])
+@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits):
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260830 + int(bits * 10))
     common = {
@@ -993,7 +1010,7 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits
         assert result.telemetry["counters"]["yaqa_segmented_v2_chunks"] >= 1
 
 
-@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5])
+@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b4_p64_yaqa_is_exact_and_independent_v2_yaqa_safe(bits):
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260840 + int(bits * 10))
     common = {
@@ -1918,6 +1935,120 @@ def test_qvq_v4_cuda_bank_dispatch_matches_selected_reference_tiles(bits):
         output_fp32=True,
         bank_ids=bank_ids,
     )
+    torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
+
+
+@pytest.mark.parametrize("bits", (3.0, 3.5))
+@pytest.mark.parametrize("format_name", ("v2b2-p32", "v2b4-p64"))
+@pytest.mark.parametrize("m", (1, 17))
+def test_qvq_segmented_v2_cuda_gemv_matches_dense_reference(bits, format_name, m):
+    """W3/W3.5 packed selectors must decode natively without dense reconstruction."""
+
+    k, n = 64, 64
+    transition_bits = qvq_transition_bits(bits)
+    generator = torch.Generator(device="cpu").manual_seed(5330 + int(bits * 10) + m + len(format_name))
+    tiles = (k // 16) * (n // 16)
+    edges = torch.randint(0, 1 << transition_bits, (128, tiles), generator=generator, dtype=torch.int32)
+    trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
+    x = torch.randn((m, k), generator=generator, dtype=torch.float16).cuda()
+    if format_name == "v2b2-p32":
+        dense_selectors = (torch.arange(tiles * 8, dtype=torch.uint8) % 2).contiguous()
+        bank_ids = pack_qvq_binary_bank_ids(dense_selectors).cuda()
+        bank_alt_id = 3
+        format_kwargs = {
+            "v2b2_p32": True,
+            "bank_alt_id": torch.tensor([bank_alt_id], dtype=torch.uint8, device="cuda"),
+        }
+        kernel_kwargs = {"v2b2_p32": True, "bank_alt_id": bank_alt_id}
+    else:
+        dense_selectors = (torch.arange(tiles * 4, dtype=torch.uint8) % 4).contiguous()
+        bank_ids = pack_qvq_bank_ids(dense_selectors).cuda()
+        format_kwargs = {"v2b4_p64": True}
+        kernel_kwargs = {"v2b4_p64": True}
+    inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_ids=bank_ids,
+        **format_kwargs,
+    )
+    reference = x.float() @ inner.float()
+    actual = qvq_cuda_gemv(
+        x,
+        trellis,
+        bits,
+        out_features=n,
+        output_fp32=True,
+        bank_ids=bank_ids,
+        **kernel_kwargs,
+    )
+    error = (actual - reference).abs()
+    assert torch.isfinite(actual).all()
+    assert error.max().item() <= 2e-3
+
+
+def test_qvq_segmented_v2_cuda_gemv_rejects_invalid_contracts():
+    x = torch.zeros((1, 16), dtype=torch.float16, device="cuda")
+    trellis_w3 = torch.zeros((1, 24), dtype=torch.int32, device="cuda")
+    trellis_w4 = torch.zeros((1, 32), dtype=torch.int32, device="cuda")
+    selectors = torch.zeros((1,), dtype=torch.uint8, device="cuda")
+
+    with pytest.raises(ValueError, match="exactly one packed selector"):
+        qvq_cuda_gemv(x, trellis_w3, 3.0, out_features=16, v2b4_p64=True)
+    with pytest.raises(ValueError, match="W1 through W3.5"):
+        qvq_cuda_gemv(
+            x,
+            trellis_w4,
+            4.0,
+            out_features=16,
+            bank_ids=selectors,
+            v2b4_p64=True,
+        )
+    with pytest.raises(ValueError, match="bank_alt_id must be in"):
+        qvq_cuda_gemv(
+            x,
+            trellis_w3,
+            3.0,
+            out_features=16,
+            bank_ids=selectors,
+            v2b2_p32=True,
+            bank_alt_id=4,
+        )
+
+
+@pytest.mark.parametrize(("bits", "format_name"), ((3.0, "v2b2-p32"), (3.5, "v2b4-p64")))
+def test_qvq_segmented_v2_linear_routes_w3_rates_to_native_cuda(bits, format_name):
+    k = n = 16
+    transition_bits = qvq_transition_bits(bits)
+    generator = torch.Generator(device="cpu").manual_seed(5390 + int(bits * 10))
+    edges = torch.randint(0, 1 << transition_bits, (128, 1), generator=generator, dtype=torch.int32)
+    trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
+    if format_name == "v2b2-p32":
+        bank_ids = pack_qvq_binary_bank_ids(torch.arange(8, dtype=torch.uint8) % 2).cuda()
+        tensors = {
+            "trellis": trellis,
+            "SU": torch.ones(k, dtype=torch.float16, device="cuda"),
+            "SV": torch.ones(n, dtype=torch.float16, device="cuda"),
+            "bank_ids": bank_ids,
+            "bank_alt_id": torch.tensor([3], dtype=torch.uint8, device="cuda"),
+        }
+        format_kwargs = {"bank_count": 2, "v2b2_p32": True}
+    else:
+        bank_ids = pack_qvq_bank_ids(torch.arange(4, dtype=torch.uint8)).cuda()
+        tensors = {
+            "trellis": trellis,
+            "SU": torch.ones(k, dtype=torch.float16, device="cuda"),
+            "SV": torch.ones(n, dtype=torch.float16, device="cuda"),
+            "bank_ids": bank_ids,
+        }
+        format_kwargs = {"bank_count": 4, "v2b4_p64": True}
+    layer = QVQLinear(bits=bits, in_features=k, out_features=n, tensors=tensors, **format_kwargs).eval()
+    x = torch.randn((3, k), generator=generator, dtype=torch.float16).cuda()
+    reference = x.float() @ layer.get_inner_weight_tensor(dtype=torch.float32)
+    with patch("gptqmodel.utils.qvq_cuda.qvq_cuda_gemv", wraps=qvq_cuda_gemv) as native:
+        actual = layer._inner_forward(x)
+    assert native.call_count == 1
     torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
 
 

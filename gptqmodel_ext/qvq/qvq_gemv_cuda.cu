@@ -106,6 +106,18 @@ __device__ __forceinline__ uint32_t pgc16_bank_mask_runtime(int transition_bits,
   return masks[row][bank & 3u];
 }
 
+__device__ __forceinline__ uint32_t pgc16_v2_bank_mask_runtime(int transition_bits, uint32_t bank) {
+  constexpr uint32_t masks[6][4] = {
+      {0x0000u, 0xA5A5u, 0x5A5Au, 0x3C3Cu},
+      {0x0000u, 0xA5A5u, 0x9696u, 0x6969u},
+      {0x0000u, 0x5A5Au, 0x3C3Cu, 0xC3C3u},
+      {0x0000u, 0x9696u, 0x3C3Cu, 0xC3C3u},
+      {0x0000u, 0x6969u, 0x5A5Au, 0x3C3Cu},
+      {0x0000u, 0xC3C3u, 0x9696u, 0x5A5Au},
+  };
+  return masks[transition_bits - 2][bank & 3u];
+}
+
 __device__ __noinline__ uint32_t planar_transition_runtime(
     const uint32_t* words, int edge, int transition_bits) {
   const int block = edge >> 5;
@@ -157,10 +169,12 @@ __device__ __forceinline__ uint32_t pgc16_mix(uint32_t state) {
 template <int VectorSize>
 __device__ __forceinline__ float qvq_decode_weight(
     const uint32_t* packed_words,
-    uint8_t bank_id,
+    uint8_t packed_bank_id,
     const half* cached_levels,
     int local,
-    int transition_bits) {
+    int transition_bits,
+    int bank_mode,
+    int bank_alt_id) {
   const int col = local & 15;
   const int v4_group = local >> 2;
   uint32_t mixed = 0;
@@ -170,14 +184,23 @@ __device__ __forceinline__ float qvq_decode_weight(
     if ((col & 3) == 0) {
       const uint32_t state = qvq_state_runtime<VectorSize>(packed_words, v4_group, transition_bits);
       mixed_pair = pgc16_mix(state) |
-          (pgc16_mix(state ^ pgc16_bank_mask_runtime(transition_bits, bank_id)) << 16);
+          (pgc16_mix(state ^ pgc16_bank_mask_runtime(transition_bits, packed_bank_id)) << 16);
     }
     mixed_pair = __shfl_sync(0xffffffffu, mixed_pair, local & ~3);
     mixed = mixed_pair & 0xffffu;
     mixed2 = mixed_pair >> 16;
   } else {
-    const uint32_t state = qvq_state_runtime<VectorSize>(packed_words, local >> 1, transition_bits);
-    mixed = pgc16_mix(state);
+    const int pair = local >> 1;
+    const uint32_t state = qvq_state_runtime<VectorSize>(packed_words, pair, transition_bits);
+    uint32_t bank = 0;
+    if (bank_mode == 2) {
+      bank = (static_cast<uint32_t>(packed_bank_id) >> ((pair >> 5) * 2)) & 3u;
+    } else if (bank_mode == 3) {
+      bank = ((static_cast<uint32_t>(packed_bank_id) >> (pair >> 4)) & 1u) *
+          static_cast<uint32_t>(bank_alt_id);
+    }
+    const uint32_t mask = bank_mode == 0 ? 0u : pgc16_v2_bank_mask_runtime(transition_bits, bank);
+    mixed = pgc16_mix(state ^ mask);
     mixed2 = pgc16_mix(state ^ 0xA5A5u);
   }
 
@@ -228,7 +251,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
     int size_m,
     int size_k,
     int size_n,
-    int transition_bits) {
+    int transition_bits,
+    int bank_mode,
+    int bank_alt_id) {
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ float reduced[kThreads / 32][ROWS * kTileColumns];  // [warp][row*16+col]
 
@@ -298,7 +323,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
         // Decode the single weight this thread needs (register; no shared write).
         const int local = (k_slot << 4) | col;
         const float weight = qvq_decode_weight<VectorSize>(
-            packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits);
+            packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
+            bank_mode, bank_alt_id);
 
 #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
@@ -351,7 +377,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
     int size_k,
     int size_n,
     int split_count,
-    int transition_bits) {
+    int transition_bits,
+    int bank_mode,
+    int bank_alt_id) {
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ float reduced[kThreads / 32][ROWS * kTileColumns];
 
@@ -415,7 +443,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
       if (u < tiles_here) {
         const int local = (k_slot << 4) | col;
         const float weight = qvq_decode_weight<VectorSize>(
-            packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits);
+            packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
+            bank_mode, bank_alt_id);
 
 #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
@@ -573,6 +602,8 @@ void launch_qvq_gemv(
     const at::Tensor& levels,
     at::Tensor& output,
     int transition_bits,
+    int bank_mode,
+    int bank_alt_id,
     cudaStream_t stream) {
   const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
   const dim3 grid(
@@ -586,7 +617,7 @@ void launch_qvq_gemv(
 #define QVQ_LAUNCH(ROWS)                                                                                           \
   qvq_gemv_kernel<Scalar, OutputScalar, ROWS, VectorSize><<<grid, kThreads, 0, stream>>>(                       \
       input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, static_cast<int>(input.size(0)),             \
-      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits)
+      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits, bank_mode, bank_alt_id)
   if (rows == 1) {
     QVQ_LAUNCH(1);
   } else if (rows == 8) {
@@ -609,6 +640,8 @@ void launch_qvq_gemv_splitk(
     at::Tensor& output,
     int transition_bits,
     int split_count,
+    int bank_mode,
+    int bank_alt_id,
     cudaStream_t stream) {
   float* partial_ptr = partial_output.mutable_data_ptr<float>();
   const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
@@ -624,7 +657,8 @@ void launch_qvq_gemv_splitk(
 #define QVQ_SPLITK_LAUNCH(ROWS)                                                                                   \
   qvq_gemv_splitk_kernel<Scalar, ROWS, VectorSize><<<grid, kThreads, 0, stream>>>(                               \
       input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, partial_ptr, static_cast<int>(input.size(0)),            \
-      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits)
+      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits,          \
+      bank_mode, bank_alt_id)
   if (rows == 1) {
     QVQ_SPLITK_LAUNCH(1);
   } else if (rows == 8) {
@@ -736,7 +770,9 @@ at::Tensor qvq_gemv_cuda_impl(
     int64_t out_features,
     bool output_fp32,
     int64_t vector_size,
-    const c10::optional<at::Tensor>& bank_ids) {
+    const c10::optional<at::Tensor>& bank_ids,
+    int64_t bank_mode,
+    int64_t bank_alt_id) {
   TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
   TORCH_CHECK(trellis.is_cuda(), "trellis must be a CUDA tensor");
   TORCH_CHECK(levels.is_cuda(), "PGC16 levels must be a CUDA tensor");
@@ -749,7 +785,12 @@ at::Tensor qvq_gemv_cuda_impl(
                 "V4 transition_bits must be one of {4, 6, 8, 10, 12, 14, 16}");
   }
   TORCH_CHECK(vector_size == 2 || vector_size == 4, "vector_size must be 2 or 4");
-  TORCH_CHECK(!bank_ids.has_value(), "V2 GEMV does not support V4 bank selectors");
+  TORCH_CHECK(bank_mode >= 0 && bank_mode <= 3 && bank_mode != 1,
+              "V2 GEMV bank_mode must be 0, 2 (V2B4-P64), or 3 (V2B2-P32)");
+  TORCH_CHECK((bank_mode == 0) == !bank_ids.has_value(),
+              "segmented-bank V2 GEMV requires selectors exactly when bank_mode is 2 or 3");
+  TORCH_CHECK(bank_mode != 3 || (bank_alt_id >= 1 && bank_alt_id <= 3),
+              "V2B2-P32 alternative-bank ID must be in [1, 3]");
   TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
               "input must have dtype float16 or bfloat16");
   TORCH_CHECK(levels.scalar_type() == at::kHalf, "PGC16 levels must preserve the canonical float16 bit patterns");
@@ -772,6 +813,17 @@ at::Tensor qvq_gemv_cuda_impl(
   const int64_t tile_count = (size_k / kTileRows) * (out_features / kTileColumns);
   TORCH_CHECK(trellis.sizes() == at::IntArrayRef({tile_count, (vector_size == 2 ? 4 : 2) * transition_bits}),
               "trellis shape must match K, N, and transition_bits");
+  if (bank_ids.has_value()) {
+    const at::Tensor& selectors = *bank_ids;
+    TORCH_CHECK(transition_bits >= 2 && transition_bits <= 7,
+                "segmented-bank V2 GEMV supports transition_bits in [2, 7]");
+    TORCH_CHECK(selectors.is_cuda() && selectors.device() == input.device(),
+                "segmented-bank V2 selectors must share the input CUDA device");
+    TORCH_CHECK(selectors.scalar_type() == at::kByte && selectors.is_contiguous(),
+                "segmented-bank V2 selectors must be contiguous uint8");
+    TORCH_CHECK(selectors.dim() == 1 && selectors.numel() == tile_count,
+                "segmented-bank V2 selectors must contain one packed byte per trellis tile");
+  }
 
   if (size_m == 0) {
     return at::empty(
@@ -796,29 +848,40 @@ at::Tensor qvq_gemv_cuda_impl(
         at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     if (input.scalar_type() == at::kHalf && output_fp32) {
       launch_qvq_gemv_splitk<half, float>(
-          input, trellis, nullptr, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);
+          input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
     } else if (input.scalar_type() == at::kHalf) {
       launch_qvq_gemv_splitk<half, half>(
-          input, trellis, nullptr, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);
+          input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
     } else if (output_fp32) {
       launch_qvq_gemv_splitk<nv_bfloat16, float>(
-          input, trellis, nullptr, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);
+          input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
     } else {
       launch_qvq_gemv_splitk<nv_bfloat16, nv_bfloat16>(
-          input, trellis, nullptr, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);
+          input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
     }
   } else if (input.scalar_type() == at::kHalf) {
     if (output_fp32) {
-      launch_qvq_gemv<half, float>(input, trellis, nullptr, levels, output, static_cast<int>(transition_bits), stream);
+      launch_qvq_gemv<half, float>(input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
+                                   static_cast<int>(transition_bits), static_cast<int>(bank_mode),
+                                   static_cast<int>(bank_alt_id), stream);
     } else {
-      launch_qvq_gemv<half, half>(input, trellis, nullptr, levels, output, static_cast<int>(transition_bits), stream);
+      launch_qvq_gemv<half, half>(input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
+                                  static_cast<int>(transition_bits), static_cast<int>(bank_mode),
+                                  static_cast<int>(bank_alt_id), stream);
     }
   } else {
     if (output_fp32) {
-      launch_qvq_gemv<nv_bfloat16, float>(input, trellis, nullptr, levels, output, static_cast<int>(transition_bits), stream);
+      launch_qvq_gemv<nv_bfloat16, float>(input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
+                                          static_cast<int>(transition_bits), static_cast<int>(bank_mode),
+                                          static_cast<int>(bank_alt_id), stream);
     } else {
       launch_qvq_gemv<nv_bfloat16, nv_bfloat16>(
-          input, trellis, nullptr, levels, output, static_cast<int>(transition_bits), stream);
+          input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
+          static_cast<int>(transition_bits), static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
     }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -904,39 +967,39 @@ at::Tensor qvq_gemv_cuda_v4(
     if (input.scalar_type() == at::kHalf && output_fp32) {
       launch_qvq_gemv_splitk<half, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
     } else if (input.scalar_type() == at::kHalf) {
       launch_qvq_gemv_splitk<half, half, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
     } else if (output_fp32) {
       launch_qvq_gemv_splitk<nv_bfloat16, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
     } else {
       launch_qvq_gemv_splitk<nv_bfloat16, nv_bfloat16, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
     }
   } else if (input.scalar_type() == at::kHalf) {
     if (output_fp32) {
       launch_qvq_gemv<half, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
-          static_cast<int>(transition_bits), stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
     } else {
       launch_qvq_gemv<half, half, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
-          static_cast<int>(transition_bits), stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
     }
   } else {
     if (output_fp32) {
       launch_qvq_gemv<nv_bfloat16, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
-          static_cast<int>(transition_bits), stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
     } else {
       launch_qvq_gemv<nv_bfloat16, nv_bfloat16, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, levels, output,
-          static_cast<int>(transition_bits), stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
     }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -946,11 +1009,11 @@ at::Tensor qvq_gemv_cuda_v4(
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
-  m.def("gemv(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None) -> Tensor");
+  m.def("gemv(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None, int bank_mode=0, int bank_alt_id=0) -> Tensor");
   m.def("gemv_v4(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
-  m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids); });
+  m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids, int64_t bank_mode, int64_t bank_alt_id) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, bank_mode, bank_alt_id); });
   m.impl("gemv_v4", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids) { return qvq_gemv_cuda_v4(input, trellis, levels, transition_bits, out_features, output_fp32, 4, bank_ids); });
 }

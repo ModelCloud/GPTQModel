@@ -5880,13 +5880,13 @@ class QVQConfig(BaseQuantizeConfig):
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v4_l18` only supports rates W1 through W2.5."
                 )
-            if self.format == FORMAT.QVQ_V2B4_P64 and layer_bits > 2.5:
+            if self.format == FORMAT.QVQ_V2B4_P64 and layer_bits > 3.5:
                 raise ValueError(
-                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b4_p64` only supports W1 through W2.5."
+                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b4_p64` only supports W1 through W3.5."
                 )
-            if self.format == FORMAT.QVQ_V2B2_P32 and layer_bits > 2.5:
+            if self.format == FORMAT.QVQ_V2B2_P32 and layer_bits > 3.5:
                 raise ValueError(
-                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32` only supports W1 through W2.5."
+                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32` only supports W1 through W3.5."
                 )
             layer_dict["bits"] = layer_bits
 
@@ -5927,16 +5927,16 @@ class QVQConfig(BaseQuantizeConfig):
             if self.bank_count != 1:
                 raise ValueError("QVQConfig: `format=qvq_dual_v2` requires bank_count=1.")
         elif self.format == FORMAT.QVQ_V2B4_P64:
-            if self.bits > 2.5:
-                raise ValueError("QVQConfig: `format=qvq_v2b4_p64` supports only rates W1 through W2.5.")
+            if self.bits > 3.5:
+                raise ValueError("QVQConfig: `format=qvq_v2b4_p64` supports only rates W1 through W3.5.")
             if self.bank_count not in (1, 4):
                 raise ValueError("QVQConfig: `format=qvq_v2b4_p64` requires bank_count=4.")
             self.vector_size = 2
             self.trellis_window = 16
             self.bank_count = 4
         elif self.format == FORMAT.QVQ_V2B2_P32:
-            if self.bits > 2.5:
-                raise ValueError("QVQConfig: `format=qvq_v2b2_p32` supports only rates W1 through W2.5.")
+            if self.bits > 3.5:
+                raise ValueError("QVQConfig: `format=qvq_v2b2_p32` supports only rates W1 through W3.5.")
             if self.bank_count not in (1, 2):
                 raise ValueError("QVQConfig: `format=qvq_v2b2_p32` requires bank_count=2.")
             self.vector_size = 2

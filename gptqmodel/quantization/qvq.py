@@ -877,18 +877,18 @@ def decode_trellis_tiles(
         raise ValueError("QVQ Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive.")
     if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
         raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids.")
-    if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_ids is None or bits > 2.5):
-        raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank selectors, and W1-W2.5.")
+    if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_ids is None or bits > 3.5):
+        raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank selectors, and W1-W3.5.")
     if v2b2_p32 and (
         vector_size != 2
         or trellis_window != 16
         or bank_ids is None
         or bank_alt_id is None
-        or bits > 2.5
+        or bits > 3.5
     ):
         raise ValueError(
             "QVQ V2B2-P32 requires vector_size=2, trellis_window=16, binary selectors, an alternative bank, "
-            "and W1-W2.5."
+            "and W1-W3.5."
         )
     if vector_size not in (2, 4) or trellis_window not in (16, 18):
         raise ValueError(
@@ -1359,8 +1359,8 @@ def _batched_v2_banked_viterbi_quantize(
             raise ValueError("QVQ banked V2 step weights must be finite and nonnegative.")
 
     shift = _validate_trellis_shape(bits=bits, vector_size=2, trellis_window=16)
-    if shift > 5:
-        raise ValueError("QVQ banked V2 supports only rates W1 through W2.5.")
+    if shift > 7:
+        raise ValueError("QVQ banked V2 supports only rates W1 through W3.5.")
     if (
         sequences.device.type == "mps"
         and sequences.dtype == torch.float32
@@ -2264,8 +2264,8 @@ def _block_ldlq_inner_v2_banked(
         raise ValueError("QVQ banked V2 requires two or four `[65536, 2]` codebooks.")
     if any(codebook.device != inner_weight.device for codebook in codebooks):
         raise ValueError("QVQ banked V2 codebooks must share the weight device.")
-    if bits > 2.5:
-        raise ValueError("QVQ banked V2 supports only rates W1 through W2.5.")
+    if bits > 3.5:
+        raise ValueError("QVQ banked V2 supports only rates W1 through W3.5.")
     if tail_biting_candidates != 1:
         raise ValueError("QVQ banked V2 initially supports one tail-biting candidate.")
     if tile_rows != 16 or tile_cols != 16:
@@ -4300,10 +4300,10 @@ def quantize_qvq_linear(
         raise ValueError("QVQ L18 uses implicit history-selected banks and requires `bank_count=1`.")
     if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_count != 1):
         raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and bank_count=1.")
-    if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_count != 4 or bits > 2.5):
-        raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank_count=4, and W1-W2.5.")
-    if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or bits > 2.5):
-        raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W2.5.")
+    if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_count != 4 or bits > 3.5):
+        raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank_count=4, and W1-W3.5.")
+    if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or bits > 3.5):
+        raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5.")
     if weight.ndim != 2 or not weight.is_floating_point():
         raise ValueError("QVQ weight must be a floating-point matrix.")
     out_features, in_features = weight.shape

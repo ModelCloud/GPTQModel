@@ -780,12 +780,12 @@ def main() -> None:
         for arm in args.arms:
             started = time.perf_counter()
             geometry = dict(ARM_CONFIG[arm])
-            if geometry.get("v2b2_p32") and rate > 2.5:
+            if geometry.get("v2b2_p32") and rate > 3.5:
                 report["results"][str(rate)][arm] = {
                     "status": "unsupported",
-                    "reason": "V2B2-P32 supports W1 through W2.5",
+                    "reason": "V2B2-P32 supports W1 through W3.5",
                 }
-                print(f"Skipping W{rate:g} {arm}: V2B2-P32 supports W1 through W2.5", flush=True)
+                print(f"Skipping W{rate:g} {arm}: V2B2-P32 supports W1 through W3.5", flush=True)
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 continue

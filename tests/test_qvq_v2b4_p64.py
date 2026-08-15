@@ -56,7 +56,7 @@ def test_qvq_v2b4_p64_comparison_harness_defaults_to_matched_v2_control():
     assert metrics["selector_bpw"] == 0.03125
 
 
-@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_v2b4_p64_config_round_trip(bits):
     config = QVQConfig(bits=bits, format=FORMAT.QVQ_V2B4_P64, offload_to_disk=False)
     assert config.vector_size == 2
@@ -69,8 +69,8 @@ def test_qvq_v2b4_p64_config_round_trip(bits):
 
 
 def test_qvq_v2b4_p64_config_rejects_unsupported_math():
-    with pytest.raises(ValueError, match="W1 through W2.5"):
-        QVQConfig(bits=3, format=FORMAT.QVQ_V2B4_P64, offload_to_disk=False)
+    with pytest.raises(ValueError, match="W1 through W3.5"):
+        QVQConfig(bits=4, format=FORMAT.QVQ_V2B4_P64, offload_to_disk=False)
     config = QVQConfig(bits=2, format=FORMAT.QVQ_V2B4_P64, rounding="yaqa", offload_to_disk=False)
     assert config.rounding == "yaqa"
     with pytest.raises(ValueError, match="one tail-biting candidate"):
@@ -89,16 +89,16 @@ def test_qvq_v2b4_p64_config_rejects_unsupported_math():
         )
     with pytest.raises(ValueError, match="bank_count"):
         QVQConfig(bits=2, format=FORMAT.QVQ_V2B4_P64, bank_count=2, offload_to_disk=False)
-    with pytest.raises(ValueError, match="qvq_v2b4_p64.*W1 through W2.5"):
+    with pytest.raises(ValueError, match="qvq_v2b4_p64.*W1 through W3.5"):
         QVQConfig(
             bits=2,
             format=FORMAT.QVQ_V2B4_P64,
-            dynamic={r".*q_proj": {"bits": 3}},
+            dynamic={r".*q_proj": {"bits": 4}},
             offload_to_disk=False,
         )
 
 
-@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_v2b4_p64_bank_zero_is_exhaustively_bit_exact_v2(bits):
     states = torch.arange(1 << 16, dtype=torch.int64)
     selectors = torch.zeros_like(states, dtype=torch.uint8)
@@ -146,13 +146,14 @@ def test_qvq_v2b4_p64_selector_round_trip_reconstructs_independent_bank_decoder(
     torch.testing.assert_close(actual, result.values.reshape(16, 16), rtol=0, atol=0)
 
 
-def test_qvq_v2b4_p64_block_ldlq_pack_reload_and_torch_forward():
+@pytest.mark.parametrize("bits", (2.5, 3, 3.5))
+def test_qvq_v2b4_p64_block_ldlq_pack_reload_and_torch_forward(bits):
     generator = torch.Generator().manual_seed(9)
     weight = torch.randn((16, 16), generator=generator) * 0.1
     result = quantize_qvq_linear(
         weight,
         torch.eye(16),
-        bits=2.5,
+        bits=bits,
         bank_count=4,
         v2b4_p64=True,
         trellis_batch_size=1,
@@ -162,7 +163,7 @@ def test_qvq_v2b4_p64_block_ldlq_pack_reload_and_torch_forward():
     assert tensors["bank_ids"].numel() == 1
     decoded = reconstruct_qvq_inner_weight(
         result.trellis,
-        bits=2.5,
+        bits=bits,
         in_features=16,
         out_features=16,
         bank_ids=tensors["bank_ids"],
@@ -171,14 +172,14 @@ def test_qvq_v2b4_p64_block_ldlq_pack_reload_and_torch_forward():
     torch.testing.assert_close(decoded, result.inner_weight, rtol=0, atol=0)
 
     layer = QVQLinear(
-        bits=2.5,
+        bits=bits,
         in_features=16,
         out_features=16,
         bank_count=4,
         v2b4_p64=True,
         tensors=tensors,
     ).eval()
-    shell = QVQLinear(bits=2.5, in_features=16, out_features=16, bank_count=4, v2b4_p64=True)
+    shell = QVQLinear(bits=bits, in_features=16, out_features=16, bank_count=4, v2b4_p64=True)
     shell.load_state_dict(layer.state_dict(), strict=True)
     x = torch.randn((3, 16), generator=generator)
     torch.testing.assert_close(layer(x), x @ result.weight.T, rtol=1e-5, atol=1e-6)

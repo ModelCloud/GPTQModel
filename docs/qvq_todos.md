@@ -10,13 +10,14 @@ not selectable through configuration, lifecycle, loading, or inference. Continue
 V2B2-P32 is now the first banked-V2 A/B arm. It uses the same one-byte-per-tile selector payload as V2B4-P64 but
 spends it as eight binary P32 decisions. One complementary family is selected per module from the existing three
 alternative graph mappings. The initial implementation used a Block-LDLQ/Torch reference recurrence. Commit
-`9e420a89` added the exact native CUDA segmented-bank recurrence for both P32 and P64 quantization; packed native
-CUDA inference remains separate work.
+`9e420a89` added the exact native CUDA segmented-bank recurrence for both P32 and P64 quantization. The W3/W3.5
+extension adds exact E=6/E=7 quantization and packed native CUDA inference; E=7 uses 16-bit traceback because four
+banks times 128 predecessor prefixes require nine bits.
 
 - **complete:** format/config/processor/QVQLinear integration, exact coupled P32 recurrence, binary packing,
   module-level alternative-family selection, strict serialization/reload, independent canonical-V2 rollback, and
   a matched four-layer comparison-driver arm;
-- **run now:** `v2` versus `v2b2-p32`, W1/W1.5/W2/W2.5, real Llama 3.2 1B layers 0--3 Q/K/V/O, 64 full
+- **run now:** `v2` versus `v2b2-p32`, W1--W3.5, real Llama 3.2 1B layers 0--3 Q/K/V/O, 64 full
   calibration rows and disjoint rows `[64,128)`, batch 1, no concatenation or length cap;
 - **complete -- YAQA level 1:** generate/select P32 schedules from YAQA-corrected tiles, choose the module's
   complementary family under the complete Kronecker proxy, and retain an independently encoded canonical-V2 YAQA
@@ -29,8 +30,7 @@ CUDA inference remains separate work.
   disjoint final-KL/Top-N/task gates;
 - **P1 -- propagation:** use live-prefix candidate generation, disjoint replay search, and independent confirmation.
   This is the quality gate that can promote a low-rate selector map; it is not implemented in the base slice;
-- **P2 -- native inference:** add CUDA/MPS/MLX binary P32 decode only after Torch reconstruction and model-level
-  evidence pass.
+- **P2 -- native inference:** CUDA and MLX packed P32 decode are complete through W3.5; native MPS remains pending.
 - **complete -- spectral P3 reference:** recover the truncated post-YAQA residual through triangular solves, use it
   only as a Viterbi rounding-target push, retain original-weight feedback and original-Kronecker acceptance, expose
   continuous-oracle/absorption/churn telemetry, and serialize only the exact ordinary V2B2-P32 payload;
@@ -42,6 +42,36 @@ CUDA inference remains separate work.
 The module alternative ID is physically one serialized byte. Exact artifact accounting must include it even though
 its amortized BPW is negligible for real projection matrices.
 
+### W3/W3.5 native extension validation (2026-08-15)
+
+The W3/W3.5 extension was measured on one idle PG506-230 A100-class `sm_80` GPU with CUDA 13.0 and FP16 inputs.
+Quantization used one complete 128-step tile and compared the persistent native recurrence with the eager CUDA
+recurrence. States and selectors were exact; the diagnostic FP32 objective differed by at most `3.82e-6` because
+the native emission uses a different FP32 evaluation order.
+
+| Rate | Format | Native quant | Eager quant | Speedup | States/selectors |
+|---:|:---|---:|---:|---:|:---|
+| W3 | V2B2-P32 | 6.465 ms | 52.891 ms | 8.18x | exact |
+| W3 | V2B4-P64 | 12.253 ms | 48.689 ms | 3.97x | exact |
+| W3.5 | V2B2-P32 | 6.491 ms | 48.358 ms | 7.45x | exact |
+| W3.5 | V2B4-P64 | 12.109 ms | 54.411 ms | 4.49x | exact |
+
+Packed inference used a representative 2048x2048 projection. The comparison below is against transient dense
+reconstruction plus GEMM; a permanently cached dense matrix remains faster but consumes the full dense weight VRAM.
+Across batch 1 and 16, max absolute error against an independently reconstructed FP32 dense weight was at most
+`4.58e-5`, below the `2e-3` inference contract.
+
+| Rate | Format | Batch | Native | Transient dense | Speedup | Max abs |
+|---:|:---|---:|---:|---:|---:|---:|
+| W3 | V2B2-P32 | 1 | 0.184 ms | 3.978 ms | 21.58x | 3.43e-5 |
+| W3 | V2B2-P32 | 16 | 0.213 ms | 3.197 ms | 15.01x | 3.82e-5 |
+| W3 | V2B4-P64 | 1 | 0.184 ms | 3.088 ms | 16.76x | 3.82e-5 |
+| W3 | V2B4-P64 | 16 | 0.213 ms | 3.141 ms | 14.75x | 4.58e-5 |
+| W3.5 | V2B2-P32 | 1 | 0.243 ms | 3.233 ms | 13.32x | 4.58e-5 |
+| W3.5 | V2B2-P32 | 16 | 0.271 ms | 3.247 ms | 11.97x | 4.58e-5 |
+| W3.5 | V2B4-P64 | 1 | 0.243 ms | 3.193 ms | 13.16x | 3.82e-5 |
+| W3.5 | V2B4-P64 | 16 | 0.271 ms | 3.215 ms | 11.85x | 4.58e-5 |
+
 ## V2B4-P64 bring-up (2026-08-15; second banked arm)
 
 The first V2B4-P64 checkpoint slice is intentionally a plain Block-LDLQ control. Do not delay its matched V2 test
@@ -49,7 +79,7 @@ for YAQA or propagation integration: adding either now would confound codec geom
 acceptance objective.
 
 - **P0 -- run now:** compare `v2` against `v2b4-p64` with real Llama 3.2 1B Instruct weights, decoder layers 0--3,
-  all Q/K/V/O projections, W1/W1.5/W2/W2.5, 64 independent full calibration rows, and disjoint full rows `[64,128)`
+  all Q/K/V/O projections, W1--W3.5, 64 independent full calibration rows, and disjoint full rows `[64,128)`
   for evaluation. Use batch 1, no concatenation, no length cap, identical seeds/Hessians, and the Torch/reference
   reconstruction boundary. Record weight relative-L2/SQNR, Block-LDLQ proxy, local/live QKVO KL, every layer KL,
   final-logit KL, top-1/top-5/top-10, quantization time, effective BPW, selector occupancy/entropy, and repeat parity.
@@ -65,8 +95,8 @@ acceptance objective.
   disjoint prompt split. Any failure, non-finite output, confirmation regression, or replay omission serializes the
   exact local baseline. Later evaluate joint state re-encoding only if fixed-trellis bank refinement leaves a
   material quality gap.
-- **P2 -- native inference:** add CUDA/MPS/MLX P64 selector decode only after Torch pack/reload and model-level
-  evidence pass. Native kernels must match the serialized Torch reconstruction before performance comparisons.
+- **P2 -- native inference:** CUDA and MLX packed P64 decode are complete through W3.5; native MPS remains pending.
+  Native kernels match the serialized Torch reconstruction under the 2e-3 inference drift contract.
 
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
