@@ -20,6 +20,7 @@ from gptqmodel.quantization.qvq import (
     tail_biting_viterbi_quantize,
     unpack_qvq_binary_bank_ids,
     yaqa_inner_v2b2_p32,
+    yaqa_localized_spectral_refine_v2b2_p32,
     yaqa_output_spectral_refine_v2b2_p32,
     yaqa_spectral_push_v2b2_p32,
 )
@@ -465,6 +466,67 @@ def test_qvq_v2b2_p32_fixed_boundary_segment_changes_only_interior_states():
     assert localized.states.shape == (1, 16)
     assert localized.segment_bank_ids.shape == (1, 1)
     assert torch.isfinite(localized.squared_error).all()
+
+
+def test_qvq_v2b2_p32_localized_spectral_refinement_recovers_one_segment_without_path_avalanche():
+    generator = torch.Generator().manual_seed(20260818)
+    library = tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in range(4))
+    pair = torch.stack((library[0], library[2]))
+    baseline_path = tail_biting_v2b2_p32_quantize(
+        torch.randn((1, 128, 2), generator=generator),
+        pair,
+        bits=2,
+    )
+    segment_id = 3
+    start = segment_id * 16
+    stop = start + 16
+    alternate = fixed_boundary_v2b2_p32_segment_quantize(
+        torch.randn((1, 16, 2), generator=generator),
+        pair,
+        bits=2,
+        entry_states=baseline_path.states[:, start - 1],
+        exit_states=baseline_path.states[:, stop - 1],
+    )
+    assert not torch.equal(alternate.states, baseline_path.states[:, start:stop])
+
+    baseline_weight = baseline_path.values.reshape(16, 16)
+    source = baseline_weight.clone()
+    source[segment_id * 2 : segment_id * 2 + 2] = alternate.values.reshape(2, 16)
+    baseline = (
+        baseline_weight,
+        baseline_path.states,
+        baseline_path.segment_bank_ids.reshape(-1),
+        torch.tensor([2], dtype=torch.uint8),
+    )
+    diagnostics = {}
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        refined = yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(2,),
+            alphas=(1.0,),
+            max_segments=1,
+            diagnostics=diagnostics,
+            bits=2,
+        )
+
+    torch.testing.assert_close(refined[0], source, rtol=0, atol=0)
+    assert torch.equal(refined[1][:, :start], baseline_path.states[:, :start])
+    assert torch.equal(refined[1][:, stop:], baseline_path.states[:, stop:])
+    assert torch.equal(refined[1][:, stop - 1], baseline_path.states[:, stop - 1])
+    assert torch.count_nonzero(refined[2] != baseline[2]) <= 1
+    assert torch.equal(refined[3], baseline[3])
+    assert diagnostics["spectral_method"] == "localized_p32"
+    assert diagnostics["spectral_selected"] is True
+    assert diagnostics["localized_boundary_preserved"] is True
+    assert diagnostics["spectral_selected_loss"] == pytest.approx(0.0, abs=1e-6)
+    assert sum(candidate["selected"] for candidate in diagnostics["spectral_candidates"].values()) == 1
 
 
 @pytest.mark.parametrize("bits", (2, 3, 3.5))

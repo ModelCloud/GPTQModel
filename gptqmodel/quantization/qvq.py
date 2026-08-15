@@ -4087,6 +4087,242 @@ def yaqa_spectral_push_v2b2_p32(
     return best
 
 
+def yaqa_localized_spectral_refine_v2b2_p32(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    codebook_library: tuple[torch.Tensor, ...],
+    baseline: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    *,
+    ranks: tuple[int, ...],
+    alphas: tuple[float, ...],
+    max_segments: int,
+    diagnostics: dict[str, object] | None = None,
+    bits: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Propose one spectrally ranked P32 replacement without global path churn.
+
+    Candidate generation is restricted to one 32-weight segment.  Its entry
+    predecessor and final V2 state are fixed to the accepted YAQA artifact, so
+    every untouched segment remains bit-identical.  Candidates are ranked by
+    the exact first-order YAQA decrease and accepted only after the complete
+    original Kronecker quadratic is proven smaller.
+    """
+
+    if not ranks or any(isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in ranks):
+        raise ValueError("YAQA localized spectral ranks must be positive integers.")
+    if not alphas or any(
+        isinstance(alpha, bool)
+        or not isinstance(alpha, (int, float))
+        or not math.isfinite(float(alpha))
+        or float(alpha) <= 0
+        for alpha in alphas
+    ):
+        raise ValueError("YAQA localized spectral alphas must be finite and positive.")
+    if isinstance(max_segments, bool) or not isinstance(max_segments, int) or max_segments < 1:
+        raise ValueError("YAQA localized spectral max_segments must be a positive integer.")
+    if len(codebook_library) != 4:
+        raise ValueError("YAQA localized V2B2-P32 requires canonical V2 plus three complementary families.")
+
+    baseline_weight, baseline_states, baseline_selectors, baseline_alt_id = baseline
+    source = inner_weight.to(torch.float32)
+    accepted = baseline_weight.to(torch.float32)
+    if source.ndim != 2 or source.shape != accepted.shape or source.shape[0] % 16 or source.shape[1] % 16:
+        raise ValueError("YAQA localized V2B2-P32 requires matching 16-aligned weight matrices.")
+    input_blocks = source.shape[0] // 16
+    output_blocks = source.shape[1] // 16
+    tile_count = input_blocks * output_blocks
+    expected_state_shape = (tile_count, 128)
+    expected_selector_count = tile_count * QVQ_V2B2_P32_SEGMENTS_PER_TILE
+    if tuple(baseline_states.shape) != expected_state_shape:
+        raise ValueError("YAQA localized V2B2-P32 baseline states have incompatible geometry.")
+    if baseline_selectors.numel() != expected_selector_count:
+        raise ValueError("YAQA localized V2B2-P32 baseline selectors have incompatible geometry.")
+    alt_id = int(baseline_alt_id.item())
+    if baseline_alt_id.numel() != 1 or alt_id not in (1, 2, 3):
+        raise ValueError("YAQA localized V2B2-P32 baseline family ID must be 1, 2, or 3.")
+
+    original_input = input_hessian.to(torch.float32)
+    original_output = output_hessian.to(torch.float32)
+    if tuple(original_input.shape) != (source.shape[0], source.shape[0]):
+        raise ValueError("YAQA localized input Hessian does not match the weight geometry.")
+    if tuple(original_output.shape) != (source.shape[1], source.shape[1]):
+        raise ValueError("YAQA localized output Hessian does not match the weight geometry.")
+    residual = source - accepted
+    input_root = torch.linalg.cholesky(original_input)
+    output_root = torch.linalg.cholesky(original_output)
+    whitened_residual = input_root.transpose(0, 1) @ residual @ output_root
+    maximum_rank = min(max(ranks), min(whitened_residual.shape))
+    from ..eora.eora import _eora_compute_svd
+
+    spectral_device = torch.device("cpu") if whitened_residual.device.type == "mps" else whitened_residual.device
+    left_vectors, singular_values, right_vectors_h = _eora_compute_svd(
+        whitened_residual.to(device=spectral_device),
+        maximum_rank,
+        algo="lowrank",
+    )
+    left_vectors = left_vectors.to(device=source.device)
+    singular_values = singular_values.to(device=source.device)
+    right_vectors_h = right_vectors_h.to(device=source.device)
+    usable_ranks = tuple(sorted({min(rank, singular_values.numel()) for rank in ranks}))
+    error = accepted - source
+    gradient = 2 * (original_input @ error @ original_output)
+    baseline_loss = torch.einsum("ij,ik,kl,lj->", error, original_input, error, original_output)
+    pair_codebooks = torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
+
+    def segment_view(matrix: torch.Tensor) -> torch.Tensor:
+        return (
+            matrix.reshape(input_blocks, 16, output_blocks, 16)
+            .permute(0, 2, 1, 3)
+            .reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE, 2, 16)
+        )
+
+    baseline_tiles = segment_view(accepted)
+    gradient_tiles = segment_view(gradient)
+    state_tiles = baseline_states.reshape(tile_count, 128)
+    selector_tiles = baseline_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)
+    best_loss = baseline_loss
+    best_record: tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor, str] | None = None
+    candidate_records: dict[str, dict[str, object]] = {}
+    eps = torch.finfo(torch.float32).eps
+
+    for rank in usable_ranks:
+        whitened_correction = (
+            left_vectors[:, :rank] * singular_values[:rank].unsqueeze(0)
+        ) @ right_vectors_h[:rank]
+        correction = torch.linalg.solve_triangular(
+            input_root.transpose(0, 1),
+            whitened_correction,
+            upper=True,
+        )
+        correction = torch.linalg.solve_triangular(
+            output_root.transpose(0, 1),
+            correction.transpose(0, 1),
+            upper=True,
+        ).transpose(0, 1)
+        correction_tiles = segment_view(correction)
+        first_order_scores = -(gradient_tiles * correction_tiles).sum(dim=(2, 3)).reshape(-1)
+        candidate_count = min(max_segments, first_order_scores.numel())
+        ranked_scores, ranked_segments = first_order_scores.topk(candidate_count)
+        positive = ranked_scores > 0
+        ranked_scores = ranked_scores[positive]
+        ranked_segments = ranked_segments[positive]
+        if ranked_segments.numel() == 0:
+            continue
+        tile_indices = ranked_segments // QVQ_V2B2_P32_SEGMENTS_PER_TILE
+        segment_indices = ranked_segments % QVQ_V2B2_P32_SEGMENTS_PER_TILE
+        starts = segment_indices * QVQ_V2B2_P32_STEPS_PER_SEGMENT
+        exits = starts + QVQ_V2B2_P32_STEPS_PER_SEGMENT - 1
+        entry_indices = torch.where(starts == 0, torch.full_like(starts, 127), starts - 1)
+        entries = state_tiles[tile_indices, entry_indices]
+        required_exits = state_tiles[tile_indices, exits]
+
+        for alpha in alphas:
+            targets = (
+                baseline_tiles[tile_indices, segment_indices]
+                + float(alpha) * correction_tiles[tile_indices, segment_indices]
+            ).reshape(-1, QVQ_V2B2_P32_STEPS_PER_SEGMENT, 2)
+            localized = fixed_boundary_v2b2_p32_segment_quantize(
+                targets,
+                pair_codebooks,
+                bits=bits,
+                entry_states=entries,
+                exit_states=required_exits,
+            )
+            localized_blocks = localized.values.reshape(-1, 2, 16).to(torch.float32)
+            deltas = localized_blocks - baseline_tiles[tile_indices, segment_indices]
+            for candidate_index in range(ranked_segments.numel()):
+                tile_index = int(tile_indices[candidate_index].item())
+                segment_index = int(segment_indices[candidate_index].item())
+                input_block = tile_index // output_blocks
+                output_block = tile_index % output_blocks
+                input_start = input_block * 16 + segment_index * 2
+                output_start = output_block * 16
+                delta = deltas[candidate_index]
+                linear = (gradient[input_start : input_start + 2, output_start : output_start + 16] * delta).sum()
+                quadratic = torch.einsum(
+                    "ij,ik,kl,lj->",
+                    delta,
+                    original_input[input_start : input_start + 2, input_start : input_start + 2],
+                    delta,
+                    original_output[output_start : output_start + 16, output_start : output_start + 16],
+                )
+                candidate_loss = baseline_loss + linear + quadratic
+                candidate_key = f"r{rank}_a{float(alpha):g}_t{tile_index}_s{segment_index}"
+                relative_improvement = float(
+                    ((baseline_loss - candidate_loss) / baseline_loss.abs().clamp_min(eps)).item()
+                )
+                candidate_records[candidate_key] = {
+                    "rank": int(rank),
+                    "alpha": float(alpha),
+                    "tile": tile_index,
+                    "segment": segment_index,
+                    "predicted_first_order": float(ranked_scores[candidate_index].item()),
+                    "loss": float(candidate_loss.item()),
+                    "relative_improvement": relative_improvement,
+                    "selected": False,
+                }
+                if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
+                    best_loss = candidate_loss
+                    best_record = (
+                        tile_index,
+                        segment_index,
+                        localized.states[candidate_index],
+                        localized.values[candidate_index],
+                        localized.segment_bank_ids[candidate_index],
+                        candidate_key,
+                    )
+
+    selected_candidate_key = None
+    if best_record is None:
+        result = baseline
+    else:
+        tile_index, segment_index, segment_states, segment_values, segment_bank, candidate_key = best_record
+        refined_weight = baseline_weight.clone()
+        refined_states = baseline_states.clone()
+        refined_selectors = baseline_selectors.clone()
+        input_block = tile_index // output_blocks
+        output_block = tile_index % output_blocks
+        input_start = input_block * 16 + segment_index * 2
+        output_start = output_block * 16
+        refined_weight[input_start : input_start + 2, output_start : output_start + 16] = segment_values.reshape(2, 16)
+        state_start = segment_index * QVQ_V2B2_P32_STEPS_PER_SEGMENT
+        refined_states[tile_index, state_start : state_start + QVQ_V2B2_P32_STEPS_PER_SEGMENT] = segment_states
+        refined_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)[tile_index, segment_index] = segment_bank
+        exact_error = refined_weight.to(torch.float32) - source
+        exact_loss = torch.einsum(
+            "ij,ik,kl,lj->", exact_error, original_input, exact_error, original_output
+        )
+        candidate_records[candidate_key]["screening_loss"] = candidate_records[candidate_key]["loss"]
+        candidate_records[candidate_key]["loss"] = float(exact_loss.item())
+        candidate_records[candidate_key]["relative_improvement"] = float(
+            ((baseline_loss - exact_loss) / baseline_loss.abs().clamp_min(eps)).item()
+        )
+        if torch.isfinite(exact_loss) and exact_loss < baseline_loss:
+            best_loss = exact_loss
+            candidate_records[candidate_key]["selected"] = True
+            selected_candidate_key = candidate_key
+            result = refined_weight, refined_states, refined_selectors, baseline_alt_id
+        else:
+            best_loss = baseline_loss
+            result = baseline
+
+    if diagnostics is not None:
+        diagnostics["spectral_method"] = "localized_p32"
+        diagnostics["spectral_svd_device"] = spectral_device.type
+        diagnostics["spectral_candidates"] = candidate_records
+        diagnostics["spectral_selected"] = selected_candidate_key is not None
+        diagnostics["spectral_original_loss"] = float(baseline_loss.item())
+        diagnostics["spectral_selected_loss"] = float(best_loss.item())
+        diagnostics["spectral_selector_churn"] = float(
+            (result[2] != baseline_selectors).to(torch.float32).mean().item()
+        )
+        diagnostics["spectral_family_changed"] = False
+        diagnostics["spectral_absorption_efficiency"] = None
+        diagnostics["localized_boundary_preserved"] = True
+    return result
+
+
 def rht_preprocess_weight(
     weight: torch.Tensor,
     SU: torch.Tensor,
