@@ -9,7 +9,9 @@ not selectable through configuration, lifecycle, loading, or inference. Continue
 
 V2B2-P32 is now the first banked-V2 A/B arm. It uses the same one-byte-per-tile selector payload as V2B4-P64 but
 spends it as eight binary P32 decisions. One complementary family is selected per module from the existing three
-alternative graph mappings. The initial implementation is intentionally Block-LDLQ/Torch-reference only.
+alternative graph mappings. The initial implementation used a Block-LDLQ/Torch reference recurrence. Commit
+`9e420a89` added the exact native CUDA segmented-bank recurrence for both P32 and P64 quantization; packed native
+CUDA inference remains separate work.
 
 - **complete:** format/config/processor/QVQLinear integration, exact coupled P32 recurrence, binary packing,
   module-level alternative-family selection, strict serialization/reload, independent canonical-V2 rollback, and
@@ -52,42 +54,64 @@ acceptance objective.
 - **P2 -- native inference:** add CUDA/MPS/MLX P64 selector decode only after Torch pack/reload and model-level
   evidence pass. Native kernels must match the serialized Torch reconstruction before performance comparisons.
 
-### Completed four-layer V2B4-P64 reference run
+### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
-Historical result captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. V2B4-P64 improved the measured
-local metrics at every rate and improved the reported downstream point estimates at W1, W1.5, and W2.5. W2 is the
-important counterexample: weight error, Block-LDLQ proxy, local QKVO KL, and live QKVO KL all improved, while layer
-KL worsened by 11.22%, final-logit KL worsened by 0.21%, and Top-1/5/10 agreement fell. Therefore local selection is
-not a sufficient unconditional acceptance rule below W3.
+The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
+result was captured after the exact native CUDA quantization path landed in commit `9e420a89`. All V2B2-P32
+quality fields were byte-for-byte equal to its pre-native reference run; only timing changed.
+
+V2 is the baseline at each rate for every delta below. For error/KL metrics, a negative delta is an improvement. For
+Top-N agreement, each cell reports relative percent followed by the absolute percentage-point change; positive is
+an improvement. V2B2-P32 improves local metrics at every rate, but W1 is the decisive quality regression: layer KL
+rises 9.10%, final KL rises 13.55%, and Top-1/5/10 all lose more
+than 3.4 points. At W1.5--W2.5 it improves final KL and Top-N, with the strongest layer-KL result at W2.5. V2B4-P64
+retains its known W2 counterexample, where local metrics improve while layer and final KL regress. These results
+reinforce that local/Hessian selection is not a sufficient unconditional acceptance rule below W3.
 
 | Rate | Arm | EBPW | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Time |
 |---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | W1 | V2 | 1.00000 | 0.659996 | 0.042760 | 0.074643 | 0.263296 | 0.733819 | 34.18% | 36.83% | 36.74% | 33.46s |
+| W1 | V2B2-P32 | 1.03125 | 0.645997 | 0.037820 | 0.070428 | 0.287250 | 0.833278 | 30.69% | 33.40% | 33.27% | 231.25s |
 | W1 | V2B4-P64 | 1.03125 | 0.646150 | 0.036563 | 0.065726 | 0.262046 | 0.706435 | 35.00% | 37.78% | 37.63% | 435.46s |
 | W1.5 | V2 | 1.50000 | 0.477342 | 0.007191 | 0.017653 | 0.096077 | 0.310906 | 49.63% | 54.11% | 54.49% | 30.41s |
+| W1.5 | V2B2-P32 | 1.53125 | 0.466209 | 0.006186 | 0.017011 | 0.088885 | 0.286538 | 50.86% | 55.38% | 56.10% | 254.07s |
 | W1.5 | V2B4-P64 | 1.53125 | 0.465909 | 0.006031 | 0.015189 | 0.094804 | 0.283900 | 50.96% | 55.80% | 56.38% | 418.19s |
 | W2 | V2 | 2.00000 | 0.343255 | 0.002360 | 0.006637 | 0.029056 | 0.130507 | 64.23% | 67.98% | 68.94% | 33.87s |
+| W2 | V2B2-P32 | 2.03125 | 0.334570 | 0.002198 | 0.006596 | 0.026981 | 0.121946 | 64.68% | 68.91% | 69.76% | 222.15s |
 | W2 | V2B4-P64 | 2.03125 | 0.334940 | 0.002250 | 0.006151 | 0.032317 | 0.130783 | 63.64% | 67.79% | 68.78% | 410.22s |
 | W2.5 | V2 | 2.50000 | 0.245716 | 0.001032 | 0.003082 | 0.016850 | 0.063957 | 72.79% | 76.24% | 77.33% | 31.42s |
+| W2.5 | V2B2-P32 | 2.53125 | 0.239230 | 0.000991 | 0.002694 | 0.014070 | 0.060997 | 73.34% | 76.94% | 77.93% | 224.90s |
 | W2.5 | V2B4-P64 | 2.53125 | 0.238943 | 0.000992 | 0.002831 | 0.016822 | 0.063667 | 73.22% | 76.47% | 77.35% | 409.71s |
 
-Matched V2B4-P64 deltas relative to V2:
+Matched deltas relative to V2 at the same rate:
 
-| Rate | Weight MSE | Proxy loss | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Time |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| W1 | -4.27% | -9.20% | -14.49% | -11.95% | -0.47% | -3.73% | +0.82pp | +0.95pp | +0.89pp | 13.02x |
-| W1.5 | -4.81% | -6.98% | -16.13% | -13.96% | -1.32% | -8.69% | +1.33pp | +1.69pp | +1.88pp | 13.75x |
-| W2 | -4.79% | -5.51% | -4.68% | -7.32% | +11.22% | +0.21% | -0.58pp | -0.19pp | -0.16pp | 12.11x |
-| W2.5 | -5.54% | -5.86% | -3.89% | -8.13% | -0.16% | -0.45% | +0.43pp | +0.23pp | +0.03pp | 13.04x |
+| Rate | Arm | EBPW | Weight MSE | Proxy loss | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Time |
+|---:|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | V2B2-P32 | +3.12% | -4.29% | -8.98% | -2.12% | -11.55% | -5.65% | +9.10% | +13.55% | -10.22% (-3.49pp) | -9.30% (-3.43pp) | -9.44% (-3.47pp) | 6.91x |
+| W1 | V2B4-P64 | +3.12% | -4.27% | -9.20% | -2.10% | -14.49% | -11.95% | -0.47% | -3.73% | +2.40% (+0.82pp) | +2.58% (+0.95pp) | +2.41% (+0.89pp) | 13.02x* |
+| W1.5 | V2B2-P32 | +2.08% | -4.67% | -6.50% | -2.33% | -13.97% | -3.64% | -7.49% | -7.84% | +2.47% (+1.23pp) | +2.34% (+1.27pp) | +2.95% (+1.61pp) | 8.35x |
+| W1.5 | V2B4-P64 | +2.08% | -4.81% | -6.98% | -2.40% | -16.13% | -13.96% | -1.32% | -8.69% | +2.68% (+1.33pp) | +3.13% (+1.69pp) | +3.46% (+1.88pp) | 13.75x* |
+| W2 | V2B2-P32 | +1.56% | -5.05% | -5.80% | -2.53% | -6.88% | -0.61% | -7.14% | -6.56% | +0.71% (+0.46pp) | +1.37% (+0.93pp) | +1.19% (+0.82pp) | 6.56x |
+| W2 | V2B4-P64 | +1.56% | -4.79% | -5.51% | -2.42% | -4.68% | -7.32% | +11.22% | +0.21% | -0.91% (-0.58pp) | -0.28% (-0.19pp) | -0.23% (-0.16pp) | 12.11x* |
+| W2.5 | V2B2-P32 | +1.25% | -5.31% | -5.58% | -2.64% | -3.99% | -12.58% | -16.49% | -4.63% | +0.75% (+0.55pp) | +0.91% (+0.70pp) | +0.78% (+0.61pp) | 7.16x |
+| W2.5 | V2B4-P64 | +1.25% | -5.54% | -5.86% | -2.76% | -3.89% | -8.13% | -0.16% | -0.45% | +0.59% (+0.43pp) | +0.30% (+0.23pp) | +0.03% (+0.03pp) | 13.04x* |
+
+`*` V2B4-P64 timing is from its older Torch-reference quantization run and must not be compared directly with the
+native V2B2-P32 timing. V2B2-P32's native recurrence reduced its own matched pre-native wall time by 3.38--3.82x
+without changing any quality or selector field.
 
 Selector usage confirms that the mixed arm did not collapse to canonical bank zero:
 
-| Rate | Nonzero selectors | Entropy (bits) | Bank histogram 0 / 1 / 2 / 3 |
-|---:|---:|---:|:---|
-| W1 | 73.21% | 1.996100 | 175570 / 152492 / 151130 / 176168 |
-| W1.5 | 72.68% | 1.993749 | 179069 / 179071 / 149378 / 147842 |
-| W2 | 66.47% | 1.973751 | 219761 / 145758 / 145371 / 144470 |
-| W2.5 | 71.87% | 1.989493 | 184323 / 182805 / 145263 / 142969 |
+| Rate | Arm | Nonzero selectors | Entropy (bits) | Bank histogram 0 / 1 / 2 / 3 | Module alt IDs 0 / 1 / 2 / 3 |
+|---:|:---|---:|---:|:---|:---|
+| W1 | V2B2-P32 | 50.08% | 0.999998 | 654341 / 656379 / 0 / 0 | 0 / 2 / 8 / 6 |
+| W1 | V2B4-P64 | 73.21% | 1.996100 | 175570 / 152492 / 151130 / 176168 | n/a |
+| W1.5 | V2B2-P32 | 50.04% | 1.000000 | 654850 / 655870 / 0 / 0 | 0 / 6 / 4 / 6 |
+| W1.5 | V2B4-P64 | 72.68% | 1.993749 | 179069 / 179071 / 149378 / 147842 | n/a |
+| W2 | V2B2-P32 | 49.94% | 0.999999 | 656138 / 654582 / 0 / 0 | 0 / 5 / 3 / 8 |
+| W2 | V2B4-P64 | 66.47% | 1.973751 | 219761 / 145758 / 145371 / 144470 | n/a |
+| W2.5 | V2B2-P32 | 50.06% | 0.999999 | 654513 / 656207 / 0 / 0 | 0 / 5 / 8 / 3 |
+| W2.5 | V2B4-P64 | 71.87% | 1.989493 | 184323 / 182805 / 145263 / 142969 | n/a |
 
 Run contract:
 
@@ -96,7 +120,8 @@ Run contract:
 - disjoint evaluation rows 64--127 with 20,384 valid tokens;
 - batch 1, no concatenation, no length limit, Block-LDLQ, and YAQA/propagation disabled;
 - Torch 2.13.0, CUDA 13.0, A100-class SM80 physical GPUs 4--7;
-- focused tests 15/15 passed; all four workers exited successfully.
+- V2B4-P64 focused reference tests passed 15/15; native segmented-bank CUDA tests passed 31/31 and V2B2/V2B4
+  lifecycle/packing tests passed 30/30; all sweep workers exited successfully.
 
 Original artifacts:
 
@@ -104,6 +129,10 @@ Original artifacts:
 - `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w1p5_gpu5.json`
 - `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w2_gpu6.json`
 - `gpt-qmodel-ultra-v2b4-p64-run/artifacts/qvq_v2b4_p64_4layer/w2p5_gpu7.json`
+- `/root/qvq-benchmark-artifacts/v2b2-p32-4layer-9e420a89-native/w1_gpu4.json`
+- `/root/qvq-benchmark-artifacts/v2b2-p32-4layer-9e420a89-native/w1p5_gpu5.json`
+- `/root/qvq-benchmark-artifacts/v2b2-p32-4layer-9e420a89-native/w2_gpu6.json`
+- `/root/qvq-benchmark-artifacts/v2b2-p32-4layer-9e420a89-native/w2p5_gpu7.json`
 
 The comparison driver `scripts/compare_qvq_codecs_llama_qkvo.py` now defaults to only `v2` and `v2b2-p32` so the
 base result is available quickly. Its other defaults encode the P0 contract above: four layers, rates W1--W2.5,
