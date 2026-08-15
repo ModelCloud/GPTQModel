@@ -161,6 +161,43 @@ the sample has only two rows per split, the live prefix before layer-0 `q_proj` 
 mixed. Next run multiple disjoint row blocks and YAQA seeds, then repeat after installing the complete live quantized
 prefix.
 
+Three follow-up gates tested whether that result survives prompt and YAQA-factor changes. All used W2, exact
+serialized proposals, the same four-layer Llama shell, full-length independent rows, batch 1, and a fail-closed
+confirmation callback. The two-row repeats used seed-0 YAQA512 factors. The larger matched gates used eight search,
+eight confirmation, and eight untouched evaluation rows; promotion required lower confirmation KL and no more than
+0.25 percentage points of regression in each Top-1/5/10 metric.
+
+| Gate | Search / confirmation / evaluation rows | Confirmation KL delta | Untouched KL delta | Decision |
+| --- | --- | ---: | ---: | --- |
+| seed 0 repeat 1 | `[1542,1544)` / `[1544,1546)` / `[1546,1548)` | -0.95% | -0.85% | accepted |
+| seed 0 repeat 2 | `[1548,1550)` / `[1550,1552)` / `[1552,1554)` | +0.65% | exact rollback | rejected |
+| seed 0 larger gate | `[1554,1562)` / `[1562,1570)` / `[1570,1578)` | -0.76% | -0.77% | accepted |
+| seed 1 larger gate | `[1554,1562)` / `[1562,1570)` / `[1570,1578)` | -0.88% | -0.19% | accepted |
+
+The seed-0 larger gate changed one of 131,072 selectors. On untouched rows it changed Top-1/5/10 by -0.18, -0.009,
+and -0.005 percentage points. The seed-1 gate changed the state path but not the selector map; its untouched Top-1,
+Top-5, and Top-10 changes were -0.07, +0.04, and -0.06 points. These results establish repeatable small KL recovery,
+not unconditional quality recovery: the rejected block and mixed Top-N deltas show why independent confirmation and
+atomic rollback remain mandatory. The seed-1 Sketch-B cache used the same 512 rows `[1024,1536)` and contained
+163,324 valid tokens, so only the categorical Fisher sampling seed changed in the matched seed comparison.
+
+The first live-prefix gate then installed ordinary V2B2-P32+YAQA W2 reconstructions for all layer-0 Q/K/V/O
+projections and refined layer-1 `q_proj`. Search rows `[1578,1586)` supplied 3,819 live student-input tokens while
+the target remained the dense layer-1 `q_proj` output. Confirmation rows were `[1586,1594)` and untouched evaluation
+rows were `[1594,1602)`. The seed-1 proposal changed the V2 state path without changing the P32 selector map and
+passed confirmation.
+
+| Split | Baseline final KL | Selected final KL | KL delta | Top-1 delta | Top-5 delta | Top-10 delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| confirmation | 0.0107126643 | 0.0107104190 | -0.021% | +0.074 pp | -0.008 pp | -0.036 pp |
+| untouched evaluation | 0.0106917837 | 0.0106884246 | -0.031% | +0.096 pp | -0.010 pp | +0.041 pp |
+
+The live-prefix effect is small, but it is the first result in which untouched KL, Top-1, and Top-10 improve together
+after upstream W2 quantization error is present. It supports continuing P4 as an opt-in, propagation-confirmed
+candidate generator. It does not justify enabling P4 by default: only one target module, one rate, two YAQA seeds,
+and one live prefix have passed, and no task benchmark has yet confirmed that these sub-percent logit changes recover
+answers.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
