@@ -738,6 +738,61 @@ Future low-rate format proposals must pass all of these gates before implementat
 The resulting principle is: **increase usable, propagation-scored capacity—not merely decoder cardinality or the
 sum of independent histories.**
 
+#### V2B4-P64 implementation slice
+
+`format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W2.5. It keeps the canonical L16/V2
+state recurrence and adds a two-bit decoder-bank selector for each contiguous 64-weight segment:
+
+```text
+one 16x16 tile (256 weights)
+  |
+  +-- 64 weights -- bank selector b0 -- 32 coupled V2 transitions
+  +-- 64 weights -- bank selector b1 -- 32 coupled V2 transitions
+  +-- 64 weights -- bank selector b2 -- 32 coupled V2 transitions
+  `-- 64 weights -- bank selector b3 -- 32 coupled V2 transitions
+
+bank 0: canonical V2 decoder (frozen)
+banks 1--3: rate-keyed bijective state relabellings
+```
+
+The selector cost is exactly `2/64 = 0.03125` bpw. Four selectors fit in one byte per 16x16 tile. The trellis
+payload itself is unchanged. Unlike Dual-V2, bank selection does not split the path into independent parity chains:
+every transition remains conditioned on the immediately preceding V2 state.
+
+The reference dynamic program keeps four bank costs inside a segment. At a P64 boundary it minimizes over the prior
+bank and the legal V2 predecessor prefixes, then exposes all four current-bank emissions:
+
+```text
+C_t(b, s') = d_b(x_t, s')
+             + min over prior bank a and legal predecessor s -> s' of C_(t-1)(a, s)
+```
+
+Inside a segment `a=b`, so the selected bank cannot change early. At a boundary the merge retains the best prior
+history for each next state before opening the next four-bank choice. This is an exact coupled recurrence for the
+declared P64 search space; it does not enumerate `4**4` complete schedules and does not factor the V2 path.
+
+Bank zero is a complete independently quantized V2 artifact. After Block-LDLQ, the mixed-bank artifact is compared
+with it using the full transformed input-Hessian objective
+
+```text
+D(E) = tr(E H_x E^T).
+```
+
+Non-finite, tied, or worse mixed results atomically restore the bank-zero states and all-zero selectors. Therefore
+the initial implementation has an algebraic no-regression guarantee for this proxy, not an end-to-end quality
+guarantee. Low-rate promotion still requires propagated held-out replay and independent confirmation because this
+local quadratic objective is not sufficient below W3.
+
+Current implementation status:
+
+- complete: format/config lifecycle, rate-keyed graph banks, exact Torch P64 Viterbi, Block-LDLQ integration,
+  planar selector serialization, save/load-compatible `QVQLinear`, dense Torch inference, exhaustive bank-zero/V2
+  parity, and full-proxy rollback tests;
+- deliberately pending: learned table portfolios, YAQA bank scoring, propagation-aware bank refinement, native
+  CUDA/MPS/MLX kernels, and model-level KLD/Top-N/task recovery gates;
+- rejected as a claim: four graph banks alone are not yet evidence of a 50% recovery improvement. They are the
+  baseline-safe search substrate on which propagation-aware selection and learned portfolios can be tested.
+
 #### All-rate storage and compute consequences
 
 Pure `L16/V4` is defined only through W4. Its transition width is `E=4R`, and a bitshift trellis requires `E <= L`.

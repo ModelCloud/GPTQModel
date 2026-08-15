@@ -18,6 +18,15 @@ PGC16_STATE_COUNT = 1 << 16
 PGC16_LEVEL_COUNT = 1 << 8
 PGC16_V4_BANK_COUNT = 4
 PGC18_V4_STATE_COUNT = 1 << 18
+PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS = {
+    # Experimental V2B4-P64 graph portfolio. Bank zero is the canonical V2
+    # mapping. The other masks are deliberately rate-keyed because the local
+    # successor neighborhoods contain 2**E states at transition width E.
+    2: (0x0000, 0xA5A5, 0x5A5A, 0x3C3C),
+    3: (0x0000, 0xA5A5, 0x9696, 0x6969),
+    4: (0x0000, 0x5A5A, 0x3C3C, 0xC3C3),
+    5: (0x0000, 0x9696, 0x3C3C, 0xC3C3),
+}
 PGC16_V4_BANK_XOR_MASKS = (0xA5A5, 0x5A5A, 0x3C3C, 0xC3C3)
 PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS = {
     # Bank zero preserves canonical V4. The remaining permutations were
@@ -379,6 +388,47 @@ def pgc16_decode_states(states: torch.Tensor, *, levels: torch.Tensor | None = N
     return levels[indices].contiguous()
 
 
+def pgc16_decode_states_v2_banked(
+    states: torch.Tensor,
+    bank_ids: torch.Tensor,
+    *,
+    bits: float,
+    levels: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Decode the experimental rate-keyed V2B4 graph portfolio.
+
+    Every bank remains an L16/V2 decoder. Bank zero is exactly canonical V2;
+    banks one through three only change the bijective state labelling. The
+    P64 format chooses one bank for each contiguous 64-weight segment.
+    """
+
+    if bank_ids.dtype == torch.bool or bank_ids.is_floating_point() or bank_ids.is_complex():
+        raise TypeError("PGC16 V2B4 bank selectors must use an integer dtype.")
+    if bank_ids.device != states.device:
+        raise ValueError("PGC16 states and V2B4 bank selectors must be on the same device.")
+    if bank_ids.ndim == 0:
+        bank_ids = bank_ids.expand(states.shape)
+    if tuple(bank_ids.shape) != tuple(states.shape):
+        raise ValueError(f"PGC16 V2B4 selectors must have shape {tuple(states.shape)}, got {tuple(bank_ids.shape)}.")
+    bank_ids_i64 = bank_ids.to(torch.int64)
+    if torch.any((bank_ids_i64 < 0) | (bank_ids_i64 >= PGC16_V4_BANK_COUNT)):
+        raise ValueError(f"PGC16 V2B4 selectors must be in `[0, {PGC16_V4_BANK_COUNT - 1}]`.")
+    if levels is None:
+        levels = canonical_pgc16_levels().to(device=states.device)
+    else:
+        if levels.device != states.device:
+            raise ValueError("PGC16 states and levels must be on the same device.")
+        validate_pgc16_levels(levels)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    masks_for_rate = PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS.get(transition_bits)
+    if masks_for_rate is None:
+        raise ValueError("PGC16 V2B4 decoding supports only rates W1 through W2.5.")
+    masks = torch.tensor(masks_for_rate, dtype=torch.int64, device=states.device)
+    mixed = pgc16_mix_states(states.to(torch.int64) ^ masks[bank_ids_i64])
+    indices = torch.stack((mixed >> 8, mixed & 0xFF), dim=-1)
+    return levels[indices].contiguous()
+
+
 def pgc16_decode_states_v4(states: torch.Tensor, *, levels: torch.Tensor | None = None) -> torch.Tensor:
     """Decode the opt-in four-scalar PGC16 vector codec.
 
@@ -507,6 +557,27 @@ def pgc16_codebook_v4(
     return pgc16_decode_states_v4(states, levels=target_levels).to(dtype=dtype)
 
 
+def pgc16_codebook_v2_bank(
+    bank: int,
+    *,
+    bits: float,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+    levels: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Materialize one L16/V2 bank from the experimental P64 portfolio."""
+
+    if isinstance(bank, bool) or not isinstance(bank, int) or not 0 <= bank < PGC16_V4_BANK_COUNT:
+        raise ValueError(f"PGC16 V2B4 bank must be an integer in `[0, {PGC16_V4_BANK_COUNT - 1}]`.")
+    if dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        raise TypeError("PGC16 codebook dtype must be floating point.")
+    target_device = torch.device("cpu" if device is None else device)
+    states = torch.arange(PGC16_STATE_COUNT, dtype=torch.int64, device=target_device)
+    selectors = torch.full((PGC16_STATE_COUNT,), bank, dtype=torch.uint8, device=target_device)
+    target_levels = None if levels is None else levels.to(device=target_device)
+    return pgc16_decode_states_v2_banked(states, selectors, bits=bits, levels=target_levels).to(dtype=dtype)
+
+
 def pgc16_codebook_v4_bank(
     bank: int,
     *,
@@ -562,14 +633,17 @@ __all__ = [
     "PGC16_SCALE_FACTORS",
     "PGC16_STATE_COUNT",
     "PGC16_V4_BANK_COUNT",
+    "PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS",
     "PGC16_V4_BANK_XOR_MASKS",
     "PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS",
     "PGC18_V4_STATE_COUNT",
     "canonical_pgc16_levels",
     "pgc16_codebook",
+    "pgc16_codebook_v2_bank",
     "pgc16_codebook_v4",
     "pgc16_codebook_v4_bank",
     "pgc16_decode_states",
+    "pgc16_decode_states_v2_banked",
     "pgc16_decode_states_v4",
     "pgc16_decode_states_v4_banked",
     "pgc16_levels_for_version",

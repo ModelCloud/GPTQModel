@@ -418,6 +418,7 @@ class QVQProcessor(LoopProcessor):
             return
         automatic_propagation = (
             module_qcfg.propagated_bank_selection is None
+            and module_qcfg.format == FORMAT.QVQ_V4
             and module_qcfg.bank_count == 4
             and module_qcfg.rounding == "block_ldlq"
         )
@@ -810,6 +811,7 @@ class QVQProcessor(LoopProcessor):
                 vector_size=module_qcfg.vector_size,
                 trellis_window=module_qcfg.trellis_window,
                 dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
+                v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
                 module_scale_search=module_qcfg.module_scale_search,
                 output_channel_scale_optimization=module_qcfg.output_channel_scale_optimization,
                 viterbi_objective=module_qcfg.viterbi_objective,
@@ -843,6 +845,7 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.bank_count,
                     module_qcfg.trellis_window,
                     module_qcfg.format == FORMAT.QVQ_DUAL_V2,
+                    module_qcfg.format == FORMAT.QVQ_V2B4_P64,
                 )
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
@@ -954,6 +957,7 @@ class QVQProcessor(LoopProcessor):
                 bank_count = runtime_config[3] if len(runtime_config) > 3 else 1
                 trellis_window = runtime_config[4] if len(runtime_config) > 4 else 16
                 dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
+                v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
                 for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids"):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
@@ -980,6 +984,7 @@ class QVQProcessor(LoopProcessor):
                 trellis_window=trellis_window,
                 bank_count=bank_count,
                 dual_v2=dual_v2,
+                v2b4_p64=v2b4_p64,
             )
             # Materialized layer leaves may be freshly constructed with
             # ``training=True`` even while the authoritative model is in eval
@@ -1046,7 +1051,9 @@ class QVQProcessor(LoopProcessor):
         model.quantize_config.method = METHOD.QVQ
         # Preserve the selected QVQ codec format so V4 artifacts remain
         # distinguishable from the default V2 format after lifecycle finalization.
-        if model.quantize_config.format == FORMAT.QVQ_DUAL_V2:
+        if model.quantize_config.format == FORMAT.QVQ_V2B4_P64:
+            model.quantize_config.format = FORMAT.QVQ_V2B4_P64
+        elif model.quantize_config.format == FORMAT.QVQ_DUAL_V2:
             model.quantize_config.format = FORMAT.QVQ_DUAL_V2
         elif model.quantize_config.trellis_window == 18:
             model.quantize_config.format = FORMAT.QVQ_V4_L18

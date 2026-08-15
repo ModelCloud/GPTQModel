@@ -956,7 +956,15 @@ def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
         "gptqmodel" in uri
         or bool(qcfg.dynamic)
         or resolve_quant_format(qcfg.format, qcfg.method)
-        in (FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2)
+        in (
+            FORMAT.GPTQ_V2,
+            FORMAT.GPTQ_P,
+            FORMAT.QVQ,
+            FORMAT.QVQ_V4,
+            FORMAT.QVQ_V4_L18,
+            FORMAT.QVQ_DUAL_V2,
+            FORMAT.QVQ_V2B4_P64,
+        )
     )
 
 
@@ -966,7 +974,13 @@ def _quantized_weight_suffix(qcfg: QuantizeConfig) -> str:
     format_code = resolve_quant_format(qcfg.format, qcfg.method)
     return (
         ".trellis"
-        if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2)
+        if format_code in (
+            FORMAT.QVQ,
+            FORMAT.QVQ_V4,
+            FORMAT.QVQ_V4_L18,
+            FORMAT.QVQ_DUAL_V2,
+            FORMAT.QVQ_V2B4_P64,
+        )
         else ".qweight"
     )
 
