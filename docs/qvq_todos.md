@@ -391,6 +391,46 @@ W2 prefix has poor information return: the next decisive experiment is an indepe
 followed by the same locked ARC/GSM8K gates, rather than further prompt or candidate selection on these development
 rows.
 
+#### P4 target-Fisher seed replication
+
+The next gate changed the layer-1 Q/K YAQA Sketch-B cache from Fisher seed 1 to seed 0 while holding the exact
+layer-0 W2 packed prefix, model snapshot, RHT/quantization seed, row splits, and P4 rank/alpha search fixed. This is
+an intentionally controlled **target-factor seed replication**, not a whole-prefix seed replication: rebuilding
+layer 0 would change both the upstream quantized activations and the target factors and would therefore confound the
+question being tested. Both caches contain 512 independent `neuralmagic/calibration` rows from `[1024,1536)` and
+163,324 valid tokens; only the Sketch-B sampling seed differs.
+
+Layer-1 `q_proj` ordinary YAQA took 310.65 seconds. Its P4 search over ranks 8/16/32, alphas 0.25/0.5/1.0, and at
+most eight localized P32 segments took 339.62 seconds and accepted a one-state proposal with selector churn
+`7.6294e-6`. Layer-1 `k_proj`, conditioned on the selected Q artifact for each coordinate path, took 71.90 seconds
+for ordinary YAQA and 79.07 seconds for P4. K's proposal had zero selector churn and failed confirmation, so its
+exact ordinary-YAQA rollback artifact was serialized. This is evidence that P4's candidate generator frequently
+remains in the same discrete basin; acceptance must not be inferred merely from running the spectral search.
+
+The first locked comparison used the same fresh rows `[1698,1762)` as the seed-1 gate: 64 full, untruncated,
+batch-1 rows containing 23,093 valid tokens. Both paths quantized the same six modules; only the seed-0 Q proposal
+and the K coordinate re-encoded under its corresponding Q differed.
+
+| Seed-0 four-layer arm | Final KL | Top-1 | Top-5 | Top-10 |
+| --- | ---: | ---: | ---: | ---: |
+| ordinary YAQA Q/K | 0.0103252763 | 89.1268% | 89.9518% | 90.3582% |
+| P4 coordinate path | 0.0103286730 | 89.1441% | 89.9587% | 90.3717% |
+| P4 minus ordinary | +0.0329% | +0.0174 pp | +0.0069 pp | +0.0135 pp |
+
+The complete 16-layer comparison then used disjoint rows `[1762,1826)` and the same two serialized coordinate
+paths. It produced `KL -4.3817e-7`, Top-1 `-0.0184` points, Top-5 `-0.0138` points, and Top-10 `-0.0009` points for
+P4 versus ordinary YAQA. Thus the four-layer KL sign reverses after full propagation while the Top-N signs reverse
+in the other direction. All changes are minute.
+
+The seed-1 four-layer gate had improved KL by `1.2596e-5`; seed 0 worsened it by `3.3967e-6`. At the full-model
+horizon seed 1 improved KL by `5.1879e-6`, while seed 0 improved it by only `4.3817e-7`, and neither seed produced a
+consistent Top-1/5/10 direction. The effect is therefore seed-sensitive and near the measurement/decision boundary,
+not a replicated recovery signal. Together with the one-net-rescue ARC result and one-net-rescue 64-row flexible
+GSM8K diagnostic, this closes the current P4 promotion gate as **neutral/negative evidence**. Keep P4 available as a
+diagnostic candidate generator, but do not enable it by default or spend a full task sweep on this formulation.
+Future spectral work must first demonstrate materially larger selector/path churn and a predeclared, seed-stable
+held-out gain before task evaluation.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
