@@ -5,12 +5,14 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.config import FORMAT, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import (
-    QVQQuantizationTelemetry,
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+    QVQQuantizationTelemetry,
     block_ldlq_inner,
     fixed_boundary_v2b2_p32_segment_quantize,
     pack_qvq_binary_bank_ids,
@@ -27,15 +29,21 @@ from gptqmodel.quantization.qvq import (
     yaqa_spectral_push_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
-from scripts.analyze_gptq_low_bit_grid import capture_calibration_hessians, tensor_metrics
+from scripts.analyze_gptq_low_bit_grid import (
+    capture_calibration_hessians,
+    tensor_metrics,
+)
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
     _aggregate_qvq_telemetry,
+    _install_qvq_prefix_artifact,
+    _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
     _padded_batch_chunks,
     _parser,
     _quantized_linear_modules,
+    _save_qvq_prefix_artifact,
     _save_yaqa_factor_cache,
     _shared_input_hessian_groups,
     _streaming_compare_models,
@@ -293,6 +301,87 @@ def test_qvq_banked_yaqa_factor_cache_is_atomic_and_validated(tmp_path):
     assert not tuple(tmp_path.glob(".*.tmp"))
     with pytest.raises(ValueError, match="metadata does not match"):
         _load_yaqa_factor_cache(path, expected_metadata={**metadata, "version": 2})
+
+
+def test_qvq_v2b2_prefix_artifact_round_trips_packed_modules_without_dense_weights(tmp_path):
+    generator = torch.Generator().manual_seed(20260816)
+    source = torch.randn((16, 16), generator=generator) * 0.1
+    result = quantize_qvq_linear(
+        source,
+        torch.eye(16),
+        bits=2,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    path = tmp_path / "prefix.safetensors"
+    provenance = {"model": "tiny", "yaqa_seed": 1, "rows": [1024, 1536]}
+    manifest = _save_qvq_prefix_artifact(
+        path,
+        module_results={"layer.proj": result},
+        bits=2,
+        provenance=provenance,
+    )
+
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        storage_names = list(handle.keys())
+        assert not any(key.endswith((".weight", ".inner_weight")) for key in storage_names)
+    loaded_manifest, payload = _load_qvq_prefix_artifact(path, expected_provenance=provenance)
+    assert loaded_manifest == manifest
+    assert set(payload["layer.proj"]) == {"trellis", "SU", "SV", "bank_ids", "bank_alt_id"}
+    for name, expected in result.serialized_tensors().items():
+        torch.testing.assert_close(payload["layer.proj"][name], expected, rtol=0, atol=0)
+
+    model = torch.nn.Module()
+    model.layer = torch.nn.Module()
+    model.layer.proj = torch.nn.Linear(16, 16, bias=False)
+    replacements = _install_qvq_prefix_artifact(model, manifest=loaded_manifest, module_tensors=payload)
+    assert model.layer.proj is replacements["layer.proj"]
+    assert isinstance(model.layer.proj, QVQLinear)
+    inputs = torch.randn((7, 16), generator=generator)
+    torch.testing.assert_close(model.layer.proj(inputs), inputs @ result.weight.T, rtol=1e-5, atol=1e-6)
+
+    with pytest.raises(ValueError, match="provenance"):
+        _load_qvq_prefix_artifact(path, expected_provenance={**provenance, "yaqa_seed": 2})
+
+    tampered_path = tmp_path / "tampered-prefix.safetensors"
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        metadata = handle.metadata()
+        tensor_names = list(handle.keys())
+        tampered = {name: handle.get_tensor(name) for name in tensor_names}
+    selector_name = "layer.proj.bank_ids"
+    tampered[selector_name] = tampered[selector_name].clone()
+    tampered[selector_name].view(-1)[0] ^= 1
+    save_file(tampered, tampered_path, metadata=metadata)
+    with pytest.raises(ValueError, match="checksum"):
+        _load_qvq_prefix_artifact(tampered_path)
+
+
+def test_qvq_v2b2_prefix_artifact_install_is_transactional_on_geometry_error(tmp_path):
+    generator = torch.Generator().manual_seed(20260817)
+    results = {
+        name: quantize_qvq_linear(
+            torch.randn((16, 16), generator=generator) * 0.1,
+            torch.eye(16),
+            bits=2,
+            bank_count=2,
+            v2b2_p32=True,
+            trellis_batch_size=1,
+        )
+        for name in ("first", "second")
+    }
+    path = tmp_path / "prefix.safetensors"
+    _save_qvq_prefix_artifact(path, module_results=results, bits=2, provenance={"model": "tiny"})
+    manifest, payload = _load_qvq_prefix_artifact(path)
+    model = torch.nn.Module()
+    model.first = torch.nn.Linear(16, 16, bias=False)
+    model.second = torch.nn.Linear(32, 16, bias=False)
+    first = model.first
+
+    with pytest.raises(ValueError, match="does not match the serialized geometry"):
+        _install_qvq_prefix_artifact(model, manifest=manifest, module_tensors=payload)
+    assert model.first is first
+    assert isinstance(model.first, torch.nn.Linear)
 
 
 def test_qvq_streamed_metrics_match_monolithic_kl_and_topn_means():
@@ -1567,4 +1656,3 @@ def test_qvq_v2b2_p32_rejects_invalid_alternative_bank(alt_id):
             v2b2_p32=True,
             bank_alt_id=torch.tensor([alt_id], dtype=torch.uint8),
         )
-    _aggregate_qvq_telemetry,

@@ -198,6 +198,21 @@ candidate generator. It does not justify enabling P4 by default: only one target
 and one live prefix have passed, and no task benchmark has yet confirmed that these sub-percent logit changes recover
 answers.
 
+The research harness now supports a reusable packed prefix artifact so subsequent propagation gates do not need to
+requantize the same upstream modules. The artifact is an atomic safetensors file containing only canonical QVQ
+`trellis`, FP32 `SU`/`SV`, packed `bank_ids`, `bank_alt_id`, and an optional bias. Its versioned manifest records
+format/rate/geometry/provenance plus a SHA-256 for every tensor. Loading rejects mismatched provenance, checksums,
+dtypes, shapes, missing tensors, and unexpected tensors. Installation constructs and validates every `QVQLinear`
+before replacing any dense module, so a later geometry failure leaves the model untouched.
+
+The real seed-1 W2 layer-0 Q/K/V/O prefix required 410.65 seconds to quantize on the Apple host and produced a
+2,721,532-byte artifact. A fresh four-layer shell loaded and installed all four packed modules in 0.0701 seconds;
+the first full-row forward then took 0.1595 seconds. Against the same quantized result replayed through dense
+reconstructed weights on two untouched rows, packed MPS inference had mean KL `6.8142e-6`, maximum logit difference
+`0.0244141`, and 99.6933% Top-1/5/10 agreement. This is bounded FP16 kernel/accumulation drift rather than serialized
+tensor drift: every saved tensor is checksum- and bit-validated before installation. The generated artifact remains
+an untracked experiment output, not a production full-model checkpoint.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

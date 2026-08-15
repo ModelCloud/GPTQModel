@@ -5,17 +5,20 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import math
 import platform
 import time
 import uuid
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 try:
     from analyze_gptq_low_bit_grid import (
@@ -37,15 +40,17 @@ except ModuleNotFoundError:  # Package import used by unit tests.
     )
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import (
+    QVQLinearQuantizationResult,
     QVQQuantizationTelemetry,
     default_qvq_trellis_batch_size,
     prepare_qvq_input_hessian,
     quantize_qvq_linear,
 )
+from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
-
 
 QKVO_SUFFIXES = (
     "self_attn.q_proj",
@@ -62,6 +67,9 @@ MODULE_SCOPE_SUFFIXES = {
     "qkvo": QKVO_SUFFIXES,
     "all-linear": (*QKVO_SUFFIXES, *MLP_SUFFIXES),
 }
+_QVQ_PREFIX_MANIFEST_KEY = "qvq_prefix_manifest"
+_QVQ_PREFIX_SCHEMA_VERSION = 1
+_QVQ_PREFIX_TENSOR_NAMES = frozenset(("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"))
 ARM_CONFIG = {
     "v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": False},
     "v2b2-p32": {
@@ -306,6 +314,248 @@ def _save_yaqa_factor_cache(
         temporary,
     )
     temporary.replace(path)
+
+
+def _tensor_sha256(tensor: torch.Tensor) -> str:
+    """Hash one canonical CPU tensor without changing its dtype or shape."""
+
+    owned = tensor.detach().to(device="cpu").contiguous()
+    return hashlib.sha256(owned.view(torch.uint8).numpy().tobytes()).hexdigest()
+
+
+def _save_qvq_prefix_artifact(
+    path: Path,
+    *,
+    module_results: Mapping[str, QVQLinearQuantizationResult],
+    bits: float,
+    provenance: Mapping[str, object],
+    codebook_version: str = PGC16_CODEBOOK_VERSION,
+) -> dict[str, object]:
+    """Atomically save a reusable packed V2B2-P32 prefix without dense weights."""
+
+    normalized_bits = normalize_qvq_rate(bits)
+    if normalized_bits > 3.5:
+        raise ValueError("QVQ V2B2-P32 prefix artifacts support W1 through W3.5")
+    if not module_results:
+        raise ValueError("QVQ prefix artifacts require at least one quantized module")
+    if not isinstance(provenance, Mapping):
+        raise TypeError("QVQ prefix artifact provenance must be a mapping")
+    try:
+        normalized_provenance = json.loads(json.dumps(dict(provenance), sort_keys=True))
+    except (TypeError, ValueError) as error:
+        raise TypeError("QVQ prefix artifact provenance must be JSON serializable") from error
+
+    stored: dict[str, torch.Tensor] = {}
+    module_manifest: dict[str, object] = {}
+    for module_name, result in sorted(module_results.items()):
+        if not isinstance(module_name, str) or not module_name:
+            raise ValueError("QVQ prefix artifact module names must be non-empty strings")
+        if not isinstance(result, QVQLinearQuantizationResult):
+            raise TypeError(f"QVQ prefix artifact module `{module_name}` has an invalid quantization result")
+        payload = result.serialized_tensors()
+        unexpected = set(payload) - _QVQ_PREFIX_TENSOR_NAMES
+        required = {"trellis", "SU", "SV", "bank_ids", "bank_alt_id"}
+        if unexpected or not required.issubset(payload):
+            raise ValueError(
+                f"QVQ prefix artifact module `{module_name}` has invalid tensors: "
+                f"missing={sorted(required - set(payload))}, unexpected={sorted(unexpected)}"
+            )
+        in_features = int(result.SU.numel())
+        out_features = int(result.SV.numel())
+        tensor_manifest = {}
+        owned_payload = {}
+        for tensor_name, tensor in sorted(payload.items()):
+            owned = tensor.detach().to(device="cpu").contiguous()
+            if owned.is_floating_point() and not torch.isfinite(owned).all():
+                raise ValueError(f"QVQ prefix artifact tensor `{module_name}.{tensor_name}` is non-finite")
+            storage_name = f"{module_name}.{tensor_name}"
+            stored[storage_name] = owned
+            owned_payload[tensor_name] = owned
+            tensor_manifest[tensor_name] = {
+                "dtype": str(owned.dtype),
+                "shape": list(owned.shape),
+                "sha256": _tensor_sha256(owned),
+            }
+        # Validate the exact packed ownership boundary before publishing any
+        # bytes. This catches malformed trellis/selector geometry even when a
+        # caller manually constructs a quantization-result dataclass.
+        QVQLinear(
+            bits=normalized_bits,
+            in_features=in_features,
+            out_features=out_features,
+            tensors={name: tensor.clone() for name, tensor in owned_payload.items()},
+            vector_size=2,
+            trellis_window=16,
+            bank_count=2,
+            v2b2_p32=True,
+        )
+        module_manifest[module_name] = {
+            "in_features": in_features,
+            "out_features": out_features,
+            "bias": "bias" in payload,
+            "tensors": tensor_manifest,
+        }
+
+    manifest = {
+        "schema_version": _QVQ_PREFIX_SCHEMA_VERSION,
+        "format": "qvq_v2b2_p32",
+        "bits": normalized_bits,
+        "vector_size": 2,
+        "trellis_window": 16,
+        "bank_count": 2,
+        "codebook_version": str(codebook_version),
+        "provenance": normalized_provenance,
+        "modules": module_manifest,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp.safetensors")
+    try:
+        save_file(
+            stored,
+            str(temporary),
+            metadata={_QVQ_PREFIX_MANIFEST_KEY: json.dumps(manifest, sort_keys=True, separators=(",", ":"))},
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return manifest
+
+
+def _load_qvq_prefix_artifact(
+    path: Path,
+    *,
+    expected_provenance: Mapping[str, object] | None = None,
+) -> tuple[dict[str, object], dict[str, dict[str, torch.Tensor]]]:
+    """Load and fully validate one packed V2B2-P32 prefix artifact on CPU."""
+
+    with safe_open(str(path), framework="pt", device="cpu") as handle:
+        encoded_manifest = (handle.metadata() or {}).get(_QVQ_PREFIX_MANIFEST_KEY)
+        if encoded_manifest is None:
+            raise ValueError(f"QVQ prefix artifact has no manifest: {path}")
+        try:
+            manifest = json.loads(encoded_manifest)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"QVQ prefix artifact manifest is invalid JSON: {path}") from error
+        if not isinstance(manifest, dict):
+            raise TypeError(f"QVQ prefix artifact manifest must be an object: {path}")
+        fixed_contract = {
+            "schema_version": _QVQ_PREFIX_SCHEMA_VERSION,
+            "format": "qvq_v2b2_p32",
+            "vector_size": 2,
+            "trellis_window": 16,
+            "bank_count": 2,
+        }
+        for field, expected in fixed_contract.items():
+            if manifest.get(field) != expected:
+                raise ValueError(f"QVQ prefix artifact has unsupported `{field}`: {manifest.get(field)!r}")
+        bits = normalize_qvq_rate(manifest.get("bits"))
+        if bits > 3.5:
+            raise ValueError("QVQ prefix artifact rate exceeds the V2B2-P32 contract")
+        if expected_provenance is not None:
+            try:
+                normalized_expected_provenance = json.loads(json.dumps(dict(expected_provenance), sort_keys=True))
+            except (TypeError, ValueError) as error:
+                raise TypeError("expected QVQ prefix provenance must be JSON serializable") from error
+            if manifest.get("provenance") != normalized_expected_provenance:
+                raise ValueError(f"QVQ prefix artifact provenance does not match this run: {path}")
+        modules = manifest.get("modules")
+        if not isinstance(modules, dict) or not modules:
+            raise ValueError(f"QVQ prefix artifact has no module manifest: {path}")
+
+        storage_names = set(handle.keys())
+        expected_storage_names = set()
+        loaded: dict[str, dict[str, torch.Tensor]] = {}
+        for module_name, module_spec in modules.items():
+            if not isinstance(module_name, str) or not isinstance(module_spec, dict):
+                raise TypeError("QVQ prefix artifact module manifest is malformed")
+            in_features = module_spec.get("in_features")
+            out_features = module_spec.get("out_features")
+            if (
+                isinstance(in_features, bool)
+                or not isinstance(in_features, int)
+                or in_features < 16
+                or in_features % 16
+                or isinstance(out_features, bool)
+                or not isinstance(out_features, int)
+                or out_features < 16
+                or out_features % 16
+                or not isinstance(module_spec.get("bias"), bool)
+            ):
+                raise ValueError(f"QVQ prefix artifact module `{module_name}` has invalid geometry metadata")
+            tensor_specs = module_spec.get("tensors")
+            if not isinstance(tensor_specs, dict):
+                raise TypeError(f"QVQ prefix artifact module `{module_name}` has no tensor manifest")
+            required = {"trellis", "SU", "SV", "bank_ids", "bank_alt_id"}
+            if not required.issubset(tensor_specs) or set(tensor_specs) - _QVQ_PREFIX_TENSOR_NAMES:
+                raise ValueError(f"QVQ prefix artifact module `{module_name}` has an invalid tensor set")
+            loaded[module_name] = {}
+            for tensor_name, tensor_spec in tensor_specs.items():
+                storage_name = f"{module_name}.{tensor_name}"
+                expected_storage_names.add(storage_name)
+                if not isinstance(tensor_spec, dict) or storage_name not in storage_names:
+                    raise ValueError(f"QVQ prefix artifact tensor `{storage_name}` is missing or malformed")
+                tensor = handle.get_tensor(storage_name).contiguous()
+                if str(tensor.dtype) != tensor_spec.get("dtype") or list(tensor.shape) != tensor_spec.get("shape"):
+                    raise ValueError(f"QVQ prefix artifact tensor `{storage_name}` violates its dtype/shape manifest")
+                if _tensor_sha256(tensor) != tensor_spec.get("sha256"):
+                    raise ValueError(f"QVQ prefix artifact tensor `{storage_name}` failed checksum validation")
+                if tensor.is_floating_point() and not torch.isfinite(tensor).all():
+                    raise ValueError(f"QVQ prefix artifact tensor `{storage_name}` is non-finite")
+                loaded[module_name][tensor_name] = tensor
+        if storage_names != expected_storage_names:
+            raise ValueError("QVQ prefix artifact contains unexpected serialized tensors")
+    return manifest, loaded
+
+
+def _install_qvq_prefix_artifact(
+    model: torch.nn.Module,
+    *,
+    manifest: Mapping[str, object],
+    module_tensors: Mapping[str, Mapping[str, torch.Tensor]],
+) -> dict[str, QVQLinear]:
+    """Transactionally replace matching dense modules with validated packed QVQLinear modules."""
+
+    modules = manifest.get("modules")
+    if not isinstance(modules, Mapping) or set(modules) != set(module_tensors):
+        raise ValueError("QVQ prefix artifact module payload does not match its manifest")
+    bits = normalize_qvq_rate(manifest.get("bits"))
+    replacements = {}
+    for module_name, module_spec in modules.items():
+        current = model.get_submodule(module_name)
+        if not isinstance(current, torch.nn.Linear):
+            raise TypeError(f"QVQ prefix target `{module_name}` is not a dense torch.nn.Linear")
+        if (
+            not isinstance(module_spec, Mapping)
+            or current.in_features != module_spec.get("in_features")
+            or current.out_features != module_spec.get("out_features")
+            or (current.bias is not None) != module_spec.get("bias")
+        ):
+            raise ValueError(f"QVQ prefix target `{module_name}` does not match the serialized geometry")
+        device = current.weight.device
+        dtype = current.weight.dtype
+        tensors = {name: tensor.to(device=device) for name, tensor in module_tensors[module_name].items()}
+        replacement = QVQLinear(
+            bits=bits,
+            in_features=current.in_features,
+            out_features=current.out_features,
+            name=module_name,
+            tensors=tensors,
+            dtype=dtype,
+            out_dtype=dtype,
+            codebook_version=str(manifest.get("codebook_version")),
+            vector_size=2,
+            trellis_window=16,
+            bank_count=2,
+            v2b2_p32=True,
+        ).train(current.training)
+        replacement.post_init()
+        replacements[module_name] = replacement
+
+    for module_name, replacement in replacements.items():
+        parent_name, _, child_name = module_name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, child_name, replacement)
+    return replacements
 
 
 def _quantized_linear_modules(
