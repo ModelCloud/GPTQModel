@@ -31,6 +31,8 @@ from ..quantization.qvq_rates import (
 QVQ_MLX_BITS = QVQ_BITS
 _KERNEL: Any | None = None
 _KERNEL_ERROR: str | None = None
+_DUAL_V2_KERNEL: Any | None = None
+_DUAL_V2_KERNEL_ERROR: str | None = None
 _KERNEL_LOCK = threading.Lock()
 _V4_KERNEL: Any | None = None
 _V4_KERNEL_ERROR: str | None = None
@@ -101,8 +103,14 @@ inline uint qpt(device const int* p,uint edge,uint eb){uint block=edge>>5,lane=e
     v|=code<<off;rem-=w;row+=w;off+=w;}return v;}
 inline uint qstate(device const int* tile,uint pair,uint eb){uint count=(15+eb)/eb,first=(pair+128-count+1)&127,s=0;
   for(uint j=0;j<count;++j){uint edge=(first+j)&127;s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}return s;}
+inline uint qstated(device const int* tile,uint pair,uint eb){uint chain=pair&1u,step=pair>>1;
+  uint count=(15+eb)/eb,first=(step+64-count+1)&63,s=0;
+  for(uint j=0;j<count;++j){uint edge=(((first+j)&63u)<<1)|chain;
+    s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}return s;}
 inline uint qstate4(device const int* tile,uint vec,uint eb){uint count=(15+eb)/eb,first=(vec+64-count+1)&63,s=0;
   for(uint j=0;j<count;++j){uint edge=(first+j)&63;s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}return s;}
+inline uint qstate4l18(device const int* tile,uint vec,uint eb){uint count=(17+eb)/eb,first=(vec+64-count+1)&63,s=0;
+  for(uint j=0;j<count;++j){uint edge=(first+j)&63;s=((s<<eb)|qpt(tile,edge,eb))&0x3ffffu;}return s;}
 inline uint qstate4e4(device const int* tile,uint vec){uint first=(vec+61)&63,s=0;
   for(uint j=0;j<4;++j){uint edge=(first+j)&63,block=edge>>5,lane=edge&31;
     uint word=as_type<uint>(tile[block*4+lane/8]);s=(s<<4)|((word>>(4*(lane&7)))&15u);}return s;}
@@ -120,8 +128,13 @@ inline float4 qlevels4b(device const half* levels,uint s,uint bank,uint eb){uint
   p0=(p0*40503u+17011u)&0xffffu;p0^=p0>>7;uint p1=s^uint(qbank_masks[(eb-4u)>>1][bank]);
   p1^=p1>>8;p1=(p1*40503u+17011u)&0xffffu;p1^=p1>>7;
   return float4(float(levels[p0>>8]),float(levels[p0&255u]),float(levels[p1>>8]),float(levels[p1&255u]));}
+inline float4 qlevels4l18(device const half* levels,uint s,uint eb){
+  return qlevels4b(levels,s&0xffffu,s>>16,eb);}
 inline float2 qpair(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
   uint tile=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),s=qstate(t+tile*(4*eb),local>>1,eb);
+  return qlevels(levels,s);}
+inline float2 qpaird(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
+  uint tile=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),s=qstated(t+tile*(4*eb),local>>1,eb);
   return qlevels(levels,s);}
 inline float4 qquad(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
   uint ti=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),pair=local>>1;
@@ -131,6 +144,9 @@ inline float4 qquad(device const int* t,device const half* levels,uint k,uint n,
 inline float4 qquad4(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
   uint ti=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),s=qstate4(t+ti*(2*eb),local>>2,eb);
   return qlevels4(levels,s);}
+inline float4 qquad4l18(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
+  uint ti=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),s=qstate4l18(t+ti*(2*eb),local>>2,eb);
+  return qlevels4l18(levels,s,eb);}
 inline float4 qquad4b(device const int* t,constant const uchar* ids,device const half* levels,
     uint k,uint n,uint N,uint eb){uint ti=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15);
   uint s=qstate4(t+ti*(2*eb),local>>2,eb);return qlevels4b(levels,s,qbank(ids,ti),eb);}
@@ -218,11 +234,14 @@ _V4_N4_E4_SOURCE = _V4_N4_SOURCE.replace("qquad4(trellis,levels,k,n,N,eb", "qqua
 _V4_N4_BANKED_SOURCE = _V4_N4_SOURCE.replace(
     "qquad4(trellis,levels,", "qquad4b(trellis,bank_ids,levels,"
 )
+_V4_N4_L18_SOURCE = _V4_N4_SOURCE.replace("qquad4(trellis,levels,", "qquad4l18(trellis,levels,")
 
 _FP32_SOURCE = _SOURCE.replace(
     "out[m*N+n]=half(sum0);out[m*N+n+1]=half(sum1);",
     "out[m*N+n]=sum0;out[m*N+n+1]=sum1;",
 )
+_DUAL_V2_SOURCE = _SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
+_DUAL_V2_FP32_SOURCE = _FP32_SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
 _V4_N4_FP32_SOURCE = _V4_N4_SOURCE.replace(
     "*reinterpret_cast<device half4*>(out+m*N+n)=half4(sum);",
     "*reinterpret_cast<device float4*>(out+m*N+n)=sum;",
@@ -230,6 +249,7 @@ _V4_N4_FP32_SOURCE = _V4_N4_SOURCE.replace(
 _V4_N4_BANKED_FP32_SOURCE = _V4_N4_FP32_SOURCE.replace(
     "qquad4(trellis,levels,", "qquad4b(trellis,bank_ids,levels,"
 )
+_V4_N4_L18_FP32_SOURCE = _V4_N4_FP32_SOURCE.replace("qquad4(trellis,levels,", "qquad4l18(trellis,levels,")
 
 _V4_BANKED_SOURCE = _V4_SOURCE.replace("qwide4(trellis,levels,", "qwide4b(trellis,bank_ids,levels,")
 
@@ -457,6 +477,30 @@ def _kernel():
     return _KERNEL
 
 
+def _dual_v2_kernel():
+    global _DUAL_V2_KERNEL, _DUAL_V2_KERNEL_ERROR
+    if _DUAL_V2_KERNEL is None:
+        with _KERNEL_LOCK:
+            if _DUAL_V2_KERNEL is None:
+                if _DUAL_V2_KERNEL_ERROR is not None:
+                    raise RuntimeError(_DUAL_V2_KERNEL_ERROR)
+                import mlx.core as mx
+
+                try:
+                    _DUAL_V2_KERNEL = mx.fast.metal_kernel(
+                        name="gptqmodel_qvq_planar_dual_v2",
+                        input_names=["x", "trellis", "levels", "dims"],
+                        output_names=["out"],
+                        header=_HEADER,
+                        source=_DUAL_V2_SOURCE,
+                        ensure_row_contiguous=True,
+                    )
+                except Exception as exc:
+                    _DUAL_V2_KERNEL_ERROR = f"QVQ Dual-V2 MLX kernel creation failed: {exc}"
+                    raise RuntimeError(_DUAL_V2_KERNEL_ERROR) from exc
+    return _DUAL_V2_KERNEL
+
+
 def _fp32_kernel(kind: str):
     """Range-preserving scalar-row kernel used by full QVQ epilogues."""
 
@@ -474,12 +518,18 @@ def _fp32_kernel(kind: str):
         if kind == "v2":
             input_names = ["x", "trellis", "levels", "dims"]
             source = _FP32_SOURCE
+        elif kind == "dual_v2":
+            input_names = ["x", "trellis", "levels", "dims"]
+            source = _DUAL_V2_FP32_SOURCE
         elif kind == "v4":
             input_names = ["x", "trellis", "levels", "dims"]
             source = _V4_N4_FP32_SOURCE
         elif kind == "v4_banked":
             input_names = ["x", "trellis", "bank_ids", "levels", "dims"]
             source = _V4_N4_BANKED_FP32_SOURCE
+        elif kind == "v4_l18":
+            input_names = ["x", "trellis", "levels", "dims"]
+            source = _V4_N4_L18_FP32_SOURCE
         else:
             raise ValueError(f"unknown QVQ MLX FP32 kernel kind: {kind}")
         try:
@@ -588,7 +638,7 @@ def _v4_n32_kernel(kind: str):
 
 
 def _v4_n4_kernel(kind: str):
-    if kind not in ("generic", "e4", "banked"):
+    if kind not in ("generic", "e4", "banked", "l18"):
         raise ValueError(f"Unknown QVQ V4 MLX N4 kernel kind: {kind}")
     kernel = _V4_N4_KERNELS.get(kind)
     if kernel is not None:
@@ -602,7 +652,12 @@ def _v4_n4_kernel(kind: str):
             raise RuntimeError(error)
         import mlx.core as mx
 
-        source_by_kind = {"generic": _V4_N4_SOURCE, "e4": _V4_N4_E4_SOURCE, "banked": _V4_N4_BANKED_SOURCE}
+        source_by_kind = {
+            "generic": _V4_N4_SOURCE,
+            "e4": _V4_N4_E4_SOURCE,
+            "banked": _V4_N4_BANKED_SOURCE,
+            "l18": _V4_N4_L18_SOURCE,
+        }
         input_names = ["x", "trellis", "levels", "dims"]
         if kind == "banked":
             input_names.insert(2, "bank_ids")
@@ -1035,6 +1090,8 @@ def qvq_mlx_gemv(
     out_features: int,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     vector_size: int = 2,
+    trellis_window: int = 16,
+    dual_v2: bool = False,
     bank_ids=None,
     output_fp32: bool = False,
     _prepared_compander: _QVQMLXPreparedCompander | None = None,
@@ -1046,10 +1103,23 @@ def qvq_mlx_gemv(
     bits = normalize_qvq_rate(bits)
     if not isinstance(output_fp32, bool):
         raise TypeError("QVQ MLX output_fp32 must be a bool")
+    if not isinstance(dual_v2, bool):
+        raise TypeError("QVQ MLX dual_v2 must be a bool")
     if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
         raise ValueError("QVQ MLX vector_size must be 2, or 4 for rates W1 through W4")
+    trellis_window = _integer_argument(trellis_window, "trellis_window")
+    if trellis_window not in (16, 18):
+        raise ValueError("QVQ MLX trellis_window must be 16 or 18")
+    if trellis_window == 18 and vector_size != 4:
+        raise ValueError("QVQ MLX L18 requires vector_size=4")
+    if trellis_window == 18 and bits > 2.5:
+        raise ValueError("QVQ MLX L18 supports only rates W1 through W2.5")
+    if trellis_window == 18 and bank_ids is not None:
+        raise ValueError("QVQ MLX L18 uses implicit history-selected banks and rejects bank_ids")
     if bank_ids is not None and vector_size != 4:
         raise ValueError("QVQ MLX bank selectors require vector_size=4")
+    if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
+        raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     if x.ndim != 2 or trellis.ndim != 2:
         raise ValueError("QVQ MLX expects 2D x and trellis arrays")
@@ -1080,7 +1150,17 @@ def qvq_mlx_gemv(
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
     if output_fp32:
-        kind = "v4_banked" if bank_ids is not None else "v4" if vector_size == 4 else "v2"
+        kind = (
+            "dual_v2"
+            if dual_v2
+            else "v4_l18"
+            if trellis_window == 18
+            else "v4_banked"
+            if bank_ids is not None
+            else "v4"
+            if vector_size == 4
+            else "v2"
+        )
         inputs = [x, trellis, levels, _dims_array(m, k, n, transition_bits)]
         if bank_ids is not None:
             inputs.insert(2, bank_ids)
@@ -1091,6 +1171,24 @@ def qvq_mlx_gemv(
             threadgroup=(32, 1, 1),
             output_shapes=[(m, n)],
             output_dtypes=[mx.float32],
+        )[0]
+    if dual_v2:
+        return _dual_v2_kernel()(
+            inputs=[x, trellis, levels, _dims_array(m, k, n, transition_bits)],
+            template=[("EdgeBits", transition_bits)],
+            grid=(m * (n // 2) * 32, 1, 1),
+            threadgroup=(32, 1, 1),
+            output_shapes=[(m, n)],
+            output_dtypes=[mx.float16],
+        )[0]
+    if trellis_window == 18:
+        return _v4_n4_kernel("l18")(
+            inputs=[x, trellis, levels, _dims_array(m, k, n, transition_bits)],
+            template=[("EdgeBits", transition_bits)],
+            grid=(m * (n // 4) * 32, 1, 1),
+            threadgroup=(32, 1, 1),
+            output_shapes=[(m, n)],
+            output_dtypes=[mx.float16],
         )[0]
     if bank_ids is not None:
         if _v4_use_mma(m, n):
@@ -1247,6 +1345,8 @@ if _mlx_nn is not None:
             bias=None,
             codebook_version: str = PGC16_CODEBOOK_VERSION,
             vector_size: int = 2,
+            trellis_window: int = 16,
+            dual_v2: bool = False,
             bank_ids=None,
         ):
             super().__init__()
@@ -1257,6 +1357,20 @@ if _mlx_nn is not None:
             self.out_features = _integer_argument(out_features, "out_features")
             self.codebook_version = str(codebook_version).strip().lower()
             self.vector_size = _integer_argument(vector_size, "vector_size")
+            self.trellis_window = _integer_argument(trellis_window, "trellis_window")
+            if not isinstance(dual_v2, bool):
+                raise TypeError("QVQ MLX dual_v2 must be a bool")
+            self.dual_v2 = dual_v2
+            if self.trellis_window not in (16, 18):
+                raise ValueError("QVQ MLX trellis_window must be 16 or 18")
+            if self.trellis_window == 18 and self.vector_size != 4:
+                raise ValueError("QVQ MLX L18 requires vector_size=4")
+            if self.trellis_window == 18 and self.bits > 2.5:
+                raise ValueError("QVQ MLX L18 supports only rates W1 through W2.5")
+            if self.trellis_window == 18 and bank_ids is not None:
+                raise ValueError("QVQ MLX L18 uses implicit history-selected banks and rejects bank_ids")
+            if self.dual_v2 and (self.vector_size != 2 or self.trellis_window != 16 or bank_ids is not None):
+                raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
             self.trellis = trellis.astype(mx.int32)
             self.SU = SU.astype(mx.float32)
             self.SV = SV.astype(mx.float32)
@@ -1299,6 +1413,8 @@ if _mlx_nn is not None:
                 out_features=self.out_features,
                 codebook_version=self.codebook_version,
                 vector_size=self.vector_size,
+                trellis_window=self.trellis_window,
+                dual_v2=self.dual_v2,
                 bank_ids=self.bank_ids,
                 output_fp32=True,
             )

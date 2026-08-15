@@ -175,6 +175,8 @@ class QVQLinear(BaseQuantLinear):
     SUPPORTS_FORMAT_BIT_MAP: ClassVar[dict[FORMAT, FormatSupport]] = {
         FORMAT.QVQ: FormatSupport(priority=100, bits=QVQ_BITS),
         FORMAT.QVQ_V4: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 4)),
+        FORMAT.QVQ_V4_L18: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
+        FORMAT.QVQ_DUAL_V2: FormatSupport(priority=100, bits=QVQ_BITS),
     }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
@@ -215,7 +217,9 @@ class QVQLinear(BaseQuantLinear):
         out_dtype: torch.dtype = torch.float16,
         codebook_version: str = PGC16_CODEBOOK_VERSION,
         vector_size: int = 2,
+        trellis_window: int = 16,
         bank_count: int = 1,
+        dual_v2: bool = False,
         **kwargs,
     ):
         del kwargs
@@ -236,7 +240,16 @@ class QVQLinear(BaseQuantLinear):
                 "desc_act": desc_act,
                 "sym": sym,
                 "pack_dtype": pack_dtype,
-                "format": FORMAT.QVQ_V4 if vector_size == 4 else FORMAT.QVQ,
+                "format": (
+                    FORMAT.QVQ_DUAL_V2
+                    if dual_v2
+                    else
+                    FORMAT.QVQ_V4_L18
+                    if trellis_window == 18
+                    else FORMAT.QVQ_V4
+                    if vector_size == 4
+                    else FORMAT.QVQ
+                ),
             },
         )
         self.group_size = group_size
@@ -248,6 +261,20 @@ class QVQLinear(BaseQuantLinear):
         if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
             raise ValueError("QVQ vector_size must be 2, or 4 for rates W1 through W4.")
         self.vector_size = vector_size
+        if trellis_window not in (16, 18):
+            raise ValueError("QVQ trellis_window must be 16 or 18")
+        if trellis_window == 18 and vector_size != 4:
+            raise ValueError("QVQ L18 requires vector_size=4")
+        if trellis_window == 18 and self.bits > 2.5:
+            raise ValueError("QVQ L18 supports only rates W1 through W2.5")
+        if trellis_window == 18 and bank_count != 1:
+            raise ValueError("QVQ L18 uses implicit history-selected banks and requires bank_count=1")
+        self.trellis_window = trellis_window
+        if not isinstance(dual_v2, bool):
+            raise TypeError("QVQ dual_v2 must be a bool")
+        if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_count != 1):
+            raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and bank_count=1")
+        self.dual_v2 = dual_v2
         if isinstance(bank_count, bool) or not isinstance(bank_count, int) or bank_count not in (1, 4):
             raise ValueError("QVQ bank_count must be 1 or 4")
         if bank_count == 4 and vector_size != 4:
@@ -373,7 +400,11 @@ class QVQLinear(BaseQuantLinear):
             (args.get("group_size", -1) == -1, "group_size=-1"),
             (args.get("desc_act", False) is False, "desc_act=False"),
             (args.get("sym", True) is True, "sym=True"),
-            (args.get("format", FORMAT.QVQ) in (FORMAT.QVQ, FORMAT.QVQ_V4), "format=qvq or qvq_v4"),
+            (
+                args.get("format", FORMAT.QVQ)
+                in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2),
+                "format=qvq, qvq_v4, qvq_v4_l18, or qvq_dual_v2",
+            ),
         )
         for accepted, requirement in checks:
             if not accepted:
@@ -395,7 +426,9 @@ class QVQLinear(BaseQuantLinear):
         tensors: dict[str, torch.Tensor],
         codebook_version: str = PGC16_CODEBOOK_VERSION,
         vector_size: int = 2,
+        trellis_window: int = 16,
         bank_count: int = 1,
+        dual_v2: bool = False,
     ) -> QVQLinear:
         return cls(
             bits=bits,
@@ -405,7 +438,9 @@ class QVQLinear(BaseQuantLinear):
             tensors=tensors,
             codebook_version=codebook_version,
             vector_size=vector_size,
+            trellis_window=trellis_window,
             bank_count=bank_count,
+            dual_v2=dual_v2,
         )
 
     def _validate_tensors(self) -> None:
@@ -538,10 +573,12 @@ class QVQLinear(BaseQuantLinear):
             self.trellis,
             bits=self.bits,
             vector_size=self.vector_size,
+            trellis_window=self.trellis_window,
             in_features=self.in_features,
             out_features=self.out_features,
             codebook_version=self.codebook_version,
             bank_ids=self.bank_ids,
+            dual_v2=self.dual_v2,
         ).to(dtype=dtype)
 
     def _reference_inner_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -570,7 +607,7 @@ class QVQLinear(BaseQuantLinear):
                 qvq_mps_supported,
             )
 
-            if not qvq_mps_supported():
+            if self.trellis_window != 16 or self.dual_v2 or not qvq_mps_supported():
                 return self._reference_inner_forward(x)
 
             prepared = getattr(self, "_qvq_mps_compander", None)
@@ -605,7 +642,7 @@ class QVQLinear(BaseQuantLinear):
             # Native GEMV intentionally supports FP16/BF16 inputs. FP32 has no
             # packed native specialization and remains on the dense reference
             # path; BF16 reaches native GEMV below.
-            if x.dtype == torch.float32:
+            if self.trellis_window != 16 or self.dual_v2 or x.dtype == torch.float32:
                 return self._reference_inner_forward(x)
 
             cuda_bank_ids = None

@@ -27,6 +27,8 @@ from .qvq_codecs import (
     pgc16_codebook_v4_bank,
     pgc16_levels_for_version,
     pgc16_scale_factor,
+    pgc18_codebook_v4,
+    pgc18_decode_states_v4,
 )
 from .qvq_rates import (
     QVQ_BITS as _QVQ_BITS,
@@ -43,7 +45,7 @@ QVQ_BITS = _QVQ_BITS
 _QVQ_LOW_RATE_OUTPUT_SCALE_STRENGTH = 0.5
 _QVQ_PROPAGATION_DELTA_CACHE_BYTES = 256 * 1024 * 1024
 _QVQ_CODEBOOK_CACHE_LOCK = threading.Lock()
-_QVQ_CODEBOOK_CACHE: dict[tuple[str, int, str, torch.dtype], torch.Tensor] = {}
+_QVQ_CODEBOOK_CACHE: dict[tuple[str, int, int, float, str, torch.dtype], torch.Tensor] = {}
 _QVQ_V4_BANK_CACHE: dict[tuple[str, float, str, torch.dtype], tuple[torch.Tensor, ...]] = {}
 _QVQ_V4_BANK_STACK_CACHE: dict[tuple[str, float, str, torch.dtype], torch.Tensor] = {}
 
@@ -52,6 +54,8 @@ def _canonical_qvq_codebook(
     *,
     device: torch.device,
     vector_size: int,
+    trellis_window: int = 16,
+    bits: float = 2.0,
     codebook_version: str,
     dtype: torch.dtype,
 ) -> torch.Tensor:
@@ -63,17 +67,26 @@ def _canonical_qvq_codebook(
     instead of retaining one table and norm buffer per module.
     """
 
-    key = (str(device), vector_size, codebook_version, dtype)
+    # L16's canonical codebook is rate-independent. L18 embeds the rate-keyed
+    # bank masks in its reconstruction manifold and therefore needs one cache
+    # entry per rate.
+    rate_key = float(bits) if trellis_window == 18 else 0.0
+    key = (str(device), vector_size, trellis_window, rate_key, codebook_version, dtype)
     with _QVQ_CODEBOOK_CACHE_LOCK:
         cached = _QVQ_CODEBOOK_CACHE.get(key)
         if cached is not None:
             return cached
         levels = pgc16_levels_for_version(codebook_version).to(device=device)
-        codebook = (
-            pgc16_codebook(device=device, dtype=dtype, levels=levels)
-            if vector_size == 2
-            else pgc16_codebook_v4(device=device, dtype=dtype, levels=levels)
-        )
+        if trellis_window == 18:
+            if vector_size != 4:
+                raise ValueError("QVQ L18 currently requires vector_size=4.")
+            codebook = pgc18_codebook_v4(bits=bits, device=device, dtype=dtype, levels=levels)
+        else:
+            codebook = (
+                pgc16_codebook(device=device, dtype=dtype, levels=levels)
+                if vector_size == 2
+                else pgc16_codebook_v4(device=device, dtype=dtype, levels=levels)
+            )
         _QVQ_CODEBOOK_CACHE[key] = codebook
         return codebook
 
@@ -618,6 +631,56 @@ def unpack_trellis_states(
     return (bits_i64.to(torch.int64) << state_shifts).sum(dim=-1).contiguous()
 
 
+def _states_from_circular_edges(edges: torch.Tensor, *, shift: int, trellis_window: int) -> torch.Tensor:
+    """Recover circular states from one logical edge stream."""
+
+    edge_count = edges.shape[-1]
+    total_bits = edge_count * shift
+    step_ids = torch.arange(edge_count, dtype=torch.int64, device=edges.device)
+    state_bits = torch.arange(trellis_window, dtype=torch.int64, device=edges.device)
+    offsets = ((step_ids[:, None] + 1) * shift - trellis_window + state_bits[None, :]) % total_bits
+    selected = edges[..., offsets // shift]
+    bits_i64 = (selected >> (shift - 1 - offsets % shift)) & 1
+    state_shifts = torch.arange(trellis_window - 1, -1, -1, dtype=torch.int64, device=edges.device)
+    return (bits_i64.to(torch.int64) << state_shifts).sum(dim=-1).contiguous()
+
+
+def unpack_dual_v2_states(trellis: torch.Tensor, *, bits: float) -> torch.Tensor:
+    """Recover two interleaved circular L16/V2 state paths from one planar tile."""
+
+    shift = qvq_transition_bits(bits, vector_size=2)
+    if trellis.dtype != torch.int32:
+        raise TypeError(f"QVQ planar trellis words must use torch.int32, got {trellis.dtype}.")
+    if trellis.ndim < 1 or trellis.shape[-1] != qvq_words_per_tile(bits, vector_size=2):
+        raise ValueError("QVQ Dual-V2 trellis has an invalid planar word count.")
+    columns = trellis.reshape(-1, trellis.shape[-1]).transpose(0, 1).contiguous()
+    edges = planar_unpack_rows(columns, shift).transpose(0, 1)
+    edges = edges.reshape(*trellis.shape[:-1], 128).to(torch.int64)
+    first = _states_from_circular_edges(edges[..., 0::2], shift=shift, trellis_window=16)
+    second = _states_from_circular_edges(edges[..., 1::2], shift=shift, trellis_window=16)
+    states = torch.empty((*edges.shape[:-1], 128), dtype=torch.int64, device=trellis.device)
+    states[..., 0::2] = first
+    states[..., 1::2] = second
+    return states
+
+
+def pack_dual_v2_states(states: torch.Tensor, *, bits: float) -> torch.Tensor:
+    """Pack two interleaved circular L16/V2 paths without adding payload bits."""
+
+    shift = qvq_transition_bits(bits, vector_size=2)
+    if states.ndim < 1 or states.shape[-1] != 128:
+        raise ValueError("QVQ Dual-V2 state streams must contain exactly 128 interleaved pair states per tile.")
+    states_i64 = states.to(torch.int64)
+    if torch.any((states_i64 < 0) | (states_i64 >= 1 << 16)):
+        raise ValueError("QVQ Dual-V2 states must be in [0, 65535].")
+    edges = states_i64 & ((1 << shift) - 1)
+    packed = planar_pack_rows(edges.reshape(-1, 128).transpose(0, 1).contiguous(), shift)
+    packed = packed.transpose(0, 1).reshape(*states.shape[:-1], -1).contiguous()
+    if not torch.equal(unpack_dual_v2_states(packed, bits=bits), states_i64):
+        raise ValueError("QVQ Dual-V2 states must form two transition-consistent tail-biting paths.")
+    return packed
+
+
 def decode_trellis_tiles(
     trellis: torch.Tensor,
     *,
@@ -626,20 +689,39 @@ def decode_trellis_tiles(
     trellis_window: int = 16,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     bank_ids: torch.Tensor | None = None,
+    dual_v2: bool = False,
 ) -> torch.Tensor:
     """Decode packed PGC16 QVQ tiles to scalar values in row-major order."""
 
-    if vector_size not in (2, 4) or trellis_window != 16:
-        raise ValueError("PGC16 requires `trellis_window=16` and `vector_size` 2 or 4.")
+    if not isinstance(dual_v2, bool):
+        raise TypeError("QVQ dual_v2 must be a bool.")
+    if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
+        raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids.")
+    if vector_size not in (2, 4) or trellis_window not in (16, 18):
+        raise ValueError(
+            "PGC16 requires vector_size 2 or 4 with trellis_window=16; L18/V4 requires vector_size=4."
+        )
+    if trellis_window == 18 and vector_size != 4:
+        raise ValueError("QVQ L18 decoding requires vector_size=4.")
+    if trellis_window == 18 and qvq_transition_bits(bits, vector_size=4) > 10:
+        raise ValueError("QVQ L18 decoding supports only rates W1 through W2.5.")
+    if trellis_window == 18 and bank_ids is not None:
+        raise ValueError("QVQ L18 uses implicit history-selected banks and rejects serialized bank_ids.")
 
-    states = unpack_trellis_states(
-        trellis,
-        bits=bits,
-        vector_size=vector_size,
-        trellis_window=trellis_window,
+    states = (
+        unpack_dual_v2_states(trellis, bits=bits)
+        if dual_v2
+        else unpack_trellis_states(
+            trellis,
+            bits=bits,
+            vector_size=vector_size,
+            trellis_window=trellis_window,
+        )
     )
     levels = pgc16_levels_for_version(codebook_version).to(device=trellis.device)
-    if vector_size == 2:
+    if trellis_window == 18:
+        decoded = pgc18_decode_states_v4(states, bits=bits, levels=levels)
+    elif vector_size == 2:
         decoded = pgc16_decode_states(states, levels=levels)
     elif bank_ids is None:
         decoded = pgc16_decode_states_v4(states, levels=levels)
@@ -658,8 +740,10 @@ def reconstruct_qvq_inner_weight(
     tile_rows: int = 16,
     tile_cols: int = 16,
     vector_size: int = 2,
+    trellis_window: int = 16,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     bank_ids: torch.Tensor | None = None,
+    dual_v2: bool = False,
 ) -> torch.Tensor:
     """Materialize the transformed ``[in_features, out_features]`` weight."""
 
@@ -685,8 +769,10 @@ def reconstruct_qvq_inner_weight(
         trellis,
         bits=bits,
         vector_size=vector_size,
+        trellis_window=trellis_window,
         codebook_version=codebook_version,
         bank_ids=bank_ids,
+        dual_v2=dual_v2,
     )
     return (
         decoded.view(in_features // tile_rows, out_features // tile_cols, tile_rows, tile_cols)
@@ -1289,6 +1375,25 @@ def block_ldl_factor(H: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor,
     return L, D
 
 
+def _dual_v2_split(values: torch.Tensor) -> torch.Tensor:
+    """Split interleaved pair steps into two independent batch-major chains."""
+
+    if values.ndim < 2 or values.shape[1] != 128:
+        raise ValueError("QVQ Dual-V2 expects 128 interleaved pair steps per tile.")
+    return torch.cat((values[:, 0::2], values[:, 1::2]), dim=0).contiguous()
+
+
+def _dual_v2_merge(values: torch.Tensor, batch_size: int) -> torch.Tensor:
+    """Merge two batch-major 64-step chains back into planar pair order."""
+
+    if values.shape[0] != 2 * batch_size or values.shape[1] != 64:
+        raise ValueError("QVQ Dual-V2 chain output has an invalid shape.")
+    merged = torch.empty((batch_size, 128, *values.shape[2:]), dtype=values.dtype, device=values.device)
+    merged[:, 0::2] = values[:batch_size]
+    merged[:, 1::2] = values[batch_size:]
+    return merged
+
+
 def block_ldlq_inner(
     inner_weight: torch.Tensor,
     H: torch.Tensor,
@@ -1302,6 +1407,7 @@ def block_ldlq_inner(
     tail_biting_candidates: int = 1,
     telemetry: QVQQuantizationTelemetry | None = None,
     factorization: tuple[torch.Tensor, torch.Tensor] | None = None,
+    dual_v2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize transformed ``[in, out]`` weights with QVQ BlockLDLQ.
 
@@ -1345,6 +1451,10 @@ def block_ldlq_inner(
         raise ValueError("QVQ tail-biting candidate count must be a positive integer.")
     if viterbi_objective not in {"euclidean", "hessian_diagonal"}:
         raise ValueError("QVQ Viterbi objective must be `euclidean` or `hessian_diagonal`.")
+    if not isinstance(dual_v2, bool):
+        raise TypeError("QVQ dual_v2 must be a bool.")
+    if dual_v2 and (codebook.shape[0] != 1 << 16 or codebook.shape[1] != 2):
+        raise ValueError("QVQ Dual-V2 requires the canonical [65536, 2] codebook.")
 
     if factorization is None:
         with _qvq_phase(telemetry, "block_ldl_factor", H.device):
@@ -1400,6 +1510,11 @@ def block_ldlq_inner(
             step_weights = (
                 diagonal_weights.repeat_interleave(weights_per_row).unsqueeze(0).expand(sequences.shape[0], -1)
             )
+        logical_batch_size = sequences.shape[0]
+        if dual_v2:
+            sequences = _dual_v2_split(sequences)
+            if step_weights is not None:
+                step_weights = _dual_v2_split(step_weights)
         reconstructed_chunks = []
         state_chunks = []
         sequence_chunks = sequences.split(trellis_batch_size)
@@ -1419,7 +1534,10 @@ def block_ldlq_inner(
                 state_chunks.append(result.states)
                 if telemetry is not None:
                     telemetry.count("tail_biting_chunks")
-                    overlap_bits = 16 - qvq_transition_bits(bits, vector_size=codebook.shape[1])
+                    overlap_bits = int(math.log2(codebook.shape[0])) - qvq_transition_bits(
+                        bits,
+                        vector_size=codebook.shape[1],
+                    )
                     recurrence_passes = 1 if overlap_bits == 0 else 1 + tail_biting_candidates
                     telemetry.count("viterbi_recurrence_passes", recurrence_passes)
                     if (
@@ -1433,11 +1551,15 @@ def block_ldlq_inner(
                         telemetry.count("native_viterbi_launches", recurrence_passes)
         with _qvq_phase(telemetry, "block_ldl_reconstruct", L.device):
             reconstructed_values = torch.cat(reconstructed_chunks, dim=0)
+            reconstructed_states = torch.cat(state_chunks, dim=0)
+            if dual_v2:
+                reconstructed_values = _dual_v2_merge(reconstructed_values, logical_batch_size)
+                reconstructed_states = _dual_v2_merge(reconstructed_states, logical_batch_size)
             reconstructed = reconstructed_values.reshape(out_features // tile_cols, tile_rows, tile_cols)
             reconstructed = reconstructed.permute(1, 0, 2).reshape(tile_rows, out_features)
             quantized[start:stop] = reconstructed
             error[start:stop] = source[start:stop] - reconstructed
-            tile_states[block] = torch.cat(state_chunks, dim=0)
+            tile_states[block] = reconstructed_states
 
     return quantized.to(dtype=inner_weight.dtype), tile_states.reshape(-1, tile_states.shape[-1])
 
@@ -1976,6 +2098,7 @@ def yaqa_inner(
     tail_biting_candidates: int = 1,
     bank_codebooks: tuple[torch.Tensor, ...] | None = None,
     bank_codebook_stack: torch.Tensor | None = None,
+    dual_v2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
 
@@ -2000,6 +2123,10 @@ def yaqa_inner(
         raise ValueError("YAQA tile rows must be a positive integer.")
     if isinstance(tile_cols, bool) or not isinstance(tile_cols, int) or tile_cols < 1:
         raise ValueError("YAQA tile columns must be a positive integer.")
+    if not isinstance(dual_v2, bool):
+        raise TypeError("YAQA dual_v2 must be a bool.")
+    if dual_v2 and bank_codebooks is not None:
+        raise ValueError("YAQA Dual-V2 does not use V4 bank codebooks.")
     if bank_codebooks is not None:
         if len(bank_codebooks) != 4 or any(tuple(bank.shape) != (1 << 16, 4) for bank in bank_codebooks):
             raise ValueError("YAQA banked mode requires four [65536, 4] codebooks.")
@@ -2069,6 +2196,8 @@ def yaqa_inner(
         raise ValueError("YAQA Hessians must contain only finite values.")
     if tile_rows * tile_cols % codebook.shape[1]:
         raise ValueError("YAQA tile size must be divisible by the codebook vector size.")
+    if dual_v2 and tuple(codebook.shape) != (1 << 16, 2):
+        raise ValueError("YAQA Dual-V2 requires the canonical [65536, 2] codebook.")
     if isinstance(trellis_batch_size, bool) or not isinstance(trellis_batch_size, int) or trellis_batch_size < 1:
         raise ValueError("YAQA trellis batch size must be a positive integer.")
     if (
@@ -2158,6 +2287,9 @@ def yaqa_inner(
 
         corrected_tile_stack = torch.stack(corrected_tiles)
         sequences = corrected_tile_stack.reshape(len(coordinates), steps_per_tile, codebook.shape[1])
+        logical_batch_size = sequences.shape[0]
+        if dual_v2:
+            sequences = _dual_v2_split(sequences)
         candidate_values, candidate_states = [], []
         if bank_codebooks is not None and sequences.device.type == "cuda" and tail_biting_candidates == 1:
             # Banked V4 YAQA has independent banks for each tile on an
@@ -2203,8 +2335,13 @@ def yaqa_inner(
                     )
                     values.append(result.values)
                     states_for_bank.append(result.states)
-                candidate_values.append(torch.cat(values).reshape(len(coordinates), tile_rows, tile_cols))
-                candidate_states.append(torch.cat(states_for_bank))
+                candidate_value = torch.cat(values)
+                candidate_state = torch.cat(states_for_bank)
+                if dual_v2:
+                    candidate_value = _dual_v2_merge(candidate_value, logical_batch_size)
+                    candidate_state = _dual_v2_merge(candidate_state, logical_batch_size)
+                candidate_values.append(candidate_value.reshape(len(coordinates), tile_rows, tile_cols))
+                candidate_states.append(candidate_state)
         if bank_codebooks is None:
             reconstructed = candidate_values[0]
             states = candidate_states[0]
@@ -2603,6 +2740,8 @@ def quantize_qvq_linear(
     rounding: str = "block_ldlq",
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
+    trellis_window: int = 16,
+    dual_v2: bool = False,
     experimental_codebook: torch.Tensor | None = None,
     telemetry: QVQQuantizationTelemetry | None = None,
     bank_count: int = 1,
@@ -2619,8 +2758,20 @@ def quantize_qvq_linear(
     """
 
     bits = normalize_qvq_rate(bits)
+    if not isinstance(dual_v2, bool):
+        raise TypeError("QVQ `dual_v2` must be a bool.")
     if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
         raise ValueError("QVQ `vector_size` must be 2, or 4 for rates W1-W4.")
+    if trellis_window not in (16, 18):
+        raise ValueError("QVQ `trellis_window` must be 16 or the experimental L18/V4 value 18.")
+    if trellis_window == 18 and vector_size != 4:
+        raise ValueError("QVQ L18 requires `vector_size=4`.")
+    if trellis_window == 18 and bits > 2.5:
+        raise ValueError("QVQ L18 supports only rates W1 through W2.5.")
+    if trellis_window == 18 and bank_count != 1:
+        raise ValueError("QVQ L18 uses implicit history-selected banks and requires `bank_count=1`.")
+    if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_count != 1):
+        raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and bank_count=1.")
     if weight.ndim != 2 or not weight.is_floating_point():
         raise ValueError("QVQ weight must be a floating-point matrix.")
     out_features, in_features = weight.shape
@@ -2770,11 +2921,13 @@ def quantize_qvq_linear(
             codebook = _canonical_qvq_codebook(
                 device=device,
                 vector_size=vector_size,
+                trellis_window=trellis_window,
+                bits=bits,
                 codebook_version=codebook_version,
                 dtype=codebook_dtype,
             )
         else:
-            expected_shape = (1 << 16, vector_size)
+            expected_shape = (1 << trellis_window, vector_size)
             if experimental_codebook.shape != expected_shape:
                 raise ValueError(f"QVQ experimental codebook must have shape {expected_shape}.")
             if not experimental_codebook.is_floating_point():
@@ -2827,6 +2980,7 @@ def quantize_qvq_linear(
                 tail_biting_candidates=tail_biting_candidates,
                 bank_codebooks=bank_codebooks,
                 bank_codebook_stack=bank_codebook_stack,
+                dual_v2=dual_v2,
             )
         if bank_codebooks is not None:
             if propagated_inputs is not None and rounding == "block_ldlq":
@@ -2893,6 +3047,7 @@ def quantize_qvq_linear(
             tail_biting_candidates=tail_biting_candidates,
             telemetry=telemetry,
             factorization=prepared_block_factors,
+            dual_v2=dual_v2,
         )
 
     with _qvq_phase(telemetry, "baseline_encode", device):
@@ -3251,12 +3406,22 @@ def quantize_qvq_linear(
         # expressed entirely with device-native tensor operations and is
         # bit-exact with the CPU implementation. Keeping it local avoids a
         # full state-stream D2H copy, CPU pack, and packed-word H2D copy.
-        trellis = pack_trellis_states(states, bits=bits, vector_size=vector_size)
+        trellis = (
+            pack_dual_v2_states(states, bits=bits)
+            if dual_v2
+            else pack_trellis_states(
+                states,
+                bits=bits,
+                vector_size=vector_size,
+                trellis_window=trellis_window,
+            )
+        )
     if propagated_inputs is not None and selected_bank_ids is not None:
         roundtrip_inner = reconstruct_qvq_inner_weight(
             trellis,
             bits=bits,
             vector_size=vector_size,
+            trellis_window=trellis_window,
             in_features=in_features,
             out_features=out_features,
             codebook_version=codebook_version,
@@ -3271,7 +3436,12 @@ def quantize_qvq_linear(
             selected_bank_ids = preprop_bank_ids
             reconstructed_weight = preprop_weight
             proxy_loss = _qvq_proxy_loss_unchecked(weight, reconstructed_weight, source_H)
-            trellis = pack_trellis_states(states, bits=bits, vector_size=vector_size)
+            trellis = pack_trellis_states(
+                states,
+                bits=bits,
+                vector_size=vector_size,
+                trellis_window=trellis_window,
+            )
     kronecker_proxy_loss = None
     if output_hessian is not None:
         kronecker_proxy_loss = yaqa_proxy_loss(

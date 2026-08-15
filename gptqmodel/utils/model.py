@@ -955,7 +955,8 @@ def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
     return (
         "gptqmodel" in uri
         or bool(qcfg.dynamic)
-        or resolve_quant_format(qcfg.format, qcfg.method) in (FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.QVQ, FORMAT.QVQ_V4)
+        or resolve_quant_format(qcfg.format, qcfg.method)
+        in (FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2)
     )
 
 
@@ -963,7 +964,11 @@ def _quantized_weight_suffix(qcfg: QuantizeConfig) -> str:
     """Return the authoritative module-discovery tensor for one native format."""
 
     format_code = resolve_quant_format(qcfg.format, qcfg.method)
-    return ".trellis" if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4) else ".qweight"
+    return (
+        ".trellis"
+        if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2)
+        else ".qweight"
+    )
 
 
 def _checkpoint_quantized_module_names(

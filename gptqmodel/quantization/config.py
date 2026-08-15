@@ -164,6 +164,8 @@ class FORMAT(str, Enum):
     EXL3 = "exl3"
     QVQ = "qvq"
     QVQ_V4 = "qvq_v4"
+    QVQ_V4_L18 = "qvq_v4_l18"
+    QVQ_DUAL_V2 = "qvq_dual_v2"
     MXFP4 = "mxfp4"
 
     GEMM = "gemm"
@@ -708,7 +710,7 @@ def _normalize_quant_bits(
     if isinstance(format_value, str):
         format_value = _normalize_format(format_value)
 
-    if format_value in {FORMAT.QVQ, FORMAT.QVQ_V4}:
+    if format_value in {FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2}:
         if isinstance(bits, GGUFBits):
             raise ValueError("QuantizeConfig: GGUF bit encodings require `format=gguf`.")
         return normalize_qvq_rate(bits)
@@ -2214,6 +2216,8 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.QVQ: {
         FORMAT.QVQ,
         FORMAT.QVQ_V4,
+        FORMAT.QVQ_V4_L18,
+        FORMAT.QVQ_DUAL_V2,
     },
     METHOD.GGUF: {
         FORMAT.GGUF,
@@ -2271,7 +2275,12 @@ BITSANDBYTES_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 EXL3_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.EXL3,
 )
-QVQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (FORMAT.QVQ, FORMAT.QVQ_V4)
+QVQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.QVQ,
+    FORMAT.QVQ_V4,
+    FORMAT.QVQ_V4_L18,
+    FORMAT.QVQ_DUAL_V2,
+)
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
@@ -2294,6 +2303,8 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.EXL3: METHOD.EXL3,
     FORMAT.QVQ: METHOD.QVQ,
     FORMAT.QVQ_V4: METHOD.QVQ,
+    FORMAT.QVQ_V4_L18: METHOD.QVQ,
+    FORMAT.QVQ_DUAL_V2: METHOD.QVQ,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
@@ -2771,6 +2782,10 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         if value == FORMAT.QVQ:
             return METHOD.QVQ
         if value == FORMAT.QVQ_V4:
+            return METHOD.QVQ
+        if value == FORMAT.QVQ_V4_L18:
+            return METHOD.QVQ
+        if value == FORMAT.QVQ_DUAL_V2:
             return METHOD.QVQ
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
@@ -3419,7 +3434,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
                 normalized[FORMAT_FIELD_CODE] = normalized_format
             except ValueError:
                 normalized_format = None
-        if normalized_format not in {FORMAT.QVQ, FORMAT.QVQ_V4}:
+        if normalized_format not in {FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2}:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QVQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QVQ
     elif target_cls is ParoConfig:
@@ -5789,6 +5804,10 @@ class QVQConfig(BaseQuantizeConfig):
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v4` only supports rates W1 through W4."
                 )
+            if self.format == FORMAT.QVQ_V4_L18 and layer_bits > 2.5:
+                raise ValueError(
+                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v4_l18` only supports rates W1 through W2.5."
+                )
             layer_dict["bits"] = layer_bits
 
     def __post_init__(self):
@@ -5812,6 +5831,19 @@ class QVQConfig(BaseQuantizeConfig):
             if self.bits > 4:
                 raise ValueError("QVQConfig: `format=qvq_v4` supports only rates W1 through W4.")
             self.vector_size = 4
+            self.trellis_window = 16
+        elif self.format == FORMAT.QVQ_V4_L18:
+            if self.bits > 2.5:
+                raise ValueError("QVQConfig: `format=qvq_v4_l18` supports only rates W1 through W2.5.")
+            self.vector_size = 4
+            self.trellis_window = 18
+            if self.bank_count != 1:
+                raise ValueError("QVQConfig: `format=qvq_v4_l18` uses implicit history banks and requires bank_count=1.")
+        elif self.format == FORMAT.QVQ_DUAL_V2:
+            self.vector_size = 2
+            self.trellis_window = 16
+            if self.bank_count != 1:
+                raise ValueError("QVQConfig: `format=qvq_dual_v2` requires bank_count=1.")
 
         self.codebook = str(self.codebook).strip().lower()
         pgc16_levels_for_version(self.codebook)
@@ -5863,7 +5895,6 @@ class QVQConfig(BaseQuantizeConfig):
         if self.rounding == "yaqa" and self.lm_head:
             raise ValueError("QVQConfig: YAQA does not support quantizing the language-model head.")
         canonical_fields = {
-            "trellis_window": (self.trellis_window, 16),
             "tile_rows": (self.tile_rows, 16),
             "tile_cols": (self.tile_cols, 16),
             "incoherence": (self.incoherence, "rht"),
@@ -5873,8 +5904,15 @@ class QVQConfig(BaseQuantizeConfig):
                 raise ValueError(
                     f"QVQConfig: QVQ integration requires `{field_name}={expected!r}`, got `{actual!r}`."
                 )
-        if self.vector_size not in (2, 4) or (self.vector_size == 4 and self.format != FORMAT.QVQ_V4):
-            raise ValueError("QVQConfig: `vector_size=4` requires `format=qvq_v4`.")
+        if self.vector_size not in (2, 4) or (
+            self.vector_size == 4 and self.format not in (FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18)
+        ):
+            raise ValueError("QVQConfig: `vector_size=4` requires `format=qvq_v4` or `format=qvq_v4_l18`.")
+        expected_window = 18 if self.format == FORMAT.QVQ_V4_L18 else 16
+        if self.trellis_window != expected_window:
+            raise ValueError(
+                f"QVQConfig: format `{self.format.value}` requires `trellis_window={expected_window}`."
+            )
         if self.vector_size == 4 and self.bits > 4:
             raise ValueError("QVQConfig: `vector_size=4` supports only rates W1 through W4.")
         if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 4):
@@ -5943,7 +5981,9 @@ class QVQConfig(BaseQuantizeConfig):
         return {
             "codebook_version": self.codebook,
             "vector_size": self.vector_size,
+            "trellis_window": self.trellis_window,
             "bank_count": self.bank_count,
+            "dual_v2": self.format == FORMAT.QVQ_DUAL_V2,
         }
 
 
@@ -6363,7 +6403,12 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3Config
-    if method == METHOD.QVQ or format_value in (FORMAT.QVQ, FORMAT.QVQ_V4):
+    if method == METHOD.QVQ or format_value in (
+        FORMAT.QVQ,
+        FORMAT.QVQ_V4,
+        FORMAT.QVQ_V4_L18,
+        FORMAT.QVQ_DUAL_V2,
+    ):
         return QVQConfig
     if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
         return ParoConfig

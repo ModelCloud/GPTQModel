@@ -17,6 +17,7 @@ PGC16_CODEBOOK_VERSIONS = (PGC16_CODEBOOK_VERSION,)
 PGC16_STATE_COUNT = 1 << 16
 PGC16_LEVEL_COUNT = 1 << 8
 PGC16_V4_BANK_COUNT = 4
+PGC18_V4_STATE_COUNT = 1 << 18
 PGC16_V4_BANK_XOR_MASKS = (0xA5A5, 0x5A5A, 0x3C3C, 0xC3C3)
 PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS = {
     # Bank zero preserves canonical V4. The remaining permutations were
@@ -439,6 +440,41 @@ def pgc16_decode_states_v4_banked(
     return levels[indices].contiguous()
 
 
+def pgc18_decode_states_v4(states: torch.Tensor, *, bits: float, levels: torch.Tensor | None = None) -> torch.Tensor:
+    """Decode the experimental L18/V4 contextual codec.
+
+    The high two state bits select one of the four rate-keyed V4 manifolds;
+    the low sixteen bits remain the canonical PGC16 state.  This makes the
+    additional trellis history reconstruction-visible without adding a
+    serialized bank selector or changing the planar transition payload.
+    """
+
+    if states.dtype == torch.bool or states.is_floating_point() or states.is_complex():
+        raise TypeError("PGC18 V4 states must use an integer dtype.")
+    states_i64 = states.to(torch.int64)
+    if torch.any((states_i64 < 0) | (states_i64 >= PGC18_V4_STATE_COUNT)):
+        raise ValueError(f"PGC18 V4 states must be in `[0, {PGC18_V4_STATE_COUNT - 1}]`.")
+    local_states = (states_i64 & 0xFFFF).contiguous()
+    context_banks = (states_i64 >> 16).contiguous()
+    if levels is None:
+        levels = canonical_pgc16_levels().to(device=states.device)
+    else:
+        if levels.device != states.device:
+            raise ValueError("PGC18 V4 states and levels must be on the same device.")
+        validate_pgc16_levels(levels)
+    transition_bits = qvq_transition_bits(bits, vector_size=4)
+    if transition_bits > 10:
+        raise ValueError("PGC18 V4 decoding supports only rates W1 through W2.5.")
+    masks_for_rate = PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS.get(transition_bits)
+    if masks_for_rate is None:
+        raise ValueError("PGC18 V4 decoding supports only rates W1 through W2.5.")
+    masks = torch.tensor(masks_for_rate, dtype=torch.int64, device=states.device)
+    first = pgc16_mix_states(local_states)
+    second = pgc16_mix_states(local_states ^ masks[context_banks])
+    indices = torch.stack((first >> 8, first & 0xFF, second >> 8, second & 0xFF), dim=-1)
+    return levels[indices].contiguous()
+
+
 def pgc16_codebook(
     *,
     device: torch.device | str | None = None,
@@ -492,6 +528,23 @@ def pgc16_codebook_v4_bank(
     return pgc16_decode_states_v4_banked(states, selectors, bits=bits, levels=target_levels).to(dtype=dtype)
 
 
+def pgc18_codebook_v4(
+    *,
+    bits: float,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float32,
+    levels: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Materialize the experimental 262,144-row L18/V4 codebook."""
+
+    if dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64):
+        raise TypeError("PGC18 V4 codebook dtype must be floating point.")
+    target_device = torch.device("cpu" if device is None else device)
+    states = torch.arange(PGC18_V4_STATE_COUNT, dtype=torch.int64, device=target_device)
+    target_levels = None if levels is None else levels.to(device=target_device)
+    return pgc18_decode_states_v4(states, bits=bits, levels=target_levels).to(dtype=dtype)
+
+
 def pgc16_scale_factor(bits: float) -> float:
     """Return the Gaussian scale multiplier for half-step W1 through W8."""
 
@@ -511,6 +564,7 @@ __all__ = [
     "PGC16_V4_BANK_COUNT",
     "PGC16_V4_BANK_XOR_MASKS",
     "PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS",
+    "PGC18_V4_STATE_COUNT",
     "canonical_pgc16_levels",
     "pgc16_codebook",
     "pgc16_codebook_v4",
@@ -521,5 +575,7 @@ __all__ = [
     "pgc16_levels_for_version",
     "pgc16_mix_states",
     "pgc16_scale_factor",
+    "pgc18_codebook_v4",
+    "pgc18_decode_states_v4",
     "validate_pgc16_levels",
 ]

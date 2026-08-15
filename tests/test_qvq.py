@@ -41,6 +41,7 @@ from gptqmodel.quantization.qvq import (
     optimize_qvq_module_scale,
     optimize_qvq_output_channel_scales,
     pack_qvq_bank_ids,
+    pack_dual_v2_states,
     pack_trellis_states,
     quantize_qvq_linear,
     qvq_proxy_loss,
@@ -51,6 +52,7 @@ from gptqmodel.quantization.qvq import (
     select_banked_tiles_by_output_error,
     tail_biting_viterbi_quantize,
     unpack_qvq_bank_ids,
+    unpack_dual_v2_states,
     unpack_trellis_states,
     viterbi_quantize,
     yaqa_inner,
@@ -72,6 +74,8 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_decode_states_v4,
     pgc16_decode_states_v4_banked,
     pgc16_mix_states,
+    pgc18_codebook_v4,
+    pgc18_decode_states_v4,
 )
 from gptqmodel.quantization.qvq_codecs.hyb_reference import (
     canonical_hyb_lut,
@@ -243,11 +247,259 @@ def test_qvq_v4_toggle_round_trips_and_reconstructs(bits):
     assert decoded.shape == (1, 256)
 
 
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+def test_qvq_l18_v4_torch_pack_decode_matches_contextual_codebook(bits):
+    transition_bits = qvq_transition_bits(bits, vector_size=4)
+    generator = torch.Generator().manual_seed(18200 + transition_bits)
+    edges = torch.randint(0, 1 << transition_bits, (1, 64), generator=generator, dtype=torch.int64)
+    packed_edges = planar_pack_rows(edges.T.contiguous(), transition_bits).T.contiguous()
+    states = unpack_trellis_states(
+        packed_edges,
+        bits=bits,
+        vector_size=4,
+        trellis_window=18,
+    )
+    trellis = pack_trellis_states(
+        states,
+        bits=bits,
+        vector_size=4,
+        trellis_window=18,
+    )
+
+    assert torch.equal(trellis, packed_edges)
+    decoded = decode_trellis_tiles(
+        trellis,
+        bits=bits,
+        vector_size=4,
+        trellis_window=18,
+    )
+    direct = pgc18_decode_states_v4(states, bits=bits).reshape(1, 256).float()
+    codebook = pgc18_codebook_v4(bits=bits)
+
+    torch.testing.assert_close(decoded, direct, rtol=0, atol=0)
+    torch.testing.assert_close(codebook[states].reshape(1, 256), direct, rtol=0, atol=0)
+    assert int(states.max()) < 1 << 18
+    assert torch.unique(states >> 16).numel() > 1
+
+
+def test_qvq_l18_v4_torch_viterbi_recovers_exact_transition_consistent_path():
+    bits = 2
+    transition_bits = qvq_transition_bits(bits, vector_size=4)
+    generator = torch.Generator().manual_seed(18208)
+    edges = torch.randint(0, 1 << transition_bits, (1, 32), generator=generator, dtype=torch.int64)
+    trellis = planar_pack_rows(edges.T.contiguous(), transition_bits).T.contiguous()
+    states = unpack_trellis_states(trellis, bits=bits, vector_size=4, trellis_window=18)
+    codebook = pgc18_codebook_v4(bits=bits)
+    targets = codebook[states]
+    overlap = states[:, 0] >> transition_bits
+
+    result = batched_viterbi_quantize(targets, codebook, bits=bits, overlap=overlap)
+
+    torch.testing.assert_close(result.values, targets, rtol=0, atol=0)
+    torch.testing.assert_close(result.squared_error, torch.zeros_like(result.squared_error), rtol=0, atol=1e-6)
+
+
+def test_qvq_l18_v4_block_quantize_pack_and_torch_linear_are_synchronized():
+    bits = 2
+    generator = torch.Generator().manual_seed(18218)
+    weight = torch.randn((16, 16), generator=generator)
+    inputs = torch.randn((5, 16), generator=generator)
+    result = quantize_qvq_linear(
+        weight,
+        torch.eye(16),
+        bits=bits,
+        vector_size=4,
+        trellis_window=18,
+        trellis_batch_size=1,
+    )
+    layer = QVQLinear(
+        bits=bits,
+        in_features=16,
+        out_features=16,
+        tensors=result.serialized_tensors(),
+        vector_size=4,
+        trellis_window=18,
+    ).eval()
+    reloaded = QVQLinear(
+        bits=bits,
+        in_features=16,
+        out_features=16,
+        vector_size=4,
+        trellis_window=18,
+        register_buffers=True,
+    ).eval()
+    reloaded.load_state_dict(layer.state_dict(), strict=True)
+
+    reconstructed = layer.get_inner_weight_tensor(dtype=torch.float32)
+    actual = layer(inputs)
+    reloaded_actual = reloaded(inputs)
+    expected = inputs @ result.weight.float().T
+
+    torch.testing.assert_close(reconstructed, result.inner_weight.float(), rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(reloaded_actual, actual, rtol=0, atol=0)
+    assert result.trellis.shape == (1, qvq_words_per_tile(bits, vector_size=4))
+    assert torch.isfinite(actual).all()
+
+
+def test_qvq_l18_v4_yaqa_quantize_pack_and_torch_linear_are_synchronized():
+    bits = 2
+    generator = torch.Generator().manual_seed(18219)
+    weight = torch.randn((16, 16), generator=generator)
+    inputs = torch.randn((5, 16), generator=generator)
+    input_hessian = inputs.T @ inputs / inputs.shape[0]
+    output_hessian = torch.eye(16)
+    result = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        output_hessian=output_hessian,
+        bits=bits,
+        rounding="yaqa",
+        vector_size=4,
+        trellis_window=18,
+        trellis_batch_size=1,
+    )
+    layer = QVQLinear(
+        bits=bits,
+        in_features=16,
+        out_features=16,
+        tensors=result.serialized_tensors(),
+        vector_size=4,
+        trellis_window=18,
+    ).eval()
+
+    reconstructed = layer.get_inner_weight_tensor(dtype=torch.float32)
+    actual = layer(inputs)
+    expected = inputs @ result.weight.float().T
+
+    torch.testing.assert_close(reconstructed, result.inner_weight.float(), rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    assert result.rounding == "yaqa"
+    assert result.kronecker_proxy_loss is not None
+    assert torch.isfinite(result.kronecker_proxy_loss)
+
+
 def test_qvq_v4_toggle_rejects_high_rate_and_manual_vector_size():
     with pytest.raises(ValueError, match="unsupported bits|W1 through W4"):
         QVQConfig(bits=4.5, format="qvq_v4", offload_to_disk=False)
     with pytest.raises(ValueError, match="requires `format=qvq_v4`"):
         QVQConfig(bits=2, vector_size=4, offload_to_disk=False)
+
+
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+def test_qvq_l18_v4_format_round_trips_with_fixed_geometry(bits):
+    cfg = QVQConfig(bits=bits, format="qvq_v4_l18", offload_to_disk=False)
+    payload = cfg.to_dict()
+    reloaded = QuantizeConfig.from_quant_config(payload)
+
+    assert cfg.format == FORMAT.QVQ_V4_L18
+    assert cfg.vector_size == 4
+    assert cfg.trellis_window == 18
+    assert cfg.bank_count == 1
+    assert reloaded.to_dict() == payload
+    assert cfg.quant_linear_init_kwargs()["trellis_window"] == 18
+
+
+def test_qvq_l18_v4_format_rejects_unsupported_rate_and_explicit_banks():
+    with pytest.raises(ValueError, match="W1 through W2.5"):
+        QVQConfig(bits=3, format="qvq_v4_l18", offload_to_disk=False)
+    with pytest.raises(ValueError, match="implicit history banks"):
+        QVQConfig(bits=2, format="qvq_v4_l18", bank_count=4, offload_to_disk=False)
+    with pytest.raises(NotImplementedError, match=r"supports.*\[1, 1.5, 2, 2.5\]"):
+        QVQLinear(bits=3, in_features=16, out_features=16, vector_size=4, trellis_window=18)
+    with pytest.raises(ValueError, match="W1 through W2.5"):
+        quantize_qvq_linear(
+            torch.eye(16),
+            torch.eye(16),
+            bits=3,
+            vector_size=4,
+            trellis_window=18,
+        )
+
+
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 4, 8))
+def test_qvq_dual_v2_pack_decode_matches_two_independent_v2_chains(bits):
+    shift = qvq_transition_bits(bits, vector_size=2)
+    generator = torch.Generator().manual_seed(32000 + shift)
+    edge_a = torch.randint(0, 1 << shift, (1, 64), generator=generator, dtype=torch.int64)
+    edge_b = torch.randint(0, 1 << shift, (1, 64), generator=generator, dtype=torch.int64)
+    trellis_a = planar_pack_rows(edge_a.T.contiguous(), shift).T.contiguous()
+    trellis_b = planar_pack_rows(edge_b.T.contiguous(), shift).T.contiguous()
+    state_a = unpack_trellis_states(trellis_a, bits=bits)
+    state_b = unpack_trellis_states(trellis_b, bits=bits)
+    states = torch.empty((1, 128), dtype=torch.int64)
+    states[:, 0::2] = state_a
+    states[:, 1::2] = state_b
+
+    trellis = pack_dual_v2_states(states, bits=bits)
+    recovered = unpack_dual_v2_states(trellis, bits=bits)
+    decoded = decode_trellis_tiles(trellis, bits=bits, dual_v2=True)
+    direct = pgc16_decode_states(states).reshape(1, 256).float()
+
+    assert torch.equal(recovered, states)
+    torch.testing.assert_close(decoded, direct, rtol=0, atol=0)
+    assert trellis.shape == (1, qvq_words_per_tile(bits, vector_size=2))
+
+
+@pytest.mark.parametrize("rounding", ("block_ldlq", "yaqa"))
+def test_qvq_dual_v2_quantize_pack_and_torch_linear_are_synchronized(rounding):
+    bits = 2
+    generator = torch.Generator().manual_seed(32200 + (rounding == "yaqa"))
+    weight = torch.randn((16, 16), generator=generator)
+    inputs = torch.randn((16, 16), generator=generator)
+    kwargs = {}
+    if rounding == "yaqa":
+        kwargs = {"rounding": "yaqa", "output_hessian": torch.eye(16)}
+    result = quantize_qvq_linear(
+        weight,
+        inputs.T @ inputs / inputs.shape[0],
+        bits=bits,
+        dual_v2=True,
+        trellis_batch_size=1,
+        **kwargs,
+    )
+    layer = QVQLinear(
+        bits=bits,
+        in_features=16,
+        out_features=16,
+        tensors=result.serialized_tensors(),
+        dual_v2=True,
+    ).eval()
+
+    reconstructed = layer.get_inner_weight_tensor(dtype=torch.float32)
+    actual = layer(inputs)
+    expected = inputs @ result.weight.float().T
+
+    reloaded = QVQLinear(
+        bits=bits,
+        in_features=16,
+        out_features=16,
+        dual_v2=True,
+        register_buffers=True,
+    ).eval()
+    reloaded.load_state_dict(layer.state_dict(), strict=True)
+
+    torch.testing.assert_close(reconstructed, result.inner_weight.float(), rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(reloaded(inputs), actual, rtol=0, atol=0)
+    assert result.rounding == rounding
+
+
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 4, 8))
+def test_qvq_dual_v2_format_round_trips(bits):
+    cfg = QVQConfig(bits=bits, format="qvq_dual_v2", offload_to_disk=False)
+    reloaded = QuantizeConfig.from_quant_config(cfg.to_dict())
+
+    assert cfg.format == FORMAT.QVQ_DUAL_V2
+    assert cfg.vector_size == 2
+    assert cfg.trellis_window == 16
+    assert cfg.quant_linear_init_kwargs()["dual_v2"] is True
+    assert reloaded.to_dict() == cfg.to_dict()
+
+
+def test_qvq_dual_v2_rejects_explicit_v4_banks():
+    with pytest.raises(ValueError, match="requires bank_count=1"):
+        QVQConfig(bits=2, format="qvq_dual_v2", bank_count=4, offload_to_disk=False)
 
 
 def test_qvq_v4_four_bank_config_round_trips_and_rejects_legacy_format():

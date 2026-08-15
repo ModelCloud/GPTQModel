@@ -123,7 +123,12 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
 def _external_preload_backend(backend: BACKEND, method: METHOD, format_code: FORMAT) -> BACKEND:
     """Select the Torch shell that owns checkpoint tensors before external conversion."""
 
-    if backend == BACKEND.MLX and method == METHOD.QVQ and format_code in (FORMAT.QVQ, FORMAT.QVQ_V4):
+    if backend == BACKEND.MLX and method == METHOD.QVQ and format_code in (
+        FORMAT.QVQ,
+        FORMAT.QVQ_V4,
+        FORMAT.QVQ_V4_L18,
+        FORMAT.QVQ_DUAL_V2,
+    ):
         return BACKEND.QVQ
     return backend
 
@@ -503,7 +508,7 @@ def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype
 def _checkpoint_load_dtype(*, format_code: FORMAT, dtype):
     """Choose Accelerate's checkpoint coercion policy for a quantized format."""
 
-    if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4):
+    if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2):
         # QVQ checkpoints intentionally mix FP32 SU/SV codec auxiliaries with
         # model-dtype dense tensors and bias. Passing one global dtype to
         # Accelerate destroys that contract; the already typed model shell is
@@ -2035,7 +2040,7 @@ def ModelLoader(cls):
                     "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
                 )
 
-            if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4):
+            if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2):
                 model = convert_qvq_to_mlx_model(model_id_or_path, model, cls.lm_head)
             else:
                 with tempfile.TemporaryDirectory() as temp_dir:

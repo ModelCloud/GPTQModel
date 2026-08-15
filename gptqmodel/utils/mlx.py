@@ -56,6 +56,8 @@ def _qvq_mlx_linear_from_torch(module):
         bias=copy_array(module.bias),
         codebook_version=module.codebook_version,
         vector_size=module.vector_size,
+        trellis_window=module.trellis_window,
+        dual_v2=module.dual_v2,
         bank_ids=copy_array(module.bank_ids),
     )
 

@@ -567,6 +567,128 @@ the second permutation and pair ordering for worst-context four-dimensional orth
 centroid, covariance condition, and magnitude diversity. Then select only on occupancy-weighted live paths and the
 complete propagation gate--not on synthetic nearest-neighbor MSE alone.
 
+#### Experimental retained-history arm: `L18/V4`
+
+`format="qvq_v4_l18"` is a separate, fail-closed W1--W2.5 research format. It keeps the V4 transition width
+`E=4R` and exact `R`-bpw planar payload, but expands the state from 16 to 18 bits. The low 16 bits remain the
+canonical PGC16 state. The high two bits select one of the four existing rate-keyed V4 mixer masks:
+
+```text
+18-bit state
+  |-- high 2 bits --> implicit reconstruction bank (0..3)
+  `-- low 16 bits --> canonical PGC16 state
+                         |
+                         `--> four reconstructed scalars
+```
+
+The selector is therefore part of trellis history, not a serialized per-tile tensor. Raw and effective BPW are
+unchanged relative to L16 at the same rate. The extra state increases retained history by exactly two bits while
+leaving direct successor count unchanged:
+
+| Rate | Edge bits | Successors | L16/V4 history | L18/V4 history |
+|---:|---:|---:|---:|---:|
+| W1 | 4 | 16 | 12 | 14 |
+| W1.5 | 6 | 64 | 10 | 12 |
+| W2 | 8 | 256 | 8 | 10 |
+| W2.5 | 10 | 1,024 | 6 | 8 |
+
+Exact Viterbi quantization has four times as many states and codebook rows (`262,144 x 4`), so its dominant state
+costs and workspace should be budgeted at roughly 4x L16/V4 before backend-specific optimization. Inference does not
+materialize that table: it reconstructs the 18-bit state from the planar stream, extracts the high two bits, and
+performs the same two PGC mixes and four scalar lookups. Depending on `E`, reconstructing 18 rather than 16 history
+bits needs zero or one additional edge extraction; measure latency rather than inferring it from the offline table.
+
+The initial implementation provides Torch quantization/reference inference and a native MLX decoder. MPS and CUDA
+fall back to the Torch reference for this format until dedicated L18 kernels pass parity. It rejects explicit
+`bank_ids`, rates above W2.5, and any vector size other than four.
+
+A deterministic 16x16 Block-LDLQ synchronization probe (128 Hessian rows, 1,024 held-out rows, seed 18240) found:
+
+| Rate | Arm | Weight MSE | Output KL | Top-1 | Top-5 overlap |
+|---:|:---|---:|---:|---:|---:|
+| W1 | V2 | 0.279328 | 0.807800 | 54.39% | 72.64% |
+| W1 | V4 | 0.290393 | 0.897001 | 53.32% | 71.99% |
+| W1 | L18/V4 | 0.276493 | 0.954248 | 53.03% | 74.49% |
+| W1.5 | V2 | 0.134872 | 0.400912 | 67.38% | 81.54% |
+| W1.5 | V4 | 0.154858 | 0.555226 | 63.77% | 80.66% |
+| W1.5 | L18/V4 | 0.144913 | 0.405387 | 67.09% | 80.12% |
+| W2 | V2 | 0.067028 | 0.206508 | 75.10% | 85.80% |
+| W2 | V4 | 0.089202 | 0.279160 | 74.61% | 85.02% |
+| W2 | L18/V4 | 0.082399 | 0.242434 | 75.68% | 85.16% |
+| W2.5 | V2 | 0.035471 | 0.109628 | 84.18% | 90.23% |
+| W2.5 | V4 | 0.060060 | 0.170244 | 78.61% | 87.71% |
+| W2.5 | L18/V4 | 0.048411 | 0.148707 | 81.05% | 88.79% |
+
+This probe verifies synchronization and shows that retained history recovers part of L16/V4's loss, especially at
+W2.5. It does **not** establish model-level recovery: L18/V4 remains worse than V2 on most local metrics, and the W1
+case again demonstrates that lower weight MSE need not lower output KL. Promotion requires propagated two-layer and
+full-model held-out gates.
+
+#### Experimental factored arm: Dual-V2
+
+`format="qvq_dual_v2"` preserves two independent L16/V2 chains inside each 16x16 tile. Four consecutive scalar
+weights are decoded as one pair from chain A and one pair from chain B:
+
+```text
+planar pair edges:  A0 B0 A1 B1 ... A63 B63
+                       |             |
+                       v             v
+                  L16/V2 chain A  L16/V2 chain B
+                       |             |
+                       `---- 4 reconstructed weights
+```
+
+The conceptual joint state has 32 bits, but the transition and emission objective factor into two 65,536-state
+problems. The implementation therefore never constructs a `2**32` codebook or cost vector. Block-LDLQ and YAQA
+still compute their corrected 16x16 tile first; only the tile's Euclidean trellis rounding is split into its even
+and odd pair chains. Each chain is tail-bitten independently, and their states are interleaved before planar packing.
+
+At rate `R`, each chain appends `2R` bits. The joint successor count is `2**(4R)`, while retained history is the sum
+of the two independent chain histories, `2*(16-2R)`:
+
+| Rate | Joint successors | Retained history, total | Retained history per chain |
+|---:|---:|---:|---:|
+| W1 | 16 | 28 | 14 |
+| W1.5 | 64 | 26 | 13 |
+| W2 | 256 | 24 | 12 |
+| W2.5 | 1,024 | 22 | 11 |
+| W3 | 4,096 | 20 | 10 |
+| W3.5 | 16,384 | 18 | 9 |
+| W4 | 65,536 | 16 | 8 |
+| W4.5 | 262,144 | 14 | 7 |
+| W5--W8 | `2**(4R)` | `32-4R` | `16-2R` |
+
+This is a joint count across two factored pair decisions, not 1,024 mutually coupled four-dimensional reconstruction
+vectors at W2.5. That distinction is precisely why exact search remains practical. Quantization performs the same
+total 128 pair emissions per tile as V2, split over two 64-step paths; workspace per path remains L16-sized and the
+two paths may be batched. Inference performs the same two PGC mixes and four scalar lookups per four weights as V2.
+Its only topology change is that state reconstruction walks same-parity planar edges. Raw payload, SU/SV storage,
+and effective BPW are unchanged.
+
+The Torch quantizer/reference decoder and native MLX decoder support W1--W8. CUDA and MPS deliberately use the Torch
+reference until dedicated same-parity state reconstruction passes backend parity.
+
+Adding Dual-V2 to the same deterministic 16x16 synchronization probe gives:
+
+| Rate | Arm | Weight MSE | Output KL | Top-1 | Top-5 overlap |
+|---:|:---|---:|---:|---:|---:|
+| W1 | V2 | 0.279328 | 0.807800 | 54.39% | 72.64% |
+| W1 | Dual-V2 | 0.281140 | 0.936393 | 55.57% | 72.60% |
+| W1 | L18/V4 | 0.276493 | 0.954248 | 53.03% | 74.49% |
+| W1.5 | V2 | 0.134872 | 0.400912 | 67.38% | 81.54% |
+| W1.5 | Dual-V2 | 0.145535 | 0.393389 | 68.95% | 79.51% |
+| W1.5 | L18/V4 | 0.144913 | 0.405387 | 67.09% | 80.12% |
+| W2 | V2 | 0.067028 | 0.206508 | 75.10% | 85.80% |
+| W2 | Dual-V2 | 0.069705 | 0.234060 | 74.61% | 86.31% |
+| W2 | L18/V4 | 0.082399 | 0.242434 | 75.68% | 85.16% |
+| W2.5 | V2 | 0.035471 | 0.109628 | 84.18% | 90.23% |
+| W2.5 | Dual-V2 | 0.034796 | 0.101282 | 82.62% | 90.96% |
+| W2.5 | L18/V4 | 0.048411 | 0.148707 | 81.05% | 88.79% |
+
+Dual-V2 is the strongest of the two history-preserving prototypes at W1.5 and W2.5 in this one local probe, but it
+is not uniformly better and its W2.5 Top-1 moves opposite to MSE/KL/Top-5. This is screening evidence only. The
+format must be selected by propagated held-out recovery, not by this local table.
+
 #### All-rate storage and compute consequences
 
 Pure `L16/V4` is defined only through W4. Its transition width is `E=4R`, and a bitshift trellis requires `E <= L`.

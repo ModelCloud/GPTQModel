@@ -33,7 +33,16 @@ def _mlx(tensor: torch.Tensor):
     return mx.array(tensor.numpy())
 
 
-def _case(bits: float, m: int, *, k: int = 32, n: int = 32, vector_size: int = 2):
+def _case(
+    bits: float,
+    m: int,
+    *,
+    k: int = 32,
+    n: int = 32,
+    vector_size: int = 2,
+    trellis_window: int = 16,
+    dual_v2: bool = False,
+):
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     generator = torch.Generator().manual_seed(9100 + transition_bits * 10 + m + vector_size)
     tiles = (k // 16) * (n // 16)
@@ -50,6 +59,8 @@ def _case(bits: float, m: int, *, k: int = 32, n: int = 32, vector_size: int = 2
         trellis,
         bits=bits,
         vector_size=vector_size,
+        trellis_window=trellis_window,
+        dual_v2=dual_v2,
         in_features=k,
         out_features=n,
     )
@@ -116,6 +127,50 @@ def test_qvq_mlx_linear_runs_full_format_native_forward(bits, vector_size, banke
         bias=_mlx(bias),
         vector_size=vector_size,
         bank_ids=None if bank_ids is None else _mlx(bank_ids),
+    )
+
+    actual = layer(_mlx(x))
+    mx.eval(actual)
+    actual_torch = torch.from_numpy(np.asarray(actual))
+
+    torch.testing.assert_close(actual_torch, expected, rtol=1e-3, atol=1e-3)
+    assert actual_torch.dtype == x.dtype
+
+
+def test_qvq_l18_v4_mlx_linear_runs_full_native_forward():
+    from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
+
+    bits, k, n = 2, 32, 48
+    transition_bits = qvq_transition_bits(bits, vector_size=4)
+    generator = torch.Generator().manual_seed(22118)
+    tile_count = (k // 16) * (n // 16)
+    edges = torch.randint(0, 1 << transition_bits, (64, tile_count), generator=generator, dtype=torch.int32)
+    trellis = planar_pack_rows(edges, transition_bits).T.contiguous()
+    su = torch.randint(0, 2, (k,), generator=generator).mul_(2).sub_(1).float()
+    sv = torch.randn(n, generator=generator).mul_(0.1)
+    bias = torch.randn(n, generator=generator).mul_(0.1)
+    x = torch.randn((2, 3, k), generator=generator).half()
+    inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=bits,
+        vector_size=4,
+        trellis_window=18,
+        in_features=k,
+        out_features=n,
+    )
+    transformed = matmul_hadU(x.reshape(-1, k).float() * su)
+    expected = matmul_hadU(transformed.half().float() @ inner.float()) * sv + bias
+    expected = expected.reshape(2, 3, n).half()
+    layer = QVQMLXLinear(
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        trellis=_mlx(trellis),
+        SU=_mlx(su),
+        SV=_mlx(sv),
+        bias=_mlx(bias),
+        vector_size=4,
+        trellis_window=18,
     )
 
     actual = layer(_mlx(x))
@@ -194,6 +249,109 @@ def test_qvq_mlx_loader_conversion_preserves_native_v4_payload():
     np.testing.assert_array_equal(np.asarray(converted.bank_ids), bank_ids.numpy())
     np.testing.assert_array_equal(np.asarray(converted.SU), tensors["SU"].numpy())
     np.testing.assert_array_equal(np.asarray(converted.SV), tensors["SV"].numpy())
+
+
+def test_qvq_mlx_loader_conversion_preserves_l18_v4_geometry():
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+    from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
+
+    bits, k, n = 2.5, 32, 48
+    transition_bits = qvq_transition_bits(bits, vector_size=4)
+    tile_count = (k // 16) * (n // 16)
+    generator = torch.Generator().manual_seed(18250)
+    edges = torch.randint(0, 1 << transition_bits, (64, tile_count), generator=generator, dtype=torch.int32)
+    trellis = planar_pack_rows(edges, transition_bits).T.contiguous()
+    tensors = {
+        "trellis": trellis,
+        "SU": torch.randn(k, generator=generator),
+        "SV": torch.randn(n, generator=generator),
+        "bias": torch.randn(n, generator=generator),
+    }
+    source = QVQLinear(
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        name="model.layers.0.self_attn.q_proj",
+        tensors=tensors,
+        vector_size=4,
+        trellis_window=18,
+    )
+
+    converted = _qvq_mlx_linear_from_torch(source)
+
+    assert isinstance(converted, QVQMLXLinear)
+    assert converted.bits == bits
+    assert converted.vector_size == 4
+    assert converted.trellis_window == 18
+    assert converted.bank_ids is None
+    np.testing.assert_array_equal(np.asarray(converted.trellis), trellis.numpy())
+    np.testing.assert_array_equal(np.asarray(converted.SU), tensors["SU"].numpy())
+    np.testing.assert_array_equal(np.asarray(converted.SV), tensors["SV"].numpy())
+
+
+def test_qvq_l18_v4_mlx_rejects_rates_above_w2_5():
+    operands, _ = _case(3, 1, vector_size=4)
+
+    with pytest.raises(ValueError, match="W1 through W2.5"):
+        qvq_mlx_gemv(
+            *operands,
+            3,
+            out_features=16,
+            vector_size=4,
+            trellis_window=18,
+        )
+
+
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 4, 8))
+@pytest.mark.parametrize("m", (1, 4))
+def test_qvq_dual_v2_mlx_matches_torch_dense_reference(bits, m):
+    operands, reference = _case(bits, m, dual_v2=True)
+
+    actual = qvq_mlx_gemv(
+        *operands,
+        bits,
+        out_features=reference.shape[1],
+        dual_v2=True,
+    )
+    mx.eval(actual)
+    actual = torch.from_numpy(np.asarray(actual))
+
+    torch.testing.assert_close(actual, reference, rtol=1e-3, atol=1e-3)
+    _assert_dense_accuracy_metrics(actual.numpy(), reference)
+
+
+def test_qvq_dual_v2_mlx_linear_runs_full_native_forward():
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+    from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
+
+    bits, k, n = 2, 32, 48
+    operands, _ = _case(bits, 6, k=k, n=n, dual_v2=True)
+    x, trellis = operands
+    generator = torch.Generator().manual_seed(32218)
+    su = torch.randint(0, 2, (k,), generator=generator).mul_(2).sub_(1).float()
+    sv = torch.randn(n, generator=generator).mul_(0.1)
+    bias = torch.randn(n, generator=generator).mul_(0.1)
+    torch_layer = QVQLinear(
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        tensors={
+            "trellis": torch.from_numpy(np.asarray(trellis)),
+            "SU": su,
+            "SV": sv,
+            "bias": bias,
+        },
+        dual_v2=True,
+    ).eval()
+    layer = _qvq_mlx_linear_from_torch(torch_layer)
+
+    actual = layer(x)
+    mx.eval(actual)
+    actual = torch.from_numpy(np.asarray(actual))
+    expected = torch_layer(torch.from_numpy(np.asarray(x)))
+
+    assert layer.dual_v2 is True
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
 
 
 def test_qvq_mlx_model_conversion_replaces_matching_linear(monkeypatch):
@@ -374,6 +532,54 @@ def test_qvq_v4_mlx_matches_dense_reference(bits, m):
 
     np.testing.assert_allclose(actual, reference.numpy(), rtol=1e-3, atol=1e-3)
     _assert_dense_accuracy_metrics(actual, reference)
+
+
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+@pytest.mark.parametrize("m", (1, 4))
+def test_qvq_l18_v4_mlx_matches_torch_dense_reference(bits, m):
+    operands, reference = _case(bits, m, vector_size=4, trellis_window=18)
+
+    actual = np.asarray(
+        qvq_mlx_gemv(
+            *operands,
+            bits,
+            out_features=reference.shape[1],
+            vector_size=4,
+            trellis_window=18,
+        )
+    )
+
+    np.testing.assert_allclose(actual, reference.numpy(), rtol=1e-3, atol=1e-3)
+    _assert_dense_accuracy_metrics(actual, reference)
+
+
+@pytest.mark.parametrize("bits", (1, 2.5))
+def test_qvq_l18_v4_mlx_fp32_output_matches_torch_dense_reference(bits):
+    operands, _ = _case(bits, 3, k=32, n=48, vector_size=4, trellis_window=18)
+    x = torch.from_numpy(np.asarray(operands[0]))
+    trellis = torch.from_numpy(np.asarray(operands[1]))
+    inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=bits,
+        vector_size=4,
+        trellis_window=18,
+        in_features=32,
+        out_features=48,
+    )
+    reference = x.float() @ inner.float()
+
+    actual = qvq_mlx_gemv(
+        *operands,
+        bits,
+        out_features=48,
+        vector_size=4,
+        trellis_window=18,
+        output_fp32=True,
+    )
+    mx.eval(actual)
+    actual = torch.from_numpy(np.asarray(actual))
+
+    torch.testing.assert_close(actual, reference, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5, 4))

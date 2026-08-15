@@ -1,8 +1,9 @@
 # QVQ V4 inference kernels for Apple MPS and MLX
 
-Status: native and validated on Apple M4 Max. MPS is integrated into `QVQLinear`; MLX currently exposes the native
-array kernel but is not yet wired into the model loader. This document covers the Apple-specific L16/V4 inference
-implementation for W1--W4. CUDA design and measurements remain in [qvq_inference.md](qvq_inference.md).
+Status: native and validated on Apple M4 Max. MPS is integrated into `QVQLinear`; MLX checkpoint loading replaces
+Torch `QVQLinear` modules with `QVQMLXLinear` while preserving their planar payload and codec metadata. This
+document covers the Apple-specific L16/V4 inference implementation for W1--W4. CUDA design and measurements remain
+in [qvq_inference.md](qvq_inference.md).
 
 ## Format and reconstruction contract
 
@@ -17,6 +18,15 @@ words/16x16 tile:     2E = 8R int32 words
 raw payload:          R bits/weight
 supported V4 rates:   W1, W1.5, W2, W2.5, W3, W3.5, W4
 ```
+
+The experimental `qvq_v4_l18` format is narrower: it supports W1--W2.5 and currently has a native MLX reference
+kernel only. Its 18-bit state uses the high two history bits as an implicit rate-keyed bank selector and the low
+16 bits as the canonical PGC state. It carries no `bank_ids` tensor and preserves the exact planar bytes per weight.
+MPS deliberately falls back to Torch reconstruction until a dedicated L18 shader is implemented and validated.
+
+`qvq_dual_v2` is also native in MLX. It interleaves two independent L16/V2 edge streams in the ordinary planar
+payload and reconstructs each state from same-parity edges. It adds no tensors or bytes and retains V2's two mixes
+and four scalar lookups per four weights. The current MPS path intentionally falls back to Torch for this topology.
 
 One state reconstructs four values with two implicit PGC16 permutations and four canonical FP16 scalar-table
 lookups:

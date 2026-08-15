@@ -460,8 +460,16 @@ def _compile_qvq_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec,
 
     export = weight.export
     if export is not None:
-        if export.format not in {None, FORMAT.QVQ.value, FORMAT.QVQ_V4.value}:
-            raise NotImplementedError('QVQ compiler supports only `weight.export.format = "qvq"` or `"qvq_v4"`.')
+        if export.format not in {
+            None,
+            FORMAT.QVQ.value,
+            FORMAT.QVQ_V4.value,
+            FORMAT.QVQ_V4_L18.value,
+            FORMAT.QVQ_DUAL_V2.value,
+        }:
+            raise NotImplementedError(
+                "QVQ compiler supports only qvq, qvq_v4, qvq_v4_l18, or qvq_dual_v2 export formats."
+            )
         if export.variant not in {None, "pgc16-v1"}:
             raise NotImplementedError('QVQ compiler supports only `weight.export.variant = "pgc16-v1"`.')
 
@@ -490,7 +498,15 @@ def _compile_qvq_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec,
         if requested_codebook != export.variant:
             raise ValueError("QVQ quantize codebook and export variant must match.")
 
-    requested_format = FORMAT.QVQ_V4 if export is not None and export.format == FORMAT.QVQ_V4.value else FORMAT.QVQ
+    requested_format = (
+        FORMAT.QVQ_DUAL_V2
+        if export is not None and export.format == FORMAT.QVQ_DUAL_V2.value
+        else FORMAT.QVQ_V4_L18
+        if export is not None and export.format == FORMAT.QVQ_V4_L18.value
+        else FORMAT.QVQ_V4
+        if export is not None and export.format == FORMAT.QVQ_V4.value
+        else FORMAT.QVQ
+    )
     return QVQConfig(
         bits=bits,
         format=requested_format,

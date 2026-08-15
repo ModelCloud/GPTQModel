@@ -20,6 +20,7 @@ from .pgc16 import (
     PGC16_V4_BANK_COUNT,
     PGC16_V4_BANK_XOR_MASKS,
     PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS,
+    PGC18_V4_STATE_COUNT,
     canonical_pgc16_levels,
     pgc16_codebook,
     pgc16_codebook_v4,
@@ -30,6 +31,8 @@ from .pgc16 import (
     pgc16_levels_for_version,
     pgc16_mix_states,
     pgc16_scale_factor,
+    pgc18_codebook_v4,
+    pgc18_decode_states_v4,
     validate_pgc16_levels,
 )
 
@@ -46,6 +49,7 @@ __all__ = [
     "PGC16_V4_BANK_COUNT",
     "PGC16_V4_BANK_XOR_MASKS",
     "PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS",
+    "PGC18_V4_STATE_COUNT",
     "canonical_pgc16_levels",
     "pgc16_codebook",
     "pgc16_codebook_v4",
@@ -56,5 +60,7 @@ __all__ = [
     "pgc16_levels_for_version",
     "pgc16_mix_states",
     "pgc16_scale_factor",
+    "pgc18_codebook_v4",
+    "pgc18_decode_states_v4",
     "validate_pgc16_levels",
 ]

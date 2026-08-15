@@ -104,7 +104,13 @@ def _loaded_checkpoint_requires_shell_rebuild(load_quantized_model: bool, runtim
     checkpoint also mistakes its remaining dense modules for missing trellises.
     """
 
-    return load_quantized_model and runtime_format not in (FORMAT.EXL3, FORMAT.QVQ, FORMAT.QVQ_V4)
+    return load_quantized_model and runtime_format not in (
+        FORMAT.EXL3,
+        FORMAT.QVQ,
+        FORMAT.QVQ_V4,
+        FORMAT.QVQ_V4_L18,
+        FORMAT.QVQ_DUAL_V2,
+    )
 
 PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
