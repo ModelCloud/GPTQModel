@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare QVQ trellis topologies on one full-width Llama attention block."""
+"""Compare QVQ trellis topologies on full-width Llama attention blocks."""
 
 from __future__ import annotations
 
@@ -13,14 +13,24 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from analyze_gptq_low_bit_grid import (
-    capture_calibration_hessians,
-    capture_forward,
-    load_nm_calibration_batches,
-    load_nm_evaluation_batch,
-    request_performance_qos,
-    tensor_metrics,
-)
+try:
+    from analyze_gptq_low_bit_grid import (
+        capture_calibration_hessians,
+        capture_forward,
+        load_nm_calibration_batches,
+        load_nm_evaluation_batch,
+        request_performance_qos,
+        tensor_metrics,
+    )
+except ModuleNotFoundError:  # Package import used by unit tests.
+    from scripts.analyze_gptq_low_bit_grid import (
+        capture_calibration_hessians,
+        capture_forward,
+        load_nm_calibration_batches,
+        load_nm_evaluation_batch,
+        request_performance_qos,
+        tensor_metrics,
+    )
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from gptqmodel.quantization.qvq import (
@@ -55,7 +65,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-rows", type=int, default=8)
     parser.add_argument("--evaluation-rows", type=int, default=8)
     parser.add_argument("--evaluation-row-offset", type=int, default=8)
-    parser.add_argument("--max-length", type=int, default=128)
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=None,
+        help="Optional per-row truncation limit; omitted means each row's full tokenized length.",
+    )
     parser.add_argument("--seed", type=int, default=18240)
     parser.add_argument("--trellis-batch-size", type=int)
     return parser
@@ -190,6 +205,10 @@ def main() -> None:
         concat_size=None,
         batch_size=1,
     )
+    if calibration_stats["concat_size"] is not None or calibration_stats["batch_size"] != 1:
+        raise RuntimeError("codec comparison requires independent, non-concatenated calibration rows at batch 1")
+    if calibration_stats["prepared_sequences"] != args.calibration_rows:
+        raise RuntimeError("codec comparison calibration did not preserve one sequence per source row")
     evaluation, evaluation_stats = load_nm_evaluation_batch(
         tokenizer,
         dataset_path=args.dataset,
@@ -229,9 +248,11 @@ def main() -> None:
             "python": platform.python_version(),
             "performance_qos_requested": qos_requested,
             "calibration": calibration_stats,
+            "calibration_execution": "independent full rows; batch=1; no sequence concatenation",
             "calibration_samples": sample_counts,
             "evaluation": evaluation_stats,
             "evaluation_batch_size": 1,
+            "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
             "rounding": "block_ldlq",
             "serialization": "disabled; dense reconstruction comparison",
         },
@@ -295,20 +316,26 @@ def main() -> None:
                 },
                 "local_qkvo": tensor_metrics(dense_qkvo, local_qkvo, normalize_distribution=True),
                 "live_qkvo": tensor_metrics(dense_qkvo, live_qkvo, normalize_distribution=True),
-                "layer": tensor_metrics(
-                    dense_outputs[f"layer.{args.layers - 1}.hidden"],
-                    live_outputs[f"layer.{args.layers - 1}.hidden"],
-                    normalize_distribution=True,
-                ),
+                "layers": {
+                    str(layer_index): tensor_metrics(
+                        dense_outputs[f"layer.{layer_index}.hidden"],
+                        live_outputs[f"layer.{layer_index}.hidden"],
+                        normalize_distribution=True,
+                    )
+                    for layer_index in range(args.layers)
+                },
                 "logits": tensor_metrics(dense_logits, quantized_logits, normalize_distribution=False),
             }
             report["results"][str(rate)][arm] = arm_report
             logits = arm_report["logits"]
+            layer_kl = _mean(
+                [metrics["kl_forward"]["mean"] for metrics in arm_report["layers"].values()]
+            )
             print(
                 f"W{rate:g} {arm}: relL2={arm_report['weight']['mean_relative_l2']:.6f} "
                 f"localKL={arm_report['local_qkvo']['kl_forward']['mean']:.6f} "
                 f"liveKL={arm_report['live_qkvo']['kl_forward']['mean']:.6f} "
-                f"layerKL={arm_report['layer']['kl_forward']['mean']:.6f} "
+                f"layerKL={layer_kl:.6f} "
                 f"logitKL={logits['kl_forward']['mean']:.6f} "
                 f"top1={logits['top1_agreement']:.4f} top5={logits['top5_overlap']['mean']:.4f}",
                 flush=True,

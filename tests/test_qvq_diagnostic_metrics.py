@@ -15,6 +15,7 @@ from torch import nn
 
 from gptqmodel.quantization.qvq import yaqa_sketch_b
 from scripts.analyze_gptq_low_bit_grid import (
+    _load_nm_calibration,
     _summary,
     aggregate_storage_rate,
     allocate_exl3_module_bits,
@@ -1592,6 +1593,48 @@ def test_qvq_diagnostic_loads_disjoint_nm_rows_for_held_out_evaluation():
         "valid_tokens": 5,
         "padded_tokens_excluded": 1,
     }
+
+
+def test_qvq_diagnostic_loads_direct_parquet_without_flattening_structured_rows():
+    dataset = object()
+    path = Path("/nm/llm.parquet")
+    with (
+        patch("scripts.analyze_gptq_low_bit_grid.os.path.isfile", return_value=True),
+        patch("scripts.analyze_gptq_low_bit_grid.load_dataset", return_value=dataset) as load,
+    ):
+        result = _load_nm_calibration(path)
+
+    load.assert_called_once_with("parquet", data_files={"train": str(path)}, split="train")
+    assert result is dataset
+
+
+def test_qvq_diagnostic_evaluation_none_preserves_full_rows_without_truncation():
+    dataset = MagicMock()
+    dataset.__len__.return_value = 4
+    selected = {"text": ["one", "two"]}
+    dataset.select.return_value = selected
+    tokenizer = MagicMock(
+        return_value={
+            "input_ids": torch.tensor([[1, 2], [3, 4]]),
+            "attention_mask": torch.ones((2, 2), dtype=torch.long),
+        }
+    )
+    with patch("scripts.analyze_gptq_low_bit_grid.load_dataset", return_value=dataset):
+        _, stats = load_nm_evaluation_batch(
+            tokenizer,
+            dataset_path=Path("/nm/dataset"),
+            row_offset=2,
+            rows=2,
+            max_length=None,
+        )
+
+    tokenizer.assert_called_once_with(
+        selected["text"],
+        return_tensors="pt",
+        padding=True,
+        truncation=False,
+    )
+    assert stats["max_length"] == "full_row"
 
 
 @pytest.mark.parametrize(

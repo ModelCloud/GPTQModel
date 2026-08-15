@@ -53,45 +53,50 @@ except ImportError:  # pragma: no cover - fallback reads nm-calibration text JSO
     _HAVE_DATASETS = False
 
 
-class _TextRows:
-    """Minimal HF-Dataset-compatible view over local calibration texts.
+class _LocalRows:
+    """Minimal HF-Dataset-compatible view over local structured rows.
 
     Mirrors only the API surface used by this harness (len/select/rows/
     column access) so the diagnostic can run without the `datasets` package.
     """
 
-    def __init__(self, texts):
-        self._texts = list(texts)
+    def __init__(self, rows):
+        self._rows = [dict(row) for row in rows]
 
     def __len__(self):
-        return len(self._texts)
+        return len(self._rows)
 
     def __iter__(self):
-        return ({"text": t} for t in self._texts)
+        return iter(self._rows)
 
     def __getitem__(self, key):
         if isinstance(key, str):
-            if key == "text":
-                return list(self._texts)
-            raise KeyError(key)
+            return [row[key] for row in self._rows]
         if isinstance(key, slice):
-            return [{"text": t} for t in self._texts[key]]
-        return {"text": self._texts[key]}
+            return self._rows[key]
+        return self._rows[key]
 
     def select(self, indices):
-        return _TextRows([self._texts[i] for i in indices])
+        return _LocalRows([self._rows[i] for i in indices])
+
+
+class _TextRows(_LocalRows):
+    def __init__(self, texts):
+        super().__init__({"text": text} for text in texts)
 
 
 def _load_nm_calibration(dataset_path, config="LLM", split="train"):
     """Load nm-calibration rows; prefer `datasets`, fall back to JSONL."""
 
+    candidate_path = str(dataset_path)
     if _HAVE_DATASETS:
         try:
-            return load_dataset(path=str(dataset_path), name=config, split=split)
+            if candidate_path.endswith(".parquet") and os.path.isfile(candidate_path):
+                return load_dataset("parquet", data_files={split: candidate_path}, split=split)
+            return load_dataset(path=candidate_path, name=config, split=split)
         except Exception:
             pass
     parquet_path = None
-    candidate_path = str(dataset_path)
     if candidate_path.endswith(".parquet") and os.path.isfile(candidate_path):
         parquet_path = candidate_path
     elif os.path.isdir(candidate_path):
@@ -107,22 +112,10 @@ def _load_nm_calibration(dataset_path, config="LLM", split="train"):
             import pyarrow.parquet as parquet
         except ImportError as exc:
             raise RuntimeError("parquet calibration input requires pyarrow") from exc
-        table = parquet.read_table(parquet_path, columns=["messages"])
-        texts = []
-        for row in table.column("messages").to_pylist():
-            if isinstance(row, list):
-                text = "\n\n".join(
-                    str(item.get("content", ""))
-                    for item in row
-                    if isinstance(item, dict) and item.get("content")
-                )
-            else:
-                text = str(row or "")
-            if text:
-                texts.append(text)
-        if not texts:
-            raise ValueError(f"no non-empty messages found in parquet calibration input {parquet_path}")
-        return _TextRows(texts)
+        rows = parquet.read_table(parquet_path).to_pylist()
+        if not rows:
+            raise ValueError(f"no rows found in parquet calibration input {parquet_path}")
+        return _LocalRows(rows)
     candidate = os.environ.get("NM_CALIBRATION_JSONL")
     if candidate is None:
         base = str(dataset_path)
@@ -303,14 +296,14 @@ def load_nm_evaluation_batch(
     dataset_path: Path,
     row_offset: int,
     rows: int,
-    max_length: int,
+    max_length: int | None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, int | str]]:
     """Tokenize a disjoint nm-calibration slice for held-out logit evaluation."""
 
     if row_offset < 0:
         raise ValueError("evaluation row offset must be nonnegative")
-    if rows < 1 or max_length < 1:
-        raise ValueError("evaluation rows and max length must be positive")
+    if rows < 1 or (max_length is not None and max_length < 1):
+        raise ValueError("evaluation rows must be positive and max length must be positive or None")
     dataset = _load_nm_calibration(dataset_path)
     row_end = row_offset + rows
     if len(dataset) < row_end:
@@ -321,13 +314,10 @@ def load_nm_evaluation_batch(
     texts = list(selected["text"])
     if len(texts) != rows or any(not isinstance(text, str) or not text.strip() for text in texts):
         raise ValueError("evaluation dataset slice must contain one nonempty `text` value per row")
-    encoded = tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-    )
+    tokenizer_kwargs = {"return_tensors": "pt", "padding": True, "truncation": max_length is not None}
+    if max_length is not None:
+        tokenizer_kwargs["max_length"] = max_length
+    encoded = tokenizer(texts, **tokenizer_kwargs)
     if "attention_mask" not in encoded:
         raise ValueError("evaluation tokenizer output must include an attention mask")
     valid_tokens = int(encoded["attention_mask"].ne(0).sum())
@@ -340,7 +330,7 @@ def load_nm_evaluation_batch(
         "row_start": row_offset,
         "row_end_exclusive": row_end,
         "source_rows": rows,
-        "max_length": max_length,
+        "max_length": "full_row" if max_length is None else max_length,
         "valid_tokens": valid_tokens,
         "padded_tokens_excluded": padded_tokens,
     }
