@@ -9,6 +9,13 @@ Diagnose the instantiated model architecture before writing an adapter. Model na
 
 Read [references/model-adapter-map.md](references/model-adapter-map.md) before adding a definition.
 
+## Model snapshot storage
+
+Use `/private/monster/data/model` as the canonical local root for model snapshots and QVQ test artifacts.
+Do not use the NFS path `/monster/data/model` for new work; preserve each snapshot's relative directory
+layout beneath the local root so scripts and cached references remain reproducible. If an incoming request
+uses `/private/mosnter/data/model`, treat that spelling as the known typo for `/private/monster/data/model`.
+
 ## Diagnose first
 
 1. Record the model's `model_type`, architecture class, Transformers version, dtype, trust-remote-code requirement, and relevant nested configs.
