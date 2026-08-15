@@ -236,6 +236,30 @@ is zero, Top-N is mixed, and one target/split cannot establish task recovery. Th
 `scripts/validate_qvq_p4_live_prefix.py`; raw JSON and the one-module selected artifact remain under the untracked
 `artifacts/qvq_p4_promotion/` directory.
 
+The driver now installs multiple compatible artifacts atomically, allowing conditional coordinate refinement rather
+than independent module tests. It rejects duplicate modules, mixed codec contracts, source-model mismatches, and a
+prefix that already contains the current target before mutating the model. The first sequential gate installed both
+the layer-0 Q/K/V/O prefix and the accepted layer-1 `q_proj`, then refined layer-1 `k_proj` on fresh eight-row splits:
+search `[1626,1634)`, confirmation `[1634,1642)`, and untouched evaluation `[1642,1650)`. Search captured 2,954 live
+input tokens and completed in 80.63 seconds. The proposal changed the state path without selector or family churn.
+
+| Split | Arm | Final-logit KL | Top-1 | Top-5 | Top-10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| confirmation | rollback | 0.0124357109 | 86.2589% | 88.7390% | 89.4512% |
+| confirmation | serialized proposal reconstruction | 0.0124295838 | 86.3008% | 88.7306% | 89.4344% |
+| untouched evaluation | rollback | 0.0112255992 | 89.0890% | 90.0353% | 90.3566% |
+| untouched evaluation | selected dense reconstruction | 0.0112241216 | 88.9831% | 90.1059% | 90.3566% |
+| untouched evaluation | selected packed MPS | 0.0112184444 | 88.9477% | 90.0141% | 90.3566% |
+
+Confirmation accepted a 0.0493% KL improvement with Top-1 +0.0419 percentage points and Top-5/10
+-0.0084/-0.0168 points. On untouched rows the selected dense reconstruction improved KL by 0.0132%, decreased
+Top-1 by 0.1059 points, increased Top-5 by 0.0706 points, and left Top-10 unchanged. Native packed execution moved
+KL another -0.0506% relative to the selected dense reconstruction while moving Top-1/5 by -0.0353/-0.0918 points.
+This is useful conditional evidence but still below a promotion threshold: both accepted layer-1 proposals improve
+KL by only hundredths of a percent, neither changes the selector map, and their untouched Top-N changes are mixed.
+The next sequential arm should test `v_proj` on another fresh split, but the complete Q/K/V/O chain must ultimately
+beat the original live-prefix baseline on a common locked confirmation set before any accumulated map is retained.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
