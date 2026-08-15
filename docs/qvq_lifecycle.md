@@ -10,8 +10,8 @@ The target public flow is:
 
 ```text
 GPTQModel.load(source)
-    -> prepared_artifacts = model.prepare(stage=PrepareStage.QUANTIZATION, ...)
-    -> model.quantize(prepared_artifacts=prepared_artifacts)
+    -> prepared_artifact = model.prepare(stage=PrepareStage.QUANTIZATION, ...)
+    -> model.quantize(prepared_artifact=prepared_artifact)
     -> validate live packed model
     -> model.save(output)
     -> GPTQModel.load(output)
@@ -97,7 +97,7 @@ checkpoint owner, and source tensors are materialized only for the active layer 
 Add an explicit staged preparation operation rather than overloading `quantize()` with another opaque prepass:
 
 ```python
-prepared_artifacts: dict[str, BasePreparedArtifact] = model.prepare(
+prepared_artifact: QVQPreparedArtifact = model.prepare(
     stage=PrepareStage.QUANTIZATION,
     config=QVQPrepareConfig(
         calibration=calibration,
@@ -113,7 +113,7 @@ prepared_artifacts: dict[str, BasePreparedArtifact] = model.prepare(
 )
 
 model.quantize(
-    prepared_artifacts=prepared_artifacts,
+    prepared_artifact=prepared_artifact,
     layer_scope=None,
 )
 ```
@@ -122,27 +122,12 @@ model.quantize(
 contract, and the concrete config selects `QVQPreparationProcessor`. A non-QVQ quantizer can register another processor
 behind the same stage without adding another top-level model method.
 
-`model.prepare()` returns a dictionary because one stage may produce several generic and method-specific artifacts.
-Use the plural name `prepared_artifacts`, not `prepared_payload`: the values represent validated lifecycle results and
-managed cache references, not one opaque tensor transport bundle.
+`model.prepare()` returns one concrete subclass of `BasePreparedArtifact`. The stage and config select the processor
+and expected return subclass. QVQ preparation returns `QVQPreparedArtifact`; another quantization method may return its
+own subclass with completely different typed fields.
 
-A representative QVQ result is:
-
-```python
-prepared_artifacts = {
-    "manifest": PreparationManifest(...),
-    "calibration": CalibrationArtifact(...),
-    "validation": ValidationArtifact(...),
-    "qvq.input_hessians": HessianArtifact(...),
-    "qvq.input_factors": FactorizationArtifact(...),
-    "qvq.sketch_b": SketchBArtifact(...),
-    "qvq.propagation": PropagationArtifact(...),
-}
-```
-
-Only `manifest` is universally required. Generic lifecycle keys are unprefixed; method-owned keys use a stable
-namespace such as `qvq.*`. Multiple preparation processors may contribute to the same result, but registering the same
-key twice is an error. No processor may silently overwrite another processor's artifact.
+Use the singular name `prepared_artifact`, not `prepared_payload`. The object is a validated lifecycle result with
+provenance, parsing, and managed-storage behavior, not an opaque tensor transport bundle.
 
 The model state machine becomes:
 
@@ -165,17 +150,15 @@ Failure transitions are transactional:
 - validation failure rejects the artifact and preserves the last independently accepted baseline;
 - cleanup failures are reported without masking the primary exception.
 
-`quantize()` remains backward compatible. If no `prepared_artifacts` dictionary is supplied, it internally runs the
-quantization preparation stage for the minimum required state. Supplying artifacts skips only work proven reusable by
-the manifest and each value's fingerprint; it does not bypass validation.
+`quantize()` remains backward compatible. If no `prepared_artifact` is supplied, it internally runs the quantization
+preparation stage for the minimum required state. Supplying an artifact skips only work proven reusable by its
+manifest and fingerprint; it does not bypass validation.
 
-## Prepared-artifact dictionary
+## Prepared artifact
 
-The public return type is `dict[str, BasePreparedArtifact]`. By contract, consumers treat the dictionary as read-only
-after `model.prepare()` returns. Every value is a frozen dataclass derived from `BasePreparedArtifact`; raw tensors,
-untyped nested dictionaries, and arbitrary processor objects cannot be inserted directly. Specialized dataclasses may
-contain immutable metadata, detached tensors, or managed read-only cache handles. They must not contain source model
-weights.
+The public return type is `BasePreparedArtifact`; the runtime value is the method-specific subclass selected by the
+preparation registry. The artifact is a frozen dataclass. It may contain typed component dataclasses, typed mappings,
+detached tensors, or managed read-only cache handles, but never source model weights or untyped processor state.
 
 ### Base artifact contract
 
@@ -184,13 +167,12 @@ The common base provides uniform parsing and consumption without forcing every q
 ```python
 @dataclass(frozen=True, kw_only=True)
 class BasePreparedArtifact:
-    key: str
     kind: str
     stage: PrepareStage
     schema_version: int
     producer: str
     fingerprint: str
-    dependencies: tuple[str, ...] = ()
+    manifest: PreparationManifest
 
     def validate(self, context: PrepareValidationContext) -> None:
         ...
@@ -203,37 +185,51 @@ class BasePreparedArtifact:
         ...
 ```
 
-Subclasses own their typed fields. Examples include `PreparationManifest`, `CalibrationArtifact`, `HessianArtifact`,
-`FactorizationArtifact`, `SketchBArtifact`, and `PropagationArtifact`. A subclass containing external tensor storage
-uses a typed `ArtifactStorage` handle with checksum, dtype, shape, location, and ownership information rather than an
-unstructured path.
+QVQ aggregates its multiple preparation products in one typed subclass:
+
+```python
+@dataclass(frozen=True, kw_only=True)
+class QVQPreparedArtifact(BasePreparedArtifact):
+    calibration: CalibrationArtifact
+    validation: ValidationArtifact | None
+    input_hessians: Mapping[str, HessianArtifact]
+    input_factors: Mapping[str, FactorizationArtifact]
+    sketch_b: SketchBArtifact | None
+    propagation: PropagationArtifact | None
+    compander: CompanderArtifact | None
+```
+
+The internal component types are ordinary frozen dataclasses owned by QVQ; they do not need to inherit
+`BasePreparedArtifact` because they are not independent lifecycle return values. Typed mappings support arbitrarily
+many modules and calculation groups without weakening the top-level return contract. A component containing external
+tensor storage uses an `ArtifactStorage` handle with checksum, dtype, shape, location, and ownership information rather
+than an unstructured path.
 
 An in-memory tensor field must be detached, non-gradient, artifact-owned, and treated as read-only. Freezing the
 dataclass does not make a PyTorch tensor immutable, so validation recomputes its checksum before consumption whenever
 the artifact crosses a lifecycle or process boundary. Large or shared tensors should prefer `ArtifactStorage` handles
 to make ownership and mutation boundaries explicit.
 
-The mapping key and `artifact.key` must match. `kind` is a stable serialized discriminator, not a Python class name.
-Deserialization uses a registry from `(stage, kind, schema_version)` to the permitted dataclass parser. Unknown kinds,
-unsupported versions, missing dependencies, key mismatches, and unexpected subclasses fail closed.
+`kind` is a stable serialized discriminator, not a Python class name. Deserialization uses a registry from
+`(stage, kind, schema_version)` to the permitted `BasePreparedArtifact` subclass parser. Unknown kinds, unsupported
+versions, malformed component mappings, and unexpected subclasses fail closed.
 
-Consumers do not cast arbitrary values from the dictionary. They use a checked accessor:
+Consumers validate and narrow the return type once at the lifecycle boundary:
 
 ```python
-sketch_b = require_prepared_artifact(
-    prepared_artifacts,
-    key="qvq.sketch_b",
-    artifact_type=SketchBArtifact,
+qvq_artifact = require_prepared_artifact(
+    prepared_artifact,
+    artifact_type=QVQPreparedArtifact,
 )
 ```
 
-The accessor validates the manifest membership, expected type, stage, fingerprint, dependencies, and current model/
-config context before returning the artifact.
+Its `sketch_b` field is then statically typed. The accessor validates the expected subclass, stage, fingerprint,
+manifest, and current model/config context before returning the narrowed artifact.
 
-The required `PreparationManifest` is the authority for the complete dictionary. It records the stage, config,
-producer, keys, dependencies, checksums, storage locations, and lifecycle schema. Removing, replacing, or adding a key
-without regenerating the manifest invalidates the dictionary. Its own checksum excludes the manifest's fingerprint
-field to avoid a self-referential digest.
+The required `PreparationManifest` is the authority for the complete object. It records the stage, config, producer,
+component fields, dependencies, checksums, storage locations, and lifecycle schema. Removing, replacing, or adding a
+component without regenerating the manifest invalidates the artifact. Its own checksum excludes the manifest's
+fingerprint field to avoid a self-referential digest.
 
 ### Identity and provenance
 
@@ -249,12 +245,12 @@ The manifest records:
 - seed policy and all derived seed/sign checksums;
 - implementation/schema version and checksums for every stored tensor.
 
-The dictionary or an individual artifact is rejected when any field affecting its math differs. It must never be
-accepted based only on matching tensor shapes.
+The artifact is rejected when any field affecting its math differs. It must never be accepted based only on matching
+tensor shapes.
 
 ### Stored QVQ data
 
-Depending on the requested arms, the dictionary may contain:
+Depending on the requested arms, `QVQPreparedArtifact` may contain:
 
 - pristine input Hessians/Grams, shared by exact same-activation groups;
 - sample counts and padding-exclusion metadata;
@@ -446,8 +442,8 @@ The initial dense implementation may continue using full-model backward. The sca
 6. define routed-token and zero-sample semantics before enabling MoE;
 7. add distributed reduction only after exact single-device parity is established.
 
-The prepared-artifacts dictionary must support reuse of one validated Sketch-B collection across compatible V2,
-V2B2-P32, and V2B4-P64 YAQA arms. Bank/family selection and trellis results are not reusable preparation data.
+`QVQPreparedArtifact` must support reuse of one validated Sketch-B collection across compatible V2, V2B2-P32, and
+V2B4-P64 YAQA arms. Bank/family selection and trellis results are not reusable preparation data.
 
 For V2B2-P32, preserve both YAQA modes:
 
@@ -534,7 +530,7 @@ The replacement comparison script becomes a thin manifest runner. A sweep arm sp
 
 ```text
 source model and tokenizer
-prepared-artifacts dictionary or preparation manifest/cache reference
+prepared artifact or serialized artifact/cache reference
 QVQ config and rate
 rounding mode
 layer/module scope
@@ -599,8 +595,8 @@ new correctness stages to one side of the A/B.
 
 - preparation state transitions, idempotence, invalidation, and failure cleanup;
 - `BasePreparedArtifact` subclass registration, serialization, parsing, and checked consumption;
-- dictionary/manifest schema, key-collision rejection, and per-artifact checksum round trip;
-- unknown kind/version, wrong subtype, key mismatch, missing dependency, and mutated-tensor rejection;
+- artifact/manifest schema and component checksum round trip;
+- unknown kind/version, wrong subclass, malformed component mapping, missing dependency, and mutated-tensor rejection;
 - calibration sort, no-concat, full-length rows, masks, and exact sample counts;
 - model-tree target and calculation-group discovery without name-prefix assumptions;
 - exact shared-versus-independent Hessian and factor parity;
@@ -692,7 +688,7 @@ Exit: the standalone oracle is reproducible from one manifest.
 - add `PrepareStage`, `BasePreparedArtifact`, its parser registry, preparation state/protocol, and `model.prepare()`;
 - move model-tree target resolution and shared Hessian capture behind the lifecycle;
 - add explicit seed policy and pristine geometry mode;
-- consume `prepared_artifacts` in `QVQProcessor`;
+- consume `prepared_artifact` in `QVQProcessor`;
 - retain existing `quantize()` behavior when no prepared artifact is supplied.
 
 Exit: Llama 3.2 1B dense-resident lifecycle matches the standalone tensors exactly.
@@ -752,7 +748,7 @@ Exit: propagation-aware selection measures true downstream logits and never cons
 | Shell/source materialization | `BaseQModel.shell_module_materialize()` and `LazyTurtle` |
 | Device/subset scheduling | `ModuleLooper` / `SubsetPlan` |
 | QVQ preparation validation and quantization | `QVQProcessor` |
-| Hessian/Sketch-B reusable data | namespaced prepared artifacts plus bounded cache storage |
+| Hessian/Sketch-B reusable data | typed `QVQPreparedArtifact` fields plus bounded cache storage |
 | QVQ math | `gptqmodel.quantization.qvq` |
 | Packed module and backend selection | `QVQLinear` and existing backend lifecycle |
 | Save/reload/sharding | existing GPT-QModel checkpoint lifecycle |
