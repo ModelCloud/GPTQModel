@@ -624,26 +624,26 @@ def test_qvq_mlp_acceptance_is_atomic_tree_derived_and_fail_closed():
         observed.append((label, tuple(float(module.weight.detach()[0, 0]) for module in modules.values())))
         return {
             "qkvo_dense_mlp_baseline": _acceptance_metrics(1.0),
-            "mlp_layer_0_gate": _acceptance_metrics(0.85),
-            "mlp_layer_0_up": _acceptance_metrics(0.95),
-            "mlp_layer_0_gate_up": _acceptance_metrics(0.7),
-            "mlp_layer_0_down": _acceptance_metrics(0.9),
-            "mlp_layer_0_gate_down": _acceptance_metrics(0.82),
-            "mlp_layer_0_up_down": _acceptance_metrics(0.88),
-            "mlp_layer_0_full": _acceptance_metrics(0.8),
-            "mlp_layer_1_gate": _acceptance_metrics(1.01),
-            "mlp_layer_1_up": _acceptance_metrics(1.02),
-            "mlp_layer_1_gate_up": _acceptance_metrics(1.1),
-            "mlp_layer_1_down": _acceptance_metrics(1.2),
-            "mlp_layer_1_gate_down": _acceptance_metrics(1.15),
-            "mlp_layer_1_up_down": _acceptance_metrics(1.25),
-            "mlp_layer_1_full": _acceptance_metrics(1.3),
+            "mlp_layer_0_gate_w2": _acceptance_metrics(0.85),
+            "mlp_layer_0_up_w2": _acceptance_metrics(0.95),
+            "mlp_layer_0_gate_up_w2": _acceptance_metrics(0.7),
+            "mlp_layer_0_down_w2": _acceptance_metrics(0.9),
+            "mlp_layer_0_gate_down_w2": _acceptance_metrics(0.82),
+            "mlp_layer_0_up_down_w2": _acceptance_metrics(0.88),
+            "mlp_layer_0_full_w2": _acceptance_metrics(0.8),
+            "mlp_layer_1_gate_w2": _acceptance_metrics(1.01),
+            "mlp_layer_1_up_w2": _acceptance_metrics(1.02),
+            "mlp_layer_1_gate_up_w2": _acceptance_metrics(1.1),
+            "mlp_layer_1_down_w2": _acceptance_metrics(1.2),
+            "mlp_layer_1_gate_down_w2": _acceptance_metrics(1.15),
+            "mlp_layer_1_up_down_w2": _acceptance_metrics(1.25),
+            "mlp_layer_1_full_w2": _acceptance_metrics(1.3),
         }[label]
 
     selected, report = _select_mlp_layer_candidates(
         root,
         modules,
-        candidates,
+        {2.0: candidates},
         originals,
         evaluate=evaluate,
         kl_regression_limit=0.0,
@@ -709,7 +709,7 @@ def test_qvq_mlp_acceptance_is_atomic_tree_derived_and_fail_closed():
         _select_mlp_layer_candidates(
             root,
             modules,
-            candidates,
+            {2.0: candidates},
             originals,
             evaluate=lambda label: (
                 _acceptance_metrics(1.0)
@@ -721,6 +721,65 @@ def test_qvq_mlp_acceptance_is_atomic_tree_derived_and_fail_closed():
         )
     for name in report["decisions"][0]["modules"]:
         assert torch.equal(modules[name].weight, originals[name])
+
+
+def test_qvq_mlp_rate_ladder_promotes_to_cheapest_safe_complete_subset():
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList((layer,))
+    modules = {}
+    originals = {}
+    candidates_by_rate = {2.0: {}, 3.0: {}, 3.5: {}, 4.0: {}}
+    fixed_name = "model.layers.0.self_attn.q_proj"
+    fixed_module = torch.nn.Linear(2, 2, bias=False)
+    modules[fixed_name] = fixed_module
+    originals[fixed_name] = torch.ones_like(fixed_module.weight)
+    for rate in candidates_by_rate:
+        candidates_by_rate[rate][fixed_name] = torch.full_like(fixed_module.weight, 9.0)
+    with torch.no_grad():
+        fixed_module.weight.copy_(candidates_by_rate[2.0][fixed_name])
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        module = torch.nn.Linear(2, 2, bias=False)
+        setattr(layer.mlp, role, module)
+        name = f"model.layers.0.mlp.{role}"
+        modules[name] = module
+        originals[name] = torch.ones_like(module.weight)
+        for rate in candidates_by_rate:
+            candidates_by_rate[rate][name] = torch.full_like(module.weight, rate)
+
+    def evaluate(label):
+        if label == "qkvo_dense_mlp_baseline":
+            return _acceptance_metrics(1.0)
+        variant, rate_text = label.removeprefix("mlp_layer_0_").rsplit("_w", 1)
+        rate = float(rate_text)
+        if rate == 2.0 and variant == "up":
+            return _acceptance_metrics(0.8)
+        if rate >= 3.0 and variant == "full":
+            return _acceptance_metrics(0.9 + 0.01 * rate)
+        return _acceptance_metrics(1.1)
+
+    selected, report = _select_mlp_layer_candidates(
+        root,
+        modules,
+        candidates_by_rate,
+        originals,
+        evaluate=evaluate,
+        kl_regression_limit=0.0,
+        topn_regression_limit=0.0,
+        selector_bpw=0.03125,
+    )
+
+    decision = report["decisions"][0]
+    assert decision["selected_variant"] == "full"
+    assert decision["selected_rate"] == 3.0
+    assert decision["selected_effective_bpw"] == pytest.approx(3.03125)
+    assert len(decision["candidates"]) == 28
+    assert set(decision["selected_rates"].values()) == {3.0}
+    assert all(torch.equal(selected[name], candidates_by_rate[3.0][name]) for name in modules)
+    assert all(torch.equal(module.weight, candidates_by_rate[3.0][name]) for name, module in modules.items())
+    assert torch.equal(selected[fixed_name], candidates_by_rate[2.0][fixed_name])
 
 
 def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
@@ -747,6 +806,13 @@ def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
     assert mixed_mlp.mlp_gate_up_rate == 6
     assert mixed_mlp.mlp_down_rate == 3.5
     assert mixed_mlp.mlp_codec == "v2"
+    ladder = _parser().parse_args(
+        (
+            "--model", "model", "--dataset", "dataset", "--output", "report.json",
+            "--module-scope", "all-linear", "--mlp-rate-ladder", "2", "3", "3.5", "4",
+        )
+    )
+    assert ladder.mlp_rate_ladder == [2.0, 3.0, 3.5, 4.0]
     assert (args.calibration_rows, args.evaluation_row_offset, args.yaqa_row_offset) == (512, 512, 1024)
 
     encoded = {

@@ -195,6 +195,16 @@ def _parser() -> argparse.ArgumentParser:
         help="Optional independent gate/up/down rate for isolating MLP sensitivity while QKVO uses --rates.",
     )
     parser.add_argument(
+        "--mlp-rate-ladder",
+        nargs="+",
+        type=float,
+        help=(
+            "Ordered low-to-high MLP rates. Each layer tries every projection subset at these rates and "
+            "keeps the accepted candidate with the lowest dense-inclusive storage cost. If none passes, "
+            "the complete layer MLP remains dense."
+        ),
+    )
+    parser.add_argument(
         "--mlp-gate-up-rate",
         type=float,
         help="Optional gate/up rate; overrides --mlp-rate for those same-input projections.",
@@ -861,17 +871,27 @@ def _streaming_logit_metrics(
 def _select_mlp_layer_candidates(
     model: torch.nn.Module,
     selected_modules: dict[str, torch.nn.Linear],
-    candidate_reconstructions: dict[str, torch.Tensor],
+    candidate_reconstructions_by_rate: Mapping[float, Mapping[str, torch.Tensor]],
     original_weights: dict[str, torch.Tensor],
     *,
     evaluate,
     kl_regression_limit: float,
     topn_regression_limit: float,
+    selector_bpw: float = 0.0,
 ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
-    """Greedily add downstream-safe MLP projection subsets with atomic rollback."""
+    """Greedily add downstream-safe MLP subsets from an ordered rate ladder."""
 
     groups = _mlp_layer_groups(model, selected_modules)
-    selected_reconstructions = dict(candidate_reconstructions)
+    candidate_rates = tuple(sorted(candidate_reconstructions_by_rate))
+    if not candidate_rates:
+        raise ValueError("MLP rate ladder must contain at least one rate")
+    for rate in candidate_rates:
+        missing = set(name for group in groups for name in group).difference(candidate_reconstructions_by_rate[rate])
+        if missing:
+            raise ValueError(f"MLP rate W{rate:g} is missing candidate reconstructions: {sorted(missing)}")
+    # Non-MLP projections are fixed candidates during this search and must
+    # survive the MLP rollback/selection unchanged.
+    selected_reconstructions = dict(candidate_reconstructions_by_rate[candidate_rates[0]])
     with torch.no_grad():
         for group in groups:
             for name in group:
@@ -898,31 +918,37 @@ def _select_mlp_layer_candidates(
         )
         candidate_reports = []
         try:
-            for variant, candidate_names in candidate_specs:
-                with torch.no_grad():
-                    for name in group:
-                        module = selected_modules[name]
-                        weight = (
-                            candidate_reconstructions[name]
-                            if name in candidate_names
-                            else original_weights[name]
-                        )
-                        module.weight.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
-                proposal = evaluate(f"mlp_layer_{layer_index}_{variant}")
-                accepted = _passes_mlp_acceptance(
-                    baseline,
-                    proposal,
-                    kl_regression_limit=kl_regression_limit,
-                    topn_regression_limit=topn_regression_limit,
-                )
-                candidate_reports.append(
-                    {
-                        "variant": variant,
-                        "modules": list(candidate_names),
-                        "accepted": accepted,
-                        "metrics": proposal,
-                    }
-                )
+            for rate in candidate_rates:
+                rate_reconstructions = candidate_reconstructions_by_rate[rate]
+                for variant, candidate_names in candidate_specs:
+                    with torch.no_grad():
+                        for name in group:
+                            module = selected_modules[name]
+                            weight = rate_reconstructions[name] if name in candidate_names else original_weights[name]
+                            module.weight.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
+                    proposal = evaluate(f"mlp_layer_{layer_index}_{variant}_w{rate:g}")
+                    accepted = _passes_mlp_acceptance(
+                        baseline,
+                        proposal,
+                        kl_regression_limit=kl_regression_limit,
+                        topn_regression_limit=topn_regression_limit,
+                    )
+                    group_parameters = sum(original_weights[name].numel() for name in group)
+                    quantized_parameters = sum(original_weights[name].numel() for name in candidate_names)
+                    dense_parameters = group_parameters - quantized_parameters
+                    effective_bpw = (
+                        quantized_parameters * (rate + selector_bpw) + dense_parameters * 16.0
+                    ) / group_parameters
+                    candidate_reports.append(
+                        {
+                            "variant": variant,
+                            "rate": rate,
+                            "modules": list(candidate_names),
+                            "accepted": accepted,
+                            "effective_bpw": effective_bpw,
+                            "metrics": proposal,
+                        }
+                    )
         except BaseException:
             with torch.no_grad():
                 for name in group:
@@ -932,16 +958,23 @@ def _select_mlp_layer_candidates(
                     selected_reconstructions[name] = dense
             raise
         eligible = [candidate for candidate in candidate_reports if candidate["accepted"]]
-        selected_candidate = min(
-            eligible,
-            key=lambda candidate: float(candidate["metrics"]["kl_forward"]["mean"]),
-            default=None,
-        )
+        def candidate_key(candidate):
+            # Preserve the historical fixed-rate quality policy. A ladder is a
+            # bit allocator, so include dense fallback storage before quality.
+            storage_cost = 0.0 if len(candidate_rates) == 1 else float(candidate["effective_bpw"])
+            return storage_cost, float(candidate["metrics"]["kl_forward"]["mean"])
+        selected_candidate = min(eligible, key=candidate_key, default=None)
         selected_names = set() if selected_candidate is None else set(selected_candidate["modules"])
+        selected_rate = None if selected_candidate is None else float(selected_candidate["rate"])
         with torch.no_grad():
             for name in group:
                 module = selected_modules[name]
-                weight = candidate_reconstructions[name] if name in selected_names else original_weights[name]
+                if name in selected_names:
+                    if selected_rate is None:
+                        raise RuntimeError("accepted MLP candidate is missing its selected rate")
+                    weight = candidate_reconstructions_by_rate[selected_rate][name]
+                else:
+                    weight = original_weights[name]
                 module.weight.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
                 selected_reconstructions[name] = weight
         if selected_candidate is not None:
@@ -952,7 +985,12 @@ def _select_mlp_layer_candidates(
                 "modules": list(group),
                 "accepted": selected_candidate is not None,
                 "selected_variant": None if selected_candidate is None else selected_candidate["variant"],
+                "selected_rate": selected_rate,
+                "selected_effective_bpw": (
+                    16.0 if selected_candidate is None else selected_candidate["effective_bpw"]
+                ),
                 "selected_modules": list(selected_names),
+                "selected_rates": {name: selected_rate for name in selected_names},
                 "candidates": candidate_reports,
             }
         )
@@ -1328,15 +1366,25 @@ def main() -> None:
         ):
             raise ValueError("MLP acceptance rows must be disjoint from calibration, evaluation, and YAQA rows")
     rates = tuple(normalize_qvq_rate(rate) for rate in args.rates)
+    mlp_rate_ladder = tuple(normalize_qvq_rate(rate) for rate in (args.mlp_rate_ladder or ()))
+    if mlp_rate_ladder and (
+        len(set(mlp_rate_ladder)) != len(mlp_rate_ladder)
+        or tuple(sorted(mlp_rate_ladder)) != mlp_rate_ladder
+    ):
+        raise ValueError("MLP rate ladder must be unique and strictly low-to-high")
     mlp_rate = None if args.mlp_rate is None else normalize_qvq_rate(args.mlp_rate)
     mlp_gate_up_rate = (
         mlp_rate if args.mlp_gate_up_rate is None else normalize_qvq_rate(args.mlp_gate_up_rate)
     )
     mlp_down_rate = mlp_rate if args.mlp_down_rate is None else normalize_qvq_rate(args.mlp_down_rate)
-    if args.module_scope != "all-linear" and any(
-        value is not None for value in (mlp_rate, mlp_gate_up_rate, mlp_down_rate)
+    if args.module_scope != "all-linear" and (
+        mlp_rate_ladder or any(value is not None for value in (mlp_rate, mlp_gate_up_rate, mlp_down_rate))
     ):
         raise ValueError("MLP rate overrides require --module-scope all-linear")
+    if mlp_rate_ladder and any(value is not None for value in (mlp_rate, mlp_gate_up_rate, mlp_down_rate)):
+        raise ValueError("--mlp-rate-ladder cannot be combined with fixed MLP rate overrides")
+    if mlp_rate_ladder and not mlp_acceptance_enabled:
+        raise ValueError("MLP rate ladder requires the disjoint fail-closed MLP acceptance gate")
     device = torch.device(args.device)
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS is unavailable")
@@ -1537,6 +1585,7 @@ def main() -> None:
             "modules": list(module_names),
             "module_shapes": module_shapes,
             "rates": list(rates),
+            "mlp_rate_ladder": list(mlp_rate_ladder),
             "mlp_rate": mlp_rate,
             "mlp_gate_up_rate": mlp_gate_up_rate,
             "mlp_down_rate": mlp_down_rate,
@@ -1597,7 +1646,7 @@ def main() -> None:
             if (
                 geometry.get("v2b2_p32")
                 and args.mlp_codec == "same"
-                and any(module_rate > 3.5 for module_rate in mlp_rate_by_name.values())
+                and any(module_rate > 3.5 for module_rate in (*mlp_rate_by_name.values(), *mlp_rate_ladder))
             ):
                 raise ValueError("V2B2-P32 MLP rate must be W1 through W3.5")
             rounding = geometry.get("rounding", "block_ldlq")
@@ -1613,6 +1662,10 @@ def main() -> None:
                 trellis_window=geometry["trellis_window"],
             )
             reconstructions: dict[str, torch.Tensor] = {}
+            mlp_candidate_reconstructions_by_rate = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
+            mlp_candidate_metrics_by_rate = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
+            mlp_candidate_selector_counts = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
+            mlp_candidate_alternative_banks = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
             alternative_bank_histogram = [0, 0, 0, 0]
@@ -1690,19 +1743,14 @@ def main() -> None:
                     module = modules[name]
                     is_mlp = name in mlp_module_names
                     module_rate = mlp_rate_by_name.get(name, rate)
+                    module_rates = mlp_rate_ladder if is_mlp and mlp_rate_ladder else (module_rate,)
                     module_geometry = dict(geometry)
                     if is_mlp and args.mlp_codec == "v2":
                         module_geometry.update(vector_size=2, trellis_window=16, dual_v2=False, bank_count=1)
                         for flag in ("v2b2_p32", "v2b4_p64"):
                             module_geometry.pop(flag, None)
-                    module_batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
-                        module_rate,
-                        device,
-                        trellis_window=module_geometry["trellis_window"],
-                    )
                     completed_modules += 1
                     module_started = time.perf_counter()
-                    module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
                     if rounding == "yaqa":
                         quantization_hessian = stage_input_hessians[name].to(device)
                         input_preparation = None
@@ -1722,30 +1770,66 @@ def main() -> None:
                                 damp_percent=0.01,
                             )
                             input_preparations[source_key] = input_preparation
-                    result = quantize_qvq_linear(
-                        original_weights[name].to(device),
-                        quantization_hessian,
-                        bits=module_rate,
-                        output_hessian=(
-                            stage_output_hessians[name].to(device) if rounding == "yaqa" else None
-                        ),
-                        seed=args.seed,
-                        trellis_batch_size=module_batch_size,
-                        input_hessian_preparation=input_preparation,
-                        telemetry=module_telemetry,
-                        **module_geometry,
-                    )
+                    rate_results = {}
+                    for candidate_rate in module_rates:
+                        module_batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
+                            candidate_rate,
+                            device,
+                            trellis_window=module_geometry["trellis_window"],
+                        )
+                        module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
+                        result = quantize_qvq_linear(
+                            original_weights[name].to(device),
+                            quantization_hessian,
+                            bits=candidate_rate,
+                            output_hessian=(
+                                stage_output_hessians[name].to(device) if rounding == "yaqa" else None
+                            ),
+                            seed=args.seed,
+                            trellis_batch_size=module_batch_size,
+                            input_hessian_preparation=input_preparation,
+                            telemetry=module_telemetry,
+                            **module_geometry,
+                        )
+                        reconstruction = result.weight.detach().cpu().float()
+                        rate_results[candidate_rate] = (result, reconstruction)
+                        if is_mlp and mlp_rate_ladder:
+                            mlp_candidate_reconstructions_by_rate[candidate_rate][name] = reconstruction
+                            mlp_candidate_metrics_by_rate[candidate_rate][name] = {
+                                **_weight_metrics(original_weights[name], reconstruction),
+                                "proxy_loss": float(result.proxy_loss),
+                                "kronecker_proxy_loss": (
+                                    None
+                                    if result.kronecker_proxy_loss is None
+                                    else float(result.kronecker_proxy_loss)
+                                ),
+                                "qvq_telemetry": result.telemetry,
+                            }
+                            if result.bank_ids is not None:
+                                mlp_candidate_selector_counts[candidate_rate][name] = torch.bincount(
+                                    result.bank_ids.to(torch.int64).cpu(), minlength=4
+                                ).tolist()
+                            if result.bank_alt_id is not None:
+                                mlp_candidate_alternative_banks[candidate_rate][name] = int(
+                                    result.bank_alt_id.item()
+                                )
+                    replay_rate = module_rates[-1]
+                    result, reconstruction = rate_results[replay_rate]
                     if rounding != "yaqa":
                         shared_hessian_remaining[source_key] -= 1
                         if shared_hessian_remaining[source_key] == 0:
                             device_hessians.pop(source_key, None)
                             input_preparations.pop(source_key, None)
-                    reconstruction = result.weight.detach().cpu().float()
                     reconstructions[name] = reconstruction
                     weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
                     weight_metrics[name]["shape"] = list(original_weights[name].shape)
                     weight_metrics[name]["parameter_count"] = original_weights[name].numel()
-                    weight_metrics[name]["rate"] = module_rate
+                    weight_metrics[name]["rate"] = replay_rate
+                    if is_mlp and mlp_rate_ladder:
+                        weight_metrics[name]["rate_candidates"] = {
+                            str(candidate_rate): mlp_candidate_metrics_by_rate[candidate_rate][name]
+                            for candidate_rate in module_rates
+                        }
                     weight_metrics[name]["qvq_telemetry"] = result.telemetry
                     weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
                     weight_metrics[name]["kronecker_proxy_loss"] = (
@@ -1765,17 +1849,18 @@ def main() -> None:
                         "selector_churn": result.yaqa_spectral_selector_churn,
                         "family_changed": result.yaqa_spectral_family_changed,
                     }
-                    if result.bank_ids is not None:
+                    if result.bank_ids is not None and not (is_mlp and mlp_rate_ladder):
                         counts = torch.bincount(result.bank_ids.to(torch.int64).cpu(), minlength=4)
                         selector_histogram = [
                             current + int(count)
                             for current, count in zip(selector_histogram, counts.tolist(), strict=True)
                         ]
-                    if result.bank_alt_id is not None:
+                    if result.bank_alt_id is not None and not (is_mlp and mlp_rate_ladder):
                         alternative_bank_histogram[int(result.bank_alt_id.item())] += 1
                     print(
                         f"W{rate:g} {arm}: {completed_modules}/{len(modules)} {name} "
-                        f"at W{module_rate:g} in {time.perf_counter() - module_started:.2f}s",
+                        f"at {','.join(f'W{candidate_rate:g}' for candidate_rate in module_rates)} "
+                        f"in {time.perf_counter() - module_started:.2f}s",
                         flush=True,
                     )
                     if result.telemetry is not None:
@@ -1808,6 +1893,7 @@ def main() -> None:
                 for name, module in modules.items():
                     module.weight.copy_(reconstructions[name].to(device=device, dtype=module.weight.dtype))
             mlp_acceptance_report = {"enabled": False}
+            selector_bpw = 2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0
             if mlp_acceptance_enabled:
 
                 def evaluate_mlp_candidate(label: str) -> dict[str, object]:
@@ -1822,26 +1908,65 @@ def main() -> None:
                     )
                     return metrics
 
-                candidate_reconstructions = reconstructions
+                candidate_reconstructions_by_rate = (
+                    {
+                        candidate_rate: {
+                            **reconstructions,
+                            **mlp_candidate_reconstructions_by_rate[candidate_rate],
+                        }
+                        for candidate_rate in mlp_rate_ladder
+                    }
+                    if mlp_rate_ladder
+                    else {rate: reconstructions}
+                )
                 reconstructions, mlp_acceptance_report = _select_mlp_layer_candidates(
                     model,
                     modules,
-                    candidate_reconstructions,
+                    candidate_reconstructions_by_rate,
                     original_weights,
                     evaluate=evaluate_mlp_candidate,
                     kl_regression_limit=args.mlp_acceptance_kl_regression_limit,
                     topn_regression_limit=args.mlp_acceptance_topn_regression_limit,
+                    selector_bpw=0 if args.mlp_codec == "v2" else selector_bpw,
                 )
                 for decision in mlp_acceptance_report["decisions"]:
                     selected_mlp_modules = set(decision["selected_modules"])
                     for name in decision["modules"]:
                         metrics = weight_metrics[name]
-                        metrics["candidate_weight"] = {
-                            key: metrics[key] for key in ("mse", "relative_l2", "sqnr_db")
-                        }
+                        metrics["candidate_weight"] = (
+                            {
+                                str(candidate_rate): {
+                                    key: mlp_candidate_metrics_by_rate[candidate_rate][name][key]
+                                    for key in ("mse", "relative_l2", "sqnr_db")
+                                }
+                                for candidate_rate in mlp_rate_ladder
+                            }
+                            if mlp_rate_ladder
+                            else {key: metrics[key] for key in ("mse", "relative_l2", "sqnr_db")}
+                        )
                         metrics.update(_weight_metrics(original_weights[name], reconstructions[name]))
                         metrics["mlp_quantized"] = name in selected_mlp_modules
                         metrics["mlp_selected_variant"] = decision["selected_variant"]
+                        metrics["mlp_selected_rate"] = (
+                            decision["selected_rates"].get(name)
+                            if mlp_rate_ladder
+                            else mlp_rate_by_name.get(name, rate)
+                        )
+                        metrics["rate"] = metrics["mlp_selected_rate"] if name in selected_mlp_modules else None
+                        if name in selected_mlp_modules and mlp_rate_ladder:
+                            selected_rate = decision["selected_rates"][name]
+                            metrics.update(mlp_candidate_metrics_by_rate[selected_rate][name])
+                            counts = mlp_candidate_selector_counts[selected_rate].get(name)
+                            if counts is not None:
+                                selector_histogram = [
+                                    current + int(count)
+                                    for current, count in zip(selector_histogram, counts, strict=True)
+                                ]
+                            alternative_bank = mlp_candidate_alternative_banks[selected_rate].get(name)
+                            if alternative_bank is not None:
+                                alternative_bank_histogram[alternative_bank] += 1
+                        elif name not in selected_mlp_modules:
+                            metrics["qvq_telemetry"] = None
             streamed_metrics = _streaming_compare_models(
                 dense_model,
                 model,
@@ -1853,11 +1978,19 @@ def main() -> None:
                 progress_label=f"W{rate:g} {arm}",
                 module_scope=args.module_scope,
             )
-            selector_bpw = 2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0
             codec_bpw = rate + selector_bpw
+            selected_mlp_rates = (
+                {
+                    name: selected_rate
+                    for decision in mlp_acceptance_report.get("decisions", ())
+                    for name, selected_rate in decision.get("selected_rates", {}).items()
+                }
+                if mlp_rate_ladder
+                else {}
+            )
             codec_bpw_by_name = {
                 name: (
-                    mlp_rate_by_name.get(name, rate)
+                    selected_mlp_rates.get(name, mlp_rate_by_name.get(name, rate))
                     + (0 if args.mlp_codec == "v2" else selector_bpw)
                     if name in mlp_module_names
                     else codec_bpw
@@ -1877,9 +2010,13 @@ def main() -> None:
                 "quantization_stages": stage_reports,
                 "effective_bpw": codec_bpw,
                 "mlp_effective_bpw": (
-                    None
-                    if mlp_rate is None
-                    else mlp_rate + (0 if args.mlp_codec == "v2" else selector_bpw)
+                    [candidate_rate + (0 if args.mlp_codec == "v2" else selector_bpw) for candidate_rate in mlp_rate_ladder]
+                    if mlp_rate_ladder
+                    else (
+                        None
+                        if mlp_rate is None
+                        else mlp_rate + (0 if args.mlp_codec == "v2" else selector_bpw)
+                    )
                 ),
                 "mlp_effective_bpw_by_role": {
                     "gate_up": (mlp_gate_up_rate if mlp_gate_up_rate is not None else rate)
