@@ -154,6 +154,11 @@ python scripts/compare_qvq_codecs_llama_qkvo.py \
   --device cuda
 ```
 
+The default `--module-scope qkvo` preserves historical comparability. Use `--module-scope all-linear` to quantize
+all seven decoder projections per layer: Q/K/V/O plus MLP gate/up/down. The expanded scope excludes embeddings and
+the LM head, records the scope in the report, uses generic `local_modules`/`live_modules` metrics, and creates a
+distinct YAQA factor-cache contract. For all 16 Llama 3.2 1B layers, add `--layers 16 --module-scope all-linear`.
+
 ## Already validated and pushed
 
 - QVQ is the QTIP-derived quantizer plus this repository's planar PGC16 and backend upgrades. `pgc16-v1` uses the

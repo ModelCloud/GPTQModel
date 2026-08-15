@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+
 try:
     from analyze_gptq_low_bit_grid import (
         capture_calibration_hessians,
@@ -43,12 +44,22 @@ from gptqmodel.quantization.qvq import (
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 
+
 QKVO_SUFFIXES = (
     "self_attn.q_proj",
     "self_attn.k_proj",
     "self_attn.v_proj",
     "self_attn.o_proj",
 )
+MLP_SUFFIXES = (
+    "mlp.gate_proj",
+    "mlp.up_proj",
+    "mlp.down_proj",
+)
+MODULE_SCOPE_SUFFIXES = {
+    "qkvo": QKVO_SUFFIXES,
+    "all-linear": (*QKVO_SUFFIXES, *MLP_SUFFIXES),
+}
 ARM_CONFIG = {
     "v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": False},
     "v2b2-p32": {
@@ -118,6 +129,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="mps")
     parser.add_argument("--layers", type=int, default=4)
+    parser.add_argument(
+        "--module-scope",
+        choices=tuple(MODULE_SCOPE_SUFFIXES),
+        default="qkvo",
+        help="Quantize attention Q/K/V/O only, or every Q/K/V/O and gate/up/down projection.",
+    )
     parser.add_argument("--rates", nargs="+", type=float, default=(1, 1.5, 2, 2.5))
     parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=DEFAULT_ARMS)
     parser.add_argument("--calibration-rows", type=int, default=64)
@@ -182,7 +199,7 @@ def _padded_batch_chunks(
 
 
 def _yaqa_cache_metadata(args: argparse.Namespace, module_shapes: dict[str, list[int]], row_offset: int) -> dict:
-    return {
+    metadata = {
         "version": 1,
         "model": str(args.model.resolve()),
         "dataset": str(args.dataset.resolve()),
@@ -194,6 +211,12 @@ def _yaqa_cache_metadata(args: argparse.Namespace, module_shapes: dict[str, list
         "seed": args.yaqa_seed,
         "max_length": args.max_length,
     }
+    # Preserve compatibility with existing QKVO caches while making expanded
+    # all-linear caches self-describing and impossible to reuse accidentally.
+    if args.module_scope != "qkvo":
+        metadata["version"] = 2
+        metadata["module_scope"] = args.module_scope
+    return metadata
 
 
 def _load_yaqa_factor_cache(
@@ -257,22 +280,41 @@ def _save_yaqa_factor_cache(
     temporary.replace(path)
 
 
-def _qkvo_modules(model: torch.nn.Module, *, layer_count: int) -> dict[str, torch.nn.Linear]:
+def _quantized_linear_modules(
+    model: torch.nn.Module,
+    *,
+    layer_count: int,
+    module_scope: str,
+) -> dict[str, torch.nn.Linear]:
+    """Select the exact decoder projection set requested by the comparison run."""
+
+    try:
+        suffixes = MODULE_SCOPE_SUFFIXES[module_scope]
+    except KeyError as error:
+        raise ValueError(f"unsupported module scope: {module_scope}") from error
     modules = {
         name: module
         for name, module in model.named_modules()
-        if isinstance(module, torch.nn.Linear) and name.endswith(QKVO_SUFFIXES)
+        if isinstance(module, torch.nn.Linear) and name.endswith(suffixes)
     }
-    expected = layer_count * len(QKVO_SUFFIXES)
+    expected = layer_count * len(suffixes)
     if len(modules) != expected:
-        raise ValueError(f"expected {expected} QKVO modules in {layer_count} decoder layers, found {tuple(modules)}")
+        raise ValueError(
+            f"expected {expected} {module_scope} modules in {layer_count} decoder layers, found {tuple(modules)}"
+        )
     return modules
+
+
+def _qkvo_modules(model: torch.nn.Module, *, layer_count: int) -> dict[str, torch.nn.Linear]:
+    """Retain the original QKVO-only selector for callers importing this helper."""
+
+    return _quantized_linear_modules(model, layer_count=layer_count, module_scope="qkvo")
 
 
 def _joined(outputs: dict[str, torch.Tensor], names: tuple[str, ...]) -> torch.Tensor:
     rows = {outputs[name].shape[0] for name in names}
     if len(rows) != 1:
-        raise ValueError("QKVO outputs do not share one held-out token geometry")
+        raise ValueError("selected module outputs do not share one held-out token geometry")
     return torch.cat([outputs[name] for name in names], dim=-1)
 
 
@@ -440,6 +482,7 @@ def _streaming_compare_models(
     *,
     layer_count: int,
     progress_label: str,
+    module_scope: str = "qkvo",
 ) -> dict:
     module_names = tuple(dense_modules)
     local_accumulator = _WeightedMetricAccumulator()
@@ -470,13 +513,21 @@ def _streaming_compare_models(
             )
             for name in module_names
         }
-        dense_qkvo = _joined(dense_outputs, module_names)
+        dense_joined = _joined(dense_outputs, module_names)
         local_accumulator.add(
-            tensor_metrics(dense_qkvo, _joined(local_outputs, module_names), normalize_distribution=True),
+            tensor_metrics(
+                dense_joined,
+                _joined(local_outputs, module_names),
+                normalize_distribution=True,
+            ),
             rows=token_count,
         )
         live_accumulator.add(
-            tensor_metrics(dense_qkvo, _joined(live_outputs, module_names), normalize_distribution=True),
+            tensor_metrics(
+                dense_joined,
+                _joined(live_outputs, module_names),
+                normalize_distribution=True,
+            ),
             rows=token_count,
         )
         for layer_index, accumulator in layer_accumulators.items():
@@ -489,7 +540,12 @@ def _streaming_compare_models(
                 rows=token_count,
             )
         logit_accumulator.add(
-            tensor_metrics(dense_logits, quantized_logits, normalize_distribution=False, include_top10=True),
+            tensor_metrics(
+                dense_logits,
+                quantized_logits,
+                normalize_distribution=False,
+                include_top10=True,
+            ),
             rows=token_count,
         )
         if row_index % 16 == 0 or row_index == len(rows):
@@ -501,12 +557,18 @@ def _streaming_compare_models(
                 f"top10={logit_accumulator.mean('top10_overlap', 'mean'):.4f}",
                 flush=True,
             )
-    return {
-        "local_qkvo": local_accumulator.result(),
-        "live_qkvo": live_accumulator.result(),
+    local_metrics = local_accumulator.result()
+    live_metrics = live_accumulator.result()
+    result = {
+        "local_modules": local_metrics,
+        "live_modules": live_metrics,
         "layers": {str(index): accumulator.result() for index, accumulator in layer_accumulators.items()},
         "logits": logit_accumulator.result(),
     }
+    if module_scope == "qkvo":
+        result["local_qkvo"] = local_metrics
+        result["live_qkvo"] = live_metrics
+    return result
 
 
 def main() -> None:
@@ -550,7 +612,7 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    modules = _qkvo_modules(model, layer_count=args.layers)
+    modules = _quantized_linear_modules(model, layer_count=args.layers, module_scope=args.module_scope)
     module_names = tuple(modules)
     module_shapes = {name: list(module.weight.shape) for name, module in modules.items()}
     yaqa_input_hessians = {}
@@ -645,7 +707,7 @@ def main() -> None:
     )
     evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
 
-    print("Capturing QKVO calibration Hessians", flush=True)
+    print(f"Capturing {args.module_scope} calibration Hessians", flush=True)
     hessians, sample_counts = capture_calibration_hessians(model, calibration, modules, device=device)
     original_weights = {name: module.weight.detach().cpu().float().clone() for name, module in modules.items()}
     print("Loading an immutable dense replay model for row-streamed metrics", flush=True)
@@ -656,13 +718,18 @@ def main() -> None:
         low_cpu_mem_usage=True,
         local_files_only=True,
     ).eval().to(device)
-    dense_modules = _qkvo_modules(dense_model, layer_count=args.layers)
+    dense_modules = _quantized_linear_modules(
+        dense_model,
+        layer_count=args.layers,
+        module_scope=args.module_scope,
+    )
 
     report = {
         "settings": {
             "model": str(args.model),
             "source_layers": source_layers,
             "tested_layers": args.layers,
+            "module_scope": args.module_scope,
             "modules": list(module_names),
             "module_shapes": module_shapes,
             "rates": list(rates),
@@ -770,6 +837,7 @@ def main() -> None:
                 reconstructions,
                 layer_count=args.layers,
                 progress_label=f"W{rate:g} {arm}",
+                module_scope=args.module_scope,
             )
             arm_report = {
                 "seconds": time.perf_counter() - started,
@@ -794,8 +862,8 @@ def main() -> None:
             )
             print(
                 f"W{rate:g} {arm}: relL2={arm_report['weight']['mean_relative_l2']:.6f} "
-                f"localKL={arm_report['local_qkvo']['kl_forward']['mean']:.6f} "
-                f"liveKL={arm_report['live_qkvo']['kl_forward']['mean']:.6f} "
+                f"localKL={arm_report['local_modules']['kl_forward']['mean']:.6f} "
+                f"liveKL={arm_report['live_modules']['kl_forward']['mean']:.6f} "
                 f"layerKL={layer_kl:.6f} "
                 f"logitKL={logits['kl_forward']['mean']:.6f} "
                 f"top1={logits['top1_agreement']:.4f} "

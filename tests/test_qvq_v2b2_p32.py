@@ -22,22 +22,26 @@ from gptqmodel.quantization.qvq import (
     yaqa_output_spectral_refine_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
+from scripts.analyze_gptq_low_bit_grid import tensor_metrics
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
-    _WeightedMetricAccumulator,
     _load_yaqa_factor_cache,
     _padded_batch_chunks,
     _parser,
+    _quantized_linear_modules,
     _save_yaqa_factor_cache,
+    _streaming_compare_models,
+    _WeightedMetricAccumulator,
+    _yaqa_cache_metadata,
 )
-from scripts.analyze_gptq_low_bit_grid import tensor_metrics
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert DEFAULT_ARMS == ("v2", "v2b2-p32")
     args = _parser().parse_args(("--model", "model", "--dataset", "dataset", "--output", "report.json"))
     assert args.layers == 4
+    assert args.module_scope == "qkvo"
     assert args.calibration_rows == 64
     assert args.evaluation_rows == 64
     assert args.evaluation_row_offset == 64
@@ -51,6 +55,94 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     }
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
+
+
+def test_qvq_comparison_harness_can_select_every_decoder_linear_projection():
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList()
+    for _ in range(2):
+        layer = torch.nn.Module()
+        layer.self_attn = torch.nn.Module()
+        for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            setattr(layer.self_attn, name, torch.nn.Linear(4, 4, bias=False))
+        layer.mlp = torch.nn.Module()
+        layer.mlp.gate_proj = torch.nn.Linear(4, 8, bias=False)
+        layer.mlp.up_proj = torch.nn.Linear(4, 8, bias=False)
+        layer.mlp.down_proj = torch.nn.Linear(8, 4, bias=False)
+        model.model.layers.append(layer)
+    model.lm_head = torch.nn.Linear(4, 16, bias=False)
+
+    qkvo = _quantized_linear_modules(model, layer_count=2, module_scope="qkvo")
+    all_linear = _quantized_linear_modules(model, layer_count=2, module_scope="all-linear")
+
+    assert len(qkvo) == 8
+    assert len(all_linear) == 14
+    assert "model.layers.0.mlp.gate_proj" in all_linear
+    assert "model.layers.1.mlp.up_proj" in all_linear
+    assert "model.layers.1.mlp.down_proj" in all_linear
+    assert "lm_head" not in all_linear
+    with pytest.raises(ValueError, match="unsupported module scope"):
+        _quantized_linear_modules(model, layer_count=2, module_scope="everything")
+
+
+def test_qvq_all_linear_scope_has_distinct_yaqa_cache_metadata():
+    args = _parser().parse_args(
+        (
+            "--model",
+            "model",
+            "--dataset",
+            "dataset",
+            "--output",
+            "report.json",
+            "--module-scope",
+            "all-linear",
+        )
+    )
+    metadata = _yaqa_cache_metadata(args, {"model.layers.0.mlp.down_proj": [4, 8]}, row_offset=128)
+
+    assert metadata["version"] == 2
+    assert metadata["module_scope"] == "all-linear"
+
+
+def test_qvq_all_linear_streamed_metrics_use_generic_schema():
+    module_name = "model.layers.0.mlp.gate_proj"
+    dense_module = torch.nn.Linear(2, 2, bias=False)
+    quantized_module = torch.nn.Linear(2, 2, bias=False)
+    dense_inputs = {module_name: torch.tensor([[1.0, 2.0], [3.0, 4.0]])}
+    dense_outputs = {
+        module_name: torch.tensor([[0.5, 1.0], [1.5, 2.0]]),
+        "layer.0.hidden": torch.tensor([[0.25, 0.75], [1.25, 1.75]]),
+    }
+    live_outputs = {
+        module_name: dense_outputs[module_name] + 0.01,
+        "layer.0.hidden": dense_outputs["layer.0.hidden"] + 0.01,
+    }
+    dense_logits = torch.tensor([[2.0, 1.0, 0.0], [0.0, 1.0, 2.0]])
+    quantized_logits = dense_logits + 0.01
+    captures = (
+        (dense_logits, dense_inputs, dense_outputs),
+        (quantized_logits, {}, live_outputs),
+    )
+
+    with patch("scripts.compare_qvq_codecs_llama_qkvo.capture_forward", side_effect=captures):
+        metrics = _streaming_compare_models(
+            torch.nn.Module(),
+            torch.nn.Module(),
+            ({"attention_mask": torch.ones((1, 2), dtype=torch.long)},),
+            {module_name: dense_module},
+            {module_name: quantized_module},
+            {module_name: dense_module.weight.detach().float()},
+            layer_count=1,
+            progress_label="test",
+            module_scope="all-linear",
+        )
+
+    assert "local_modules" in metrics
+    assert "live_modules" in metrics
+    assert "local_qkvo" not in metrics
+    assert "live_qkvo" not in metrics
+    assert metrics["logits"]["streamed_rows"] == 2
 
 
 def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
