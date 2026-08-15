@@ -11,6 +11,7 @@ import time
 import torch
 
 from gptqmodel.quantization.qvq import (
+    QVQQuantizationTelemetry,
     _canonical_qvq_codebook,
     _canonical_qvq_v2b2_pair_stacks,
     _canonical_qvq_v2b4_bank_stack,
@@ -31,6 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repetitions", type=int, default=10)
     parser.add_argument("--seeds", nargs="+", type=int, default=(20260861, 20260862, 20260863))
     parser.add_argument("--trellis-batch-size", type=int, default=3)
+    parser.add_argument("--telemetry", action="store_true")
     return parser
 
 
@@ -107,32 +109,43 @@ def main() -> None:
             "trellis_batch_size": args.trellis_batch_size,
         }
         runners = {
-            "V2": lambda: yaqa_inner(source, input_hessian, output_hessian, canonical, **common),
-            "B2 fixed": lambda: yaqa_inner_v2b2_p32(
+            "V2": lambda telemetry=None: yaqa_inner(
+                source,
+                input_hessian,
+                output_hessian,
+                canonical,
+                telemetry=telemetry,
+                **common,
+            ),
+            "B2 fixed": lambda telemetry=None: yaqa_inner_v2b2_p32(
                 source,
                 input_hessian,
                 output_hessian,
                 banks,
                 bank_codebook_pair_stacks=pair_stacks,
-                family_mode="fixed",
-                fixed_family_id=1,
+                family_mode="fixed_block_ldlq",
+                block_family_id=1,
+                telemetry=telemetry,
                 **common,
             ),
-            "B2 reselect": lambda: yaqa_inner_v2b2_p32(
+            "B2 reselect": lambda telemetry=None: yaqa_inner_v2b2_p32(
                 source,
                 input_hessian,
                 output_hessian,
                 banks,
                 bank_codebook_pair_stacks=pair_stacks,
                 family_mode="reselect",
+                block_family_id=1,
+                telemetry=telemetry,
                 **common,
             ),
-            "B4": lambda: yaqa_inner_v2b4_p64(
+            "B4": lambda telemetry=None: yaqa_inner_v2b4_p64(
                 source,
                 input_hessian,
                 output_hessian,
                 banks,
-                bank_codebook_stack=bank_stack,
+                segmented_bank_stack=bank_stack,
+                telemetry=telemetry,
                 **common,
             ),
         }
@@ -151,6 +164,21 @@ def main() -> None:
                     for candidate, reference in zip(candidate_payload, reference_payload, strict=True)
                 )
             losses[arm].append(_loss(source, reference_weight, input_hessian, output_hessian))
+            if args.telemetry:
+                measured = QVQQuantizationTelemetry()
+                measured_weight, measured_payload = _artifact(runner(measured))
+                report = measured.finalize()
+                if not torch.equal(measured_weight, reference_weight) or any(
+                    not torch.equal(candidate, reference)
+                    for candidate, reference in zip(measured_payload, reference_payload, strict=True)
+                ):
+                    raise RuntimeError(f"{arm} telemetry changed the quantized artifact")
+                phase_text = ", ".join(
+                    f"{name}={values['gpu_ms']:.2f}ms"
+                    for name, values in report["phases"].items()
+                    if values["gpu_ms"] is not None
+                )
+                print(f"TELEMETRY seed={seed} arm={arm}: {phase_text}", flush=True)
 
     baseline_loss = statistics.mean(losses["V2"])
     print("+-------------+-----------+-----------+-----------+-----------+--------+")
