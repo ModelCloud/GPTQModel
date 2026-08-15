@@ -11,6 +11,7 @@ from gptqmodel.quantization.config import FORMAT, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
     block_ldlq_inner,
+    fixed_boundary_v2b2_p32_segment_quantize,
     pack_qvq_binary_bank_ids,
     pack_trellis_states,
     quantize_qvq_linear,
@@ -406,6 +407,64 @@ def test_qvq_v2b2_p32_selector_round_trip_reconstructs_selected_alternative():
         result.segment_bank_ids.reshape(-1),
     )
     torch.testing.assert_close(actual, result.values.reshape(16, 16), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("bits", (1, 2, 3.5))
+@pytest.mark.parametrize("segment_id", (0, 3, 7))
+def test_qvq_v2b2_p32_fixed_boundary_segment_recovers_exact_baseline(bits, segment_id):
+    generator = torch.Generator().manual_seed(20260816)
+    sequence = torch.randn((1, 128, 2), generator=generator)
+    banks = torch.stack(
+        (
+            pgc16_codebook_v2_bank(0, bits=bits),
+            pgc16_codebook_v2_bank(2, bits=bits),
+        )
+    )
+    baseline = tail_biting_v2b2_p32_quantize(sequence, banks, bits=bits)
+    start = segment_id * 16
+    stop = start + 16
+    entry = baseline.states[:, start - 1] if start else baseline.states[:, -1]
+    localized = fixed_boundary_v2b2_p32_segment_quantize(
+        baseline.values[:, start:stop],
+        banks,
+        bits=bits,
+        entry_states=entry,
+        exit_states=baseline.states[:, stop - 1],
+    )
+
+    assert torch.equal(localized.states, baseline.states[:, start:stop])
+    assert torch.equal(localized.values, baseline.values[:, start:stop])
+    assert torch.equal(localized.segment_bank_ids[:, 0], baseline.segment_bank_ids[:, segment_id])
+    assert torch.equal(localized.squared_error, torch.zeros_like(localized.squared_error))
+
+
+def test_qvq_v2b2_p32_fixed_boundary_segment_changes_only_interior_states():
+    generator = torch.Generator().manual_seed(20260817)
+    sequence = torch.randn((1, 128, 2), generator=generator)
+    banks = torch.stack(
+        (
+            pgc16_codebook_v2_bank(0, bits=2),
+            pgc16_codebook_v2_bank(3, bits=2),
+        )
+    )
+    baseline = tail_biting_v2b2_p32_quantize(sequence, banks, bits=2)
+    segment_id = 4
+    start = segment_id * 16
+    stop = start + 16
+    target = banks[1, baseline.states[:, start:stop]].clone()
+    localized = fixed_boundary_v2b2_p32_segment_quantize(
+        target,
+        banks,
+        bits=2,
+        entry_states=baseline.states[:, start - 1],
+        exit_states=baseline.states[:, stop - 1],
+    )
+
+    assert torch.equal(localized.states[:, -1], baseline.states[:, stop - 1])
+    assert torch.equal(localized.states[:, 0] >> 4, baseline.states[:, start - 1] & ((1 << 12) - 1))
+    assert localized.states.shape == (1, 16)
+    assert localized.segment_bank_ids.shape == (1, 1)
+    assert torch.isfinite(localized.squared_error).all()
 
 
 @pytest.mark.parametrize("bits", (2, 3, 3.5))

@@ -1564,6 +1564,119 @@ def batched_v2b4_p64_viterbi_quantize(
     )
 
 
+def fixed_boundary_v2b2_p32_segment_quantize(
+    sequences: torch.Tensor,
+    codebooks: torch.Tensor,
+    *,
+    bits: float,
+    entry_states: torch.Tensor,
+    exit_states: torch.Tensor,
+) -> BankedTrellisQuantizationResult:
+    """Quantize one P32 segment while preserving its surrounding V2 history.
+
+    ``entry_states`` is the state immediately before the segment and
+    ``exit_states`` is the segment's required final state.  Fixing both makes
+    the replacement composable with every untouched segment: the first state
+    remains a legal successor of the original prefix and the following
+    segment observes the exact same predecessor state.
+    """
+
+    if sequences.ndim != 3 or tuple(sequences.shape[1:]) != (QVQ_V2B2_P32_STEPS_PER_SEGMENT, 2):
+        raise ValueError("QVQ fixed-boundary P32 sequences must have shape [batch, 16, 2].")
+    if tuple(codebooks.shape) != (2, 1 << 16, 2):
+        raise ValueError("QVQ fixed-boundary P32 codebooks must have shape [2, 65536, 2].")
+    if sequences.device != codebooks.device or not sequences.is_floating_point() or not codebooks.is_floating_point():
+        raise TypeError("QVQ fixed-boundary P32 inputs must be floating point on one device.")
+    if not torch.isfinite(sequences).all() or not torch.isfinite(codebooks).all():
+        raise ValueError("QVQ fixed-boundary P32 inputs must be finite.")
+    batch_size = sequences.shape[0]
+    for name, states in (("entry", entry_states), ("exit", exit_states)):
+        if states.device != sequences.device or states.ndim != 1 or states.shape[0] != batch_size:
+            raise ValueError(f"QVQ fixed-boundary P32 {name} states must have shape [batch] on the sequence device.")
+        if states.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+            raise TypeError(f"QVQ fixed-boundary P32 {name} states must use an integer dtype.")
+        if torch.any((states.to(torch.long) < 0) | (states.to(torch.long) >= 1 << 16)):
+            raise ValueError(f"QVQ fixed-boundary P32 {name} states must be unsigned 16-bit values.")
+
+    shift = _validate_trellis_shape(bits=bits, vector_size=2, trellis_window=16)
+    if shift > 7:
+        raise ValueError("QVQ fixed-boundary P32 supports only rates W1 through W3.5.")
+    work_dtype = torch.float64 if sequences.device.type != "mps" and (
+        sequences.dtype == torch.float64 or codebooks.dtype == torch.float64
+    ) else torch.float32
+    for bank in codebooks:
+        _validate_viterbi_distance_range(sequences, bank, work_dtype=work_dtype)
+    work_sequences = sequences.to(work_dtype)
+    work_codebooks = codebooks.to(work_dtype)
+    codebook_norms = work_codebooks.square().sum(dim=-1)
+    state_count = 1 << 16
+    bank_count = 2
+    prefix_count = 1 << shift
+    suffix_count = 1 << (16 - shift)
+    state_ids = torch.arange(state_count, dtype=torch.long, device=sequences.device)
+    predecessor_suffix = state_ids >> shift
+    entry_i64 = entry_states.to(torch.long)
+    exit_i64 = exit_states.to(torch.long)
+
+    def emission(step: int) -> torch.Tensor:
+        target = work_sequences[:, step]
+        if work_dtype == torch.float64:
+            return (target[:, None, None, :] - work_codebooks[None]).square().sum(dim=-1)
+        return (
+            target.square().sum(dim=-1)[:, None, None]
+            + codebook_norms[None]
+            - 2 * torch.einsum("bv,ksv->bks", target, work_codebooks)
+        ).clamp_min_(0)
+
+    overlap_mask = suffix_count - 1
+    allowed_start = (state_ids.unsqueeze(0) >> shift) == (entry_i64 & overlap_mask).unsqueeze(1)
+    costs = emission(0).masked_fill(~allowed_start[:, None, :], torch.inf)
+    prefix_pointers: list[torch.Tensor] = []
+    repeat_contiguous = sequences.device.type in ("cuda", "mps")
+    for step in range(1, QVQ_V2B2_P32_STEPS_PER_SEGMENT):
+        reshaped = costs.reshape(batch_size, bank_count, prefix_count, suffix_count)
+        best_cost, best_prefix = reshaped.min(dim=2)
+        transitioned = (
+            best_cost.repeat_interleave(prefix_count, dim=2)
+            if repeat_contiguous
+            else best_cost[:, :, predecessor_suffix]
+        )
+        costs = transitioned + emission(step)
+        prefix_pointers.append(best_prefix.to(torch.int16))
+
+    batch_ids = torch.arange(batch_size, dtype=torch.long, device=sequences.device)
+    exit_costs = costs[batch_ids, :, exit_i64]
+    selected_banks = exit_costs.argmin(dim=1)
+    selected_loss = exit_costs[batch_ids, selected_banks]
+    if not torch.isfinite(selected_loss).all():
+        raise RuntimeError("QVQ fixed-boundary P32 search found no legal path between its boundary states.")
+
+    path = torch.empty(
+        (batch_size, QVQ_V2B2_P32_STEPS_PER_SEGMENT),
+        dtype=torch.long,
+        device=sequences.device,
+    )
+    current_state = exit_i64
+    path[:, -1] = current_state
+    for step in range(QVQ_V2B2_P32_STEPS_PER_SEGMENT - 1, 0, -1):
+        suffix = current_state >> shift
+        prefix = prefix_pointers[step - 1][batch_ids, selected_banks, suffix].to(torch.long)
+        current_state = prefix * suffix_count + suffix
+        path[:, step - 1] = current_state
+
+    if not torch.equal(path[:, -1], exit_i64):
+        raise RuntimeError("QVQ fixed-boundary P32 traceback changed the required exit state.")
+    if not torch.equal(path[:, 0] >> shift, entry_i64 & overlap_mask):
+        raise RuntimeError("QVQ fixed-boundary P32 traceback disconnected from the required entry state.")
+    path_banks = selected_banks[:, None].expand(-1, QVQ_V2B2_P32_STEPS_PER_SEGMENT)
+    return BankedTrellisQuantizationResult(
+        states=path,
+        values=codebooks[path_banks, path],
+        squared_error=selected_loss,
+        segment_bank_ids=selected_banks.to(torch.uint8).unsqueeze(1),
+    )
+
+
 def batched_v2b2_p32_viterbi_quantize(
     sequences: torch.Tensor,
     codebooks: torch.Tensor,
