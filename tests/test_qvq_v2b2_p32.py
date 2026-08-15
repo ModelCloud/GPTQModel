@@ -37,12 +37,18 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     }
 
 
-def test_qvq_v2b2_p32_native_mlx_conversion_fails_closed_until_selector_support_exists():
+def test_qvq_v2b2_p32_native_mlx_conversion_preserves_selector_payload():
     from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
+    from gptqmodel.utils.qvq_mlx import QVQMLXLinear
 
     layer = QVQLinear(bits=2, in_features=16, out_features=16, bank_count=2, v2b2_p32=True)
-    with pytest.raises(NotImplementedError, match="binary P32 selector"):
-        _qvq_mlx_linear_from_torch(layer)
+    converted = _qvq_mlx_linear_from_torch(layer)
+
+    assert isinstance(converted, QVQMLXLinear)
+    assert converted.v2b2_p32 is True
+    assert converted.v2b4_p64 is False
+    assert converted.bank_ids.shape == (1,)
+    assert converted.bank_alt_id.shape == (1,)
 
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))

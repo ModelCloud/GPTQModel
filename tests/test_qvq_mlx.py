@@ -12,6 +12,7 @@ mx = pytest.importorskip("mlx.core")
 from gptqmodel.quantization.qvq import (
     batched_viterbi_quantize,
     pack_qvq_bank_ids,
+    pack_qvq_binary_bank_ids,
     reconstruct_qvq_inner_weight,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook
@@ -86,6 +87,38 @@ def _banked_case(bits: float, m: int, *, k: int = 32, n: int = 32):
     )
     reference = (x.float() @ inner.float()).half()
     return tuple(map(_mlx, (x, trellis, bank_ids))), reference
+
+
+def _v2_banked_case(bits: float, m: int, *, kind: str, k: int = 32, n: int = 32):
+    transition_bits = qvq_transition_bits(bits)
+    generator = torch.Generator().manual_seed(29100 + transition_bits * 10 + m + k + n)
+    tile_count = (k // 16) * (n // 16)
+    edges = torch.randint(0, 1 << transition_bits, (128, tile_count), generator=generator, dtype=torch.int32)
+    trellis = planar_pack_rows(edges, transition_bits).T.contiguous()
+    if kind == "v2b4_p64":
+        selectors = torch.arange(tile_count * 4, dtype=torch.uint8).remainder_(4)
+        bank_ids = pack_qvq_bank_ids(selectors)
+        bank_alt_id = None
+    elif kind == "v2b2_p32":
+        selectors = torch.arange(tile_count * 8, dtype=torch.uint8).remainder_(2)
+        bank_ids = pack_qvq_binary_bank_ids(selectors)
+        bank_alt_id = torch.tensor([3], dtype=torch.uint8)
+    else:
+        raise ValueError(kind)
+    x = torch.randn((m, k), generator=generator).half()
+    inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_ids=bank_ids,
+        v2b4_p64=kind == "v2b4_p64",
+        v2b2_p32=kind == "v2b2_p32",
+        bank_alt_id=bank_alt_id,
+    )
+    reference = x.float() @ inner.float()
+    operands = tuple(map(_mlx, (x, trellis, bank_ids)))
+    return operands, None if bank_alt_id is None else _mlx(bank_alt_id), reference
 
 
 @pytest.mark.parametrize(("bits", "vector_size", "banked"), ((2.5, 2, False), (2, 4, True)))
@@ -613,6 +646,70 @@ def test_qvq_v4_banked_mlx_matches_dense_reference(bits, m):
 
     np.testing.assert_allclose(actual, reference.numpy(), rtol=1e-3, atol=1e-3)
     _assert_dense_accuracy_metrics(actual, reference)
+
+
+@pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+@pytest.mark.parametrize("m", (1, 4, 17))
+def test_qvq_v2_banked_mlx_matches_dense_reference(kind, bits, m):
+    (x, trellis, bank_ids), bank_alt_id, reference = _v2_banked_case(bits, m, kind=kind)
+    actual = qvq_mlx_gemv(
+        x,
+        trellis,
+        bits,
+        out_features=reference.shape[1],
+        bank_ids=bank_ids,
+        v2b4_p64=kind == "v2b4_p64",
+        v2b2_p32=kind == "v2b2_p32",
+        bank_alt_id=bank_alt_id,
+        output_fp32=True,
+    )
+    mx.eval(actual)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), reference, rtol=2e-4, atol=2e-3)
+
+
+@pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
+def test_qvq_v2_banked_mlx_linear_full_forward(kind):
+    from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
+
+    bits, k, n = 2, 32, 48
+    (x2d, trellis, bank_ids), bank_alt_id, _ = _v2_banked_case(bits, 6, kind=kind, k=k, n=n)
+    x_torch = torch.from_numpy(np.asarray(x2d)).reshape(2, 3, k)
+    trellis_torch = torch.from_numpy(np.asarray(trellis))
+    bank_ids_torch = torch.from_numpy(np.asarray(bank_ids))
+    alt_torch = None if bank_alt_id is None else torch.from_numpy(np.asarray(bank_alt_id))
+    generator = torch.Generator().manual_seed(29200 + len(kind))
+    su = torch.randint(0, 2, (k,), generator=generator).mul_(2).sub_(1).float()
+    sv = torch.randn(n, generator=generator).mul_(0.1)
+    bias = torch.randn(n, generator=generator).mul_(0.1)
+    inner = reconstruct_qvq_inner_weight(
+        trellis_torch,
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_ids=bank_ids_torch,
+        v2b4_p64=kind == "v2b4_p64",
+        v2b2_p32=kind == "v2b2_p32",
+        bank_alt_id=alt_torch,
+    )
+    transformed = matmul_hadU(x_torch.reshape(-1, k).float() * su)
+    expected = (matmul_hadU(transformed.half().float() @ inner.float()) * sv + bias).reshape(2, 3, n).half()
+    layer = QVQMLXLinear(
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        trellis=trellis,
+        SU=_mlx(su),
+        SV=_mlx(sv),
+        bias=_mlx(bias),
+        bank_ids=bank_ids,
+        v2b4_p64=kind == "v2b4_p64",
+        v2b2_p32=kind == "v2b2_p32",
+        bank_alt_id=bank_alt_id,
+    )
+    actual = layer(_mlx(x_torch))
+    mx.eval(actual)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5, 4))
