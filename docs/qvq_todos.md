@@ -279,6 +279,32 @@ evidence that an eight-row confirmation gate can overfit even when every confirm
 raw selected artifact for diagnosis, but do not include it in the sequential prefix. The later `o_proj` arm must
 condition on accepted Q/K only, and the rows used here are now development evidence rather than a final locked test.
 
+The conditional `o_proj` arm therefore installed layer-0 Q/K/V/O plus only the accepted layer-1 Q/K artifacts; the
+rejected layer-1 V artifact was deliberately excluded. It used search rows `[1674,1682)`, confirmation rows
+`[1682,1690)`, and untouched evaluation rows `[1690,1698)`, all batch 1, untruncated, and disjoint from ordinary
+calibration and YAQA rows. Search captured 2,397 valid live-prefix input tokens and the rank `{8,16,32}` localized
+search completed in 307.19 seconds on Apple P cores.
+
+This gate found no alternate candidate: every localized spectral proposal reconstructed the exact current state path,
+P32 selector map, and module family (`proposed=false`, selector churn zero). The fail-closed confirmation callback was
+therefore not invoked, and the independently serialized Q/K-conditioned rollback remained selected. Untouched
+evaluation streamed 2,621 aligned output positions from 2,629 valid source tokens:
+
+| Evaluation arm | Final-logit KL | Top-1 | Top-5 | Top-10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| rollback dense reconstruction | 0.0168956196 | 84.0900% | 85.9748% | 87.0088% |
+| selected dense reconstruction | 0.0168956196 | 84.0900% | 85.9748% | 87.0088% |
+| selected packed MPS | 0.0168964521 | 84.0519% | 85.9748% | 87.0317% |
+
+Packed MPS changed KL by only `+0.00493%` relative, Top-1 by `-0.0382` percentage points, Top-5 by less than the
+reported precision, and Top-10 by `+0.0229` points. Those are backend accumulation-order measurements, not an
+`o_proj` refinement effect. The result excludes layer-1 `o_proj` as a useful candidate under this localized search
+contract and split. It also reinforces the architectural limit exposed by the accepted Q/K gates: fixed-boundary P4
+can find tiny alternate state paths in some projections, but its present spectral generator does not reliably expose
+a new discrete basin for every module. Do not force selector churn or weaken rollback. The next decision should be a
+common locked evaluation of the retained Q/K map against the original layer-0-only prefix, followed by a task-like
+gate; do not continue accumulating projection candidates merely because fresh rows remain available.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
