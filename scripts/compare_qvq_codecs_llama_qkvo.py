@@ -38,6 +38,7 @@ except ModuleNotFoundError:  # Package import used by unit tests.
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from gptqmodel.quantization.qvq import (
+    QVQQuantizationTelemetry,
     default_qvq_trellis_batch_size,
     prepare_qvq_input_hessian,
     quantize_qvq_linear,
@@ -186,6 +187,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--seed", type=int, default=18240)
     parser.add_argument("--trellis-batch-size", type=int)
+    parser.add_argument(
+        "--qvq-telemetry",
+        action="store_true",
+        help="Record nested QVQ phase timing and shape counters for each quantized module.",
+    )
     return parser
 
 
@@ -376,6 +382,27 @@ def _weight_metrics(dense: torch.Tensor, quantized: torch.Tensor) -> dict[str, f
         "relative_l2": (error_norm / dense_norm).item(),
         "sqnr_db": (20 * torch.log10(dense_norm / error_norm.clamp_min(torch.finfo(torch.float64).eps))).item(),
     }
+
+
+def _aggregate_qvq_telemetry(module_metrics: dict[str, dict[str, object]]) -> dict[str, object]:
+    """Aggregate already-finalized per-module telemetry without another synchronization."""
+
+    phases: dict[str, dict[str, float | int | None]] = {}
+    counters: Counter[str] = Counter()
+    for metrics in module_metrics.values():
+        telemetry = metrics.get("qvq_telemetry")
+        if not isinstance(telemetry, dict):
+            continue
+        counters.update(telemetry.get("counters", {}))
+        for name, values in telemetry.get("phases", {}).items():
+            aggregate = phases.setdefault(name, {"calls": 0, "host_dispatch_ms": 0.0, "gpu_ms": 0.0})
+            aggregate["calls"] += int(values["calls"])
+            aggregate["host_dispatch_ms"] += float(values["host_dispatch_ms"])
+            if values["gpu_ms"] is None:
+                aggregate["gpu_ms"] = None
+            elif aggregate["gpu_ms"] is not None:
+                aggregate["gpu_ms"] += float(values["gpu_ms"])
+    return {"phases": phases, "counters": dict(counters)}
 
 
 def _mean(values: list[float]) -> float:
@@ -848,6 +875,7 @@ def main() -> None:
             print(f"Starting W{rate:g} {arm} with trellis batch {batch_size}", flush=True)
             for index, (name, module) in enumerate(modules.items(), start=1):
                 module_started = time.perf_counter()
+                module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
                 if rounding == "yaqa":
                     quantization_hessian = yaqa_input_hessians[name].to(device)
                     input_preparation = None
@@ -877,6 +905,7 @@ def main() -> None:
                     seed=args.seed,
                     trellis_batch_size=batch_size,
                     input_hessian_preparation=input_preparation,
+                    telemetry=module_telemetry,
                     **geometry,
                 )
                 if rounding != "yaqa":
@@ -887,6 +916,9 @@ def main() -> None:
                 reconstruction = result.weight.detach().cpu().float()
                 reconstructions[name] = reconstruction
                 weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
+                weight_metrics[name]["shape"] = list(original_weights[name].shape)
+                weight_metrics[name]["parameter_count"] = original_weights[name].numel()
+                weight_metrics[name]["qvq_telemetry"] = result.telemetry
                 weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
                 weight_metrics[name]["kronecker_proxy_loss"] = (
                     None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss)
@@ -918,6 +950,13 @@ def main() -> None:
                     f"in {time.perf_counter() - module_started:.2f}s",
                     flush=True,
                 )
+                if result.telemetry is not None:
+                    phase_times = ", ".join(
+                        f"{phase}={values['gpu_ms']:.1f}ms"
+                        for phase, values in result.telemetry["phases"].items()
+                        if values["gpu_ms"] is not None
+                    )
+                    print(f"  QVQ telemetry [{list(original_weights[name].shape)}]: {phase_times}", flush=True)
 
             with torch.no_grad():
                 for name, module in modules.items():
@@ -942,6 +981,7 @@ def main() -> None:
                 "module_alternative_bank_histogram": (
                     alternative_bank_histogram if geometry.get("v2b2_p32") else None
                 ),
+                "qvq_telemetry": _aggregate_qvq_telemetry(weight_metrics) if args.qvq_telemetry else None,
                 "weight": {
                     "modules": weight_metrics,
                     "mean_mse": _mean([metric["mse"] for metric in weight_metrics.values()]),

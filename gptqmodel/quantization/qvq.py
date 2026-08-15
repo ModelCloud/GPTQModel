@@ -3355,6 +3355,16 @@ def yaqa_inner(
     ):
         raise ValueError("YAQA tail-biting candidate count must be a positive integer.")
 
+    input_blocks = in_features // tile_rows
+    output_blocks = out_features // tile_cols
+    if telemetry is not None:
+        telemetry.count("yaqa_calls")
+        telemetry.count("yaqa_input_features", in_features)
+        telemetry.count("yaqa_output_features", out_features)
+        telemetry.count("yaqa_tiles", input_blocks * output_blocks)
+        telemetry.count("yaqa_anti_diagonals", input_blocks + output_blocks - 1)
+        telemetry.count("yaqa_candidate_banks", 1 if bank_codebooks is None else len(bank_codebooks))
+
     bank0_reference = None
     bank0_reference_states = None
     if bank_codebooks is not None:
@@ -3421,8 +3431,6 @@ def yaqa_inner(
          for index in range(0, out_features, tile_cols)]
     )
     quantized = torch.zeros_like(source)
-    input_blocks = in_features // tile_rows
-    output_blocks = out_features // tile_cols
     steps_per_tile = tile_rows * tile_cols // codebook.shape[1]
     tile_states = torch.empty(
         (input_blocks, output_blocks, steps_per_tile),
@@ -3463,20 +3471,25 @@ def yaqa_inner(
             (input_block, diagonal - input_block) for input_block in range(first_input_block, last_input_block + 1)
         ]
         corrected_tiles = []
-        for input_block, output_block in coordinates:
-            input_start = input_block * tile_rows
-            input_stop = input_start + tile_rows
-            output_start = output_block * tile_cols
-            output_stop = output_start + tile_cols
-            left_feedback = input_feedback[input_start:, input_start:input_stop].transpose(0, 1)
-            right_feedback = output_feedback[output_start:, output_start:output_stop]
-            corrected_tiles.append(
-                source[input_start:input_stop, output_start:output_stop]
-                + (0.0 if rounding_bias is None else rounding_bias[input_start:input_stop, output_start:output_stop])
-                + left_feedback @ error[input_start:, output_start:] @ right_feedback
-                + left_feedback @ error[input_start:, output_start:output_stop]
-                + error[input_start:input_stop, output_start:] @ right_feedback
-            )
+        with _qvq_phase(telemetry, "yaqa_feedback", source.device):
+            for input_block, output_block in coordinates:
+                input_start = input_block * tile_rows
+                input_stop = input_start + tile_rows
+                output_start = output_block * tile_cols
+                output_stop = output_start + tile_cols
+                left_feedback = input_feedback[input_start:, input_start:input_stop].transpose(0, 1)
+                right_feedback = output_feedback[output_start:, output_start:output_stop]
+                corrected_tiles.append(
+                    source[input_start:input_stop, output_start:output_stop]
+                    + (
+                        0.0
+                        if rounding_bias is None
+                        else rounding_bias[input_start:input_stop, output_start:output_stop]
+                    )
+                    + left_feedback @ error[input_start:, output_start:] @ right_feedback
+                    + left_feedback @ error[input_start:, output_start:output_stop]
+                    + error[input_start:input_stop, output_start:] @ right_feedback
+                )
 
         corrected_tile_stack = torch.stack(corrected_tiles)
         sequences = corrected_tile_stack.reshape(len(coordinates), steps_per_tile, codebook.shape[1])
@@ -3491,19 +3504,20 @@ def yaqa_inner(
             segment_steps = (
                 QVQ_V2B2_P32_STEPS_PER_SEGMENT if v2b2_p32 else QVQ_V2B4_P64_STEPS_PER_SEGMENT
             )
-            for chunk in sequences.split(trellis_batch_size):
-                if telemetry is not None:
-                    telemetry.count("yaqa_segmented_v2_chunks")
-                result = _tail_biting_v2_banked_quantize(
-                    chunk,
-                    segmented_bank_stack,
-                    bits=bits,
-                    segment_steps=segment_steps,
-                    candidate_count=tail_biting_candidates,
-                )
-                values.append(result.values)
-                states_for_chunks.append(result.states)
-                selectors.append(result.segment_bank_ids)
+            with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
+                for chunk in sequences.split(trellis_batch_size):
+                    if telemetry is not None:
+                        telemetry.count("yaqa_segmented_v2_chunks")
+                    result = _tail_biting_v2_banked_quantize(
+                        chunk,
+                        segmented_bank_stack,
+                        bits=bits,
+                        segment_steps=segment_steps,
+                        candidate_count=tail_biting_candidates,
+                    )
+                    values.append(result.values)
+                    states_for_chunks.append(result.states)
+                    selectors.append(result.segment_bank_ids)
             reconstructed = torch.cat(values).reshape(len(coordinates), tile_rows, tile_cols)
             states = torch.cat(states_for_chunks)
             segmented_selectors = torch.cat(selectors)
@@ -3590,34 +3604,36 @@ def yaqa_inner(
             winners = torch.stack(losses).argmin(dim=0)
             reconstructed = candidates[winners, torch.arange(len(coordinates), device=source.device)]
             states = torch.stack(candidate_states)[winners, torch.arange(len(coordinates), device=source.device)]
-        for coordinate_index, (input_block, output_block) in enumerate(coordinates):
-            input_start = input_block * tile_rows
-            output_start = output_block * tile_cols
-            quantized[
-                input_start : input_start + tile_rows,
-                output_start : output_start + tile_cols,
-            ] = reconstructed[coordinate_index]
-            error[input_start : input_start + tile_rows, output_start : output_start + tile_cols] = (
-                source[input_start : input_start + tile_rows, output_start : output_start + tile_cols]
-                - reconstructed[coordinate_index]
-            )
-            tile_states[input_block, output_block] = states[coordinate_index]
-            if segmented_v2:
-                tile_index = input_block * output_blocks + output_block
-                selector_start = tile_index * segments_per_tile
-                bank_ids[selector_start : selector_start + segments_per_tile] = segmented_selectors[coordinate_index]
-            elif bank_codebooks is not None:
-                bank_ids[input_block * output_blocks + output_block] = winners[coordinate_index].to(torch.uint8)
+        with _qvq_phase(telemetry, "yaqa_commit", source.device):
+            for coordinate_index, (input_block, output_block) in enumerate(coordinates):
+                input_start = input_block * tile_rows
+                output_start = output_block * tile_cols
+                quantized[
+                    input_start : input_start + tile_rows,
+                    output_start : output_start + tile_cols,
+                ] = reconstructed[coordinate_index]
+                error[input_start : input_start + tile_rows, output_start : output_start + tile_cols] = (
+                    source[input_start : input_start + tile_rows, output_start : output_start + tile_cols]
+                    - reconstructed[coordinate_index]
+                )
+                tile_states[input_block, output_block] = states[coordinate_index]
+                if segmented_v2:
+                    tile_index = input_block * output_blocks + output_block
+                    selector_start = tile_index * segments_per_tile
+                    bank_ids[selector_start : selector_start + segments_per_tile] = segmented_selectors[coordinate_index]
+                elif bank_codebooks is not None:
+                    bank_ids[input_block * output_blocks + output_block] = winners[coordinate_index].to(torch.uint8)
 
     if bank_codebooks is not None:
-        mixed_error = quantized.to(torch.float32) - source
-        bank0_error = bank0_reference.to(torch.float32) - source
-        mixed_loss = torch.einsum(
-            "ij,ik,kl,lj->", mixed_error, input_hessian_fp32, mixed_error, output_hessian_fp32
-        )
-        bank0_loss = torch.einsum(
-            "ij,ik,kl,lj->", bank0_error, input_hessian_fp32, bank0_error, output_hessian_fp32
-        )
+        with _qvq_phase(telemetry, "yaqa_full_proxy", source.device):
+            mixed_error = quantized.to(torch.float32) - source
+            bank0_error = bank0_reference.to(torch.float32) - source
+            mixed_loss = torch.einsum(
+                "ij,ik,kl,lj->", mixed_error, input_hessian_fp32, mixed_error, output_hessian_fp32
+            )
+            bank0_loss = torch.einsum(
+                "ij,ik,kl,lj->", bank0_error, input_hessian_fp32, bank0_error, output_hessian_fp32
+            )
         fallback_to_bank0 = not torch.isfinite(mixed_loss) or mixed_loss >= bank0_loss
         if _diagnostics is not None:
             bank0_states = bank0_reference_states.reshape_as(tile_states)
@@ -3698,6 +3714,8 @@ def yaqa_inner_v2b2_p32(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select one complementary V2 family per module under YAQA's full proxy."""
 
+    telemetry = kwargs.get("telemetry")
+
     if len(codebook_library) != 4:
         raise ValueError("YAQA V2B2-P32 requires canonical V2 plus three complementary candidates.")
     if bank_codebook_pair_stacks is not None and (
@@ -3707,31 +3725,36 @@ def yaqa_inner_v2b2_p32(
         raise ValueError("YAQA V2B2-P32 pair stacks must contain three [2, 65536, 2] tensors.")
     if family_mode not in {"fixed_block_ldlq", "reselect"}:
         raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if telemetry is not None:
+        telemetry.count("yaqa_v2b2_modules")
+        telemetry.count("yaqa_v2b2_reselect_modules", int(family_mode == "reselect"))
     if block_family_id is None:
-        _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
-            inner_weight,
-            input_hessian if block_input_hessian is None else block_input_hessian,
-            codebook_library,
-            bits=kwargs["bits"],
-            tile_rows=kwargs.get("tile_rows", 16),
-            tile_cols=kwargs.get("tile_cols", 16),
-            trellis_batch_size=kwargs.get("trellis_batch_size", 16),
-            viterbi_objective="euclidean",
-            tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
-        )
+        with _qvq_phase(telemetry, "yaqa_v2b2_block_family_selection", inner_weight.device):
+            _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
+                inner_weight,
+                input_hessian if block_input_hessian is None else block_input_hessian,
+                codebook_library,
+                bits=kwargs["bits"],
+                tile_rows=kwargs.get("tile_rows", 16),
+                tile_cols=kwargs.get("tile_cols", 16),
+                trellis_batch_size=kwargs.get("trellis_batch_size", 16),
+                viterbi_objective="euclidean",
+                tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
+            )
         block_alt_id = int(block_alt_id_tensor.item())
     else:
         if isinstance(block_family_id, bool) or not isinstance(block_family_id, int) or block_family_id not in (1, 2, 3):
             raise ValueError("YAQA V2B2-P32 cached Block-LDLQ family ID must be 1, 2, or 3.")
         block_alt_id = block_family_id
         block_selectors = None
-    canonical_weight, canonical_states = yaqa_inner(
-        inner_weight,
-        input_hessian,
-        output_hessian,
-        codebook_library[0],
-        **kwargs,
-    )
+    with _qvq_phase(telemetry, "yaqa_v2b2_canonical", inner_weight.device):
+        canonical_weight, canonical_states = yaqa_inner(
+            inner_weight,
+            input_hessian,
+            output_hessian,
+            codebook_library[0],
+            **kwargs,
+        )
     source = inner_weight.to(torch.float32)
     input_hessian_fp32 = input_hessian.to(torch.float32)
     output_hessian_fp32 = output_hessian.to(torch.float32)
@@ -3751,12 +3774,15 @@ def yaqa_inner_v2b2_p32(
     # canonical V2. This makes fixed-family mode a strict experiment over one
     # unchanged codec candidate space; selectors alone become all zero.
     best_alt_id = block_alt_id
-    best_loss = full_loss(canonical_weight)
+    with _qvq_phase(telemetry, "yaqa_v2b2_full_proxy", inner_weight.device):
+        best_loss = full_loss(canonical_weight)
     selected_banked_candidate = False
     oracle = canonical_weight, canonical_states
     alternative_ids = (block_alt_id,) if family_mode == "fixed_block_ldlq" else range(1, 4)
     family_diagnostics: dict[str, dict[str, object]] = {}
     for alt_id in alternative_ids:
+        if telemetry is not None:
+            telemetry.count("yaqa_v2b2_family_candidates")
         pair_stack = (
             torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
             if bank_codebook_pair_stacks is None
@@ -3764,19 +3790,21 @@ def yaqa_inner_v2b2_p32(
         )
         pair_codebooks = tuple(pair_stack[bank] for bank in range(2))
         inner_diagnostics: dict[str, object] = {}
-        candidate_weight, candidate_states, candidate_selectors = yaqa_inner(
-            inner_weight,
-            input_hessian,
-            output_hessian,
-            pair_codebooks[0],
-            bank_codebooks=pair_codebooks,
-            segmented_bank_stack=pair_stack,
-            v2b2_p32=True,
-            _bank0_oracle=oracle,
-            _diagnostics=inner_diagnostics,
-            **kwargs,
-        )
-        candidate_loss = full_loss(candidate_weight)
+        with _qvq_phase(telemetry, "yaqa_v2b2_family_candidate", inner_weight.device):
+            candidate_weight, candidate_states, candidate_selectors = yaqa_inner(
+                inner_weight,
+                input_hessian,
+                output_hessian,
+                pair_codebooks[0],
+                bank_codebooks=pair_codebooks,
+                segmented_bank_stack=pair_stack,
+                v2b2_p32=True,
+                _bank0_oracle=oracle,
+                _diagnostics=inner_diagnostics,
+                **kwargs,
+            )
+        with _qvq_phase(telemetry, "yaqa_v2b2_full_proxy", inner_weight.device):
+            candidate_loss = full_loss(candidate_weight)
         family_diagnostics[str(alt_id)] = {
             "fallback_to_bank0": bool(inner_diagnostics.get("fallback_to_bank0", False)),
             "mixed_loss_before_fallback": inner_diagnostics.get("mixed_loss_before_fallback"),

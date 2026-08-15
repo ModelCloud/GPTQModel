@@ -9,6 +9,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.config import FORMAT, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import (
+    QVQQuantizationTelemetry,
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
     block_ldlq_inner,
     fixed_boundary_v2b2_p32_segment_quantize,
@@ -30,6 +31,7 @@ from scripts.analyze_gptq_low_bit_grid import capture_calibration_hessians, tens
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
+    _aggregate_qvq_telemetry,
     _load_yaqa_factor_cache,
     _padded_batch_chunks,
     _parser,
@@ -64,6 +66,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert args.evaluation_rows == 64
     assert args.evaluation_row_offset == 64
     assert args.max_length is None
+    assert args.qvq_telemetry is False
     assert ARM_CONFIG["v2b2-p32"] == {
         "vector_size": 2,
         "trellis_window": 16,
@@ -1460,6 +1463,7 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
         return candidate, states, selectors
 
     diagnostics = {}
+    telemetry = QVQQuantizationTelemetry()
     with (
         patch("gptqmodel.quantization.qvq.block_ldlq_inner_v2b2_p32", side_effect=fake_block),
         patch("gptqmodel.quantization.qvq.yaqa_inner", side_effect=fake_yaqa),
@@ -1472,7 +1476,10 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
             bits=2,
             family_mode=family_mode,
             diagnostics=diagnostics,
+            telemetry=telemetry,
         )
+
+    measured = telemetry.finalize()
 
     assert int(family.item()) == expected_family
     family_candidates = diagnostics.pop("family_candidates")
@@ -1483,6 +1490,19 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
         "block_family_id": 2,
     }
     expected_ids = {"2"} if family_mode == "fixed_block_ldlq" else {"1", "2", "3"}
+    expected_candidate_count = len(expected_ids)
+    assert measured["counters"] == {
+        "yaqa_v2b2_modules": 1,
+        "yaqa_v2b2_reselect_modules": int(family_mode == "reselect"),
+        "yaqa_v2b2_family_candidates": expected_candidate_count,
+    }
+    assert {name: values["calls"] for name, values in measured["phases"].items()} == {
+        "yaqa_v2b2_block_family_selection": 1,
+        "yaqa_v2b2_canonical": 1,
+        "yaqa_v2b2_full_proxy": expected_candidate_count + 1,
+        "yaqa_v2b2_family_candidate": expected_candidate_count,
+    }
+    assert all(values["gpu_ms"] is None for values in measured["phases"].values())
     assert set(family_candidates) == expected_ids
     for candidate in family_candidates.values():
         assert candidate == {
@@ -1492,6 +1512,30 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
             "pre_fallback_selector_churn": None,
             "pre_fallback_state_churn": None,
         }
+
+
+def test_qvq_sweep_telemetry_aggregate_preserves_shape_attribution():
+    modules = {
+        "q_proj": {
+            "qvq_telemetry": {
+                "phases": {"yaqa_feedback": {"calls": 2, "host_dispatch_ms": 3.0, "gpu_ms": 4.0}},
+                "counters": {"yaqa_tiles": 8, "yaqa_anti_diagonals": 3},
+            }
+        },
+        "gate_proj": {
+            "qvq_telemetry": {
+                "phases": {"yaqa_feedback": {"calls": 5, "host_dispatch_ms": 7.0, "gpu_ms": 11.0}},
+                "counters": {"yaqa_tiles": 32, "yaqa_anti_diagonals": 6},
+            }
+        },
+    }
+
+    aggregate = _aggregate_qvq_telemetry(modules)
+
+    assert aggregate == {
+        "phases": {"yaqa_feedback": {"calls": 7, "host_dispatch_ms": 10.0, "gpu_ms": 15.0}},
+        "counters": {"yaqa_tiles": 40, "yaqa_anti_diagonals": 9},
+    }
 
 
 def test_qvq_v2b2_p32_reuses_one_canonical_block_ldlq_oracle():
@@ -1523,3 +1567,4 @@ def test_qvq_v2b2_p32_rejects_invalid_alternative_bank(alt_id):
             v2b2_p32=True,
             bank_alt_id=torch.tensor([alt_id], dtype=torch.uint8),
         )
+    _aggregate_qvq_telemetry,
