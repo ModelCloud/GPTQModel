@@ -90,6 +90,7 @@ def _iter_dynamic_contracts(
                 FORMAT.QVQ_V4_L18,
                 FORMAT.QVQ_DUAL_V2,
                 FORMAT.QVQ_V2B4_P64,
+                FORMAT.QVQ_V2B2_P32,
             ):
                 contract_bits = quant_bits_width(contract_bits)
         else:
@@ -535,6 +536,7 @@ def select_quant_linear(
         FORMAT.QVQ_V4_L18,
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
     ):
         bits = quant_bits_width(bits)
 

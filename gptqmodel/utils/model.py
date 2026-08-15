@@ -964,6 +964,7 @@ def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
             FORMAT.QVQ_V4_L18,
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
+            FORMAT.QVQ_V2B2_P32,
         )
     )
 
@@ -980,6 +981,7 @@ def _quantized_weight_suffix(qcfg: QuantizeConfig) -> str:
             FORMAT.QVQ_V4_L18,
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
+            FORMAT.QVQ_V2B2_P32,
         )
         else ".qweight"
     )

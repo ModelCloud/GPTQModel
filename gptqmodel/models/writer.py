@@ -111,6 +111,7 @@ def _loaded_checkpoint_requires_shell_rebuild(load_quantized_model: bool, runtim
         FORMAT.QVQ_V4_L18,
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
     )
 
 PROCESS_LOG_NAME = "process"

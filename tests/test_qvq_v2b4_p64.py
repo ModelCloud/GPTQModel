@@ -31,7 +31,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
 
 
 def test_qvq_v2b4_p64_comparison_harness_defaults_to_matched_v2_control():
-    assert DEFAULT_ARMS == ("v2", "v2b4-p64")
+    assert DEFAULT_ARMS == ("v2", "v2b2-p32")
     args = _parser().parse_args(("--model", "model", "--dataset", "dataset", "--output", "report.json"))
     assert args.layers == 4
     assert args.rates == (1, 1.5, 2, 2.5)

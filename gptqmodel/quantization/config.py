@@ -167,6 +167,7 @@ class FORMAT(str, Enum):
     QVQ_V4_L18 = "qvq_v4_l18"
     QVQ_DUAL_V2 = "qvq_dual_v2"
     QVQ_V2B4_P64 = "qvq_v2b4_p64"
+    QVQ_V2B2_P32 = "qvq_v2b2_p32"
     MXFP4 = "mxfp4"
 
     GEMM = "gemm"
@@ -717,6 +718,7 @@ def _normalize_quant_bits(
         FORMAT.QVQ_V4_L18,
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
     }:
         if isinstance(bits, GGUFBits):
             raise ValueError("QuantizeConfig: GGUF bit encodings require `format=gguf`.")
@@ -2226,6 +2228,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.QVQ_V4_L18,
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
     },
     METHOD.GGUF: {
         FORMAT.GGUF,
@@ -2289,6 +2292,7 @@ QVQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QVQ_V4_L18,
     FORMAT.QVQ_DUAL_V2,
     FORMAT.QVQ_V2B4_P64,
+    FORMAT.QVQ_V2B2_P32,
 )
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
@@ -2315,6 +2319,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.QVQ_V4_L18: METHOD.QVQ,
     FORMAT.QVQ_DUAL_V2: METHOD.QVQ,
     FORMAT.QVQ_V2B4_P64: METHOD.QVQ,
+    FORMAT.QVQ_V2B2_P32: METHOD.QVQ,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
@@ -2798,6 +2803,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         if value == FORMAT.QVQ_DUAL_V2:
             return METHOD.QVQ
         if value == FORMAT.QVQ_V2B4_P64:
+            return METHOD.QVQ
+        if value == FORMAT.QVQ_V2B2_P32:
             return METHOD.QVQ
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
@@ -3452,6 +3459,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             FORMAT.QVQ_V4_L18,
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
+            FORMAT.QVQ_V2B2_P32,
         }:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QVQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QVQ
@@ -5830,6 +5838,10 @@ class QVQConfig(BaseQuantizeConfig):
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b4_p64` only supports W1 through W2.5."
                 )
+            if self.format == FORMAT.QVQ_V2B2_P32 and layer_bits > 2.5:
+                raise ValueError(
+                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32` only supports W1 through W2.5."
+                )
             layer_dict["bits"] = layer_bits
 
     def __post_init__(self):
@@ -5848,8 +5860,8 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: affine asymmetric quantization is not part of the QVQ format.")
         if requested_pack_dtype != torch.int32:
             raise ValueError("QVQConfig: the planar trellis stream requires `pack_dtype=torch.int32`.")
-        if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 4):
-            raise ValueError("QVQConfig: `bank_count` must be 1 or 4.")
+        if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 2, 4):
+            raise ValueError("QVQConfig: `bank_count` must be 1, 2, or 4.")
 
         if self.format == FORMAT.QVQ_V4:
             if self.bits > 4:
@@ -5871,9 +5883,19 @@ class QVQConfig(BaseQuantizeConfig):
         elif self.format == FORMAT.QVQ_V2B4_P64:
             if self.bits > 2.5:
                 raise ValueError("QVQConfig: `format=qvq_v2b4_p64` supports only rates W1 through W2.5.")
+            if self.bank_count not in (1, 4):
+                raise ValueError("QVQConfig: `format=qvq_v2b4_p64` requires bank_count=4.")
             self.vector_size = 2
             self.trellis_window = 16
             self.bank_count = 4
+        elif self.format == FORMAT.QVQ_V2B2_P32:
+            if self.bits > 2.5:
+                raise ValueError("QVQConfig: `format=qvq_v2b2_p32` supports only rates W1 through W2.5.")
+            if self.bank_count not in (1, 2):
+                raise ValueError("QVQConfig: `format=qvq_v2b2_p32` requires bank_count=2.")
+            self.vector_size = 2
+            self.trellis_window = 16
+            self.bank_count = 2
 
         self.codebook = str(self.codebook).strip().lower()
         pgc16_levels_for_version(self.codebook)
@@ -5928,6 +5950,12 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: `format=qvq_v2b4_p64` initially supports Block-LDLQ only.")
         if self.format == FORMAT.QVQ_V2B4_P64 and self.tail_biting_candidates != 1:
             raise ValueError("QVQConfig: `format=qvq_v2b4_p64` initially requires one tail-biting candidate.")
+        if self.format == FORMAT.QVQ_V2B2_P32 and self.rounding != "block_ldlq":
+            raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially supports Block-LDLQ only.")
+        if self.format == FORMAT.QVQ_V2B2_P32 and self.tail_biting_candidates != 1:
+            raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially requires one tail-biting candidate.")
+        if self.format == FORMAT.QVQ_V2B2_P32 and self.viterbi_objective != "euclidean":
+            raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially requires the Euclidean Viterbi objective.")
         canonical_fields = {
             "tile_rows": (self.tile_rows, 16),
             "tile_cols": (self.tile_cols, 16),
@@ -5949,14 +5977,18 @@ class QVQConfig(BaseQuantizeConfig):
             )
         if self.vector_size == 4 and self.bits > 4:
             raise ValueError("QVQConfig: `vector_size=4` supports only rates W1 through W4.")
-        if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 4):
-            raise ValueError("QVQConfig: `bank_count` must be 1 or 4.")
+        if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 2, 4):
+            raise ValueError("QVQConfig: `bank_count` must be 1, 2, or 4.")
+        if self.bank_count == 2 and self.format != FORMAT.QVQ_V2B2_P32:
+            raise ValueError("QVQConfig: `bank_count=2` requires `format=qvq_v2b2_p32`.")
         if self.bank_count == 4 and self.format not in (FORMAT.QVQ_V4, FORMAT.QVQ_V2B4_P64):
             raise ValueError("QVQConfig: `bank_count=4` requires `format=qvq_v4` or `format=qvq_v2b4_p64`.")
         if self.bank_count == 4 and (self.module_scale_search or self.output_channel_scale_optimization):
             raise ValueError("QVQConfig: four-bank selection currently excludes scale-search controls.")
         if self.propagated_bank_selection is not None and not isinstance(self.propagated_bank_selection, bool):
             raise TypeError("QVQConfig: `propagated_bank_selection` must be boolean or None.")
+        if self.format == FORMAT.QVQ_V2B2_P32 and self.propagated_bank_selection is True:
+            raise ValueError("QVQConfig: V2B2-P32 propagation replay is not enabled in the initial reference slice.")
         if self.propagated_bank_selection is True and self.bank_count != 4:
             raise ValueError("QVQConfig: propagated bank selection requires `bank_count=4`.")
         if self.propagated_bank_selection is True and self.rounding != "block_ldlq":
@@ -5967,7 +5999,7 @@ class QVQConfig(BaseQuantizeConfig):
         if self.tensor_storage is not None:
             if not isinstance(self.tensor_storage, dict):
                 raise ValueError("QVQConfig: `tensor_storage` must be a dictionary when provided.")
-            allowed_tensors = {"trellis", "SU", "SV", "bias", "bank_ids"}
+            allowed_tensors = {"trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"}
             for module_name, tensors in self.tensor_storage.items():
                 if not isinstance(tensors, dict):
                     raise ValueError(f"QVQConfig: tensor storage for `{module_name}` must be a dictionary.")
@@ -5977,8 +6009,13 @@ class QVQConfig(BaseQuantizeConfig):
                         f"QVQConfig: tensor storage for `{module_name}` has unexpected tensors: {sorted(unexpected)}."
                     )
                 has_selector = "bank_ids" in tensors
-                if self.bank_count == 4 and not has_selector:
+                has_alt_id = "bank_alt_id" in tensors
+                if self.bank_count in (2, 4) and not has_selector:
                     raise ValueError(f"QVQConfig: banked module `{module_name}` is missing `bank_ids` selectors.")
+                if self.bank_count == 2 and not has_alt_id:
+                    raise ValueError(f"QVQConfig: V2B2-P32 module `{module_name}` is missing `bank_alt_id`.")
+                if self.bank_count != 2 and has_alt_id:
+                    raise ValueError(f"QVQConfig: only V2B2-P32 module `{module_name}` may contain `bank_alt_id`.")
                 if self.bank_count == 1 and has_selector:
                     raise ValueError(f"QVQConfig: canonical module `{module_name}` cannot contain `bank_ids` selectors.")
 
@@ -5987,8 +6024,9 @@ class QVQConfig(BaseQuantizeConfig):
         self.pack_dtype = torch.int32
 
     def calculate_bits_per_weight(self):
-        effective_bpw = self.bits + (2 / 64 if self.format == FORMAT.QVQ_V2B4_P64 else 0)
-        description = " including the P64 selector payload" if self.format == FORMAT.QVQ_V2B4_P64 else ""
+        banked_v2 = self.format in (FORMAT.QVQ_V2B4_P64, FORMAT.QVQ_V2B2_P32)
+        effective_bpw = self.bits + (2 / 64 if banked_v2 else 0)
+        description = " including the segmented-bank selector payload" if banked_v2 else ""
         log.info(
             "Estimated Quantization BPW (bits per weight): %s bpw%s",
             effective_bpw,
@@ -6024,6 +6062,7 @@ class QVQConfig(BaseQuantizeConfig):
             "bank_count": self.bank_count,
             "dual_v2": self.format == FORMAT.QVQ_DUAL_V2,
             "v2b4_p64": self.format == FORMAT.QVQ_V2B4_P64,
+            "v2b2_p32": self.format == FORMAT.QVQ_V2B2_P32,
         }
 
 
@@ -6449,6 +6488,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         FORMAT.QVQ_V4_L18,
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
     ):
         return QVQConfig
     if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:

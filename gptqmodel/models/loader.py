@@ -129,6 +129,7 @@ def _external_preload_backend(backend: BACKEND, method: METHOD, format_code: FOR
         FORMAT.QVQ_V4_L18,
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
     ):
         return BACKEND.QVQ
     return backend
@@ -509,7 +510,14 @@ def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype
 def _checkpoint_load_dtype(*, format_code: FORMAT, dtype):
     """Choose Accelerate's checkpoint coercion policy for a quantized format."""
 
-    if format_code in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2, FORMAT.QVQ_V2B4_P64):
+    if format_code in (
+        FORMAT.QVQ,
+        FORMAT.QVQ_V4,
+        FORMAT.QVQ_V4_L18,
+        FORMAT.QVQ_DUAL_V2,
+        FORMAT.QVQ_V2B4_P64,
+        FORMAT.QVQ_V2B2_P32,
+    ):
         # QVQ checkpoints intentionally mix FP32 SU/SV codec auxiliaries with
         # model-dtype dense tensors and bias. Passing one global dtype to
         # Accelerate destroys that contract; the already typed model shell is
@@ -2047,6 +2055,7 @@ def ModelLoader(cls):
                 FORMAT.QVQ_V4_L18,
                 FORMAT.QVQ_DUAL_V2,
                 FORMAT.QVQ_V2B4_P64,
+                FORMAT.QVQ_V2B2_P32,
             ):
                 model = convert_qvq_to_mlx_model(model_id_or_path, model, cls.lm_head)
             else:

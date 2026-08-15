@@ -5,7 +5,28 @@ tests showed local/proxy error reductions without dependable held-out final-KLD 
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
 
-## V2B4-P64 bring-up (2026-08-15)
+## V2B2-P32 bring-up (2026-08-15)
+
+V2B2-P32 is now the first banked-V2 A/B arm. It uses the same one-byte-per-tile selector payload as V2B4-P64 but
+spends it as eight binary P32 decisions. One complementary family is selected per module from the existing three
+alternative graph mappings. The initial implementation is intentionally Block-LDLQ/Torch-reference only.
+
+- **complete:** format/config/processor/QVQLinear integration, exact coupled P32 recurrence, binary packing,
+  module-level alternative-family selection, strict serialization/reload, independent canonical-V2 rollback, and
+  a matched four-layer comparison-driver arm;
+- **run now:** `v2` versus `v2b2-p32`, W1/W1.5/W2/W2.5, real Llama 3.2 1B layers 0--3 Q/K/V/O, 64 full
+  calibration rows and disjoint rows `[64,128)`, batch 1, no concatenation or length cap;
+- **P1 -- YAQA:** generate/select banks inside the two-sided objective while retaining an independently encoded
+  canonical-V2 YAQA oracle. Do not accept from Kronecker/local proxy alone;
+- **P1 -- propagation:** use live-prefix candidate generation, disjoint replay search, and independent confirmation.
+  This is the quality gate that can promote a low-rate selector map; it is not implemented in the base slice;
+- **P2 -- native inference:** add CUDA/MPS/MLX binary P32 decode only after Torch reconstruction and model-level
+  evidence pass.
+
+The module alternative ID is physically one serialized byte. Exact artifact accounting must include it even though
+its amortized BPW is negligible for real projection matrices.
+
+## V2B4-P64 bring-up (2026-08-15; second banked arm)
 
 The first V2B4-P64 checkpoint slice is intentionally a plain Block-LDLQ control. Do not delay its matched V2 test
 for YAQA or propagation integration: adding either now would confound codec geometry with a different rounding or
@@ -31,7 +52,7 @@ acceptance objective.
 - **P2 -- native inference:** add CUDA/MPS/MLX P64 selector decode only after Torch pack/reload and model-level
   evidence pass. Native kernels must match the serialized Torch reconstruction before performance comparisons.
 
-The comparison driver `scripts/compare_qvq_codecs_llama_qkvo.py` now defaults to only `v2` and `v2b4-p64` so the
+The comparison driver `scripts/compare_qvq_codecs_llama_qkvo.py` now defaults to only `v2` and `v2b2-p32` so the
 base result is available quickly. Its other defaults encode the P0 contract above: four layers, rates W1--W2.5,
 64 calibration rows, 64 evaluation rows at offset 64, batch 1, and full row lengths. Dual-V2, V4, and L18/V4 remain
 explicit optional arms. A CUDA host can launch the matched gate with:
@@ -40,7 +61,7 @@ explicit optional arms. A CUDA host can launch the matched gate with:
 python scripts/compare_qvq_codecs_llama_qkvo.py \
   --model /path/to/Llama-3.2-1B-Instruct \
   --dataset neuralmagic/calibration \
-  --output artifacts/qvq_v2_vs_v2b4_p64.json \
+  --output artifacts/qvq_v2_vs_v2b2_p32.json \
   --device cuda
 ```
 

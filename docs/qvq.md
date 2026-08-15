@@ -738,6 +738,47 @@ Future low-rate format proposals must pass all of these gates before implementat
 The resulting principle is: **increase usable, propagation-scored capacity—not merely decoder cardinality or the
 sum of independent histories.**
 
+#### V2B2-P32 first implementation slice
+
+`format="qvq_v2b2_p32"` is the first low-rate banked-V2 prototype at W1--W2.5. It preserves the canonical L16/V2
+recurrence and spends one selector bit every 32 weights:
+
+```text
+one 16x16 tile (256 weights)
+  |
+  +-- eight contiguous 32-weight segments
+  +-- one binary selector per segment
+  +-- selector 0: exact canonical V2 decoder
+  `-- selector 1: one module-selected complementary decoder family
+```
+
+The eight selectors occupy exactly one byte per tile, so the selector cost is `1/32 = 0.03125` bpw: the same
+selector entropy as V2B4-P64, at twice the switching resolution and with two rather than four active bank paths.
+Each module also stores one `uint8` alternative-family ID. That byte chooses one of the three rate-keyed graph
+families already defined by the four-bank library; it is module metadata, not a per-weight selector.
+
+The initial reference implementation deliberately separates codec validation from downstream optimization:
+
+1. Quantize canonical V2 independently as the exact rollback oracle.
+2. For each alternative family, run the coupled two-bank P32 recurrence and complete Block-LDLQ reconstruction.
+3. Score the complete serialized reconstruction with `tr(E H_x E^T)`.
+4. Accept only a finite strict improvement; otherwise emit the independent V2 path, all-zero selectors, and a
+   deterministic alternative-family ID.
+
+This proves non-regression only for the full input-Hessian proxy. It does **not** justify low-rate quality promotion:
+local/proxy improvements below W3 have repeatedly regressed live downstream metrics. YAQA candidate generation and
+live-prefix propagation-aware search/confirmation therefore remain required follow-ups. Until those are integrated,
+V2B2-P32 is an A/B reference format whose main purpose is to test whether finer binary switching creates useful
+candidate diversity.
+
+Current status:
+
+- complete: exact P32 dynamic program, binary selector packing, module-selected alternative ID, independent V2
+  rollback, format/config/processor/QVQLinear lifecycle, Torch reconstruction, strict reload, and focused math tests;
+- pending: YAQA, propagated selection on disjoint search/confirmation prompts, native CUDA/MPS/MLX decode, and
+  four-layer final-KL/Top-N/task evidence;
+- baseline comparison: `scripts/compare_qvq_codecs_llama_qkvo.py` defaults to matched `v2` and `v2b2-p32` arms.
+
 #### V2B4-P64 implementation slice
 
 `format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W2.5. It keeps the canonical L16/V2

@@ -15,8 +15,10 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.qvq import (
     QVQ_BITS,
+    pack_qvq_binary_bank_ids,
     pack_qvq_bank_ids,
     reconstruct_qvq_inner_weight,
+    unpack_qvq_binary_bank_ids,
     unpack_qvq_bank_ids,
 )
 from ...quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
@@ -30,7 +32,7 @@ from ...utils.qvq_cuda import (
 )
 from . import BaseQuantLinear, FormatSupport
 
-_QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids")
+_QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id")
 # The real Llama/Qwen transforms that exposed delayed-normalization overflow
 # start at this width. Preserve the original, slightly more accurate FP16
 # operation ordering for narrow transforms; the finite-output retry below
@@ -178,6 +180,7 @@ class QVQLinear(BaseQuantLinear):
         FORMAT.QVQ_V4_L18: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
         FORMAT.QVQ_DUAL_V2: FormatSupport(priority=100, bits=QVQ_BITS),
         FORMAT.QVQ_V2B4_P64: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
+        FORMAT.QVQ_V2B2_P32: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 2.5)),
     }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
@@ -222,6 +225,7 @@ class QVQLinear(BaseQuantLinear):
         bank_count: int = 1,
         dual_v2: bool = False,
         v2b4_p64: bool = False,
+        v2b2_p32: bool = False,
         **kwargs,
     ):
         del kwargs
@@ -243,7 +247,9 @@ class QVQLinear(BaseQuantLinear):
                 "sym": sym,
                 "pack_dtype": pack_dtype,
                 "format": (
-                    FORMAT.QVQ_V2B4_P64
+                    FORMAT.QVQ_V2B2_P32
+                    if v2b2_p32
+                    else FORMAT.QVQ_V2B4_P64
                     if v2b4_p64
                     else FORMAT.QVQ_DUAL_V2
                     if dual_v2
@@ -278,34 +284,43 @@ class QVQLinear(BaseQuantLinear):
             raise TypeError("QVQ dual_v2 must be a bool")
         if not isinstance(v2b4_p64, bool):
             raise TypeError("QVQ v2b4_p64 must be a bool")
-        if dual_v2 and v2b4_p64:
-            raise ValueError("QVQ Dual-V2 and V2B4-P64 are mutually exclusive")
+        if not isinstance(v2b2_p32, bool):
+            raise TypeError("QVQ v2b2_p32 must be a bool")
+        if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
+            raise ValueError("QVQ Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive")
         if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_count != 1):
             raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and bank_count=1")
         self.dual_v2 = dual_v2
         if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_count != 4 or self.bits > 2.5):
             raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank_count=4, and W1-W2.5")
         self.v2b4_p64 = v2b4_p64
-        if isinstance(bank_count, bool) or not isinstance(bank_count, int) or bank_count not in (1, 4):
-            raise ValueError("QVQ bank_count must be 1 or 4")
+        if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or self.bits > 2.5):
+            raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W2.5")
+        self.v2b2_p32 = v2b2_p32
+        if isinstance(bank_count, bool) or not isinstance(bank_count, int) or bank_count not in (1, 2, 4):
+            raise ValueError("QVQ bank_count must be 1, 2, or 4")
         if bank_count == 4 and vector_size != 4 and not v2b4_p64:
             raise ValueError("QVQ bank_count=4 requires V4 or V2B4-P64")
         self.bank_count = bank_count
-        if self.bank_count == 4 and tensors and tensors.get("bank_ids") is None:
-            raise ValueError("QVQ bank_count=4 requires serialized bank_ids selectors")
-        if self.bank_count == 4 and tensors and tensors["bank_ids"].device.type != "meta":
+        if self.bank_count in (2, 4) and tensors and tensors.get("bank_ids") is None:
+            raise ValueError("QVQ banked formats require serialized bank_ids selectors")
+        if self.bank_count == 2 and tensors and tensors.get("bank_alt_id") is None:
+            raise ValueError("QVQ V2B2-P32 requires serialized bank_alt_id metadata")
+        if self.bank_count in (2, 4) and tensors and tensors["bank_ids"].device.type != "meta":
             # Dense selectors are accepted at the construction API, but the
             # checkpoint/runtime format has one canonical four-per-byte
             # representation. Normalize at the ownership boundary so a
             # module built from dense selectors round-trips into a packed
             # loader shell without a state-dict shape mismatch.
             tile_count = (in_features // 16) * (out_features // 16)
-            selector_count = tile_count * 4 if v2b4_p64 else tile_count
+            selector_count = tile_count * (8 if v2b2_p32 else 4) if (v2b2_p32 or v2b4_p64) else tile_count
             tensors = dict(tensors)
-            tensors["bank_ids"] = pack_qvq_bank_ids(
-                unpack_qvq_bank_ids(tensors["bank_ids"], selector_count)
+            tensors["bank_ids"] = (
+                pack_qvq_binary_bank_ids(unpack_qvq_binary_bank_ids(tensors["bank_ids"], selector_count))
+                if v2b2_p32
+                else pack_qvq_bank_ids(unpack_qvq_bank_ids(tensors["bank_ids"], selector_count))
             )
-        self._bank_ids_loaded = self.bank_count != 4 or bool(tensors)
+        self._bank_ids_loaded = self.bank_count == 1 or bool(tensors)
         self._dtype_cache: dict[tuple, tuple] = {}
         self._qvq_mps_bank_ids_cache: tuple[torch.Tensor, int, torch.device, torch.Tensor] | None = None
         # Dense selectors are launch metadata, not a dequantized weight cache.
@@ -344,13 +359,14 @@ class QVQLinear(BaseQuantLinear):
             "bank_ids": (
                 torch.zeros(
                     (in_features // 16) * (out_features // 16)
-                    if v2b4_p64
+                    if v2b4_p64 or v2b2_p32
                     else ((in_features // 16) * (out_features // 16) + 3) // 4,
                     dtype=torch.uint8,
                 )
-                if bank_count == 4
+                if bank_count in (2, 4)
                 else None
             ),
+            "bank_alt_id": torch.ones(1, dtype=torch.uint8) if v2b2_p32 else None,
         }
         for buffer_name in _QVQ_BUFFER_NAMES:
             tensor = tensors.get(buffer_name, defaults[buffer_name] if register_buffers else None)
@@ -377,7 +393,7 @@ class QVQLinear(BaseQuantLinear):
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
         selector_key = f"{prefix}bank_ids"
-        if self.bank_count == 4 and selector_key not in state_dict:
+        if self.bank_count in (2, 4) and selector_key not in state_dict:
             self._bank_ids_loaded = False
         else:
             self._bank_ids_loaded = True
@@ -419,8 +435,15 @@ class QVQLinear(BaseQuantLinear):
             (args.get("sym", True) is True, "sym=True"),
             (
                 args.get("format", FORMAT.QVQ)
-                in (FORMAT.QVQ, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18, FORMAT.QVQ_DUAL_V2, FORMAT.QVQ_V2B4_P64),
-                "format=qvq, qvq_v4, qvq_v4_l18, qvq_dual_v2, or qvq_v2b4_p64",
+                in (
+                    FORMAT.QVQ,
+                    FORMAT.QVQ_V4,
+                    FORMAT.QVQ_V4_L18,
+                    FORMAT.QVQ_DUAL_V2,
+                    FORMAT.QVQ_V2B4_P64,
+                    FORMAT.QVQ_V2B2_P32,
+                ),
+                "a supported QVQ format including format=qvq",
             ),
         )
         for accepted, requirement in checks:
@@ -447,6 +470,7 @@ class QVQLinear(BaseQuantLinear):
         bank_count: int = 1,
         dual_v2: bool = False,
         v2b4_p64: bool = False,
+        v2b2_p32: bool = False,
     ) -> QVQLinear:
         return cls(
             bits=bits,
@@ -460,6 +484,7 @@ class QVQLinear(BaseQuantLinear):
             bank_count=bank_count,
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
+            v2b2_p32=v2b2_p32,
         )
 
     def _validate_tensors(self) -> None:
@@ -483,13 +508,16 @@ class QVQLinear(BaseQuantLinear):
             if name != "trellis" and not tensor.is_floating_point():
                 raise TypeError(f"QVQ `{name}` must use a floating-point dtype")
         if self.bank_ids is not None:
-            if self.bank_count != 4 or (self.vector_size != 4 and not self.v2b4_p64):
-                raise ValueError("QVQ bank selectors require bank_count=4 and a banked format")
+            if self.bank_count not in (2, 4) or (
+                self.vector_size != 4 and not self.v2b4_p64 and not self.v2b2_p32
+            ):
+                raise ValueError("QVQ bank selectors require a banked format")
             tile_count = (self.in_features // 16) * (self.out_features // 16)
-            selector_count = tile_count * 4 if self.v2b4_p64 else tile_count
+            selector_count = tile_count * (8 if self.v2b2_p32 else 4) if (self.v2b2_p32 or self.v2b4_p64) else tile_count
+            packed_count = (selector_count + (7 if self.v2b2_p32 else 3)) // (8 if self.v2b2_p32 else 4)
             if self.bank_ids.ndim != 1 or self.bank_ids.numel() not in (
                 selector_count,
-                (selector_count + 3) // 4,
+                packed_count,
             ):
                 raise ValueError("QVQ `bank_ids` must be dense or packed for the module tile count")
             if self.bank_ids.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
@@ -499,7 +527,21 @@ class QVQLinear(BaseQuantLinear):
             # scalar read from a meta selector; defer it until the real payload
             # is installed, while retaining shape/dtype checks above.
             if self.bank_ids.device.type != "meta":
-                unpack_qvq_bank_ids(self.bank_ids, selector_count)
+                if self.v2b2_p32:
+                    unpack_qvq_binary_bank_ids(self.bank_ids, selector_count)
+                else:
+                    unpack_qvq_bank_ids(self.bank_ids, selector_count)
+        if self.v2b2_p32:
+            if self.bank_alt_id is None or tuple(self.bank_alt_id.shape) != (1,):
+                raise ValueError("QVQ V2B2-P32 requires one bank_alt_id value")
+            if self.bank_alt_id.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+                raise TypeError("QVQ bank_alt_id must use an integer dtype")
+            if self.bank_alt_id.device.type != "meta" and not bool(
+                ((self.bank_alt_id >= 1) & (self.bank_alt_id <= 3)).all()
+            ):
+                raise ValueError("QVQ bank_alt_id must be in [1, 3]")
+        elif self.bank_alt_id is not None:
+            raise ValueError("QVQ bank_alt_id is valid only for V2B2-P32")
         if self.bias is not None:
             if tuple(self.bias.shape) != (self.out_features,):
                 raise ValueError(
@@ -510,6 +552,8 @@ class QVQLinear(BaseQuantLinear):
         devices = {getattr(self, name).device for name in ("trellis", "SU", "SV")}
         if self.bank_ids is not None:
             devices.add(self.bank_ids.device)
+        if self.bank_alt_id is not None:
+            devices.add(self.bank_alt_id.device)
         if self.bias is not None:
             devices.add(self.bias.device)
         if len(devices) != 1:
@@ -573,7 +617,9 @@ class QVQLinear(BaseQuantLinear):
             return cached[3]
 
         tile_count = (self.in_features // 16) * (self.out_features // 16)
-        selector_count = tile_count * 4 if self.v2b4_p64 else tile_count
+        selector_count = (
+            tile_count * 8 if self.v2b2_p32 else tile_count * 4 if self.v2b4_p64 else tile_count
+        )
         for _ in range(3):
             source = self.bank_ids
             if source is None:
@@ -582,7 +628,11 @@ class QVQLinear(BaseQuantLinear):
                 return None
             source_version = source._version
             snapshot = source.detach().clone()
-            packed = pack_qvq_bank_ids(unpack_qvq_bank_ids(snapshot, selector_count)).to(device=device)
+            packed = (
+                pack_qvq_binary_bank_ids(unpack_qvq_binary_bank_ids(snapshot, selector_count))
+                if self.v2b2_p32
+                else pack_qvq_bank_ids(unpack_qvq_bank_ids(snapshot, selector_count))
+            ).to(device=device)
             if source is self.bank_ids and source_version == source._version:
                 self._qvq_mps_bank_ids_cache = (source, source_version, device, packed)
                 self._qvq_mps_bank_ids = packed
@@ -604,6 +654,8 @@ class QVQLinear(BaseQuantLinear):
             bank_ids=self.bank_ids,
             dual_v2=self.dual_v2,
             v2b4_p64=self.v2b4_p64,
+            v2b2_p32=self.v2b2_p32,
+            bank_alt_id=self.bank_alt_id,
         ).to(dtype=dtype)
 
     def _reference_inner_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -611,7 +663,7 @@ class QVQLinear(BaseQuantLinear):
         return x @ inner
 
     def _inner_forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.bank_count == 4 and (
+        if self.bank_count in (2, 4) and (
             not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta"
         ):
             # Accelerate's direct tensor loader can install buffers without
@@ -619,10 +671,15 @@ class QVQLinear(BaseQuantLinear):
             # concrete selector arrives, validate it exactly once and mark the
             # module ready; a missing/meta selector still fails closed.
             if self.bank_ids is None or self.bank_ids.device.type == "meta":
-                raise RuntimeError("QVQ banked V4 module cannot run before bank_ids selectors are loaded")
+                raise RuntimeError("QVQ banked module cannot run before bank_ids selectors are loaded")
             tile_count = (self.in_features // 16) * (self.out_features // 16)
-            selector_count = tile_count * 4 if self.v2b4_p64 else tile_count
-            unpack_qvq_bank_ids(self.bank_ids, selector_count)
+            selector_count = (
+                tile_count * 8 if self.v2b2_p32 else tile_count * 4 if self.v2b4_p64 else tile_count
+            )
+            if self.v2b2_p32:
+                unpack_qvq_binary_bank_ids(self.bank_ids, selector_count)
+            else:
+                unpack_qvq_bank_ids(self.bank_ids, selector_count)
             self._bank_ids_loaded = True
         if self.training:
             return self._reference_inner_forward(x)
@@ -633,7 +690,13 @@ class QVQLinear(BaseQuantLinear):
                 qvq_mps_supported,
             )
 
-            if self.trellis_window != 16 or self.dual_v2 or self.v2b4_p64 or not qvq_mps_supported():
+            if (
+                self.trellis_window != 16
+                or self.dual_v2
+                or self.v2b4_p64
+                or self.v2b2_p32
+                or not qvq_mps_supported()
+            ):
                 return self._reference_inner_forward(x)
 
             prepared = getattr(self, "_qvq_mps_compander", None)
@@ -668,7 +731,13 @@ class QVQLinear(BaseQuantLinear):
             # Native GEMV intentionally supports FP16/BF16 inputs. FP32 has no
             # packed native specialization and remains on the dense reference
             # path; BF16 reaches native GEMV below.
-            if self.trellis_window != 16 or self.dual_v2 or self.v2b4_p64 or x.dtype == torch.float32:
+            if (
+                self.trellis_window != 16
+                or self.dual_v2
+                or self.v2b4_p64
+                or self.v2b2_p32
+                or x.dtype == torch.float32
+            ):
                 return self._reference_inner_forward(x)
 
             cuda_bank_ids = None

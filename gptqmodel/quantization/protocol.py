@@ -467,6 +467,7 @@ def _compile_qvq_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec,
             FORMAT.QVQ_V4_L18.value,
             FORMAT.QVQ_DUAL_V2.value,
             FORMAT.QVQ_V2B4_P64.value,
+            FORMAT.QVQ_V2B2_P32.value,
         }:
             raise NotImplementedError(
                 "QVQ compiler received an unsupported QVQ export format."
@@ -500,7 +501,9 @@ def _compile_qvq_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec,
             raise ValueError("QVQ quantize codebook and export variant must match.")
 
     requested_format = (
-        FORMAT.QVQ_V2B4_P64
+        FORMAT.QVQ_V2B2_P32
+        if export is not None and export.format == FORMAT.QVQ_V2B2_P32.value
+        else FORMAT.QVQ_V2B4_P64
         if export is not None and export.format == FORMAT.QVQ_V2B4_P64.value
         else FORMAT.QVQ_DUAL_V2
         if export is not None and export.format == FORMAT.QVQ_DUAL_V2.value

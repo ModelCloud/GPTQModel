@@ -49,6 +49,13 @@ QKVO_SUFFIXES = (
 )
 ARM_CONFIG = {
     "v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": False},
+    "v2b2-p32": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+    },
     "v2b4-p64": {
         "vector_size": 2,
         "trellis_window": 16,
@@ -60,7 +67,7 @@ ARM_CONFIG = {
     "v4": {"vector_size": 4, "trellis_window": 16, "dual_v2": False},
     "l18-v4": {"vector_size": 4, "trellis_window": 18, "dual_v2": False},
 }
-DEFAULT_ARMS = ("v2", "v2b4-p64")
+DEFAULT_ARMS = ("v2", "v2b2-p32")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -297,6 +304,7 @@ def main() -> None:
             local_outputs: dict[str, torch.Tensor] = {}
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
+            alternative_bank_histogram = [0, 0, 0, 0]
             print(f"Starting W{rate:g} {arm} with trellis batch {batch_size}", flush=True)
             for index, (name, module) in enumerate(modules.items(), start=1):
                 module_started = time.perf_counter()
@@ -318,6 +326,8 @@ def main() -> None:
                         current + int(count)
                         for current, count in zip(selector_histogram, counts.tolist(), strict=True)
                     ]
+                if result.bank_alt_id is not None:
+                    alternative_bank_histogram[int(result.bank_alt_id.item())] += 1
                 bias = None if module.bias is None else module.bias.detach().cpu().float()
                 local_outputs[name] = F.linear(dense_inputs[name], reconstruction, bias)
                 print(
@@ -341,8 +351,11 @@ def main() -> None:
             arm_report = {
                 "seconds": time.perf_counter() - started,
                 "trellis_batch_size": batch_size,
-                "effective_bpw": rate + (2 / 64 if arm == "v2b4-p64" else 0),
+                "effective_bpw": rate + (2 / 64 if arm in ("v2b2-p32", "v2b4-p64") else 0),
                 "bank_selectors": _selector_metrics(selector_histogram),
+                "module_alternative_bank_histogram": (
+                    alternative_bank_histogram if arm == "v2b2-p32" else None
+                ),
                 "weight": {
                     "modules": weight_metrics,
                     "mean_mse": _mean([metric["mse"] for metric in weight_metrics.values()]),
