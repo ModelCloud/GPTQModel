@@ -512,6 +512,7 @@ def test_qvq_cuda_viterbi_uses_current_non_default_stream():
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
 @pytest.mark.parametrize("constrained,weighted", ((False, False), (True, False), (True, True)))
+@pytest.mark.parametrize("codebook_dtype", (torch.float16, torch.float32))
 def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
     monkeypatch,
     bits,
@@ -519,6 +520,7 @@ def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
     segment_steps,
     constrained,
     weighted,
+    codebook_dtype,
 ):
     generator = torch.Generator(device="cuda").manual_seed(
         20260815 + int(bits * 2) * 100 + bank_count * 10 + constrained * 2 + weighted
@@ -526,7 +528,7 @@ def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
     sequences = torch.randn((2, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
         tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
-    ).cuda()
+    ).to(device="cuda", dtype=codebook_dtype)
     overlap = (
         torch.randint(
             0,

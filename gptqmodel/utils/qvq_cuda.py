@@ -37,6 +37,7 @@ _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V4_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_BANKED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP: Callable | None = None
 
 
 def _validate_viterbi_distance_range(
@@ -87,6 +88,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v4",
         "viterbi_banked",
         "viterbi_v2_segment_banked",
+        "viterbi_v2_segment_g",
         "hadamard",
     ),
     sources=_qvq_cuda_sources,
@@ -184,6 +186,19 @@ def _qvq_cuda_viterbi_v2_segment_banked_op() -> Callable:
                     "qvq_cuda", "viterbi_v2_segment_banked"
                 )
     return _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP
+
+
+def _qvq_cuda_viterbi_v2_segment_g_op() -> Callable:
+    """Resolve the G-only segmented V2 operator once."""
+
+    global _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP
+    if _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP is None:
+                _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_v2_segment_g"
+                )
+    return _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP
 
 
 def qvq_cuda_viterbi(
@@ -371,7 +386,7 @@ def qvq_cuda_viterbi_v2_segment_banked(
             raise ValueError("QVQ segmented-bank V2 step weights must be finite and nonnegative")
     if torch.cuda.get_device_capability(sequences.device) < (8, 0):
         raise RuntimeError("QVQ segmented-bank V2 requires compute capability >= 8.0")
-    return _qvq_cuda_viterbi_v2_segment_banked_op()(
+    return _qvq_cuda_viterbi_v2_segment_g_op()(
         sequences,
         codebooks,
         transition_bits,
