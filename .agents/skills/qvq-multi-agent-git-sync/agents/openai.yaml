@@ -1,0 +1,4 @@
+interface:
+  display_name: "QvQ Multi-Agent Git Sync"
+  short_description: "Synchronize shared QvQ branches before every push"
+  default_prompt: "Synchronize this shared ModelCloud/QvQ branch, preserve collaborator changes, verify the integrated result, and push safely."
