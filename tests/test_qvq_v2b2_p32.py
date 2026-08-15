@@ -21,7 +21,14 @@ from gptqmodel.quantization.qvq import (
     yaqa_inner_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
-from scripts.compare_qvq_codecs_llama_qkvo import ARM_CONFIG, DEFAULT_ARMS, _parser
+from scripts.compare_qvq_codecs_llama_qkvo import (
+    ARM_CONFIG,
+    DEFAULT_ARMS,
+    _load_yaqa_factor_cache,
+    _padded_batch_chunks,
+    _parser,
+    _save_yaqa_factor_cache,
+)
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
@@ -41,7 +48,55 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     }
 
 
+def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
+    assert ARM_CONFIG["v2-yaqa"]["rounding"] == "yaqa"
+    assert ARM_CONFIG["v2b2-p32-yaqa-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
+    assert ARM_CONFIG["v2b2-p32-yaqa"]["yaqa_v2b2_family_mode"] == "reselect"
+    args = _parser().parse_args(
+        (
+            "--model", "model", "--dataset", "dataset", "--output", "report.json",
+            "--arms", "v2", "v2-yaqa", "v2b2-p32-yaqa",
+            "--calibration-rows", "512", "--evaluation-rows", "512", "--evaluation-row-offset", "512",
+            "--yaqa-rows", "512", "--yaqa-row-offset", "1024",
+        )
+    )
+    assert args.yaqa_batch_size == 8
+    assert (args.calibration_rows, args.evaluation_row_offset, args.yaqa_row_offset) == (512, 512, 1024)
+
+    encoded = {
+        "input_ids": torch.tensor([[0, 0, 11, 12, 13], [0, 21, 22, 23, 24], [0, 0, 0, 31, 32]]),
+        "attention_mask": torch.tensor([[0, 0, 1, 1, 1], [0, 1, 1, 1, 1], [0, 0, 0, 1, 1]]),
+    }
+    batches = _padded_batch_chunks(encoded, batch_size=2)
+    assert [tuple(batch["attention_mask"].shape) for batch in batches] == [(2, 4), (1, 2)]
+    assert sum(int(batch["attention_mask"].sum()) for batch in batches) == 9
+
+
+def test_qvq_banked_yaqa_factor_cache_is_atomic_and_validated(tmp_path):
+    path = tmp_path / "sketch_b.pt"
+    metadata = {"version": 1, "module_shapes": {"proj": [3, 2]}}
+    input_hessians = {"proj": torch.eye(2)}
+    output_hessians = {"proj": torch.eye(3)}
+    stats = {"independent_sequences": 512}
+    _save_yaqa_factor_cache(
+        path,
+        metadata=metadata,
+        input_hessians=input_hessians,
+        output_hessians=output_hessians,
+        stats=stats,
+    )
+
+    loaded_input, loaded_output, loaded_stats = _load_yaqa_factor_cache(path, expected_metadata=metadata)
+    assert torch.equal(loaded_input["proj"], input_hessians["proj"])
+    assert torch.equal(loaded_output["proj"], output_hessians["proj"])
+    assert loaded_stats == stats
+    assert not tuple(tmp_path.glob(".*.tmp"))
+    with pytest.raises(ValueError, match="metadata does not match"):
+        _load_yaqa_factor_cache(path, expected_metadata={**metadata, "version": 2})
+
+
 def test_qvq_v2b2_p32_native_mlx_conversion_preserves_selector_payload():
+    pytest.importorskip("mlx.core")
     from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
     from gptqmodel.utils.qvq_mlx import QVQMLXLinear
 

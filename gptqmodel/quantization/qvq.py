@@ -57,6 +57,8 @@ _QVQ_CODEBOOK_CACHE: dict[tuple[str, int, int, float, str, torch.dtype], torch.T
 _QVQ_V4_BANK_CACHE: dict[tuple[str, float, str, torch.dtype], tuple[torch.Tensor, ...]] = {}
 _QVQ_V4_BANK_STACK_CACHE: dict[tuple[str, float, str, torch.dtype], torch.Tensor] = {}
 _QVQ_V2B4_BANK_CACHE: dict[tuple[str, float, str, torch.dtype], tuple[torch.Tensor, ...]] = {}
+_QVQ_V2B4_BANK_STACK_CACHE: dict[tuple[str, float, str, torch.dtype], torch.Tensor] = {}
+_QVQ_V2B2_PAIR_STACK_CACHE: dict[tuple[str, float, str, torch.dtype], tuple[torch.Tensor, ...]] = {}
 
 
 def _canonical_qvq_codebook(
@@ -155,7 +157,57 @@ def _canonical_qvq_v2b4_banks(
         ).contiguous()
         banks = tuple(stack[bank] for bank in range(4))
         _QVQ_V2B4_BANK_CACHE[key] = banks
+        _QVQ_V2B4_BANK_STACK_CACHE[key] = stack
         return banks
+
+
+def _canonical_qvq_v2b4_bank_stack(
+    *,
+    device: torch.device,
+    bits: float,
+    codebook_version: str,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return the globally shared contiguous bank-major V2 codebook tensor."""
+
+    key = (str(device), float(bits), codebook_version, dtype)
+    with _QVQ_CODEBOOK_CACHE_LOCK:
+        stack = _QVQ_V2B4_BANK_STACK_CACHE.get(key)
+    if stack is None:
+        _canonical_qvq_v2b4_banks(
+            device=device,
+            bits=bits,
+            codebook_version=codebook_version,
+            dtype=dtype,
+        )
+        with _QVQ_CODEBOOK_CACHE_LOCK:
+            stack = _QVQ_V2B4_BANK_STACK_CACHE[key]
+    return stack
+
+
+def _canonical_qvq_v2b2_pair_stacks(
+    *,
+    device: torch.device,
+    bits: float,
+    codebook_version: str,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, ...]:
+    """Return stable canonical/alternative stacks for all three B2 searches."""
+
+    key = (str(device), float(bits), codebook_version, dtype)
+    with _QVQ_CODEBOOK_CACHE_LOCK:
+        cached = _QVQ_V2B2_PAIR_STACK_CACHE.get(key)
+    if cached is not None:
+        return cached
+    banks = _canonical_qvq_v2b4_banks(
+        device=device,
+        bits=bits,
+        codebook_version=codebook_version,
+        dtype=dtype,
+    )
+    pair_stacks = tuple(torch.stack((banks[0], banks[alt_id])).contiguous() for alt_id in range(1, 4))
+    with _QVQ_CODEBOOK_CACHE_LOCK:
+        return _QVQ_V2B2_PAIR_STACK_CACHE.setdefault(key, pair_stacks)
 
 
 def _canonical_qvq_v4_bank_stack(
@@ -1877,8 +1929,20 @@ def yaqa_sketch_b(weight_gradients: torch.Tensor) -> tuple[torch.Tensor, torch.T
     return input_hessian, output_hessian
 
 
-def block_ldl_factor(H: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return unit block-lower ``L`` and block-diagonal ``D`` for ``H=L D Lᵀ``."""
+@dataclass(frozen=True)
+class BlockLDLFactorization:
+    """One provenance-checked block-LDL factorization and its stabilized Hessian."""
+
+    hessian: torch.Tensor
+    L: torch.Tensor
+    D: torch.Tensor
+    block_size: int
+    hessian_version: int
+    effective_damping: torch.Tensor
+    retry_count: int
+
+
+def _validate_block_ldl_input(H: torch.Tensor, block_size: int) -> None:
 
     if H.ndim != 2 or H.shape[0] != H.shape[1]:
         raise ValueError("QVQ Hessian must be a square matrix.")
@@ -1891,7 +1955,10 @@ def block_ldl_factor(H: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor,
     if H.shape[0] % block_size:
         raise ValueError("QVQ Hessian width must be divisible by the block size.")
 
-    chol = torch.linalg.cholesky(H)
+
+def _block_ldl_from_cholesky(H: torch.Tensor, chol: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build block factors from an already successful Cholesky decomposition."""
+
     L = torch.zeros_like(chol)
     blocks = H.shape[0] // block_size
     D = torch.zeros_like(H)
@@ -1907,6 +1974,66 @@ def block_ldl_factor(H: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor,
         ).transpose(0, 1)
         D[start:stop, start:stop] = diagonal @ diagonal.transpose(0, 1)
     return L, D
+
+
+def block_ldl_factor(H: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return unit block-lower ``L`` and block-diagonal ``D`` for ``H=L D Lᵀ``."""
+
+    _validate_block_ldl_input(H, block_size)
+    return _block_ldl_from_cholesky(H, torch.linalg.cholesky(H), block_size=block_size)
+
+
+def stabilized_block_ldl_factor(
+    H: torch.Tensor,
+    *,
+    block_size: int,
+    retry_damping: torch.Tensor,
+    max_retries: int = 6,
+) -> BlockLDLFactorization:
+    """Factor a PSD YAQA Gram matrix with bounded isotropic FP32 recovery.
+
+    The successful Cholesky is reused to construct block-LDL factors. No
+    probe-then-refactor duplication occurs, and off-diagonal Fisher geometry
+    is never clamped or rewritten.
+    """
+
+    _validate_block_ldl_input(H, block_size)
+    if retry_damping.ndim != 0 or retry_damping.device != H.device or not retry_damping.is_floating_point():
+        raise ValueError("YAQA retry damping must be a floating-point scalar on the Hessian device.")
+    if not torch.isfinite(retry_damping) or retry_damping <= 0:
+        raise ValueError("YAQA retry damping must be finite and positive.")
+    if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+        raise ValueError("YAQA maximum damping retries must be a nonnegative integer.")
+
+    working = H
+    effective_damping = torch.zeros((), dtype=H.dtype, device=H.device)
+    retry_count = 0
+    while True:
+        chol, info = torch.linalg.cholesky_ex(working, check_errors=False)
+        if int(info.item()) == 0:
+            break
+        if retry_count >= max_retries:
+            raise ValueError("YAQA Hessian remained non-positive-definite after bounded damping retries")
+        if retry_count == 0:
+            # Preserve the caller's nominally regularized matrix when no
+            # recovery is needed; only a failed factorization allocates a
+            # stabilized copy.
+            working = H.clone()
+        increment = retry_damping * (2**retry_count)
+        working.diagonal().add_(increment)
+        effective_damping = effective_damping + increment
+        retry_count += 1
+
+    L, D = _block_ldl_from_cholesky(working, chol, block_size=block_size)
+    return BlockLDLFactorization(
+        hessian=working,
+        L=L,
+        D=D,
+        block_size=block_size,
+        hessian_version=working._version,
+        effective_damping=effective_damping,
+        retry_count=retry_count,
+    )
 
 
 def _dual_v2_split(values: torch.Tensor) -> torch.Tensor:
@@ -2880,9 +3007,12 @@ def yaqa_inner(
     tail_biting_candidates: int = 1,
     bank_codebooks: tuple[torch.Tensor, ...] | None = None,
     bank_codebook_stack: torch.Tensor | None = None,
+    segmented_bank_stack: torch.Tensor | None = None,
     dual_v2: bool = False,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
+    factorization: tuple[BlockLDLFactorization, BlockLDLFactorization] | None = None,
+    telemetry: QVQQuantizationTelemetry | None = None,
     _bank0_oracle: tuple[torch.Tensor, torch.Tensor] | None = None,
     _diagnostics: dict[str, object] | None = None,
 ) -> tuple[torch.Tensor, ...]:
@@ -2913,6 +3043,12 @@ def yaqa_inner(
         raise TypeError("YAQA format flags must be bools.")
     if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
         raise ValueError("YAQA Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive.")
+    if factorization is not None and (
+        not isinstance(factorization, tuple)
+        or len(factorization) != 2
+        or any(not isinstance(factor, BlockLDLFactorization) for factor in factorization)
+    ):
+        raise TypeError("YAQA factorization must contain input and output BlockLDLFactorization objects.")
     segmented_v2 = v2b4_p64 or v2b2_p32
     if dual_v2 and bank_codebooks is not None:
         raise ValueError("YAQA Dual-V2 does not use V4 bank codebooks.")
@@ -2930,6 +3066,25 @@ def yaqa_inner(
         codebook = bank_codebooks[0]
         if segmented_v2 and bank_codebook_stack is not None:
             raise ValueError("YAQA segmented-V2 uses the native tile quantizer and rejects a V4 bank stack.")
+        if not segmented_v2 and segmented_bank_stack is not None:
+            raise ValueError("YAQA segmented bank stack requires a segmented-V2 format.")
+        if segmented_bank_stack is not None:
+            expected_shape = (expected_banks, 1 << 16, expected_vector_size)
+            expected_strides = ((1 << 16) * expected_vector_size, expected_vector_size, 1)
+            if (
+                tuple(segmented_bank_stack.shape) != expected_shape
+                or tuple(segmented_bank_stack.stride()) != expected_strides
+                or segmented_bank_stack.device != inner_weight.device
+                or segmented_bank_stack.dtype != codebook.dtype
+                or not segmented_bank_stack.is_contiguous()
+                or any(
+                    bank.data_ptr()
+                    != segmented_bank_stack.data_ptr()
+                    + bank_index * expected_strides[0] * bank.element_size()
+                    for bank_index, bank in enumerate(bank_codebooks)
+                )
+            ):
+                raise ValueError("YAQA segmented bank stack must share bank-major storage with its codebooks.")
         if bank_codebook_stack is not None and tuple(bank_codebook_stack.shape) != (4, 1 << 16, 4):
             raise ValueError("YAQA bank codebook stack must have shape [4, 65536, 4].")
         if bank_codebook_stack is not None and (
@@ -2950,8 +3105,8 @@ def yaqa_inner(
                 for bank_index, bank in enumerate(bank_codebooks)
             ):
                 raise ValueError("YAQA bank codebook stack must share storage with bank_codebooks in bank-major order.")
-    elif bank_codebook_stack is not None:
-        raise ValueError("YAQA bank codebook stack requires bank_codebooks.")
+    elif bank_codebook_stack is not None or segmented_bank_stack is not None:
+        raise ValueError("YAQA bank codebook stacks require bank_codebooks.")
     if codebook.ndim != 2 or codebook.shape[0] < 1 or codebook.shape[1] < 1:
         raise ValueError("YAQA codebook must be a non-empty matrix.")
     if not codebook.is_floating_point():
@@ -3022,14 +3177,35 @@ def yaqa_inner(
                 trellis_batch_size=trellis_batch_size,
                 tail_biting_candidates=tail_biting_candidates,
                 bank_codebooks=None,
+                factorization=factorization,
             )
         else:
             bank0_reference, bank0_reference_states = _bank0_oracle
 
-    input_L, _ = block_ldl_factor(input_hessian.to(torch.float32), block_size=tile_rows)
-    output_L, _ = block_ldl_factor(output_hessian.to(torch.float32), block_size=tile_cols)
-    input_feedback = input_L
-    output_feedback = output_L
+    if factorization is None:
+        input_L, _ = block_ldl_factor(input_hessian.to(torch.float32), block_size=tile_rows)
+        output_L, _ = block_ldl_factor(output_hessian.to(torch.float32), block_size=tile_cols)
+    else:
+        input_factor, output_factor = factorization
+        for name, factor, hessian, block_size in (
+            ("input", input_factor, input_hessian, tile_rows),
+            ("output", output_factor, output_hessian, tile_cols),
+        ):
+            if (
+                factor.hessian is not hessian
+                or factor.block_size != block_size
+                or factor.hessian_version != hessian._version
+                or factor.L.device != hessian.device
+                or factor.L.dtype != torch.float32
+                or tuple(factor.L.shape) != tuple(hessian.shape)
+                or tuple(factor.D.shape) != tuple(hessian.shape)
+            ):
+                raise ValueError(f"YAQA prepared {name} factor does not match its originating Hessian and block size.")
+        input_L = input_factor.L
+        output_L = output_factor.L
+    # Canonical, B2-family, and B4 candidates share these immutable factors.
+    input_feedback = input_L.clone()
+    output_feedback = output_L.clone()
     input_feedback.diagonal().sub_(1)
     output_feedback.diagonal().sub_(1)
     source = inner_weight.to(torch.float32)
@@ -3069,7 +3245,8 @@ def yaqa_inner(
     )
     error = source.clone()
     active_banks = bank_codebooks if bank_codebooks is not None else (codebook,)
-    segmented_bank_stack = torch.stack(active_banks).contiguous() if segmented_v2 else None
+    if segmented_v2 and segmented_bank_stack is None:
+        segmented_bank_stack = torch.stack(active_banks).contiguous()
     banked_codebooks = (
         bank_codebook_stack if bank_codebook_stack is not None else torch.stack(active_banks).contiguous()
         if (
@@ -3116,6 +3293,8 @@ def yaqa_inner(
                 QVQ_V2B2_P32_STEPS_PER_SEGMENT if v2b2_p32 else QVQ_V2B4_P64_STEPS_PER_SEGMENT
             )
             for chunk in sequences.split(trellis_batch_size):
+                if telemetry is not None:
+                    telemetry.count("yaqa_segmented_v2_chunks")
                 result = _tail_biting_v2_banked_quantize(
                     chunk,
                     segmented_bank_stack,
@@ -3245,6 +3424,8 @@ def yaqa_inner(
             quantized = bank0_reference.to(dtype=inner_weight.dtype)
             tile_states = bank0_reference_states.reshape(input_blocks, output_blocks, steps_per_tile)
             bank_ids.zero_()
+        if telemetry is not None:
+            telemetry.count("yaqa_bank0_fallback", int(fallback_to_bank0))
         if _diagnostics is not None:
             _diagnostics["fallback_to_bank0"] = bool(fallback_to_bank0)
     result = (quantized.to(dtype=inner_weight.dtype), tile_states.reshape(-1, steps_per_tile))
@@ -3256,6 +3437,7 @@ def yaqa_inner_v2b4_p64(
     input_hessian: torch.Tensor,
     output_hessian: torch.Tensor,
     codebooks: tuple[torch.Tensor, ...],
+    segmented_bank_stack: torch.Tensor | None = None,
     block_input_hessian: torch.Tensor | None = None,
     diagnostics: dict[str, object] | None = None,
     **kwargs,
@@ -3282,6 +3464,7 @@ def yaqa_inner_v2b4_p64(
         output_hessian,
         codebooks[0],
         bank_codebooks=codebooks,
+        segmented_bank_stack=segmented_bank_stack,
         v2b4_p64=True,
         _diagnostics=local_diagnostics,
         **kwargs,
@@ -3297,6 +3480,7 @@ def yaqa_inner_v2b2_p32(
     input_hessian: torch.Tensor,
     output_hessian: torch.Tensor,
     codebook_library: tuple[torch.Tensor, ...],
+    bank_codebook_pair_stacks: tuple[torch.Tensor, ...] | None = None,
     family_mode: str = "reselect",
     block_input_hessian: torch.Tensor | None = None,
     diagnostics: dict[str, object] | None = None,
@@ -3306,6 +3490,11 @@ def yaqa_inner_v2b2_p32(
 
     if len(codebook_library) != 4:
         raise ValueError("YAQA V2B2-P32 requires canonical V2 plus three complementary candidates.")
+    if bank_codebook_pair_stacks is not None and (
+        len(bank_codebook_pair_stacks) != 3
+        or any(tuple(stack.shape) != (2, 1 << 16, 2) for stack in bank_codebook_pair_stacks)
+    ):
+        raise ValueError("YAQA V2B2-P32 pair stacks must contain three [2, 65536, 2] tensors.")
     if family_mode not in {"fixed_block_ldlq", "reselect"}:
         raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
     _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
@@ -3351,12 +3540,19 @@ def yaqa_inner_v2b2_p32(
     oracle = canonical_weight, canonical_states
     alternative_ids = (block_alt_id,) if family_mode == "fixed_block_ldlq" else range(1, 4)
     for alt_id in alternative_ids:
+        pair_stack = (
+            torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
+            if bank_codebook_pair_stacks is None
+            else bank_codebook_pair_stacks[alt_id - 1]
+        )
+        pair_codebooks = tuple(pair_stack[bank] for bank in range(2))
         candidate_weight, candidate_states, candidate_selectors = yaqa_inner(
             inner_weight,
             input_hessian,
             output_hessian,
-            codebook_library[0],
-            bank_codebooks=(codebook_library[0], codebook_library[alt_id]),
+            pair_codebooks[0],
+            bank_codebooks=pair_codebooks,
+            segmented_bank_stack=pair_stack,
             v2b2_p32=True,
             _bank0_oracle=oracle,
             **kwargs,
@@ -3934,6 +4130,27 @@ def quantize_qvq_linear(
             )
             transformed_output_hessian.diagonal().add_(output_damping)
 
+    prepared_yaqa_factorization = None
+    if rounding == "yaqa":
+        assert transformed_output_hessian is not None
+        with _qvq_phase(telemetry, "yaqa_factorization", device):
+            input_factor = stabilized_block_ldl_factor(
+                transformed_H,
+                block_size=16,
+                retry_damping=damping,
+            )
+            output_factor = stabilized_block_ldl_factor(
+                transformed_output_hessian,
+                block_size=16,
+                retry_damping=output_damping,
+            )
+            transformed_H = input_factor.hessian
+            transformed_output_hessian = output_factor.hessian
+            prepared_yaqa_factorization = input_factor, output_factor
+            if telemetry is not None:
+                telemetry.count("yaqa_input_damping_retries", input_factor.retry_count)
+                telemetry.count("yaqa_output_damping_retries", output_factor.retry_count)
+
     with _qvq_phase(telemetry, "codebook", device):
         if experimental_codebook is None:
             codebook_dtype = torch.float16 if device.type == "cuda" else torch.float32
@@ -3958,6 +4175,8 @@ def quantize_qvq_linear(
             codebook = experimental_codebook.to(dtype=torch.float32)
     bank_codebooks = None
     bank_codebook_stack = None
+    segmented_bank_stack = None
+    bank_codebook_pair_stacks = None
     if bank_count in (2, 4):
         bank_codebooks = (
             _canonical_qvq_v2b4_banks(
@@ -3974,7 +4193,21 @@ def quantize_qvq_linear(
                 dtype=codebook.dtype,
             )
         )
-        if (
+        if v2b4_p64:
+            segmented_bank_stack = _canonical_qvq_v2b4_bank_stack(
+                device=device,
+                bits=bits,
+                codebook_version=codebook_version,
+                dtype=codebook.dtype,
+            )
+        elif v2b2_p32:
+            bank_codebook_pair_stacks = _canonical_qvq_v2b2_pair_stacks(
+                device=device,
+                bits=bits,
+                codebook_version=codebook_version,
+                dtype=codebook.dtype,
+            )
+        elif (
             not v2b4_p64
             and not v2b2_p32
             and rounding in {"yaqa", "block_ldlq"}
@@ -4019,6 +4252,9 @@ def quantize_qvq_linear(
                     trellis_batch_size=trellis_batch_size,
                     tail_biting_candidates=tail_biting_candidates,
                     diagnostics=yaqa_bank_diagnostics,
+                    factorization=prepared_yaqa_factorization,
+                    segmented_bank_stack=segmented_bank_stack,
+                    telemetry=telemetry,
                 )
             if v2b2_p32:
                 assert bank_codebooks is not None
@@ -4033,6 +4269,9 @@ def quantize_qvq_linear(
                     tail_biting_candidates=tail_biting_candidates,
                     family_mode=yaqa_v2b2_family_mode,
                     diagnostics=yaqa_bank_diagnostics,
+                    factorization=prepared_yaqa_factorization,
+                    bank_codebook_pair_stacks=bank_codebook_pair_stacks,
+                    telemetry=telemetry,
                 )
             return yaqa_inner(
                 normalized_weight,
@@ -4045,6 +4284,8 @@ def quantize_qvq_linear(
                 bank_codebooks=bank_codebooks,
                 bank_codebook_stack=bank_codebook_stack,
                 dual_v2=dual_v2,
+                factorization=prepared_yaqa_factorization,
+                telemetry=telemetry,
             )
         if v2b4_p64:
             assert bank_codebooks is not None

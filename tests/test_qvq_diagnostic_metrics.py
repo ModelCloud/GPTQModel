@@ -853,13 +853,19 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
         "labels": torch.full((1, 3), -100),
     }
 
+    progress = []
     input_hessians, output_hessians, stats = capture_yaqa_sketch_b(
         model,
         [batch, second_batch],
         {"proj": module},
         device=torch.device("cpu"),
         seed=7,
+        progress_callback=progress.append,
     )
+    assert progress == [
+        {"completed_batches": 1, "total_batches": 2, "completed_sequences": 2, "valid_tokens": 3},
+        {"completed_batches": 2, "total_batches": 2, "completed_sequences": 3, "valid_tokens": 5},
+    ]
 
     generator = torch.Generator(device="cpu").manual_seed(7)
     gradients = []

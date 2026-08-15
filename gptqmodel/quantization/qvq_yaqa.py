@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import wraps
@@ -154,6 +154,7 @@ def capture_yaqa_sketch_b(
     minimum_sequences: int = 1,
     first_decoder_layer: nn.Module | None = None,
     checkpoint_modules: Sequence[nn.Module] = (),
+    progress_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -169,6 +170,8 @@ def capture_yaqa_sketch_b(
         raise TypeError("YAQA Sketch B targets must all be linear modules")
     if len({id(module) for module in modules.values()}) != len(modules):
         raise ValueError("YAQA Sketch B target modules must be unique")
+    if progress_callback is not None and not callable(progress_callback):
+        raise TypeError("YAQA Sketch B progress callback must be callable")
     if first_decoder_layer is None:
         first_decoder_layer = _default_first_decoder_layer(model)
     if not isinstance(first_decoder_layer, nn.Module):
@@ -299,7 +302,7 @@ def capture_yaqa_sketch_b(
                 cuda_matmul.allow_tf32 = False
 
         with _checkpoint_module_forwards(checkpoint_modules):
-            for batch in batches:
+            for batch_index, batch in enumerate(batches, start=1):
                 encoded = {name: value.to(device) for name, value in batch.items() if name != "labels"}
                 active_mask = encoded["attention_mask"]
                 if active_mask.ndim != 2:
@@ -320,6 +323,15 @@ def capture_yaqa_sketch_b(
                 batch_sequences = active_mask.shape[0]
                 total_sequences += batch_sequences
                 total_valid_tokens += valid_tokens
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "completed_batches": batch_index,
+                            "total_batches": len(batches),
+                            "completed_sequences": total_sequences,
+                            "valid_tokens": total_valid_tokens,
+                        }
+                    )
                 for handle in tensor_hook_handles:
                     handle.remove()
                 tensor_hook_handles.clear()

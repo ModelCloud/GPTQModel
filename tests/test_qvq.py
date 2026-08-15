@@ -5,6 +5,7 @@ import copy
 import io
 import itertools
 from dataclasses import fields
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -2261,6 +2262,25 @@ def test_block_ldl_factor_reconstructs_spd_hessian_for_multiple_block_sizes():
         assert torch.count_nonzero(torch.triu(L, diagonal=1)) == 0
 
 
+def test_yaqa_hessian_stabilization_retries_isotropic_damping_without_clamping():
+    hessian = torch.tensor([[1.0, 0.25], [0.25, 0.06245]], dtype=torch.float32)
+    off_diagonal = hessian[0, 1].clone()
+
+    with patch("torch.linalg.cholesky_ex", wraps=torch.linalg.cholesky_ex) as cholesky:
+        factor = qvq_module.stabilized_block_ldl_factor(
+            hessian,
+            block_size=1,
+            retry_damping=torch.tensor(1e-4),
+        )
+
+    assert factor.retry_count == 1
+    assert factor.effective_damping == torch.tensor(1e-4)
+    assert cholesky.call_count == 2
+    torch.testing.assert_close(factor.L @ factor.D @ factor.L.T, factor.hessian)
+    assert factor.hessian[0, 1] == off_diagonal
+    assert factor.hessian[1, 0] == off_diagonal
+
+
 @pytest.mark.parametrize("bits", (1, 1.5, 2))
 def test_block_ldlq_matches_qtip_author_reference_recurrence_at_low_rates(bits):
     """Keep QVQ's transposed recurrence identical to the authoritative QTIP implementation."""
@@ -2517,6 +2537,99 @@ def test_yaqa_antidiagonal_schedule_satisfies_the_two_sided_fixed_point():
             quantized[input_start : input_start + 4, output_start : output_start + 4],
             expected.values.reshape(4, 4),
         )
+
+
+def test_yaqa_prepared_factorization_is_exact_and_immutable():
+    generator = torch.Generator().manual_seed(20261024)
+    inner = torch.randn((8, 8), generator=generator)
+    input_source = torch.randn((8, 8), generator=generator)
+    output_source = torch.randn((8, 8), generator=generator)
+    input_hessian = input_source @ input_source.T + torch.eye(8) * 0.5
+    output_hessian = output_source @ output_source.T + torch.eye(8) * 0.5
+    codebook = torch.randn((64, 2), generator=generator)
+    input_factor = qvq_module.stabilized_block_ldl_factor(
+        input_hessian,
+        block_size=4,
+        retry_damping=torch.tensor(1e-4),
+    )
+    output_factor = qvq_module.stabilized_block_ldl_factor(
+        output_hessian,
+        block_size=4,
+        retry_damping=torch.tensor(1e-4),
+    )
+    preserved = input_factor.L.clone(), output_factor.L.clone()
+
+    expected = yaqa_inner(
+        inner,
+        input_hessian,
+        output_hessian,
+        codebook,
+        bits=2,
+        tile_rows=4,
+        tile_cols=4,
+        tail_biting_candidates=4,
+    )
+    actual = yaqa_inner(
+        inner,
+        input_hessian,
+        output_hessian,
+        codebook,
+        bits=2,
+        tile_rows=4,
+        tile_cols=4,
+        tail_biting_candidates=4,
+        factorization=(input_factor, output_factor),
+    )
+
+    assert all(torch.equal(left, right) for left, right in zip(actual, expected, strict=True))
+    assert torch.equal(input_factor.L, preserved[0])
+    assert torch.equal(output_factor.L, preserved[1])
+
+    input_hessian.diagonal().add_(1e-3)
+    with pytest.raises(ValueError, match="originating Hessian"):
+        yaqa_inner(
+            inner,
+            input_hessian,
+            output_hessian,
+            codebook,
+            bits=2,
+            tile_rows=4,
+            tile_cols=4,
+            factorization=(input_factor, output_factor),
+        )
+
+
+@pytest.mark.parametrize(
+    "format_kwargs",
+    (
+        {},
+        {"bank_count": 2, "v2b2_p32": True, "yaqa_v2b2_family_mode": "fixed_block_ldlq"},
+        {"bank_count": 2, "v2b2_p32": True, "yaqa_v2b2_family_mode": "reselect"},
+        {"bank_count": 4, "v2b4_p64": True},
+    ),
+)
+def test_yaqa_all_candidates_reuse_one_input_and_output_factorization(format_kwargs):
+    generator = torch.Generator().manual_seed(20261025)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_source = torch.randn((24, 16), generator=generator)
+    output_source = torch.randn((24, 16), generator=generator)
+    input_hessian = input_source.T @ input_source / input_source.shape[0]
+    output_hessian = output_source.T @ output_source / output_source.shape[0]
+    original_stabilized = qvq_module.stabilized_block_ldl_factor
+
+    with patch.object(qvq_module, "stabilized_block_ldl_factor", wraps=original_stabilized) as stabilized:
+        result = quantize_qvq_linear(
+            weight,
+            input_hessian,
+            bits=2,
+            rounding="yaqa",
+            output_hessian=output_hessian,
+            trellis_batch_size=1,
+            **format_kwargs,
+        )
+
+    assert stabilized.call_count == 2
+    assert torch.isfinite(result.weight).all()
 
 
 def test_yaqa_two_sided_feedback_improves_proxy_kld_top1_and_top5_overlap_fixture():

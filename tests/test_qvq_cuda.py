@@ -936,6 +936,146 @@ def test_qvq_propagated_banked_candidates_nontrivial_hessian_rate_objective_pari
     assert torch.equal(native_states, serial_states)
 
 
+def _nontrivial_yaqa_fixture(seed: int):
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    weight = (torch.randn((16, 16), generator=generator) * 0.05).cuda()
+    input_samples = torch.randn((41, 16), generator=generator).cuda()
+    output_samples = torch.randn((37, 16), generator=generator).cuda()
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0] + torch.eye(16, device="cuda") * 0.1
+    output_hessian = (
+        output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(16, device="cuda") * 0.1
+    )
+    return weight, input_hessian, output_hessian
+
+
+@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5])
+def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits):
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260830 + int(bits * 10))
+    common = {
+        "bits": bits,
+        "output_hessian": output_hessian,
+        "rounding": "yaqa",
+        "trellis_batch_size": 1,
+    }
+    canonical = quantize_qvq_linear(weight, input_hessian, **common)
+    fixed = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        yaqa_v2b2_family_mode="fixed_block_ldlq",
+        telemetry=QVQQuantizationTelemetry(),
+        **common,
+    )
+    reselected = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        yaqa_v2b2_family_mode="reselect",
+        telemetry=QVQQuantizationTelemetry(),
+        **common,
+    )
+    assert fixed.kronecker_proxy_loss <= canonical.kronecker_proxy_loss
+    assert reselected.kronecker_proxy_loss <= fixed.kronecker_proxy_loss
+    for result in (fixed, reselected):
+        tensors = result.serialized_tensors()
+        decoded = reconstruct_qvq_inner_weight(
+            result.trellis,
+            bits=bits,
+            in_features=16,
+            out_features=16,
+            bank_ids=tensors["bank_ids"],
+            bank_alt_id=tensors["bank_alt_id"],
+            v2b2_p32=True,
+        )
+        assert torch.equal(decoded, result.inner_weight)
+        assert result.telemetry["counters"]["yaqa_segmented_v2_chunks"] >= 1
+
+
+@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5])
+def test_qvq_v2b4_p64_yaqa_is_exact_and_independent_v2_yaqa_safe(bits):
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260840 + int(bits * 10))
+    common = {
+        "bits": bits,
+        "output_hessian": output_hessian,
+        "rounding": "yaqa",
+        "trellis_batch_size": 1,
+    }
+    canonical = quantize_qvq_linear(weight, input_hessian, **common)
+    banked = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bank_count=4,
+        v2b4_p64=True,
+        telemetry=QVQQuantizationTelemetry(),
+        **common,
+    )
+    assert banked.kronecker_proxy_loss <= canonical.kronecker_proxy_loss
+    tensors = banked.serialized_tensors()
+    decoded = reconstruct_qvq_inner_weight(
+        banked.trellis,
+        bits=bits,
+        in_features=16,
+        out_features=16,
+        bank_ids=tensors["bank_ids"],
+        v2b4_p64=True,
+    )
+    assert torch.equal(decoded, banked.inner_weight)
+    assert banked.telemetry["counters"]["yaqa_segmented_v2_chunks"] == 1
+
+
+@pytest.mark.parametrize("format_name", ["v2b2-p32", "v2b4-p64"])
+def test_qvq_banked_v2_yaqa_multitile_partial_batch_is_exact_and_safe(format_name):
+    generator = torch.Generator(device="cpu").manual_seed(20260850)
+    weight = (torch.randn((64, 32), generator=generator) * 0.05).cuda()
+    input_samples = torch.randn((53, 32), generator=generator).cuda()
+    output_samples = torch.randn((47, 64), generator=generator).cuda()
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0] + torch.eye(32, device="cuda") * 0.1
+    output_hessian = (
+        output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(64, device="cuda") * 0.1
+    )
+    common = {
+        "bits": 2.0,
+        "output_hessian": output_hessian,
+        "rounding": "yaqa",
+        "trellis_batch_size": 3,
+    }
+    canonical = quantize_qvq_linear(weight, input_hessian, **common)
+    format_kwargs = (
+        {
+                "bank_count": 2,
+                "v2b2_p32": True,
+                "yaqa_v2b2_family_mode": "fixed_block_ldlq",
+            }
+        if format_name == "v2b2-p32"
+        else {"bank_count": 4, "v2b4_p64": True}
+    )
+    banked = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        telemetry=QVQQuantizationTelemetry(),
+        **common,
+        **format_kwargs,
+    )
+    assert banked.kronecker_proxy_loss <= canonical.kronecker_proxy_loss
+    tensors = banked.serialized_tensors()
+    decoded = reconstruct_qvq_inner_weight(
+        banked.trellis,
+        bits=2.0,
+        in_features=32,
+        out_features=64,
+        bank_ids=tensors["bank_ids"],
+        bank_alt_id=tensors.get("bank_alt_id"),
+        v2b2_p32=format_name == "v2b2-p32",
+        v2b4_p64=format_name == "v2b4-p64",
+    )
+    assert torch.equal(decoded, banked.inner_weight)
+    expected_selectors = 8 * (8 if format_name == "v2b2-p32" else 4)
+    assert banked.bank_ids.numel() == expected_selectors
+    assert banked.telemetry["counters"]["yaqa_segmented_v2_chunks"] == 5
+
+
 def test_qvq_cuda_empty_batch_and_contract_guards():
     x = torch.zeros((0, 16), device="cuda", dtype=torch.float16)
     trellis = torch.zeros((1, 16), device="cuda", dtype=torch.int32)
@@ -986,7 +1126,7 @@ def test_qvq_cuda_empty_batch_and_contract_guards():
             qvq_cuda_gemv(*args, **kwargs)
 
     banked_trellis = torch.zeros((1, 8), device="cuda", dtype=torch.int32)
-    with pytest.raises(ValueError, match="selectors must be in \[0, 3\]"):
+    with pytest.raises(ValueError, match=r"selectors must be in \[0, 3\]"):
         qvq_cuda_gemv(
             x,
             banked_trellis,

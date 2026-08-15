@@ -9,6 +9,7 @@ import json
 import math
 import platform
 import time
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from gptqmodel.quantization.qvq import (
     quantize_qvq_linear,
 )
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
+from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 
 QKVO_SUFFIXES = (
     "self_attn.q_proj",
@@ -66,6 +68,25 @@ ARM_CONFIG = {
     "dual-v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": True},
     "v4": {"vector_size": 4, "trellis_window": 16, "dual_v2": False},
     "l18-v4": {"vector_size": 4, "trellis_window": 18, "dual_v2": False},
+    "v2-yaqa": {"vector_size": 2, "trellis_window": 16, "dual_v2": False, "rounding": "yaqa"},
+    "v2b2-p32-yaqa-fixed": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "fixed_block_ldlq",
+    },
+    "v2b2-p32-yaqa": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "reselect",
+    },
 }
 DEFAULT_ARMS = ("v2", "v2b2-p32")
 
@@ -82,6 +103,20 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-rows", type=int, default=64)
     parser.add_argument("--evaluation-rows", type=int, default=64)
     parser.add_argument("--evaluation-row-offset", type=int, default=64)
+    parser.add_argument("--yaqa-rows", type=int, default=512)
+    parser.add_argument("--yaqa-row-offset", type=int)
+    parser.add_argument("--yaqa-batch-size", type=int, default=8)
+    parser.add_argument("--yaqa-seed", type=int, default=0)
+    parser.add_argument(
+        "--yaqa-factor-cache",
+        type=Path,
+        help="Optional validated CPU cache shared by matched YAQA rate workers.",
+    )
+    parser.add_argument(
+        "--prepare-yaqa-only",
+        action="store_true",
+        help="Collect and cache Sketch-B factors, then exit before Hessian capture and quantization.",
+    )
     parser.add_argument(
         "--max-length",
         type=int,
@@ -91,6 +126,113 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=18240)
     parser.add_argument("--trellis-batch-size", type=int)
     return parser
+
+
+def _padded_batch_chunks(
+    encoded: dict[str, torch.Tensor],
+    *,
+    batch_size: int,
+) -> list[dict[str, torch.Tensor]]:
+    """Split padded rows into batches while trimming padding-only edge columns."""
+
+    attention_mask = encoded.get("attention_mask")
+    if not isinstance(attention_mask, torch.Tensor) or attention_mask.ndim != 2:
+        raise ValueError("YAQA encoding must contain a rank-2 attention mask")
+    if batch_size < 1:
+        raise ValueError("YAQA batch size must be positive")
+    batches = []
+    for start in range(0, attention_mask.shape[0], batch_size):
+        stop = min(start + batch_size, attention_mask.shape[0])
+        mask = attention_mask[start:stop]
+        active_columns = mask.ne(0).any(dim=0).nonzero(as_tuple=False).flatten()
+        if active_columns.numel() == 0:
+            raise ValueError("YAQA batch contains no valid tokens")
+        column_start = int(active_columns[0])
+        column_stop = int(active_columns[-1]) + 1
+        batch = {}
+        for name, value in encoded.items():
+            if value.ndim >= 2 and tuple(value.shape[:2]) == tuple(attention_mask.shape):
+                batch[name] = value[start:stop, column_start:column_stop].contiguous()
+            else:
+                batch[name] = value[start:stop].contiguous()
+        batches.append(batch)
+    return batches
+
+
+def _yaqa_cache_metadata(args: argparse.Namespace, module_shapes: dict[str, list[int]], row_offset: int) -> dict:
+    return {
+        "version": 1,
+        "model": str(args.model.resolve()),
+        "dataset": str(args.dataset.resolve()),
+        "layers": args.layers,
+        "module_shapes": module_shapes,
+        "rows": args.yaqa_rows,
+        "row_offset": row_offset,
+        "batch_size": args.yaqa_batch_size,
+        "seed": args.yaqa_seed,
+        "max_length": args.max_length,
+    }
+
+
+def _load_yaqa_factor_cache(
+    path: Path,
+    *,
+    expected_metadata: dict,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict]:
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, dict) or payload.get("metadata") != expected_metadata:
+        raise ValueError(f"YAQA factor cache metadata does not match this sweep: {path}")
+    input_hessians = payload.get("input_hessians")
+    output_hessians = payload.get("output_hessians")
+    stats = payload.get("stats")
+    expected_names = set(expected_metadata["module_shapes"])
+    if not isinstance(input_hessians, dict) or not isinstance(output_hessians, dict) or not isinstance(stats, dict):
+        raise ValueError(f"YAQA factor cache has an invalid payload: {path}")
+    if set(input_hessians) != expected_names or set(output_hessians) != expected_names:
+        raise ValueError(f"YAQA factor cache module names do not match this sweep: {path}")
+    for name, shape in expected_metadata["module_shapes"].items():
+        out_features, in_features = shape
+        input_factor = input_hessians[name]
+        output_factor = output_hessians[name]
+        if (
+            not isinstance(input_factor, torch.Tensor)
+            or input_factor.device.type != "cpu"
+            or input_factor.dtype != torch.float32
+            or tuple(input_factor.shape) != (in_features, in_features)
+            or not input_factor.is_contiguous()
+        ):
+            raise ValueError(f"YAQA input factor {name} has invalid storage or geometry")
+        if (
+            not isinstance(output_factor, torch.Tensor)
+            or output_factor.device.type != "cpu"
+            or output_factor.dtype != torch.float32
+            or tuple(output_factor.shape) != (out_features, out_features)
+            or not output_factor.is_contiguous()
+        ):
+            raise ValueError(f"YAQA output factor {name} has invalid storage or geometry")
+    return input_hessians, output_hessians, stats
+
+
+def _save_yaqa_factor_cache(
+    path: Path,
+    *,
+    metadata: dict,
+    input_hessians: dict[str, torch.Tensor],
+    output_hessians: dict[str, torch.Tensor],
+    stats: dict,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    torch.save(
+        {
+            "metadata": metadata,
+            "input_hessians": input_hessians,
+            "output_hessians": output_hessians,
+            "stats": stats,
+        },
+        temporary,
+    )
+    temporary.replace(path)
 
 
 def _qkvo_modules(model: torch.nn.Module, *, layer_count: int) -> dict[str, torch.nn.Linear]:
@@ -203,8 +345,20 @@ def main() -> None:
     args = _parser().parse_args()
     if args.layers < 1:
         raise ValueError("layer count must be positive")
+    if args.prepare_yaqa_only and args.yaqa_factor_cache is None:
+        raise ValueError("--prepare-yaqa-only requires --yaqa-factor-cache")
     if args.evaluation_row_offset < args.calibration_rows:
         raise ValueError("evaluation rows must be disjoint from calibration rows")
+    yaqa_enabled = any(ARM_CONFIG[arm].get("rounding") == "yaqa" for arm in args.arms)
+    yaqa_row_offset = (
+        args.evaluation_row_offset + args.evaluation_rows if args.yaqa_row_offset is None else args.yaqa_row_offset
+    )
+    if yaqa_enabled and (
+        args.yaqa_rows < 1
+        or args.yaqa_batch_size < 1
+        or yaqa_row_offset < args.evaluation_row_offset + args.evaluation_rows
+    ):
+        raise ValueError("YAQA rows must be positive and disjoint from calibration and evaluation rows")
     rates = tuple(normalize_qvq_rate(rate) for rate in args.rates)
     device = torch.device(args.device)
     if device.type == "mps" and not torch.backends.mps.is_available():
@@ -228,6 +382,80 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    modules = _qkvo_modules(model, layer_count=args.layers)
+    module_names = tuple(modules)
+    module_shapes = {name: list(module.weight.shape) for name, module in modules.items()}
+    yaqa_input_hessians = {}
+    yaqa_output_hessians = {}
+    yaqa_stats = None
+    if yaqa_enabled:
+        cache_metadata = _yaqa_cache_metadata(args, module_shapes, yaqa_row_offset)
+        if args.yaqa_factor_cache is not None and args.yaqa_factor_cache.is_file():
+            yaqa_input_hessians, yaqa_output_hessians, yaqa_stats = _load_yaqa_factor_cache(
+                args.yaqa_factor_cache,
+                expected_metadata=cache_metadata,
+            )
+            yaqa_stats = dict(yaqa_stats)
+            yaqa_stats["cache"] = "loaded"
+            yaqa_stats["cache_path"] = str(args.yaqa_factor_cache)
+            print(f"Loaded validated YAQA Sketch-B factors from {args.yaqa_factor_cache}", flush=True)
+        else:
+            yaqa_encoded, yaqa_data_stats = load_nm_evaluation_batch(
+                tokenizer,
+                dataset_path=args.dataset,
+                row_offset=yaqa_row_offset,
+                rows=args.yaqa_rows,
+                max_length=args.max_length,
+            )
+            yaqa_batches = _padded_batch_chunks(yaqa_encoded, batch_size=args.yaqa_batch_size)
+            print(
+                f"Capturing YAQA Sketch B from rows {yaqa_row_offset}:{yaqa_row_offset + args.yaqa_rows} "
+                f"in {len(yaqa_batches)} batches",
+                flush=True,
+            )
+
+            def sketch_progress(stats):
+                print(
+                    f"Sketch-B {stats['completed_batches']}/{stats['total_batches']} batches, "
+                    f"{stats['completed_sequences']}/{args.yaqa_rows} rows, {stats['valid_tokens']} valid tokens",
+                    flush=True,
+                )
+
+            yaqa_started = time.perf_counter()
+            yaqa_input_hessians, yaqa_output_hessians, yaqa_stats = capture_yaqa_sketch_b(
+                model,
+                yaqa_batches,
+                modules,
+                device=device,
+                seed=args.yaqa_seed,
+                minimum_sequences=args.yaqa_rows,
+                checkpoint_modules=tuple(model.model.layers),
+                progress_callback=sketch_progress,
+            )
+            yaqa_stats["collection_seconds"] = time.perf_counter() - yaqa_started
+            yaqa_stats["data"] = yaqa_data_stats
+            yaqa_stats["row_offset"] = yaqa_row_offset
+            yaqa_stats["batch_size"] = args.yaqa_batch_size
+            yaqa_stats["cache"] = "collected"
+            if args.yaqa_factor_cache is not None:
+                _save_yaqa_factor_cache(
+                    args.yaqa_factor_cache,
+                    metadata=cache_metadata,
+                    input_hessians=yaqa_input_hessians,
+                    output_hessians=yaqa_output_hessians,
+                    stats=yaqa_stats,
+                )
+                yaqa_stats["cache_path"] = str(args.yaqa_factor_cache)
+                print(f"Saved YAQA Sketch-B factors to {args.yaqa_factor_cache}", flush=True)
+    if args.prepare_yaqa_only:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps({"metadata": cache_metadata, "stats": yaqa_stats}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print("YAQA Sketch-B factor preparation complete", flush=True)
+        return
+
     calibration, calibration_stats = load_nm_calibration_batches(
         tokenizer,
         config,
@@ -248,8 +476,6 @@ def main() -> None:
         max_length=args.max_length,
     )
     evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
-    modules = _qkvo_modules(model, layer_count=args.layers)
-    module_names = tuple(modules)
 
     print("Capturing QKVO calibration Hessians", flush=True)
     hessians, sample_counts = capture_calibration_hessians(model, calibration, modules, device=device)
@@ -270,7 +496,7 @@ def main() -> None:
             "source_layers": source_layers,
             "tested_layers": args.layers,
             "modules": list(module_names),
-            "module_shapes": {name: list(module.weight.shape) for name, module in modules.items()},
+            "module_shapes": module_shapes,
             "rates": list(rates),
             "arms": list(args.arms),
             "seed": args.seed,
@@ -284,7 +510,7 @@ def main() -> None:
             "evaluation": evaluation_stats,
             "evaluation_batch_size": 1,
             "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
-            "rounding": "block_ldlq",
+            "yaqa_sketch_b": yaqa_stats,
             "serialization": "disabled; dense reconstruction comparison",
         },
         "results": {},
@@ -295,6 +521,16 @@ def main() -> None:
         for arm in args.arms:
             started = time.perf_counter()
             geometry = ARM_CONFIG[arm]
+            if geometry.get("v2b2_p32") and rate > 2.5:
+                report["results"][str(rate)][arm] = {
+                    "status": "unsupported",
+                    "reason": "V2B2-P32 supports W1 through W2.5",
+                }
+                print(f"Skipping W{rate:g} {arm}: V2B2-P32 supports W1 through W2.5", flush=True)
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                continue
+            rounding = geometry.get("rounding", "block_ldlq")
             batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
                 rate,
                 device,
@@ -310,8 +546,11 @@ def main() -> None:
                 module_started = time.perf_counter()
                 result = quantize_qvq_linear(
                     original_weights[name].to(device),
-                    hessians[name].to(device),
+                    (yaqa_input_hessians[name] if rounding == "yaqa" else hessians[name]).to(device),
                     bits=rate,
+                    output_hessian=(
+                        yaqa_output_hessians[name].to(device) if rounding == "yaqa" else None
+                    ),
                     seed=args.seed,
                     trellis_batch_size=batch_size,
                     **geometry,
@@ -320,6 +559,9 @@ def main() -> None:
                 reconstructions[name] = reconstruction
                 weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
                 weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
+                weight_metrics[name]["kronecker_proxy_loss"] = (
+                    None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss)
+                )
                 if result.bank_ids is not None:
                     counts = torch.bincount(result.bank_ids.to(torch.int64).cpu(), minlength=4)
                     selector_histogram = [
@@ -351,10 +593,11 @@ def main() -> None:
             arm_report = {
                 "seconds": time.perf_counter() - started,
                 "trellis_batch_size": batch_size,
-                "effective_bpw": rate + (2 / 64 if arm in ("v2b2-p32", "v2b4-p64") else 0),
+                "rounding": rounding,
+                "effective_bpw": rate + (2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0),
                 "bank_selectors": _selector_metrics(selector_histogram),
                 "module_alternative_bank_histogram": (
-                    alternative_bank_histogram if arm == "v2b2-p32" else None
+                    alternative_bank_histogram if geometry.get("v2b2_p32") else None
                 ),
                 "weight": {
                     "modules": weight_metrics,
