@@ -8,6 +8,7 @@ import gc
 import json
 import platform
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -94,6 +95,64 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _unpadded_evaluation_rows(
+    encoded: dict[str, torch.Tensor],
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], ...]:
+    attention_mask = encoded.get("attention_mask")
+    if attention_mask is None or attention_mask.ndim != 2:
+        raise ValueError("evaluation encoding must contain a rank-2 attention mask")
+    rows = []
+    for row_index in range(attention_mask.shape[0]):
+        valid = attention_mask[row_index].ne(0).nonzero(as_tuple=False).flatten()
+        if valid.numel() == 0:
+            raise ValueError(f"evaluation row {row_index} contains no valid tokens")
+        start = int(valid[0])
+        stop = int(valid[-1]) + 1
+        row = {}
+        for name, value in encoded.items():
+            if value.ndim >= 2 and tuple(value.shape[:2]) == tuple(attention_mask.shape):
+                row[name] = value[row_index : row_index + 1, start:stop].to(device)
+            else:
+                row[name] = value[row_index : row_index + 1].to(device)
+        if not bool(row["attention_mask"].ne(0).all()):
+            raise ValueError(f"evaluation row {row_index} was not fully unpadded")
+        rows.append(row)
+    return tuple(rows)
+
+
+@torch.inference_mode()
+def _capture_forward_rows(
+    model: torch.nn.Module,
+    rows: tuple[dict[str, torch.Tensor], ...],
+    modules: dict[str, torch.nn.Linear],
+    *,
+    capture_inputs: bool,
+    layer_count: int,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    logits = []
+    inputs: dict[str, list[torch.Tensor]] = defaultdict(list)
+    outputs: dict[str, list[torch.Tensor]] = defaultdict(list)
+    for row in rows:
+        row_logits, row_inputs, row_outputs = capture_forward(
+            model,
+            row,
+            modules,
+            capture_inputs=capture_inputs,
+            layer_count=layer_count,
+        )
+        logits.append(row_logits)
+        for name, value in row_inputs.items():
+            inputs[name].append(value)
+        for name, value in row_outputs.items():
+            outputs[name].append(value)
+    return (
+        torch.cat(logits, dim=0),
+        {name: torch.cat(values, dim=0) for name, values in inputs.items()},
+        {name: torch.cat(values, dim=0) for name, values in outputs.items()},
+    )
+
+
 def main() -> None:
     args = _parser().parse_args()
     if args.layers < 1:
@@ -138,16 +197,16 @@ def main() -> None:
         rows=args.evaluation_rows,
         max_length=args.max_length,
     )
-    evaluation = {name: value.to(device) for name, value in evaluation.items()}
+    evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
     modules = _qkvo_modules(model, layer_count=args.layers)
     module_names = tuple(modules)
 
     print("Capturing QKVO calibration Hessians", flush=True)
     hessians, sample_counts = capture_calibration_hessians(model, calibration, modules, device=device)
     print("Capturing dense held-out QKVO/layer/logit outputs", flush=True)
-    dense_logits, dense_inputs, dense_outputs = capture_forward(
+    dense_logits, dense_inputs, dense_outputs = _capture_forward_rows(
         model,
-        evaluation,
+        evaluation_rows,
         modules,
         capture_inputs=True,
         layer_count=args.layers,
@@ -172,6 +231,7 @@ def main() -> None:
             "calibration": calibration_stats,
             "calibration_samples": sample_counts,
             "evaluation": evaluation_stats,
+            "evaluation_batch_size": 1,
             "rounding": "block_ldlq",
             "serialization": "disabled; dense reconstruction comparison",
         },
@@ -216,9 +276,9 @@ def main() -> None:
             with torch.no_grad():
                 for name, module in modules.items():
                     module.weight.copy_(reconstructions[name].to(device=device, dtype=module.weight.dtype))
-            quantized_logits, _, live_outputs = capture_forward(
+            quantized_logits, _, live_outputs = _capture_forward_rows(
                 model,
-                evaluation,
+                evaluation_rows,
                 modules,
                 capture_inputs=False,
                 layer_count=args.layers,
