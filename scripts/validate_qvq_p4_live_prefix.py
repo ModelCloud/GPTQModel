@@ -64,6 +64,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--alphas", nargs="+", type=float, default=(0.25, 0.5, 1.0))
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
+    parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Serialize ordinary V2B2-P32+YAQA without localized P4 candidate generation.",
+    )
     return parser
 
 
@@ -344,19 +349,25 @@ def main() -> None:
             max_length=args.max_length,
             device=device,
         )
-    print("Capturing live-prefix search inputs with target-boundary early stop", flush=True)
-    propagated_inputs = _capture_target_inputs(student_model, target, row_sets["search"])
     source_weight = dense_target.weight.detach().to(device=device, dtype=torch.float32)
     source_bias = None if dense_target.bias is None else dense_target.bias.detach().to(device=device, dtype=torch.float32)
-    propagated_target = F.linear(propagated_inputs, source_weight, source_bias)
-
-    print("Caching dense teacher logits for confirmation and untouched evaluation", flush=True)
-    confirmation_teacher = _teacher_logits(dense_model, row_sets["confirmation"])
+    propagated_inputs = None
+    propagated_target = None
+    confirmation_teacher = None
+    if not args.baseline_only:
+        print("Capturing live-prefix search inputs with target-boundary early stop", flush=True)
+        propagated_inputs = _capture_target_inputs(student_model, target, row_sets["search"])
+        propagated_target = F.linear(propagated_inputs, source_weight, source_bias)
+        print("Caching dense teacher logits for confirmation and untouched evaluation", flush=True)
+        confirmation_teacher = _teacher_logits(dense_model, row_sets["confirmation"])
+    else:
+        print("Skipping localized search for the ordinary YAQA baseline oracle", flush=True)
     evaluation_teacher = _teacher_logits(dense_model, row_sets["evaluation"])
     callback_report: dict[str, object] = {}
     callback_weights: dict[str, torch.Tensor] = {}
 
     def confirmation_callback(proposal: torch.Tensor, rollback: torch.Tensor) -> bool:
+        assert confirmation_teacher is not None
         callback_weights["proposal"] = proposal.detach().clone()
         callback_weights["rollback"] = rollback.detach().clone()
         with torch.no_grad():
@@ -375,29 +386,38 @@ def main() -> None:
             target.weight.copy_(rollback.to(device=device, dtype=target.weight.dtype))
         return accepted
 
-    print(f"Starting localized P4 quantization for {args.target}", flush=True)
+    mode = "ordinary YAQA baseline" if args.baseline_only else "localized P4"
+    print(f"Starting {mode} quantization for {args.target}", flush=True)
     started = time.perf_counter()
+    quantization_kwargs = {
+        "output_hessian": output_hessians[args.target].to(device),
+        "seed": args.seed,
+        "trellis_batch_size": args.trellis_batch_size,
+        "rounding": "yaqa",
+        "bank_count": 2,
+        "v2b2_p32": True,
+        "yaqa_v2b2_family_mode": "reselect",
+    }
+    if not args.baseline_only:
+        quantization_kwargs.update(
+            yaqa_spectral_localized=True,
+            yaqa_spectral_ranks=tuple(args.ranks),
+            yaqa_spectral_localized_alphas=tuple(args.alphas),
+            yaqa_spectral_localized_max_segments=args.max_segments,
+            propagated_inputs=propagated_inputs,
+            propagated_target_output=propagated_target,
+            propagated_acceptance=confirmation_callback,
+        )
     result = quantize_qvq_linear(
         source_weight,
         input_hessians[args.target].to(device),
         bits=args.bits,
-        output_hessian=output_hessians[args.target].to(device),
-        seed=args.seed,
-        trellis_batch_size=args.trellis_batch_size,
-        rounding="yaqa",
-        bank_count=2,
-        v2b2_p32=True,
-        yaqa_v2b2_family_mode="reselect",
-        yaqa_spectral_localized=True,
-        yaqa_spectral_ranks=tuple(args.ranks),
-        yaqa_spectral_localized_alphas=tuple(args.alphas),
-        yaqa_spectral_localized_max_segments=args.max_segments,
-        propagated_inputs=propagated_inputs,
-        propagated_target_output=propagated_target,
-        propagated_acceptance=confirmation_callback,
+        **quantization_kwargs,
     )
     quantization_seconds = time.perf_counter() - started
-    if not callback_report:
+    if args.baseline_only:
+        callback_report = {"accepted": False, "reason": "baseline-only ordinary YAQA oracle"}
+    elif not callback_report:
         callback_report = {"accepted": False, "reason": "localized proposal unchanged; callback not invoked"}
 
     rollback_weight = callback_weights.get("rollback", result.weight).detach().float().clone()
@@ -444,9 +464,10 @@ def main() -> None:
             "alphas": list(args.alphas),
             "max_segments": args.max_segments,
             "topn_regression_limit": args.topn_regression_limit,
+            "baseline_only": args.baseline_only,
         },
         "quantization_seconds": quantization_seconds,
-        "search_valid_tokens": int(propagated_inputs.shape[0]),
+        "search_valid_tokens": 0 if propagated_inputs is None else int(propagated_inputs.shape[0]),
         "localized": _localized_summary(result, callback_report),
         "confirmation": callback_report,
         "evaluation": {

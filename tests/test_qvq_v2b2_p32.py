@@ -50,12 +50,16 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _WeightedMetricAccumulator,
     _yaqa_cache_metadata,
 )
+from scripts.compare_qvq_p4_prefixes import _compare_locked_rows, _metric_value
 from scripts.validate_qvq_p4_live_prefix import (
     _capture_target_inputs,
     _install_prefix_artifacts,
     _localized_summary,
     _passes_confirmation,
     _validate_disjoint_splits,
+)
+from scripts.validate_qvq_p4_live_prefix import (
+    _parser as _p4_parser,
 )
 
 
@@ -85,6 +89,61 @@ class _EarlyStopHarness(torch.nn.Module):
         hidden = self.target(hidden)
         self.after_calls += 1
         return hidden
+
+
+class _LockedLogitHarness(torch.nn.Module):
+    def __init__(self, offset: float):
+        super().__init__()
+        self.offset = offset
+
+    def forward(self, input_ids, attention_mask):
+        del attention_mask
+        values = input_ids.float()
+        logits = torch.stack((values, -values, values * 0.5, values * -0.25 + self.offset), dim=-1)
+        return type("Output", (), {"logits": logits})()
+
+
+def test_qvq_p4_locked_prefix_comparison_streams_matched_rows():
+    rows = (
+        {
+            "input_ids": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones((1, 3), dtype=torch.long),
+        },
+        {
+            "input_ids": torch.tensor([[4, 5]]),
+            "attention_mask": torch.ones((1, 2), dtype=torch.long),
+        },
+    )
+    teacher = _LockedLogitHarness(0.0)
+    baseline = _LockedLogitHarness(0.5)
+    candidate = _LockedLogitHarness(0.0)
+
+    baseline_metrics, candidate_metrics = _compare_locked_rows(teacher, baseline, candidate, rows)
+
+    assert candidate_metrics["kl_forward"]["mean"] == pytest.approx(0.0, abs=1e-7)
+    assert _metric_value(candidate_metrics, "kl_forward") < _metric_value(baseline_metrics, "kl_forward")
+    assert _metric_value(candidate_metrics, "top1_agreement") == 1.0
+    assert _metric_value(candidate_metrics, "top5_overlap") == 1.0
+    assert _metric_value(candidate_metrics, "top10_overlap") == 1.0
+
+
+def test_qvq_p4_baseline_only_is_explicit_and_default_off():
+    required = (
+        "--model",
+        "model",
+        "--dataset",
+        "dataset",
+        "--prefix-artifact",
+        "prefix.safetensors",
+        "--yaqa-factor-cache",
+        "factors.pt",
+        "--yaqa-metadata",
+        "metadata.json",
+        "--output",
+        "report.json",
+    )
+    assert not _p4_parser().parse_args(required).baseline_only
+    assert _p4_parser().parse_args((*required, "--baseline-only")).baseline_only
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():

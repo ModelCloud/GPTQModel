@@ -302,8 +302,48 @@ reported precision, and Top-10 by `+0.0229` points. Those are backend accumulati
 contract and split. It also reinforces the architectural limit exposed by the accepted Q/K gates: fixed-boundary P4
 can find tiny alternate state paths in some projections, but its present spectral generator does not reliably expose
 a new discrete basin for every module. Do not force selector churn or weaken rollback. The next decision should be a
-common locked evaluation of the retained Q/K map against the original layer-0-only prefix, followed by a task-like
-gate; do not continue accumulating projection candidates merely because fresh rows remain available.
+common locked evaluation of the retained Q/K map against independently encoded ordinary-YAQA Q/K, with layer-0-only
+kept as a separate precision-cost control, followed by a task-like gate. Do not continue accumulating projection
+candidates merely because fresh rows remain available.
+
+The locked comparison harness now streams one full row at a time through one dense teacher and two packed-prefix
+students. This avoids caching a complete vocabulary-logit corpus and makes larger batch-1, untruncated gates practical
+on Apple. An explicit `--baseline-only` mode in the P4 driver serializes ordinary V2B2-P32+YAQA without entering
+localized spectral generation; it must be used instead of an invalid zero-alpha spectral proposal.
+
+The first 64-row control used rows `[1698,1762)` (23,093 valid tokens) and compared the layer-0-only prefix with the
+same prefix plus the retained layer-1 Q/K artifacts. Adding two W2 modules raised KL from `0.0084199104` to
+`0.0102976438` (+22.30%) and changed Top-1/5/10 by `-0.9510/-0.7608/-0.8342` percentage points. This measures the
+expected precision cost of replacing dense Q/K with W2 Q/K; it does **not** measure the P4 refinement and must not be
+used to reject P4.
+
+For the matched P4 control, canonical layer-1 Q and K artifacts were independently generated with ordinary
+V2B2-P32+YAQA. Canonical K was conditioned on canonical Q, while refined K remained conditioned on refined Q. Both
+complete coordinate paths therefore quantize the exact same six modules at W2 and differ only in their P4-selected
+Q/K state paths. On the same 64 locked rows:
+
+| Four-layer arm | Final KL | JSD | Top-1 | Top-5 | Top-10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ordinary YAQA Q/K | 0.0103102394 | 0.0025641023 | 88.8011% | 90.0013% | 90.4112% |
+| P4-refined Q/K | 0.0102976438 | 0.0025609845 | 88.8228% | 89.9961% | 90.4182% |
+| P4 minus ordinary | -0.1222% | -0.1216% | +0.0217 pp | -0.0052 pp | +0.0069 pp |
+
+The matched map passes the predeclared distribution guard: KL improves and every Top-N change is far inside the
+0.25-point non-regression margin. The signal is nevertheless too small for promotion from this shell alone.
+
+A second locked gate then used the complete 16-layer model and fresh rows `[1762,1826)` (21,862 valid tokens). It
+kept the same two exact packed coordinate paths and changed only the downstream propagation horizon:
+
+| Full-model arm | Final KL | JSD | Top-1 | Top-5 | Top-10 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ordinary YAQA Q/K | 0.0029644251 | 0.0007304349 | 97.9035% | 96.8144% | 96.7960% |
+| P4-refined Q/K | 0.0029592371 | 0.0007290677 | 97.9310% | 96.8043% | 96.7850% |
+| P4 minus ordinary | -0.1750% | -0.1872% | +0.0275 pp | -0.0101 pp | -0.0110 pp |
+
+The tiny KL/JSD and Top-1 gains survive all 16 decoder layers; Top-5/10 move slightly backward but remain well inside
+the guardrail. This is positive propagated evidence, not task recovery. Retain Q/K as an experimental paired map,
+keep V rejected and O unchanged, and advance only to a paired task-like gate using the exact ordinary-versus-refined
+artifacts. Do not spend further quantization time accumulating layer-1 modules before that decision.
 
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
