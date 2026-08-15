@@ -14,8 +14,10 @@ from gptqmodel.quantization.qvq import (
     pack_qvq_bank_ids,
     pack_qvq_binary_bank_ids,
     reconstruct_qvq_inner_weight,
+    tail_biting_v2b2_p32_quantize,
+    tail_biting_v2b4_p64_quantize,
 )
-from gptqmodel.quantization.qvq_codecs import pgc16_codebook
+from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_mlx import (
@@ -26,6 +28,8 @@ from gptqmodel.utils.qvq_mlx import (
     _v4_row_tile,
     _v4_use_mma,
     qvq_mlx_gemv,
+    qvq_mlx_tail_biting_v2b2_p32,
+    qvq_mlx_tail_biting_v2b4_p64,
     qvq_mlx_viterbi,
 )
 
@@ -504,6 +508,86 @@ def test_qvq_mlx_viterbi_rejects_invalid_numeric_inputs():
         qvq_mlx_viterbi(sequences, codebook, 1, overlap=overlap)
 
 
+@pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))
+def test_qvq_mlx_banked_v2_tail_biting_matches_torch_oracle(kind, bits):
+    generator = torch.Generator().manual_seed(32000 + int(bits * 10) + len(kind))
+    sequences = torch.randn((1, 128, 2), generator=generator)
+    weights = torch.rand((1, 128), generator=generator).add_(0.25)
+    all_banks = torch.stack(tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in range(4)))
+    if kind == "v2b2_p32":
+        codebooks = all_banks[[0, 3]].contiguous()
+        expected = tail_biting_v2b2_p32_quantize(
+            sequences,
+            codebooks,
+            bits=bits,
+            step_weights=weights,
+        )
+        actual = qvq_mlx_tail_biting_v2b2_p32(
+            _mlx(sequences),
+            _mlx(codebooks),
+            bits,
+            step_weights=_mlx(weights),
+        )
+    else:
+        codebooks = all_banks
+        expected = tail_biting_v2b4_p64_quantize(
+            sequences,
+            codebooks,
+            bits=bits,
+            step_weights=weights,
+        )
+        actual = qvq_mlx_tail_biting_v2b4_p64(
+            _mlx(sequences),
+            _mlx(codebooks),
+            bits,
+            step_weights=_mlx(weights),
+        )
+    mx.eval(*actual)
+    states, selectors, squared_error = (torch.from_numpy(np.asarray(item)) for item in actual)
+
+    assert torch.equal(states.to(torch.long), expected.states)
+    assert torch.equal(selectors, expected.segment_bank_ids)
+    torch.testing.assert_close(squared_error, expected.squared_error, rtol=2e-5, atol=2e-4)
+
+
+@pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
+def test_qvq_mps_banked_v2_quantization_auto_dispatches_to_mlx(monkeypatch, kind):
+    from gptqmodel.utils import qvq_mlx
+
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    bits = 2.5
+    generator = torch.Generator().manual_seed(32100 + len(kind))
+    sequences = torch.randn((1, 128, 2), generator=generator)
+    all_banks = torch.stack(tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in range(4)))
+    codebooks = all_banks[[0, 3]].contiguous() if kind == "v2b2_p32" else all_banks
+    expected = (
+        tail_biting_v2b2_p32_quantize(sequences, codebooks, bits=bits)
+        if kind == "v2b2_p32"
+        else tail_biting_v2b4_p64_quantize(sequences, codebooks, bits=bits)
+    )
+    original = qvq_mlx.qvq_mlx_v2_banked_viterbi_from_torch_mps
+    launches = 0
+
+    def counted(*args, **kwargs):
+        nonlocal launches
+        launches += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "qvq_mlx_v2_banked_viterbi_from_torch_mps", counted)
+    actual = (
+        tail_biting_v2b2_p32_quantize(sequences.to("mps"), codebooks.to("mps"), bits=bits)
+        if kind == "v2b2_p32"
+        else tail_biting_v2b4_p64_quantize(sequences.to("mps"), codebooks.to("mps"), bits=bits)
+    )
+
+    assert launches == 2
+    assert torch.equal(actual.states.cpu(), expected.states)
+    assert torch.equal(actual.segment_bank_ids.cpu(), expected.segment_bank_ids)
+    torch.testing.assert_close(actual.squared_error.cpu(), expected.squared_error, rtol=2e-5, atol=2e-4)
+
+
 def _assert_dense_accuracy_metrics(actual: np.ndarray, reference: torch.Tensor) -> None:
     actual_f32 = torch.from_numpy(actual).float()
     reference_f32 = reference.float()
@@ -709,6 +793,48 @@ def test_qvq_v2_banked_mlx_linear_full_forward(kind):
     )
     actual = layer(_mlx(x_torch))
     mx.eval(actual)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
+def test_qvq_v2_banked_mlx_loader_conversion_auto_dispatches_native(monkeypatch, kind):
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+    from gptqmodel.utils import qvq_mlx
+    from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
+
+    bits, k, n = 2, 32, 48
+    (x, trellis, bank_ids), bank_alt_id, _ = _v2_banked_case(bits, 4, kind=kind, k=k, n=n)
+    source = QVQLinear(
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_count=2 if kind == "v2b2_p32" else 4,
+        v2b2_p32=kind == "v2b2_p32",
+        v2b4_p64=kind == "v2b4_p64",
+        tensors={
+            "trellis": torch.from_numpy(np.asarray(trellis)),
+            "SU": torch.ones(k, dtype=torch.float32),
+            "SV": torch.full((n,), 0.1, dtype=torch.float32),
+            "bank_ids": torch.from_numpy(np.asarray(bank_ids)),
+            "bank_alt_id": None if bank_alt_id is None else torch.from_numpy(np.asarray(bank_alt_id)),
+        },
+    ).eval()
+    converted = _qvq_mlx_linear_from_torch(source)
+    original = qvq_mlx._run_v2_banked
+    launches = []
+
+    def counted(*args, **kwargs):
+        launches.append((kwargs["kind"], kwargs["output_fp32"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_run_v2_banked", counted)
+    actual = converted(x)
+    mx.eval(actual)
+    expected = source(torch.from_numpy(np.asarray(x)))
+
+    assert converted.v2b2_p32 is (kind == "v2b2_p32")
+    assert converted.v2b4_p64 is (kind == "v2b4_p64")
+    assert launches == [(kind, True)]
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=1e-3, atol=1e-3)
 
 

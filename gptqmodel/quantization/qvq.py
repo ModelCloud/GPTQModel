@@ -1294,6 +1294,35 @@ def _batched_v2_banked_viterbi_quantize(
     shift = _validate_trellis_shape(bits=bits, vector_size=2, trellis_window=16)
     if shift > 5:
         raise ValueError("QVQ banked V2 supports only rates W1 through W2.5.")
+    if (
+        sequences.device.type == "mps"
+        and sequences.dtype == torch.float32
+        and codebooks.dtype == torch.float32
+        and sequences.is_contiguous()
+        and codebooks.is_contiguous()
+        and (step_weights is None or step_weights.dtype == torch.float32)
+    ):
+        try:
+            from ..utils.qvq_mlx import qvq_mlx_v2_banked_viterbi_from_torch_mps
+
+            states, segment_bank_ids, squared_error = qvq_mlx_v2_banked_viterbi_from_torch_mps(
+                sequences,
+                codebooks,
+                bits,
+                segment_steps=segment_steps,
+                overlap=overlap,
+                step_weights=None if step_weights is None else step_weights.contiguous(),
+            )
+        except ModuleNotFoundError:
+            pass
+        else:
+            path_banks = segment_bank_ids.repeat_interleave(segment_steps, dim=1).to(torch.long)
+            return BankedTrellisQuantizationResult(
+                states=states,
+                values=codebooks[path_banks, states],
+                squared_error=squared_error,
+                segment_bank_ids=segment_bank_ids,
+            )
     use_float64 = sequences.device.type != "mps" and any(
         tensor.dtype == torch.float64 for tensor in (sequences, codebooks, step_weights) if tensor is not None
     )
