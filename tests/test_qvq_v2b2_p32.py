@@ -50,6 +50,11 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _WeightedMetricAccumulator,
     _yaqa_cache_metadata,
 )
+from scripts.validate_qvq_p4_live_prefix import (
+    _capture_target_inputs,
+    _passes_confirmation,
+    _validate_disjoint_splits,
+)
 
 
 class _SharedInputHarness(torch.nn.Module):
@@ -63,6 +68,21 @@ class _SharedInputHarness(torch.nn.Module):
         del attention_mask, use_cache
         hidden = input_ids.float().unsqueeze(-1).expand(-1, -1, 4)
         return self.q(hidden) + self.k(hidden) + self.v(hidden)
+
+
+class _EarlyStopHarness(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.before = torch.nn.Linear(4, 4, bias=False)
+        self.target = torch.nn.Linear(4, 4, bias=False)
+        self.after_calls = 0
+
+    def forward(self, input_ids, attention_mask):
+        del attention_mask
+        hidden = self.before(input_ids.float())
+        hidden = self.target(hidden)
+        self.after_calls += 1
+        return hidden
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
@@ -382,6 +402,60 @@ def test_qvq_v2b2_prefix_artifact_install_is_transactional_on_geometry_error(tmp
         _install_qvq_prefix_artifact(model, manifest=manifest, module_tensors=payload)
     assert model.first is first
     assert isinstance(model.first, torch.nn.Linear)
+
+
+def test_qvq_p4_live_prefix_splits_reject_overlap_and_capture_stops_at_target():
+    _validate_disjoint_splits({"search": (10, 2), "confirmation": (12, 3), "evaluation": (15, 1)})
+    with pytest.raises(ValueError, match="must be disjoint"):
+        _validate_disjoint_splits({"search": (10, 3), "confirmation": (12, 2), "evaluation": (20, 1)})
+
+    model = _EarlyStopHarness().eval()
+    rows = tuple(
+        {
+            "input_ids": torch.randn((1, tokens, 4), generator=torch.Generator().manual_seed(tokens)),
+            "attention_mask": torch.ones((1, tokens), dtype=torch.int64),
+        }
+        for tokens in (3, 5)
+    )
+    with torch.no_grad():
+        expected = torch.cat([model.before(row["input_ids"].float()).reshape(-1, 4) for row in rows])
+    actual = _capture_target_inputs(model, model.target, rows)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert model.after_calls == 0
+    assert not model.target._forward_pre_hooks
+
+
+def test_qvq_p4_confirmation_requires_kl_improvement_and_bounded_topn():
+    baseline = {
+        "finite": True,
+        "kl_forward": {"mean": 0.1},
+        "top1_agreement": 0.8,
+        "top5_overlap": {"mean": 0.85},
+        "top10_overlap": {"mean": 0.9},
+    }
+    proposal = {
+        "finite": True,
+        "kl_forward": {"mean": 0.09},
+        "top1_agreement": 0.799,
+        "top5_overlap": {"mean": 0.848},
+        "top10_overlap": {"mean": 0.899},
+    }
+    assert _passes_confirmation(baseline, proposal, topn_regression_limit=0.0025)
+    assert not _passes_confirmation(
+        baseline,
+        {**proposal, "kl_forward": {"mean": 0.1}},
+        topn_regression_limit=0.0025,
+    )
+    assert not _passes_confirmation(
+        baseline,
+        {**proposal, "top5_overlap": {"mean": 0.84}},
+        topn_regression_limit=0.0025,
+    )
+    assert not _passes_confirmation(
+        baseline,
+        {**proposal, "finite": False},
+        topn_regression_limit=0.0025,
+    )
 
 
 def test_qvq_streamed_metrics_match_monolithic_kl_and_topn_means():
