@@ -674,20 +674,25 @@ Adding Dual-V2 to the same deterministic 16x16 synchronization probe gives:
 |---:|:---|---:|---:|---:|---:|
 | W1 | V2 | 0.279328 | 0.807800 | 54.39% | 72.64% |
 | W1 | Dual-V2 | 0.281140 | 0.936393 | 55.57% | 72.60% |
+| W1 | L16/V4 | 0.290393 | 0.897001 | 53.32% | 71.99% |
 | W1 | L18/V4 | 0.276493 | 0.954248 | 53.03% | 74.49% |
 | W1.5 | V2 | 0.134872 | 0.400912 | 67.38% | 81.54% |
 | W1.5 | Dual-V2 | 0.145535 | 0.393389 | 68.95% | 79.51% |
+| W1.5 | L16/V4 | 0.154858 | 0.555226 | 63.77% | 80.66% |
 | W1.5 | L18/V4 | 0.144913 | 0.405387 | 67.09% | 80.12% |
 | W2 | V2 | 0.067028 | 0.206508 | 75.10% | 85.80% |
 | W2 | Dual-V2 | 0.069705 | 0.234060 | 74.61% | 86.31% |
+| W2 | L16/V4 | 0.089202 | 0.279160 | 74.61% | 85.02% |
 | W2 | L18/V4 | 0.082399 | 0.242434 | 75.68% | 85.16% |
 | W2.5 | V2 | 0.035471 | 0.109628 | 84.18% | 90.23% |
 | W2.5 | Dual-V2 | 0.034796 | 0.101282 | 82.62% | 90.96% |
+| W2.5 | L16/V4 | 0.060060 | 0.170244 | 78.61% | 87.71% |
 | W2.5 | L18/V4 | 0.048411 | 0.148707 | 81.05% | 88.79% |
 
-Dual-V2 is the strongest of the two history-preserving prototypes at W1.5 and W2.5 in this one local probe, but it
-is not uniformly better and its W2.5 Top-1 moves opposite to MSE/KL/Top-5. This is screening evidence only. The
-format must be selected by propagated held-out recovery, not by this local table.
+Dual-V2 is the strongest of the two history-preserving prototypes at W1.5 and W2.5 in this one local probe, and
+both history-preserving arms recover substantial error relative to L16/V4. Dual-V2 is not uniformly better than
+V2, however, and its W2.5 Top-1 moves opposite to MSE/KL/Top-5. This is screening evidence only. The format must be
+selected by propagated held-out recovery, not by this local table.
 
 #### All-rate storage and compute consequences
 
