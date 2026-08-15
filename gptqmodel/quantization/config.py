@@ -6027,8 +6027,6 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: `format=qvq_v2b4_p64` initially requires one tail-biting candidate.")
         if self.format == FORMAT.QVQ_V2B2_P32 and self.tail_biting_candidates != 1:
             raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially requires one tail-biting candidate.")
-        if self.format == FORMAT.QVQ_V2B2_P32 and self.viterbi_objective != "euclidean":
-            raise ValueError("QVQConfig: `format=qvq_v2b2_p32` initially requires the Euclidean Viterbi objective.")
         canonical_fields = {
             "tile_rows": (self.tile_rows, 16),
             "tile_cols": (self.tile_cols, 16),

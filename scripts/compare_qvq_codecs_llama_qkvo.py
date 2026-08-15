@@ -72,12 +72,26 @@ _QVQ_PREFIX_SCHEMA_VERSION = 1
 _QVQ_PREFIX_TENSOR_NAMES = frozenset(("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"))
 ARM_CONFIG = {
     "v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": False},
+    "v2-hessian-diagonal": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "viterbi_objective": "hessian_diagonal",
+    },
     "v2b2-p32": {
         "vector_size": 2,
         "trellis_window": 16,
         "dual_v2": False,
         "v2b2_p32": True,
         "bank_count": 2,
+    },
+    "v2b2-p32-hessian-diagonal": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "viterbi_objective": "hessian_diagonal",
     },
     "v2b4-p64": {
         "vector_size": 2,

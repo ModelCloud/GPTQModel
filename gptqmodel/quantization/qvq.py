@@ -5018,8 +5018,6 @@ def quantize_qvq_linear(
         rounding != "yaqa" or not v2b2_p32
     ):
         raise ValueError("YAQA spectral experiment requires V2B2-P32 with YAQA rounding.")
-    if v2b2_p32 and viterbi_objective != "euclidean":
-        raise ValueError("QVQ V2B2-P32 supports the Euclidean Viterbi objective only.")
     if bank_count == 4 and vector_size != 4 and not v2b4_p64:
         raise ValueError("QVQ four-bank selection requires V4 or V2B4-P64.")
     if bank_count == 4 and (module_scale_search or output_channel_scale_optimization):
@@ -5582,9 +5580,12 @@ def quantize_qvq_linear(
             objective="hessian_diagonal",
             include_bank0_oracle=needs_bank0_oracle,
         )
+        hessian_bank_alt_id = None
         if bank_codebooks is None:
             hessian_inner, hessian_states = hessian_encoded
             hessian_bank_ids = None
+        elif v2b2_p32:
+            hessian_inner, hessian_states, hessian_bank_ids, hessian_bank_alt_id = hessian_encoded
         elif needs_bank0_oracle:
             hessian_inner, hessian_states, hessian_bank_ids, hessian_bank0_inner, hessian_bank0_states = hessian_encoded
         else:
@@ -5604,6 +5605,8 @@ def quantize_qvq_linear(
             quantized_inner = hessian_inner
             states = hessian_states
             selected_bank_ids = hessian_bank_ids if bank_codebooks is not None else None
+            if v2b2_p32:
+                selected_bank_alt_id = hessian_bank_alt_id
             SV = hessian_SV
             reconstructed_weight = hessian_weight
             proxy_loss = hessian_loss

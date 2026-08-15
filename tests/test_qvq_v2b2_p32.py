@@ -852,11 +852,18 @@ def test_qvq_v2b2_p32_config_round_trip(bits):
     assert reloaded.quant_linear_init_kwargs()["v2b2_p32"] is True
 
 
-def test_qvq_v2b2_p32_config_accepts_yaqa_and_rejects_unimplemented_objectives():
+def test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq():
     with pytest.raises(ValueError, match="W1 through W3.5"):
         QVQConfig(bits=4, format=FORMAT.QVQ_V2B2_P32, offload_to_disk=False)
     config = QVQConfig(bits=2, format=FORMAT.QVQ_V2B2_P32, rounding="yaqa", offload_to_disk=False)
     assert config.rounding == "yaqa"
+    weighted = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        viterbi_objective="hessian_diagonal",
+        offload_to_disk=False,
+    )
+    assert QVQConfig.from_quant_config(weighted.to_dict()).viterbi_objective == "hessian_diagonal"
     with pytest.raises(ValueError, match="one tail-biting candidate"):
         QVQConfig(
             bits=2,
@@ -1214,12 +1221,19 @@ def test_qvq_v2b2_p32_block_ldlq_pack_reload_and_torch_forward(bits):
     torch.testing.assert_close(shell(x), layer(x), rtol=0, atol=0)
 
 
-def test_qvq_v2b2_p32_full_proxy_cannot_regress_independent_v2_oracle():
+@pytest.mark.parametrize("viterbi_objective", ("euclidean", "hessian_diagonal"))
+def test_qvq_v2b2_p32_full_proxy_cannot_regress_independent_v2_oracle(viterbi_objective):
     generator = torch.Generator().manual_seed(20260815)
     weight = torch.randn((16, 16), generator=generator) * 0.1
     calibration = torch.randn((97, 16), generator=generator)
     hessian = calibration.T @ calibration / calibration.shape[0]
-    canonical = quantize_qvq_linear(weight, hessian, bits=2, trellis_batch_size=1)
+    canonical = quantize_qvq_linear(
+        weight,
+        hessian,
+        bits=2,
+        trellis_batch_size=1,
+        viterbi_objective=viterbi_objective,
+    )
     banked = quantize_qvq_linear(
         weight,
         hessian,
@@ -1227,11 +1241,22 @@ def test_qvq_v2b2_p32_full_proxy_cannot_regress_independent_v2_oracle():
         bank_count=2,
         v2b2_p32=True,
         trellis_batch_size=1,
+        viterbi_objective=viterbi_objective,
     )
     assert torch.isfinite(banked.proxy_loss)
     assert banked.proxy_loss <= canonical.proxy_loss
     assert banked.bank_ids is not None
     assert banked.bank_alt_id is not None
+    decoded = reconstruct_qvq_inner_weight(
+        banked.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=banked.serialized_tensors()["bank_ids"],
+        v2b2_p32=True,
+        bank_alt_id=banked.bank_alt_id,
+    )
+    torch.testing.assert_close(decoded, banked.inner_weight, rtol=0, atol=0)
 
 
 def test_qvq_v2b2_p32_yaqa_pack_reload_and_full_proxy_cannot_regress_v2_yaqa():
