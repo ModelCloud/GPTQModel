@@ -625,6 +625,41 @@ def test_qvq_v2b2_p32_spectral_candidates_reuse_the_baseline_block_family():
     assert result.yaqa_block_family_id in (1, 2, 3)
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is required")
+def test_qvq_v2b2_p32_spectral_analysis_uses_cpu_svd_on_mps():
+    source = torch.randn((16, 16), device="mps")
+    states = torch.zeros((1, 128), dtype=torch.long, device="mps")
+    selectors = torch.zeros(8, dtype=torch.uint8, device="mps")
+    baseline = torch.zeros_like(source), states, selectors, torch.tensor([1], dtype=torch.uint8, device="mps")
+    codebooks = tuple(torch.full((1,), index, dtype=torch.float32, device="mps") for index in range(4))
+    observed_svd_devices = []
+
+    def tracked_svd(matrix, rank, algo):
+        observed_svd_devices.append(matrix.device.type)
+        return torch.linalg.svd(matrix, full_matrices=False)
+
+    diagnostics = {}
+    with (
+        patch("gptqmodel.eora.eora._eora_compute_svd", side_effect=tracked_svd),
+        patch("gptqmodel.quantization.qvq.yaqa_inner_v2b2_p32", return_value=baseline),
+    ):
+        result = yaqa_output_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16, device="mps"),
+            torch.eye(16, device="mps"),
+            codebooks,
+            baseline,
+            ranks=(4,),
+            lambdas=(0.25,),
+            bits=2,
+            diagnostics=diagnostics,
+        )
+
+    assert observed_svd_devices == ["cpu"]
+    assert diagnostics["spectral_svd_device"] == "cpu"
+    assert torch.equal(result[0], baseline[0])
+
+
 def test_qvq_v2b2_p32_fixed_yaqa_uses_matched_block_ldlq_damping_for_family():
     generator = torch.Generator().manual_seed(20260819)
     weight = torch.randn((16, 16), generator=generator) * 0.1

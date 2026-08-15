@@ -282,6 +282,7 @@ class QVQLinearQuantizationResult:
     yaqa_spectral_selected: bool | None = None
     yaqa_spectral_rank: int | None = None
     yaqa_spectral_lambda: float | None = None
+    yaqa_spectral_svd_device: str | None = None
     yaqa_spectral_concentration: dict[str, float] | None = None
     yaqa_spectral_absorption_efficiency: float | None = None
     yaqa_spectral_selector_churn: float | None = None
@@ -3643,12 +3644,20 @@ def yaqa_output_spectral_refine_v2b2_p32(
     maximum_rank = min(max(ranks), min(whitened_residual.shape))
     from ..eora.eora import _eora_compute_svd
 
+    # MPS QR/SVD is pathological for the tall rank-focused work matrices used
+    # here (minutes for 2048-wide projections versus milliseconds on the P
+    # cores). The spectrum is quantization-time-only, so move this temporary
+    # FP32 matrix to CPU and return only the compact factors to MPS.
+    spectral_device = torch.device("cpu") if whitened_residual.device.type == "mps" else whitened_residual.device
+    svd_source = whitened_residual.to(device=spectral_device)
     left_vectors, singular_values, right_vectors_h = _eora_compute_svd(
-        whitened_residual,
+        svd_source,
         maximum_rank,
         algo="lowrank",
     )
     del left_vectors
+    singular_values = singular_values.to(device=whitened_residual.device)
+    right_vectors_h = right_vectors_h.to(device=whitened_residual.device)
     usable_ranks = tuple(sorted({min(rank, singular_values.numel()) for rank in ranks}))
     eps = torch.finfo(torch.float32).eps
     output_trace = original_output.diagonal().sum().clamp_min(eps)
@@ -3714,6 +3723,7 @@ def yaqa_output_spectral_refine_v2b2_p32(
                 best_candidate_diagnostics = candidate_diagnostics
 
     if diagnostics is not None:
+        diagnostics["spectral_svd_device"] = spectral_device.type
         diagnostics["spectral_concentration"] = concentrations
         diagnostics["spectral_selected"] = best_rank is not None
         diagnostics["spectral_rank"] = best_rank
@@ -5072,6 +5082,10 @@ def quantize_qvq_linear(
         yaqa_spectral_lambda=(
             None if yaqa_bank_diagnostics.get("spectral_lambda") is None
             else float(yaqa_bank_diagnostics["spectral_lambda"])
+        ),
+        yaqa_spectral_svd_device=(
+            None if "spectral_svd_device" not in yaqa_bank_diagnostics
+            else str(yaqa_bank_diagnostics["spectral_svd_device"])
         ),
         yaqa_spectral_concentration=(
             None if "spectral_concentration" not in yaqa_bank_diagnostics

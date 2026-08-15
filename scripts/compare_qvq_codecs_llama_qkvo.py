@@ -738,6 +738,7 @@ def main() -> None:
                     "selected": result.yaqa_spectral_selected,
                     "rank": result.yaqa_spectral_rank,
                     "lambda": result.yaqa_spectral_lambda,
+                    "svd_device": result.yaqa_spectral_svd_device,
                     "concentration": result.yaqa_spectral_concentration,
                     "absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
                     "selector_churn": result.yaqa_spectral_selector_churn,
