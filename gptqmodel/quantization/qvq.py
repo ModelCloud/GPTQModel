@@ -506,16 +506,34 @@ _QVQ_CUDA_TRELLIS_BATCH_SIZES = {
 }
 
 
-def default_qvq_trellis_batch_size(bits: float, device: torch.device | str) -> int:
-    """Return a conservative backend/rate batch size for reference quantization."""
+def default_qvq_trellis_batch_size(
+    bits: float,
+    device: torch.device | str,
+    *,
+    trellis_window: int = 16,
+) -> int:
+    """Return a backend/rate/state-width batch size for reference quantization.
+
+    The measured backend tables are L16 baselines.  Transient Viterbi costs
+    and traceback state scale with ``2**L``, so preserve approximately the
+    same workspace budget by dividing the batch by ``2**(L - 16)``.
+    """
 
     bits = normalize_qvq_rate(bits)
+    if isinstance(trellis_window, bool) or not isinstance(trellis_window, int):
+        raise TypeError("QVQ trellis window must be an integer.")
+    if trellis_window not in (16, 18):
+        raise ValueError("QVQ default batch policy supports trellis windows 16 and 18.")
+    if trellis_window == 18 and bits > 2.5:
+        raise ValueError("QVQ L18 default batch policy supports only rates W1 through W2.5.")
     target_device = torch.device(device)
     if target_device.type == "mps":
-        return _QVQ_MPS_TRELLIS_BATCH_SIZES[bits]
-    if target_device.type == "cuda":
-        return _QVQ_CUDA_TRELLIS_BATCH_SIZES[bits]
-    return 16
+        l16_batch_size = _QVQ_MPS_TRELLIS_BATCH_SIZES[bits]
+    elif target_device.type == "cuda":
+        l16_batch_size = _QVQ_CUDA_TRELLIS_BATCH_SIZES[bits]
+    else:
+        l16_batch_size = 16
+    return max(1, l16_batch_size // (1 << (trellis_window - 16)))
 
 
 def bitshift_next_state(
@@ -2883,7 +2901,11 @@ def quantize_qvq_linear(
         telemetry.count("input_features", in_features)
         telemetry.count("output_features", out_features)
     if trellis_batch_size is None:
-        trellis_batch_size = default_qvq_trellis_batch_size(bits, device)
+        trellis_batch_size = default_qvq_trellis_batch_size(
+            bits,
+            device,
+            trellis_window=trellis_window,
+        )
     generator = torch.Generator(device="cpu").manual_seed(seed)
     SU = torch.randint(0, 2, (in_features,), generator=generator, dtype=torch.int8).mul_(2).sub_(1)
     SV_sign = torch.randint(0, 2, (out_features,), generator=generator, dtype=torch.int8).mul_(2).sub_(1)

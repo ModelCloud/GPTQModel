@@ -1321,8 +1321,56 @@ def test_qvq_reference_quantizer_uses_rate_aware_backend_batches():
         2976,
     ]
     assert default_qvq_trellis_batch_size(8, "cpu") == 16
+    assert [
+        default_qvq_trellis_batch_size(bits, "mps", trellis_window=18)
+        for bits in (1, 1.5, 2, 2.5)
+    ] == [24, 24, 8, 8]
+    assert [
+        default_qvq_trellis_batch_size(bits, "cuda", trellis_window=18)
+        for bits in (1, 1.5, 2, 2.5)
+    ] == [124, 124, 128, 992]
+    assert default_qvq_trellis_batch_size(1, "cpu", trellis_window=18) == 4
     with pytest.raises(ValueError, match="rate"):
         default_qvq_trellis_batch_size(0, "mps")
+    with pytest.raises(TypeError, match="integer"):
+        default_qvq_trellis_batch_size(1, "mps", trellis_window=True)
+    with pytest.raises(ValueError, match="windows 16 and 18"):
+        default_qvq_trellis_batch_size(1, "mps", trellis_window=17)
+    with pytest.raises(ValueError, match="W1 through W2.5"):
+        default_qvq_trellis_batch_size(3, "mps", trellis_window=18)
+
+
+def test_qvq_l18_implicit_batch_policy_reaches_quantizer_without_changing_math(monkeypatch):
+    observed = []
+    original_policy = qvq_module.default_qvq_trellis_batch_size
+
+    def policy(bits, device, *, trellis_window=16):
+        observed.append((bits, torch.device(device).type, trellis_window))
+        return original_policy(bits, device, trellis_window=trellis_window)
+
+    monkeypatch.setattr(qvq_module, "default_qvq_trellis_batch_size", policy)
+    generator = torch.Generator().manual_seed(18241)
+    weight = torch.randn((16, 32), generator=generator)
+    hessian = torch.eye(32)
+    implicit = quantize_qvq_linear(
+        weight,
+        hessian,
+        bits=2,
+        vector_size=4,
+        trellis_window=18,
+    )
+    explicit = quantize_qvq_linear(
+        weight,
+        hessian,
+        bits=2,
+        vector_size=4,
+        trellis_window=18,
+        trellis_batch_size=1,
+    )
+
+    assert observed == [(2, "cpu", 18)]
+    assert torch.equal(implicit.trellis, explicit.trellis)
+    torch.testing.assert_close(implicit.weight, explicit.weight, rtol=0, atol=0)
 
 
 def test_qvq_cuda_capability_probe_is_device_specific(monkeypatch):

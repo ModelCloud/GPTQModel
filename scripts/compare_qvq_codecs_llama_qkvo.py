@@ -179,7 +179,11 @@ def main() -> None:
         for arm in args.arms:
             started = time.perf_counter()
             geometry = ARM_CONFIG[arm]
-            batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(rate, device)
+            batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
+                rate,
+                device,
+                trellis_window=geometry["trellis_window"],
+            )
             reconstructions: dict[str, torch.Tensor] = {}
             local_outputs: dict[str, torch.Tensor] = {}
             weight_metrics = {}
