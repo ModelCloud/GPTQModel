@@ -4239,7 +4239,6 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     baseline_tiles = segment_view(accepted)
     gradient_tiles = segment_view(gradient)
     state_tiles = baseline_states.reshape(tile_count, 128)
-    selector_tiles = baseline_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)
     best_loss = baseline_loss
     best_record: tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor, str] | None = None
     candidate_records: dict[str, dict[str, object]] = {}
