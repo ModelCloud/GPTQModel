@@ -53,6 +53,18 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _yaqa_cache_metadata,
 )
 from scripts.compare_qvq_p4_arc import _arm_summary, _paired_summary, _prompt_ids
+from scripts.compare_qvq_p4_gsm8k import (
+    _extract_answers as _gsm8k_extract_answers,
+)
+from scripts.compare_qvq_p4_gsm8k import (
+    _gold_answer as _gsm8k_gold_answer,
+)
+from scripts.compare_qvq_p4_gsm8k import (
+    _paired_summary as _gsm8k_paired_summary,
+)
+from scripts.compare_qvq_p4_gsm8k import (
+    _task_prompt as _gsm8k_task_prompt,
+)
 from scripts.compare_qvq_p4_prefixes import _compare_locked_rows, _metric_value
 from scripts.validate_qvq_p4_live_prefix import (
     _capture_target_inputs,
@@ -226,6 +238,30 @@ def test_qvq_p4_arc_prompt_matches_evalution_render_then_tokenize_contract():
             return SimpleNamespace(input_ids=[1, 2, 3])
 
     assert _prompt_ids(Tokenizer(), "Why?", apply_chat_template=True) == [1, 2, 3]
+
+
+def test_qvq_p4_gsm8k_contract_reuses_task_prompt_and_paired_numeric_flips():
+    prompt = _gsm8k_task_prompt("What is 2 + 2?", [{"question": "What is 1 + 1?", "target": "The answer is 2."}])
+    assert prompt == "Q: What is 1 + 1?\n\nA: The answer is 2.\n\nQ: What is 2 + 2?\n\nA:"
+    assert _gsm8k_gold_answer("work\n#### $1,024") == "1024"
+    assert _gsm8k_extract_answers("work 3. The answer is $1,024.") == ("1024", "1024")
+
+    samples = [
+        {
+            "gold_answer": "4",
+            "baseline": {"strict_answer": "3", "flexible_answer": "3"},
+            "candidate": {"strict_answer": "4", "flexible_answer": "4"},
+        },
+        {
+            "gold_answer": "7",
+            "baseline": {"strict_answer": "7", "flexible_answer": "7"},
+            "candidate": {"strict_answer": None, "flexible_answer": "8"},
+        },
+    ]
+    assert _gsm8k_paired_summary(samples, "baseline", "candidate") == {
+        "strict": {"answer_changes": 2, "wrong_to_correct": 1, "correct_to_wrong": 1, "net_correct": 0},
+        "flexible": {"answer_changes": 2, "wrong_to_correct": 1, "correct_to_wrong": 1, "net_correct": 0},
+    }
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():

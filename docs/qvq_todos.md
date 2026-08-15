@@ -368,6 +368,26 @@ exact rescue, but the effect is too small to establish a statistically meaningfu
 default. Preserve the P4 Q/K map as an opt-in candidate; the next useful test is a distinct reasoning/task split or
 seed replication, not further selection on ARC.
 
+A first distinct-task diagnostic then evaluated GSM8K rows `[0,16)` with the repository's fixed eight-shot
+`gsm8k-cot` prompt, Llama chat rendering, deterministic batch-1 generation, and at most 256 new tokens. It used the
+same complete 16-layer dense, ordinary-YAQA, and P4-refined models as the ARC gate. Row 0 and rows `[1,16)` were
+executed as non-overlapping shards with token-contract hashes
+`8df83cb701c9018ea338b325292d4fd6c3ebb1fd0f8b27a91c528ba25de22b20` and
+`f3e4bffe7bf8b7b0d552e48895c0520c22cbe9f45f008b52c97e0dd248662310`.
+
+| GSM8K diagnostic arm | Strict correct | Flexible numeric correct | Strict invalid | Flexible invalid |
+| --- | ---: | ---: | ---: | ---: |
+| dense FP16 | 1/16 (6.25%) | 3/16 (18.75%) | 10 | 7 |
+| ordinary YAQA Q/K | 0/16 (0.00%) | 1/16 (6.25%) | 14 | 11 |
+| P4-refined Q/K | 0/16 (0.00%) | 2/16 (12.50%) | 13 | 10 |
+
+P4 changed three flexible extracted answers: one wrong-to-correct rescue, zero correct-to-wrong regressions, and two
+wrong-to-different-wrong changes. Strict extraction changed once but produced no correctness flip. The result is a
+positive targeted signal and agrees in direction with the one-net-rescue ARC result, but 16 rows and the high invalid
+extraction rate make it unsuitable for promotion or percentage-recovery claims. Preserve the exact generations for
+paired diagnosis. The next decisive step is either a larger locked GSM8K shard under this frozen contract or an
+independent YAQA/P4 seed replication; do not tune prompts or candidates using these 16 development rows.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
