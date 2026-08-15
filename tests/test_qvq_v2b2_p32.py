@@ -52,6 +52,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
 )
 from scripts.validate_qvq_p4_live_prefix import (
     _capture_target_inputs,
+    _localized_summary,
     _passes_confirmation,
     _validate_disjoint_splits,
 )
@@ -351,6 +352,12 @@ def test_qvq_v2b2_prefix_artifact_round_trips_packed_modules_without_dense_weigh
     assert set(payload["layer.proj"]) == {"trellis", "SU", "SV", "bank_ids", "bank_alt_id"}
     for name, expected in result.serialized_tensors().items():
         torch.testing.assert_close(payload["layer.proj"][name], expected, rtol=0, atol=0)
+    assert _localized_summary(result, {"baseline": {}, "proposal": {}, "accepted": True}) == {
+        "proposed": True,
+        "accepted": True,
+        "selector_churn": result.yaqa_spectral_selector_churn,
+        "family_changed": result.yaqa_spectral_family_changed,
+    }
 
     model = torch.nn.Module()
     model.layer = torch.nn.Module()

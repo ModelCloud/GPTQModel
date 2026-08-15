@@ -201,6 +201,20 @@ def _replace_target_with_result(
     return replacement
 
 
+def _localized_summary(
+    result: QVQLinearQuantizationResult,
+    callback_report: Mapping[str, object],
+) -> dict[str, object]:
+    """Summarize only diagnostics exported by the stable result/callback contracts."""
+
+    return {
+        "proposed": "baseline" in callback_report and "proposal" in callback_report,
+        "accepted": bool(callback_report.get("accepted", False)),
+        "selector_churn": result.yaqa_spectral_selector_churn,
+        "family_changed": result.yaqa_spectral_family_changed,
+    }
+
+
 def main() -> None:
     args = _parser().parse_args()
     splits = {
@@ -357,7 +371,6 @@ def main() -> None:
             bits=args.bits,
             provenance=provenance,
         )
-    diagnostics = result.yaqa_bank_diagnostics or {}
     report = {
         "settings": {
             **provenance,
@@ -375,12 +388,7 @@ def main() -> None:
         },
         "quantization_seconds": quantization_seconds,
         "search_valid_tokens": int(propagated_inputs.shape[0]),
-        "localized": {
-            "proposed": diagnostics.get("localized_propagation_proposed"),
-            "accepted": diagnostics.get("localized_propagation_accepted"),
-            "selector_churn": result.yaqa_spectral_selector_churn,
-            "family_changed": result.yaqa_spectral_family_changed,
-        },
+        "localized": _localized_summary(result, callback_report),
         "confirmation": callback_report,
         "evaluation": {
             "rollback_dense": rollback_evaluation,
