@@ -430,13 +430,60 @@ def test_qvq_v2b2_p32_yaqa_spectral_push_config_round_trip():
     assert reloaded.yaqa.spectral_ranks == (4, 8)
     assert reloaded.yaqa.spectral_push_alphas == (0.25, 0.5)
 
-    with pytest.raises(ValueError, match="separate experiments"):
+    with pytest.raises(ValueError, match="mutually exclusive"):
         YaqaConfig(spectral_refinement=True, spectral_push=True)
     with pytest.raises(ValueError, match="spectral experiment requires"):
         QVQConfig(
             bits=2,
             rounding="yaqa",
             yaqa=YaqaConfig(spectral_push=True),
+            offload_to_disk=False,
+        )
+
+
+def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(
+            spectral_localized=True,
+            spectral_ranks=[4, 8, 4],
+            spectral_localized_alphas=[0.25, 0.5, 0.25],
+            spectral_localized_max_segments=12,
+        ),
+        offload_to_disk=False,
+    )
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+    assert reloaded.yaqa.spectral_localized is True
+    assert reloaded.yaqa.spectral_ranks == (4, 8)
+    assert reloaded.yaqa.spectral_localized_alphas == (0.25, 0.5)
+    assert reloaded.yaqa.spectral_localized_max_segments == 12
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        YaqaConfig(spectral_push=True, spectral_localized=True)
+    with pytest.raises(ValueError, match="positive integer"):
+        YaqaConfig(spectral_localized_max_segments=0)
+
+
+def test_qvq_v2b2_p32_localized_propagation_requires_the_exact_yaqa_mode():
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(spectral_localized=True),
+        propagated_bank_selection=True,
+        offload_to_disk=False,
+    )
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+    assert reloaded.propagated_bank_selection is True
+    assert reloaded.yaqa.spectral_localized is True
+
+    with pytest.raises(ValueError, match="propagation replay"):
+        QVQConfig(
+            bits=2,
+            format=FORMAT.QVQ_V2B2_P32,
+            propagated_bank_selection=True,
             offload_to_disk=False,
         )
 
@@ -1081,6 +1128,129 @@ def test_qvq_v2b2_p32_yaqa_spectral_push_is_serialization_neutral_and_nonregress
         bank_alt_id=pushed.bank_alt_id,
     )
     torch.testing.assert_close(decoded, pushed.inner_weight, rtol=0, atol=0)
+
+
+def test_qvq_v2b2_p32_yaqa_localized_spectral_is_serialization_neutral_and_nonregressive():
+    generator = torch.Generator().manual_seed(20260825)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_samples = torch.randn((37, 16), generator=generator)
+    output_samples = torch.randn((39, 16), generator=generator)
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    baseline = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    refined = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        yaqa_spectral_localized=True,
+        yaqa_spectral_ranks=(1,),
+        yaqa_spectral_localized_alphas=(0.5, 1.0),
+        yaqa_spectral_localized_max_segments=4,
+        trellis_batch_size=1,
+    )
+
+    assert refined.kronecker_proxy_loss <= baseline.kronecker_proxy_loss
+    assert refined.yaqa_spectral_method == "localized_p32"
+    assert refined.yaqa_spectral_family_changed is False
+    assert refined.yaqa_spectral_selector_churn <= 1 / QVQ_V2B2_P32_SEGMENTS_PER_TILE
+    assert set(refined.serialized_tensors()) == set(baseline.serialized_tensors())
+    decoded = reconstruct_qvq_inner_weight(
+        refined.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=refined.serialized_tensors()["bank_ids"],
+        v2b2_p32=True,
+        bank_alt_id=refined.bank_alt_id,
+    )
+    torch.testing.assert_close(decoded, refined.inner_weight, rtol=0, atol=0)
+
+
+def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
+    generator = torch.Generator().manual_seed(20260831)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_samples = torch.randn((37, 16), generator=generator)
+    output_samples = torch.randn((39, 16), generator=generator)
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    search_inputs = torch.randn((23, 16), generator=generator)
+    search_targets = search_inputs @ weight.T
+    common = {
+        "bits": 2,
+        "rounding": "yaqa",
+        "output_hessian": output_hessian,
+        "bank_count": 2,
+        "v2b2_p32": True,
+        "trellis_batch_size": 1,
+    }
+    baseline = quantize_qvq_linear(weight, input_hessian, **common)
+    callback_pairs = []
+
+    def reject(proposal, rollback):
+        callback_pairs.append((proposal.clone(), rollback.clone()))
+        return False
+
+    localized = {
+        "yaqa_spectral_localized": True,
+        "yaqa_spectral_ranks": (8, 16),
+        "yaqa_spectral_localized_alphas": (1.0, 2.0, 4.0, 8.0),
+        "yaqa_spectral_localized_max_segments": 8,
+        "propagated_inputs": search_inputs,
+        "propagated_target_output": search_targets,
+    }
+    rejected = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        propagated_acceptance=reject,
+        **common,
+        **localized,
+    )
+    accepted = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        propagated_acceptance=lambda proposal, rollback: True,
+        **common,
+        **localized,
+    )
+    callback_error = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        propagated_acceptance=lambda proposal, rollback: (_ for _ in ()).throw(RuntimeError("gate failed")),
+        **common,
+        **localized,
+    )
+
+    assert len(callback_pairs) == 1
+    torch.testing.assert_close(callback_pairs[0][1], baseline.weight, rtol=0, atol=0)
+    torch.testing.assert_close(callback_pairs[0][0], accepted.weight, rtol=0, atol=0)
+    for name in ("trellis", "bank_ids", "bank_alt_id"):
+        assert torch.equal(rejected.serialized_tensors()[name], baseline.serialized_tensors()[name])
+        assert torch.equal(callback_error.serialized_tensors()[name], baseline.serialized_tensors()[name])
+    torch.testing.assert_close(rejected.weight, baseline.weight, rtol=0, atol=0)
+    assert not torch.equal(accepted.trellis, baseline.trellis)
+    decoded = reconstruct_qvq_inner_weight(
+        accepted.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=accepted.bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=accepted.bank_alt_id,
+    )
+    torch.testing.assert_close(decoded, accepted.inner_weight, rtol=0, atol=0)
 
 
 def test_qvq_v2b2_p32_yaqa_randomized_spectral_subspace_matches_exact_control():

@@ -4156,16 +4156,19 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     ranks: tuple[int, ...],
     alphas: tuple[float, ...],
     max_segments: int,
+    search_inputs: torch.Tensor | None = None,
+    search_target: torch.Tensor | None = None,
     diagnostics: dict[str, object] | None = None,
     bits: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Propose one spectrally ranked P32 replacement without global path churn.
 
-    Candidate generation is restricted to one 32-weight segment.  Its entry
+    Candidate generation is restricted to one 32-weight segment. Its entry
     predecessor and final V2 state are fixed to the accepted YAQA artifact, so
-    every untouched segment remains bit-identical.  Candidates are ranked by
-    the exact first-order YAQA decrease and accepted only after the complete
-    original Kronecker quadratic is proven smaller.
+    every untouched segment remains bit-identical. Candidates are ranked by
+    the exact first-order YAQA decrease. Without search rows, acceptance uses
+    the complete original Kronecker quadratic; with search rows, it uses exact
+    held-out module-output loss before an independent propagation callback.
     """
 
     if not ranks or any(isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in ranks):
@@ -4227,6 +4230,31 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     error = accepted - source
     gradient = 2 * (original_input @ error @ original_output)
     baseline_loss = torch.einsum("ij,ik,kl,lj->", error, original_input, error, original_output)
+    if (search_inputs is None) != (search_target is None):
+        raise ValueError("YAQA localized spectral search requires both inputs and targets.")
+    if search_inputs is not None:
+        if (
+            search_inputs.ndim != 2
+            or search_target.ndim != 2
+            or search_inputs.shape[0] != search_target.shape[0]
+            or search_inputs.shape[1] != source.shape[0]
+            or search_target.shape[1] != source.shape[1]
+            or search_inputs.device != source.device
+            or search_target.device != source.device
+            or not search_inputs.is_floating_point()
+            or not search_target.is_floating_point()
+            or not torch.isfinite(search_inputs).all()
+            or not torch.isfinite(search_target).all()
+        ):
+            raise ValueError("YAQA localized spectral search tensors must be finite, aligned rank-2 matrices.")
+        search_inputs_fp32 = search_inputs.to(torch.float32)
+        search_target_fp32 = search_target.to(torch.float32)
+        search_residual = search_target_fp32 - search_inputs_fp32 @ accepted
+        baseline_search_loss = search_residual.square().sum()
+    else:
+        search_inputs_fp32 = None
+        search_residual = None
+        baseline_search_loss = None
     pair_codebooks = torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
 
     def segment_view(matrix: torch.Tensor) -> torch.Tensor:
@@ -4239,7 +4267,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     baseline_tiles = segment_view(accepted)
     gradient_tiles = segment_view(gradient)
     state_tiles = baseline_states.reshape(tile_count, 128)
-    best_loss = baseline_loss
+    best_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
     best_record: tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor, str] | None = None
     candidate_records: dict[str, dict[str, object]] = {}
     eps = torch.finfo(torch.float32).eps
@@ -4306,6 +4334,16 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                     original_output[output_start : output_start + 16, output_start : output_start + 16],
                 )
                 candidate_loss = baseline_loss + linear + quadratic
+                if search_inputs_fp32 is None:
+                    candidate_search_loss = None
+                    selection_loss = candidate_loss
+                else:
+                    projected = search_inputs_fp32[:, input_start : input_start + 2] @ delta
+                    residual_block = search_residual[:, output_start : output_start + 16]
+                    candidate_search_loss = baseline_search_loss + (
+                        (residual_block - projected).square() - residual_block.square()
+                    ).sum()
+                    selection_loss = candidate_search_loss
                 candidate_key = f"r{rank}_a{float(alpha):g}_t{tile_index}_s{segment_index}"
                 relative_improvement = float(
                     ((baseline_loss - candidate_loss) / baseline_loss.abs().clamp_min(eps)).item()
@@ -4318,10 +4356,23 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                     "predicted_first_order": float(ranked_scores[candidate_index].item()),
                     "loss": float(candidate_loss.item()),
                     "relative_improvement": relative_improvement,
+                    "search_loss": (
+                        None if candidate_search_loss is None else float(candidate_search_loss.item())
+                    ),
+                    "search_relative_improvement": (
+                        None
+                        if candidate_search_loss is None
+                        else float(
+                            (
+                                (baseline_search_loss - candidate_search_loss)
+                                / baseline_search_loss.abs().clamp_min(eps)
+                            ).item()
+                        )
+                    ),
                     "selected": False,
                 }
-                if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
-                    best_loss = candidate_loss
+                if torch.isfinite(selection_loss) and selection_loss < best_loss:
+                    best_loss = selection_loss
                     best_record = (
                         tile_index,
                         segment_index,
@@ -4348,16 +4399,29 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         refined_states[tile_index, state_start : state_start + QVQ_V2B2_P32_STEPS_PER_SEGMENT] = segment_states
         refined_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)[tile_index, segment_index] = segment_bank
         exact_error = refined_weight.to(torch.float32) - source
-        exact_loss = torch.einsum(
+        exact_proxy_loss = torch.einsum(
             "ij,ik,kl,lj->", exact_error, original_input, exact_error, original_output
         )
         candidate_records[candidate_key]["screening_loss"] = candidate_records[candidate_key]["loss"]
-        candidate_records[candidate_key]["loss"] = float(exact_loss.item())
+        candidate_records[candidate_key]["loss"] = float(exact_proxy_loss.item())
         candidate_records[candidate_key]["relative_improvement"] = float(
-            ((baseline_loss - exact_loss) / baseline_loss.abs().clamp_min(eps)).item()
+            ((baseline_loss - exact_proxy_loss) / baseline_loss.abs().clamp_min(eps)).item()
         )
-        if torch.isfinite(exact_loss) and exact_loss < baseline_loss:
-            best_loss = exact_loss
+        if search_inputs_fp32 is None:
+            exact_selection_loss = exact_proxy_loss
+        else:
+            exact_selection_loss = (search_target_fp32 - search_inputs_fp32 @ refined_weight.to(torch.float32)).square().sum()
+            candidate_records[candidate_key]["search_loss"] = float(exact_selection_loss.item())
+            candidate_records[candidate_key]["search_relative_improvement"] = float(
+                (
+                    (baseline_search_loss - exact_selection_loss)
+                    / baseline_search_loss.abs().clamp_min(eps)
+                ).item()
+            )
+        if torch.isfinite(exact_selection_loss) and exact_selection_loss < (
+            baseline_search_loss if baseline_search_loss is not None else baseline_loss
+        ):
+            best_loss = exact_selection_loss
             candidate_records[candidate_key]["selected"] = True
             selected_candidate_key = candidate_key
             result = refined_weight, refined_states, refined_selectors, baseline_alt_id
@@ -4371,12 +4435,20 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         diagnostics["spectral_candidates"] = candidate_records
         diagnostics["spectral_selected"] = selected_candidate_key is not None
         diagnostics["spectral_original_loss"] = float(baseline_loss.item())
-        diagnostics["spectral_selected_loss"] = float(best_loss.item())
+        selected_error = result[0].to(torch.float32) - source
+        diagnostics["spectral_selected_loss"] = float(
+            torch.einsum("ij,ik,kl,lj->", selected_error, original_input, selected_error, original_output).item()
+        )
+        diagnostics["localized_search_original_loss"] = (
+            None if baseline_search_loss is None else float(baseline_search_loss.item())
+        )
+        diagnostics["localized_search_selected_loss"] = (
+            None if baseline_search_loss is None else float(best_loss.item())
+        )
         diagnostics["spectral_selector_churn"] = float(
             (result[2] != baseline_selectors).to(torch.float32).mean().item()
         )
         diagnostics["spectral_family_changed"] = False
-        diagnostics["spectral_absorption_efficiency"] = None
         diagnostics["localized_boundary_preserved"] = True
     return result
 
@@ -4722,6 +4794,9 @@ def quantize_qvq_linear(
     yaqa_spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0),
     yaqa_spectral_push: bool = False,
     yaqa_spectral_push_alphas: tuple[float, ...] = (0.25, 0.5, 1.0),
+    yaqa_spectral_localized: bool = False,
+    yaqa_spectral_localized_alphas: tuple[float, ...] = (0.25, 0.5, 1.0),
+    yaqa_spectral_localized_max_segments: int = 8,
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
     trellis_window: int = 16,
@@ -4828,8 +4903,10 @@ def quantize_qvq_linear(
         raise TypeError("QVQ YAQA spectral refinement must be boolean.")
     if not isinstance(yaqa_spectral_push, bool):
         raise TypeError("QVQ YAQA spectral push must be boolean.")
-    if yaqa_spectral_refinement and yaqa_spectral_push:
-        raise ValueError("QVQ YAQA output-factor refinement and spectral push are separate experiments.")
+    if not isinstance(yaqa_spectral_localized, bool):
+        raise TypeError("QVQ YAQA localized spectral refinement must be boolean.")
+    if sum((yaqa_spectral_refinement, yaqa_spectral_push, yaqa_spectral_localized)) > 1:
+        raise ValueError("QVQ YAQA spectral refinement experiments are mutually exclusive.")
     if not isinstance(yaqa_spectral_ranks, (tuple, list)) or not yaqa_spectral_ranks or any(
         isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in yaqa_spectral_ranks
     ):
@@ -4853,6 +4930,27 @@ def quantize_qvq_linear(
     ):
         raise ValueError("QVQ YAQA spectral push alphas must be a non-empty sequence of finite positive values.")
     yaqa_spectral_push_alphas = tuple(dict.fromkeys(float(alpha) for alpha in yaqa_spectral_push_alphas))
+    if (
+        not isinstance(yaqa_spectral_localized_alphas, (tuple, list))
+        or not yaqa_spectral_localized_alphas
+        or any(
+            isinstance(alpha, bool)
+            or not isinstance(alpha, (int, float))
+            or not math.isfinite(float(alpha))
+            or float(alpha) <= 0
+            for alpha in yaqa_spectral_localized_alphas
+        )
+    ):
+        raise ValueError("QVQ YAQA localized spectral alphas must be a non-empty sequence of finite positive values.")
+    yaqa_spectral_localized_alphas = tuple(
+        dict.fromkeys(float(alpha) for alpha in yaqa_spectral_localized_alphas)
+    )
+    if (
+        isinstance(yaqa_spectral_localized_max_segments, bool)
+        or not isinstance(yaqa_spectral_localized_max_segments, int)
+        or yaqa_spectral_localized_max_segments < 1
+    ):
+        raise ValueError("QVQ YAQA localized spectral max_segments must be a positive integer.")
     if damp_percent is None:
         damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
@@ -4888,7 +4986,9 @@ def quantize_qvq_linear(
             raise ValueError("YAQA requires the Euclidean PGC16 tile objective.")
         if input_hessian_preparation is not None:
             raise ValueError("YAQA input/output factors are module-specific and cannot use shared input preparation.")
-    if (yaqa_spectral_refinement or yaqa_spectral_push) and (rounding != "yaqa" or not v2b2_p32):
+    if (yaqa_spectral_refinement or yaqa_spectral_push or yaqa_spectral_localized) and (
+        rounding != "yaqa" or not v2b2_p32
+    ):
         raise ValueError("YAQA spectral experiment requires V2B2-P32 with YAQA rounding.")
     if v2b2_p32 and viterbi_objective != "euclidean":
         raise ValueError("QVQ V2B2-P32 supports the Euclidean Viterbi objective only.")
@@ -4905,10 +5005,15 @@ def quantize_qvq_linear(
     if (propagated_inputs is None) != (propagated_target_output is None):
         raise ValueError("QVQ propagated bank selection requires both held-out inputs and target outputs.")
     if propagated_inputs is not None:
-        if v2b4_p64 or v2b2_p32:
+        localized_v2b2_propagation = v2b2_p32 and rounding == "yaqa" and yaqa_spectral_localized
+        if v2b4_p64:
             raise ValueError("QVQ banked V2 propagation replay is not enabled in the initial reference slice.")
-        if bank_count != 4 or vector_size != 4 or rounding != "block_ldlq":
+        if not localized_v2b2_propagation and (
+            bank_count != 4 or vector_size != 4 or rounding != "block_ldlq"
+        ):
             raise ValueError("QVQ propagated bank selection requires bank_count=4, vector_size=4, and block_ldlq.")
+        if localized_v2b2_propagation and (bank_count != 2 or vector_size != 2):
+            raise ValueError("QVQ localized V2B2 propagation requires bank_count=2 and vector_size=2.")
         if propagated_inputs.ndim != 2 or propagated_target_output.ndim != 2:
             raise ValueError("QVQ propagated gate tensors must be rank-2.")
         if propagated_inputs.shape[0] != propagated_target_output.shape[0] or propagated_inputs.shape[1] != in_features:
@@ -5254,6 +5359,7 @@ def quantize_qvq_linear(
 
     with _qvq_phase(telemetry, "baseline_encode", device):
         baseline_encoded = encode_at_scale(scale, include_bank0_oracle=needs_bank0_oracle)
+    localized_rollback_encoded = None
     if yaqa_spectral_refinement:
         assert v2b2_p32 and bank_codebooks is not None and transformed_output_hessian is not None
         with _qvq_phase(telemetry, "yaqa_output_spectral_refinement", device):
@@ -5297,6 +5403,34 @@ def quantize_qvq_linear(
                 tail_biting_candidates=tail_biting_candidates,
                 bank_codebook_pair_stacks=bank_codebook_pair_stacks,
                 telemetry=telemetry,
+            )
+    elif yaqa_spectral_localized:
+        assert v2b2_p32 and bank_codebooks is not None and transformed_output_hessian is not None
+        localized_rollback_encoded = baseline_encoded
+        localized_search_inputs = None
+        localized_search_target = None
+        if propagated_inputs is not None:
+            heldout_target = propagated_target_output
+            if bias is not None:
+                heldout_target = heldout_target - bias.to(device=weight.device, dtype=heldout_target.dtype)
+            localized_search_inputs = matmul_hadU(propagated_inputs * SU.to(torch.float32))
+            localized_search_target = matmul_hadU(
+                heldout_target / (SV_sign.to(torch.float32) * scale), transpose=True
+            )
+        with _qvq_phase(telemetry, "yaqa_localized_spectral_refinement", device):
+            baseline_encoded = yaqa_localized_spectral_refine_v2b2_p32(
+                transformed_weight / scale,
+                transformed_H,
+                transformed_output_hessian,
+                bank_codebooks,
+                baseline_encoded,
+                ranks=yaqa_spectral_ranks,
+                alphas=yaqa_spectral_localized_alphas,
+                max_segments=yaqa_spectral_localized_max_segments,
+                search_inputs=localized_search_inputs,
+                search_target=localized_search_target,
+                diagnostics=yaqa_bank_diagnostics,
+                bits=bits,
             )
     baseline_bank_alt_id = None
     if bank_codebooks is None:
@@ -5451,7 +5585,65 @@ def quantize_qvq_linear(
                 bank0_inner = hessian_bank0_inner
                 bank0_states = hessian_bank0_states
 
-    if propagated_inputs is not None:
+    if propagated_inputs is not None and yaqa_spectral_localized:
+        assert localized_rollback_encoded is not None and v2b2_p32
+        rollback_inner, rollback_states, rollback_bank_ids, rollback_alt_id = localized_rollback_encoded
+        rollback_SV, rollback_weight, rollback_proxy_loss, rollback_optimized_channels, _ = finish_candidate(
+            rollback_inner,
+            SV_sign * selected_encoding_scale,
+        )
+        preprop_inner = rollback_inner
+        preprop_states = rollback_states
+        preprop_bank_ids = rollback_bank_ids
+        preprop_weight = rollback_weight
+        proposal_changed = (
+            not torch.equal(states, rollback_states)
+            or not torch.equal(selected_bank_ids, rollback_bank_ids)
+            or selected_bank_alt_id != rollback_alt_id
+        )
+        accepted = bool(torch.isfinite(reconstructed_weight).all()) and proposal_changed
+        if accepted:
+            proposal_trellis = pack_trellis_states(
+                states,
+                bits=bits,
+                vector_size=vector_size,
+                trellis_window=trellis_window,
+            )
+            serialized_inner = reconstruct_qvq_inner_weight(
+                proposal_trellis,
+                bits=bits,
+                vector_size=2,
+                trellis_window=16,
+                in_features=in_features,
+                out_features=out_features,
+                codebook_version=codebook_version,
+                bank_ids=selected_bank_ids,
+                v2b2_p32=True,
+                bank_alt_id=selected_bank_alt_id,
+            )
+            accepted = torch.equal(serialized_inner.to(dtype=quantized_inner.dtype), quantized_inner)
+        if accepted:
+            quantized_inner = serialized_inner.to(dtype=quantized_inner.dtype)
+            reconstructed_weight = rht_reconstruct_weight(quantized_inner, SU, SV_sign * selected_encoding_scale)
+            try:
+                accepted = bool(propagated_acceptance(reconstructed_weight, rollback_weight))
+            except Exception:  # noqa: BLE001 - an external confirmation gate must fail closed
+                accepted = False
+                if telemetry is not None:
+                    telemetry.count("localized_propagation_callback_error")
+        if not accepted:
+            quantized_inner = rollback_inner
+            states = rollback_states
+            selected_bank_ids = rollback_bank_ids
+            selected_bank_alt_id = rollback_alt_id
+            SV = rollback_SV
+            reconstructed_weight = rollback_weight
+            proxy_loss = rollback_proxy_loss
+            optimized_channels = rollback_optimized_channels
+        if telemetry is not None:
+            telemetry.count("localized_propagation_proposal_changed", int(proposal_changed))
+            telemetry.count("localized_propagation_accepted", int(accepted))
+    elif propagated_inputs is not None:
         # Keep the accepted pre-propagation artifact separate from the
         # canonical bank-0 candidate.  The callback and fail-closed rollback
         # must use the former, even when the candidate search starts from the
@@ -5676,6 +5868,8 @@ def quantize_qvq_linear(
             out_features=out_features,
             codebook_version=codebook_version,
             bank_ids=selected_bank_ids,
+            v2b2_p32=v2b2_p32,
+            bank_alt_id=selected_bank_alt_id,
         )
         if not torch.equal(roundtrip_inner.to(dtype=quantized_inner.dtype), quantized_inner):
             # Never emit a proposal whose serialized representation differs

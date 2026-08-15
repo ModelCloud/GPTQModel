@@ -809,7 +809,8 @@ Current status:
   rollback, format/config/processor/QVQLinear lifecycle, Torch reconstruction, strict reload, and focused math tests;
 - complete: YAQA corrected-target integration, full Kronecker rollback, native CUDA quantization and packed
   inference, and native MLX corrected-tile quantization/inference through W3.5;
-- pending: propagated selection on disjoint search/confirmation prompts, native MPS decode, and
+- partial: localized propagated selection now supports explicit disjoint search rows and an independent
+  accept/rollback callback; native MPS decode and four-layer final-KL/Top-N/task evidence remain pending;
   four-layer final-KL/Top-N/task evidence;
 - baseline comparison: `scripts/compare_qvq_codecs_llama_qkvo.py` defaults to matched `v2` and `v2b2-p32` arms.
 
@@ -889,6 +890,32 @@ state, but none improved the original YAQA objective. Selector churn averaged ab
 the baseline artifact and final logits. The failure is a path avalanche, not insufficient proposal movement. Keep P3
 default-off as a diagnostic; future spectral proposals must localize the correction or impose an explicit trust
 region before they warrant another propagated gate.
+
+#### Fixed-boundary localized propagation P4
+
+P4 keeps the accepted V2B2-P32+YAQA artifact as an immutable rollback oracle and changes at most one 32-weight
+segment per module. For segment `j`, it fixes both the predecessor state entering the segment and the final state
+leaving it. The search therefore retains the complete V2 history before and after the segment:
+
+```text
+accepted YAQA path
+  |
+  +-- fixed entry state -> search 16 V2 transitions / two banks -> fixed exit state
+  |
+  `-- every state and selector outside this P32 segment remains bit-identical
+```
+
+Candidate generation ranks segments using the first-order YAQA term. A disjoint search set chooses among the
+resulting exact fixed-boundary candidates using module-output squared error. The candidate is then packed and
+decoded before an independent propagation callback sees it; that callback, rather than local MSE or Kronecker loss,
+is the final acceptance authority. A rejection, non-finite proposal, serialization mismatch, or callback error
+restores the exact original trellis, selectors, family ID, `SV`, and dense reconstruction.
+
+This is default-off as `yaqa.spectral_localized`. V2B2 propagation must be explicitly enabled and supplied through
+`QVQProcessor.set_propagation_gate`; it never derives search rows by splitting ordinary Hessian calibration data.
+The checkpoint format, `0.03125`-bpw selector overhead, and inference kernels are unchanged. The one-segment limit is
+intentional for the first causal gate: broader coordinate or beam refinement is allowed only after disjoint
+full-model evidence shows that one localized change has useful downstream absorption.
 
 #### V2B4-P64 implementation slice
 

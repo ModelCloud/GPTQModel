@@ -121,6 +121,19 @@ acceptance objective.
 - **P2 -- native inference:** CUDA and MLX packed P64 decode are complete through W3.5; native MPS remains pending.
   Native kernels match the serialized Torch reconstruction under the 2e-3 inference drift contract.
 
+### P4 localized propagation status
+
+- Implemented: exact fixed-entry/fixed-exit P32 search with at most one changed segment.
+- Implemented: disjoint module-output search objective and independently supplied propagation acceptance callback.
+- Implemented: callback sees the packed-and-decoded proposal; rejection, callback failure, or serialization mismatch
+  restores the exact V2B2-P32+YAQA baseline.
+- Implemented: configuration/processor plumbing is default-off and does not auto-split ordinary calibration rows for
+  V2B2-P32.
+- Validated on Apple P cores: boundary math across W1/W2/W3.5, changed-interior isolation, config roundtrip,
+  serialization parity, explicit accept, explicit reject, and callback-error rollback.
+- Pending: real-model disjoint search/confirmation gate, four-layer final KL and Top-1/5/10, multiple YAQA seeds,
+  callback acceptance rate, and comparison against unchanged V2B2-P32+YAQA.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

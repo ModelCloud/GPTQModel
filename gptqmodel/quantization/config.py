@@ -49,6 +49,9 @@ class YaqaConfig:
     spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0)
     spectral_push: bool = False
     spectral_push_alphas: tuple[float, ...] = (0.25, 0.5, 1.0)
+    spectral_localized: bool = False
+    spectral_localized_alphas: tuple[float, ...] = (0.25, 0.5, 1.0)
+    spectral_localized_max_segments: int = 8
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -75,8 +78,10 @@ class YaqaConfig:
             raise TypeError("YaqaConfig: `spectral_refinement` must be boolean.")
         if not isinstance(self.spectral_push, bool):
             raise TypeError("YaqaConfig: `spectral_push` must be boolean.")
-        if self.spectral_refinement and self.spectral_push:
-            raise ValueError("YaqaConfig: output-factor refinement and spectral push are separate experiments.")
+        if not isinstance(self.spectral_localized, bool):
+            raise TypeError("YaqaConfig: `spectral_localized` must be boolean.")
+        if sum((self.spectral_refinement, self.spectral_push, self.spectral_localized)) > 1:
+            raise ValueError("YaqaConfig: spectral refinement experiments are mutually exclusive.")
         if not isinstance(self.spectral_ranks, (tuple, list)) or not self.spectral_ranks:
             raise ValueError("YaqaConfig: `spectral_ranks` must be a non-empty sequence.")
         if any(isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in self.spectral_ranks):
@@ -104,6 +109,25 @@ class YaqaConfig:
         ):
             raise ValueError("YaqaConfig: every spectral push alpha must be finite and positive.")
         self.spectral_push_alphas = tuple(dict.fromkeys(float(alpha) for alpha in self.spectral_push_alphas))
+        if not isinstance(self.spectral_localized_alphas, (tuple, list)) or not self.spectral_localized_alphas:
+            raise ValueError("YaqaConfig: `spectral_localized_alphas` must be a non-empty sequence.")
+        if any(
+            isinstance(alpha, bool)
+            or not isinstance(alpha, (int, float))
+            or not math.isfinite(float(alpha))
+            or float(alpha) <= 0
+            for alpha in self.spectral_localized_alphas
+        ):
+            raise ValueError("YaqaConfig: every localized spectral alpha must be finite and positive.")
+        self.spectral_localized_alphas = tuple(
+            dict.fromkeys(float(alpha) for alpha in self.spectral_localized_alphas)
+        )
+        if (
+            isinstance(self.spectral_localized_max_segments, bool)
+            or not isinstance(self.spectral_localized_max_segments, int)
+            or self.spectral_localized_max_segments < 1
+        ):
+            raise ValueError("YaqaConfig: `spectral_localized_max_segments` must be a positive integer.")
 
 
 class _SharedTemporaryDirectory:
@@ -5956,7 +5980,7 @@ class QVQConfig(BaseQuantizeConfig):
             self.yaqa.__post_init__()
         else:
             raise TypeError("QVQConfig: `yaqa` must be a YaqaConfig or dictionary.")
-        if (self.yaqa.spectral_refinement or self.yaqa.spectral_push) and (
+        if (self.yaqa.spectral_refinement or self.yaqa.spectral_push or self.yaqa.spectral_localized) and (
             self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
             raise ValueError(
@@ -6036,12 +6060,24 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: four-bank selection currently excludes scale-search controls.")
         if self.propagated_bank_selection is not None and not isinstance(self.propagated_bank_selection, bool):
             raise TypeError("QVQConfig: `propagated_bank_selection` must be boolean or None.")
-        if self.format == FORMAT.QVQ_V2B2_P32 and self.propagated_bank_selection is True:
-            raise ValueError("QVQConfig: V2B2-P32 propagation replay is not enabled in the initial reference slice.")
-        if self.propagated_bank_selection is True and self.bank_count != 4:
-            raise ValueError("QVQConfig: propagated bank selection requires `bank_count=4`.")
-        if self.propagated_bank_selection is True and self.rounding != "block_ldlq":
-            raise ValueError("QVQConfig: propagated bank selection requires `rounding='block_ldlq'`.")
+        localized_v2b2_propagation = (
+            self.format == FORMAT.QVQ_V2B2_P32
+            and self.rounding == "yaqa"
+            and self.yaqa.spectral_localized
+        )
+        if (
+            self.format == FORMAT.QVQ_V2B2_P32
+            and self.propagated_bank_selection is True
+            and not localized_v2b2_propagation
+        ):
+            raise ValueError(
+                "QVQConfig: V2B2-P32 propagation replay requires YAQA localized spectral refinement."
+            )
+        if self.propagated_bank_selection is True and not localized_v2b2_propagation:
+            if self.bank_count != 4:
+                raise ValueError("QVQConfig: propagated bank selection requires `bank_count=4`.")
+            if self.rounding != "block_ldlq":
+                raise ValueError("QVQConfig: propagated bank selection requires `rounding='block_ldlq'`.")
         if self.format == FORMAT.QVQ_V2B4_P64 and self.propagated_bank_selection is True:
             raise ValueError("QVQConfig: V2B4-P64 propagation replay is not enabled in the initial reference slice.")
 

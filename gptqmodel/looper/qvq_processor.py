@@ -703,6 +703,7 @@ class QVQProcessor(LoopProcessor):
             qcfg = task_entry["qcfg"]
             if (
                 qcfg.propagated_bank_selection
+                and qcfg.format != FORMAT.QVQ_V2B2_P32
                 and task is task_entry["capture"]
                 and not self._has_propagation_gate(name)
                 and capture_output is not None
@@ -824,6 +825,9 @@ class QVQProcessor(LoopProcessor):
                 yaqa_spectral_lambdas=module_qcfg.yaqa.spectral_lambdas,
                 yaqa_spectral_push=module_qcfg.yaqa.spectral_push,
                 yaqa_spectral_push_alphas=module_qcfg.yaqa.spectral_push_alphas,
+                yaqa_spectral_localized=module_qcfg.yaqa.spectral_localized,
+                yaqa_spectral_localized_alphas=module_qcfg.yaqa.spectral_localized_alphas,
+                yaqa_spectral_localized_max_segments=module_qcfg.yaqa.spectral_localized_max_segments,
                 viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
                 telemetry=telemetry,
                 bank_count=module_qcfg.bank_count,
