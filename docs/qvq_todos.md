@@ -260,6 +260,25 @@ KL by only hundredths of a percent, neither changes the selector map, and their 
 The next sequential arm should test `v_proj` on another fresh split, but the complete Q/K/V/O chain must ultimately
 beat the original live-prefix baseline on a common locked confirmation set before any accumulated map is retained.
 
+That `v_proj` arm installed layer-0 Q/K/V/O plus the accepted layer-1 Q/K artifacts, then used search rows
+`[1650,1658)` (2,743 live inputs), confirmation `[1658,1666)`, and untouched evaluation `[1666,1674)`. The
+three-rank localized search took 81.71 seconds and again changed only the state path, with zero selector/family churn.
+
+| Split | Arm | Final-logit KL | Top-1 | Top-5 | Top-10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| confirmation | rollback | 0.0149397256 | 87.0996% | 87.9947% | 88.6090% |
+| confirmation | serialized proposal reconstruction | 0.0149329457 | 87.1435% | 88.0562% | 88.6134% |
+| untouched evaluation | rollback | 0.0131516776 | 87.0335% | 89.2853% | 89.9114% |
+| untouched evaluation | selected dense reconstruction | 0.0131537210 | 87.0335% | 89.2347% | 89.9051% |
+| untouched evaluation | selected packed MPS | 0.0131574372 | 87.0335% | 89.2094% | 89.8735% |
+
+Confirmation accepted a 0.0454% KL improvement and Top-1/5/10 gains of +0.0439/+0.0614/+0.0044 percentage
+points. The independent split reversed that result: dense-reconstruction KL regressed 0.0155%, packed KL regressed
+0.0438% versus rollback, and packed Top-5/10 fell 0.0759/0.0380 points while Top-1 was unchanged. This is direct
+evidence that an eight-row confirmation gate can overfit even when every confirmation metric improves. Preserve the
+raw selected artifact for diagnosis, but do not include it in the sequential prefix. The later `o_proj` arm must
+condition on accepted Q/K only, and the rows used here are now development evidence rather than a final locked test.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
