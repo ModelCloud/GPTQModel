@@ -63,6 +63,9 @@ from scripts.compare_qvq_p4_gsm8k import (
     _paired_summary as _gsm8k_paired_summary,
 )
 from scripts.compare_qvq_p4_gsm8k import (
+    _progress_summary as _gsm8k_progress_summary,
+)
+from scripts.compare_qvq_p4_gsm8k import (
     _task_prompt as _gsm8k_task_prompt,
 )
 from scripts.compare_qvq_p4_prefixes import _compare_locked_rows, _metric_value
@@ -262,6 +265,9 @@ def test_qvq_p4_gsm8k_contract_reuses_task_prompt_and_paired_numeric_flips():
         "strict": {"answer_changes": 2, "wrong_to_correct": 1, "correct_to_wrong": 1, "net_correct": 0},
         "flexible": {"answer_changes": 2, "wrong_to_correct": 1, "correct_to_wrong": 1, "net_correct": 0},
     }
+    assert _gsm8k_progress_summary(samples, ("baseline", "candidate")) == (
+        "baseline=1/2(invalid=0) candidate=1/2(invalid=0)"
+    )
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():

@@ -168,6 +168,18 @@ def _paired_summary(samples: list[dict[str, object]], left: str, right: str) -> 
     return result
 
 
+def _progress_summary(samples: list[dict[str, object]], arms: tuple[str, ...]) -> str:
+    fields = []
+    for arm in arms:
+        correct = sum(sample[arm]["flexible_answer"] == sample["gold_answer"] for sample in samples)
+        invalid = sum(sample[arm]["flexible_answer"] is None for sample in samples)
+        fields.append(
+            f"{arm}={correct}/{len(samples)}"
+            f"(invalid={invalid})"
+        )
+    return " ".join(fields)
+
+
 def main() -> None:
     args = _parser().parse_args()
     if (
@@ -242,7 +254,11 @@ def main() -> None:
         samples.append(sample)
         if (relative_index + 1) % args.report_every == 0 or relative_index + 1 == len(documents):
             partial = _paired_summary(samples, "baseline", "candidate")
-            print(f"GSM8K rows complete: {relative_index + 1}/{len(documents)} paired={partial}", flush=True)
+            progress = _progress_summary(samples, tuple(models))
+            print(
+                f"GSM8K rows complete: {relative_index + 1}/{len(documents)} {progress} paired={partial}",
+                flush=True,
+            )
 
     elapsed = time.perf_counter() - started
     summaries = {arm: _arm_summary(samples, arm) for arm in models}
