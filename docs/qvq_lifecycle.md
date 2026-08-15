@@ -97,7 +97,7 @@ checkpoint owner, and source tensors are materialized only for the active layer 
 Add an explicit staged preparation operation rather than overloading `quantize()` with another opaque prepass:
 
 ```python
-prepared_artifacts: dict[str, object] = model.prepare(
+prepared_artifacts: dict[str, BasePreparedArtifact] = model.prepare(
     stage=PrepareStage.QUANTIZATION,
     config=QVQPrepareConfig(
         calibration=calibration,
@@ -171,13 +171,69 @@ the manifest and each value's fingerprint; it does not bypass validation.
 
 ## Prepared-artifact dictionary
 
-The public return type is an ordinary dictionary. By contract, consumers treat it as read-only after `model.prepare()`
-returns. Each stored value is an immutable artifact object, immutable metadata, or a managed read-only cache handle.
-The dictionary contains algorithm inputs and reusable geometry, not source model weights.
+The public return type is `dict[str, BasePreparedArtifact]`. By contract, consumers treat the dictionary as read-only
+after `model.prepare()` returns. Every value is a frozen dataclass derived from `BasePreparedArtifact`; raw tensors,
+untyped nested dictionaries, and arbitrary processor objects cannot be inserted directly. Specialized dataclasses may
+contain immutable metadata, detached tensors, or managed read-only cache handles. They must not contain source model
+weights.
+
+### Base artifact contract
+
+The common base provides uniform parsing and consumption without forcing every quantizer to produce the same data:
+
+```python
+@dataclass(frozen=True, kw_only=True)
+class BasePreparedArtifact:
+    key: str
+    kind: str
+    stage: PrepareStage
+    schema_version: int
+    producer: str
+    fingerprint: str
+    dependencies: tuple[str, ...] = ()
+
+    def validate(self, context: PrepareValidationContext) -> None:
+        ...
+
+    def to_dict(self) -> dict[str, object]:
+        ...
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> "BasePreparedArtifact":
+        ...
+```
+
+Subclasses own their typed fields. Examples include `PreparationManifest`, `CalibrationArtifact`, `HessianArtifact`,
+`FactorizationArtifact`, `SketchBArtifact`, and `PropagationArtifact`. A subclass containing external tensor storage
+uses a typed `ArtifactStorage` handle with checksum, dtype, shape, location, and ownership information rather than an
+unstructured path.
+
+An in-memory tensor field must be detached, non-gradient, artifact-owned, and treated as read-only. Freezing the
+dataclass does not make a PyTorch tensor immutable, so validation recomputes its checksum before consumption whenever
+the artifact crosses a lifecycle or process boundary. Large or shared tensors should prefer `ArtifactStorage` handles
+to make ownership and mutation boundaries explicit.
+
+The mapping key and `artifact.key` must match. `kind` is a stable serialized discriminator, not a Python class name.
+Deserialization uses a registry from `(stage, kind, schema_version)` to the permitted dataclass parser. Unknown kinds,
+unsupported versions, missing dependencies, key mismatches, and unexpected subclasses fail closed.
+
+Consumers do not cast arbitrary values from the dictionary. They use a checked accessor:
+
+```python
+sketch_b = require_prepared_artifact(
+    prepared_artifacts,
+    key="qvq.sketch_b",
+    artifact_type=SketchBArtifact,
+)
+```
+
+The accessor validates the manifest membership, expected type, stage, fingerprint, dependencies, and current model/
+config context before returning the artifact.
 
 The required `PreparationManifest` is the authority for the complete dictionary. It records the stage, config,
 producer, keys, dependencies, checksums, storage locations, and lifecycle schema. Removing, replacing, or adding a key
-without regenerating the manifest invalidates the dictionary.
+without regenerating the manifest invalidates the dictionary. Its own checksum excludes the manifest's fingerprint
+field to avoid a self-referential digest.
 
 ### Identity and provenance
 
@@ -542,7 +598,9 @@ new correctness stages to one side of the A/B.
 ### Unit tests
 
 - preparation state transitions, idempotence, invalidation, and failure cleanup;
+- `BasePreparedArtifact` subclass registration, serialization, parsing, and checked consumption;
 - dictionary/manifest schema, key-collision rejection, and per-artifact checksum round trip;
+- unknown kind/version, wrong subtype, key mismatch, missing dependency, and mutated-tensor rejection;
 - calibration sort, no-concat, full-length rows, masks, and exact sample counts;
 - model-tree target and calculation-group discovery without name-prefix assumptions;
 - exact shared-versus-independent Hessian and factor parity;
@@ -631,7 +689,7 @@ Exit: the standalone oracle is reproducible from one manifest.
 
 ### Phase 1: preparation API and dense compatibility
 
-- add `PrepareStage`, preparation state/protocol, and `model.prepare()`;
+- add `PrepareStage`, `BasePreparedArtifact`, its parser registry, preparation state/protocol, and `model.prepare()`;
 - move model-tree target resolution and shared Hessian capture behind the lifecycle;
 - add explicit seed policy and pristine geometry mode;
 - consume `prepared_artifacts` in `QVQProcessor`;
@@ -689,6 +747,7 @@ Exit: propagation-aware selection measures true downstream logits and never cons
 | Concern | Owner |
 |---|---|
 | Public state/API and neutral preparation hooks | `BaseQModel` |
+| Base artifact dataclass, registry, manifest, and checked accessor | generic preparation lifecycle |
 | Model targets and calculation groups | model adapter `module_tree` |
 | Shell/source materialization | `BaseQModel.shell_module_materialize()` and `LazyTurtle` |
 | Device/subset scheduling | `ModuleLooper` / `SubsetPlan` |
