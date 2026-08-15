@@ -914,3 +914,23 @@ outputs, while two batch-64 searches improved by only 1.07x because 128 CTAs
 already exceed one 124-SM wave. The quantizer should therefore overlap only
 independent, memory-budgeted family searches; it must not split dependent
 selector segments across streams.
+
+The next exact pass folds the bank reduction at a selector boundary into the
+following segment CTA. Each CTA starts from the same reduced suffix frontier;
+bank zero records the winning previous-bank byte for later traceback. This
+removes seven B2 or three B4 boundary launches and keeps the first recurrence
+step on shared memory. Compile-time rate gates retain the separate boundary
+kernel where duplicating a large frontier across four B4 CTAs costs more than
+the launch. The terminal 1,024-way thread-zero scan was also replaced with a
+lexicographic warp/block argmin. It performs comparisons only, preserving the
+exact FP32 loss and lowest flattened-index tie break.
+
+Across 72 warm benchmark cells (B2/B4, W1--W3.5, batches 8--256), states,
+losses, and selectors remained bit-exact. Relative to the first segmented-grid
+kernel, B2 W1--W3 improved by 1.04--1.15x and representative large-batch B4
+W1.5--W2.5 paths improved by 1.08--1.11x. B2 W2 batch 64 moved from 3.055 ms
+to 2.780 ms, making the cumulative gain over the original 12.743 ms coupled
+kernel 4.58x. Nsight measured zero shared-load bank conflicts, so shared-memory
+swizzling was rejected. A 512-thread CTA variant and two-way candidate-loop
+unrolling were also rejected after exact A/B sweeps: they regressed common
+small/medium batches by up to 55% and 23%, respectively.

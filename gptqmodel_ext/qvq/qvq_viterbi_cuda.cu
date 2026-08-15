@@ -42,6 +42,41 @@ constexpr size_t kMaxNormCacheEntries = 32;
 
 __device__ __forceinline__ bool lower_pair(float candidate, int candidate_index, float current, int current_index);
 
+__device__ __forceinline__ void block_argmin(float& value, int& index) {
+  constexpr unsigned mask = 0xffffffffu;
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int warp = static_cast<int>(threadIdx.x) >> 5;
+  __shared__ float warp_values[32];
+  __shared__ int warp_indices[32];
+  #pragma unroll
+  for (int offset = 16; offset != 0; offset >>= 1) {
+    const float candidate_value = __shfl_down_sync(mask, value, offset);
+    const int candidate_index = __shfl_down_sync(mask, index, offset);
+    if (lane + offset < 32 && lower_pair(candidate_value, candidate_index, value, index)) {
+      value = candidate_value;
+      index = candidate_index;
+    }
+  }
+  if (lane == 0) {
+    warp_values[warp] = value;
+    warp_indices[warp] = index;
+  }
+  __syncthreads();
+  if (warp == 0) {
+    value = lane < (kThreads / 32) ? warp_values[lane] : CUDART_INF_F;
+    index = lane < (kThreads / 32) ? warp_indices[lane] : INT_MAX;
+    #pragma unroll
+    for (int offset = 16; offset != 0; offset >>= 1) {
+      const float candidate_value = __shfl_down_sync(mask, value, offset);
+      const int candidate_index = __shfl_down_sync(mask, index, offset);
+      if (lane + offset < 32 && lower_pair(candidate_value, candidate_index, value, index)) {
+        value = candidate_value;
+        index = candidate_index;
+      }
+    }
+  }
+}
+
 template <int VectorSize, typename CodebookScalar>
 __device__ __forceinline__ float emission(
     const float* __restrict__ target,
@@ -1131,6 +1166,7 @@ template <
     int Shift,
     int BankCount,
     int SegmentSteps,
+    bool FuseBoundary,
     typename CodebookScalar,
     typename BackpointerScalar>
 __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
@@ -1142,7 +1178,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
     const float* __restrict__ g_input_all,
     float* __restrict__ g_output_all,
     BackpointerScalar* __restrict__ backpointers,
-    const uint8_t* __restrict__ boundary_banks,
+    uint8_t* __restrict__ boundary_banks,
     int batch,
     int segment_index,
     bool constrained,
@@ -1204,6 +1240,29 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
           static_cast<BackpointerScalar>(best_h);
     }
     __syncthreads();
+  } else if constexpr (FuseBoundary) {
+    for (int x = thread; x < suffix_count; x += kThreads) {
+      const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
+      float best = g_input_all[input_base + x];
+      int best_bank = 0;
+      #pragma unroll
+      for (int previous_bank = 1; previous_bank < bank_count; ++previous_bank) {
+        const float candidate = g_input_all[input_base + previous_bank * suffix_count + x];
+        if (candidate < best) {
+          best = candidate;
+          best_bank = previous_bank;
+        }
+      }
+      // Every current-bank CTA needs the same reduced input frontier.  Bank
+      // zero alone records the selector for traceback after all CTAs finish.
+      g_previous[x] = best;
+      if (bank == 0) {
+        boundary_banks[
+            boundary_base + static_cast<int64_t>(segment_index - 1) * suffix_count + x] =
+            static_cast<uint8_t>(best_bank);
+      }
+    }
+    __syncthreads();
   } else {
     for (int x = thread; x < suffix_count; x += kThreads) {
       g_previous[x] = g_input_all[g_base + x];
@@ -1213,7 +1272,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 
   const int recurrence_start = segment_index == 0 ? 1 : first_step;
   for (int step = recurrence_start; step < end_step; ++step) {
-    const bool boundary = step == first_step && segment_index != 0;
+    const bool boundary = !FuseBoundary && step == first_step && segment_index != 0;
     const int boundary_index = segment_index - 1;
     const float* target = sequences + sequence_base + static_cast<int64_t>(step) * 2;
     const float weight = weighted
@@ -1228,15 +1287,20 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
       for (int h = 0; h < prefix_count; ++h) {
         const int state = h * suffix_count + x;
         const int predecessor_suffix = state >> shift;
-        const int previous_bank = boundary
-            ? static_cast<int>(boundary_banks[
-                  boundary_base + static_cast<int64_t>(boundary_index) * suffix_count +
-                  predecessor_suffix])
-            : bank;
-        const float predecessor_cost = boundary
-            ? g_input_all[static_cast<int64_t>(sequence) * bank_suffix_count +
-                          previous_bank * suffix_count + predecessor_suffix]
-            : g_previous[predecessor_suffix];
+        float predecessor_cost;
+        if constexpr (FuseBoundary) {
+          predecessor_cost = g_previous[predecessor_suffix];
+        } else {
+          const int previous_bank = boundary
+              ? static_cast<int>(boundary_banks[
+                    boundary_base + static_cast<int64_t>(boundary_index) * suffix_count +
+                    predecessor_suffix])
+              : bank;
+          predecessor_cost = boundary
+              ? g_input_all[static_cast<int64_t>(sequence) * bank_suffix_count +
+                            previous_bank * suffix_count + predecessor_suffix]
+              : g_previous[predecessor_suffix];
+        }
         const float candidate = __fadd_rn(
             predecessor_cost,
             emission<2, CodebookScalar>(
@@ -1288,9 +1352,6 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
   constexpr int segment_steps = SegmentSteps;
   constexpr int segment_count = 128 / segment_steps;
   constexpr int bank_suffix_count = bank_count * suffix_count;
-  __shared__ float partial_value[kThreads];
-  __shared__ int partial_index[kThreads];
-
   const int sequence = static_cast<int>(blockIdx.x);
   if (sequence >= batch) {
     return;
@@ -1329,18 +1390,9 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
       best_flat = flat;
     }
   }
-  partial_value[thread] = best;
-  partial_index[thread] = best_flat;
-  __syncthreads();
+  block_argmin(best, best_flat);
 
   if (thread == 0) {
-    for (int candidate_thread = 1; candidate_thread < kThreads; ++candidate_thread) {
-      if (lower_pair(
-              partial_value[candidate_thread], partial_index[candidate_thread], best, best_flat)) {
-        best = partial_value[candidate_thread];
-        best_flat = partial_index[candidate_thread];
-      }
-    }
     squared_error[sequence] = best;
     int current_bank = best_flat / kStateCount;
     int current_state = best_flat - current_bank * kStateCount;
@@ -1756,15 +1808,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
 #define QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                  \
     BITS, BANKS, SEGMENT_STEPS, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)                       \
   do {                                                                                                \
+    constexpr bool qvq_fuse_boundary =                                                               \
+        (BANKS == 2 && BITS != 7) || (BANKS == 4 && BITS >= 3 && BITS <= 6);                         \
     constexpr int qvq_segment_shared_bytes = 2 * (1 << (16 - BITS)) * sizeof(float);                  \
     C10_CUDA_CHECK(cudaFuncSetAttribute(                                                              \
         qvq_v2_segment_grid_kernel<                                                                   \
-            BITS, BANKS, SEGMENT_STEPS, CODEBOOK_TYPE, POINTER_TYPE>,                                 \
+            BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, CODEBOOK_TYPE, POINTER_TYPE>,             \
         cudaFuncAttributeMaxDynamicSharedMemorySize, qvq_segment_shared_bytes));                      \
     float* qvq_frontier_a = costs_a.mutable_data_ptr<float>();                                        \
     float* qvq_frontier_b = costs_b.mutable_data_ptr<float>();                                        \
     qvq_v2_segment_grid_kernel<                                                                       \
-        BITS, BANKS, SEGMENT_STEPS, CODEBOOK_TYPE, POINTER_TYPE><<<                                   \
+        BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, CODEBOOK_TYPE, POINTER_TYPE><<<                \
         batch * BANKS, kThreads, qvq_segment_shared_bytes, stream>>>(                                 \
         sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),   \
         overlap_ptr, weight_ptr, qvq_frontier_b, qvq_frontier_a,                                     \
@@ -1773,11 +1827,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     for (int segment = 1; segment < segments; ++segment) {                                            \
       const float* qvq_segment_input = segment % 2 == 1 ? qvq_frontier_a : qvq_frontier_b;            \
       float* qvq_segment_output = segment % 2 == 1 ? qvq_frontier_b : qvq_frontier_a;                 \
-      qvq_v2_segment_boundary_kernel<BITS, BANKS, SEGMENT_STEPS><<<batch, kThreads, 0, stream>>>(     \
-          qvq_segment_input, boundary_banks.mutable_data_ptr<uint8_t>(),                              \
-          batch, segment - 1);                                                                        \
+      if constexpr (!qvq_fuse_boundary) {                                                             \
+        qvq_v2_segment_boundary_kernel<BITS, BANKS, SEGMENT_STEPS><<<batch, kThreads, 0, stream>>>(   \
+            qvq_segment_input, boundary_banks.mutable_data_ptr<uint8_t>(),                            \
+            batch, segment - 1);                                                                      \
+      }                                                                                               \
       qvq_v2_segment_grid_kernel<                                                                     \
-          BITS, BANKS, SEGMENT_STEPS, CODEBOOK_TYPE, POINTER_TYPE><<<                                 \
+          BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, CODEBOOK_TYPE, POINTER_TYPE><<<              \
           batch * BANKS, kThreads, qvq_segment_shared_bytes, stream>>>(                               \
           sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(), \
           overlap_ptr, weight_ptr, qvq_segment_input, qvq_segment_output,                             \
