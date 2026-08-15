@@ -10,8 +10,8 @@ The target public flow is:
 
 ```text
 GPTQModel.load(source)
-    -> prepared_artifact = model.prepare(stage=PrepareStage.QUANTIZATION, ...)
-    -> model.quantize(prepared_artifact=prepared_artifact)
+    -> prepared_artifacts = model.prepare(stage=PrepareStage.QUANTIZATION, ...)
+    -> model.quantize(prepared_artifacts=prepared_artifacts)
     -> validate live packed model
     -> model.save(output)
     -> GPTQModel.load(output)
@@ -97,7 +97,7 @@ checkpoint owner, and source tensors are materialized only for the active layer 
 Add an explicit staged preparation operation rather than overloading `quantize()` with another opaque prepass:
 
 ```python
-prepared_artifact = model.prepare(
+prepared_artifacts: dict[str, object] = model.prepare(
     stage=PrepareStage.QUANTIZATION,
     config=QVQPrepareConfig(
         calibration=calibration,
@@ -113,7 +113,7 @@ prepared_artifact = model.prepare(
 )
 
 model.quantize(
-    prepared_artifact=prepared_artifact,
+    prepared_artifacts=prepared_artifacts,
     layer_scope=None,
 )
 ```
@@ -122,9 +122,27 @@ model.quantize(
 contract, and the concrete config selects `QVQPreparationProcessor`. A non-QVQ quantizer can register another processor
 behind the same stage without adding another top-level model method.
 
-Use `prepared_artifact`, not `prepared_payload`, for the returned object. The result is a typed, checksummed,
-provenance-validated lifecycle artifact that may refer to managed cache storage; it is not merely a transport bundle of
-tensors. Its concrete type is `QVQQuantizationPreparation`.
+`model.prepare()` returns a dictionary because one stage may produce several generic and method-specific artifacts.
+Use the plural name `prepared_artifacts`, not `prepared_payload`: the values represent validated lifecycle results and
+managed cache references, not one opaque tensor transport bundle.
+
+A representative QVQ result is:
+
+```python
+prepared_artifacts = {
+    "manifest": PreparationManifest(...),
+    "calibration": CalibrationArtifact(...),
+    "validation": ValidationArtifact(...),
+    "qvq.input_hessians": HessianArtifact(...),
+    "qvq.input_factors": FactorizationArtifact(...),
+    "qvq.sketch_b": SketchBArtifact(...),
+    "qvq.propagation": PropagationArtifact(...),
+}
+```
+
+Only `manifest` is universally required. Generic lifecycle keys are unprefixed; method-owned keys use a stable
+namespace such as `qvq.*`. Multiple preparation processors may contribute to the same result, but registering the same
+key twice is an error. No processor may silently overwrite another processor's artifact.
 
 The model state machine becomes:
 
@@ -147,18 +165,23 @@ Failure transitions are transactional:
 - validation failure rejects the artifact and preserves the last independently accepted baseline;
 - cleanup failures are reported without masking the primary exception.
 
-`quantize()` remains backward compatible. If no `prepared_artifact` is supplied, it internally runs the quantization
-preparation stage for the minimum required state. Supplying an artifact skips only work proven reusable by its
-fingerprint; it does not bypass validation.
+`quantize()` remains backward compatible. If no `prepared_artifacts` dictionary is supplied, it internally runs the
+quantization preparation stage for the minimum required state. Supplying artifacts skips only work proven reusable by
+the manifest and each value's fingerprint; it does not bypass validation.
 
-## Preparation artifact
+## Prepared-artifact dictionary
 
-Introduce an immutable `QuantizationPreparation` protocol and a QVQ implementation, tentatively named
-`QVQQuantizationPreparation`. It contains algorithm inputs and reusable geometry, not source model weights.
+The public return type is an ordinary dictionary. By contract, consumers treat it as read-only after `model.prepare()`
+returns. Each stored value is an immutable artifact object, immutable metadata, or a managed read-only cache handle.
+The dictionary contains algorithm inputs and reusable geometry, not source model weights.
+
+The required `PreparationManifest` is the authority for the complete dictionary. It records the stage, config,
+producer, keys, dependencies, checksums, storage locations, and lifecycle schema. Removing, replacing, or adding a key
+without regenerating the manifest invalidates the dictionary.
 
 ### Identity and provenance
 
-The artifact records:
+The manifest records:
 
 - model repository/path, checkpoint shard fingerprints, config fingerprint, and model class;
 - tokenizer fingerprint and normalization version;
@@ -170,12 +193,12 @@ The artifact records:
 - seed policy and all derived seed/sign checksums;
 - implementation/schema version and checksums for every stored tensor.
 
-An artifact is rejected when any field affecting its math differs. It must never be accepted based only on matching
-tensor shapes.
+The dictionary or an individual artifact is rejected when any field affecting its math differs. It must never be
+accepted based only on matching tensor shapes.
 
 ### Stored QVQ data
 
-Depending on the requested arms, the artifact may contain:
+Depending on the requested arms, the dictionary may contain:
 
 - pristine input Hessians/Grams, shared by exact same-activation groups;
 - sample counts and padding-exclusion metadata;
@@ -186,8 +209,8 @@ Depending on the requested arms, the artifact may contain:
 - dense-teacher logit references or a separately fingerprinted teacher cache;
 - optional model-level frozen compander data.
 
-It must not contain dense source weights. Large tensor payloads may live in a versioned cache directory with an atomic
-manifest rather than one monolithic Python serialization.
+It must not contain dense source weights. Large tensor artifacts may live in a versioned cache directory and be
+represented by managed handles rather than one monolithic Python serialization.
 
 ### Shared-geometry cache key
 
@@ -367,8 +390,8 @@ The initial dense implementation may continue using full-model backward. The sca
 6. define routed-token and zero-sample semantics before enabling MoE;
 7. add distributed reduction only after exact single-device parity is established.
 
-The preparation artifact must support reuse of one validated Sketch-B collection across compatible V2, V2B2-P32,
-and V2B4-P64 YAQA arms. Bank/family selection and trellis results are not reusable preparation data.
+The prepared-artifacts dictionary must support reuse of one validated Sketch-B collection across compatible V2,
+V2B2-P32, and V2B4-P64 YAQA arms. Bank/family selection and trellis results are not reusable preparation data.
 
 For V2B2-P32, preserve both YAQA modes:
 
@@ -455,7 +478,7 @@ The replacement comparison script becomes a thin manifest runner. A sweep arm sp
 
 ```text
 source model and tokenizer
-preparation artifact or preparation manifest
+prepared-artifacts dictionary or preparation manifest/cache reference
 QVQ config and rate
 rounding mode
 layer/module scope
@@ -519,7 +542,7 @@ new correctness stages to one side of the A/B.
 ### Unit tests
 
 - preparation state transitions, idempotence, invalidation, and failure cleanup;
-- artifact schema and checksum round trip;
+- dictionary/manifest schema, key-collision rejection, and per-artifact checksum round trip;
 - calibration sort, no-concat, full-length rows, masks, and exact sample counts;
 - model-tree target and calculation-group discovery without name-prefix assumptions;
 - exact shared-versus-independent Hessian and factor parity;
@@ -611,7 +634,7 @@ Exit: the standalone oracle is reproducible from one manifest.
 - add `PrepareStage`, preparation state/protocol, and `model.prepare()`;
 - move model-tree target resolution and shared Hessian capture behind the lifecycle;
 - add explicit seed policy and pristine geometry mode;
-- consume `prepared_artifact` in `QVQProcessor`;
+- consume `prepared_artifacts` in `QVQProcessor`;
 - retain existing `quantize()` behavior when no prepared artifact is supplied.
 
 Exit: Llama 3.2 1B dense-resident lifecycle matches the standalone tensors exactly.
@@ -670,7 +693,7 @@ Exit: propagation-aware selection measures true downstream logits and never cons
 | Shell/source materialization | `BaseQModel.shell_module_materialize()` and `LazyTurtle` |
 | Device/subset scheduling | `ModuleLooper` / `SubsetPlan` |
 | QVQ preparation validation and quantization | `QVQProcessor` |
-| Hessian/Sketch-B reusable data | `QVQQuantizationPreparation` plus bounded cache storage |
+| Hessian/Sketch-B reusable data | namespaced prepared artifacts plus bounded cache storage |
 | QVQ math | `gptqmodel.quantization.qvq` |
 | Packed module and backend selection | `QVQLinear` and existing backend lifecycle |
 | Save/reload/sharding | existing GPT-QModel checkpoint lifecycle |
