@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +52,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _WeightedMetricAccumulator,
     _yaqa_cache_metadata,
 )
+from scripts.compare_qvq_p4_arc import _arm_summary, _paired_summary, _prompt_ids
 from scripts.compare_qvq_p4_prefixes import _compare_locked_rows, _metric_value
 from scripts.validate_qvq_p4_live_prefix import (
     _capture_target_inputs,
@@ -159,6 +161,71 @@ class _SwiGLUHessianHarness(torch.nn.Module):
         hidden = input_ids.float()
         gated = torch.nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden)
         return self.down_proj(gated)
+
+
+def test_qvq_p4_arc_summary_preserves_paired_flip_directions():
+    samples = [
+        {
+            "gold_index": 0,
+            "baseline": {
+                "raw_prediction": 1,
+                "normalized_prediction": 0,
+                "raw_gold_margin": -0.5,
+                "normalized_gold_margin": 0.25,
+            },
+            "candidate": {
+                "raw_prediction": 0,
+                "normalized_prediction": 1,
+                "raw_gold_margin": 0.5,
+                "normalized_gold_margin": -0.25,
+            },
+        },
+        {
+            "gold_index": 1,
+            "baseline": {
+                "raw_prediction": 1,
+                "normalized_prediction": 1,
+                "raw_gold_margin": 0.75,
+                "normalized_gold_margin": 0.5,
+            },
+            "candidate": {
+                "raw_prediction": 1,
+                "normalized_prediction": 1,
+                "raw_gold_margin": 1.0,
+                "normalized_gold_margin": 0.75,
+            },
+        },
+    ]
+
+    assert _arm_summary(samples, "candidate") == {
+        "rows": 2,
+        "accuracy": 1.0,
+        "accuracy_normalized": 0.5,
+        "raw_correct": 2,
+        "normalized_correct": 1,
+        "mean_gold_margin": 0.75,
+        "mean_gold_margin_normalized": 0.25,
+    }
+    assert _paired_summary(samples, "baseline", "candidate") == {
+        "raw": {"prediction_changes": 1, "wrong_to_correct": 1, "correct_to_wrong": 0, "net_correct": 1},
+        "normalized": {"prediction_changes": 1, "wrong_to_correct": 0, "correct_to_wrong": 1, "net_correct": -1},
+    }
+
+
+def test_qvq_p4_arc_prompt_matches_evalution_render_then_tokenize_contract():
+    class Tokenizer:
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert messages == [{"role": "user", "content": "Question: Why?\nAnswer:"}]
+            assert tokenize is False
+            assert add_generation_prompt is True
+            return "rendered prompt"
+
+        def __call__(self, prompt, *, add_special_tokens):
+            assert prompt == "rendered prompt"
+            assert add_special_tokens is False
+            return SimpleNamespace(input_ids=[1, 2, 3])
+
+    assert _prompt_ids(Tokenizer(), "Why?", apply_chat_template=True) == [1, 2, 3]
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():

@@ -345,6 +345,29 @@ the guardrail. This is positive propagated evidence, not task recovery. Retain Q
 keep V rejected and O unchanged, and advance only to a paired task-like gate using the exact ordinary-versus-refined
 artifacts. Do not spend further quantization time accumulating layer-1 modules before that decision.
 
+The paired ARC-Challenge gate is now complete over all 1,172 test examples. It used the repository evaluation
+contract (`Question: {question}\nAnswer:`, Llama chat rendering, leading-space choice continuations), one question per
+step, all choices batched only within that question, and the complete 16-layer FP16 model on MPS. The two students
+quantized the same six W2 modules: layer-0 Q/K/V/O plus layer-1 Q/K. The only difference was ordinary YAQA versus the
+retained P4-refined layer-1 Q/K paths. The run was split into rows `[0,256)` and `[256,1172)` without overlap; their
+token-contract hashes are `12605a2d10e0a5eef0456aaa483a7431f9bf84f7a3602737208e36698b71aa94` and
+`c5e7a141e76481d8ce0f30b59ca9a9183d948da0826c00eaf5517e4e6838ae7d`.
+
+| Full ARC arm | Raw correct | Raw accuracy | Normalized correct | Normalized accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| dense FP16 | 374/1172 | 31.9113% | 414/1172 | 35.3242% |
+| ordinary YAQA Q/K | 367/1172 | 31.3140% | 402/1172 | 34.3003% |
+| P4-refined Q/K | 368/1172 | 31.3993% | 402/1172 | 34.3003% |
+| P4 minus ordinary | +1 | +0.0853 pp | 0 | 0.0000 pp |
+
+The raw paired comparison changed two predictions: one wrong-to-correct and one wrong-to-different-wrong, with zero
+correct-to-wrong flips. The normalized comparison changed one prediction, wrong-to-different-wrong, and therefore
+had zero net flips. Mean raw gold margin moved slightly backward (`-4.3896833` to `-4.3898933`), while normalized
+margin moved slightly forward (`-1.1053791` to `-1.1051739`). This passes a task non-regression gate and supplies one
+exact rescue, but the effect is too small to establish a statistically meaningful task improvement or justify a
+default. Preserve the P4 Q/K map as an opt-in candidate; the next useful test is a distinct reasoning/task split or
+seed replication, not further selection on ARC.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
