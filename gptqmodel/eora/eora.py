@@ -13,7 +13,7 @@
 #   year={2024}
 # }
 
-from typing import Sequence, Tuple
+from collections.abc import Sequence
 
 import torch
 from torch import Tensor
@@ -29,7 +29,7 @@ def eora_process_input(
         name: str,
         sample_size: int,
         device: torch.device,
-) -> Tuple[int, torch.Tensor, float]:
+) -> tuple[int, torch.Tensor, float]:
     """Prepare the per-batch covariance contribution required for EoRA.
 
     The contribution remains on the originating device so multi-GPU execution
@@ -55,7 +55,7 @@ def eora_process_input(
     return batch, contribution, scale
 
 
-def merge_eora_segments(segments: Sequence[Tuple[torch.Tensor, float]]) -> torch.Tensor:
+def merge_eora_segments(segments: Sequence[tuple[torch.Tensor, float]]) -> torch.Tensor:
     """Combine pre-aggregated EoRA segments using their scale products.
 
     Each segment entry is a tuple ``(total, scale_product)`` where ``total`` is
@@ -85,7 +85,13 @@ def eora_compute_lora(
         rank: int,
         dtype: torch.dtype,
         device: torch.device,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
+    """Compute EoRA low-rank A/B from the original/quantized weight residual.
+
+    When expanding the calibration data size for EoRA, I suggest maintaining
+    the balance by allocating 50% to general input (C4) and the remaining 50%
+    to downstream task data.
+    """
 
     assert w_wq_delta.dtype == torch.float32
 
@@ -99,16 +105,36 @@ def eora_compute_lora(
 
     L, Q = torch.linalg.eigh(raw_scaling_diag_matrix)
 
-    if (L < 0).any():
-        ## When expanding the calibration data size for EoRA, I suggest maintaining the balance by allocating 50% to general input (C4) and the remaining 50% to downstream task data.
-        log.warn(f"Found negative eigenvalues in `{name}`. Please increase your calibration data set for EoRA.")
-        minimum = torch.min(L[L > 0])
-        L[L < 0] = minimum
+    if not torch.isfinite(L).all():
+        raise FloatingPointError(f"EoRA covariance eigensolve produced non-finite eigenvalues for `{name}`.")
 
-    sqrtEigenvalues = torch.sqrt(L)
-    scaling_diag_matrix = Q @ torch.diag(sqrtEigenvalues)
+    # Eigenvalues below the numerical-rank cutoff cannot be inverted reliably.
+    # Tiny or slightly negative values from float32 covariance accumulation
+    # become arbitrarily large outliers in 1/sqrt(lambda) and propagate into
+    # the low-rank adapter, so clamp the spectrum by truncating them to zero.
+    relative_tolerance = min(1.0, max(1, L.numel()) * torch.finfo(torch.float32).eps)
+    maximum = L[-1].clamp_min(0.0)
+    cutoff = maximum * relative_tolerance
+    retained = L > cutoff
 
-    scaling_matrix_inv = torch.diag(1/sqrtEigenvalues) @ Q.T
+    discarded_count = int((~retained).sum().item())
+    if discarded_count:
+        negative_count = int((L < 0).sum().item())
+        log.warning(
+            f"EoRA: covariance for `{name}` is numerically rank deficient; using a truncated pseudoinverse "
+            f"and discarding {discarded_count}/{L.numel()} eigenvalues at or below {cutoff.item():.3e} "
+            f"(negative={negative_count}, min={L[0].item():.3e}, max={L[-1].item():.3e}, "
+            f"rtol={relative_tolerance:.3e})."
+        )
+
+    sqrtEigenvalues = torch.zeros_like(L)
+    sqrtEigenvalues[retained] = torch.sqrt(L[retained])
+
+    invSqrtEigenvalues = torch.zeros_like(L)
+    invSqrtEigenvalues[retained] = torch.rsqrt(L[retained])
+
+    scaling_diag_matrix = Q * sqrtEigenvalues.unsqueeze(0)
+    scaling_matrix_inv = invSqrtEigenvalues.unsqueeze(1) * Q.T
 
     scaling_diag_matrix = scaling_diag_matrix.to(dtype=torch.float32)
     scaling_matrix_inv = scaling_matrix_inv.to(dtype=torch.float32)
