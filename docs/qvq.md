@@ -812,6 +812,39 @@ Current status:
   four-layer final-KL/Top-N/task evidence;
 - baseline comparison: `scripts/compare_qvq_codecs_llama_qkvo.py` defaults to matched `v2` and `v2b2-p32` arms.
 
+#### Eigenspace-boosted YAQA P1
+
+The default-off `yaqa.spectral_refinement` experiment applies the residual-spectrum idea from
+[EoRA](https://arxiv.org/abs/2410.21271) without retaining an adapter. It first encodes the exact V2B2-P32+YAQA
+rollback artifact `Q0`, then analyzes its actual transformed residual `E0=W-Q0`. For inner-orientation weights and
+stabilized factors `H_I=C_I C_I.T`, `H_O=C_O C_O.T`, it computes
+
+```text
+M0 = C_I.T @ E0 @ C_O
+M0 = U @ diag(sigma) @ V.T.
+```
+
+The right singular vectors are output-space modes. For each configured rank, P1 builds the PSD penalty
+
+```text
+H_O,spec = C_O @ V_r @ V_r.T @ C_O.T
+trace(H_O,spec) = trace(H_O)
+H_O' = H_O + lambda * H_O,spec.
+```
+
+Ranks default to `{8,16,32}` and strengths to `{0.1,0.25,0.5,1.0}`. Each boosted factor is only a candidate
+generator: V2B2-P32 reruns complete YAQA family reselection, but every resulting artifact is scored under the
+original unboosted `H_I,H_O`. A non-finite, tied, or worse candidate restores `Q0` bit-for-bit. The SVD, boosted
+factors, and EoRA-style low-rank modes are discarded; serialized tensors and inference are unchanged.
+
+P1 reports rank energy concentration, selected rank/strength, absorption efficiency, selector churn, and family
+change. These are diagnostics rather than promotion evidence. Final-KL, Top-N, and task recovery on disjoint live
+replay remain required because a lower module Kronecker proxy can still regress downstream behavior below W3.
+
+> Shih-Yang Liu et al. “EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank
+> Approximation.” arXiv:2410.21271. P1 borrows the post-compression residual-spectrum principle; it does not retain
+> EoRA `(A,B)` factors or add a runtime LoRA branch.
+
 #### V2B4-P64 implementation slice
 
 `format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W2.5. It keeps the canonical L16/V2

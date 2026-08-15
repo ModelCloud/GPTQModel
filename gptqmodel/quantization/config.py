@@ -44,6 +44,9 @@ class YaqaConfig:
     regularization: float = YAQA_PAPER_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
     v2b2_family_mode: str = "reselect"
+    spectral_refinement: bool = False
+    spectral_ranks: tuple[int, ...] = (8, 16, 32)
+    spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0)
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -66,6 +69,24 @@ class YaqaConfig:
             raise ValueError(
                 "YaqaConfig: `v2b2_family_mode` must be `fixed_block_ldlq` or `reselect`."
             )
+        if not isinstance(self.spectral_refinement, bool):
+            raise TypeError("YaqaConfig: `spectral_refinement` must be boolean.")
+        if not isinstance(self.spectral_ranks, (tuple, list)) or not self.spectral_ranks:
+            raise ValueError("YaqaConfig: `spectral_ranks` must be a non-empty sequence.")
+        if any(isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in self.spectral_ranks):
+            raise ValueError("YaqaConfig: every spectral rank must be a positive integer.")
+        self.spectral_ranks = tuple(dict.fromkeys(self.spectral_ranks))
+        if not isinstance(self.spectral_lambdas, (tuple, list)) or not self.spectral_lambdas:
+            raise ValueError("YaqaConfig: `spectral_lambdas` must be a non-empty sequence.")
+        if any(
+            isinstance(strength, bool)
+            or not isinstance(strength, (int, float))
+            or not math.isfinite(float(strength))
+            or float(strength) <= 0
+            for strength in self.spectral_lambdas
+        ):
+            raise ValueError("YaqaConfig: every spectral lambda must be finite and positive.")
+        self.spectral_lambdas = tuple(dict.fromkeys(float(strength) for strength in self.spectral_lambdas))
 
 
 class _SharedTemporaryDirectory:
@@ -5918,6 +5939,13 @@ class QVQConfig(BaseQuantizeConfig):
             self.yaqa.__post_init__()
         else:
             raise TypeError("QVQConfig: `yaqa` must be a YaqaConfig or dictionary.")
+        if self.yaqa.spectral_refinement and (
+            self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
+        ):
+            raise ValueError(
+                "QVQConfig: YAQA spectral refinement currently requires `format=qvq_v2b2_p32` "
+                "with YAQA rounding."
+            )
         self.incoherence = str(self.incoherence).strip().lower()
         if not isinstance(self.module_scale_search, bool):
             raise TypeError("QVQConfig: `module_scale_search` must be boolean.")

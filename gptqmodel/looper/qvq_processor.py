@@ -819,6 +819,9 @@ class QVQProcessor(LoopProcessor):
                 tail_biting_candidates=module_qcfg.tail_biting_candidates,
                 rounding=module_qcfg.rounding,
                 yaqa_v2b2_family_mode=module_qcfg.yaqa.v2b2_family_mode,
+                yaqa_spectral_refinement=module_qcfg.yaqa.spectral_refinement,
+                yaqa_spectral_ranks=module_qcfg.yaqa.spectral_ranks,
+                yaqa_spectral_lambdas=module_qcfg.yaqa.spectral_lambdas,
                 viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
                 telemetry=telemetry,
                 bank_count=module_qcfg.bank_count,
@@ -901,6 +904,13 @@ class QVQProcessor(LoopProcessor):
                 "yaqa_selector_churn": result.yaqa_selector_churn,
                 "yaqa_family_changed": result.yaqa_family_changed,
                 "yaqa_block_family_id": result.yaqa_block_family_id,
+                "yaqa_spectral_selected": result.yaqa_spectral_selected,
+                "yaqa_spectral_rank": result.yaqa_spectral_rank,
+                "yaqa_spectral_lambda": result.yaqa_spectral_lambda,
+                "yaqa_spectral_concentration": result.yaqa_spectral_concentration,
+                "yaqa_spectral_absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
+                "yaqa_spectral_selector_churn": result.yaqa_spectral_selector_churn,
+                "yaqa_spectral_family_changed": result.yaqa_spectral_family_changed,
                 "bank_selected_family_id": (
                     None if result.bank_alt_id is None else int(result.bank_alt_id.reshape(-1)[0].item())
                 ),

@@ -19,6 +19,7 @@ from gptqmodel.quantization.qvq import (
     tail_biting_viterbi_quantize,
     unpack_qvq_binary_bank_ids,
     yaqa_inner_v2b2_p32,
+    yaqa_output_spectral_refine_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
 from scripts.compare_qvq_codecs_llama_qkvo import (
@@ -48,6 +49,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
         "v2b2_p32": True,
         "bank_count": 2,
     }
+    assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
 
 
 def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
@@ -190,6 +192,32 @@ def test_qvq_v2b2_p32_yaqa_family_mode_config_round_trip(family_mode):
     )
     reloaded = QVQConfig.from_quant_config(config.to_dict())
     assert reloaded.yaqa.v2b2_family_mode == family_mode
+
+
+def test_qvq_v2b2_p32_yaqa_spectral_config_round_trip():
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(
+            spectral_refinement=True,
+            spectral_ranks=[4, 8, 4],
+            spectral_lambdas=[0.25, 0.5, 0.25],
+        ),
+        offload_to_disk=False,
+    )
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+    assert reloaded.yaqa.spectral_refinement is True
+    assert reloaded.yaqa.spectral_ranks == (4, 8)
+    assert reloaded.yaqa.spectral_lambdas == (0.25, 0.5)
+
+    with pytest.raises(ValueError, match="requires `format=qvq_v2b2_p32`"):
+        QVQConfig(
+            bits=2,
+            rounding="yaqa",
+            yaqa=YaqaConfig(spectral_refinement=True),
+            offload_to_disk=False,
+        )
 
 
 @pytest.mark.parametrize("family_mode", (None, "unknown"))
@@ -370,6 +398,108 @@ def test_qvq_v2b2_p32_yaqa_pack_reload_and_full_proxy_cannot_regress_v2_yaqa():
     assert torch.equal(banked.trellis, block_control.trellis)
     assert torch.equal(banked.bank_ids, block_control.bank_ids)
     assert torch.equal(banked.bank_alt_id, block_control.bank_alt_id)
+
+
+def test_qvq_v2b2_p32_yaqa_output_spectral_candidate_uses_original_proxy_and_keeps_baseline():
+    source = torch.zeros((8, 8))
+    input_hessian = torch.eye(8)
+    output_hessian = torch.eye(8)
+    baseline_weight = torch.eye(8)
+    states = torch.zeros((1, 32), dtype=torch.long)
+    selectors = torch.zeros(8, dtype=torch.uint8)
+    alt_id = torch.tensor([1], dtype=torch.uint8)
+    baseline = baseline_weight, states, selectors, alt_id
+    codebooks = tuple(torch.full((1,), index, dtype=torch.float32) for index in range(4))
+    boosted_factors = []
+
+    def fake_candidate(_weight, _input, candidate_output, *_args, **_kwargs):
+        boosted_factors.append(candidate_output.clone())
+        value = 0.5 if len(boosted_factors) == 1 else 2.0
+        return (
+            torch.eye(8) * value,
+            states,
+            torch.ones_like(selectors),
+            torch.tensor([2], dtype=torch.uint8),
+        )
+
+    diagnostics = {}
+    with (
+        patch(
+            "gptqmodel.eora.eora._eora_compute_svd",
+            side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix),
+        ),
+        patch("gptqmodel.quantization.qvq.yaqa_inner_v2b2_p32", side_effect=fake_candidate),
+    ):
+        actual = yaqa_output_spectral_refine_v2b2_p32(
+            source,
+            input_hessian,
+            output_hessian,
+            codebooks,
+            baseline,
+            ranks=(1,),
+            lambdas=(0.25, 1.0),
+            bits=2,
+            diagnostics=diagnostics,
+        )
+
+    assert torch.equal(actual[0], torch.eye(8) * 0.5)
+    assert diagnostics["spectral_selected"] is True
+    assert diagnostics["spectral_rank"] == 1
+    assert diagnostics["spectral_lambda"] == 0.25
+    assert diagnostics["spectral_selected_loss"] < diagnostics["spectral_original_loss"]
+    assert diagnostics["spectral_selector_churn"] == 1.0
+    assert diagnostics["spectral_family_changed"] is True
+    assert len(boosted_factors) == 2
+    for strength, boosted in zip((0.25, 1.0), boosted_factors, strict=True):
+        assert float(boosted.trace()) == pytest.approx(8.0 * (1.0 + strength))
+
+
+def test_qvq_v2b2_p32_yaqa_output_spectral_quantization_is_serialization_neutral_and_nonregressive():
+    generator = torch.Generator().manual_seed(20260821)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_samples = torch.randn((37, 16), generator=generator)
+    output_samples = torch.randn((39, 16), generator=generator)
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    baseline = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    refined = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        yaqa_spectral_refinement=True,
+        yaqa_spectral_ranks=(1,),
+        yaqa_spectral_lambdas=(0.25,),
+        trellis_batch_size=1,
+    )
+
+    assert refined.kronecker_proxy_loss <= baseline.kronecker_proxy_loss
+    assert isinstance(refined.yaqa_spectral_selected, bool)
+    assert set(refined.yaqa_spectral_concentration) == {"1"}
+    assert 0.0 <= refined.yaqa_spectral_concentration["1"] <= 1.0 + 1e-5
+    assert set(refined.serialized_tensors()) == set(baseline.serialized_tensors())
+    decoded = reconstruct_qvq_inner_weight(
+        refined.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=refined.serialized_tensors()["bank_ids"],
+        v2b2_p32=True,
+        bank_alt_id=refined.bank_alt_id,
+    )
+    torch.testing.assert_close(decoded, refined.inner_weight, rtol=0, atol=0)
 
 
 def test_qvq_v2b2_p32_fixed_yaqa_uses_matched_block_ldlq_damping_for_family():

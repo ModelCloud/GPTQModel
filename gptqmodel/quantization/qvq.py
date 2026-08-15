@@ -279,6 +279,13 @@ class QVQLinearQuantizationResult:
     yaqa_selector_churn: float | None = None
     yaqa_family_changed: bool | None = None
     yaqa_block_family_id: int | None = None
+    yaqa_spectral_selected: bool | None = None
+    yaqa_spectral_rank: int | None = None
+    yaqa_spectral_lambda: float | None = None
+    yaqa_spectral_concentration: dict[str, float] | None = None
+    yaqa_spectral_absorption_efficiency: float | None = None
+    yaqa_spectral_selector_churn: float | None = None
+    yaqa_spectral_family_changed: bool | None = None
 
     def serialized_tensors(self) -> dict[str, torch.Tensor]:
         """Return checkpoint tensors, rejecting research-only codebooks."""
@@ -3580,6 +3587,149 @@ def yaqa_inner_v2b2_p32(
     )
 
 
+def yaqa_output_spectral_refine_v2b2_p32(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    codebook_library: tuple[torch.Tensor, ...],
+    baseline: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    *,
+    ranks: tuple[int, ...],
+    lambdas: tuple[float, ...],
+    family_mode: str = "reselect",
+    block_input_hessian: torch.Tensor | None = None,
+    factorization: tuple[BlockLDLFactorization, BlockLDLFactorization] | None = None,
+    diagnostics: dict[str, object] | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Refine V2B2-P32 using output modes of its post-YAQA residual.
+
+    The boosted factors generate candidates only. Every candidate is rescored
+    with the original, unmodified YAQA Kronecker objective, and ``baseline``
+    remains the exact rollback artifact. No spectral tensor is serialized.
+    """
+
+    if not ranks or any(isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in ranks):
+        raise ValueError("YAQA spectral ranks must be positive integers.")
+    if not lambdas or any(
+        isinstance(strength, bool)
+        or not isinstance(strength, (int, float))
+        or not math.isfinite(float(strength))
+        or float(strength) <= 0
+        for strength in lambdas
+    ):
+        raise ValueError("YAQA spectral lambdas must be finite and positive.")
+    baseline_weight, _baseline_states, baseline_selectors, baseline_alt_id = baseline
+    source = inner_weight.to(torch.float32)
+    original_input = input_hessian.to(torch.float32)
+    original_output = output_hessian.to(torch.float32)
+    residual = source - baseline_weight.to(torch.float32)
+
+    # For inner orientation E[in, out], YAQA's quadratic is
+    # ||C_I.T @ E @ C_O||_F^2 when H_I=C_I C_I.T and H_O=C_O C_O.T.
+    input_root = torch.linalg.cholesky(original_input)
+    output_root = torch.linalg.cholesky(original_output)
+    whitened_residual = input_root.transpose(0, 1) @ residual @ output_root
+    residual_energy = whitened_residual.square().sum()
+    maximum_rank = min(max(ranks), min(whitened_residual.shape))
+    from ..eora.eora import _eora_compute_svd
+
+    left_vectors, singular_values, right_vectors_h = _eora_compute_svd(
+        whitened_residual,
+        maximum_rank,
+        algo="lowrank",
+    )
+    del left_vectors
+    usable_ranks = tuple(sorted({min(rank, singular_values.numel()) for rank in ranks}))
+    eps = torch.finfo(torch.float32).eps
+    output_trace = original_output.diagonal().sum().clamp_min(eps)
+
+    def original_loss(candidate: torch.Tensor) -> torch.Tensor:
+        error = candidate.to(torch.float32) - source
+        return torch.einsum("ij,ik,kl,lj->", error, original_input, error, original_output)
+
+    best = baseline
+    baseline_loss = original_loss(baseline_weight)
+    best_loss = baseline_loss
+    best_rank = None
+    best_lambda = None
+    best_candidate_diagnostics: dict[str, object] | None = None
+    concentrations = {}
+    top_energies = {}
+    for rank in usable_ranks:
+        top_energy = singular_values[:rank].square().sum()
+        top_energies[rank] = top_energy
+        concentrations[str(rank)] = float((top_energy / residual_energy.clamp_min(eps)).item())
+        output_modes = right_vectors_h[:rank].transpose(0, 1)
+        spectral_output = output_root @ output_modes
+        spectral_output = spectral_output @ spectral_output.transpose(0, 1)
+        spectral_trace = spectral_output.diagonal().sum()
+        if not torch.isfinite(spectral_trace) or spectral_trace <= eps:
+            continue
+        spectral_output = spectral_output * (output_trace / spectral_trace)
+        for strength in lambdas:
+            boosted_output = original_output + float(strength) * spectral_output
+            candidate_factorization = None
+            if factorization is not None:
+                retry_damping = torch.maximum(
+                    boosted_output.diagonal().abs().mean() * YAQA_PAPER_REGULARIZATION,
+                    torch.tensor(eps, device=boosted_output.device),
+                )
+                candidate_factorization = (
+                    factorization[0],
+                    stabilized_block_ldl_factor(
+                        boosted_output,
+                        block_size=factorization[1].block_size,
+                        retry_damping=retry_damping,
+                    ),
+                )
+            candidate_diagnostics: dict[str, object] = {}
+            candidate = yaqa_inner_v2b2_p32(
+                inner_weight,
+                input_hessian,
+                boosted_output,
+                codebook_library,
+                family_mode=family_mode,
+                block_input_hessian=block_input_hessian,
+                diagnostics=candidate_diagnostics,
+                factorization=candidate_factorization,
+                **kwargs,
+            )
+            candidate_loss = original_loss(candidate[0])
+            if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
+                best = candidate
+                best_loss = candidate_loss
+                best_rank = rank
+                best_lambda = float(strength)
+                best_candidate_diagnostics = candidate_diagnostics
+
+    if diagnostics is not None:
+        diagnostics["spectral_concentration"] = concentrations
+        diagnostics["spectral_selected"] = best_rank is not None
+        diagnostics["spectral_rank"] = best_rank
+        diagnostics["spectral_lambda"] = best_lambda
+        diagnostics["spectral_original_loss"] = float(baseline_loss.item())
+        diagnostics["spectral_selected_loss"] = float(best_loss.item())
+        if best_rank is not None:
+            removable = top_energies[best_rank].clamp_min(eps)
+            diagnostics["spectral_absorption_efficiency"] = float(
+                ((baseline_loss - best_loss) / removable).item()
+            )
+            diagnostics["spectral_selector_churn"] = float(
+                (best[2] != baseline_selectors).to(torch.float32).mean().item()
+            )
+            diagnostics["spectral_family_changed"] = bool(
+                int(best[3].item()) != int(baseline_alt_id.item())
+            )
+            if best_candidate_diagnostics is not None:
+                diagnostics.update(best_candidate_diagnostics)
+        else:
+            diagnostics["spectral_absorption_efficiency"] = 0.0
+            diagnostics["spectral_selector_churn"] = 0.0
+            diagnostics["spectral_family_changed"] = False
+    return best
+
+
 def rht_preprocess_weight(
     weight: torch.Tensor,
     SU: torch.Tensor,
@@ -3916,6 +4066,9 @@ def quantize_qvq_linear(
     tail_biting_candidates: int = 1,
     rounding: str = "block_ldlq",
     yaqa_v2b2_family_mode: str = "reselect",
+    yaqa_spectral_refinement: bool = False,
+    yaqa_spectral_ranks: tuple[int, ...] = (8, 16, 32),
+    yaqa_spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0),
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
     trellis_window: int = 16,
@@ -4013,6 +4166,22 @@ def quantize_qvq_linear(
     yaqa_v2b2_family_mode = yaqa_v2b2_family_mode.strip().lower()
     if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
         raise ValueError("QVQ YAQA V2B2 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if not isinstance(yaqa_spectral_refinement, bool):
+        raise TypeError("QVQ YAQA spectral refinement must be boolean.")
+    if not isinstance(yaqa_spectral_ranks, (tuple, list)) or not yaqa_spectral_ranks or any(
+        isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in yaqa_spectral_ranks
+    ):
+        raise ValueError("QVQ YAQA spectral ranks must be a non-empty sequence of positive integers.")
+    yaqa_spectral_ranks = tuple(dict.fromkeys(yaqa_spectral_ranks))
+    if not isinstance(yaqa_spectral_lambdas, (tuple, list)) or not yaqa_spectral_lambdas or any(
+        isinstance(strength, bool)
+        or not isinstance(strength, (int, float))
+        or not math.isfinite(float(strength))
+        or float(strength) <= 0
+        for strength in yaqa_spectral_lambdas
+    ):
+        raise ValueError("QVQ YAQA spectral lambdas must be a non-empty sequence of finite positive values.")
+    yaqa_spectral_lambdas = tuple(dict.fromkeys(float(strength) for strength in yaqa_spectral_lambdas))
     if damp_percent is None:
         damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
@@ -4046,6 +4215,8 @@ def quantize_qvq_linear(
             raise ValueError("YAQA does not support input-Hessian-only module-scale search.")
         if viterbi_objective != "euclidean":
             raise ValueError("YAQA requires the Euclidean PGC16 tile objective.")
+    if yaqa_spectral_refinement and (rounding != "yaqa" or not v2b2_p32):
+        raise ValueError("YAQA output spectral refinement currently requires V2B2-P32 with YAQA rounding.")
     if v2b2_p32 and viterbi_objective != "euclidean":
         raise ValueError("QVQ V2B2-P32 supports the Euclidean Viterbi objective only.")
     if bank_count == 4 and vector_size != 4 and not v2b4_p64:
@@ -4387,6 +4558,27 @@ def quantize_qvq_linear(
 
     with _qvq_phase(telemetry, "baseline_encode", device):
         baseline_encoded = encode_at_scale(scale, include_bank0_oracle=needs_bank0_oracle)
+    if yaqa_spectral_refinement:
+        assert v2b2_p32 and bank_codebooks is not None and transformed_output_hessian is not None
+        with _qvq_phase(telemetry, "yaqa_output_spectral_refinement", device):
+            baseline_encoded = yaqa_output_spectral_refine_v2b2_p32(
+                transformed_weight / scale,
+                transformed_H,
+                transformed_output_hessian,
+                bank_codebooks,
+                baseline_encoded,
+                ranks=yaqa_spectral_ranks,
+                lambdas=yaqa_spectral_lambdas,
+                family_mode=yaqa_v2b2_family_mode,
+                block_input_hessian=block_ldlq_control_H,
+                factorization=prepared_yaqa_factorization,
+                diagnostics=yaqa_bank_diagnostics,
+                bits=bits,
+                trellis_batch_size=trellis_batch_size,
+                tail_biting_candidates=tail_biting_candidates,
+                bank_codebook_pair_stacks=bank_codebook_pair_stacks,
+                telemetry=telemetry,
+            )
     baseline_bank_alt_id = None
     if bank_codebooks is None:
         baseline_inner, baseline_states = baseline_encoded
@@ -4857,6 +5049,37 @@ def quantize_qvq_linear(
         ),
         yaqa_block_family_id=(
             None if "block_family_id" not in yaqa_bank_diagnostics else int(yaqa_bank_diagnostics["block_family_id"])
+        ),
+        yaqa_spectral_selected=(
+            None if "spectral_selected" not in yaqa_bank_diagnostics
+            else bool(yaqa_bank_diagnostics["spectral_selected"])
+        ),
+        yaqa_spectral_rank=(
+            None if yaqa_bank_diagnostics.get("spectral_rank") is None
+            else int(yaqa_bank_diagnostics["spectral_rank"])
+        ),
+        yaqa_spectral_lambda=(
+            None if yaqa_bank_diagnostics.get("spectral_lambda") is None
+            else float(yaqa_bank_diagnostics["spectral_lambda"])
+        ),
+        yaqa_spectral_concentration=(
+            None if "spectral_concentration" not in yaqa_bank_diagnostics
+            else {
+                str(rank): float(value)
+                for rank, value in dict(yaqa_bank_diagnostics["spectral_concentration"]).items()
+            }
+        ),
+        yaqa_spectral_absorption_efficiency=(
+            None if "spectral_absorption_efficiency" not in yaqa_bank_diagnostics
+            else float(yaqa_bank_diagnostics["spectral_absorption_efficiency"])
+        ),
+        yaqa_spectral_selector_churn=(
+            None if "spectral_selector_churn" not in yaqa_bank_diagnostics
+            else float(yaqa_bank_diagnostics["spectral_selector_churn"])
+        ),
+        yaqa_spectral_family_changed=(
+            None if "spectral_family_changed" not in yaqa_bank_diagnostics
+            else bool(yaqa_bank_diagnostics["spectral_family_changed"])
         ),
     )
 
