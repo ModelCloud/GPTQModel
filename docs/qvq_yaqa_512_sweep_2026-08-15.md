@@ -137,3 +137,57 @@ remain valid because each worker had an independent CUDA context and determinist
 are contention measurements and must not be used as single-GPU performance benchmarks. The V2B2-P32+YAQA and
 W3.5 runs used verified per-process masks on dedicated physical GPUs 4--7, so their wall times are valid dedicated-
 GPU measurements.
+
+## W2 eigenspace-boosted YAQA gate on Apple MPS
+
+This follow-up tested whether an EoRA-style, rank-16 post-quant residual subspace could improve the already
+quantized V2B2-P32+YAQA artifact without retaining a runtime low-rank adapter. The second YAQA pass used an
+output-factor boost with `lambda=0.25`; every candidate was accepted or rejected under the original, unboosted
+YAQA objective. The checkpoint payload and inference operations therefore remained ordinary V2B2-P32.
+
+The experiment used the same logical split contract as the CUDA sweep:
+
+- ordinary calibration rows 0--511: 188,256 valid tokens;
+- held-out evaluation rows 512--1023: 172,367 scored tokens;
+- YAQA Sketch-B rows 1024--1535: 163,324 valid tokens;
+- 512 independent full rows per split, batch 1 for calibration/evaluation, no concatenation or truncation;
+- real decoder layers 0--3 and all 16 Q/K/V/O projections;
+- Apple MPS, Torch `2.14.0.dev20260806`, Python 3.10.11, tested code revision `9751f735`.
+
+Two spectral variants were compared:
+
+1. **Fixed family:** preserve the alternative-family ID selected by the baseline Block-LDLQ pass and allow the
+   spectral YAQA pass to change only the V2 state path and P32 selector schedule.
+2. **Family reselection:** evaluate all three alternative-family IDs under spectral YAQA and retain the best
+   complete module result.
+
+| W2 arm | BPW | Weight rel-L2 | Local KL | Live KL | Layer KL | Final KL | JSD | Top-1 | Top-5 | Top-10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| V2+YAQA | 2.00000 | 0.477547 | 0.016999 | 0.018938 | 0.014503 | 0.061113 | 0.014918 | 73.71% | 77.05% | 77.99% |
+| V2B2-P32+YAQA | 2.03125 | 0.467504 | 0.014750 | 0.016619 | 0.013340 | 0.057504 | 0.014054 | 74.41% | 77.62% | 78.47% |
+| + spectral, fixed family | 2.03125 | 0.467144 | 0.014057 | 0.015913 | 0.013278 | 0.057493 | 0.014050 | 74.46% | 77.59% | 78.53% |
+| + spectral, family reselection | 2.03125 | 0.467303 | 0.013140 | 0.015008 | 0.013406 | 0.057525 | 0.014058 | 74.45% | 77.65% | 78.50% |
+
+Relative to V2B2-P32+YAQA, fixed-family refinement changed Final KL by only `-0.019%`, Top-1 by `+0.05`
+percentage points, Top-5 by `-0.03` points, and Top-10 by `+0.05` points. Family reselection changed Final KL by
+`+0.037%`, Top-1 by `+0.04` points, Top-5 by `+0.03` points, and Top-10 by `+0.02` points. These are neutral
+point estimates, not evidence of a material propagated recovery.
+
+### Spectral diagnostics
+
+| Variant | Spectral candidate accepted | Family changed | Mean/median rank-16 concentration | Mean/median absorption | Mean/median selector churn |
+|---|---:|---:|---:|---:|---:|
+| Fixed family | 3/16 modules | 0/16 | 0.200 / 0.138 | 0.027 / 0.000 | 0.088 / 0.000 |
+| Family reselection | 5/16 modules | 4/16 | 0.197 / 0.135 | 0.029 / 0.000 | 0.153 / 0.000 |
+
+The residual was moderately concentrated in a few modules but diffuse overall. More importantly, the codec
+absorbed very little of the continuous rank-16 upper bound: median absorption was zero in both variants. The
+accepted modules often changed 45--50% of their P32 selectors, proving that the second pass crossed discrete
+decision boundaries, but the large local changes did not produce a meaningful final-logit gain.
+
+Family reselection is therefore **not promoted** from this gate. It increased accepted candidates from three to
+five modules and changed four family IDs, yet did not improve Final KL. A full rank/lambda/rate sweep would be a
+poor use of quantization time until a candidate generator demonstrates materially higher absorption under the
+original objective. The next justified experiment is the separately gated spectral-push proposal: use the ideal
+low-rank direction only to generate candidates, retain the original YAQA factors for scoring, and require exact
+fallback to the independently encoded V2B2-P32+YAQA artifact.
