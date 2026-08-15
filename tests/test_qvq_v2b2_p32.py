@@ -37,17 +37,22 @@ from scripts.analyze_gptq_low_bit_grid import (
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
+    _acceptance_logit_metrics,
     _aggregate_qvq_telemetry,
     _all_linear_dependency_stages,
     _install_qvq_prefix_artifact,
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
+    _mlp_layer_groups,
     _padded_batch_chunks,
     _parser,
+    _passes_mlp_acceptance,
     _quantized_linear_modules,
     _save_qvq_prefix_artifact,
     _save_yaqa_factor_cache,
+    _selected_storage_metrics,
     _shared_input_hessian_groups,
+    _select_mlp_layer_candidates,
     _streaming_compare_models,
     _WeightedMetricAccumulator,
     _yaqa_cache_metadata,
@@ -549,6 +554,175 @@ def test_qvq_all_linear_streamed_metrics_use_generic_schema():
     assert metrics["logits"]["streamed_rows"] == 2
 
 
+def _acceptance_metrics(kl: float, topn: float = 0.9, *, finite: bool = True) -> dict:
+    return {
+        "finite": finite,
+        "kl_forward": {"mean": kl},
+        "top1_agreement": topn,
+        "top5_overlap": {"mean": topn},
+        "top10_overlap": {"mean": topn},
+    }
+
+
+def test_qvq_mlp_acceptance_device_reduction_matches_full_reference():
+    generator = torch.Generator().manual_seed(190)
+    dense = torch.randn((2, 3, 17), generator=generator)
+    candidate = dense + 0.2 * torch.randn((2, 3, 17), generator=generator)
+    expected = tensor_metrics(
+        dense.flatten(0, -2),
+        candidate.flatten(0, -2),
+        normalize_distribution=False,
+        include_top10=True,
+    )
+    actual = _acceptance_logit_metrics(dense, candidate)
+
+    assert actual["shape"] == [6, 17]
+    assert actual["finite"] is True
+    assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=1e-7)
+    assert actual["top1_agreement"] == expected["top1_agreement"]
+    assert actual["top5_overlap"]["mean"] == pytest.approx(expected["top5_overlap"]["mean"], abs=1e-7)
+    assert actual["top10_overlap"]["mean"] == pytest.approx(expected["top10_overlap"]["mean"], abs=1e-7)
+
+
+def test_qvq_mlp_acceptance_is_atomic_tree_derived_and_fail_closed():
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList()
+    modules = {}
+    candidates = {}
+    originals = {}
+    for layer_index in range(2):
+        layer = torch.nn.Module()
+        layer.mlp = torch.nn.Module()
+        root.model.layers.append(layer)
+        for role in ("gate_proj", "up_proj", "down_proj"):
+            module = torch.nn.Linear(2, 2, bias=False)
+            setattr(layer.mlp, role, module)
+            name = f"model.layers.{layer_index}.mlp.{role}"
+            modules[name] = module
+            originals[name] = torch.ones_like(module.weight)
+            candidates[name] = torch.full_like(module.weight, 2.0 + layer_index)
+            with torch.no_grad():
+                module.weight.copy_(candidates[name])
+
+    assert _mlp_layer_groups(root, modules) == (
+        (
+            "model.layers.0.mlp.gate_proj",
+            "model.layers.0.mlp.up_proj",
+            "model.layers.0.mlp.down_proj",
+        ),
+        (
+            "model.layers.1.mlp.gate_proj",
+            "model.layers.1.mlp.up_proj",
+            "model.layers.1.mlp.down_proj",
+        ),
+    )
+
+    observed = []
+
+    def evaluate(label):
+        observed.append((label, tuple(float(module.weight.detach()[0, 0]) for module in modules.values())))
+        return {
+            "qkvo_dense_mlp_baseline": _acceptance_metrics(1.0),
+            "mlp_layer_0_gate": _acceptance_metrics(0.85),
+            "mlp_layer_0_up": _acceptance_metrics(0.95),
+            "mlp_layer_0_gate_up": _acceptance_metrics(0.7),
+            "mlp_layer_0_down": _acceptance_metrics(0.9),
+            "mlp_layer_0_gate_down": _acceptance_metrics(0.82),
+            "mlp_layer_0_up_down": _acceptance_metrics(0.88),
+            "mlp_layer_0_full": _acceptance_metrics(0.8),
+            "mlp_layer_1_gate": _acceptance_metrics(1.01),
+            "mlp_layer_1_up": _acceptance_metrics(1.02),
+            "mlp_layer_1_gate_up": _acceptance_metrics(1.1),
+            "mlp_layer_1_down": _acceptance_metrics(1.2),
+            "mlp_layer_1_gate_down": _acceptance_metrics(1.15),
+            "mlp_layer_1_up_down": _acceptance_metrics(1.25),
+            "mlp_layer_1_full": _acceptance_metrics(1.3),
+        }[label]
+
+    selected, report = _select_mlp_layer_candidates(
+        root,
+        modules,
+        candidates,
+        originals,
+        evaluate=evaluate,
+        kl_regression_limit=0.0,
+        topn_regression_limit=0.0,
+    )
+
+    assert [decision["accepted"] for decision in report["decisions"]] == [True, False]
+    assert report["accepted_layers"] == 1
+    assert report["fully_quantized_layers"] == 0
+    assert report["decisions"][0]["selected_variant"] == "gate_up"
+    assert {candidate["variant"] for candidate in report["decisions"][0]["candidates"]} == {
+        "gate", "up", "gate_up", "down", "gate_down", "up_down", "full",
+    }
+    assert all(value == 1.0 for value in observed[0][1])
+    for name in report["decisions"][0]["selected_modules"]:
+        assert torch.equal(selected[name], candidates[name])
+        assert torch.equal(modules[name].weight, candidates[name])
+    assert torch.equal(selected["model.layers.0.mlp.down_proj"], originals["model.layers.0.mlp.down_proj"])
+    for name in report["decisions"][1]["modules"]:
+        assert torch.equal(selected[name], originals[name])
+        assert torch.equal(modules[name].weight, originals[name])
+
+    baseline = _acceptance_metrics(1.0)
+    assert _passes_mlp_acceptance(
+        baseline, _acceptance_metrics(0.9), kl_regression_limit=0.0, topn_regression_limit=0.0
+    )
+    assert _passes_mlp_acceptance(
+        baseline, _acceptance_metrics(1.01), kl_regression_limit=0.01, topn_regression_limit=1.0
+    )
+    assert not _passes_mlp_acceptance(
+        baseline, _acceptance_metrics(1.1), kl_regression_limit=0.01, topn_regression_limit=1.0
+    )
+    assert not _passes_mlp_acceptance(
+        baseline, _acceptance_metrics(float("nan")), kl_regression_limit=1.0, topn_regression_limit=1.0
+    )
+    assert not _passes_mlp_acceptance(
+        baseline,
+        _acceptance_metrics(0.9, finite=False),
+        kl_regression_limit=1.0,
+        topn_regression_limit=1.0,
+    )
+    assert not _passes_mlp_acceptance(
+        baseline,
+        _acceptance_metrics(0.9, topn=0.8),
+        kl_regression_limit=1.0,
+        topn_regression_limit=0.05,
+    )
+
+    storage = _selected_storage_metrics(originals, report, codec_bpw=2.03125)
+    assert storage["target_parameters"] == 24
+    assert storage["quantized_parameters"] == 8
+    assert storage["dense_fallback_parameters"] == 16
+    assert storage["quantized_parameter_fraction"] == pytest.approx(1 / 3)
+    assert storage["selected_effective_bpw"] == pytest.approx((2.03125 + 2 * 16.0) / 3)
+    per_module_bpw = {name: 3.03125 for name in originals}
+    mapped_storage = _selected_storage_metrics(originals, report, codec_bpw=per_module_bpw)
+    assert mapped_storage["selected_effective_bpw"] == pytest.approx((3.03125 + 2 * 16.0) / 3)
+
+    for name, module in modules.items():
+        with torch.no_grad():
+            module.weight.copy_(candidates[name])
+    with pytest.raises(RuntimeError, match="confirmation failed"):
+        _select_mlp_layer_candidates(
+            root,
+            modules,
+            candidates,
+            originals,
+            evaluate=lambda label: (
+                _acceptance_metrics(1.0)
+                if label == "qkvo_dense_mlp_baseline"
+                else (_ for _ in ()).throw(RuntimeError("confirmation failed"))
+            ),
+            kl_regression_limit=0.0,
+            topn_regression_limit=0.0,
+        )
+    for name in report["decisions"][0]["modules"]:
+        assert torch.equal(modules[name].weight, originals[name])
+
+
 def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
     assert ARM_CONFIG["v2-yaqa"]["rounding"] == "yaqa"
     assert ARM_CONFIG["v2b2-p32-yaqa-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
@@ -562,6 +736,17 @@ def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
         )
     )
     assert args.yaqa_batch_size == 8
+    mixed_mlp = _parser().parse_args(
+        (
+            "--model", "model", "--dataset", "dataset", "--output", "report.json",
+            "--module-scope", "all-linear", "--mlp-rate", "4", "--mlp-gate-up-rate", "6",
+            "--mlp-down-rate", "3.5", "--mlp-codec", "v2",
+        )
+    )
+    assert mixed_mlp.mlp_rate == 4
+    assert mixed_mlp.mlp_gate_up_rate == 6
+    assert mixed_mlp.mlp_down_rate == 3.5
+    assert mixed_mlp.mlp_codec == "v2"
     assert (args.calibration_rows, args.evaluation_row_offset, args.yaqa_row_offset) == (512, 512, 1024)
 
     encoded = {

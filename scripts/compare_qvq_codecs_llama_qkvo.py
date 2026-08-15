@@ -189,10 +189,57 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--rates", nargs="+", type=float, default=(1, 1.5, 2, 2.5))
+    parser.add_argument(
+        "--mlp-rate",
+        type=float,
+        help="Optional independent gate/up/down rate for isolating MLP sensitivity while QKVO uses --rates.",
+    )
+    parser.add_argument(
+        "--mlp-gate-up-rate",
+        type=float,
+        help="Optional gate/up rate; overrides --mlp-rate for those same-input projections.",
+    )
+    parser.add_argument(
+        "--mlp-down-rate",
+        type=float,
+        help="Optional down-projection rate; overrides --mlp-rate for the SwiGLU output projection.",
+    )
+    parser.add_argument(
+        "--mlp-codec",
+        choices=("same", "v2"),
+        default="same",
+        help="Use the arm codec or canonical V2 independently for MLP projections.",
+    )
     parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=DEFAULT_ARMS)
     parser.add_argument("--calibration-rows", type=int, default=64)
     parser.add_argument("--evaluation-rows", type=int, default=64)
     parser.add_argument("--evaluation-row-offset", type=int, default=64)
+    parser.add_argument(
+        "--mlp-acceptance-rows",
+        type=int,
+        default=8,
+        help=(
+            "Disjoint full-row final-logit gate used to accept MLP projection subsets atomically; "
+            "set to zero to disable the fail-closed MLP selection."
+        ),
+    )
+    parser.add_argument(
+        "--mlp-acceptance-row-offset",
+        type=int,
+        help="Optional MLP gate row offset; defaults after every calibration/evaluation/YAQA split.",
+    )
+    parser.add_argument(
+        "--mlp-acceptance-topn-regression-limit",
+        type=float,
+        default=0.0025,
+        help="Maximum absolute Top-1/5/10 regression accepted with a non-increasing final-logit KL.",
+    )
+    parser.add_argument(
+        "--mlp-acceptance-kl-regression-limit",
+        type=float,
+        default=0.0,
+        help="Maximum relative final-logit KL increase allowed per accepted MLP layer.",
+    )
     parser.add_argument("--yaqa-rows", type=int, default=512)
     parser.add_argument("--yaqa-row-offset", type=int)
     parser.add_argument("--yaqa-batch-size", type=int, default=8)
@@ -685,11 +732,239 @@ def _all_linear_dependency_stages(
     return tuple(tuple(stage) for stage in stages)
 
 
+def _mlp_layer_groups(
+    model: torch.nn.Module,
+    selected_modules: dict[str, torch.nn.Linear],
+) -> tuple[tuple[str, str, str], ...]:
+    """Return atomic gate/up/down groups from the instantiated decoder tree."""
+
+    selected_names_by_id = {id(module): name for name, module in selected_modules.items()}
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if layers is None:
+        raise ValueError("MLP acceptance requires decoder layers at model.layers")
+    groups = []
+    for layer in layers:
+        mlp = getattr(layer, "mlp", None)
+        if not isinstance(mlp, torch.nn.Module):
+            raise ValueError("MLP acceptance requires an mlp module in every decoder layer")
+        names = tuple(
+            selected_names_by_id.get(id(getattr(mlp, role, None)))
+            for role in ("gate_proj", "up_proj", "down_proj")
+        )
+        if any(name is None for name in names):
+            raise ValueError("MLP acceptance requires selected gate_proj, up_proj, and down_proj modules")
+        groups.append(names)
+    flattened = tuple(name for group in groups for name in group)
+    if len(flattened) != len(set(flattened)) or not set(flattened).issubset(selected_modules):
+        raise ValueError("MLP acceptance groups must cover every selected MLP projection exactly once")
+    return tuple(groups)
+
+
 def _joined(outputs: dict[str, torch.Tensor], names: tuple[str, ...]) -> torch.Tensor:
     rows = {outputs[name].shape[0] for name in names}
     if len(rows) != 1:
         raise ValueError("selected module outputs do not share one held-out token geometry")
     return torch.cat([outputs[name] for name in names], dim=-1)
+
+
+def _passes_mlp_acceptance(
+    baseline: Mapping[str, object],
+    proposal: Mapping[str, object],
+    *,
+    kl_regression_limit: float,
+    topn_regression_limit: float,
+) -> bool:
+    """Fail closed unless final-logit KL is non-increasing and Top-N remains bounded."""
+
+    if kl_regression_limit < 0 or topn_regression_limit < 0:
+        raise ValueError("MLP acceptance regression limits must be non-negative")
+    if not bool(proposal["finite"]):
+        return False
+    baseline_kl = float(baseline["kl_forward"]["mean"])
+    proposal_kl = float(proposal["kl_forward"]["mean"])
+    if (
+        not math.isfinite(baseline_kl)
+        or not math.isfinite(proposal_kl)
+        or proposal_kl > baseline_kl * (1 + kl_regression_limit)
+    ):
+        return False
+    for key in ("top1_agreement", "top5_overlap", "top10_overlap"):
+        baseline_value = baseline[key] if key == "top1_agreement" else baseline[key]["mean"]
+        proposal_value = proposal[key] if key == "top1_agreement" else proposal[key]["mean"]
+        baseline_value = float(baseline_value)
+        proposal_value = float(proposal_value)
+        if not math.isfinite(baseline_value) or not math.isfinite(proposal_value):
+            return False
+        if proposal_value < baseline_value - topn_regression_limit:
+            return False
+    return True
+
+
+@torch.inference_mode()
+def _acceptance_logit_metrics(dense_logits: torch.Tensor, candidate_logits: torch.Tensor) -> dict[str, object]:
+    """Compute only exact acceptance statistics on the producer device."""
+
+    dense = dense_logits.detach().float().reshape(-1, dense_logits.shape[-1])
+    candidate = candidate_logits.detach().float().reshape(-1, candidate_logits.shape[-1])
+    if dense.shape != candidate.shape or dense.shape[0] < 1:
+        raise ValueError(f"acceptance logit shape mismatch: {tuple(dense.shape)} != {tuple(candidate.shape)}")
+    dense_log_prob = F.log_softmax(dense, dim=-1)
+    candidate_log_prob = F.log_softmax(candidate, dim=-1)
+    kl_forward = (dense_log_prob.exp() * (dense_log_prob - candidate_log_prob)).sum(dim=-1)
+    result: dict[str, object] = {
+        "shape": list(dense.shape),
+        "finite": bool(torch.isfinite(candidate).all()),
+        "kl_forward": {"mean": kl_forward.mean().item()},
+        "top1_agreement": (dense.argmax(dim=-1) == candidate.argmax(dim=-1)).float().mean().item(),
+    }
+    for width in (5, 10):
+        effective_width = min(width, dense.shape[-1])
+        dense_topk = dense.topk(effective_width, dim=-1).indices
+        candidate_topk = candidate.topk(effective_width, dim=-1).indices
+        overlap = (
+            (dense_topk.unsqueeze(-1) == candidate_topk.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+        )
+        result[f"top{width}_overlap"] = {"mean": overlap.mean().item()}
+    return result
+
+
+@torch.inference_mode()
+def _streaming_logit_metrics(
+    dense_model: torch.nn.Module,
+    candidate_model: torch.nn.Module,
+    rows: tuple[dict[str, torch.Tensor], ...],
+) -> dict[str, object]:
+    """Compare final logits row by row without retaining full-vocabulary tensors."""
+
+    accumulator = _WeightedMetricAccumulator()
+    for row in rows:
+        dense_logits = dense_model(**row, use_cache=False).logits
+        candidate_logits = candidate_model(**row, use_cache=False).logits
+        if dense_logits.dtype == candidate_logits.dtype == torch.float32:
+            metrics = _acceptance_logit_metrics(dense_logits, candidate_logits)
+        else:
+            # CPU and CUDA top-k may resolve tied FP16/BF16 logits differently.
+            # Preserve the historical CPU ordering for those low-precision ties.
+            metrics = tensor_metrics(
+                dense_logits.detach().cpu().float().flatten(0, -2),
+                candidate_logits.detach().cpu().float().flatten(0, -2),
+                normalize_distribution=False,
+                include_top10=True,
+            )
+        accumulator.add(
+            metrics,
+            rows=dense_logits.numel() // dense_logits.shape[-1],
+        )
+    return accumulator.result()
+
+
+def _select_mlp_layer_candidates(
+    model: torch.nn.Module,
+    selected_modules: dict[str, torch.nn.Linear],
+    candidate_reconstructions: dict[str, torch.Tensor],
+    original_weights: dict[str, torch.Tensor],
+    *,
+    evaluate,
+    kl_regression_limit: float,
+    topn_regression_limit: float,
+) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
+    """Greedily add downstream-safe MLP projection subsets with atomic rollback."""
+
+    groups = _mlp_layer_groups(model, selected_modules)
+    selected_reconstructions = dict(candidate_reconstructions)
+    with torch.no_grad():
+        for group in groups:
+            for name in group:
+                module = selected_modules[name]
+                dense = original_weights[name]
+                module.weight.copy_(dense.to(device=module.weight.device, dtype=module.weight.dtype))
+                selected_reconstructions[name] = dense
+    initial_baseline = evaluate("qkvo_dense_mlp_baseline")
+    baseline = initial_baseline
+    decisions = []
+    for layer_index, group in enumerate(groups):
+        # SwiGLU's three projections are not interchangeable: gate and up are
+        # multiplied after the nonlinearity, while down consumes that product.
+        # Evaluate every non-empty subset so one harmful projection cannot
+        # force an otherwise safe projection back to dense.
+        candidate_specs = (
+            ("gate", group[:1]),
+            ("up", group[1:2]),
+            ("gate_up", group[:2]),
+            ("down", group[2:]),
+            ("gate_down", (group[0], group[2])),
+            ("up_down", group[1:]),
+            ("full", group),
+        )
+        candidate_reports = []
+        try:
+            for variant, candidate_names in candidate_specs:
+                with torch.no_grad():
+                    for name in group:
+                        module = selected_modules[name]
+                        weight = (
+                            candidate_reconstructions[name]
+                            if name in candidate_names
+                            else original_weights[name]
+                        )
+                        module.weight.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
+                proposal = evaluate(f"mlp_layer_{layer_index}_{variant}")
+                accepted = _passes_mlp_acceptance(
+                    baseline,
+                    proposal,
+                    kl_regression_limit=kl_regression_limit,
+                    topn_regression_limit=topn_regression_limit,
+                )
+                candidate_reports.append(
+                    {
+                        "variant": variant,
+                        "modules": list(candidate_names),
+                        "accepted": accepted,
+                        "metrics": proposal,
+                    }
+                )
+        except BaseException:
+            with torch.no_grad():
+                for name in group:
+                    module = selected_modules[name]
+                    dense = original_weights[name]
+                    module.weight.copy_(dense.to(device=module.weight.device, dtype=module.weight.dtype))
+                    selected_reconstructions[name] = dense
+            raise
+        eligible = [candidate for candidate in candidate_reports if candidate["accepted"]]
+        selected_candidate = min(
+            eligible,
+            key=lambda candidate: float(candidate["metrics"]["kl_forward"]["mean"]),
+            default=None,
+        )
+        selected_names = set() if selected_candidate is None else set(selected_candidate["modules"])
+        with torch.no_grad():
+            for name in group:
+                module = selected_modules[name]
+                weight = candidate_reconstructions[name] if name in selected_names else original_weights[name]
+                module.weight.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
+                selected_reconstructions[name] = weight
+        if selected_candidate is not None:
+            baseline = selected_candidate["metrics"]
+        decisions.append(
+            {
+                "layer": layer_index,
+                "modules": list(group),
+                "accepted": selected_candidate is not None,
+                "selected_variant": None if selected_candidate is None else selected_candidate["variant"],
+                "selected_modules": list(selected_names),
+                "candidates": candidate_reports,
+            }
+        )
+    return selected_reconstructions, {
+        "enabled": True,
+        "initial_qkvo_dense_mlp": initial_baseline,
+        "selected": baseline,
+        "accepted_layers": sum(int(decision["accepted"]) for decision in decisions),
+        "fully_quantized_layers": sum(decision["selected_variant"] == "full" for decision in decisions),
+        "total_layers": len(decisions),
+        "decisions": decisions,
+    }
 
 
 def _weight_metrics(dense: torch.Tensor, quantized: torch.Tensor) -> dict[str, float]:
@@ -700,6 +975,43 @@ def _weight_metrics(dense: torch.Tensor, quantized: torch.Tensor) -> dict[str, f
         "mse": error.square().mean().item(),
         "relative_l2": (error_norm / dense_norm).item(),
         "sqnr_db": (20 * torch.log10(dense_norm / error_norm.clamp_min(torch.finfo(torch.float64).eps))).item(),
+    }
+
+
+def _selected_storage_metrics(
+    original_weights: dict[str, torch.Tensor],
+    mlp_acceptance_report: Mapping[str, object],
+    *,
+    codec_bpw: float | Mapping[str, float],
+    dense_bpw: float = 16.0,
+) -> dict[str, float | int]:
+    """Account for dense MLP rollback separately from the codec's nominal BPW."""
+
+    quantized_names = set(original_weights)
+    if bool(mlp_acceptance_report.get("enabled", False)):
+        mlp_names = {
+            name
+            for decision in mlp_acceptance_report["decisions"]
+            for name in decision["modules"]
+        }
+        quantized_names.difference_update(mlp_names)
+        for decision in mlp_acceptance_report["decisions"]:
+            quantized_names.update(decision["selected_modules"])
+    total_parameters = sum(weight.numel() for weight in original_weights.values())
+    quantized_parameters = sum(original_weights[name].numel() for name in quantized_names)
+    dense_parameters = total_parameters - quantized_parameters
+    quantized_bits = sum(
+        original_weights[name].numel()
+        * (float(codec_bpw[name]) if isinstance(codec_bpw, Mapping) else codec_bpw)
+        for name in quantized_names
+    )
+    return {
+        "target_parameters": total_parameters,
+        "quantized_parameters": quantized_parameters,
+        "dense_fallback_parameters": dense_parameters,
+        "quantized_parameter_fraction": quantized_parameters / total_parameters,
+        "dense_fallback_parameter_fraction": dense_parameters / total_parameters,
+        "selected_effective_bpw": (quantized_bits + dense_parameters * dense_bpw) / total_parameters,
     }
 
 
@@ -974,6 +1286,12 @@ def main() -> None:
         raise ValueError("--prepare-yaqa-only requires --yaqa-factor-cache")
     if args.evaluation_row_offset < args.calibration_rows:
         raise ValueError("evaluation rows must be disjoint from calibration rows")
+    if args.mlp_acceptance_rows < 0:
+        raise ValueError("MLP acceptance row count must be non-negative")
+    if args.mlp_acceptance_topn_regression_limit < 0:
+        raise ValueError("MLP acceptance Top-N regression limit must be non-negative")
+    if args.mlp_acceptance_kl_regression_limit < 0:
+        raise ValueError("MLP acceptance KL regression limit must be non-negative")
     yaqa_enabled = any(ARM_CONFIG[arm].get("rounding") == "yaqa" for arm in args.arms)
     yaqa_row_offset = (
         args.evaluation_row_offset + args.evaluation_rows if args.yaqa_row_offset is None else args.yaqa_row_offset
@@ -984,7 +1302,41 @@ def main() -> None:
         or yaqa_row_offset < args.evaluation_row_offset + args.evaluation_rows
     ):
         raise ValueError("YAQA rows must be positive and disjoint from calibration and evaluation rows")
+    occupied_row_end = max(
+        args.calibration_rows,
+        args.evaluation_row_offset + args.evaluation_rows,
+        yaqa_row_offset + args.yaqa_rows if yaqa_enabled else 0,
+    )
+    mlp_acceptance_enabled = args.module_scope == "all-linear" and args.mlp_acceptance_rows > 0
+    mlp_acceptance_row_offset = (
+        occupied_row_end if args.mlp_acceptance_row_offset is None else args.mlp_acceptance_row_offset
+    )
+    if mlp_acceptance_enabled:
+        acceptance_interval = range(
+            mlp_acceptance_row_offset,
+            mlp_acceptance_row_offset + args.mlp_acceptance_rows,
+        )
+        occupied_intervals = [
+            range(0, args.calibration_rows),
+            range(args.evaluation_row_offset, args.evaluation_row_offset + args.evaluation_rows),
+        ]
+        if yaqa_enabled:
+            occupied_intervals.append(range(yaqa_row_offset, yaqa_row_offset + args.yaqa_rows))
+        if any(
+            acceptance_interval.start < interval.stop and interval.start < acceptance_interval.stop
+            for interval in occupied_intervals
+        ):
+            raise ValueError("MLP acceptance rows must be disjoint from calibration, evaluation, and YAQA rows")
     rates = tuple(normalize_qvq_rate(rate) for rate in args.rates)
+    mlp_rate = None if args.mlp_rate is None else normalize_qvq_rate(args.mlp_rate)
+    mlp_gate_up_rate = (
+        mlp_rate if args.mlp_gate_up_rate is None else normalize_qvq_rate(args.mlp_gate_up_rate)
+    )
+    mlp_down_rate = mlp_rate if args.mlp_down_rate is None else normalize_qvq_rate(args.mlp_down_rate)
+    if args.module_scope != "all-linear" and any(
+        value is not None for value in (mlp_rate, mlp_gate_up_rate, mlp_down_rate)
+    ):
+        raise ValueError("MLP rate overrides require --module-scope all-linear")
     device = torch.device(args.device)
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS is unavailable")
@@ -1008,6 +1360,15 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     modules = _quantized_linear_modules(model, layer_count=args.layers, module_scope=args.module_scope)
+    mlp_groups = _mlp_layer_groups(model, modules) if args.module_scope == "all-linear" else ()
+    mlp_module_names = {name for group in mlp_groups for name in group}
+    mlp_rate_by_name: dict[str, float] = {}
+    for gate_name, up_name, down_name in mlp_groups:
+        if mlp_gate_up_rate is not None:
+            mlp_rate_by_name[gate_name] = mlp_gate_up_rate
+            mlp_rate_by_name[up_name] = mlp_gate_up_rate
+        if mlp_down_rate is not None:
+            mlp_rate_by_name[down_name] = mlp_down_rate
     module_names = tuple(modules)
     module_shapes = {name: list(module.weight.shape) for name, module in modules.items()}
     yaqa_input_hessians = {}
@@ -1116,6 +1477,17 @@ def main() -> None:
         max_length=args.max_length,
     )
     evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
+    mlp_acceptance_rows = ()
+    mlp_acceptance_stats = None
+    if mlp_acceptance_enabled:
+        mlp_acceptance, mlp_acceptance_stats = load_nm_evaluation_batch(
+            tokenizer,
+            dataset_path=args.dataset,
+            row_offset=mlp_acceptance_row_offset,
+            rows=args.mlp_acceptance_rows,
+            max_length=args.max_length,
+        )
+        mlp_acceptance_rows = _unpadded_evaluation_rows(mlp_acceptance, device)
 
     print(f"Capturing {args.module_scope} calibration Hessians", flush=True)
     staged_all_linear = args.module_scope == "all-linear" and args.all_linear_hessian_mode != "dense-frozen"
@@ -1165,6 +1537,10 @@ def main() -> None:
             "modules": list(module_names),
             "module_shapes": module_shapes,
             "rates": list(rates),
+            "mlp_rate": mlp_rate,
+            "mlp_gate_up_rate": mlp_gate_up_rate,
+            "mlp_down_rate": mlp_down_rate,
+            "mlp_codec": args.mlp_codec,
             "arms": list(args.arms),
             "seed": args.seed,
             "device": str(device),
@@ -1187,6 +1563,14 @@ def main() -> None:
             "evaluation": evaluation_stats,
             "evaluation_batch_size": 1,
             "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
+            "mlp_acceptance": mlp_acceptance_stats,
+            "mlp_acceptance_execution": (
+                "atomic per-layer projection-subset final-logit gate against the QKVO+dense-MLP baseline"
+                if mlp_acceptance_enabled
+                else "disabled"
+            ),
+            "mlp_acceptance_topn_regression_limit": args.mlp_acceptance_topn_regression_limit,
+            "mlp_acceptance_kl_regression_limit": args.mlp_acceptance_kl_regression_limit,
             "yaqa_sketch_b": yaqa_stats,
             "yaqa_spectral_ranks": list(args.yaqa_spectral_ranks),
             "yaqa_spectral_lambdas": list(args.yaqa_spectral_lambdas),
@@ -1210,6 +1594,12 @@ def main() -> None:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 continue
+            if (
+                geometry.get("v2b2_p32")
+                and args.mlp_codec == "same"
+                and any(module_rate > 3.5 for module_rate in mlp_rate_by_name.values())
+            ):
+                raise ValueError("V2B2-P32 MLP rate must be W1 through W3.5")
             rounding = geometry.get("rounding", "block_ldlq")
             if geometry.get("yaqa_spectral_refinement", False):
                 geometry["yaqa_spectral_ranks"] = tuple(args.yaqa_spectral_ranks)
@@ -1298,6 +1688,18 @@ def main() -> None:
 
                 for name in stage_names:
                     module = modules[name]
+                    is_mlp = name in mlp_module_names
+                    module_rate = mlp_rate_by_name.get(name, rate)
+                    module_geometry = dict(geometry)
+                    if is_mlp and args.mlp_codec == "v2":
+                        module_geometry.update(vector_size=2, trellis_window=16, dual_v2=False, bank_count=1)
+                        for flag in ("v2b2_p32", "v2b4_p64"):
+                            module_geometry.pop(flag, None)
+                    module_batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
+                        module_rate,
+                        device,
+                        trellis_window=module_geometry["trellis_window"],
+                    )
                     completed_modules += 1
                     module_started = time.perf_counter()
                     module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
@@ -1323,15 +1725,15 @@ def main() -> None:
                     result = quantize_qvq_linear(
                         original_weights[name].to(device),
                         quantization_hessian,
-                        bits=rate,
+                        bits=module_rate,
                         output_hessian=(
                             stage_output_hessians[name].to(device) if rounding == "yaqa" else None
                         ),
                         seed=args.seed,
-                        trellis_batch_size=batch_size,
+                        trellis_batch_size=module_batch_size,
                         input_hessian_preparation=input_preparation,
                         telemetry=module_telemetry,
-                        **geometry,
+                        **module_geometry,
                     )
                     if rounding != "yaqa":
                         shared_hessian_remaining[source_key] -= 1
@@ -1343,6 +1745,7 @@ def main() -> None:
                     weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
                     weight_metrics[name]["shape"] = list(original_weights[name].shape)
                     weight_metrics[name]["parameter_count"] = original_weights[name].numel()
+                    weight_metrics[name]["rate"] = module_rate
                     weight_metrics[name]["qvq_telemetry"] = result.telemetry
                     weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
                     weight_metrics[name]["kronecker_proxy_loss"] = (
@@ -1372,7 +1775,7 @@ def main() -> None:
                         alternative_bank_histogram[int(result.bank_alt_id.item())] += 1
                     print(
                         f"W{rate:g} {arm}: {completed_modules}/{len(modules)} {name} "
-                        f"in {time.perf_counter() - module_started:.2f}s",
+                        f"at W{module_rate:g} in {time.perf_counter() - module_started:.2f}s",
                         flush=True,
                     )
                     if result.telemetry is not None:
@@ -1404,6 +1807,41 @@ def main() -> None:
             with torch.no_grad():
                 for name, module in modules.items():
                     module.weight.copy_(reconstructions[name].to(device=device, dtype=module.weight.dtype))
+            mlp_acceptance_report = {"enabled": False}
+            if mlp_acceptance_enabled:
+
+                def evaluate_mlp_candidate(label: str) -> dict[str, object]:
+                    metrics = _streaming_logit_metrics(dense_model, model, mlp_acceptance_rows)
+                    print(
+                        f"W{rate:g} {arm} MLP gate {label}: "
+                        f"KL={metrics['kl_forward']['mean']:.6f} "
+                        f"top1={metrics['top1_agreement']:.4f} "
+                        f"top5={metrics['top5_overlap']['mean']:.4f} "
+                        f"top10={metrics['top10_overlap']['mean']:.4f}",
+                        flush=True,
+                    )
+                    return metrics
+
+                candidate_reconstructions = reconstructions
+                reconstructions, mlp_acceptance_report = _select_mlp_layer_candidates(
+                    model,
+                    modules,
+                    candidate_reconstructions,
+                    original_weights,
+                    evaluate=evaluate_mlp_candidate,
+                    kl_regression_limit=args.mlp_acceptance_kl_regression_limit,
+                    topn_regression_limit=args.mlp_acceptance_topn_regression_limit,
+                )
+                for decision in mlp_acceptance_report["decisions"]:
+                    selected_mlp_modules = set(decision["selected_modules"])
+                    for name in decision["modules"]:
+                        metrics = weight_metrics[name]
+                        metrics["candidate_weight"] = {
+                            key: metrics[key] for key in ("mse", "relative_l2", "sqnr_db")
+                        }
+                        metrics.update(_weight_metrics(original_weights[name], reconstructions[name]))
+                        metrics["mlp_quantized"] = name in selected_mlp_modules
+                        metrics["mlp_selected_variant"] = decision["selected_variant"]
             streamed_metrics = _streaming_compare_models(
                 dense_model,
                 model,
@@ -1415,17 +1853,46 @@ def main() -> None:
                 progress_label=f"W{rate:g} {arm}",
                 module_scope=args.module_scope,
             )
+            selector_bpw = 2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0
+            codec_bpw = rate + selector_bpw
+            codec_bpw_by_name = {
+                name: (
+                    mlp_rate_by_name.get(name, rate)
+                    + (0 if args.mlp_codec == "v2" else selector_bpw)
+                    if name in mlp_module_names
+                    else codec_bpw
+                )
+                for name in original_weights
+            }
+            storage_metrics = _selected_storage_metrics(
+                original_weights,
+                mlp_acceptance_report,
+                codec_bpw=codec_bpw_by_name,
+            )
             arm_report = {
                 "seconds": time.perf_counter() - started,
                 "trellis_batch_size": batch_size,
                 "rounding": rounding,
                 "hessian_mode": args.all_linear_hessian_mode if args.module_scope == "all-linear" else "dense-frozen",
                 "quantization_stages": stage_reports,
-                "effective_bpw": rate + (2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0),
+                "effective_bpw": codec_bpw,
+                "mlp_effective_bpw": (
+                    None
+                    if mlp_rate is None
+                    else mlp_rate + (0 if args.mlp_codec == "v2" else selector_bpw)
+                ),
+                "mlp_effective_bpw_by_role": {
+                    "gate_up": (mlp_gate_up_rate if mlp_gate_up_rate is not None else rate)
+                    + (0 if args.mlp_codec == "v2" else selector_bpw),
+                    "down": (mlp_down_rate if mlp_down_rate is not None else rate)
+                    + (0 if args.mlp_codec == "v2" else selector_bpw),
+                },
+                "selected_storage": storage_metrics,
                 "bank_selectors": _selector_metrics(selector_histogram),
                 "module_alternative_bank_histogram": (
                     alternative_bank_histogram if geometry.get("v2b2_p32") else None
                 ),
+                "mlp_acceptance": mlp_acceptance_report,
                 "qvq_telemetry": _aggregate_qvq_telemetry(weight_metrics) if args.qvq_telemetry else None,
                 "weight": {
                     "modules": weight_metrics,
