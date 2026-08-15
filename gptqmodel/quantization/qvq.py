@@ -1358,7 +1358,6 @@ def _batched_v2_banked_viterbi_quantize(
 
     overlap_bits = 16 - shift
     overlap_i64 = None
-    costs = emission(0)
     if overlap is not None:
         if overlap.device != sequences.device or overlap.ndim != 1 or overlap.shape[0] != batch_size:
             raise ValueError("QVQ banked V2 overlap must have shape `[batch]` on the sequence device.")
@@ -1367,6 +1366,38 @@ def _batched_v2_banked_viterbi_quantize(
         overlap_i64 = overlap.to(torch.long)
         if torch.any((overlap_i64 < 0) | (overlap_i64 >= 1 << overlap_bits)):
             raise ValueError("QVQ banked V2 overlap is outside the legal retained-state range.")
+
+    if (
+        sequences.device.type == "cuda"
+        and work_dtype == torch.float32
+        and sequences.dtype == torch.float32
+        and codebooks.dtype in (torch.float16, torch.float32)
+        and sequences.is_contiguous()
+        and codebooks.is_contiguous()
+        and torch.cuda.get_device_capability(sequences.device) >= (8, 0)
+    ):
+        from ..utils.qvq_cuda import qvq_cuda_viterbi_v2_segment_banked
+
+        native_weights = None if step_weights is None else step_weights.to(torch.float32).contiguous()
+        native_overlap = None if overlap_i64 is None else overlap_i64.contiguous()
+        native_states, native_loss, segment_bank_ids = qvq_cuda_viterbi_v2_segment_banked(
+            sequences,
+            codebooks,
+            bits,
+            segment_steps,
+            native_overlap,
+            native_weights,
+        )
+        path_banks = segment_bank_ids.to(torch.long).repeat_interleave(segment_steps, dim=1)
+        return BankedTrellisQuantizationResult(
+            states=native_states,
+            values=codebooks[path_banks, native_states],
+            squared_error=native_loss,
+            segment_bank_ids=segment_bank_ids,
+        )
+
+    costs = emission(0)
+    if overlap_i64 is not None:
         allowed_start = (state_ids.unsqueeze(0) >> shift) == overlap_i64.unsqueeze(1)
         costs = costs.masked_fill(~allowed_start[:, None, :], torch.inf)
 
@@ -2077,6 +2108,7 @@ def _block_ldlq_inner_v2_banked(
     tail_biting_candidates: int = 1,
     telemetry: QVQQuantizationTelemetry | None = None,
     factorization: tuple[torch.Tensor, torch.Tensor] | None = None,
+    bank0_oracle: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sequential Block-LDLQ using a coupled segmented V2 recurrence.
 
@@ -2109,19 +2141,27 @@ def _block_ldlq_inner_v2_banked(
     shared_factorization = (
         block_ldl_factor(H.to(torch.float32), block_size=tile_rows) if factorization is None else factorization
     )
-    bank0_weight, bank0_states = block_ldlq_inner(
-        inner_weight,
-        H,
-        codebooks[0],
-        bits=bits,
-        tile_rows=tile_rows,
-        tile_cols=tile_cols,
-        trellis_batch_size=trellis_batch_size,
-        viterbi_objective=viterbi_objective,
-        tail_biting_candidates=tail_biting_candidates,
-        telemetry=telemetry,
-        factorization=shared_factorization,
-    )
+    if bank0_oracle is None:
+        bank0_weight, bank0_states = block_ldlq_inner(
+            inner_weight,
+            H,
+            codebooks[0],
+            bits=bits,
+            tile_rows=tile_rows,
+            tile_cols=tile_cols,
+            trellis_batch_size=trellis_batch_size,
+            viterbi_objective=viterbi_objective,
+            tail_biting_candidates=tail_biting_candidates,
+            telemetry=telemetry,
+            factorization=shared_factorization,
+        )
+    else:
+        bank0_weight, bank0_states = bank0_oracle
+        if tuple(bank0_weight.shape) != tuple(inner_weight.shape):
+            raise ValueError("QVQ banked V2 bank-zero oracle weight has an invalid shape.")
+        expected_state_shape = ((in_features // tile_rows) * (out_features // tile_cols), 128)
+        if tuple(bank0_states.shape) != expected_state_shape:
+            raise ValueError("QVQ banked V2 bank-zero oracle states have an invalid shape.")
     L, D = shared_factorization
     feedback = L.clone()
     feedback.diagonal().sub_(1)
@@ -2284,6 +2324,7 @@ def block_ldlq_inner_v2b2_p32(
             (codebook_library[0], codebook_library[alt_id]),
             segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
             factorization=factorization,
+            bank0_oracle=(bank0_weight, bank0_states),
             **kwargs,
         )
         candidate_loss = full_loss(candidate_weight)

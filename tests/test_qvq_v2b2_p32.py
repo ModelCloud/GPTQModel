@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -8,6 +10,7 @@ from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.config import FORMAT, QVQConfig
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+    block_ldlq_inner,
     pack_qvq_binary_bank_ids,
     pack_trellis_states,
     quantize_qvq_linear,
@@ -201,6 +204,22 @@ def test_qvq_v2b2_p32_full_proxy_cannot_regress_independent_v2_oracle():
     assert banked.proxy_loss <= canonical.proxy_loss
     assert banked.bank_ids is not None
     assert banked.bank_alt_id is not None
+
+
+def test_qvq_v2b2_p32_reuses_one_canonical_block_ldlq_oracle():
+    generator = torch.Generator().manual_seed(20260816)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    hessian = torch.eye(16)
+    with patch("gptqmodel.quantization.qvq.block_ldlq_inner", wraps=block_ldlq_inner) as canonical:
+        quantize_qvq_linear(
+            weight,
+            hessian,
+            bits=2,
+            bank_count=2,
+            v2b2_p32=True,
+            trellis_batch_size=1,
+        )
+    assert canonical.call_count == 1
 
 
 @pytest.mark.parametrize("alt_id", (0, 4))

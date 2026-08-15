@@ -696,6 +696,192 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
   }
 }
 
+// Coupled segmented-bank V2 recurrence used by V2B2-P32 and V2B4-P64.
+//
+// A selector is constant for SegmentSteps transitions.  Inside a segment the
+// recurrence minimizes predecessor prefixes within the current bank.  At a
+// segment boundary it additionally minimizes the predecessor bank, with the
+// flattened (bank, prefix) ordering matching torch.min exactly: bank zero and
+// then the lowest prefix win exact ties.  Costs remain in global workspace so
+// W1's four-bank 4x65536 state frontier does not exceed A100 shared memory;
+// one persistent CTA per sequence removes the 128 Python/Torch launch chain.
+template <int Shift, typename CodebookScalar>
+__global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
+    const float* __restrict__ sequences,
+    const CodebookScalar* __restrict__ codebooks,
+    const float* __restrict__ codebook_norms,
+    const int64_t* __restrict__ overlap,
+    const float* __restrict__ step_weights,
+    float* __restrict__ costs_a,
+    float* __restrict__ costs_b,
+    float* __restrict__ reduced,
+    uint8_t* __restrict__ backpointers,
+    int64_t* __restrict__ states,
+    uint8_t* __restrict__ segment_bank_ids,
+    float* __restrict__ squared_error,
+    int steps,
+    int bank_count,
+    int segment_steps,
+    bool constrained,
+    bool weighted) {
+  constexpr int shift = Shift;
+  constexpr int prefix_count = 1 << shift;
+  constexpr int suffix_count = 1 << (16 - shift);
+  constexpr int overlap_mask = suffix_count - 1;
+
+  __shared__ float partial_value[kThreads];
+  __shared__ int partial_index[kThreads];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int batch = static_cast<int>(blockIdx.x);
+  const int bank_state_count = bank_count * kStateCount;
+  const int bank_suffix_count = bank_count * suffix_count;
+  const int segment_count = steps / segment_steps;
+  const int required_overlap = constrained ? static_cast<int>(overlap[batch]) : 0;
+  const int64_t sequence_base = static_cast<int64_t>(batch) * steps * 2;
+  const int64_t cost_base = static_cast<int64_t>(batch) * bank_state_count;
+  const int64_t reduced_base = static_cast<int64_t>(batch) * bank_suffix_count;
+  const int64_t pointer_base = static_cast<int64_t>(batch) * (steps - 1) * bank_suffix_count;
+  const int64_t state_base = static_cast<int64_t>(batch) * steps;
+  const int64_t selector_base = static_cast<int64_t>(batch) * segment_count;
+  float* current_costs = costs_a + cost_base;
+  float* next_costs = costs_b + cost_base;
+  float* batch_reduced = reduced + reduced_base;
+
+  // Step zero retains one complete state frontier per bank.  The constrained
+  // pass applies the same start-state suffix rule as the eager recurrence.
+  {
+    const float* target = sequences + sequence_base;
+    const float weight = weighted ? step_weights[static_cast<int64_t>(batch) * steps] : 1.0f;
+    const float target_norm = __fadd_rn(
+        __fmul_rn(target[0], target[0]),
+        __fmul_rn(target[1], target[1]));
+    for (int flat = thread; flat < bank_state_count; flat += kThreads) {
+      const int bank = flat / kStateCount;
+      const int state = flat - bank * kStateCount;
+      const CodebookScalar* bank_codebook = codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
+      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      float value = emission<2, CodebookScalar>(
+          target, bank_codebook, bank_norm, state, weight, target_norm);
+      if (constrained && (state >> shift) != required_overlap) {
+        value = CUDART_INF_F;
+      }
+      current_costs[flat] = value;
+    }
+  }
+  __syncthreads();
+
+  for (int step = 1; step < steps; ++step) {
+    const bool boundary = step % segment_steps == 0;
+
+    // Reduce the predecessor frontier to one cost per retained suffix.  At a
+    // boundary the bank-major loop order is the public deterministic contract.
+    for (int flat = thread; flat < bank_suffix_count; flat += kThreads) {
+      const int current_bank = flat / suffix_count;
+      const int suffix = flat - current_bank * suffix_count;
+      float best = CUDART_INF_F;
+      int best_pointer = 0;
+      const int first_bank = boundary ? 0 : current_bank;
+      const int last_bank = boundary ? bank_count : current_bank + 1;
+      for (int previous_bank = first_bank; previous_bank < last_bank; ++previous_bank) {
+        #pragma unroll
+        for (int prefix = 0; prefix < prefix_count; ++prefix) {
+          const int predecessor_state = prefix * suffix_count + suffix;
+          const float candidate = current_costs[previous_bank * kStateCount + predecessor_state];
+          const int candidate_pointer = boundary ? previous_bank * prefix_count + prefix : prefix;
+          if (lower_pair(candidate, candidate_pointer, best, best_pointer)) {
+            best = candidate;
+            best_pointer = candidate_pointer;
+          }
+        }
+      }
+      batch_reduced[flat] = best;
+      backpointers[pointer_base +
+                   static_cast<int64_t>(step - 1) * bank_suffix_count + flat] =
+          static_cast<uint8_t>(best_pointer);
+    }
+    __syncthreads();
+
+    const float* target = sequences + sequence_base + static_cast<int64_t>(step) * 2;
+    const float weight = weighted
+        ? step_weights[static_cast<int64_t>(batch) * steps + step]
+        : 1.0f;
+    const float target_norm = __fadd_rn(
+        __fmul_rn(target[0], target[0]),
+        __fmul_rn(target[1], target[1]));
+    for (int flat = thread; flat < bank_state_count; flat += kThreads) {
+      const int bank = flat / kStateCount;
+      const int state = flat - bank * kStateCount;
+      const int predecessor_suffix = state >> shift;
+      const CodebookScalar* bank_codebook = codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
+      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      next_costs[flat] = __fadd_rn(
+          batch_reduced[bank * suffix_count + predecessor_suffix],
+          emission<2, CodebookScalar>(
+              target, bank_codebook, bank_norm, state, weight, target_norm));
+    }
+    __syncthreads();
+    float* swap = current_costs;
+    current_costs = next_costs;
+    next_costs = swap;
+  }
+
+  float best = CUDART_INF_F;
+  int best_flat = bank_state_count;
+  for (int flat = thread; flat < bank_state_count; flat += kThreads) {
+    const int state = flat % kStateCount;
+    float candidate = current_costs[flat];
+    if (constrained && (state & overlap_mask) != required_overlap) {
+      candidate = CUDART_INF_F;
+    }
+    if (lower_pair(candidate, flat, best, best_flat)) {
+      best = candidate;
+      best_flat = flat;
+    }
+  }
+  partial_value[thread] = best;
+  partial_index[thread] = best_flat;
+  __syncthreads();
+
+  if (thread == 0) {
+    for (int candidate_thread = 1; candidate_thread < kThreads; ++candidate_thread) {
+      if (lower_pair(
+              partial_value[candidate_thread], partial_index[candidate_thread],
+              best, best_flat)) {
+        best = partial_value[candidate_thread];
+        best_flat = partial_index[candidate_thread];
+      }
+    }
+    squared_error[batch] = best;
+    int current_bank = best_flat / kStateCount;
+    int current_state = best_flat - current_bank * kStateCount;
+    states[state_base + steps - 1] = current_state;
+    if ((steps - 1) % segment_steps == 0) {
+      segment_bank_ids[selector_base + (steps - 1) / segment_steps] =
+          static_cast<uint8_t>(current_bank);
+    }
+    for (int step = steps - 1; step > 0; --step) {
+      const int predecessor_suffix = current_state >> shift;
+      const uint8_t pointer = backpointers[
+          pointer_base + static_cast<int64_t>(step - 1) * bank_suffix_count +
+          current_bank * suffix_count + predecessor_suffix];
+      int prefix;
+      if (step % segment_steps == 0) {
+        current_bank = static_cast<int>(pointer) / prefix_count;
+        prefix = static_cast<int>(pointer) % prefix_count;
+      } else {
+        prefix = static_cast<int>(pointer);
+      }
+      current_state = prefix * suffix_count + predecessor_suffix;
+      states[state_base + step - 1] = current_state;
+      if ((step - 1) % segment_steps == 0) {
+        segment_bank_ids[selector_base + (step - 1) / segment_steps] =
+            static_cast<uint8_t>(current_bank);
+      }
+    }
+  }
+}
+
 template <int VectorSize>
 std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
     const at::Tensor& sequences,
@@ -946,6 +1132,131 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_banked_cuda(
   return qvq_viterbi_banked_cuda_impl<4>(sequences, codebooks, transition_bits, overlap, step_weights);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& overlap,
+    const c10::optional<at::Tensor>& step_weights) {
+  TORCH_CHECK(sequences.is_cuda() && codebooks.is_cuda(),
+              "segmented-bank V2 sequences and codebooks must be CUDA tensors");
+  TORCH_CHECK(sequences.dim() == 3 && sequences.size(1) == 128 && sequences.size(2) == 2,
+              "segmented-bank V2 sequences must have shape [batch, 128, 2]");
+  TORCH_CHECK(codebooks.dim() == 3 && (codebooks.size(0) == 2 || codebooks.size(0) == 4) &&
+                  codebooks.size(1) == kStateCount && codebooks.size(2) == 2,
+              "segmented-bank V2 codebooks must have shape [2|4, 65536, 2]");
+  const int batch = static_cast<int>(sequences.size(0));
+  const int bank_count = static_cast<int>(codebooks.size(0));
+  constexpr int steps = 128;
+  TORCH_CHECK(batch > 0, "segmented-bank V2 sequences must contain at least one batch");
+  TORCH_CHECK(transition_bits >= 2 && transition_bits <= 5,
+              "segmented-bank V2 transition_bits must be in [2, 5]");
+  TORCH_CHECK((bank_count == 2 && segment_steps == 16) ||
+                  (bank_count == 4 && segment_steps == 32),
+              "segmented-bank V2 requires two P32 banks or four P64 banks");
+  TORCH_CHECK(sequences.scalar_type() == at::kFloat &&
+                  (codebooks.scalar_type() == at::kHalf || codebooks.scalar_type() == at::kFloat),
+              "segmented-bank V2 requires float32 sequences and float16 or float32 codebooks");
+  TORCH_CHECK(sequences.device() == codebooks.device(),
+              "segmented-bank V2 sequences and codebooks must share one CUDA device");
+  TORCH_CHECK(sequences.is_contiguous() && codebooks.is_contiguous(),
+              "segmented-bank V2 sequences and codebooks must be contiguous");
+  TORCH_CHECK(reinterpret_cast<uintptr_t>(sequences.data_ptr()) % 4 == 0 &&
+                  reinterpret_cast<uintptr_t>(codebooks.data_ptr()) % 4 == 0,
+              "segmented-bank V2 tensors do not satisfy the native vector-load alignment contract");
+  TORCH_CHECK(at::isfinite(sequences).all().item<bool>() &&
+                  at::isfinite(codebooks).all().item<bool>(),
+              "segmented-bank V2 sequences and codebooks must be finite");
+
+  const bool constrained = overlap.has_value();
+  const at::Tensor overlap_tensor = constrained ? *overlap : at::Tensor();
+  if (constrained) {
+    TORCH_CHECK(overlap_tensor.is_cuda() && overlap_tensor.device() == sequences.device() &&
+                    overlap_tensor.scalar_type() == at::kLong && overlap_tensor.is_contiguous(),
+                "segmented-bank V2 overlap must be contiguous int64 on the sequence device");
+    TORCH_CHECK(overlap_tensor.dim() == 1 && overlap_tensor.size(0) == batch,
+                "segmented-bank V2 overlap must have shape [batch]");
+    const int64_t overlap_limit = int64_t{1} << (16 - transition_bits);
+    TORCH_CHECK(overlap_tensor.ge(0).all().item<bool>() &&
+                    overlap_tensor.lt(overlap_limit).all().item<bool>(),
+                "segmented-bank V2 overlap values are outside the retained-state range");
+  }
+
+  const bool weighted = step_weights.has_value();
+  const at::Tensor step_weights_tensor = weighted ? *step_weights : at::Tensor();
+  if (weighted) {
+    TORCH_CHECK(step_weights_tensor.is_cuda() && step_weights_tensor.device() == sequences.device() &&
+                    step_weights_tensor.scalar_type() == at::kFloat && step_weights_tensor.is_contiguous(),
+                "segmented-bank V2 step weights must be contiguous float32 on the sequence device");
+    TORCH_CHECK(step_weights_tensor.sizes() == at::IntArrayRef({batch, steps}),
+                "segmented-bank V2 step weights must have shape [batch, 128]");
+    TORCH_CHECK(at::isfinite(step_weights_tensor).all().item<bool>() &&
+                    step_weights_tensor.ge(0).all().item<bool>(),
+                "segmented-bank V2 step weights must be finite and nonnegative");
+  }
+
+  const double maximum_weight = weighted ? step_weights_tensor.abs().amax().item<double>() : 1.0;
+  const double accumulation_terms = std::max(1.0, static_cast<double>(steps) * maximum_weight);
+  const double safe_magnitude = std::sqrt(static_cast<double>(std::numeric_limits<float>::max()) /
+                                           accumulation_terms) /
+      (2.0 * std::sqrt(2.0));
+  TORCH_CHECK(sequences.abs().amax().item<double>() <= safe_magnitude &&
+                  codebooks.abs().amax().item<double>() <= safe_magnitude,
+              "segmented-bank V2 magnitudes are too large for finite FP32 distance accumulation");
+
+  const c10::cuda::CUDAGuard device_guard(sequences.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, sequences.get_device()));
+  TORCH_CHECK(properties.major >= 8,
+              "segmented-bank V2 CUDA Viterbi requires compute capability >= 8.0");
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
+  const int suffix_count = kStateCount >> static_cast<int>(transition_bits);
+  const int segments = steps / static_cast<int>(segment_steps);
+  const auto float_options = sequences.options().dtype(at::kFloat);
+  at::Tensor costs_a = at::empty({batch, bank_count, kStateCount}, float_options);
+  at::Tensor costs_b = at::empty_like(costs_a);
+  at::Tensor reduced = at::empty({batch, bank_count, suffix_count}, float_options);
+  at::Tensor backpointers = at::empty(
+      {batch, steps - 1, bank_count, suffix_count}, sequences.options().dtype(at::kByte));
+  at::Tensor states = at::empty({batch, steps}, sequences.options().dtype(at::kLong));
+  at::Tensor segment_bank_ids = at::empty({batch, segments}, sequences.options().dtype(at::kByte));
+  at::Tensor squared_error = at::empty({batch}, float_options);
+  at::Tensor codebook_norm = codebooks.scalar_type() == at::kHalf
+      ? cached_banked_codebook_norm<2, half>(codebooks, stream)
+      : cached_banked_codebook_norm<2, float>(codebooks, stream);
+  const int64_t* overlap_ptr = constrained ? overlap_tensor.const_data_ptr<int64_t>() : nullptr;
+  const float* weight_ptr = weighted ? step_weights_tensor.const_data_ptr<float>() : nullptr;
+
+#define QVQ_V2_SEGMENT_LAUNCH(BITS, CODEBOOK_TYPE, CODEBOOK_POINTER)                                  \
+  qvq_v2_segment_banked_kernel<BITS, CODEBOOK_TYPE><<<batch, kThreads, 0, stream>>>(                  \
+      sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),     \
+      overlap_ptr, weight_ptr, costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),   \
+      reduced.mutable_data_ptr<float>(), backpointers.mutable_data_ptr<uint8_t>(),                     \
+      states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),                \
+      squared_error.mutable_data_ptr<float>(), steps, bank_count, static_cast<int>(segment_steps),     \
+      constrained, weighted)
+#define QVQ_V2_SEGMENT_DISPATCH(BITS)                                                                  \
+  do {                                                                                                 \
+    if (codebooks.scalar_type() == at::kHalf) {                                                        \
+      QVQ_V2_SEGMENT_LAUNCH(BITS, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()));    \
+    } else {                                                                                           \
+      QVQ_V2_SEGMENT_LAUNCH(BITS, float, codebooks.const_data_ptr<float>());                           \
+    }                                                                                                  \
+  } while (0)
+  switch (transition_bits) {
+    case 2: QVQ_V2_SEGMENT_DISPATCH(2); break;
+    case 3: QVQ_V2_SEGMENT_DISPATCH(3); break;
+    case 4: QVQ_V2_SEGMENT_DISPATCH(4); break;
+    case 5: QVQ_V2_SEGMENT_DISPATCH(5); break;
+  }
+#undef QVQ_V2_SEGMENT_DISPATCH
+#undef QVQ_V2_SEGMENT_LAUNCH
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  record_norm_cache_use(codebooks, codebook_norm, stream);
+  return {states, squared_error, segment_bank_ids};
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
@@ -955,10 +1266,13 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_banked(Tensor sequences, Tensor codebooks, int transition_bits, Tensor? overlap=None, "
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
+  m.def("viterbi_v2_segment_banked(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
+        "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi", &qvq_viterbi_cuda);
   m.impl("viterbi_v4", &qvq_viterbi_v4_cuda);
   m.impl("viterbi_banked", &qvq_viterbi_banked_cuda);
+  m.impl("viterbi_v2_segment_banked", &qvq_viterbi_v2_segment_banked_cuda);
 }

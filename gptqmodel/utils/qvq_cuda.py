@@ -36,6 +36,7 @@ _QVQ_CUDA_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V4_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_BANKED_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP: Callable | None = None
 
 
 def _validate_viterbi_distance_range(
@@ -79,7 +80,15 @@ def _qvq_cuda_sources() -> list[str]:
 _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_CUDA_OPS_NAME,
     namespace=_QVQ_CUDA_NAMESPACE,
-    required_ops=("gemv", "gemv_v4", "viterbi", "viterbi_v4", "viterbi_banked", "hadamard"),
+    required_ops=(
+        "gemv",
+        "gemv_v4",
+        "viterbi",
+        "viterbi_v4",
+        "viterbi_banked",
+        "viterbi_v2_segment_banked",
+        "hadamard",
+    ),
     sources=_qvq_cuda_sources,
     build_root_env="GPTQMODEL_QVQ_CUDA_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_cuda"),
@@ -162,6 +171,19 @@ def _qvq_cuda_viterbi_banked_op() -> Callable:
             if _QVQ_CUDA_VITERBI_BANKED_OP is None:
                 _QVQ_CUDA_VITERBI_BANKED_OP = _extension_api().op("qvq_cuda", "viterbi_banked")
     return _QVQ_CUDA_VITERBI_BANKED_OP
+
+
+def _qvq_cuda_viterbi_v2_segment_banked_op() -> Callable:
+    """Resolve the coupled segmented-bank V2 operator once."""
+
+    global _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP
+    if _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP is None:
+                _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_v2_segment_banked"
+                )
+    return _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP
 
 
 def qvq_cuda_viterbi(
@@ -289,6 +311,74 @@ def qvq_cuda_viterbi_banked(
         sequences, codebooks, transition_bits, overlap, step_weights
     )
     return states.reshape(bank_count, batch, steps), squared_error.reshape(bank_count, batch)
+
+
+def qvq_cuda_viterbi_v2_segment_banked(
+    sequences: torch.Tensor,
+    codebooks: torch.Tensor,
+    bits: float,
+    segment_steps: int,
+    overlap: torch.Tensor | None = None,
+    step_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the exact coupled V2 bank recurrence for P32 or P64 selectors."""
+
+    bits = normalize_qvq_rate(bits)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    if transition_bits not in (2, 3, 4, 5):
+        raise ValueError("QVQ segmented-bank CUDA V2 supports only rates W1 through W2.5")
+    if tuple(sequences.shape[1:]) != (128, 2) or sequences.ndim != 3:
+        raise ValueError("QVQ segmented-bank V2 expects sequences with shape [batch, 128, 2]")
+    if codebooks.ndim != 3 or codebooks.shape[0] not in (2, 4) or tuple(codebooks.shape[1:]) != (1 << 16, 2):
+        raise ValueError("QVQ segmented-bank V2 expects codebooks with shape [2|4, 65536, 2]")
+    bank_count = int(codebooks.shape[0])
+    if (bank_count, segment_steps) not in ((2, 16), (4, 32)):
+        raise ValueError("QVQ segmented-bank V2 requires two P32 banks or four P64 banks")
+    if sequences.device.type != "cuda" or codebooks.device != sequences.device:
+        raise ValueError("QVQ segmented-bank V2 tensors must share one CUDA device")
+    if sequences.dtype != torch.float32 or codebooks.dtype not in (torch.float16, torch.float32):
+        raise TypeError("QVQ segmented-bank V2 requires float32 sequences and float16 or float32 codebooks")
+    if not sequences.is_contiguous() or not codebooks.is_contiguous():
+        raise ValueError("QVQ segmented-bank V2 tensors must be contiguous")
+    if sequences.data_ptr() % 4 or codebooks.data_ptr() % 4:
+        raise ValueError("QVQ segmented-bank V2 tensors must satisfy four-byte native alignment")
+    if not torch.isfinite(sequences).all() or not torch.isfinite(codebooks).all():
+        raise ValueError("QVQ segmented-bank V2 sequences and codebooks must be finite")
+    _validate_viterbi_distance_range(sequences, codebooks, vector_size=2, step_weights=step_weights)
+    batch = int(sequences.shape[0])
+    if overlap is not None:
+        if (
+            overlap.device != sequences.device
+            or overlap.dtype != torch.int64
+            or tuple(overlap.shape) != (batch,)
+            or not overlap.is_contiguous()
+        ):
+            raise ValueError("QVQ segmented-bank V2 overlap must be contiguous CUDA int64 with shape [batch]")
+        overlap_limit = 1 << (16 - transition_bits)
+        if torch.any((overlap < 0) | (overlap >= overlap_limit)):
+            raise ValueError(f"QVQ segmented-bank V2 overlap must be in [0, {overlap_limit})")
+    if step_weights is not None:
+        if (
+            step_weights.device != sequences.device
+            or step_weights.dtype != torch.float32
+            or tuple(step_weights.shape) != (batch, 128)
+            or not step_weights.is_contiguous()
+        ):
+            raise ValueError(
+                "QVQ segmented-bank V2 step weights must be contiguous CUDA float32 with shape [batch, 128]"
+            )
+        if not torch.isfinite(step_weights).all() or torch.any(step_weights < 0):
+            raise ValueError("QVQ segmented-bank V2 step weights must be finite and nonnegative")
+    if torch.cuda.get_device_capability(sequences.device) < (8, 0):
+        raise RuntimeError("QVQ segmented-bank V2 requires compute capability >= 8.0")
+    return _qvq_cuda_viterbi_v2_segment_banked_op()(
+        sequences,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        overlap,
+        step_weights,
+    )
 
 
 def qvq_cuda_hadamard(
@@ -478,4 +568,5 @@ __all__ = [
     "qvq_cuda_supported",
     "qvq_cuda_viterbi",
     "qvq_cuda_viterbi_banked",
+    "qvq_cuda_viterbi_v2_segment_banked",
 ]

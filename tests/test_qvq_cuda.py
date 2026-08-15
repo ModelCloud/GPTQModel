@@ -14,6 +14,7 @@ from gptqmodel.looper.qvq_output_alignment import _FixedTrellisAlignmentLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear, QVQReferenceLinear
 from gptqmodel.quantization.qvq import (
     QVQQuantizationTelemetry,
+    _batched_v2_banked_viterbi_quantize,
     _canonical_qvq_codebook,
     _canonical_qvq_v4_banks,
     batched_viterbi_quantize,
@@ -32,6 +33,7 @@ from gptqmodel.quantization.qvq_codecs import (
     PGC16_CODEBOOK_VERSION,
     canonical_pgc16_levels,
     pgc16_codebook,
+    pgc16_codebook_v2_bank,
     pgc16_codebook_v4,
 )
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
@@ -48,6 +50,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_supported,
     qvq_cuda_viterbi,
     qvq_cuda_viterbi_banked,
+    qvq_cuda_viterbi_v2_segment_banked,
 )
 
 pytestmark = [
@@ -488,6 +491,136 @@ def test_qvq_cuda_viterbi_uses_current_non_default_stream():
 
     assert torch.equal(actual[0], expected[0])
     assert torch.equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5))
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+@pytest.mark.parametrize("constrained,weighted", ((False, False), (True, False), (True, True)))
+def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
+    monkeypatch,
+    bits,
+    bank_count,
+    segment_steps,
+    constrained,
+    weighted,
+):
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260815 + int(bits * 2) * 100 + bank_count * 10 + constrained * 2 + weighted
+    )
+    sequences = torch.randn((2, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
+    ).cuda()
+    overlap = (
+        torch.randint(
+            0,
+            1 << (16 - qvq_transition_bits(bits, vector_size=2)),
+            (2,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.int64,
+        )
+        if constrained
+        else None
+    )
+    step_weights = (
+        (0.1 + torch.rand((2, 128), generator=generator, device="cuda", dtype=torch.float32)).contiguous()
+        if weighted
+        else None
+    )
+    native_states, native_loss, native_banks = qvq_cuda_viterbi_v2_segment_banked(
+        sequences,
+        codebooks,
+        bits,
+        segment_steps,
+        overlap,
+        step_weights,
+    )
+    # Keep all tensors on CUDA while forcing the public quantizer through its
+    # eager recurrence. This compares identical FP32 emission arithmetic and
+    # avoids using a lower-precision CPU surrogate as the oracle.
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (7, 5))
+    reference = _batched_v2_banked_viterbi_quantize(
+        sequences,
+        codebooks,
+        bits=bits,
+        segment_steps=segment_steps,
+        overlap=overlap,
+        step_weights=step_weights,
+    )
+    assert torch.equal(native_states, reference.states)
+    assert torch.equal(native_banks, reference.segment_bank_ids)
+    assert torch.equal(native_loss, reference.squared_error)
+
+
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(bank_count, segment_steps):
+    sequences = torch.zeros((3, 128, 2), device="cuda", dtype=torch.float32)
+    codebook = torch.zeros((1 << 16, 2), device="cuda", dtype=torch.float16)
+    codebooks = codebook.unsqueeze(0).expand(bank_count, -1, -1).contiguous()
+    states, loss, bank_ids = qvq_cuda_viterbi_v2_segment_banked(
+        sequences,
+        codebooks,
+        bits=1.0,
+        segment_steps=segment_steps,
+    )
+    assert torch.count_nonzero(states) == 0
+    assert torch.count_nonzero(loss) == 0
+    assert torch.count_nonzero(bank_ids) == 0
+
+
+def test_qvq_cuda_v2_segment_banked_uses_current_non_default_stream():
+    generator = torch.Generator(device="cuda").manual_seed(20260816)
+    sequences = torch.randn((3, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=2.5, dtype=torch.float32) for bank in range(4))
+    ).cuda()
+    weights = (0.1 + torch.rand((3, 128), generator=generator, device="cuda")).contiguous()
+    overlap = torch.randint(0, 1 << 11, (3,), generator=generator, device="cuda", dtype=torch.int64)
+    expected = qvq_cuda_viterbi_v2_segment_banked(
+        sequences, codebooks, 2.5, 32, overlap, weights
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_viterbi_v2_segment_banked(
+            sequences, codebooks, 2.5, 32, overlap, weights
+        )
+        completion = torch.cuda.Event()
+        completion.record(stream)
+    completion.synchronize()
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
+
+
+def test_qvq_cuda_v2_segment_banked_public_quantizer_routes_native():
+    generator = torch.Generator(device="cuda").manual_seed(20260817)
+    sequences = torch.randn((2, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=2.0, dtype=torch.float32) for bank in range(2))
+    ).cuda()
+    with patch(
+        "gptqmodel.utils.qvq_cuda.qvq_cuda_viterbi_v2_segment_banked",
+        wraps=qvq_cuda_viterbi_v2_segment_banked,
+    ) as native:
+        result = _batched_v2_banked_viterbi_quantize(
+            sequences,
+            codebooks,
+            bits=2.0,
+            segment_steps=16,
+        )
+    assert native.call_count == 1
+    assert result.states.shape == (2, 128)
+    assert result.segment_bank_ids.shape == (2, 8)
+
+
+@pytest.mark.parametrize(
+    "bank_count,segment_steps,error",
+    ((2, 32, "two P32 banks"), (4, 16, "four P64 banks"), (3, 16, "shape")),
+)
+def test_qvq_cuda_v2_segment_banked_rejects_invalid_format(bank_count, segment_steps, error):
+    sequences = torch.zeros((1, 128, 2), device="cuda", dtype=torch.float32)
+    codebooks = torch.zeros((bank_count, 1 << 16, 2), device="cuda", dtype=torch.float16)
+    with pytest.raises(ValueError, match=error):
+        qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 2.0, segment_steps)
 
 
 def test_qvq_v4_banked_viterbi_matches_four_serial_reference_runs():
