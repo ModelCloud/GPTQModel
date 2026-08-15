@@ -22,6 +22,38 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_decode_states,
     pgc16_decode_states_v2_banked,
 )
+from scripts.compare_qvq_codecs_llama_qkvo import (
+    ARM_CONFIG,
+    DEFAULT_ARMS,
+    _parser,
+    _selector_metrics,
+)
+
+
+def test_qvq_v2b4_p64_comparison_harness_defaults_to_matched_v2_control():
+    assert DEFAULT_ARMS == ("v2", "v2b4-p64")
+    args = _parser().parse_args(("--model", "model", "--dataset", "dataset", "--output", "report.json"))
+    assert args.layers == 4
+    assert args.rates == (1, 1.5, 2, 2.5)
+    assert args.arms == DEFAULT_ARMS
+    assert args.calibration_rows == 64
+    assert args.evaluation_rows == 64
+    assert args.evaluation_row_offset == 64
+    assert args.max_length is None
+    assert ARM_CONFIG["v2b4-p64"] == {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b4_p64": True,
+        "bank_count": 4,
+    }
+    metrics = _selector_metrics([48, 8, 4, 4])
+    assert metrics is not None
+    assert metrics["count"] == 64
+    assert metrics["histogram"] == [48, 8, 4, 4]
+    assert metrics["nonzero_fraction"] == 0.25
+    assert metrics["entropy_bits"] == pytest.approx(1.186278124459133)
+    assert metrics["selector_bpw"] == 0.03125
 
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5))

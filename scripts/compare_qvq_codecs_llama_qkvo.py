@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import platform
 import time
 from collections import defaultdict
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+
 try:
     from analyze_gptq_low_bit_grid import (
         capture_calibration_hessians,
@@ -47,10 +49,18 @@ QKVO_SUFFIXES = (
 )
 ARM_CONFIG = {
     "v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": False},
+    "v2b4-p64": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b4_p64": True,
+        "bank_count": 4,
+    },
     "dual-v2": {"vector_size": 2, "trellis_window": 16, "dual_v2": True},
     "v4": {"vector_size": 4, "trellis_window": 16, "dual_v2": False},
     "l18-v4": {"vector_size": 4, "trellis_window": 18, "dual_v2": False},
 }
+DEFAULT_ARMS = ("v2", "v2b4-p64")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -59,12 +69,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="mps")
-    parser.add_argument("--layers", type=int, default=1)
+    parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--rates", nargs="+", type=float, default=(1, 1.5, 2, 2.5))
-    parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=tuple(ARM_CONFIG))
-    parser.add_argument("--calibration-rows", type=int, default=8)
-    parser.add_argument("--evaluation-rows", type=int, default=8)
-    parser.add_argument("--evaluation-row-offset", type=int, default=8)
+    parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=DEFAULT_ARMS)
+    parser.add_argument("--calibration-rows", type=int, default=64)
+    parser.add_argument("--evaluation-rows", type=int, default=64)
+    parser.add_argument("--evaluation-row-offset", type=int, default=64)
     parser.add_argument(
         "--max-length",
         type=int,
@@ -108,6 +118,20 @@ def _weight_metrics(dense: torch.Tensor, quantized: torch.Tensor) -> dict[str, f
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
+
+
+def _selector_metrics(histogram: list[int]) -> dict[str, object] | None:
+    total = sum(histogram)
+    if total == 0:
+        return None
+    probabilities = [count / total for count in histogram if count]
+    return {
+        "count": total,
+        "histogram": histogram,
+        "nonzero_fraction": sum(histogram[1:]) / total,
+        "entropy_bits": -sum(probability * math.log2(probability) for probability in probabilities),
+        "selector_bpw": 2 / 64,
+    }
 
 
 def _unpadded_evaluation_rows(
@@ -272,6 +296,7 @@ def main() -> None:
             reconstructions: dict[str, torch.Tensor] = {}
             local_outputs: dict[str, torch.Tensor] = {}
             weight_metrics = {}
+            selector_histogram = [0, 0, 0, 0]
             print(f"Starting W{rate:g} {arm} with trellis batch {batch_size}", flush=True)
             for index, (name, module) in enumerate(modules.items(), start=1):
                 module_started = time.perf_counter()
@@ -286,6 +311,13 @@ def main() -> None:
                 reconstruction = result.weight.detach().cpu().float()
                 reconstructions[name] = reconstruction
                 weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)
+                weight_metrics[name]["proxy_loss"] = float(result.proxy_loss)
+                if result.bank_ids is not None:
+                    counts = torch.bincount(result.bank_ids.to(torch.int64).cpu(), minlength=4)
+                    selector_histogram = [
+                        current + int(count)
+                        for current, count in zip(selector_histogram, counts.tolist(), strict=True)
+                    ]
                 bias = None if module.bias is None else module.bias.detach().cpu().float()
                 local_outputs[name] = F.linear(dense_inputs[name], reconstruction, bias)
                 print(
@@ -309,6 +341,8 @@ def main() -> None:
             arm_report = {
                 "seconds": time.perf_counter() - started,
                 "trellis_batch_size": batch_size,
+                "effective_bpw": rate + (2 / 64 if arm == "v2b4-p64" else 0),
+                "bank_selectors": _selector_metrics(selector_histogram),
                 "weight": {
                     "modules": weight_metrics,
                     "mean_mse": _mean([metric["mse"] for metric in weight_metrics.values()]),

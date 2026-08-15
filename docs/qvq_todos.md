@@ -5,6 +5,45 @@ tests showed local/proxy error reductions without dependable held-out final-KLD 
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
 
+## V2B4-P64 bring-up (2026-08-15)
+
+The first V2B4-P64 checkpoint slice is intentionally a plain Block-LDLQ control. Do not delay its matched V2 test
+for YAQA or propagation integration: adding either now would confound codec geometry with a different rounding or
+acceptance objective.
+
+- **P0 -- run now:** compare `v2` against `v2b4-p64` with real Llama 3.2 1B Instruct weights, decoder layers 0--3,
+  all Q/K/V/O projections, W1/W1.5/W2/W2.5, 64 independent full calibration rows, and disjoint full rows `[64,128)`
+  for evaluation. Use batch 1, no concatenation, no length cap, identical seeds/Hessians, and the Torch/reference
+  reconstruction boundary. Record weight relative-L2/SQNR, Block-LDLQ proxy, local/live QKVO KL, every layer KL,
+  final-logit KL, top-1/top-5/top-10, quantization time, effective BPW, selector occupancy/entropy, and repeat parity.
+- **P0 safety gate:** bank zero must remain bit-exact V2; packed selectors must reload exactly; V2B4-P64's complete
+  full-Hessian proxy must never exceed the independently quantized V2 artifact because the implementation restores
+  V2 on ties, non-finite scores, or regressions. Model-level metrics are measurements, not implied by that proxy.
+- **P1 -- YAQA integration:** extend the coupled P64 recurrence to the two-sided YAQA/Sketch-B path. Keep all four
+  banks exposed during each 64-weight decision, use the YAQA tile objective without factorizing the chain, and retain
+  a complete canonical-V2 YAQA rollback artifact. Validate with an independent Fisher dataset and the same disjoint
+  downstream gate; do not promote on local Kronecker loss alone.
+- **P1 -- propagated bank selection:** start from the exact serialized local V2B4-P64 baseline, propose bounded
+  fixed-trellis P64 bank changes, score them using live downstream replay, and confirm the selected map on a second
+  disjoint prompt split. Any failure, non-finite output, confirmation regression, or replay omission serializes the
+  exact local baseline. Later evaluate joint state re-encoding only if fixed-trellis bank refinement leaves a
+  material quality gap.
+- **P2 -- native inference:** add CUDA/MPS/MLX P64 selector decode only after Torch pack/reload and model-level
+  evidence pass. Native kernels must match the serialized Torch reconstruction before performance comparisons.
+
+The comparison driver `scripts/compare_qvq_codecs_llama_qkvo.py` now defaults to only `v2` and `v2b4-p64` so the
+base result is available quickly. Its other defaults encode the P0 contract above: four layers, rates W1--W2.5,
+64 calibration rows, 64 evaluation rows at offset 64, batch 1, and full row lengths. Dual-V2, V4, and L18/V4 remain
+explicit optional arms. A CUDA host can launch the matched gate with:
+
+```bash
+python scripts/compare_qvq_codecs_llama_qkvo.py \
+  --model /path/to/Llama-3.2-1B-Instruct \
+  --dataset neuralmagic/calibration \
+  --output artifacts/qvq_v2_vs_v2b4_p64.json \
+  --device cuda
+```
+
 ## Already validated and pushed
 
 - QVQ is the QTIP-derived quantizer plus this repository's planar PGC16 and backend upgrades. `pgc16-v1` uses the
