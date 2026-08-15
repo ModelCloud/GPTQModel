@@ -423,6 +423,34 @@ def test_torch_ops_jit_extension_appends_detected_cuda_include_paths(monkeypatch
     ]
 
 
+def test_torch_ops_jit_extension_enforces_cuda13_split_compile_default(monkeypatch, tmp_path):
+    """Guard custom CUDA flag lists that bypass the common flag builder."""
+
+    loader = _make_loader(
+        tmp_path,
+        requires_cuda=True,
+        extra_cuda_cflags=["-lineinfo"],
+    )
+    state = {"ready": False}
+    compile_calls = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cpp_module, "nvcc_version_at_least", lambda major, minor: (major, minor) == (13, 0))
+    monkeypatch.delenv("GPTQMODEL_NVCC_SPLIT_COMPILE", raising=False)
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert compile_calls[0]["extra_cuda_cflags"] == ["-lineinfo", "--split-compile=8"]
+
+
 def test_torch_ops_jit_extension_merges_visible_capability_into_compile_override(monkeypatch, tmp_path):
     """Guard CUDA JIT builds so manual arch overrides still compile for the visible GPU."""
 

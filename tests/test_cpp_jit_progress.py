@@ -11,6 +11,7 @@ from gptqmodel.utils.cpp import (
     _compile_progress_step,
     _compile_progress_subtitle,
     _CompileProgressDisplay,
+    cuda_split_compile_flags,
     default_jit_cuda_cflags,
 )
 from gptqmodel.utils.jit_compile_baselines import get_jit_compile_baseline_seconds
@@ -62,17 +63,26 @@ def test_default_jit_cuda_cflags_explicit_nvcc_threads_takes_precedence(monkeypa
     assert flags[flags.index("--threads") + 1] == "16"
 
 
-def test_default_jit_cuda_cflags_adds_cuda13_split_compile(monkeypatch):
+def test_default_jit_cuda_cflags_adds_cuda13_split_compile_by_default(monkeypatch):
     monkeypatch.setattr("gptqmodel.utils.cpp.nvcc_version_at_least", lambda major, minor: True)
     monkeypatch.delenv("GPTQMODEL_NVCC_SPLIT_COMPILE", raising=False)
-    flags = default_jit_cuda_cflags(include_split_compile=True)
+    flags = default_jit_cuda_cflags()
     assert "--split-compile=8" in flags
 
 
-def test_default_jit_cuda_cflags_skips_cuda13_flags_on_older_nvcc(monkeypatch):
+def test_default_jit_cuda_cflags_skips_split_compile_before_cuda13(monkeypatch):
     monkeypatch.setattr("gptqmodel.utils.cpp.nvcc_version_at_least", lambda major, minor: False)
-    flags = default_jit_cuda_cflags(include_split_compile=True)
+    flags = default_jit_cuda_cflags()
     assert not any(flag.startswith("--split-compile=") for flag in flags)
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    (("12.9", []), ("13.0", ["--split-compile=8"]), ("13.1", ["--split-compile=8"])),
+)
+def test_cuda_split_compile_flags_use_exact_cuda13_boundary(monkeypatch, version, expected):
+    monkeypatch.delenv("GPTQMODEL_NVCC_SPLIT_COMPILE", raising=False)
+    assert cuda_split_compile_flags(nvcc_version=version) == expected
 
 
 def test_default_jit_cuda_cflags_fast_compile_is_explicit(monkeypatch):

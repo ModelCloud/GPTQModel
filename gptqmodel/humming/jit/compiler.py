@@ -16,6 +16,7 @@ import torch
 from cuda.bindings import nvrtc
 from filelock import FileLock
 
+from ...utils.cpp import cuda_split_compile_flags
 from ..utils import jit as jit_utils
 from ..utils.cuda import filter_cuda_paths
 from ..utils.nvrtc import get_nvrtc_library_path, may_build_nvrtc_compile_binary
@@ -250,6 +251,8 @@ class NVCCCompiler(Compiler):
 
     @classmethod
     def get_flags(cls, sm_version, disable_fast_math=False):
+        nvcc_path = cls._get_env()["binaries"]["nvcc"]
+        nvcc_version = jit_utils.get_cuda_nvcc_version(nvcc_path)
         cxx_flags = [
             "-fPIC",
             "-O3",
@@ -272,6 +275,7 @@ class NVCCCompiler(Compiler):
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             f"--compiler-options={','.join(cxx_flags)}",
+            *cuda_split_compile_flags(nvcc_version=nvcc_version),
         ]
         if disable_fast_math:
             flags.remove("--use_fast_math")

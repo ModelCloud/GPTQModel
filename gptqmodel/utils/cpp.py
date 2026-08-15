@@ -169,6 +169,47 @@ def is_nvcc_compatible() -> bool:
     return nvcc_version_at_least(12, 8)
 
 
+def cuda_split_compile_flags(
+    *,
+    include: bool = True,
+    split_compile: str | int | None = None,
+    nvcc_version: str | tuple[int, int] | None = None,
+) -> list[str]:
+    """Return the CUDA-13-gated default NVCC split-compilation flag."""
+
+    if not include:
+        return []
+    if nvcc_version is None:
+        supported = nvcc_version_at_least(13, 0)
+    else:
+        if isinstance(nvcc_version, str):
+            parts = nvcc_version.split(".", maxsplit=2)
+            try:
+                resolved_version = (int(parts[0]), int(parts[1]))
+            except (IndexError, ValueError) as exc:
+                raise ValueError(f"Invalid CUDA NVCC version: {nvcc_version!r}") from exc
+        else:
+            resolved_version = tuple(nvcc_version)
+        supported = resolved_version >= (13, 0)
+    if not supported:
+        return []
+
+    resolved_split_compile = (
+        str(split_compile)
+        if split_compile is not None
+        else os.getenv("GPTQMODEL_NVCC_SPLIT_COMPILE", "8")
+    )
+    if not resolved_split_compile:
+        return []
+    try:
+        split_value = int(resolved_split_compile)
+    except ValueError as exc:
+        raise ValueError("CUDA split compile must be a non-negative integer") from exc
+    if split_value < 0:
+        raise ValueError("CUDA split compile must be a non-negative integer")
+    return [f"--split-compile={split_value}"] if split_value else []
+
+
 def _format_compile_duration_seconds(seconds: float) -> str:
     """Format one duration compactly for user-facing compile progress text."""
 
@@ -615,7 +656,7 @@ def default_jit_cuda_cflags(
     include_fatbin_compression: bool = False,
     include_diag_suppress: bool = False,
     nvcc_threads: str | int | None = None,
-    include_split_compile: bool = False,
+    include_split_compile: bool = True,
     split_compile: str | int | None = None,
     include_fast_compile: bool = False,
     fast_compile: str | None = None,
@@ -637,21 +678,14 @@ def default_jit_cuda_cflags(
                 resolved_opt_level[1:] if resolved_opt_level.startswith("O") else resolved_opt_level
             )
             flags.append(f"--optimize={optimization_level}")
-    if include_split_compile and nvcc_version_at_least(12, 1):
-        resolved_split_compile = (
-            str(split_compile)
-            if split_compile is not None
-            else os.getenv("GPTQMODEL_NVCC_SPLIT_COMPILE", "8")
+    # CUDA 13 makes split compilation a safe common default. Older toolchains
+    # deliberately receive no such flag.
+    flags.extend(
+        cuda_split_compile_flags(
+            include=include_split_compile,
+            split_compile=split_compile,
         )
-        if resolved_split_compile:
-            try:
-                split_value = int(resolved_split_compile)
-            except ValueError as exc:
-                raise ValueError("CUDA split compile must be a non-negative integer") from exc
-            if split_value < 0:
-                raise ValueError("CUDA split compile must be a non-negative integer")
-            if split_value:
-                flags.append(f"--split-compile={split_value}")
+    )
     if include_fast_compile:
         resolved_fast_compile = fast_compile or os.getenv("GPTQMODEL_NVCC_FAST_COMPILE")
         if resolved_fast_compile:
@@ -808,11 +842,19 @@ class TorchOpsJitExtension:
             payload.extend(self._source_cache_fingerprint_payload(source, include_paths))
 
         payload.extend(self._resolve_sequence(self.extra_cflags))
-        payload.extend(self._resolve_sequence(self.extra_cuda_cflags))
+        payload.extend(self._resolved_extra_cuda_cflags())
         payload.extend(include_paths)
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
+
+    def _resolved_extra_cuda_cflags(self) -> list[str]:
+        """Resolve CUDA flags and enforce the CUDA-13 split-build default."""
+
+        flags = self._resolve_sequence(self.extra_cuda_cflags)
+        if self.requires_cuda and not any(flag.startswith("--split-compile=") for flag in flags):
+            flags.extend(cuda_split_compile_flags())
+        return flags
 
     def _cuda_cache_fingerprint_payload(self) -> list[str]:
         """Capture the effective CUDA target set so cached binaries stay device-compatible."""
@@ -1015,7 +1057,7 @@ class TorchOpsJitExtension:
                 extra_cflags = self._resolve_sequence(self.extra_cflags)
                 if extra_cflags:
                     kwargs["extra_cflags"] = extra_cflags
-                extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
+                extra_cuda_cflags = self._resolved_extra_cuda_cflags()
                 if extra_cuda_cflags:
                     kwargs["extra_cuda_cflags"] = extra_cuda_cflags
                 if extra_include_paths:
