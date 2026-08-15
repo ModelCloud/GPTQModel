@@ -869,3 +869,48 @@ finite logits from all 14 banked modules. These are two-layer promotion probes,
 not full-model quality evidence. `bank_count=4` remains explicit opt-in; once
 selected with Block-LDLQ, module-boundary propagation is automatic. The
 deferred full-model refiner remains a separate opt-in gate.
+
+## Segmented V2 shared-frontier CUDA profile (August 2026)
+
+Nsight Compute on an SM80 PG506-230 (124 SMs, CUDA 13.0) showed that the
+original B2-P32 W2 batch-64 kernel spent 12.743 ms per call, issued on only
+34.97% of active scheduler cycles, and spent 15.33 cycles per issued
+instruction on long-scoreboard stalls. The first exact G-only reformulation
+reduced that call to 3.539 ms (3.60x), but its 64 persistent CTAs populated
+only 0.52 waves/SM.
+
+The segmented-grid implementation assigns one CTA to each `(sequence, bank)`
+and keeps both suffix frontiers in dynamic shared memory for all 16 or 32
+steps in a selector segment. Kernel launches provide the exact global barrier
+between segments. The largest W1 frontier pair occupies 128 KiB/CTA on SM80;
+W2 occupies 32 KiB/CTA. The W2 B2 batch-64 call measured 3.055 ms, or 4.17x
+faster than the original coupled kernel and 1.09x faster than G-only. A profiled
+W2 segment launch used 128 CTAs (1.03 waves/SM), 51 registers/thread, 32 KiB
+dynamic shared memory, 67.15% issue-active, 0.12% DRAM throughput, and a 99.80%
+L2 hit rate.
+
+Warm 30-run CUDA-event medians below compare the immediately preceding exact
+G-only implementation with shared-frontier segmented-grid. Every state, loss,
+and selector tensor was bit-exact.
+
+| Format | Rate | Batch 8 | Batch 16 | Batch 32 | Batch 64 | Batch 128 | Batch 256 |
+|:--|:--|--:|--:|--:|--:|--:|--:|
+| B2-P32 | W1 | 1.91x | 1.92x | 1.93x | 1.08x | 1.43x | 1.42x |
+| B2-P32 | W1.5 | 2.29x | 2.35x | 2.39x | 1.36x | 1.67x | 1.50x |
+| B2-P32 | W2 | 1.95x | 1.92x | 1.89x | 1.09x | 1.38x | 1.23x |
+| B2-P32 | W2.5 | 2.13x | 2.09x | 2.02x | 1.15x | 1.46x | 1.31x |
+| B2-P32 | W3 | 2.10x | 2.09x | 2.08x | 1.23x | 1.56x | 1.40x |
+| B2-P32 | W3.5 | 1.57x | 1.55x | 1.54x | 1.03x | 1.30x | 1.20x |
+| B4-P64 | W1 | 4.10x | 4.10x | 2.39x | 2.79x | 2.84x | 2.60x |
+| B4-P64 | W1.5 | 4.33x | 4.44x | 2.61x | 1.74x | 2.09x | 2.02x |
+| B4-P64 | W2 | 3.61x | 3.55x | 2.02x | 1.36x | 1.58x | 1.33x |
+| B4-P64 | W2.5 | 4.06x | 3.93x | 2.25x | 1.52x | 1.78x | 1.45x |
+| B4-P64 | W3 | 4.04x | 4.04x | 2.40x | 1.66x | 1.93x | 1.60x |
+| B4-P64 | W3.5 | 3.04x | 3.02x | 1.94x | 1.34x | 1.61x | 1.34x |
+
+Independent stream overlap is useful only when searches underfill the GPU.
+Three B2 family searches at batches 8/16/32 improved by 2.14--2.16x with exact
+outputs, while two batch-64 searches improved by only 1.07x because 128 CTAs
+already exceed one 124-SM wave. The quantizer should therefore overlap only
+independent, memory-budgeted family searches; it must not split dependent
+selector segments across streams.

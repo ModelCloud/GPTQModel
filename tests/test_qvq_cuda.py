@@ -47,6 +47,7 @@ from gptqmodel.quantization.rotation.hadamard_utils import (
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
+    _qvq_cuda_viterbi_v2_segment_g_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_supported,
@@ -585,6 +586,32 @@ def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(bank_count, segme
     assert torch.count_nonzero(states) == 0
     assert torch.count_nonzero(loss) == 0
     assert torch.count_nonzero(bank_ids) == 0
+
+
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+def test_qvq_cuda_v2_segment_banked_multiwave_grid_is_deterministic(bank_count, segment_steps):
+    """Cover more bank CTAs than one 124-SM A100 wave with identical work."""
+
+    generator = torch.Generator(device="cuda").manual_seed(20260817 + bank_count)
+    one_sequence = torch.randn((1, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    sequences = one_sequence.expand(64, -1, -1).contiguous()
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=1.5, dtype=torch.float32) for bank in range(bank_count))
+    ).to(device="cuda", dtype=torch.float16)
+    expected = _qvq_cuda_viterbi_v2_segment_g_op()(
+        sequences,
+        codebooks,
+        qvq_transition_bits(1.5, vector_size=2),
+        segment_steps,
+        None,
+        None,
+    )
+    for _ in range(5):
+        actual = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 1.5, segment_steps)
+        assert all(
+            torch.equal(expected_tensor, actual_tensor)
+            for expected_tensor, actual_tensor in zip(expected, actual)
+        )
 
 
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
