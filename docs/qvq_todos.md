@@ -141,6 +141,26 @@ selector churn. Confirmation MSE regressed from `2.7109018e-5` to `2.7253496e-5`
 the baseline exactly. This is a successful rollback/lifecycle check, not evidence of quality recovery and not a
 substitute for the pending full-width live-prefix/final-logit gate.
 
+The next Apple P-core gate exercised the complete 2,048x2,048 layer-0 `q_proj` inside a four-layer Llama 3.2 1B
+shell at W2. It used the frozen YAQA512 factors from rows `[1024,1536)`, 285 valid search tokens from rows
+`[1536,1538)`, independent confirmation rows `[1538,1540)`, and untouched evaluation rows `[1540,1542)`. The
+localized search changed exactly one of 131,072 P32 selectors (`7.6293945e-6` churn) and completed in 150.38 seconds.
+
+| Split | Arm | Final-logit KL | Top-1 | Top-5 | Top-10 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Confirmation | V2B2-P32+YAQA baseline | 0.0005097432 | 97.4334% | 97.0877% | 97.4719% |
+| Confirmation | P4 proposal | 0.0005078066 | 98.0751% | 97.2160% | 97.4998% |
+| Untouched evaluation | V2B2-P32+YAQA baseline | 0.0003955135 | 99.7409% | 98.7737% | 98.0749% |
+| Untouched evaluation | confirmed P4 artifact | 0.0003901825 | 99.7409% | 98.6701% | 98.0663% |
+
+Confirmation accepted the serialized proposal: KL improved by 0.38%, Top-1 by 0.64 percentage points, Top-5 by
+0.13 points, and Top-10 by 0.03 points. On the untouched final split, KL improved by 1.35% and Top-1 was unchanged,
+while Top-5 and Top-10 declined by 0.10 and 0.009 points. This is the first full-width evidence that a fixed-boundary
+proposal can survive downstream final-logit confirmation without a path avalanche. It is not a promotion result:
+the sample has only two rows per split, the live prefix before layer-0 `q_proj` is dense, and the Top-N evidence is
+mixed. Next run multiple disjoint row blocks and YAQA seeds, then repeat after installing the complete live quantized
+prefix.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
