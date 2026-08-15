@@ -10,8 +10,8 @@ The target public flow is:
 
 ```text
 GPTQModel.load(source)
-    -> model.prepare_quantization(...)
-    -> model.quantize(preparation=...)
+    -> prepared_artifact = model.prepare(stage=PrepareStage.QUANTIZATION, ...)
+    -> model.quantize(prepared_artifact=prepared_artifact)
     -> validate live packed model
     -> model.save(output)
     -> GPTQModel.load(output)
@@ -94,11 +94,12 @@ checkpoint owner, and source tensors are materialized only for the active layer 
 
 ## Public lifecycle and state machine
 
-Add an explicit preparation operation rather than overloading `quantize()` with another opaque prepass:
+Add an explicit staged preparation operation rather than overloading `quantize()` with another opaque prepass:
 
 ```python
-preparation = model.prepare_quantization(
-    QVQPrepareConfig(
+prepared_artifact = model.prepare(
+    stage=PrepareStage.QUANTIZATION,
+    config=QVQPrepareConfig(
         calibration=calibration,
         validation_calibration=validation_calibration,
         yaqa_calibration=yaqa_calibration,
@@ -108,18 +109,22 @@ preparation = model.prepare_quantization(
         layer_scope=None,
         execution=ExecutionConfig.AUTO,
         cache_dir=None,
-    )
+    ),
 )
 
 model.quantize(
-    preparation=preparation,
+    prepared_artifact=prepared_artifact,
     layer_scope=None,
 )
 ```
 
-`model.prepare(stage="quantization", ...)` may be added later as a generic alias, but
-`prepare_quantization()` should be the first public API because its inputs, artifact, and validity rules are specific
-and discoverable.
+`PrepareStage` is the generic lifecycle dispatch enum. `PrepareStage.QUANTIZATION` selects the quantization preparation
+contract, and the concrete config selects `QVQPreparationProcessor`. A non-QVQ quantizer can register another processor
+behind the same stage without adding another top-level model method.
+
+Use `prepared_artifact`, not `prepared_payload`, for the returned object. The result is a typed, checksummed,
+provenance-validated lifecycle artifact that may refer to managed cache storage; it is not merely a transport bundle of
+tensors. Its concrete type is `QVQQuantizationPreparation`.
 
 The model state machine becomes:
 
@@ -142,8 +147,9 @@ Failure transitions are transactional:
 - validation failure rejects the artifact and preserves the last independently accepted baseline;
 - cleanup failures are reported without masking the primary exception.
 
-`quantize()` remains backward compatible. If no preparation is supplied, it internally prepares the minimum required
-state. Supplying a preparation skips only work proven reusable by its fingerprint; it does not bypass validation.
+`quantize()` remains backward compatible. If no `prepared_artifact` is supplied, it internally runs the quantization
+preparation stage for the minimum required state. Supplying an artifact skips only work proven reusable by its
+fingerprint; it does not bypass validation.
 
 ## Preparation artifact
 
@@ -602,11 +608,11 @@ Exit: the standalone oracle is reproducible from one manifest.
 
 ### Phase 1: preparation API and dense compatibility
 
-- add preparation state/protocol and `prepare_quantization()`;
+- add `PrepareStage`, preparation state/protocol, and `model.prepare()`;
 - move model-tree target resolution and shared Hessian capture behind the lifecycle;
 - add explicit seed policy and pristine geometry mode;
-- consume preparation in `QVQProcessor`;
-- retain existing `quantize()` behavior when no preparation is supplied.
+- consume `prepared_artifact` in `QVQProcessor`;
+- retain existing `quantize()` behavior when no prepared artifact is supplied.
 
 Exit: Llama 3.2 1B dense-resident lifecycle matches the standalone tensors exactly.
 
