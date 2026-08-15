@@ -324,7 +324,12 @@ def main() -> None:
                     )
                     for layer_index in range(args.layers)
                 },
-                "logits": tensor_metrics(dense_logits, quantized_logits, normalize_distribution=False),
+                "logits": tensor_metrics(
+                    dense_logits,
+                    quantized_logits,
+                    normalize_distribution=False,
+                    include_top10=True,
+                ),
             }
             report["results"][str(rate)][arm] = arm_report
             logits = arm_report["logits"]
@@ -337,7 +342,9 @@ def main() -> None:
                 f"liveKL={arm_report['live_qkvo']['kl_forward']['mean']:.6f} "
                 f"layerKL={layer_kl:.6f} "
                 f"logitKL={logits['kl_forward']['mean']:.6f} "
-                f"top1={logits['top1_agreement']:.4f} top5={logits['top5_overlap']['mean']:.4f}",
+                f"top1={logits['top1_agreement']:.4f} "
+                f"top5={logits['top5_overlap']['mean']:.4f} "
+                f"top10={logits['top10_overlap']['mean']:.4f}",
                 flush=True,
             )
             with torch.no_grad():

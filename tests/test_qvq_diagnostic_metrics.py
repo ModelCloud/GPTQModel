@@ -1743,6 +1743,27 @@ def test_qvq_diagnostic_reports_divergence_cross_entropy_and_topk_metrics():
     assert metrics["quantized_top1_in_dense_top5"] == 1.0
 
 
+def test_qvq_diagnostic_reports_requested_final_logit_top10_metrics():
+    dense = torch.arange(12, 0, -1, dtype=torch.float32).unsqueeze(0)
+    quantized = dense.clone()
+    quantized[0, 9] = -1.0
+    quantized[0, 10] = 3.5
+
+    metrics = tensor_metrics(
+        dense,
+        quantized,
+        normalize_distribution=False,
+        include_top10=True,
+    )
+
+    assert metrics["top1_agreement"] == 1.0
+    assert metrics["top5_overlap"]["mean"] == 1.0
+    assert metrics["top10_overlap"]["mean"] == pytest.approx(0.9)
+    assert metrics["top10_exact_agreement"] == 0.0
+    assert metrics["dense_top1_in_quantized_top10"] == 1.0
+    assert metrics["quantized_top1_in_dense_top10"] == 1.0
+
+
 def test_qvq_diagnostic_identical_standardized_channels_are_exact():
     dense = torch.tensor([[[1.0, -2.0, 0.5], [0.0, 3.0, -1.0]]])
 

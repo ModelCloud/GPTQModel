@@ -378,6 +378,7 @@ def tensor_metrics(
     quantized: torch.Tensor,
     *,
     normalize_distribution: bool,
+    include_top10: bool = False,
 ) -> dict[str, Any]:
     dense = dense.detach().float()
     quantized = quantized.detach().float()
@@ -389,6 +390,8 @@ def tensor_metrics(
         normalize_distribution=normalize_distribution,
     )
     if native_metrics is not None:
+        if include_top10:
+            native_metrics.update(_topk_metrics(dense, quantized, k=10))
         return native_metrics
 
     error = quantized - dense
@@ -445,7 +448,7 @@ def tensor_metrics(
     cosine = F.cosine_similarity(dense_flat64, quantized_flat64, dim=0).clamp(-1.0, 1.0)
     pearson = F.cosine_similarity(dense_centered, quantized_centered, dim=0).clamp(-1.0, 1.0)
 
-    return {
+    result = {
         "shape": list(dense.shape),
         "finite": bool(torch.isfinite(quantized).all()),
         "mae": error_flat64.abs().mean().item(),
@@ -473,6 +476,27 @@ def tensor_metrics(
         "top5_exact_agreement": topk_exact.float().mean().item(),
         "dense_top1_in_quantized_top5": dense_top1_in_quantized_topk.float().mean().item(),
         "quantized_top1_in_dense_top5": quantized_top1_in_dense_topk.float().mean().item(),
+    }
+    if include_top10:
+        result.update(_topk_metrics(dense, quantized, k=10))
+    return result
+
+
+def _topk_metrics(dense: torch.Tensor, quantized: torch.Tensor, *, k: int) -> dict[str, Any]:
+    """Compute exact set and top-1 containment metrics for one requested top-k."""
+
+    dense_rows = dense.detach().float().reshape(-1, dense.shape[-1])
+    quantized_rows = quantized.detach().float().reshape(-1, quantized.shape[-1])
+    effective_k = min(k, dense_rows.shape[-1])
+    dense_topk = dense_rows.topk(effective_k, dim=-1).indices
+    quantized_topk = quantized_rows.topk(effective_k, dim=-1).indices
+    overlap = (dense_topk.unsqueeze(-1) == quantized_topk.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+    exact = (dense_topk.sort(dim=-1).values == quantized_topk.sort(dim=-1).values).all(dim=-1)
+    return {
+        f"top{k}_overlap": _summary(overlap),
+        f"top{k}_exact_agreement": exact.float().mean().item(),
+        f"dense_top1_in_quantized_top{k}": (dense_topk[:, :1] == quantized_topk).any(dim=-1).float().mean().item(),
+        f"quantized_top1_in_dense_top{k}": (quantized_topk[:, :1] == dense_topk).any(dim=-1).float().mean().item(),
     }
 
 
