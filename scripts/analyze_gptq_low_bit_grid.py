@@ -587,8 +587,25 @@ def capture_calibration_hessians(
     modules: dict[str, nn.Linear],
     *,
     device: torch.device,
+    shared_input_groups: tuple[tuple[str, ...], ...] = (),
 ) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
     """Stream calibration batches and accumulate X.T@X from valid token rows only."""
+
+    grouped_members: set[str] = set()
+    representative_for: dict[str, str] = {}
+    for group in shared_input_groups:
+        if len(group) < 2:
+            raise ValueError("shared Hessian groups must contain at least two modules")
+        if len(set(group)) != len(group) or any(name not in modules for name in group):
+            raise ValueError("shared Hessian groups must contain unique selected module names")
+        if grouped_members.intersection(group):
+            raise ValueError("shared Hessian groups must be disjoint")
+        widths = {modules[name].in_features for name in group}
+        if len(widths) != 1:
+            raise ValueError("shared Hessian modules must have the same input width")
+        representative = group[0]
+        representative_for.update({name: representative for name in group})
+        grouped_members.update(group)
 
     accumulators: dict[str, torch.Tensor] = {}
     sample_counts = dict.fromkeys(modules, 0)
@@ -598,6 +615,8 @@ def capture_calibration_hessians(
     backbone = getattr(model, "model", model)
 
     for name, module in modules.items():
+        if representative_for.get(name, name) != name:
+            continue
 
         def module_hook(_module, args, _output, module_name=name):
             if active_mask is None:
@@ -635,10 +654,14 @@ def capture_calibration_hessians(
 
     hessians = {}
     for name in modules:
-        count = sample_counts[name]
-        if count == 0 or name not in accumulators:
+        representative = representative_for.get(name, name)
+        count = sample_counts[representative]
+        if count == 0 or representative not in accumulators:
             raise ValueError(f"module {name} observed no valid calibration tokens")
-        hessians[name] = accumulators[name].div(count).cpu().contiguous()
+        if representative not in hessians:
+            hessians[representative] = accumulators[representative].div(count).cpu().contiguous()
+        hessians[name] = hessians[representative]
+        sample_counts[name] = count
     return hessians, sample_counts
 
 

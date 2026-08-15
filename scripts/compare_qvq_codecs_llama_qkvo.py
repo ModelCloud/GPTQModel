@@ -10,7 +10,7 @@ import math
 import platform
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
@@ -39,6 +39,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from gptqmodel.quantization.qvq import (
     default_qvq_trellis_batch_size,
+    prepare_qvq_input_hessian,
     quantize_qvq_linear,
 )
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
@@ -330,6 +331,33 @@ def _qkvo_modules(model: torch.nn.Module, *, layer_count: int) -> dict[str, torc
     """Retain the original QKVO-only selector for callers importing this helper."""
 
     return _quantized_linear_modules(model, layer_count=layer_count, module_scope="qkvo")
+
+
+def _shared_input_hessian_groups(
+    model: torch.nn.Module,
+    selected_modules: dict[str, torch.nn.Linear],
+) -> tuple[tuple[str, ...], ...]:
+    """Discover same-input projection groups from the instantiated module tree."""
+
+    selected_names_by_id = {id(module): name for name, module in selected_modules.items()}
+    groups = []
+    seen: set[int] = set()
+    for parent in model.modules():
+        children_by_role = dict(parent.named_children())
+        for child_roles in (("q_proj", "k_proj", "v_proj"), ("gate_proj", "up_proj")):
+            children = tuple(children_by_role.get(role) for role in child_roles)
+            if any(not isinstance(child, torch.nn.Linear) for child in children):
+                continue
+            child_ids = tuple(id(child) for child in children)
+            if any(child_id not in selected_names_by_id for child_id in child_ids):
+                continue
+            if len(set(child_ids)) != len(child_ids) or seen.intersection(child_ids):
+                raise ValueError("shared-input projection groups must contain distinct, disjoint modules")
+            if len({child.in_features for child in children}) != 1:
+                raise ValueError("shared-input projection groups must have one input width")
+            groups.append(tuple(selected_names_by_id[child_id] for child_id in child_ids))
+            seen.update(child_ids)
+    return tuple(groups)
 
 
 def _joined(outputs: dict[str, torch.Tensor], names: tuple[str, ...]) -> torch.Tensor:
@@ -729,7 +757,14 @@ def main() -> None:
     evaluation_rows = _unpadded_evaluation_rows(evaluation, device)
 
     print(f"Capturing {args.module_scope} calibration Hessians", flush=True)
-    hessians, sample_counts = capture_calibration_hessians(model, calibration, modules, device=device)
+    shared_hessian_groups = _shared_input_hessian_groups(model, modules)
+    hessians, sample_counts = capture_calibration_hessians(
+        model,
+        calibration,
+        modules,
+        device=device,
+        shared_input_groups=shared_hessian_groups,
+    )
     original_weights = {name: module.weight.detach().cpu().float().clone() for name, module in modules.items()}
     print("Loading an immutable dense replay model for row-streamed metrics", flush=True)
     dense_model = AutoModelForCausalLM.from_pretrained(
@@ -763,6 +798,7 @@ def main() -> None:
             "calibration": calibration_stats,
             "calibration_execution": "independent full rows; batch=1; no sequence concatenation",
             "calibration_samples": sample_counts,
+            "shared_input_hessian_groups": [list(group) for group in shared_hessian_groups],
             "evaluation": evaluation_stats,
             "evaluation_batch_size": 1,
             "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
@@ -805,20 +841,49 @@ def main() -> None:
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
             alternative_bank_histogram = [0, 0, 0, 0]
+            shared_hessian_totals = Counter(id(hessians[name]) for name in module_names)
+            shared_hessian_remaining = shared_hessian_totals.copy()
+            device_hessians: dict[int, torch.Tensor] = {}
+            input_preparations = {}
             print(f"Starting W{rate:g} {arm} with trellis batch {batch_size}", flush=True)
             for index, (name, module) in enumerate(modules.items(), start=1):
                 module_started = time.perf_counter()
+                if rounding == "yaqa":
+                    quantization_hessian = yaqa_input_hessians[name].to(device)
+                    input_preparation = None
+                else:
+                    source_hessian = hessians[name]
+                    source_key = id(source_hessian)
+                    quantization_hessian = device_hessians.get(source_key)
+                    if quantization_hessian is None:
+                        quantization_hessian = source_hessian.to(device)
+                        if shared_hessian_totals[source_key] > 1:
+                            device_hessians[source_key] = quantization_hessian
+                    input_preparation = input_preparations.get(source_key)
+                    if input_preparation is None and shared_hessian_totals[source_key] > 1:
+                        input_preparation = prepare_qvq_input_hessian(
+                            quantization_hessian,
+                            seed=args.seed,
+                            damp_percent=0.01,
+                        )
+                        input_preparations[source_key] = input_preparation
                 result = quantize_qvq_linear(
                     original_weights[name].to(device),
-                    (yaqa_input_hessians[name] if rounding == "yaqa" else hessians[name]).to(device),
+                    quantization_hessian,
                     bits=rate,
                     output_hessian=(
                         yaqa_output_hessians[name].to(device) if rounding == "yaqa" else None
                     ),
                     seed=args.seed,
                     trellis_batch_size=batch_size,
+                    input_hessian_preparation=input_preparation,
                     **geometry,
                 )
+                if rounding != "yaqa":
+                    shared_hessian_remaining[source_key] -= 1
+                    if shared_hessian_remaining[source_key] == 0:
+                        device_hessians.pop(source_key, None)
+                        input_preparations.pop(source_key, None)
                 reconstruction = result.weight.detach().cpu().float()
                 reconstructions[name] = reconstruction
                 weight_metrics[name] = _weight_metrics(original_weights[name], reconstruction)

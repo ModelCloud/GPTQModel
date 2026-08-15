@@ -14,6 +14,7 @@ from gptqmodel.quantization.qvq import (
     fixed_boundary_v2b2_p32_segment_quantize,
     pack_qvq_binary_bank_ids,
     pack_trellis_states,
+    prepare_qvq_input_hessian,
     quantize_qvq_linear,
     reconstruct_qvq_inner_weight,
     tail_biting_v2b2_p32_quantize,
@@ -25,7 +26,7 @@ from gptqmodel.quantization.qvq import (
     yaqa_spectral_push_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
-from scripts.analyze_gptq_low_bit_grid import tensor_metrics
+from scripts.analyze_gptq_low_bit_grid import capture_calibration_hessians, tensor_metrics
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
@@ -34,10 +35,24 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _parser,
     _quantized_linear_modules,
     _save_yaqa_factor_cache,
+    _shared_input_hessian_groups,
     _streaming_compare_models,
     _WeightedMetricAccumulator,
     _yaqa_cache_metadata,
 )
+
+
+class _SharedInputHarness(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = torch.nn.Linear(4, 4, bias=False)
+        self.k = torch.nn.Linear(4, 4, bias=False)
+        self.v = torch.nn.Linear(4, 4, bias=False)
+
+    def forward(self, input_ids, attention_mask, use_cache=False):
+        del attention_mask, use_cache
+        hidden = input_ids.float().unsqueeze(-1).expand(-1, -1, 4)
+        return self.q(hidden) + self.k(hidden) + self.v(hidden)
 
 
 def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
@@ -89,6 +104,86 @@ def test_qvq_comparison_harness_can_select_every_decoder_linear_projection():
     assert "lm_head" not in all_linear
     with pytest.raises(ValueError, match="unsupported module scope"):
         _quantized_linear_modules(model, layer_count=2, module_scope="everything")
+
+
+def test_qvq_comparison_shared_input_groups_cover_qkv_and_gate_up_only():
+    model = torch.nn.Module()
+    model.attention = torch.nn.Module()
+    model.attention.q_proj = torch.nn.Linear(4, 4, bias=False)
+    model.attention.k_proj = torch.nn.Linear(4, 2, bias=False)
+    model.attention.v_proj = torch.nn.Linear(4, 2, bias=False)
+    model.attention.o_proj = torch.nn.Linear(4, 4, bias=False)
+    model.feed_forward = torch.nn.Module()
+    model.feed_forward.gate_proj = torch.nn.Linear(4, 8, bias=False)
+    model.feed_forward.up_proj = torch.nn.Linear(4, 8, bias=False)
+    model.feed_forward.down_proj = torch.nn.Linear(8, 4, bias=False)
+    modules = {name: module for name, module in model.named_modules() if isinstance(module, torch.nn.Linear)}
+
+    assert _shared_input_hessian_groups(model, modules) == (
+        ("attention.q_proj", "attention.k_proj", "attention.v_proj"),
+        ("feed_forward.gate_proj", "feed_forward.up_proj"),
+    )
+
+
+def test_shared_hessian_capture_matches_independent_and_aliases_storage():
+    model = _SharedInputHarness()
+    modules = {"q": model.q, "k": model.k, "v": model.v}
+    batches = [{"input_ids": torch.tensor([[1, 2, 0]]), "attention_mask": torch.tensor([[1, 1, 0]])}]
+    independent, independent_counts = capture_calibration_hessians(
+        model, batches, modules, device=torch.device("cpu")
+    )
+    shared, shared_counts = capture_calibration_hessians(
+        model,
+        batches,
+        modules,
+        device=torch.device("cpu"),
+        shared_input_groups=(("q", "k", "v"),),
+    )
+    assert shared_counts == independent_counts == {"q": 2, "k": 2, "v": 2}
+    assert all(torch.equal(shared[name], independent[name]) for name in modules)
+    assert shared["q"].data_ptr() == shared["k"].data_ptr() == shared["v"].data_ptr()
+
+
+def test_qvq_shared_input_factorization_is_exact_reused_and_provenance_checked():
+    generator = torch.Generator().manual_seed(91)
+    weight = torch.randn((16, 16), generator=generator)
+    basis = torch.randn((16, 16), generator=generator)
+    hessian = basis.mT @ basis + torch.eye(16)
+    expected = quantize_qvq_linear(weight, hessian, bits=4, seed=17, trellis_batch_size=1)
+    preparation = prepare_qvq_input_hessian(hessian, seed=17)
+
+    with patch("gptqmodel.quantization.qvq.block_ldl_factor", side_effect=AssertionError("unexpected refactor")):
+        actual = quantize_qvq_linear(
+            weight,
+            hessian,
+            bits=4,
+            seed=17,
+            trellis_batch_size=1,
+            input_hessian_preparation=preparation,
+        )
+    assert torch.equal(actual.trellis, expected.trellis)
+    assert torch.equal(actual.weight, expected.weight)
+    assert torch.equal(actual.inner_weight, expected.inner_weight)
+
+    with pytest.raises(ValueError, match="does not match the source geometry"):
+        quantize_qvq_linear(
+            weight,
+            hessian,
+            bits=4,
+            seed=18,
+            trellis_batch_size=1,
+            input_hessian_preparation=preparation,
+        )
+    hessian.diagonal().add_(1)
+    with pytest.raises(ValueError, match="does not match the source geometry"):
+        quantize_qvq_linear(
+            weight,
+            hessian,
+            bits=4,
+            seed=17,
+            trellis_batch_size=1,
+            input_hessian_preparation=preparation,
+        )
 
 
 def test_qvq_all_linear_scope_has_distinct_yaqa_cache_metadata():

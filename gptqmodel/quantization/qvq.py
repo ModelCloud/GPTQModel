@@ -2067,6 +2067,23 @@ class BlockLDLFactorization:
     retry_count: int
 
 
+@dataclass(frozen=True)
+class QVQInputHessianPreparation:
+    """Provenance-checked reusable Block-LDLQ input geometry."""
+
+    hessian: torch.Tensor
+    factorization: tuple[torch.Tensor, torch.Tensor]
+    damping: torch.Tensor
+    source_hessian: torch.Tensor
+    source_data_ptr: int
+    source_version: int
+    transformed_version: int
+    factor_versions: tuple[int, int]
+    block_size: int
+    seed: int
+    damp_percent: float
+
+
 def _validate_block_ldl_input(H: torch.Tensor, block_size: int) -> None:
 
     if H.ndim != 2 or H.shape[0] != H.shape[1]:
@@ -2106,6 +2123,48 @@ def block_ldl_factor(H: torch.Tensor, *, block_size: int) -> tuple[torch.Tensor,
 
     _validate_block_ldl_input(H, block_size)
     return _block_ldl_from_cholesky(H, torch.linalg.cholesky(H), block_size=block_size)
+
+
+def prepare_qvq_input_hessian(
+    H: torch.Tensor,
+    *,
+    seed: int,
+    damp_percent: float = 0.01,
+) -> QVQInputHessianPreparation:
+    """Transform, damp, and factor one shared Block-LDLQ input Hessian."""
+
+    _validate_block_ldl_input(H, 16)
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError("QVQ seed must be an integer.")
+    if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
+        raise TypeError("QVQ damping percent must be a real scalar.")
+    damp_percent = float(damp_percent)
+    if not math.isfinite(damp_percent) or damp_percent < 0:
+        raise ValueError("QVQ damping percent must be finite and nonnegative.")
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    signs = torch.randint(0, 2, (H.shape[0],), generator=generator, dtype=torch.int8).mul_(2).sub_(1)
+    signs = signs.to(device=H.device, dtype=torch.float32)
+    transformed = rht_preprocess_hessian(H, signs)
+    transformed = (transformed + transformed.transpose(0, 1)) * 0.5
+    damping = torch.maximum(
+        transformed.diagonal().abs().mean() * damp_percent,
+        torch.tensor(torch.finfo(torch.float32).eps, device=H.device),
+    )
+    transformed.diagonal().add_(damping)
+    factorization = block_ldl_factor(transformed.to(torch.float32), block_size=16)
+    return QVQInputHessianPreparation(
+        hessian=transformed,
+        factorization=factorization,
+        damping=damping,
+        source_hessian=H,
+        source_data_ptr=H.data_ptr(),
+        source_version=H._version,
+        transformed_version=transformed._version,
+        factor_versions=(factorization[0]._version, factorization[1]._version),
+        block_size=16,
+        seed=seed,
+        damp_percent=damp_percent,
+    )
 
 
 def stabilized_block_ldl_factor(
@@ -4676,6 +4735,7 @@ def quantize_qvq_linear(
     propagated_inputs: torch.Tensor | None = None,
     propagated_target_output: torch.Tensor | None = None,
     propagated_acceptance: Callable[[torch.Tensor, torch.Tensor], bool] | None = None,
+    input_hessian_preparation: QVQInputHessianPreparation | None = None,
 ) -> QVQLinearQuantizationResult:
     """Run RHT, BlockLDLQ/YAQA, PGC16 TCQ, and planar packing for a linear.
 
@@ -4753,6 +4813,10 @@ def quantize_qvq_linear(
         raise ValueError("QVQ `bank_count` must be 1, 2, or 4.")
     if not isinstance(rounding, str):
         raise TypeError("QVQ rounding must be a string.")
+    if input_hessian_preparation is not None and not isinstance(
+        input_hessian_preparation, QVQInputHessianPreparation
+    ):
+        raise TypeError("QVQ shared input-Hessian preparation has an invalid type.")
     rounding = rounding.strip().lower()
     if rounding not in {"block_ldlq", "yaqa"}:
         raise ValueError("QVQ rounding must be `block_ldlq` or `yaqa`.")
@@ -4823,6 +4887,8 @@ def quantize_qvq_linear(
             raise ValueError("YAQA does not support input-Hessian-only module-scale search.")
         if viterbi_objective != "euclidean":
             raise ValueError("YAQA requires the Euclidean PGC16 tile objective.")
+        if input_hessian_preparation is not None:
+            raise ValueError("YAQA input/output factors are module-specific and cannot use shared input preparation.")
     if (yaqa_spectral_refinement or yaqa_spectral_push) and (rounding != "yaqa" or not v2b2_p32):
         raise ValueError("YAQA spectral experiment requires V2B2-P32 with YAQA rounding.")
     if v2b2_p32 and viterbi_objective != "euclidean":
@@ -4879,22 +4945,43 @@ def quantize_qvq_linear(
     with _qvq_phase(telemetry, "rht_weight", device):
         transformed_weight = rht_preprocess_weight(weight, SU, SV_sign)
     with _qvq_phase(telemetry, "rht_hessian", device):
-        transformed_H = rht_preprocess_hessian(H.to(device=device), SU)
-        transformed_H = (transformed_H + transformed_H.transpose(0, 1)) * 0.5
-        mean_diagonal = transformed_H.diagonal().abs().mean()
         block_ldlq_control_H = None
-        if rounding == "yaqa" and (v2b4_p64 or v2b2_p32):
-            block_ldlq_control_H = transformed_H.clone()
-            block_control_damping = torch.maximum(
-                mean_diagonal * 0.01,
+        if input_hessian_preparation is not None:
+            preparation = input_hessian_preparation
+            if (
+                preparation.source_hessian is not H
+                or preparation.source_data_ptr != H.data_ptr()
+                or preparation.source_version != H._version
+                or preparation.transformed_version != preparation.hessian._version
+                or preparation.factor_versions
+                != (preparation.factorization[0]._version, preparation.factorization[1]._version)
+                or preparation.block_size != 16
+                or preparation.seed != seed
+                or preparation.damp_percent != damp_percent
+                or preparation.hessian.device != device
+                or tuple(preparation.hessian.shape) != tuple(H.shape)
+                or any(factor.device != device for factor in preparation.factorization)
+                or any(tuple(factor.shape) != tuple(H.shape) for factor in preparation.factorization)
+            ):
+                raise ValueError("QVQ shared input-Hessian preparation does not match the source geometry.")
+            transformed_H = preparation.hessian
+            damping = preparation.damping
+        else:
+            transformed_H = rht_preprocess_hessian(H.to(device=device), SU)
+            transformed_H = (transformed_H + transformed_H.transpose(0, 1)) * 0.5
+            mean_diagonal = transformed_H.diagonal().abs().mean()
+            if rounding == "yaqa" and (v2b4_p64 or v2b2_p32):
+                block_ldlq_control_H = transformed_H.clone()
+                block_control_damping = torch.maximum(
+                    mean_diagonal * 0.01,
+                    torch.tensor(torch.finfo(torch.float32).eps, device=device),
+                )
+                block_ldlq_control_H.diagonal().add_(block_control_damping)
+            damping = torch.maximum(
+                mean_diagonal * damp_percent,
                 torch.tensor(torch.finfo(torch.float32).eps, device=device),
             )
-            block_ldlq_control_H.diagonal().add_(block_control_damping)
-        damping = torch.maximum(
-            mean_diagonal * damp_percent,
-            torch.tensor(torch.finfo(torch.float32).eps, device=device),
-        )
-        transformed_H.diagonal().add_(damping)
+            transformed_H.diagonal().add_(damping)
     transformed_output_hessian = None
     if output_hessian is not None:
         with _qvq_phase(telemetry, "rht_output_hessian", device):
@@ -5001,11 +5088,13 @@ def quantize_qvq_linear(
             )
     source_rms = transformed_weight.square().mean().sqrt()
     scale = (source_rms / PGC16_NORMALIZATION_RMS * pgc16_scale_factor(bits)).clamp_min(torch.finfo(torch.float32).eps)
-    prepared_block_factors = (
-        block_ldl_factor(transformed_H.to(torch.float32), block_size=16)
-        if bank_codebooks is not None and rounding == "block_ldlq"
-        else None
-    )
+    prepared_block_factors = None
+    if rounding == "block_ldlq":
+        prepared_block_factors = (
+            input_hessian_preparation.factorization
+            if input_hessian_preparation is not None
+            else block_ldl_factor(transformed_H.to(torch.float32), block_size=16)
+        )
     needs_bank0_oracle = (
         bank_codebooks is not None and rounding == "block_ldlq" and not v2b4_p64 and not v2b2_p32
     )
