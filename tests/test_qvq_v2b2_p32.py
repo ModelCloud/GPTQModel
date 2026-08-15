@@ -50,6 +50,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
         "bank_count": 2,
     }
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
+    assert ARM_CONFIG["v2b2-p32-yaqa-spectral-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
 
 
 def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
@@ -500,6 +501,95 @@ def test_qvq_v2b2_p32_yaqa_output_spectral_quantization_is_serialization_neutral
         bank_alt_id=refined.bank_alt_id,
     )
     torch.testing.assert_close(decoded, refined.inner_weight, rtol=0, atol=0)
+
+    live = QVQLinear(
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_count=2,
+        v2b2_p32=True,
+        tensors=refined.serialized_tensors(),
+    ).eval()
+    reloaded = QVQLinear(bits=2, in_features=16, out_features=16, bank_count=2, v2b2_p32=True).eval()
+    reloaded.load_state_dict(live.state_dict(), strict=True)
+    inputs = torch.randn((7, 16), generator=generator)
+    torch.testing.assert_close(reloaded(inputs), live(inputs), rtol=0, atol=0)
+    torch.testing.assert_close(live(inputs), inputs @ refined.weight.T, rtol=1e-5, atol=1e-6)
+
+
+def test_qvq_v2b2_p32_yaqa_randomized_spectral_subspace_matches_exact_control():
+    generator = torch.Generator().manual_seed(20260822)
+    left = torch.randn((16, 4), generator=generator)
+    right = torch.randn((4, 16), generator=generator)
+    source = left @ right + 1e-3 * torch.randn((16, 16), generator=generator)
+    baseline = (
+        torch.zeros_like(source),
+        torch.zeros((1, 128), dtype=torch.long),
+        torch.zeros(8, dtype=torch.uint8),
+        torch.tensor([1], dtype=torch.uint8),
+    )
+    codebooks = tuple(torch.full((1,), index, dtype=torch.float32) for index in range(4))
+
+    def run(*, exact: bool):
+        boosted = []
+
+        def keep_baseline(_weight, _input, candidate_output, *_args, **_kwargs):
+            boosted.append(candidate_output.clone())
+            return baseline
+
+        diagnostics = {}
+        svd_patch = (
+            patch(
+                "gptqmodel.eora.eora._eora_compute_svd",
+                side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+            )
+            if exact
+            else patch("gptqmodel.quantization.qvq.yaqa_inner_v2b2_p32", side_effect=keep_baseline)
+        )
+        contexts = (
+            (
+                patch("gptqmodel.quantization.qvq.yaqa_inner_v2b2_p32", side_effect=keep_baseline),
+                svd_patch,
+            )
+            if exact
+            else (svd_patch,)
+        )
+        with contexts[0]:
+            if len(contexts) == 2:
+                with contexts[1]:
+                    result = yaqa_output_spectral_refine_v2b2_p32(
+                        source,
+                        torch.eye(16),
+                        torch.eye(16),
+                        codebooks,
+                        baseline,
+                        ranks=(4,),
+                        lambdas=(0.25,),
+                        bits=2,
+                        diagnostics=diagnostics,
+                    )
+            else:
+                result = yaqa_output_spectral_refine_v2b2_p32(
+                    source,
+                    torch.eye(16),
+                    torch.eye(16),
+                    codebooks,
+                    baseline,
+                    ranks=(4,),
+                    lambdas=(0.25,),
+                    bits=2,
+                    diagnostics=diagnostics,
+                )
+        return result, diagnostics, boosted
+
+    approximate, approximate_diagnostics, approximate_boosted = run(exact=False)
+    exact, exact_diagnostics, exact_boosted = run(exact=True)
+    assert torch.equal(approximate[0], baseline[0])
+    assert torch.equal(exact[0], baseline[0])
+    assert approximate_diagnostics["spectral_concentration"]["4"] == pytest.approx(
+        exact_diagnostics["spectral_concentration"]["4"], rel=1e-4, abs=1e-6
+    )
+    torch.testing.assert_close(approximate_boosted[0], exact_boosted[0], rtol=2e-3, atol=2e-3)
 
 
 def test_qvq_v2b2_p32_fixed_yaqa_uses_matched_block_ldlq_damping_for_family():

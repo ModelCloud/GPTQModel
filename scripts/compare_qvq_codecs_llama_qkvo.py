@@ -97,6 +97,16 @@ ARM_CONFIG = {
         "yaqa_v2b2_family_mode": "reselect",
         "yaqa_spectral_refinement": True,
     },
+    "v2b2-p32-yaqa-spectral-fixed": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "fixed_block_ldlq",
+        "yaqa_spectral_refinement": True,
+    },
 }
 DEFAULT_ARMS = ("v2", "v2b2-p32")
 
