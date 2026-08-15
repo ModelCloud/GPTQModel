@@ -190,12 +190,11 @@ QVQ aggregates its multiple preparation products in one typed subclass:
 ```python
 @dataclass(frozen=True, kw_only=True)
 class QVQPreparedArtifact(BasePreparedArtifact):
-    calibration: CalibrationArtifact
-    validation: ValidationArtifact | None
     input_hessians: Mapping[str, HessianArtifact]
     input_factors: Mapping[str, FactorizationArtifact]
     sketch_b: SketchBArtifact | None
     propagation: PropagationArtifact | None
+    validation_replay: ValidationReplayArtifact | None
     compander: CompanderArtifact | None
 ```
 
@@ -204,6 +203,11 @@ The internal component types are ordinary frozen dataclasses owned by QVQ; they 
 many modules and calculation groups without weakening the top-level return contract. A component containing external
 tensor storage uses an `ArtifactStorage` handle with checksum, dtype, shape, location, and ownership information rather
 than an unstructured path.
+
+Calibration and validation datasets are inputs to `model.prepare()`, not fields of `QVQPreparedArtifact`. Their
+identity, selected row IDs, preprocessing settings, counts, and digests belong in the manifest. When later
+quantization needs reusable validation products, `validation_replay` may contain only derived teacher logits, masks,
+or bounded replay handles. It must not retain or duplicate the raw calibration dataset.
 
 An in-memory tensor field must be detached, non-gradient, artifact-owned, and treated as read-only. Freezing the
 dataclass does not make a PyTorch tensor immutable, so validation recomputes its checksum before consumption whenever
@@ -238,8 +242,8 @@ The manifest records:
 - model repository/path, checkpoint shard fingerprints, config fingerprint, and model class;
 - tokenizer fingerprint and normalization version;
 - calibration, validation, and YAQA dataset fingerprints;
-- exact source row IDs, row ordering, token IDs or a stable token-batch digest;
-- padding masks, valid-token counts, sequence counts, and exclusion counts;
+- exact source row IDs, row ordering, and a stable token-batch digest;
+- padding-mask digest, valid-token counts, sequence counts, and exclusion counts;
 - model-tree version, target full names, object roles, calculation-group IDs, and layer scope;
 - QVQ format/version, rate-independent controls, dtype, block size, damping policy, and device family;
 - seed policy and all derived seed/sign checksums;
@@ -261,8 +265,9 @@ Depending on the requested arms, `QVQPreparedArtifact` may contain:
 - dense-teacher logit references or a separately fingerprinted teacher cache;
 - optional model-level frozen compander data.
 
-It must not contain dense source weights. Large tensor artifacts may live in a versioned cache directory and be
-represented by managed handles rather than one monolithic Python serialization.
+It must not contain raw calibration/validation datasets or dense source weights. Large derived tensor artifacts may
+live in a versioned cache directory and be represented by managed handles rather than one monolithic Python
+serialization.
 
 ### Shared-geometry cache key
 
@@ -597,6 +602,7 @@ new correctness stages to one side of the A/B.
 - `BasePreparedArtifact` subclass registration, serialization, parsing, and checked consumption;
 - artifact/manifest schema and component checksum round trip;
 - unknown kind/version, wrong subclass, malformed component mapping, missing dependency, and mutated-tensor rejection;
+- no raw calibration or validation dataset retained after preparation;
 - calibration sort, no-concat, full-length rows, masks, and exact sample counts;
 - model-tree target and calculation-group discovery without name-prefix assumptions;
 - exact shared-versus-independent Hessian and factor parity;
@@ -760,6 +766,7 @@ Exit: propagation-aware selection measures true downstream logits and never cons
 - Do not change QVQ codec geometry merely to fit the lifecycle.
 - Do not make YAQA state part of the inference checkpoint.
 - Do not infer same-activation groups from module name strings.
+- Do not store raw calibration or validation datasets in `QVQPreparedArtifact`.
 - Do not retain source weights in preparation artifacts.
 - Do not treat module-local MSE as final-logit propagation.
 - Do not include save/reload time in only one side of a quantization-speed A/B.
