@@ -1,8 +1,7 @@
 # Llama 3.2 1B QVQ YAQA 512-row sweep (2026-08-15)
 
-This log records the four-layer Q/K/V/O comparison of canonical V2 Block-LDLQ and canonical V2 with YAQA. The
-V2B2-P32+YAQA arms were still running when this checkpoint was written and are intentionally not represented as
-completed results.
+This log records the four-layer Q/K/V/O comparison of canonical V2 Block-LDLQ, canonical V2 with YAQA, and
+V2B2-P32 with YAQA family reselection.
 
 ## Configuration
 
@@ -52,6 +51,51 @@ YAQA increases raw weight relative L2 and the local QKVO KL at every rate while 
 logit KL. This is expected evidence that the two-sided objective is selecting a better propagated error direction,
 not merely a lower-MSE weight reconstruction.
 
+## V2B2-P32+YAQA family-reselection results
+
+These arms evaluated all three alternative B2 families for every module under the YAQA objective, then retained
+the best complete module result. They ran on dedicated physical GPUs 4--6 with verified process masks.
+
+| Rate | Arm | BPW | Weight rel-L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Wall time |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1.5 | V2B2-P32+YAQA | 1.53125 | 0.614660 | 0.074820 | 0.080649 | 0.035609 | 0.138015 | 63.15% | 67.24% | 68.25% | 1012.80 s |
+| W2 | V2B2-P32+YAQA | 2.03125 | 0.467218 | 0.016472 | 0.018225 | 0.013133 | 0.056970 | 74.55% | 77.59% | 78.66% | 980.17 s |
+| W2.5 | V2B2-P32+YAQA | 2.53125 | 0.348671 | 0.006070 | 0.006788 | 0.005581 | 0.025907 | 81.84% | 84.28% | 85.02% | 967.36 s |
+
+| Rate | Layer-KL delta vs V2+YAQA | Final-KL delta vs V2+YAQA | Top-1 delta vs V2+YAQA |
+|---|---:|---:|---:|
+| W1.5 | -10.20% | -8.16% | +1.12 pp |
+| W2 | -8.48% | -6.76% | +0.96 pp |
+| W2.5 | -5.93% | -5.72% | +0.24 pp |
+
+The banked advantage remains positive after YAQA at every supported rate. Its magnitude decreases as rate rises,
+from an 8.16% Final-KL reduction at W1.5 to 5.72% at W2.5.
+
+### Selector and family telemetry
+
+| Rate | Alternative occupancy | Entropy | Selector histogram | Module family histogram 0/1/2/3 |
+|---|---:|---:|---|---|
+| W1.5 | 50.08% | 0.999998 bits | 654345 / 656375 / 0 / 0 | 0 / 7 / 4 / 5 |
+| W2 | 49.93% | 0.999999 bits | 656283 / 654437 / 0 / 0 | 0 / 5 / 5 / 6 |
+| W2.5 | 50.01% | 1.000000 bits | 655243 / 655477 / 0 / 0 | 0 / 6 / 8 / 2 |
+
+All three alternative families win complete modules at every rate. Near-maximal selector entropy indicates that
+the gain is not produced by a sparse rescue path: YAQA actively uses both canonical and alternative segment
+manifolds across approximately half of the P32 segments.
+
+## W3.5 completion
+
+W3.5 does not support V2B2-P32, so it compares canonical V2 with V2+YAQA. Both arms ran on dedicated physical GPU
+7 with a verified process mask.
+
+| Rate | Arm | BPW | Weight rel-L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 | Wall time |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W3.5 | V2 | 3.50000 | 0.123013 | 0.000241 | 0.000633 | 0.003223 | 0.015064 | 85.85% | 87.49% | 88.12% | 374.04 s |
+| W3.5 | V2+YAQA | 3.50000 | 0.190856 | 0.001605 | 0.001774 | 0.001390 | 0.006748 | 90.27% | 91.27% | 91.83% | 430.78 s |
+
+At W3.5, YAQA reduces Layer KL by 56.86% and Final KL by 55.20%, while improving Top-1 agreement by 4.42
+percentage points.
+
 ## RAM-fix validation
 
 The original evaluation implementation retained every full-vocabulary row and grew each worker to 335--364 GiB
@@ -61,9 +105,9 @@ worker RSS remained between 3.4 and 6.3 GiB and host available RAM remained appr
 
 ## Timing caveat and follow-up
 
-An orchestration error scoped `CUDA_VISIBLE_DEVICES` to a shell builtin instead of the Python process, so these four
-workers shared physical GPU 0 rather than the intended GPUs 4--7. The output metrics remain valid because each
-worker had an independent CUDA context and deterministic inputs, but the wall times are contention measurements
-and must not be used as single-GPU performance benchmarks. The unfinished V2B2-P32+YAQA runs and W3.5 rerun use
-verified per-process GPU masks on physical GPUs 4--7.
-
+An orchestration error scoped `CUDA_VISIBLE_DEVICES` to a shell builtin instead of the Python process, so the
+W1.5--W3 V2 and V2+YAQA workers shared physical GPU 0 rather than the intended GPUs 4--7. Their output metrics
+remain valid because each worker had an independent CUDA context and deterministic inputs, but those wall times
+are contention measurements and must not be used as single-GPU performance benchmarks. The V2B2-P32+YAQA and
+W3.5 runs used verified per-process masks on dedicated physical GPUs 4--7, so their wall times are valid dedicated-
+GPU measurements.
