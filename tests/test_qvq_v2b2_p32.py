@@ -20,6 +20,7 @@ from gptqmodel.quantization.qvq import (
     unpack_qvq_binary_bank_ids,
     yaqa_inner_v2b2_p32,
     yaqa_output_spectral_refine_v2b2_p32,
+    yaqa_spectral_push_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
 from scripts.analyze_gptq_low_bit_grid import tensor_metrics
@@ -55,6 +56,8 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     }
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
+    assert ARM_CONFIG["v2b2-p32-yaqa-spectral-push-fixed"]["yaqa_spectral_push"] is True
+    assert ARM_CONFIG["v2b2-p32-yaqa-spectral-push"]["yaqa_v2b2_family_mode"] == "reselect"
 
 
 def test_qvq_comparison_harness_can_select_every_decoder_linear_projection():
@@ -313,6 +316,34 @@ def test_qvq_v2b2_p32_yaqa_spectral_config_round_trip():
         )
 
 
+def test_qvq_v2b2_p32_yaqa_spectral_push_config_round_trip():
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(
+            spectral_push=True,
+            spectral_ranks=[4, 8, 4],
+            spectral_push_alphas=[0.25, 0.5, 0.25],
+        ),
+        offload_to_disk=False,
+    )
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+    assert reloaded.yaqa.spectral_push is True
+    assert reloaded.yaqa.spectral_ranks == (4, 8)
+    assert reloaded.yaqa.spectral_push_alphas == (0.25, 0.5)
+
+    with pytest.raises(ValueError, match="separate experiments"):
+        YaqaConfig(spectral_refinement=True, spectral_push=True)
+    with pytest.raises(ValueError, match="spectral experiment requires"):
+        QVQConfig(
+            bits=2,
+            rounding="yaqa",
+            yaqa=YaqaConfig(spectral_push=True),
+            offload_to_disk=False,
+        )
+
+
 @pytest.mark.parametrize("family_mode", (None, "unknown"))
 def test_qvq_v2b2_p32_rejects_invalid_yaqa_family_mode(family_mode):
     error = TypeError if family_mode is None else ValueError
@@ -547,6 +578,81 @@ def test_qvq_v2b2_p32_yaqa_output_spectral_candidate_uses_original_proxy_and_kee
         assert float(boosted.trace()) == pytest.approx(8.0 * (1.0 + strength))
 
 
+def test_qvq_v2b2_p32_yaqa_spectral_push_uses_low_rank_target_and_original_proxy():
+    source = torch.zeros((8, 8))
+    input_hessian = torch.eye(8)
+    output_hessian = torch.eye(8)
+    baseline_weight = torch.eye(8)
+    states = torch.zeros((1, 32), dtype=torch.long)
+    selectors = torch.zeros(8, dtype=torch.uint8)
+    alt_id = torch.tensor([1], dtype=torch.uint8)
+    baseline = baseline_weight, states, selectors, alt_id
+    codebooks = tuple(torch.full((1,), index, dtype=torch.float32) for index in range(4))
+    rounding_biases = []
+
+    def fake_candidate(_weight, _input, _output, *_args, **kwargs):
+        rounding_biases.append(kwargs["_rounding_bias"].clone())
+        value = 0.5 if len(rounding_biases) == 1 else 2.0
+        return (
+            torch.eye(8) * value,
+            states,
+            torch.ones_like(selectors),
+            torch.tensor([2], dtype=torch.uint8),
+        )
+
+    diagnostics = {}
+    with (
+        patch(
+            "gptqmodel.eora.eora._eora_compute_svd",
+            side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+        ),
+        patch("gptqmodel.quantization.qvq.yaqa_inner_v2b2_p32", side_effect=fake_candidate),
+    ):
+        actual = yaqa_spectral_push_v2b2_p32(
+            source,
+            input_hessian,
+            output_hessian,
+            codebooks,
+            baseline,
+            ranks=(8,),
+            alphas=(0.5, 1.0),
+            bits=2,
+            diagnostics=diagnostics,
+        )
+
+    assert torch.equal(actual[0], torch.eye(8) * 0.5)
+    assert diagnostics["spectral_method"] == "push"
+    assert diagnostics["spectral_selected"] is True
+    assert diagnostics["spectral_rank"] == 8
+    assert diagnostics["spectral_lambda"] is None
+    assert diagnostics["spectral_alpha"] == 0.5
+    assert diagnostics["spectral_oracle_losses"]["8"] == pytest.approx(0.0, abs=1e-6)
+    assert diagnostics["spectral_selected_loss"] < diagnostics["spectral_original_loss"]
+    assert diagnostics["spectral_selector_churn"] == 1.0
+    assert diagnostics["spectral_family_changed"] is True
+    torch.testing.assert_close(rounding_biases[0], -0.5 * torch.eye(8), rtol=0, atol=1e-6)
+    torch.testing.assert_close(rounding_biases[1], -torch.eye(8), rtol=0, atol=1e-6)
+
+
+def test_qvq_v2b2_p32_yaqa_spectral_push_rejects_invalid_controls():
+    source = torch.zeros((8, 8))
+    baseline = (
+        torch.zeros_like(source),
+        torch.zeros((1, 32), dtype=torch.long),
+        torch.zeros(8, dtype=torch.uint8),
+        torch.tensor([1], dtype=torch.uint8),
+    )
+    codebooks = tuple(torch.full((1,), index, dtype=torch.float32) for index in range(4))
+    with pytest.raises(ValueError, match="ranks"):
+        yaqa_spectral_push_v2b2_p32(
+            source, torch.eye(8), torch.eye(8), codebooks, baseline, ranks=(0,), alphas=(0.5,), bits=2
+        )
+    with pytest.raises(ValueError, match="alphas"):
+        yaqa_spectral_push_v2b2_p32(
+            source, torch.eye(8), torch.eye(8), codebooks, baseline, ranks=(4,), alphas=(float("nan"),), bits=2
+        )
+
+
 def test_qvq_v2b2_p32_yaqa_output_spectral_quantization_is_serialization_neutral_and_nonregressive():
     generator = torch.Generator().manual_seed(20260821)
     weight = torch.randn((16, 16), generator=generator) * 0.1
@@ -607,6 +713,56 @@ def test_qvq_v2b2_p32_yaqa_output_spectral_quantization_is_serialization_neutral
     inputs = torch.randn((7, 16), generator=generator)
     torch.testing.assert_close(reloaded(inputs), live(inputs), rtol=0, atol=0)
     torch.testing.assert_close(live(inputs), inputs @ refined.weight.T, rtol=1e-5, atol=1e-6)
+
+
+def test_qvq_v2b2_p32_yaqa_spectral_push_is_serialization_neutral_and_nonregressive():
+    generator = torch.Generator().manual_seed(20260824)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_samples = torch.randn((37, 16), generator=generator)
+    output_samples = torch.randn((39, 16), generator=generator)
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    baseline = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        trellis_batch_size=1,
+    )
+    pushed = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        bits=2,
+        rounding="yaqa",
+        output_hessian=output_hessian,
+        bank_count=2,
+        v2b2_p32=True,
+        yaqa_spectral_push=True,
+        yaqa_spectral_ranks=(1,),
+        yaqa_spectral_push_alphas=(0.25, 0.5),
+        trellis_batch_size=1,
+    )
+
+    assert pushed.kronecker_proxy_loss <= baseline.kronecker_proxy_loss
+    assert pushed.yaqa_spectral_method == "push"
+    assert pushed.yaqa_spectral_lambda is None
+    assert pushed.yaqa_spectral_alpha is None or pushed.yaqa_spectral_alpha in (0.25, 0.5)
+    assert set(pushed.yaqa_spectral_concentration) == {"1"}
+    assert set(pushed.yaqa_spectral_oracle_losses) == {"1"}
+    assert set(pushed.serialized_tensors()) == set(baseline.serialized_tensors())
+    decoded = reconstruct_qvq_inner_weight(
+        pushed.trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        bank_ids=pushed.serialized_tensors()["bank_ids"],
+        v2b2_p32=True,
+        bank_alt_id=pushed.bank_alt_id,
+    )
+    torch.testing.assert_close(decoded, pushed.inner_weight, rtol=0, atol=0)
 
 
 def test_qvq_v2b2_p32_yaqa_randomized_spectral_subspace_matches_exact_control():

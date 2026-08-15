@@ -31,6 +31,13 @@ CUDA inference remains separate work.
   This is the quality gate that can promote a low-rate selector map; it is not implemented in the base slice;
 - **P2 -- native inference:** add CUDA/MPS/MLX binary P32 decode only after Torch reconstruction and model-level
   evidence pass.
+- **complete -- spectral P3 reference:** recover the truncated post-YAQA residual through triangular solves, use it
+  only as a Viterbi rounding-target push, retain original-weight feedback and original-Kronecker acceptance, expose
+  continuous-oracle/absorption/churn telemetry, and serialize only the exact ordinary V2B2-P32 payload;
+- **run now -- spectral P3 gate:** W2 fixed-family first with rank 16 and `alpha={0.25,0.5,1.0}` on the strict
+  512/512/512 split. Expand ranks, rates, or family reselection only if held-out final KL improves without a
+  material Top-1/5/10 regression. Otherwise retire the spectral path and prioritize live-prefix propagation-aware
+  selector scoring.
 
 The module alternative ID is physically one serialized byte. Exact artifact accounting must include it even though
 its amortized BPW is negligible for real projection matrices.

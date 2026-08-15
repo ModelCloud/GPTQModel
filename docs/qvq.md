@@ -845,6 +845,42 @@ replay remain required because a lower module Kronecker proxy can still regress 
 > Approximation.” arXiv:2410.21271. P1 borrows the post-compression residual-spectrum principle; it does not retain
 > EoRA `(A,B)` factors or add a runtime LoRA branch.
 
+#### Eigenspace spectral push P3
+
+The default-off `yaqa.spectral_push` experiment addresses P1/P2's measured failure mode: output-factor boosting
+substantially reduced local/live KL while leaving final KL effectively unchanged, and its median discrete absorption
+was zero. P3 therefore uses the continuous low-rank correction to cross rounding boundaries directly instead of
+changing the objective used by YAQA.
+
+For baseline `Q0`, residual `E0=W-Q0`, Cholesky roots `H_I=C_I C_I.T`, `H_O=C_O C_O.T`, and truncated SVD
+
+```text
+C_I.T @ E0 @ C_O = U @ diag(sigma) @ V.T,
+```
+
+P3 recovers the rank-`r` correction in QVQ's inner orientation without forming matrix inverses:
+
+```text
+C_I.T @ L_r @ C_O = U_r @ diag(sigma_r) @ V_r.T.
+```
+
+The implementation uses two triangular solves, then proposes each configured `alpha` through
+
+```text
+T_round = T_YAQA + alpha * L_r.
+```
+
+This changes only the tile target supplied to the segmented V2 Viterbi search. YAQA's committed error remains
+`W-Q`, its two-sided feedback remains relative to the original dense `W`, and every complete candidate is rescored
+under the original unmodified `H_I,H_O` Kronecker objective. A non-finite, tied, or worse candidate restores `Q0`
+bit-for-bit. SVD factors and `L_r` are discarded, so checkpoint tensors, effective BPW, and inference are unchanged.
+
+P3 reports the continuous-oracle loss for each rank, selected rank/alpha, rank-energy concentration, discrete
+absorption efficiency, selector churn, and family change. Fixed-family and family-reselection arms remain separate:
+the fixed arm is the first causal gate, while reselection is justified only if the fixed candidate shows propagated
+benefit. Local or Kronecker improvement alone cannot promote P3; disjoint live-prefix/final-logit confirmation is
+still required below W3.
+
 #### V2B4-P64 implementation slice
 
 `format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W2.5. It keeps the canonical L16/V2

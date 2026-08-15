@@ -118,6 +118,26 @@ ARM_CONFIG = {
         "yaqa_v2b2_family_mode": "fixed_block_ldlq",
         "yaqa_spectral_refinement": True,
     },
+    "v2b2-p32-yaqa-spectral-push-fixed": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "fixed_block_ldlq",
+        "yaqa_spectral_push": True,
+    },
+    "v2b2-p32-yaqa-spectral-push": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "reselect",
+        "yaqa_spectral_push": True,
+    },
 }
 DEFAULT_ARMS = ("v2", "v2b2-p32")
 
@@ -146,6 +166,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaqa-seed", type=int, default=0)
     parser.add_argument("--yaqa-spectral-ranks", nargs="+", type=int, default=(8, 16, 32))
     parser.add_argument("--yaqa-spectral-lambdas", nargs="+", type=float, default=(0.1, 0.25, 0.5, 1.0))
+    parser.add_argument("--yaqa-spectral-push-alphas", nargs="+", type=float, default=(0.25, 0.5, 1.0))
     parser.add_argument(
         "--yaqa-factor-cache",
         type=Path,
@@ -748,6 +769,7 @@ def main() -> None:
             "yaqa_sketch_b": yaqa_stats,
             "yaqa_spectral_ranks": list(args.yaqa_spectral_ranks),
             "yaqa_spectral_lambdas": list(args.yaqa_spectral_lambdas),
+            "yaqa_spectral_push_alphas": list(args.yaqa_spectral_push_alphas),
             "serialization": "disabled; dense reconstruction comparison",
         },
         "results": {},
@@ -771,6 +793,9 @@ def main() -> None:
             if geometry.get("yaqa_spectral_refinement", False):
                 geometry["yaqa_spectral_ranks"] = tuple(args.yaqa_spectral_ranks)
                 geometry["yaqa_spectral_lambdas"] = tuple(args.yaqa_spectral_lambdas)
+            if geometry.get("yaqa_spectral_push", False):
+                geometry["yaqa_spectral_ranks"] = tuple(args.yaqa_spectral_ranks)
+                geometry["yaqa_spectral_push_alphas"] = tuple(args.yaqa_spectral_push_alphas)
             batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
                 rate,
                 device,
@@ -803,10 +828,13 @@ def main() -> None:
                 )
                 weight_metrics[name]["yaqa_spectral"] = {
                     "selected": result.yaqa_spectral_selected,
+                    "method": result.yaqa_spectral_method,
                     "rank": result.yaqa_spectral_rank,
                     "lambda": result.yaqa_spectral_lambda,
+                    "alpha": result.yaqa_spectral_alpha,
                     "svd_device": result.yaqa_spectral_svd_device,
                     "concentration": result.yaqa_spectral_concentration,
+                    "oracle_losses": result.yaqa_spectral_oracle_losses,
                     "absorption_efficiency": result.yaqa_spectral_absorption_efficiency,
                     "selector_churn": result.yaqa_spectral_selector_churn,
                     "family_changed": result.yaqa_spectral_family_changed,

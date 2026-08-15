@@ -47,6 +47,8 @@ class YaqaConfig:
     spectral_refinement: bool = False
     spectral_ranks: tuple[int, ...] = (8, 16, 32)
     spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0)
+    spectral_push: bool = False
+    spectral_push_alphas: tuple[float, ...] = (0.25, 0.5, 1.0)
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -71,6 +73,10 @@ class YaqaConfig:
             )
         if not isinstance(self.spectral_refinement, bool):
             raise TypeError("YaqaConfig: `spectral_refinement` must be boolean.")
+        if not isinstance(self.spectral_push, bool):
+            raise TypeError("YaqaConfig: `spectral_push` must be boolean.")
+        if self.spectral_refinement and self.spectral_push:
+            raise ValueError("YaqaConfig: output-factor refinement and spectral push are separate experiments.")
         if not isinstance(self.spectral_ranks, (tuple, list)) or not self.spectral_ranks:
             raise ValueError("YaqaConfig: `spectral_ranks` must be a non-empty sequence.")
         if any(isinstance(rank, bool) or not isinstance(rank, int) or rank < 1 for rank in self.spectral_ranks):
@@ -87,6 +93,17 @@ class YaqaConfig:
         ):
             raise ValueError("YaqaConfig: every spectral lambda must be finite and positive.")
         self.spectral_lambdas = tuple(dict.fromkeys(float(strength) for strength in self.spectral_lambdas))
+        if not isinstance(self.spectral_push_alphas, (tuple, list)) or not self.spectral_push_alphas:
+            raise ValueError("YaqaConfig: `spectral_push_alphas` must be a non-empty sequence.")
+        if any(
+            isinstance(alpha, bool)
+            or not isinstance(alpha, (int, float))
+            or not math.isfinite(float(alpha))
+            or float(alpha) <= 0
+            for alpha in self.spectral_push_alphas
+        ):
+            raise ValueError("YaqaConfig: every spectral push alpha must be finite and positive.")
+        self.spectral_push_alphas = tuple(dict.fromkeys(float(alpha) for alpha in self.spectral_push_alphas))
 
 
 class _SharedTemporaryDirectory:
@@ -5939,11 +5956,11 @@ class QVQConfig(BaseQuantizeConfig):
             self.yaqa.__post_init__()
         else:
             raise TypeError("QVQConfig: `yaqa` must be a YaqaConfig or dictionary.")
-        if self.yaqa.spectral_refinement and (
+        if (self.yaqa.spectral_refinement or self.yaqa.spectral_push) and (
             self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
             raise ValueError(
-                "QVQConfig: YAQA spectral refinement currently requires `format=qvq_v2b2_p32` "
+                "QVQConfig: YAQA spectral experiment requires `format=qvq_v2b2_p32` "
                 "with YAQA rounding."
             )
         self.incoherence = str(self.incoherence).strip().lower()
