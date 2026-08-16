@@ -38,7 +38,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-rows", type=int, default=16)
     parser.add_argument("--evaluation-offset", type=int, default=128)
     parser.add_argument("--evaluation-rows", type=int, default=128)
-    parser.add_argument("--max-length", type=int, default=48)
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=0,
+        help="Maximum tokenized row length; 0 preserves every full natural row.",
+    )
     parser.add_argument("--train-batch-size", type=int, default=1)
     parser.add_argument("--evaluation-batch-size", type=int, default=4)
     parser.add_argument("--gradient-accumulation", type=int, default=2)
@@ -76,9 +81,29 @@ def _encoded_rows(tokenizer, args, *, offset: int, rows: int) -> dict[str, torch
         dataset_path=args.dataset,
         row_offset=offset,
         rows=rows,
-        max_length=args.max_length,
+        max_length=None if args.max_length == 0 else args.max_length,
     )
     return encoded
+
+
+def _encoded_provenance(encoded: dict[str, torch.Tensor], *, offset: int) -> dict[str, int | str]:
+    attention_mask = encoded.get("attention_mask")
+    input_ids = encoded.get("input_ids")
+    if attention_mask is None or input_ids is None:
+        raise ValueError("QVQ end-to-end rows require input_ids and attention_mask.")
+    lengths = attention_mask.ne(0).sum(dim=1)
+    digest = hashlib.sha256()
+    digest.update(input_ids.contiguous().numpy().tobytes())
+    digest.update(attention_mask.contiguous().numpy().tobytes())
+    return {
+        "row_start": offset,
+        "row_end_exclusive": offset + int(input_ids.shape[0]),
+        "rows": int(input_ids.shape[0]),
+        "valid_tokens": int(lengths.sum()),
+        "minimum_tokens_per_row": int(lengths.min()),
+        "maximum_tokens_per_row": int(lengths.max()),
+        "token_contract_sha256": digest.hexdigest(),
+    }
 
 
 def _batches(encoded: dict[str, torch.Tensor], batch_size: int):
@@ -127,7 +152,7 @@ def _logit_digest(model, encoded, *, batch_size: int, device: torch.device) -> s
 
 @torch.no_grad()
 def _evaluate(teacher, student, encoded, *, batch_size: int, device: torch.device) -> dict[str, float]:
-    sums = {"kld": 0.0, "jsd": 0.0, "top1": 0.0, "top5": 0.0}
+    sums = {"kld": 0.0, "jsd": 0.0, "top1": 0.0, "top5": 0.0, "top10": 0.0}
     tokens = 0
     for batch in _batches(encoded, batch_size):
         batch = {name: value.to(device) for name, value in batch.items()}
@@ -153,16 +178,29 @@ def _evaluate(teacher, student, encoded, *, batch_size: int, device: torch.devic
                 + (student_prob * (student_log_prob - midpoint_log)).sum()
             ).item()
         )
-        teacher_top5 = teacher_logits.topk(5, dim=-1).indices
-        student_top5 = student_logits.topk(5, dim=-1).indices
-        sums["top1"] += (teacher_top5[:, 0] == student_top5[:, 0]).sum().item()
+        top10_width = min(10, teacher_logits.shape[-1])
+        top5_width = min(5, top10_width)
+        teacher_top10 = teacher_logits.topk(top10_width, dim=-1).indices
+        student_top10 = student_logits.topk(top10_width, dim=-1).indices
+        sums["top1"] += (teacher_top10[:, 0] == student_top10[:, 0]).sum().item()
         sums["top5"] += (
-            (teacher_top5.unsqueeze(-1) == student_top5.unsqueeze(-2))
+            (
+                teacher_top10[:, :top5_width].unsqueeze(-1)
+                == student_top10[:, :top5_width].unsqueeze(-2)
+            )
             .any(dim=-1)
             .float()
             .sum()
             .item()
-            / 5.0
+            / top5_width
+        )
+        sums["top10"] += (
+            (teacher_top10.unsqueeze(-1) == student_top10.unsqueeze(-2))
+            .any(dim=-1)
+            .float()
+            .sum()
+            .item()
+            / top10_width
         )
         tokens += count
     return {
@@ -171,13 +209,21 @@ def _evaluate(teacher, student, encoded, *, batch_size: int, device: torch.devic
         "jensen_shannon": sums["jsd"] / tokens,
         "top1_agreement": sums["top1"] / tokens,
         "top5_overlap": sums["top5"] / tokens,
+        "top10_overlap": sums["top10"] / tokens,
     }
 
 
 def _passes_accuracy_gate(baseline: dict[str, float], candidate: dict[str, float]) -> bool:
     """Apply one strict, same-population distributional acceptance gate."""
 
-    required = ("valid_tokens", "forward_kld", "jensen_shannon", "top1_agreement", "top5_overlap")
+    required = (
+        "valid_tokens",
+        "forward_kld",
+        "jensen_shannon",
+        "top1_agreement",
+        "top5_overlap",
+        "top10_overlap",
+    )
     for label, metrics in (("baseline", baseline), ("candidate", candidate)):
         missing = set(required) - set(metrics)
         if missing:
@@ -197,6 +243,7 @@ def _passes_accuracy_gate(baseline: dict[str, float], candidate: dict[str, float
         and candidate["jensen_shannon"] < baseline["jensen_shannon"]
         and candidate["top1_agreement"] >= baseline["top1_agreement"]
         and candidate["top5_overlap"] >= baseline["top5_overlap"]
+        and candidate["top10_overlap"] >= baseline["top10_overlap"]
     )
 
 
@@ -282,18 +329,20 @@ def _restore_floating_tensor_dtypes(
 
 def main() -> None:
     args = _parser().parse_args()
-    integer_fields = (
+    positive_integer_fields = (
         "train_rows",
         "validation_rows",
         "evaluation_rows",
-        "max_length",
         "train_batch_size",
         "evaluation_batch_size",
         "gradient_accumulation",
         "epochs",
     )
-    if any(getattr(args, name) < 1 for name in integer_fields):
-        raise ValueError("QVQ end-to-end alignment row, batch, length, accumulation, and epoch counts must be positive.")
+    if any(getattr(args, name) < 1 for name in positive_integer_fields) or args.max_length < 0:
+        raise ValueError(
+            "QVQ end-to-end alignment row, batch, accumulation, and epoch counts must be positive; "
+            "max length must be nonnegative."
+        )
     if any(getattr(args, name) < 0 for name in ("train_offset", "validation_offset", "evaluation_offset")):
         raise ValueError("QVQ end-to-end alignment row offsets must be nonnegative.")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
@@ -308,6 +357,11 @@ def main() -> None:
     train = _encoded_rows(tokenizer, args, offset=args.train_offset, rows=args.train_rows)
     validation = _encoded_rows(tokenizer, args, offset=args.validation_offset, rows=args.validation_rows)
     evaluation = _encoded_rows(tokenizer, args, offset=args.evaluation_offset, rows=args.evaluation_rows)
+    split_provenance = {
+        "train": _encoded_provenance(train, offset=args.train_offset),
+        "validation": _encoded_provenance(validation, offset=args.validation_offset),
+        "evaluation": _encoded_provenance(evaluation, offset=args.evaluation_offset),
+    }
 
     started = time.perf_counter()
     teacher = _load_dense(args.dense_model, args.device)
@@ -463,6 +517,7 @@ def main() -> None:
         "gradient_accumulation_math": args.gradient_accumulation_mode,
         "forward_precision": args.forward_parameter_precision,
         "config": vars(args) | {"dense_model": str(args.dense_model), "checkpoint": str(args.checkpoint)},
+        "split_provenance": split_provenance,
         "baseline_validation": baseline_validation,
         "candidate_validation": candidate_validation,
         "baseline_evaluation": baseline_evaluation,

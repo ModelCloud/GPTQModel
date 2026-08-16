@@ -8,6 +8,7 @@ import torch
 
 from scripts.analyze_qvq_e2e_alignment import (
     _batches,
+    _encoded_provenance,
     _evaluate,
     _floating_tensor_dtypes,
     _logit_digest,
@@ -84,7 +85,16 @@ def test_qvq_e2e_metrics_and_dtype_rollback_are_exact():
         "jensen_shannon": 0.0,
         "top1_agreement": 1.0,
         "top5_overlap": 1.0,
+        "top10_overlap": 1.0,
     }
+
+    provenance = _encoded_provenance(encoded, offset=32)
+    assert provenance["row_start"] == 32
+    assert provenance["row_end_exclusive"] == 33
+    assert provenance["valid_tokens"] == 3
+    assert provenance["minimum_tokens_per_row"] == 3
+    assert provenance["maximum_tokens_per_row"] == 3
+    assert len(provenance["token_contract_sha256"]) == 64
 
     original = _floating_tensor_dtypes(model)
     model.float()
@@ -116,6 +126,7 @@ def test_qvq_e2e_accuracy_gate_uses_one_exact_finite_population():
         "jensen_shannon": 0.1,
         "top1_agreement": 0.7,
         "top5_overlap": 0.8,
+        "top10_overlap": 0.85,
     }
     candidate = {
         "valid_tokens": 32.0,
@@ -123,12 +134,13 @@ def test_qvq_e2e_accuracy_gate_uses_one_exact_finite_population():
         "jensen_shannon": 0.09,
         "top1_agreement": 0.7,
         "top5_overlap": 0.81,
+        "top10_overlap": 0.86,
     }
     assert _passes_accuracy_gate(baseline, candidate)
 
     for metric in ("forward_kld", "jensen_shannon"):
         assert not _passes_accuracy_gate(baseline, candidate | {metric: baseline[metric]})
-    for metric in ("top1_agreement", "top5_overlap"):
+    for metric in ("top1_agreement", "top5_overlap", "top10_overlap"):
         assert not _passes_accuracy_gate(baseline, candidate | {metric: baseline[metric] - 0.01})
 
     with pytest.raises(ValueError, match="same valid-token population"):
