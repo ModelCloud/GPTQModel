@@ -44,10 +44,12 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
     _mlp_layer_groups,
+    _parse_target_rate_ladders,
     _padded_batch_chunks,
     _parser,
     _passes_mlp_acceptance,
     _quantized_linear_modules,
+    _resolve_mlp_rate_geometry,
     _save_qvq_prefix_artifact,
     _save_yaqa_factor_cache,
     _selected_storage_metrics,
@@ -768,18 +770,83 @@ def test_qvq_mlp_rate_ladder_promotes_to_cheapest_safe_complete_subset():
         evaluate=evaluate,
         kl_regression_limit=0.0,
         topn_regression_limit=0.0,
-        selector_bpw=0.03125,
+        candidate_codecs={2.0: "v2b2-p32", 3.0: "v2b2-p32", 3.5: "v2b2-p32", 4.0: "v2"},
+        candidate_roundings={2.0: "yaqa", 3.0: "yaqa", 3.5: "yaqa", 4.0: "yaqa"},
+        candidate_bpw={2.0: 2.03125, 3.0: 3.03125, 3.5: 3.53125, 4.0: 4.0},
     )
 
     decision = report["decisions"][0]
     assert decision["selected_variant"] == "full"
     assert decision["selected_rate"] == 3.0
+    assert decision["selected_codec"] == "v2b2-p32"
+    assert decision["selected_rounding"] == "yaqa"
     assert decision["selected_effective_bpw"] == pytest.approx(3.03125)
     assert len(decision["candidates"]) == 28
     assert set(decision["selected_rates"].values()) == {3.0}
+    assert set(decision["selected_codecs"].values()) == {"v2b2-p32"}
+    assert set(decision["selected_roundings"].values()) == {"yaqa"}
     assert all(torch.equal(selected[name], candidates_by_rate[3.0][name]) for name in modules)
     assert all(torch.equal(module.weight, candidates_by_rate[3.0][name]) for name, module in modules.items())
     assert torch.equal(selected[fixed_name], candidates_by_rate[2.0][fixed_name])
+
+
+def test_qvq_target_rate_ladder_uses_canonical_v2_for_unsupported_banked_rates():
+    target_ladders = _parse_target_rate_ladders([["mlp", "4", "4.5", "5.5", "6", "6.5"]])
+    assert target_ladders == {"mlp": (4, 4.5, 5.5, 6, 6.5)}
+    banked = ARM_CONFIG["v2b2-p32"]
+    for rate in target_ladders["mlp"]:
+        geometry, codec, effective_bpw = _resolve_mlp_rate_geometry(
+            banked,
+            rate=rate,
+            codec_policy="same",
+        )
+        assert codec == "v2"
+        assert effective_bpw == rate
+        assert geometry["vector_size"] == 2
+        assert geometry["trellis_window"] == 16
+        assert geometry["bank_count"] == 1
+        assert "v2b2_p32" not in geometry
+
+    geometry, codec, effective_bpw = _resolve_mlp_rate_geometry(
+        banked,
+        rate=3.5,
+        codec_policy="same",
+    )
+    assert codec == "v2b2-p32"
+    assert effective_bpw == 3.53125
+    assert geometry["v2b2_p32"] is True
+
+    # The ladder changes only the codec. YAQA and all generic controls remain
+    # active when an unsupported segmented rate falls back to canonical V2.
+    banked_yaqa = {
+        **ARM_CONFIG["v2b2-p32-yaqa"],
+        "damp_percent": 0.025,
+        "tail_biting_candidates": 3,
+        "codebook_version": "test-version",
+    }
+    original = dict(banked_yaqa)
+    for rate, codec_policy in ((4, "same"), (2, "v2")):
+        geometry, codec, effective_bpw = _resolve_mlp_rate_geometry(
+            banked_yaqa,
+            rate=rate,
+            codec_policy=codec_policy,
+        )
+        assert codec == "v2"
+        assert effective_bpw == rate
+        assert geometry["rounding"] == "yaqa"
+        assert geometry["damp_percent"] == 0.025
+        assert geometry["tail_biting_candidates"] == 3
+        assert geometry["codebook_version"] == "test-version"
+        assert "yaqa_v2b2_family_mode" not in geometry
+        assert geometry["bank_count"] == 1
+    assert banked_yaqa == original
+
+    with pytest.raises(ValueError, match="unsupported target"):
+        _parse_target_rate_ladders([["attention", "4"]])
+    with pytest.raises(ValueError, match="strictly low-to-high"):
+        _parse_target_rate_ladders([["mlp", "4", "3.5"]])
+    with pytest.raises(ValueError, match="duplicate target"):
+        _parse_target_rate_ladders([["mlp", "4"], ["mlp", "5"]])
 
 
 def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
@@ -813,6 +880,13 @@ def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
         )
     )
     assert ladder.mlp_rate_ladder == [2.0, 3.0, 3.5, 4.0]
+    targeted = _parser().parse_args(
+        (
+            "--model", "model", "--dataset", "dataset", "--output", "report.json",
+            "--module-scope", "all-linear", "--target-rate-ladder", "mlp", "4", "4.5", "5.5", "6", "6.5",
+        )
+    )
+    assert targeted.target_rate_ladder == [["mlp", "4", "4.5", "5.5", "6", "6.5"]]
     assert (args.calibration_rows, args.evaluation_row_offset, args.yaqa_row_offset) == (512, 512, 1024)
 
     encoded = {

@@ -198,7 +198,16 @@ def _parser() -> argparse.ArgumentParser:
         "--mlp-rate-ladder",
         nargs="+",
         type=float,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--target-rate-ladder",
+        action="append",
+        nargs="+",
+        metavar="TARGET_OR_RATE",
         help=(
+            "Target zone followed by an ordered rate ladder, for example "
+            "`--target-rate-ladder mlp 4 4.5 5.5 6 6.5`. Unsupported banked rates automatically use V2. "
             "Ordered low-to-high MLP rates. Each layer tries every projection subset at these rates and "
             "keeps the accepted candidate with the lowest dense-inclusive storage cost. If none passes, "
             "the complete layer MLP remains dense."
@@ -281,6 +290,72 @@ def _parser() -> argparse.ArgumentParser:
         help="Record nested QVQ phase timing and shape counters for each quantized module.",
     )
     return parser
+
+
+def _parse_target_rate_ladders(specs: list[list[str]] | None) -> dict[str, tuple[int | float, ...]]:
+    """Parse explicit target zones while rejecting ambiguous or unordered ladders."""
+
+    ladders = {}
+    for spec in specs or ():
+        if len(spec) < 2:
+            raise ValueError("target rate ladder requires a target followed by at least one rate")
+        target, *raw_rates = spec
+        if target != "mlp":
+            raise ValueError(f"unsupported target rate ladder zone: {target!r}")
+        if target in ladders:
+            raise ValueError(f"duplicate target rate ladder zone: {target!r}")
+        rates = tuple(normalize_qvq_rate(rate) for rate in raw_rates)
+        if len(set(rates)) != len(rates) or tuple(sorted(rates)) != rates:
+            raise ValueError(f"target rate ladder for {target!r} must be unique and strictly low-to-high")
+        ladders[target] = rates
+    return ladders
+
+
+def _canonical_v2_geometry(geometry: Mapping[str, object]) -> dict[str, object]:
+    """Return canonical V2 while preserving every codec-independent quantization control.
+
+    A rate ladder changes only the storage codec. In particular, a B2+YAQA arm
+    must become V2+YAQA rather than silently reverting to Block-LDLQ. The
+    removed controls below describe segmented-bank search and therefore have
+    no canonical-V2 meaning; all generic controls are deliberately retained.
+    """
+
+    fallback = dict(geometry)
+    fallback.update(vector_size=2, trellis_window=16, dual_v2=False, bank_count=1)
+    for flag in (
+        "v2b2_p32",
+        "v2b4_p64",
+        "yaqa_v2b2_family_mode",
+        "yaqa_spectral_refinement",
+        "yaqa_spectral_push",
+        "yaqa_spectral_localized",
+    ):
+        fallback.pop(flag, None)
+    return fallback
+
+
+def _resolve_mlp_rate_geometry(
+    geometry: Mapping[str, object],
+    *,
+    rate: int | float,
+    codec_policy: str,
+) -> tuple[dict[str, object], str, float]:
+    """Resolve one target rate to the preferred supported codec and its BPW."""
+
+    segmented_v2 = bool(geometry.get("v2b2_p32") or geometry.get("v2b4_p64"))
+    if codec_policy == "v2" or (segmented_v2 and rate > 3.5):
+        return _canonical_v2_geometry(geometry), "v2", float(rate)
+    codec = (
+        "v2b2-p32"
+        if geometry.get("v2b2_p32")
+        else "v2b4-p64"
+        if geometry.get("v2b4_p64")
+        else "v2"
+        if geometry.get("vector_size") == 2
+        else "same"
+    )
+    selector_bpw = 2 / 64 if segmented_v2 else 0.0
+    return dict(geometry), codec, float(rate) + selector_bpw
 
 
 def _padded_batch_chunks(
@@ -877,7 +952,9 @@ def _select_mlp_layer_candidates(
     evaluate,
     kl_regression_limit: float,
     topn_regression_limit: float,
-    selector_bpw: float = 0.0,
+    candidate_codecs: Mapping[int | float, str] | None = None,
+    candidate_roundings: Mapping[int | float, str] | None = None,
+    candidate_bpw: Mapping[int | float, float] | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
     """Greedily add downstream-safe MLP subsets from an ordered rate ladder."""
 
@@ -889,6 +966,15 @@ def _select_mlp_layer_candidates(
         missing = set(name for group in groups for name in group).difference(candidate_reconstructions_by_rate[rate])
         if missing:
             raise ValueError(f"MLP rate W{rate:g} is missing candidate reconstructions: {sorted(missing)}")
+    candidate_codecs = dict(candidate_codecs or {rate: "same" for rate in candidate_rates})
+    candidate_roundings = dict(candidate_roundings or {rate: "block_ldlq" for rate in candidate_rates})
+    candidate_bpw = dict(candidate_bpw or {rate: float(rate) for rate in candidate_rates})
+    if (
+        set(candidate_codecs) != set(candidate_rates)
+        or set(candidate_roundings) != set(candidate_rates)
+        or set(candidate_bpw) != set(candidate_rates)
+    ):
+        raise ValueError("MLP rate ladder codec, rounding, and BPW metadata must cover every candidate rate exactly")
     # Non-MLP projections are fixed candidates during this search and must
     # survive the MLP rollback/selection unchanged.
     selected_reconstructions = dict(candidate_reconstructions_by_rate[candidate_rates[0]])
@@ -937,12 +1023,15 @@ def _select_mlp_layer_candidates(
                     quantized_parameters = sum(original_weights[name].numel() for name in candidate_names)
                     dense_parameters = group_parameters - quantized_parameters
                     effective_bpw = (
-                        quantized_parameters * (rate + selector_bpw) + dense_parameters * 16.0
+                        quantized_parameters * candidate_bpw[rate] + dense_parameters * 16.0
                     ) / group_parameters
                     candidate_reports.append(
                         {
                             "variant": variant,
                             "rate": rate,
+                            "codec": candidate_codecs[rate],
+                            "rounding": candidate_roundings[rate],
+                            "codec_bpw": candidate_bpw[rate],
                             "modules": list(candidate_names),
                             "accepted": accepted,
                             "effective_bpw": effective_bpw,
@@ -966,6 +1055,8 @@ def _select_mlp_layer_candidates(
         selected_candidate = min(eligible, key=candidate_key, default=None)
         selected_names = set() if selected_candidate is None else set(selected_candidate["modules"])
         selected_rate = None if selected_candidate is None else float(selected_candidate["rate"])
+        selected_codec = None if selected_candidate is None else selected_candidate["codec"]
+        selected_rounding = None if selected_candidate is None else selected_candidate["rounding"]
         with torch.no_grad():
             for name in group:
                 module = selected_modules[name]
@@ -986,11 +1077,15 @@ def _select_mlp_layer_candidates(
                 "accepted": selected_candidate is not None,
                 "selected_variant": None if selected_candidate is None else selected_candidate["variant"],
                 "selected_rate": selected_rate,
+                "selected_codec": selected_codec,
+                "selected_rounding": selected_rounding,
                 "selected_effective_bpw": (
                     16.0 if selected_candidate is None else selected_candidate["effective_bpw"]
                 ),
                 "selected_modules": list(selected_names),
                 "selected_rates": {name: selected_rate for name in selected_names},
+                "selected_codecs": {name: selected_codec for name in selected_names},
+                "selected_roundings": {name: selected_rounding for name in selected_names},
                 "candidates": candidate_reports,
             }
         )
@@ -1366,7 +1461,13 @@ def main() -> None:
         ):
             raise ValueError("MLP acceptance rows must be disjoint from calibration, evaluation, and YAQA rows")
     rates = tuple(normalize_qvq_rate(rate) for rate in args.rates)
-    mlp_rate_ladder = tuple(normalize_qvq_rate(rate) for rate in (args.mlp_rate_ladder or ()))
+    target_rate_ladders = _parse_target_rate_ladders(args.target_rate_ladder)
+    if args.mlp_rate_ladder and "mlp" in target_rate_ladders:
+        raise ValueError("legacy --mlp-rate-ladder cannot be combined with --target-rate-ladder mlp")
+    mlp_rate_ladder = target_rate_ladders.get(
+        "mlp",
+        tuple(normalize_qvq_rate(rate) for rate in (args.mlp_rate_ladder or ())),
+    )
     if mlp_rate_ladder and (
         len(set(mlp_rate_ladder)) != len(mlp_rate_ladder)
         or tuple(sorted(mlp_rate_ladder)) != mlp_rate_ladder
@@ -1585,6 +1686,7 @@ def main() -> None:
             "modules": list(module_names),
             "module_shapes": module_shapes,
             "rates": list(rates),
+            "target_rate_ladders": {target: list(ladder) for target, ladder in target_rate_ladders.items()},
             "mlp_rate_ladder": list(mlp_rate_ladder),
             "mlp_rate": mlp_rate,
             "mlp_gate_up_rate": mlp_gate_up_rate,
@@ -1643,12 +1745,6 @@ def main() -> None:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
                 args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 continue
-            if (
-                geometry.get("v2b2_p32")
-                and args.mlp_codec == "same"
-                and any(module_rate > 3.5 for module_rate in (*mlp_rate_by_name.values(), *mlp_rate_ladder))
-            ):
-                raise ValueError("V2B2-P32 MLP rate must be W1 through W3.5")
             rounding = geometry.get("rounding", "block_ldlq")
             if geometry.get("yaqa_spectral_refinement", False):
                 geometry["yaqa_spectral_ranks"] = tuple(args.yaqa_spectral_ranks)
@@ -1666,6 +1762,10 @@ def main() -> None:
             mlp_candidate_metrics_by_rate = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
             mlp_candidate_selector_counts = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
             mlp_candidate_alternative_banks = {candidate_rate: {} for candidate_rate in mlp_rate_ladder}
+            mlp_candidate_codecs = {}
+            mlp_candidate_roundings = {}
+            mlp_candidate_bpw = {}
+            mlp_default_bpw_by_name = {}
             weight_metrics = {}
             selector_histogram = [0, 0, 0, 0]
             alternative_bank_histogram = [0, 0, 0, 0]
@@ -1744,11 +1844,6 @@ def main() -> None:
                     is_mlp = name in mlp_module_names
                     module_rate = mlp_rate_by_name.get(name, rate)
                     module_rates = mlp_rate_ladder if is_mlp and mlp_rate_ladder else (module_rate,)
-                    module_geometry = dict(geometry)
-                    if is_mlp and args.mlp_codec == "v2":
-                        module_geometry.update(vector_size=2, trellis_window=16, dual_v2=False, bank_count=1)
-                        for flag in ("v2b2_p32", "v2b4_p64"):
-                            module_geometry.pop(flag, None)
                     completed_modules += 1
                     module_started = time.perf_counter()
                     if rounding == "yaqa":
@@ -1771,11 +1866,26 @@ def main() -> None:
                             )
                             input_preparations[source_key] = input_preparation
                     rate_results = {}
+                    rate_metadata = {}
                     for candidate_rate in module_rates:
+                        if is_mlp:
+                            candidate_geometry, candidate_codec, candidate_effective_bpw = _resolve_mlp_rate_geometry(
+                                geometry,
+                                rate=candidate_rate,
+                                codec_policy=args.mlp_codec,
+                            )
+                        else:
+                            candidate_geometry = dict(geometry)
+                            candidate_codec = arm
+                            candidate_effective_bpw = float(candidate_rate) + (
+                                2 / 64
+                                if candidate_geometry.get("v2b2_p32") or candidate_geometry.get("v2b4_p64")
+                                else 0
+                            )
                         module_batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
                             candidate_rate,
                             device,
-                            trellis_window=module_geometry["trellis_window"],
+                            trellis_window=candidate_geometry["trellis_window"],
                         )
                         module_telemetry = QVQQuantizationTelemetry() if args.qvq_telemetry else None
                         result = quantize_qvq_linear(
@@ -1789,14 +1899,32 @@ def main() -> None:
                             trellis_batch_size=module_batch_size,
                             input_hessian_preparation=input_preparation,
                             telemetry=module_telemetry,
-                            **module_geometry,
+                            **candidate_geometry,
                         )
                         reconstruction = result.weight.detach().cpu().float()
                         rate_results[candidate_rate] = (result, reconstruction)
+                        candidate_rounding = str(candidate_geometry.get("rounding", "block_ldlq"))
+                        rate_metadata[candidate_rate] = (
+                            candidate_codec,
+                            candidate_rounding,
+                            candidate_effective_bpw,
+                        )
                         if is_mlp and mlp_rate_ladder:
+                            previous_codec = mlp_candidate_codecs.setdefault(candidate_rate, candidate_codec)
+                            previous_rounding = mlp_candidate_roundings.setdefault(candidate_rate, candidate_rounding)
+                            previous_bpw = mlp_candidate_bpw.setdefault(candidate_rate, candidate_effective_bpw)
+                            if (
+                                previous_codec != candidate_codec
+                                or previous_rounding != candidate_rounding
+                                or previous_bpw != candidate_effective_bpw
+                            ):
+                                raise RuntimeError("MLP target rate resolved inconsistently across modules")
                             mlp_candidate_reconstructions_by_rate[candidate_rate][name] = reconstruction
                             mlp_candidate_metrics_by_rate[candidate_rate][name] = {
                                 **_weight_metrics(original_weights[name], reconstruction),
+                                "codec": candidate_codec,
+                                "rounding": candidate_rounding,
+                                "effective_bpw": candidate_effective_bpw,
                                 "proxy_loss": float(result.proxy_loss),
                                 "kronecker_proxy_loss": (
                                     None
@@ -1815,6 +1943,8 @@ def main() -> None:
                                 )
                     replay_rate = module_rates[-1]
                     result, reconstruction = rate_results[replay_rate]
+                    if is_mlp:
+                        mlp_default_bpw_by_name[name] = rate_metadata[replay_rate][2]
                     if rounding != "yaqa":
                         shared_hessian_remaining[source_key] -= 1
                         if shared_hessian_remaining[source_key] == 0:
@@ -1927,7 +2057,9 @@ def main() -> None:
                     evaluate=evaluate_mlp_candidate,
                     kl_regression_limit=args.mlp_acceptance_kl_regression_limit,
                     topn_regression_limit=args.mlp_acceptance_topn_regression_limit,
-                    selector_bpw=0 if args.mlp_codec == "v2" else selector_bpw,
+                    candidate_codecs=mlp_candidate_codecs if mlp_rate_ladder else None,
+                    candidate_roundings=mlp_candidate_roundings if mlp_rate_ladder else None,
+                    candidate_bpw=mlp_candidate_bpw if mlp_rate_ladder else None,
                 )
                 for decision in mlp_acceptance_report["decisions"]:
                     selected_mlp_modules = set(decision["selected_modules"])
@@ -1952,6 +2084,8 @@ def main() -> None:
                             if mlp_rate_ladder
                             else mlp_rate_by_name.get(name, rate)
                         )
+                        metrics["mlp_selected_codec"] = decision["selected_codecs"].get(name)
+                        metrics["mlp_selected_rounding"] = decision["selected_roundings"].get(name)
                         metrics["rate"] = metrics["mlp_selected_rate"] if name in selected_mlp_modules else None
                         if name in selected_mlp_modules and mlp_rate_ladder:
                             selected_rate = decision["selected_rates"][name]
@@ -1988,10 +2122,13 @@ def main() -> None:
                 if mlp_rate_ladder
                 else {}
             )
+            selected_mlp_bpw = {
+                name: mlp_candidate_bpw[selected_rate]
+                for name, selected_rate in selected_mlp_rates.items()
+            }
             codec_bpw_by_name = {
                 name: (
-                    selected_mlp_rates.get(name, mlp_rate_by_name.get(name, rate))
-                    + (0 if args.mlp_codec == "v2" else selector_bpw)
+                    selected_mlp_bpw.get(name, mlp_default_bpw_by_name[name])
                     if name in mlp_module_names
                     else codec_bpw
                 )
@@ -2010,20 +2147,34 @@ def main() -> None:
                 "quantization_stages": stage_reports,
                 "effective_bpw": codec_bpw,
                 "mlp_effective_bpw": (
-                    [candidate_rate + (0 if args.mlp_codec == "v2" else selector_bpw) for candidate_rate in mlp_rate_ladder]
+                    [mlp_candidate_bpw[candidate_rate] for candidate_rate in mlp_rate_ladder]
                     if mlp_rate_ladder
                     else (
                         None
                         if mlp_rate is None
-                        else mlp_rate + (0 if args.mlp_codec == "v2" else selector_bpw)
+                        else mlp_default_bpw_by_name[next(iter(mlp_module_names))]
                     )
                 ),
-                "mlp_effective_bpw_by_role": {
-                    "gate_up": (mlp_gate_up_rate if mlp_gate_up_rate is not None else rate)
-                    + (0 if args.mlp_codec == "v2" else selector_bpw),
-                    "down": (mlp_down_rate if mlp_down_rate is not None else rate)
-                    + (0 if args.mlp_codec == "v2" else selector_bpw),
-                },
+                "mlp_target_resolution": (
+                    {
+                        str(candidate_rate): {
+                            "codec": mlp_candidate_codecs[candidate_rate],
+                            "rounding": mlp_candidate_roundings[candidate_rate],
+                            "effective_bpw": mlp_candidate_bpw[candidate_rate],
+                        }
+                        for candidate_rate in mlp_rate_ladder
+                    }
+                    if mlp_rate_ladder
+                    else None
+                ),
+                "mlp_effective_bpw_by_role": (
+                    None
+                    if mlp_rate_ladder or not mlp_groups
+                    else {
+                        "gate_up": mlp_default_bpw_by_name[mlp_groups[0][0]],
+                        "down": mlp_default_bpw_by_name[mlp_groups[0][2]],
+                    }
+                ),
                 "selected_storage": storage_metrics,
                 "bank_selectors": _selector_metrics(selector_histogram),
                 "module_alternative_bank_histogram": (
