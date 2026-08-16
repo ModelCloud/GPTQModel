@@ -1017,6 +1017,32 @@ def _acceptance_metrics_preserving_topk_ties(
     )
 
 
+def _pythonize_metric_scalars(value):
+    if isinstance(value, dict):
+        return {name: _pythonize_metric_scalars(child) for name, child in value.items()}
+    if isinstance(value, torch.Tensor) and value.numel() == 1:
+        return value.item()
+    return value
+
+
+def _fast_cuda_acceptance_metrics(
+    dense_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+) -> dict[str, object] | None:
+    if candidate_logits.device.type != "cuda":
+        return None
+    dense_cuda = dense_logits.to(candidate_logits.device, non_blocking=True).float().reshape(-1, dense_logits.shape[-1])
+    candidate_cuda = candidate_logits.float().reshape(-1, candidate_logits.shape[-1])
+    return _pythonize_metric_scalars(
+        _device_primary_metrics(
+            dense_cuda,
+            candidate_cuda,
+            normalize_distribution=False,
+            include_top10=True,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class _LlamaMlpPrefixState:
     """One row's exact state immediately before a selected Llama MLP."""
@@ -1041,6 +1067,8 @@ class _MlpAcceptanceEvaluatorBase:
         *,
         progress_prefix: str,
         execution: str,
+        kl_regression_limit: float = 0.05,
+        topn_regression_limit: float = 0.05,
     ) -> None:
         if not rows:
             raise ValueError("MLP acceptance requires at least one row")
@@ -1049,6 +1077,8 @@ class _MlpAcceptanceEvaluatorBase:
         self.rows = rows
         self.progress_prefix = progress_prefix
         self.execution = execution
+        self.kl_regression_limit = kl_regression_limit
+        self.topn_regression_limit = topn_regression_limit
         self.device = next(iter(rows[0].values())).device
         self.layer_count = len(candidate_model.model.layers)
         self.started = time.perf_counter()
@@ -1061,6 +1091,11 @@ class _MlpAcceptanceEvaluatorBase:
         self.prefix_layer_equivalents = 0.0
         self.suffix_layer_equivalents = 0.0
         self.cpu_topk_fallback_rows = 0
+        self.fast_cuda_metric_calls = 0
+        self.exact_cpu_metric_calls = 0
+        self.acceptance_near_threshold_evaluations = 0
+        self.candidate_host_cache_bytes = 0
+        self.acceptance_baseline = None
         self.start_allocated_bytes = 0
         self.start_reserved_bytes = 0
         if self.device.type == "cuda":
@@ -1108,6 +1143,10 @@ class _MlpAcceptanceEvaluatorBase:
             "prefix_forward_calls": self.prefix_forward_calls,
             "suffix_forward_calls": self.suffix_forward_calls,
             "cpu_topk_fallback_rows": self.cpu_topk_fallback_rows,
+            "fast_cuda_metric_calls": self.fast_cuda_metric_calls,
+            "exact_cpu_metric_calls": self.exact_cpu_metric_calls,
+            "acceptance_near_threshold_evaluations": self.acceptance_near_threshold_evaluations,
+            "candidate_host_cache_bytes": self.candidate_host_cache_bytes,
             "historical_full_forward_calls": historical_full_calls,
             "actual_full_forward_calls": actual_full_calls,
             "full_forward_call_reduction": (
@@ -1127,6 +1166,65 @@ class _MlpAcceptanceEvaluatorBase:
             "incremental_peak_allocated_bytes": max(0, peak_allocated - self.start_allocated_bytes),
             "incremental_peak_reserved_bytes": max(0, peak_reserved - self.start_reserved_bytes),
         }
+
+    def set_acceptance_baseline(self, metrics: dict[str, object]) -> None:
+        self.acceptance_baseline = metrics
+
+    def _near_acceptance_threshold(self, metrics: dict[str, object]) -> bool:
+        if self.acceptance_baseline is None:
+            return False
+        baseline_kl = float(self.acceptance_baseline["kl_forward"]["mean"])
+        proposal_kl = float(metrics["kl_forward"]["mean"])
+        kl_boundary = baseline_kl * (1 + self.kl_regression_limit)
+        kl_margin = max(1e-5, 0.05 * max(abs(kl_boundary), 1e-5))
+        if abs(proposal_kl - kl_boundary) <= kl_margin:
+            return True
+        for key in ("top1_agreement", "top5_overlap", "top10_overlap"):
+            baseline_value = self.acceptance_baseline[key]
+            proposal_value = metrics[key]
+            if key != "top1_agreement":
+                baseline_value = baseline_value["mean"]
+                proposal_value = proposal_value["mean"]
+            boundary = float(baseline_value) - self.topn_regression_limit
+            margin = max(1e-4, 0.05 * max(self.topn_regression_limit, 0.01))
+            if abs(float(proposal_value) - boundary) <= margin:
+                return True
+        return False
+
+    def _score_candidate_logits(self, candidate_logits_factory) -> dict[str, object]:
+        fast_accumulator = _WeightedMetricAccumulator()
+        use_fast = self.device.type == "cuda"
+        for dense_logits, candidate in zip(self.dense_logits_by_row, candidate_logits_factory(), strict=True):
+            if use_fast:
+                metrics = _fast_cuda_acceptance_metrics(dense_logits, candidate)
+                if metrics is None:
+                    use_fast = False
+                    break
+                self.fast_cuda_metric_calls += 1
+                fast_accumulator.add(metrics, rows=candidate.numel() // candidate.shape[-1])
+        if use_fast:
+            fast_metrics = fast_accumulator.result()
+            needs_exact_reference = self.acceptance_baseline is None
+            near_threshold = self._near_acceptance_threshold(fast_metrics)
+            if not needs_exact_reference and not near_threshold:
+                return fast_metrics
+            if near_threshold:
+                self.acceptance_near_threshold_evaluations += 1
+            exact = _WeightedMetricAccumulator()
+            for dense_logits, candidate in zip(self.dense_logits_by_row, candidate_logits_factory(), strict=True):
+                candidate = candidate.detach().cpu()
+                metrics, used_cpu_fallback = _acceptance_metrics_preserving_topk_ties(dense_logits, candidate)
+                self.exact_cpu_metric_calls += 1
+                self.cpu_topk_fallback_rows += int(used_cpu_fallback)
+                exact.add(metrics, rows=candidate.numel() // candidate.shape[-1])
+            return exact.result()
+        exact = _WeightedMetricAccumulator()
+        for dense_logits, candidate in zip(self.dense_logits_by_row, candidate_logits_factory(), strict=True):
+            metrics, used_cpu_fallback = _acceptance_metrics_preserving_topk_ties(dense_logits, candidate)
+            self.exact_cpu_metric_calls += 1
+            self.cpu_topk_fallback_rows += int(used_cpu_fallback)
+            exact.add(metrics, rows=candidate.numel() // candidate.shape[-1])
+        return exact.result()
 
 
 class _FullModelMlpAcceptanceEvaluator(_MlpAcceptanceEvaluatorBase):
@@ -1242,7 +1340,6 @@ class _LlamaMlpSuffixAcceptanceEvaluator(_MlpAcceptanceEvaluatorBase):
 
     @torch.inference_mode()
     def __call__(self, label: str) -> dict[str, object]:
-        accumulator = _WeightedMetricAccumulator()
         if self.active_layer_index is None:
             def full_logits():
                 for row in self.rows:
@@ -1251,7 +1348,7 @@ class _LlamaMlpSuffixAcceptanceEvaluator(_MlpAcceptanceEvaluatorBase):
                     self.phase_seconds["candidate_forward"] += time.perf_counter() - forward_started
                     yield logits
 
-            candidate_logits_parts = full_logits()
+            candidate_logits_factory = full_logits
             self.candidate_full_forward_calls += len(self.rows)
         else:
             layer_index = self.active_layer_index
@@ -1267,20 +1364,12 @@ class _LlamaMlpSuffixAcceptanceEvaluator(_MlpAcceptanceEvaluatorBase):
                     self.phase_seconds["candidate_forward"] += time.perf_counter() - forward_started
                     yield logits
 
-            candidate_logits_parts = suffix_logits()
+            candidate_logits_factory = suffix_logits
             self.suffix_forward_calls += len(self.rows)
             self.suffix_layer_equivalents += len(self.rows) * (self.layer_count - layer_index - 0.5)
-        for dense_logits, candidate_logits in zip(
-            self.dense_logits_by_row,
-            candidate_logits_parts,
-            strict=True,
-        ):
-            metrics_started = time.perf_counter()
-            row_metrics, used_cpu_fallback = _acceptance_metrics_preserving_topk_ties(dense_logits, candidate_logits)
-            self.cpu_topk_fallback_rows += int(used_cpu_fallback)
-            self.phase_seconds["metrics"] += time.perf_counter() - metrics_started
-            accumulator.add(row_metrics, rows=candidate_logits.numel() // candidate_logits.shape[-1])
-        metrics = accumulator.result()
+        metrics_started = time.perf_counter()
+        metrics = self._score_candidate_logits(candidate_logits_factory)
+        self.phase_seconds["metrics"] += time.perf_counter() - metrics_started
         self.evaluation_calls += 1
         return self._record_metrics(label, metrics)
 
@@ -1292,6 +1381,8 @@ def _build_mlp_acceptance_evaluator(
     *,
     progress_prefix: str,
     execution: str,
+    kl_regression_limit: float = 0.05,
+    topn_regression_limit: float = 0.05,
 ) -> _MlpAcceptanceEvaluatorBase:
     """Build the requested evaluator while making `auto` fallback explicit in telemetry."""
 
@@ -1303,12 +1394,16 @@ def _build_mlp_acceptance_evaluator(
             candidate_model,
             rows,
             progress_prefix=progress_prefix,
+            kl_regression_limit=kl_regression_limit,
+            topn_regression_limit=topn_regression_limit,
         )
     return _FullModelMlpAcceptanceEvaluator(
         dense_model,
         candidate_model,
         rows,
         progress_prefix=progress_prefix,
+        kl_regression_limit=kl_regression_limit,
+        topn_regression_limit=topn_regression_limit,
     )
 
 
@@ -1357,6 +1452,9 @@ def _select_mlp_layer_candidates(
                 selected_reconstructions[name] = dense
     initial_baseline = evaluate("qkvo_dense_mlp_baseline")
     baseline = initial_baseline
+    set_acceptance_baseline = getattr(evaluate, "set_acceptance_baseline", None)
+    if set_acceptance_baseline is not None:
+        set_acceptance_baseline(baseline)
     decisions = []
     for layer_index, group in enumerate(groups):
         prepare_layer = getattr(evaluate, "prepare_layer", None)
@@ -1481,6 +1579,8 @@ def _select_mlp_layer_candidates(
                 selected_reconstructions[name] = weight
         if selected_candidate is not None:
             baseline = selected_candidate["metrics"]
+            if set_acceptance_baseline is not None:
+                set_acceptance_baseline(baseline)
         decisions.append(
             {
                 "layer": layer_index,
@@ -3365,6 +3465,8 @@ def main() -> None:
                     mlp_acceptance_rows,
                     progress_prefix=f"W{rate:g} {arm}",
                     execution=args.mlp_acceptance_execution,
+                    kl_regression_limit=args.mlp_acceptance_kl_regression_limit,
+                    topn_regression_limit=args.mlp_acceptance_topn_regression_limit,
                 )
 
                 candidate_reconstructions_by_rate = (

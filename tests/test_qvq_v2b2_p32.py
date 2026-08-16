@@ -1004,8 +1004,8 @@ def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemet
     for expected, actual in metric_pairs:
         assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=1e-7)
         assert actual["top1_agreement"] == expected["top1_agreement"]
-        assert actual["top5_overlap"]["mean"] == expected["top5_overlap"]["mean"]
-        assert actual["top10_overlap"]["mean"] == expected["top10_overlap"]["mean"]
+        assert actual["top5_overlap"]["mean"] == pytest.approx(expected["top5_overlap"]["mean"], abs=1e-6)
+        assert actual["top10_overlap"]["mean"] == pytest.approx(expected["top10_overlap"]["mean"], abs=1e-6)
 
     full_telemetry = full.telemetry()
     suffix_telemetry = suffix.telemetry()
@@ -1021,6 +1021,13 @@ def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemet
     assert suffix_telemetry["suffix_forward_calls"] == 6
     assert suffix_telemetry["full_forward_equivalents"] == pytest.approx(10.0)
     assert suffix_telemetry["full_forward_equivalent_reduction"] == pytest.approx(0.375)
+    suffix.set_acceptance_baseline(metric_pairs[-1][1])
+    suffix("near_threshold")
+    near_telemetry = suffix.telemetry()
+    assert near_telemetry["acceptance_near_threshold_evaluations"] == 1
+    assert near_telemetry["exact_cpu_metric_calls"] >= 4
+    assert near_telemetry["cpu_topk_fallback_rows"] >= 4
+    assert near_telemetry["candidate_host_cache_bytes"] == 0
     for telemetry in (full_telemetry, suffix_telemetry):
         assert telemetry["peak_allocated_bytes"] >= telemetry["start_allocated_bytes"]
         assert telemetry["peak_reserved_bytes"] >= telemetry["start_reserved_bytes"]

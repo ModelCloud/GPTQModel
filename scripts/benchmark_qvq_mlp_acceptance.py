@@ -71,8 +71,11 @@ def main() -> None:
         rows,
         progress_prefix=f"benchmark/{args.execution}",
         execution=args.execution,
+        kl_regression_limit=0.05,
+        topn_regression_limit=0.05,
     )
     reports = [evaluator("baseline")]
+    evaluator.set_acceptance_baseline(reports[0])
     subsets = ((0,), (1,), (0, 1), (2,), (0, 2), (1, 2), (0, 1, 2))
     for layer_index, layer in enumerate(candidate.model.layers):
         evaluator.prepare_layer(layer_index)
