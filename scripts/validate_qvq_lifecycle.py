@@ -90,6 +90,12 @@ def parse_args() -> argparse.Namespace:
         help="Override explicitly tagged Q/K/V/O projections; never inferred from module names.",
     )
     parser.add_argument("--rounding", choices=("block_ldlq", "yaqa"), default="block_ldlq")
+    parser.add_argument(
+        "--propagated-bank-selection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable propagation-aware bank selection; omitted uses the QVQ default.",
+    )
     parser.add_argument("--yaqa-seed", type=int, default=0)
     parser.add_argument("--yaqa-regularization", type=float, default=YAQA_PAPER_REGULARIZATION)
     parser.add_argument("--yaqa-minimum-sequences", type=int, default=YAQA_PAPER_MINIMUM_SEQUENCES)
@@ -260,6 +266,7 @@ def main() -> None:
         device=args.device,
         dynamic=dynamic,
         rounding=args.rounding,
+        propagated_bank_selection=args.propagated_bank_selection,
         yaqa=YaqaConfig(
             seed=args.yaqa_seed,
             regularization=args.yaqa_regularization,
