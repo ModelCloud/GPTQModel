@@ -797,6 +797,19 @@ Using the same 32 rows for both makes the first-order ranking and nonlinear sear
 A new disjoint gradient split, followed by the unchanged two-fold search and 64-row confirmation, will test whether
 the small surviving effect is limited by gradient overfitting or simply by one-segment codec capacity.
 
+##### P9 disjoint-gradient revalidation (Apple M4, 2026-08-17)
+
+The live-prefix validator now accepts optional `--gradient-row-offset/--gradient-rows`, so gradient-generation rows
+can be disjoint from the replay-search rows while preserving the existing confirmation/evaluation contract. The
+first real-Llama attempt used gradient rows `[1538,1602)`, replay-search rows `[1602,1634)`, confirmation rows
+`[1634,1698)`, and untouched evaluation rows `[1698,1762)` with the same layer-1 `q_proj`, W2, four direct
+candidates, and the existing V2B2-P32+YAQA prefix. Split validation, model loading, teacher-logit caching, and the
+disjoint gradient-teacher cache all completed successfully. However, the MPS run reached a 50-minute bound without
+producing a candidate or quality metric and was interrupted inside the YAQA banked Viterbi quantizer
+(`_batched_v2_banked_viterbi_quantize`). No acceptance or rejection is inferred. This is a resource-inconclusive
+Apple result; rerun the identical split on CUDA before revisiting P9's quality decision. The harness change is
+serialization-neutral and retains the default behavior when the optional gradient split is omitted.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

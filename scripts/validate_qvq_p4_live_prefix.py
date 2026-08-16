@@ -55,6 +55,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--search-row-offset", type=int, default=1602)
     parser.add_argument("--search-rows", type=int, default=8)
+    parser.add_argument(
+        "--gradient-row-offset",
+        type=int,
+        help="Optional disjoint rows used only to generate the P9 teacher-KL gradient.",
+    )
+    parser.add_argument(
+        "--gradient-rows",
+        type=int,
+        help="Number of optional disjoint P9 gradient-generation rows (defaults to search rows).",
+    )
     parser.add_argument("--confirmation-row-offset", type=int, default=1610)
     parser.add_argument("--confirmation-rows", type=int, default=8)
     parser.add_argument("--evaluation-row-offset", type=int, default=1618)
@@ -396,6 +406,10 @@ def main() -> None:
         "confirmation": (args.confirmation_row_offset, args.confirmation_rows),
         "evaluation": (args.evaluation_row_offset, args.evaluation_rows),
     }
+    if args.gradient_row_offset is not None or args.gradient_rows is not None:
+        if args.gradient_row_offset is None or args.gradient_rows is None:
+            raise ValueError("--gradient-row-offset and --gradient-rows must be provided together")
+        splits["gradient"] = (args.gradient_row_offset, args.gradient_rows)
     _validate_disjoint_splits(splits)
     device = torch.device(args.device)
     if device.type == "mps" and not torch.backends.mps.is_available():
@@ -476,6 +490,7 @@ def main() -> None:
     propagated_inputs = None
     propagated_target = None
     search_teacher = None
+    gradient_teacher = None
     confirmation_teacher = None
     if not args.baseline_only:
         print("Capturing live-prefix search inputs with target-boundary early stop", flush=True)
@@ -484,6 +499,10 @@ def main() -> None:
         if args.replay_candidates:
             print("Caching dense teacher logits for full-horizon search reranking", flush=True)
             search_teacher = _teacher_logits(dense_model, row_sets["search"])
+            if args.gradient_ranked_direct:
+                gradient_rows = row_sets.get("gradient", row_sets["search"])
+                print("Caching dense teacher logits for disjoint P9 gradient generation", flush=True)
+                gradient_teacher = _teacher_logits(dense_model, gradient_rows)
         print("Caching dense teacher logits for confirmation and untouched evaluation", flush=True)
         confirmation_teacher = _teacher_logits(dense_model, row_sets["confirmation"])
     else:
@@ -543,19 +562,21 @@ def main() -> None:
 
     def full_horizon_candidate_gradient(candidate: torch.Tensor) -> torch.Tensor:
         assert search_teacher is not None
+        gradient_rows = row_sets.get("gradient", row_sets["search"])
+        gradient_targets = gradient_teacher if gradient_teacher is not None else search_teacher
         started_gradient = time.perf_counter()
         try:
             gradient = _teacher_kl_weight_gradient(
                 student_model,
                 target,
-                row_sets["search"],
-                search_teacher,
+                gradient_rows,
+                gradient_targets,
                 candidate,
             )
             gradient_report.update(
                 {
                     "seconds": time.perf_counter() - started_gradient,
-                    "valid_tokens": sum(int(logits.shape[0] * logits.shape[1]) for logits in search_teacher),
+                    "valid_tokens": sum(int(logits.shape[0] * logits.shape[1]) for logits in gradient_targets),
                     "l2_norm": float(torch.linalg.vector_norm(gradient.to(torch.float32)).item()),
                     "max_abs": float(gradient.abs().max().item()),
                     "finite": bool(torch.isfinite(gradient).all()),
