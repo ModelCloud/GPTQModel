@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -46,17 +47,17 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
     _mlp_layer_groups,
-    _parse_target_rate_ladders,
     _padded_batch_chunks,
+    _parse_target_rate_ladders,
     _parser,
     _passes_mlp_acceptance,
     _quantized_linear_modules,
     _resolve_mlp_rate_geometry,
     _save_qvq_prefix_artifact,
     _save_yaqa_factor_cache,
+    _select_mlp_layer_candidates,
     _selected_storage_metrics,
     _shared_input_hessian_groups,
-    _select_mlp_layer_candidates,
     _streaming_compare_models,
     _WeightedMetricAccumulator,
     _yaqa_cache_metadata,
@@ -82,6 +83,7 @@ from scripts.validate_qvq_p4_live_prefix import (
     _capture_target_inputs,
     _install_prefix_artifacts,
     _localized_summary,
+    _minimax_relative_replay_score,
     _passes_confirmation,
     _validate_disjoint_splits,
 )
@@ -172,6 +174,7 @@ def test_qvq_p4_baseline_only_is_explicit_and_default_off():
     defaults = _p4_parser().parse_args(required)
     assert not defaults.baseline_only
     assert defaults.replay_candidates == 0
+    assert defaults.replay_folds == 1
     replay = _p4_parser().parse_args((*required, "--replay-candidates", "4"))
     assert replay.replay_candidates == 4
     assert _p4_parser().parse_args((*required, "--baseline-only")).baseline_only
@@ -1162,6 +1165,15 @@ def test_qvq_p4_confirmation_requires_kl_improvement_and_bounded_topn():
         {**proposal, "finite": False},
         topn_regression_limit=0.0025,
     )
+
+
+def test_qvq_full_horizon_replay_requires_every_search_fold_to_improve():
+    assert _minimax_relative_replay_score((0.8, 1.8), (1.0, 2.0)) == pytest.approx(0.9)
+    # The pooled mean improves from 1.5 to 1.45, but fold zero regresses.
+    assert _minimax_relative_replay_score((1.1, 1.8), (1.0, 2.0)) == pytest.approx(1.1)
+    assert math.isinf(_minimax_relative_replay_score((float("nan"), 1.8), (1.0, 2.0)))
+    with pytest.raises(ValueError, match="non-empty and aligned"):
+        _minimax_relative_replay_score((0.8,), (1.0, 2.0))
 
 
 def test_qvq_streamed_metrics_match_monolithic_kl_and_topn_means():

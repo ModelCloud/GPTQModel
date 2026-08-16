@@ -66,6 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--max-changes", type=int, default=1)
     parser.add_argument("--replay-candidates", type=int, default=0)
+    parser.add_argument("--replay-folds", type=int, default=1)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
     parser.add_argument("--minimum-relative-kl-improvement", type=float, default=0.001)
     parser.add_argument(
@@ -195,6 +196,22 @@ def _passes_confirmation(
     return True
 
 
+def _minimax_relative_replay_score(
+    candidate_fold_kl: Sequence[float],
+    baseline_fold_kl: Sequence[float],
+) -> float:
+    """Return the worst fold-relative KL; values below one improve every fold."""
+
+    if len(candidate_fold_kl) != len(baseline_fold_kl) or not candidate_fold_kl:
+        raise ValueError("replay fold scores must be non-empty and aligned")
+    ratios = []
+    for candidate, baseline in zip(candidate_fold_kl, baseline_fold_kl, strict=True):
+        if not math.isfinite(candidate) or not math.isfinite(baseline) or candidate < 0 or baseline <= 0:
+            return math.inf
+        ratios.append(candidate / baseline)
+    return max(ratios)
+
+
 def _replace_target_with_result(
     model: torch.nn.Module,
     *,
@@ -310,6 +327,8 @@ def main() -> None:
         raise ValueError("P4 live-prefix validation requires at least two decoder layers")
     if args.replay_candidates < 0:
         raise ValueError("full-horizon replay candidate count must be nonnegative")
+    if args.replay_folds < 1 or args.replay_folds > args.search_rows:
+        raise ValueError("replay fold count must be between one and the search row count")
     if not 0 <= args.minimum_relative_kl_improvement < 1:
         raise ValueError("minimum relative KL improvement must be in [0, 1)")
     if args.baseline_only and args.replay_candidates:
@@ -391,21 +410,48 @@ def main() -> None:
     evaluation_teacher = _teacher_logits(dense_model, row_sets["evaluation"])
     callback_report: dict[str, object] = {}
     callback_weights: dict[str, torch.Tensor] = {}
-    replay_scores: list[dict[str, float]] = []
+    replay_scores: list[dict[str, object]] = []
+    replay_baseline_fold_kl: list[float] | None = None
+    replay_row_folds = tuple(
+        tuple(row_sets["search"][fold_index :: args.replay_folds])
+        for fold_index in range(args.replay_folds)
+    )
 
     def full_horizon_candidate_score(candidate: torch.Tensor) -> float:
+        nonlocal replay_baseline_fold_kl
         assert search_teacher is not None
         try:
             with torch.no_grad():
                 target.weight.copy_(candidate.to(device=device, dtype=target.weight.dtype))
-            metrics = _compare_logits(student_model, row_sets["search"], search_teacher)
-            score = float(metrics["kl_forward"]["mean"])
+            fold_metrics = []
+            for fold_index, fold_rows in enumerate(replay_row_folds):
+                fold_teacher = tuple(search_teacher[fold_index :: args.replay_folds])
+                fold_metrics.append(_compare_logits(student_model, fold_rows, fold_teacher))
+            fold_kl = [float(metrics["kl_forward"]["mean"]) for metrics in fold_metrics]
+            if replay_baseline_fold_kl is None:
+                replay_baseline_fold_kl = fold_kl
+                score = 1.0
+            else:
+                score = _minimax_relative_replay_score(fold_kl, replay_baseline_fold_kl)
+            fold_tokens = [int(metrics["shape"][0]) for metrics in fold_metrics]
+            total_tokens = sum(fold_tokens)
+
+            def weighted(name: str) -> float:
+                values = [
+                    metrics[name] if name == "top1_agreement" else metrics[name]["mean"]
+                    for metrics in fold_metrics
+                ]
+                return sum(float(value) * rows for value, rows in zip(values, fold_tokens, strict=True)) / total_tokens
+
             replay_scores.append(
                 {
-                    "kl_forward": score,
-                    "top1": float(metrics["top1_agreement"]),
-                    "top5": float(metrics["top5_overlap"]["mean"]),
-                    "top10": float(metrics["top10_overlap"]["mean"]),
+                    "score": score,
+                    "fold_kl_forward": fold_kl,
+                    "kl_forward": sum(value * rows for value, rows in zip(fold_kl, fold_tokens, strict=True))
+                    / total_tokens,
+                    "top1": weighted("top1_agreement"),
+                    "top5": weighted("top5_overlap"),
+                    "top10": weighted("top10_overlap"),
                 }
             )
             return score
@@ -516,6 +562,7 @@ def main() -> None:
             "max_segments": args.max_segments,
             "max_changes": args.max_changes,
             "replay_candidates": args.replay_candidates,
+            "replay_folds": args.replay_folds,
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
             "baseline_only": args.baseline_only,

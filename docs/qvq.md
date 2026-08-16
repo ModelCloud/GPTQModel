@@ -945,6 +945,20 @@ module. It changes neither checkpoint bytes nor inference operations. Independen
 minimum relative KL improvement (0.1% in the validation driver by default) in addition to the Top-N guard. Merely
 changing the sign of KL by an amount below that threshold is treated as no demonstrated improvement.
 
+The validation driver can also divide the fixed search rows into `F` round-robin folds without adding prompts or
+forwards. Let `K_f(Q)` be full-model teacher KL on fold `f` and let `Q_0` be the immutable serialized baseline. It
+ranks a candidate with the minimax relative score
+
+```text
+S(Q) = max_f K_f(Q) / K_f(Q_0).
+```
+
+The baseline has score one, so a candidate can win only when it improves every search fold. Round-robin assignment
+avoids making a contiguous prompt region the entire fold. This is a conservative robustness screen, not independent
+confirmation: the folds still participate in candidate selection, and the winner must pass the separate confirmation
+set and its minimum-effect/Top-N gates. `F=1` preserves the pooled-search behavior. Larger `F` reduces tokens per
+fold and can amplify estimator noise, so fold count must remain small and predeclared.
+
 #### V2B4-P64 implementation slice
 
 `format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W3.5. It keeps the canonical L16/V2

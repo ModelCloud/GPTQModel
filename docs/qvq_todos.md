@@ -486,6 +486,28 @@ This is evidence that full-horizon ranking fixes the objective horizon but not s
 now requires at least 0.1% relative KL improvement by default, so the same Q proposal fails. The next experiment
 must use a materially larger disjoint confirmation set; no task evaluation is justified from the 8-row result.
 
+A larger layer-1 Q gate used 32 search rows `[1602,1634)`, 64 confirmation rows `[1634,1698)`, and 64 evaluation
+rows `[1826,1890)`, with respectively 10,567, 19,039, and 23,265 valid tokens. Rank `{8,16,32}`, alpha
+`{0.25,0.5,1}`, four full-horizon replay candidates, and one changed segment selected `r16_a1_t19_s5` on search:
+
+| Horizon | Baseline KL | Proposal KL | Decision |
+| --- | ---: | ---: | :--- |
+| 32-row search | 0.0028417924 | 0.0028383114 | provisional winner |
+| 64-row confirmation | 0.0028031558 | 0.0028038107 | reject; exact baseline serialized |
+
+The independently evaluated rollback reconstruction had KL `0.0017517403`; the selected packed artifact measured
+`0.0017531236`, a packing/backend numerical comparison rather than an accepted quantization change. This larger
+split again shows that the pooled search winner is not stable enough to promote. The next bounded experiment uses
+two round-robin search folds and the minimax relative score
+
+```text
+S(Q) = max_f KL_f(Q) / KL_f(Q0).
+```
+
+It reuses the same search prompts and forwards, but rejects any candidate that regresses either fold. This makes the
+search criterion more robust at no model-format or inference cost. It does not turn either fold into confirmation;
+the disjoint 64-row confirmation gate remains authoritative.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
