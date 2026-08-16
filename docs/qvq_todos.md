@@ -625,6 +625,33 @@ a functional teacher-KL gradient test, a gradient-ranking test, and callback-err
 change. The first matched gate remains W2 layer-1 `q_proj`, 32/64/64 rows, two search folds, `K=4`, `D=4`; only the
 portfolio ordering changes from P8.
 
+That matched P9 gate completed at commit `8d08da40`. The FP32 teacher-KL gradient was finite, used 10,535 valid
+next-token positions, had L2 norm `0.0282021` and maximum absolute entry `0.000955462`, and cost `21.79` seconds.
+The four exact replay candidates were:
+
+| Candidate | Predicted `<G,D>` | Fold 0 KL | Fold 1 KL | Minimax score | Search decision |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| baseline | - | 0.0024100594 | 0.0033453477 | 1.000000 | oracle |
+| `direct_t257_s0` | -8.4317e-6 | 0.0024067420 | 0.0033280355 | 0.998624 | improves both |
+| `direct_t8_s5` | -7.1038e-6 | 0.0024007727 | 0.0033374627 | 0.997643 | provisional winner |
+| `direct_t0_s5` | -6.5516e-6 | 0.0024102578 | 0.0033323928 | 1.000082 | fold-0 regression |
+| `direct_t644_s3` | -4.7582e-6 | 0.0024115325 | 0.0033345074 | 1.000611 | fold-0 regression |
+
+This is materially better candidate generation than P8: two of four candidates improved every search fold, and the
+winner's worst-fold gain was `0.2357%` rather than P8's `0.0099%`. Independent 64-row confirmation also retained the
+correct direction across every reported metric: KL improved from `0.0028031558` to `0.0028028920` (`0.0094%`),
+Top-1 from `97.8551%` to `97.8656%`, Top-5 overlap from `97.0277%` to `97.0298%`, and Top-10 overlap from `96.8922%`
+to `96.9091%`. The KL effect was nevertheless about 10.6 times smaller than the predeclared `0.1%` minimum, so the
+proposal was correctly rejected and the exact baseline serialized. Packed evaluation therefore remains KL
+`0.0017531236`, Top-1 `98.2113%`, Top-5 `97.5648%`, and Top-10 `97.3217%`. Quantization, gradient, and replay took
+`719.76` seconds.
+
+P9 should not be retired: unlike P7/P8, its downstream-derived ordering found a stable positive confirmation
+direction. The next controlled experiment should separate gradient-generation prompts from replay-ranking prompts.
+Using the same 32 rows for both makes the first-order ranking and nonlinear search score statistically dependent.
+A new disjoint gradient split, followed by the unchanged two-fold search and 64-row confirmation, will test whether
+the small surviving effect is limited by gradient overfitting or simply by one-segment codec capacity.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
