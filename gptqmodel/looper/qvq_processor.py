@@ -136,7 +136,7 @@ class QVQProcessor(LoopProcessor):
         self._pristine_hessian_lock = threading.RLock()
         self._pristine_hessian_modules: Dict[int, Dict[str, NamedModule]] = {}
         self._active_pristine_hessian_captures: Dict[str, GPTQ] = {}
-        self._propagation_gates: Dict[str, tuple[torch.Tensor, torch.Tensor, Any]] = {}
+        self._propagation_gates: Dict[str, tuple[torch.Tensor, torch.Tensor, Any, Any]] = {}
         self._automatic_propagation_gate_samples: Dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         self._additional_calibration_sample_counts: Dict[str, set[int]] = {}
         self._propagation_gates_lock = threading.RLock()
@@ -190,7 +190,12 @@ class QVQProcessor(LoopProcessor):
             return module_full_name in self._propagation_gates
 
     def set_propagation_gate(
-        self, module_full_name: str, inputs: torch.Tensor, target_output: torch.Tensor, acceptance_gate=None
+        self,
+        module_full_name: str,
+        inputs: torch.Tensor,
+        target_output: torch.Tensor,
+        acceptance_gate=None,
+        candidate_score=None,
     ) -> None:
         """Attach disjoint held-out module rows for opt-in bank selection."""
         if inputs.ndim != 2 or target_output.ndim != 2 or inputs.shape[0] != target_output.shape[0]:
@@ -199,7 +204,7 @@ class QVQProcessor(LoopProcessor):
             raise ValueError("QVQ propagation gate tensors must be finite.")
         with self._propagation_gates_lock:
             self._propagation_gates[module_full_name] = (
-                inputs.detach().clone(), target_output.detach().clone(), acceptance_gate
+                inputs.detach().clone(), target_output.detach().clone(), acceptance_gate, candidate_score
             )
 
     def _get_propagation_gate(self, module_full_name: str, device: torch.device):
@@ -207,11 +212,12 @@ class QVQProcessor(LoopProcessor):
             gate = self._propagation_gates.get(module_full_name)
             if gate is None:
                 return None
-            inputs, targets, callback = gate
+            inputs, targets, callback, candidate_score = gate
             return (
                 inputs.to(device=device, dtype=torch.float32),
                 targets.to(device=device, dtype=torch.float32),
                 callback,
+                candidate_score,
                 gate,
             )
 
@@ -222,11 +228,12 @@ class QVQProcessor(LoopProcessor):
                 raise RuntimeError(
                     f"QVQ propagated bank selection requires a disjoint held-out gate for `{module_full_name}`."
                 )
-            inputs, targets, callback = gate
+            inputs, targets, callback, candidate_score = gate
             return (
                 inputs.to(device=device, dtype=torch.float32),
                 targets.to(device=device, dtype=torch.float32),
                 callback,
+                candidate_score,
                 gate,
             )
 
@@ -829,12 +836,18 @@ class QVQProcessor(LoopProcessor):
                 yaqa_spectral_localized_alphas=module_qcfg.yaqa.spectral_localized_alphas,
                 yaqa_spectral_localized_max_segments=module_qcfg.yaqa.spectral_localized_max_segments,
                 yaqa_spectral_localized_max_changes=module_qcfg.yaqa.spectral_localized_max_changes,
+                yaqa_spectral_localized_replay_candidates=module_qcfg.yaqa.spectral_localized_replay_candidates,
                 viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
                 telemetry=telemetry,
                 bank_count=module_qcfg.bank_count,
                 propagated_inputs=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[0],
                 propagated_target_output=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[1],
                 propagated_acceptance=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[2],
+                propagated_candidate_score=(
+                    None
+                    if propagation_gate is None or not module_qcfg.propagated_bank_selection
+                    else propagation_gate[3]
+                ),
             )
             duration = time.perf_counter() - started
 
@@ -981,7 +994,7 @@ class QVQProcessor(LoopProcessor):
             # retained host snapshot and any device copy as soon as this
             # module finishes, including failure paths.
             if propagation_gate is not None:
-                self._pop_propagation_gate(module.full_name, propagation_gate[3])
+                self._pop_propagation_gate(module.full_name, propagation_gate[4])
             capture.free()
             if module_qcfg.rounding == "yaqa":
                 task_entry.pop("yaqa_input_hessian", None)

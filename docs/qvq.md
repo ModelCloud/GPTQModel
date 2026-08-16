@@ -922,6 +922,27 @@ the invalid assumption that standalone candidate gains add. The default remains 
 experimental and must pass a disjoint full-model confirmation horizon; module output or short-prefix improvement is
 not sufficient evidence below W3.
 
+An optional full-horizon shortlist closes the remaining selection mismatch without making every spectral proposal
+expensive. Cheap conditional module loss first orders the legal fixed-boundary candidates. At each greedy step only
+the best `spectral_localized_replay_candidates` candidates are serialized exactly and scored by a caller-supplied
+full-model search loss:
+
+```text
+all legal fixed-boundary candidates
+  -> conditional module-loss ordering
+  -> bounded top-K shortlist
+  -> exact pack/decode/reconstruct
+  -> full-model search-split score
+  -> conditional winner or no change
+  -> independent confirmation split
+```
+
+The search scorer is lower-is-better and is evaluated first on the immutable baseline. Non-finite baseline scores or
+callback failures retain the exact baseline. Every later greedy step scores candidates on top of the already selected
+serialized path, so the procedure does not assume that standalone downstream gains add. This mode is default-off
+(`spectral_localized_replay_candidates=0`) because it adds up to `1 + K * max_changes` full-model search forwards per
+module. It changes neither checkpoint bytes nor inference operations.
+
 #### V2B4-P64 implementation slice
 
 `format="qvq_v2b4_p64"` is the baseline-safe replacement for Dual-V2 at W1--W3.5. It keeps the canonical L16/V2

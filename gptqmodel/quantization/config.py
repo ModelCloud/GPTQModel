@@ -53,6 +53,7 @@ class YaqaConfig:
     spectral_localized_alphas: tuple[float, ...] = (0.25, 0.5, 1.0)
     spectral_localized_max_segments: int = 8
     spectral_localized_max_changes: int = 1
+    spectral_localized_replay_candidates: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -138,6 +139,14 @@ class YaqaConfig:
             raise ValueError(
                 "YaqaConfig: `spectral_localized_max_changes` must be between 1 and "
                 "`spectral_localized_max_segments`."
+            )
+        if (
+            isinstance(self.spectral_localized_replay_candidates, bool)
+            or not isinstance(self.spectral_localized_replay_candidates, int)
+            or self.spectral_localized_replay_candidates < 0
+        ):
+            raise ValueError(
+                "YaqaConfig: `spectral_localized_replay_candidates` must be a nonnegative integer."
             )
 
 

@@ -4185,12 +4185,17 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     alphas: tuple[float, ...],
     max_segments: int,
     max_changes: int = 1,
+    replay_candidates: int = 0,
+    candidate_score: Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], float
+    ]
+    | None = None,
     search_inputs: torch.Tensor | None = None,
     search_target: torch.Tensor | None = None,
     diagnostics: dict[str, object] | None = None,
     bits: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Propose one spectrally ranked P32 replacement without global path churn.
+    """Propose fixed-boundary P32 replacements without global path churn.
 
     Candidate generation is restricted to one 32-weight segment. Its entry
     predecessor and final V2 state are fixed to the accepted YAQA artifact, so
@@ -4219,6 +4224,14 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         or max_changes > max_segments
     ):
         raise ValueError("YAQA localized spectral max_changes must be between 1 and max_segments.")
+    if (
+        isinstance(replay_candidates, bool)
+        or not isinstance(replay_candidates, int)
+        or replay_candidates < 0
+    ):
+        raise ValueError("YAQA localized spectral replay_candidates must be a nonnegative integer.")
+    if (candidate_score is None) != (replay_candidates == 0):
+        raise ValueError("YAQA localized full-horizon scoring requires both a scorer and a positive shortlist.")
     if len(codebook_library) != 4:
         raise ValueError("YAQA localized V2B2-P32 requires canonical V2 plus three complementary families.")
 
@@ -4427,6 +4440,20 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     selected_segments: set[tuple[int, int]] = set()
     current_search_residual = None if search_residual is None else search_residual.clone()
     current_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
+    current_replay_score = None
+    replay_callback_error = False
+    if candidate_score is not None:
+        try:
+            current_replay_score = float(
+                candidate_score(refined_weight, refined_states, refined_selectors, baseline_alt_id)
+            )
+        except Exception:  # noqa: BLE001 - an external full-model scorer must fail closed
+            current_replay_score = math.inf
+            replay_callback_error = True
+        if not math.isfinite(current_replay_score):
+            replay_callback_error = True
+        if replay_callback_error:
+            candidate_payloads.clear()
 
     # Every proposal preserves the accepted entry/exit state, so replacements
     # for distinct P32 segments compose exactly. Greedy scoring is conditional:
@@ -4434,8 +4461,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     # current live-output residual (or complete Kronecker proxy). This avoids
     # treating individually favorable candidates as additively independent.
     for _ in range(max_changes):
-        best_key = None
-        best_step_loss = current_loss
+        locally_ranked: list[tuple[float, str]] = []
         for candidate_key, payload in candidate_payloads.items():
             tile_index, segment_index, _segment_states, segment_values, _segment_bank, _delta = payload
             if (tile_index, segment_index) in selected_segments:
@@ -4462,9 +4488,52 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                 step_loss = torch.einsum(
                     "ij,ik,kl,lj->", candidate_error, original_input, candidate_error, original_output
                 )
-            if torch.isfinite(step_loss) and step_loss < best_step_loss:
-                best_step_loss = step_loss
+            if torch.isfinite(step_loss) and step_loss < current_loss:
+                locally_ranked.append((float(step_loss.item()), candidate_key))
+
+        locally_ranked.sort(key=lambda item: (item[0], item[1]))
+        if candidate_score is None:
+            shortlisted = locally_ranked[:1]
+        else:
+            shortlisted = locally_ranked[:replay_candidates]
+
+        best_key = None
+        best_step_loss = current_loss
+        best_replay_score = current_replay_score
+        for local_loss, candidate_key in shortlisted:
+            if candidate_score is None:
                 best_key = candidate_key
+                best_step_loss = torch.as_tensor(local_loss, device=current_loss.device)
+                break
+            payload = candidate_payloads[candidate_key]
+            tile_index, segment_index, segment_states, segment_values, segment_bank, _delta = payload
+            input_block = tile_index // output_blocks
+            output_block = tile_index % output_blocks
+            input_start = input_block * 16 + segment_index * 2
+            output_start = output_block * 16
+            trial_weight = refined_weight.clone()
+            trial_states = refined_states.clone()
+            trial_selectors = refined_selectors.clone()
+            trial_weight[
+                input_start : input_start + 2, output_start : output_start + 16
+            ] = segment_values.reshape(2, 16)
+            state_start = segment_index * QVQ_V2B2_P32_STEPS_PER_SEGMENT
+            trial_states[tile_index, state_start : state_start + QVQ_V2B2_P32_STEPS_PER_SEGMENT] = segment_states
+            trial_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)[
+                tile_index, segment_index
+            ] = segment_bank
+            try:
+                replay_score = float(
+                    candidate_score(trial_weight, trial_states, trial_selectors, baseline_alt_id)
+                )
+            except Exception:  # noqa: BLE001 - an external full-model scorer must fail closed
+                replay_callback_error = True
+                continue
+            candidate_records[candidate_key]["replay_score"] = replay_score
+            if math.isfinite(replay_score) and replay_score < best_replay_score:
+                best_key = candidate_key
+                best_step_loss = torch.as_tensor(local_loss, device=current_loss.device)
+                best_replay_score = replay_score
 
         if best_key is None:
             break
@@ -4489,6 +4558,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         candidate_records[best_key]["selected"] = True
         candidate_records[best_key]["conditional_selection_loss"] = float(best_step_loss.item())
         current_loss = best_step_loss
+        current_replay_score = best_replay_score
 
     if selected_candidate_keys:
         exact_error = refined_weight.to(torch.float32) - source
@@ -4518,6 +4588,9 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         diagnostics["spectral_selected"] = bool(selected_candidate_keys)
         diagnostics["localized_selected_changes"] = len(selected_candidate_keys)
         diagnostics["localized_selected_candidates"] = selected_candidate_keys
+        diagnostics["localized_replay_candidates"] = replay_candidates
+        diagnostics["localized_replay_score"] = current_replay_score
+        diagnostics["localized_replay_callback_error"] = replay_callback_error
         diagnostics["spectral_original_loss"] = float(baseline_loss.item())
         selected_error = result[0].to(torch.float32) - source
         diagnostics["spectral_selected_loss"] = float(
@@ -4882,6 +4955,7 @@ def quantize_qvq_linear(
     yaqa_spectral_localized_alphas: tuple[float, ...] = (0.25, 0.5, 1.0),
     yaqa_spectral_localized_max_segments: int = 8,
     yaqa_spectral_localized_max_changes: int = 1,
+    yaqa_spectral_localized_replay_candidates: int = 0,
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
     trellis_window: int = 16,
@@ -4894,6 +4968,7 @@ def quantize_qvq_linear(
     propagated_inputs: torch.Tensor | None = None,
     propagated_target_output: torch.Tensor | None = None,
     propagated_acceptance: Callable[[torch.Tensor, torch.Tensor], bool] | None = None,
+    propagated_candidate_score: Callable[[torch.Tensor], float] | None = None,
     input_hessian_preparation: QVQInputHessianPreparation | None = None,
 ) -> QVQLinearQuantizationResult:
     """Run RHT, BlockLDLQ/YAQA, PGC16 TCQ, and planar packing for a linear.
@@ -5043,6 +5118,12 @@ def quantize_qvq_linear(
         or yaqa_spectral_localized_max_changes > yaqa_spectral_localized_max_segments
     ):
         raise ValueError("QVQ YAQA localized spectral max_changes must be between 1 and max_segments.")
+    if (
+        isinstance(yaqa_spectral_localized_replay_candidates, bool)
+        or not isinstance(yaqa_spectral_localized_replay_candidates, int)
+        or yaqa_spectral_localized_replay_candidates < 0
+    ):
+        raise ValueError("QVQ YAQA localized replay candidate count must be a nonnegative integer.")
     if damp_percent is None:
         damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
@@ -5116,8 +5197,14 @@ def quantize_qvq_linear(
         propagated_target_output = propagated_target_output.to(device=weight.device, dtype=torch.float32)
     if propagated_acceptance is not None and not callable(propagated_acceptance):
         raise TypeError("QVQ propagated acceptance gate must be callable.")
+    if propagated_candidate_score is not None and not callable(propagated_candidate_score):
+        raise TypeError("QVQ propagated candidate scorer must be callable.")
     if propagated_inputs is not None and propagated_acceptance is None:
         raise ValueError("QVQ propagated bank selection requires an explicit acceptance gate.")
+    if (propagated_candidate_score is None) != (yaqa_spectral_localized_replay_candidates == 0):
+        raise ValueError(
+            "QVQ localized full-horizon scoring requires both a candidate scorer and a positive shortlist."
+        )
 
     device = weight.device
     if telemetry is not None:
@@ -5507,6 +5594,42 @@ def quantize_qvq_linear(
             localized_search_target = matmul_hadU(
                 heldout_target / (SV_sign.to(torch.float32) * scale), transpose=True
             )
+
+        localized_candidate_score = None
+        if propagated_candidate_score is not None:
+            def localized_candidate_score(
+                candidate_inner: torch.Tensor,
+                candidate_states: torch.Tensor,
+                candidate_bank_ids: torch.Tensor,
+                candidate_alt_id: torch.Tensor,
+            ) -> float:
+                candidate_trellis = pack_trellis_states(
+                    candidate_states,
+                    bits=bits,
+                    vector_size=2,
+                    trellis_window=16,
+                )
+                serialized_inner = reconstruct_qvq_inner_weight(
+                    candidate_trellis,
+                    bits=bits,
+                    vector_size=2,
+                    trellis_window=16,
+                    in_features=in_features,
+                    out_features=out_features,
+                    codebook_version=codebook_version,
+                    bank_ids=candidate_bank_ids,
+                    v2b2_p32=True,
+                    bank_alt_id=candidate_alt_id,
+                )
+                if not torch.equal(serialized_inner.to(dtype=candidate_inner.dtype), candidate_inner):
+                    raise ValueError("QVQ localized replay candidate failed exact serialized reconstruction.")
+                candidate_weight = rht_reconstruct_weight(
+                    serialized_inner.to(dtype=candidate_inner.dtype),
+                    SU,
+                    SV_sign * scale,
+                )
+                score = float(propagated_candidate_score(candidate_weight))
+                return score if math.isfinite(score) else math.inf
         with _qvq_phase(telemetry, "yaqa_localized_spectral_refinement", device):
             baseline_encoded = yaqa_localized_spectral_refine_v2b2_p32(
                 transformed_weight / scale,
@@ -5518,6 +5641,8 @@ def quantize_qvq_linear(
                 alphas=yaqa_spectral_localized_alphas,
                 max_segments=yaqa_spectral_localized_max_segments,
                 max_changes=yaqa_spectral_localized_max_changes,
+                replay_candidates=yaqa_spectral_localized_replay_candidates,
+                candidate_score=localized_candidate_score,
                 search_inputs=localized_search_inputs,
                 search_target=localized_search_target,
                 diagnostics=yaqa_bank_diagnostics,

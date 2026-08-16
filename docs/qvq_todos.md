@@ -461,6 +461,20 @@ multi-change composition is algebraically valid and generates more distinct path
 cannot be trusted. Keep the wider mode default-off and require a complete downstream confirmation horizon for any
 future low-rate promotion.
 
+#### P6 bounded full-horizon candidate reranking
+
+P5 showed that full-model confirmation can reject a bundle chosen by module-output search, but confirmation occurs
+too late to recover another candidate from the same portfolio. P6 keeps spectral generation and conditional module
+loss as a cheap breadth screen, then scores only a bounded top-K shortlist through the complete live quantized model.
+The search and confirmation prompt sets remain disjoint. The implementation scores exact packed/decoded candidate
+weights, composes winners conditionally, and falls back atomically on callback failure or non-finite baseline score.
+
+The format and inference contract are unchanged. Quantization cost is bounded by
+`1 + replay_candidates * max_changes` full-model search forwards plus the existing independent confirmation. The
+initial causal gate uses one changed segment and four replay candidates on layer-1 Q, followed by K only if Q passes
+confirmation. Promotion still requires strict confirmation KL improvement with bounded Top-1/5/10 regressions; a
+better search-split rank alone is not sufficient.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

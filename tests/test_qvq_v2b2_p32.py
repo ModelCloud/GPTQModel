@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from gptqmodel.looper.qvq_processor import QVQProcessor
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.config import FORMAT, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import (
@@ -167,8 +169,34 @@ def test_qvq_p4_baseline_only_is_explicit_and_default_off():
         "--output",
         "report.json",
     )
-    assert not _p4_parser().parse_args(required).baseline_only
+    defaults = _p4_parser().parse_args(required)
+    assert not defaults.baseline_only
+    assert defaults.replay_candidates == 0
+    replay = _p4_parser().parse_args((*required, "--replay-candidates", "4"))
+    assert replay.replay_candidates == 4
     assert _p4_parser().parse_args((*required, "--baseline-only")).baseline_only
+
+
+def test_qvq_propagation_gate_keeps_search_scorer_and_owner_lifecycle():
+    processor = QVQProcessor.__new__(QVQProcessor)
+    processor._propagation_gates = {}
+    processor._propagation_gates_lock = threading.RLock()
+    acceptance = lambda proposal, baseline: True
+    scorer = lambda candidate: 0.0
+    processor.set_propagation_gate(
+        "layer.q_proj",
+        torch.eye(2),
+        torch.zeros((2, 2)),
+        acceptance,
+        scorer,
+    )
+
+    gate = processor._require_propagation_gate("layer.q_proj", torch.device("cpu"))
+    assert gate[2] is acceptance
+    assert gate[3] is scorer
+    owner = gate[4]
+    processor._pop_propagation_gate("layer.q_proj", owner)
+    assert processor._propagation_gates == {}
 
 
 class _SwiGLUHessianHarness(torch.nn.Module):
@@ -1291,6 +1319,7 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
             spectral_localized_alphas=[0.25, 0.5, 0.25],
             spectral_localized_max_segments=12,
             spectral_localized_max_changes=3,
+            spectral_localized_replay_candidates=4,
         ),
         offload_to_disk=False,
     )
@@ -1300,6 +1329,7 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
     assert reloaded.yaqa.spectral_localized_alphas == (0.25, 0.5)
     assert reloaded.yaqa.spectral_localized_max_segments == 12
     assert reloaded.yaqa.spectral_localized_max_changes == 3
+    assert reloaded.yaqa.spectral_localized_replay_candidates == 4
 
     with pytest.raises(ValueError, match="mutually exclusive"):
         YaqaConfig(spectral_push=True, spectral_localized=True)
@@ -1307,6 +1337,8 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
         YaqaConfig(spectral_localized_max_segments=0)
     with pytest.raises(ValueError, match="between 1"):
         YaqaConfig(spectral_localized_max_segments=2, spectral_localized_max_changes=3)
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        YaqaConfig(spectral_localized_replay_candidates=-1)
 
 
 def test_qvq_v2b2_p32_localized_propagation_requires_the_exact_yaqa_mode():
@@ -1606,6 +1638,86 @@ def test_qvq_v2b2_p32_localized_spectral_refinement_composes_two_fixed_boundary_
     torch.testing.assert_close(conditional[0], one_change_target, rtol=0, atol=0)
     assert conditional_diagnostics["localized_selected_changes"] == 1
     assert sum(candidate["selected"] for candidate in conditional_diagnostics["spectral_candidates"].values()) == 1
+
+    replay_target = one_change_target
+    replay_calls = []
+
+    def replay_score(candidate_weight, candidate_states, candidate_selectors, candidate_alt_id):
+        replay_calls.append(
+            (
+                candidate_weight.clone(),
+                candidate_states.clone(),
+                candidate_selectors.clone(),
+                candidate_alt_id.clone(),
+            )
+        )
+        return float((candidate_weight - replay_target).square().sum().item())
+
+    replay_diagnostics = {}
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        replay_refined = yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(1.0,),
+            max_segments=2,
+            max_changes=2,
+            replay_candidates=2,
+            candidate_score=replay_score,
+            diagnostics=replay_diagnostics,
+            bits=2,
+        )
+
+    torch.testing.assert_close(replay_refined[0], replay_target, rtol=0, atol=0)
+    assert replay_diagnostics["localized_selected_changes"] == 1
+    assert replay_diagnostics["localized_replay_candidates"] == 2
+    assert replay_diagnostics["localized_replay_callback_error"] is False
+    assert len(replay_calls) == 4
+
+
+def test_qvq_v2b2_p32_localized_full_horizon_baseline_error_fails_closed():
+    generator = torch.Generator().manual_seed(20260901)
+    library = tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in range(4))
+    pair = torch.stack((library[0], library[1]))
+    source = torch.randn((16, 16), generator=generator)
+    baseline_path = tail_biting_v2b2_p32_quantize(source.reshape(1, 128, 2), pair, bits=2)
+    baseline = (
+        baseline_path.values.reshape(16, 16),
+        baseline_path.states,
+        baseline_path.segment_bank_ids.reshape(-1),
+        torch.tensor([1], dtype=torch.uint8),
+    )
+    diagnostics = {}
+
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        result = yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(1.0,),
+            max_segments=2,
+            replay_candidates=2,
+            candidate_score=lambda *_: (_ for _ in ()).throw(RuntimeError("replay failed")),
+            diagnostics=diagnostics,
+            bits=2,
+        )
+
+    for actual, expected in zip(result, baseline, strict=True):
+        assert torch.equal(actual, expected)
+    assert diagnostics["localized_replay_callback_error"] is True
+    assert diagnostics["localized_selected_changes"] == 0
 
 
 @pytest.mark.parametrize("bits", (2, 3, 3.5))
@@ -2166,6 +2278,24 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
         "propagated_inputs": search_inputs,
         "propagated_target_output": search_targets,
     }
+    with pytest.raises(ValueError, match="candidate scorer and a positive shortlist"):
+        quantize_qvq_linear(
+            weight,
+            input_hessian,
+            propagated_acceptance=lambda proposal, rollback: True,
+            yaqa_spectral_localized_replay_candidates=1,
+            **common,
+            **localized,
+        )
+    with pytest.raises(ValueError, match="candidate scorer and a positive shortlist"):
+        quantize_qvq_linear(
+            weight,
+            input_hessian,
+            propagated_acceptance=lambda proposal, rollback: True,
+            propagated_candidate_score=lambda candidate: 0.0,
+            **common,
+            **localized,
+        )
     rejected = quantize_qvq_linear(
         weight,
         input_hessian,
@@ -2177,6 +2307,21 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
         weight,
         input_hessian,
         propagated_acceptance=lambda proposal, rollback: True,
+        **common,
+        **localized,
+    )
+    replayed_weights = []
+
+    def replay_score(candidate):
+        replayed_weights.append(candidate.clone())
+        return -float(len(replayed_weights))
+
+    replayed = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        propagated_acceptance=lambda proposal, rollback: True,
+        propagated_candidate_score=replay_score,
+        yaqa_spectral_localized_replay_candidates=2,
         **common,
         **localized,
     )
@@ -2192,6 +2337,9 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
     assert rejected.yaqa_spectral_selected is False
     assert callback_error.yaqa_spectral_selected is False
     assert accepted.yaqa_spectral_selected is True
+    assert replayed.yaqa_spectral_selected is True
+    assert len(replayed_weights) >= 2
+    assert any(torch.equal(candidate, replayed.weight) for candidate in replayed_weights)
     torch.testing.assert_close(callback_pairs[0][1], baseline.weight, rtol=0, atol=0)
     torch.testing.assert_close(callback_pairs[0][0], accepted.weight, rtol=0, atol=0)
     for name in ("trellis", "bank_ids", "bank_alt_id"):

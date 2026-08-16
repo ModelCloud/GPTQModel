@@ -64,6 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--alphas", nargs="+", type=float, default=(0.25, 0.5, 1.0))
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--max-changes", type=int, default=1)
+    parser.add_argument("--replay-candidates", type=int, default=0)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
     parser.add_argument(
         "--baseline-only",
@@ -297,6 +298,10 @@ def main() -> None:
         raise RuntimeError("MPS is unavailable")
     if args.layers < 2:
         raise ValueError("P4 live-prefix validation requires at least two decoder layers")
+    if args.replay_candidates < 0:
+        raise ValueError("full-horizon replay candidate count must be nonnegative")
+    if args.baseline_only and args.replay_candidates:
+        raise ValueError("baseline-only mode cannot enable full-horizon candidate replay")
     torch.manual_seed(args.seed)
 
     config = AutoConfig.from_pretrained(args.model, local_files_only=True)
@@ -358,11 +363,15 @@ def main() -> None:
     source_bias = None if dense_target.bias is None else dense_target.bias.detach().to(device=device, dtype=torch.float32)
     propagated_inputs = None
     propagated_target = None
+    search_teacher = None
     confirmation_teacher = None
     if not args.baseline_only:
         print("Capturing live-prefix search inputs with target-boundary early stop", flush=True)
         propagated_inputs = _capture_target_inputs(student_model, target, row_sets["search"])
         propagated_target = F.linear(propagated_inputs, source_weight, source_bias)
+        if args.replay_candidates:
+            print("Caching dense teacher logits for full-horizon search reranking", flush=True)
+            search_teacher = _teacher_logits(dense_model, row_sets["search"])
         print("Caching dense teacher logits for confirmation and untouched evaluation", flush=True)
         confirmation_teacher = _teacher_logits(dense_model, row_sets["confirmation"])
     else:
@@ -370,6 +379,27 @@ def main() -> None:
     evaluation_teacher = _teacher_logits(dense_model, row_sets["evaluation"])
     callback_report: dict[str, object] = {}
     callback_weights: dict[str, torch.Tensor] = {}
+    replay_scores: list[dict[str, float]] = []
+
+    def full_horizon_candidate_score(candidate: torch.Tensor) -> float:
+        assert search_teacher is not None
+        try:
+            with torch.no_grad():
+                target.weight.copy_(candidate.to(device=device, dtype=target.weight.dtype))
+            metrics = _compare_logits(student_model, row_sets["search"], search_teacher)
+            score = float(metrics["kl_forward"]["mean"])
+            replay_scores.append(
+                {
+                    "kl_forward": score,
+                    "top1": float(metrics["top1_agreement"]),
+                    "top5": float(metrics["top5_overlap"]["mean"]),
+                    "top10": float(metrics["top10_overlap"]["mean"]),
+                }
+            )
+            return score
+        finally:
+            with torch.no_grad():
+                target.weight.copy_(source_weight.to(device=device, dtype=target.weight.dtype))
 
     def confirmation_callback(proposal: torch.Tensor, rollback: torch.Tensor) -> bool:
         assert confirmation_teacher is not None
@@ -410,9 +440,11 @@ def main() -> None:
             yaqa_spectral_localized_alphas=tuple(args.alphas),
             yaqa_spectral_localized_max_segments=args.max_segments,
             yaqa_spectral_localized_max_changes=args.max_changes,
+            yaqa_spectral_localized_replay_candidates=args.replay_candidates,
             propagated_inputs=propagated_inputs,
             propagated_target_output=propagated_target,
             propagated_acceptance=confirmation_callback,
+            propagated_candidate_score=(full_horizon_candidate_score if args.replay_candidates else None),
         )
     result = quantize_qvq_linear(
         source_weight,
@@ -470,12 +502,17 @@ def main() -> None:
             "alphas": list(args.alphas),
             "max_segments": args.max_segments,
             "max_changes": args.max_changes,
+            "replay_candidates": args.replay_candidates,
             "topn_regression_limit": args.topn_regression_limit,
             "baseline_only": args.baseline_only,
         },
         "quantization_seconds": quantization_seconds,
         "search_valid_tokens": 0 if propagated_inputs is None else int(propagated_inputs.shape[0]),
         "localized": _localized_summary(result, callback_report),
+        "full_horizon_search": {
+            "enabled": bool(args.replay_candidates),
+            "evaluations": replay_scores,
+        },
         "confirmation": callback_report,
         "evaluation": {
             "rollback_dense": rollback_evaluation,
