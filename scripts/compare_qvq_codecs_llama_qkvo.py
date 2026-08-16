@@ -207,10 +207,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar="TARGET_OR_RATE",
         help=(
             "Target zone followed by an ordered rate ladder, for example "
-            "`--target-rate-ladder mlp 4 4.5 5.5 6 6.5`. Unsupported banked rates automatically use V2. "
+            "`--target-rate-ladder mlp 2 3 3.5 4 4.5`. Unsupported banked rates automatically use V2. "
             "Ordered low-to-high MLP rates. Each layer tries every projection subset at these rates and "
-            "keeps the accepted candidate with the lowest dense-inclusive storage cost. If none passes, "
-            "the complete layer MLP remains dense."
+            "keeps the accepted candidate with the lowest dense-inclusive storage cost that does not exceed "
+            "the final ladder rate. If none passes, the complete layer MLP is quantized at that final rate; "
+            "the configured maximum is a hard effective-BPW bound, not a request to fall back to dense FP16."
         ),
     )
     parser.add_argument(
@@ -955,8 +956,9 @@ def _select_mlp_layer_candidates(
     candidate_codecs: Mapping[int | float, str] | None = None,
     candidate_roundings: Mapping[int | float, str] | None = None,
     candidate_bpw: Mapping[int | float, float] | None = None,
+    enforce_rate_ladder_cap: bool = False,
 ) -> tuple[dict[str, torch.Tensor], dict[str, object]]:
-    """Greedily add downstream-safe MLP subsets from an ordered rate ladder."""
+    """Greedily add MLP subsets while optionally enforcing a hard ladder BPW ceiling."""
 
     groups = _mlp_layer_groups(model, selected_modules)
     candidate_rates = tuple(sorted(candidate_reconstructions_by_rate))
@@ -1046,13 +1048,51 @@ def _select_mlp_layer_candidates(
                     module.weight.copy_(dense.to(device=module.weight.device, dtype=module.weight.dtype))
                     selected_reconstructions[name] = dense
             raise
-        eligible = [candidate for candidate in candidate_reports if candidate["accepted"]]
+        maximum_ladder_bpw = candidate_bpw[candidate_rates[-1]]
+        eligible = [
+            candidate
+            for candidate in candidate_reports
+            if candidate["accepted"]
+            and (
+                not enforce_rate_ladder_cap
+                or float(candidate["effective_bpw"]) <= maximum_ladder_bpw + 1e-12
+            )
+        ]
+
         def candidate_key(candidate):
             # Preserve the historical fixed-rate quality policy. A ladder is a
             # bit allocator, so include dense fallback storage before quality.
             storage_cost = 0.0 if len(candidate_rates) == 1 else float(candidate["effective_bpw"])
             return storage_cost, float(candidate["metrics"]["kl_forward"]["mean"])
+
         selected_candidate = min(eligible, key=candidate_key, default=None)
+        forced_to_ladder_max = False
+        if selected_candidate is None and enforce_rate_ladder_cap:
+            maximum_rate = candidate_rates[-1]
+            maximum_rate_full = [
+                candidate
+                for candidate in candidate_reports
+                if candidate["rate"] == maximum_rate and candidate["variant"] == "full"
+            ]
+            if len(maximum_rate_full) != 1:
+                raise RuntimeError("bounded MLP ladder must produce exactly one full candidate at its maximum rate")
+            selected_candidate = maximum_rate_full[0]
+            proposal = selected_candidate["metrics"]
+            proposal_values = (
+                float(proposal["kl_forward"]["mean"]),
+                float(proposal["top1_agreement"]),
+                float(proposal["top5_overlap"]["mean"]),
+                float(proposal["top10_overlap"]["mean"]),
+            )
+            if not bool(proposal["finite"]) or not all(math.isfinite(value) for value in proposal_values):
+                with torch.no_grad():
+                    for name in group:
+                        module = selected_modules[name]
+                        dense = original_weights[name]
+                        module.weight.copy_(dense.to(device=module.weight.device, dtype=module.weight.dtype))
+                        selected_reconstructions[name] = dense
+                raise RuntimeError("bounded MLP ladder maximum-rate candidate produced non-finite metrics")
+            forced_to_ladder_max = True
         selected_names = set() if selected_candidate is None else set(selected_candidate["modules"])
         selected_rate = None if selected_candidate is None else float(selected_candidate["rate"])
         selected_codec = None if selected_candidate is None else selected_candidate["codec"]
@@ -1075,6 +1115,15 @@ def _select_mlp_layer_candidates(
                 "layer": layer_index,
                 "modules": list(group),
                 "accepted": selected_candidate is not None,
+                "quality_accepted": selected_candidate is not None and bool(selected_candidate["accepted"]),
+                "forced_to_ladder_max": forced_to_ladder_max,
+                "selection_reason": (
+                    "dense_fallback"
+                    if selected_candidate is None
+                    else "hard_max_fallback"
+                    if forced_to_ladder_max
+                    else "quality_gate"
+                ),
                 "selected_variant": None if selected_candidate is None else selected_candidate["variant"],
                 "selected_rate": selected_rate,
                 "selected_codec": selected_codec,
@@ -1094,6 +1143,8 @@ def _select_mlp_layer_candidates(
         "initial_qkvo_dense_mlp": initial_baseline,
         "selected": baseline,
         "accepted_layers": sum(int(decision["accepted"]) for decision in decisions),
+        "quality_accepted_layers": sum(int(decision["quality_accepted"]) for decision in decisions),
+        "forced_to_ladder_max_layers": sum(int(decision["forced_to_ladder_max"]) for decision in decisions),
         "fully_quantized_layers": sum(decision["selected_variant"] == "full" for decision in decisions),
         "total_layers": len(decisions),
         "decisions": decisions,
@@ -2060,6 +2111,7 @@ def main() -> None:
                     candidate_codecs=mlp_candidate_codecs if mlp_rate_ladder else None,
                     candidate_roundings=mlp_candidate_roundings if mlp_rate_ladder else None,
                     candidate_bpw=mlp_candidate_bpw if mlp_rate_ladder else None,
+                    enforce_rate_ladder_cap=bool(mlp_rate_ladder),
                 )
                 for decision in mlp_acceptance_report["decisions"]:
                     selected_mlp_modules = set(decision["selected_modules"])

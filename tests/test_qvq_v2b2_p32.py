@@ -804,6 +804,7 @@ def test_qvq_mlp_rate_ladder_promotes_to_cheapest_safe_complete_subset():
         candidate_codecs={2.0: "v2b2-p32", 3.0: "v2b2-p32", 3.5: "v2b2-p32", 4.0: "v2"},
         candidate_roundings={2.0: "yaqa", 3.0: "yaqa", 3.5: "yaqa", 4.0: "yaqa"},
         candidate_bpw={2.0: 2.03125, 3.0: 3.03125, 3.5: 3.53125, 4.0: 4.0},
+        enforce_rate_ladder_cap=True,
     )
 
     decision = report["decisions"][0]
@@ -812,6 +813,9 @@ def test_qvq_mlp_rate_ladder_promotes_to_cheapest_safe_complete_subset():
     assert decision["selected_codec"] == "v2b2-p32"
     assert decision["selected_rounding"] == "yaqa"
     assert decision["selected_effective_bpw"] == pytest.approx(3.03125)
+    assert decision["quality_accepted"] is True
+    assert decision["forced_to_ladder_max"] is False
+    assert decision["selection_reason"] == "quality_gate"
     assert len(decision["candidates"]) == 28
     assert set(decision["selected_rates"].values()) == {3.0}
     assert set(decision["selected_codecs"].values()) == {"v2b2-p32"}
@@ -819,6 +823,97 @@ def test_qvq_mlp_rate_ladder_promotes_to_cheapest_safe_complete_subset():
     assert all(torch.equal(selected[name], candidates_by_rate[3.0][name]) for name in modules)
     assert all(torch.equal(module.weight, candidates_by_rate[3.0][name]) for name, module in modules.items())
     assert torch.equal(selected[fixed_name], candidates_by_rate[2.0][fixed_name])
+
+
+def test_qvq_mlp_rate_ladder_forces_finite_maximum_instead_of_dense_or_partial_fallback():
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList((layer,))
+    modules = {}
+    originals = {}
+    candidates_by_rate = {2.0: {}, 3.0: {}, 4.5: {}}
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        module = torch.nn.Linear(2, 2, bias=False)
+        setattr(layer.mlp, role, module)
+        name = f"model.layers.0.mlp.{role}"
+        modules[name] = module
+        originals[name] = torch.ones_like(module.weight)
+        for rate in candidates_by_rate:
+            candidates_by_rate[rate][name] = torch.full_like(module.weight, rate)
+
+    def evaluate(label):
+        if label == "qkvo_dense_mlp_baseline":
+            return _acceptance_metrics(1.0)
+        variant, rate_text = label.removeprefix("mlp_layer_0_").rsplit("_w", 1)
+        if variant == "gate" and float(rate_text) == 2.0:
+            return _acceptance_metrics(0.9)
+        return _acceptance_metrics(1.1)
+
+    selected, report = _select_mlp_layer_candidates(
+        root,
+        modules,
+        candidates_by_rate,
+        originals,
+        evaluate=evaluate,
+        kl_regression_limit=0.0,
+        topn_regression_limit=0.0,
+        candidate_bpw={2.0: 2.03125, 3.0: 3.03125, 4.5: 4.5},
+        enforce_rate_ladder_cap=True,
+    )
+
+    decision = report["decisions"][0]
+    assert decision["selected_variant"] == "full"
+    assert decision["selected_rate"] == 4.5
+    assert decision["selected_effective_bpw"] == 4.5
+    assert decision["quality_accepted"] is False
+    assert decision["forced_to_ladder_max"] is True
+    assert decision["selection_reason"] == "hard_max_fallback"
+    assert report["accepted_layers"] == 1
+    assert report["quality_accepted_layers"] == 0
+    assert report["forced_to_ladder_max_layers"] == 1
+    assert all(torch.equal(selected[name], candidates_by_rate[4.5][name]) for name in modules)
+
+
+def test_qvq_mlp_bounded_rate_ladder_rejects_non_finite_maximum_candidate():
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList((layer,))
+    modules = {}
+    originals = {}
+    candidates_by_rate = {2.0: {}, 4.5: {}}
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        module = torch.nn.Linear(2, 2, bias=False)
+        setattr(layer.mlp, role, module)
+        name = f"model.layers.0.mlp.{role}"
+        modules[name] = module
+        originals[name] = torch.ones_like(module.weight)
+        for rate in candidates_by_rate:
+            candidates_by_rate[rate][name] = torch.full_like(module.weight, rate)
+
+    def evaluate(label):
+        if label == "qkvo_dense_mlp_baseline":
+            return _acceptance_metrics(1.0)
+        if label == "mlp_layer_0_full_w4.5":
+            return _acceptance_metrics(float("nan"), finite=False)
+        return _acceptance_metrics(1.1)
+
+    with pytest.raises(RuntimeError, match="maximum-rate candidate produced non-finite metrics"):
+        _select_mlp_layer_candidates(
+            root,
+            modules,
+            candidates_by_rate,
+            originals,
+            evaluate=evaluate,
+            kl_regression_limit=0.0,
+            topn_regression_limit=0.0,
+            candidate_bpw={2.0: 2.03125, 4.5: 4.5},
+            enforce_rate_ladder_cap=True,
+        )
+    assert all(torch.equal(module.weight, originals[name]) for name, module in modules.items())
 
 
 def test_qvq_target_rate_ladder_uses_canonical_v2_for_unsupported_banked_rates():
