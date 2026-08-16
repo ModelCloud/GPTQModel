@@ -7,6 +7,7 @@ import threading
 import time
 
 import pytest
+import torch
 
 import gptqmodel
 import gptqmodel.exllamav3.ext as exllamav3_ext
@@ -75,6 +76,7 @@ class _FakeExtension:
 
 
 def _install_fake_extensions(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     fakes = {
         "adjacent_exact": _FakeExtension("AdjacentExact CUDA"),
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
@@ -82,6 +84,7 @@ def _install_fake_extensions(monkeypatch):
         "qvq_cuda": _FakeExtension("QVQ planar CUDA GEMV"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
         "diagnostic_metrics_cpu": _FakeExtension("diagnostic_metrics_cpu"),
+        "diagnostic_metrics_cuda": _FakeExtension("diagnostic_metrics_cuda"),
         "awq": _FakeExtension("AWQ"),
         "qqq": _FakeExtension("QQQ"),
         "exllamav2": _FakeExtension("ExLlamaV2 GPTQ"),
@@ -126,6 +129,11 @@ def _install_fake_extensions(monkeypatch):
         diagnostic_metrics_utils,
         "_DIAGNOSTIC_METRICS_CPU_EXTENSION",
         fakes["diagnostic_metrics_cpu"],
+    )
+    monkeypatch.setattr(
+        diagnostic_metrics_utils,
+        "_DIAGNOSTIC_METRICS_CUDA_EXTENSION",
+        fakes["diagnostic_metrics_cuda"],
     )
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
     monkeypatch.setattr(qqq_utils, "_QQQ_TORCH_OPS_EXTENSION", fakes["qqq"])
@@ -244,6 +252,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "qvq_cuda": True,
         "floatx_cpu": True,
         "diagnostic_metrics_cpu": True,
+        "diagnostic_metrics_cuda": True,
         "awq": True,
         "qqq": True,
         "exllamav2": True,

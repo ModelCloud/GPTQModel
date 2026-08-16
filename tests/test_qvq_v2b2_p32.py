@@ -36,6 +36,7 @@ from gptqmodel.quantization.qvq import (
     yaqa_spectral_push_v2b2_p32,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
+from gptqmodel.utils.diagnostic_metrics import native_primary_metrics_cuda
 from scripts.analyze_gptq_low_bit_grid import (
     capture_calibration_hessians,
     tensor_metrics,
@@ -46,6 +47,9 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _acceptance_logit_metrics,
     _aggregate_qvq_telemetry,
     _all_linear_dependency_stages,
+    _device_primary_metrics,
+    _device_tensor_metrics,
+    _DeviceMetricAccumulator,
     _install_qvq_prefix_artifact,
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
@@ -54,8 +58,10 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _parse_target_rate_ladders,
     _parser,
     _passes_mlp_acceptance,
+    _prepare_local_replay_groups,
     _quantized_linear_modules,
     _resolve_mlp_rate_geometry,
+    _replay_local_groups,
     _save_qvq_prefix_artifact,
     _save_yaqa_factor_cache,
     _select_mlp_layer_candidates,
@@ -274,8 +280,11 @@ def test_qvq_propagation_gate_keeps_search_scorer_and_owner_lifecycle():
     processor = QVQProcessor.__new__(QVQProcessor)
     processor._propagation_gates = {}
     processor._propagation_gates_lock = threading.RLock()
-    acceptance = lambda proposal, baseline: True
-    scorer = lambda candidate: 0.0
+    def acceptance(proposal, baseline):
+        return True
+
+    def scorer(candidate):
+        return 0.0
     processor.set_propagation_gate(
         "layer.q_proj",
         torch.eye(2),
@@ -677,6 +686,255 @@ def test_qvq_all_linear_streamed_metrics_use_generic_schema():
     assert "local_qkvo" not in metrics
     assert "live_qkvo" not in metrics
     assert metrics["logits"]["streamed_rows"] == 2
+
+
+@pytest.mark.parametrize("normalize_distribution,include_top10", ((False, True), (True, False)))
+def test_qvq_device_diagnostic_metrics_match_cpu_reference(normalize_distribution, include_top10):
+    generator = torch.Generator().manual_seed(20260816)
+    dense = torch.randn((11, 37), generator=generator)
+    quantized = dense + 0.1 * torch.randn((11, 37), generator=generator)
+    expected = tensor_metrics(
+        dense,
+        quantized,
+        normalize_distribution=normalize_distribution,
+        include_top10=include_top10,
+    )
+    accumulator = _DeviceMetricAccumulator()
+    accumulator.add(
+        _device_tensor_metrics(
+            dense,
+            quantized,
+            normalize_distribution=normalize_distribution,
+            include_top10=include_top10,
+        ),
+        rows=dense.shape[0],
+    )
+    actual = accumulator.result()
+
+    def compare(actual_value, expected_value):
+        if isinstance(expected_value, dict):
+            for name, child in expected_value.items():
+                compare(actual_value[name], child)
+        elif isinstance(expected_value, bool):
+            assert actual_value is expected_value
+        elif isinstance(expected_value, (int, float)):
+            assert actual_value == pytest.approx(expected_value, abs=2e-6, rel=5e-5)
+        else:
+            assert actual_value == expected_value
+
+    compare(actual, expected)
+    assert actual["streamed_rows"] == dense.shape[0]
+
+
+@pytest.mark.parametrize("normalize_distribution,include_top10", ((False, True), (True, False)))
+def test_qvq_primary_device_diagnostics_preserve_reported_metrics(normalize_distribution, include_top10):
+    generator = torch.Generator().manual_seed(20260818)
+    dense = torch.randn((17, 43), generator=generator)
+    quantized = dense + 0.07 * torch.randn((17, 43), generator=generator)
+    expected = tensor_metrics(
+        dense,
+        quantized,
+        normalize_distribution=normalize_distribution,
+        include_top10=include_top10,
+    )
+    accumulator = _DeviceMetricAccumulator()
+    accumulator.add(
+        _device_primary_metrics(
+            dense,
+            quantized,
+            normalize_distribution=normalize_distribution,
+            include_top10=include_top10,
+        ),
+        rows=dense.shape[0],
+    )
+    actual = accumulator.result()
+
+    for path in (
+        ("relative_l2",),
+        ("kl_forward", "mean"),
+        *((("top1_agreement",), ("top5_overlap", "mean"), ("top10_overlap", "mean")) if include_top10 else ()),
+    ):
+        expected_value = expected
+        actual_value = actual
+        for name in path:
+            expected_value = expected_value[name]
+            actual_value = actual_value[name]
+        assert actual_value == pytest.approx(expected_value, abs=2e-6, rel=5e-5)
+
+
+def test_qvq_grouped_device_replay_matches_independent_fp32_linears():
+    model = torch.nn.Module()
+    model.attention = torch.nn.Module()
+    model.attention.q_proj = torch.nn.Linear(4, 4, bias=True)
+    model.attention.k_proj = torch.nn.Linear(4, 2, bias=False)
+    model.attention.v_proj = torch.nn.Linear(4, 2, bias=True)
+    modules = {name: module for name, module in model.named_modules() if isinstance(module, torch.nn.Linear)}
+    reconstructions = {name: module.weight.detach().float() for name, module in modules.items()}
+    shared_input = torch.randn((7, 4), generator=torch.Generator().manual_seed(91))
+    inputs = {name: shared_input for name in modules}
+    groups = _prepare_local_replay_groups(model, modules, reconstructions, device=torch.device("cpu"))
+
+    actual = _replay_local_groups(inputs, groups)
+    expected = {
+        name: torch.nn.functional.linear(
+            shared_input.float(),
+            reconstructions[name],
+            None if module.bias is None else module.bias.detach().float(),
+        )
+        for name, module in modules.items()
+    }
+
+    assert len(groups) == 1
+    assert groups[0].names == tuple(modules)
+    for name in modules:
+        torch.testing.assert_close(actual[name], expected[name], atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_qvq_cuda_diagnostic_reduction_matches_cpu_reference():
+    generator = torch.Generator().manual_seed(20260817)
+    dense_cpu = torch.randn((13, 61), generator=generator)
+    quantized_cpu = dense_cpu + 0.05 * torch.randn((13, 61), generator=generator)
+    expected = tensor_metrics(dense_cpu, quantized_cpu, normalize_distribution=False, include_top10=True)
+    accumulator = _DeviceMetricAccumulator()
+    accumulator.add(
+        _device_tensor_metrics(
+            dense_cpu.cuda(),
+            quantized_cpu.cuda(),
+            normalize_distribution=False,
+            include_top10=True,
+        ),
+        rows=dense_cpu.shape[0],
+    )
+    actual = accumulator.result()
+
+    assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=2e-6, rel=5e-5)
+    assert actual["top1_agreement"] == pytest.approx(expected["top1_agreement"], abs=1e-7)
+    assert actual["top5_overlap"]["mean"] == pytest.approx(expected["top5_overlap"]["mean"], abs=1e-7)
+    assert actual["top10_overlap"]["mean"] == pytest.approx(expected["top10_overlap"]["mean"], abs=1e-7)
+
+
+@pytest.mark.parametrize("normalize_distribution", (False, True))
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_qvq_fused_cuda_primary_metrics_match_cpu_and_preserve_ties(normalize_distribution):
+    generator = torch.Generator().manual_seed(20260819)
+    dense_cpu = torch.randn((19, 73), generator=generator)
+    quantized_cpu = dense_cpu + 0.04 * torch.randn((19, 73), generator=generator)
+    dense_cpu[0].zero_()
+    quantized_cpu[0].zero_()
+    expected = tensor_metrics(dense_cpu, quantized_cpu, normalize_distribution=normalize_distribution, include_top10=True)
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        native_stats, native_top10, native_ambiguous = native_primary_metrics_cuda(
+            dense_cpu.cuda(),
+            quantized_cpu.cuda(),
+            normalize_distribution=normalize_distribution,
+            include_top10=True,
+        )
+        accumulator = _DeviceMetricAccumulator()
+        accumulator.add(
+            _device_primary_metrics(
+                dense_cpu.cuda(),
+                quantized_cpu.cuda(),
+                normalize_distribution=normalize_distribution,
+                include_top10=True,
+            ),
+            rows=dense_cpu.shape[0],
+        )
+        actual = accumulator.result()
+    stream.synchronize()
+
+    assert native_stats.shape == (19, 13)
+    assert native_stats[:, 1].bool().all()
+    torch.testing.assert_close(native_top10[:, 0].cpu(), torch.arange(10).expand(2, -1))
+    assert native_ambiguous[0].item() is True
+    assert actual["relative_l2"] == pytest.approx(expected["relative_l2"], abs=2e-6, rel=5e-5)
+    assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=2e-6, rel=5e-5)
+    assert actual["top1_agreement"] == pytest.approx(expected["top1_agreement"], abs=1e-7)
+    assert actual["top5_overlap"]["mean"] == pytest.approx(expected["top5_overlap"]["mean"], abs=1e-7)
+    assert actual["top10_overlap"]["mean"] == pytest.approx(expected["top10_overlap"]["mean"], abs=1e-7)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_qvq_fused_cuda_primary_metrics_reject_noncontiguous_inputs():
+    dense = torch.randn((17, 23), device="cuda").transpose(0, 1)
+    quantized = dense.clone().transpose(0, 1).contiguous().transpose(0, 1)
+    with pytest.raises(RuntimeError, match="contiguous"):
+        native_primary_metrics_cuda(
+            dense,
+            quantized,
+            normalize_distribution=False,
+            include_top10=True,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_qvq_two_stream_diagnostics_match_serial_pipeline():
+    class TinyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = torch.nn.Linear(4, 4, bias=True)
+
+        def forward(self, hidden_values):
+            return torch.tanh(self.proj(hidden_values))
+
+    class TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.layers = torch.nn.ModuleList((TinyLayer(),))
+            self.head = torch.nn.Linear(4, 13, bias=False)
+
+        def forward(self, hidden_values, attention_mask, use_cache=False):
+            del attention_mask, use_cache
+            hidden_values = self.model.layers[0](hidden_values)
+            return SimpleNamespace(logits=self.head(hidden_values))
+
+    dense_model = TinyModel().cuda().eval()
+    quantized_model = TinyModel().cuda().eval()
+    quantized_model.load_state_dict(dense_model.state_dict())
+    with torch.no_grad():
+        quantized_model.model.layers[0].proj.weight.add_(0.01)
+    module_name = "model.layers.0.proj"
+    dense_modules = {module_name: dense_model.model.layers[0].proj}
+    quantized_modules = {module_name: quantized_model.model.layers[0].proj}
+    reconstructions = {module_name: quantized_modules[module_name].weight.detach().float()}
+    generator = torch.Generator(device="cuda").manual_seed(20260820)
+    rows = tuple(
+        {
+            "hidden_values": torch.randn((1, length, 4), device="cuda", generator=generator),
+            "attention_mask": torch.ones((1, length), device="cuda", dtype=torch.long),
+        }
+        for length in (7, 11, 5, 13)
+    )
+
+    reports = []
+    for diagnostic_streams in (1, 2):
+        reports.append(
+            _streaming_compare_models(
+                dense_model,
+                quantized_model,
+                rows,
+                dense_modules,
+                quantized_modules,
+                reconstructions,
+                layer_count=1,
+                progress_label=f"streams-{diagnostic_streams}",
+                module_scope="all-linear",
+                diagnostic_device="cuda",
+                diagnostic_detail="primary",
+                diagnostic_streams=diagnostic_streams,
+            )
+        )
+
+    for section in ("local_modules", "live_modules", "logits"):
+        assert reports[1][section]["relative_l2"] == pytest.approx(reports[0][section]["relative_l2"], abs=1e-12)
+        assert reports[1][section]["kl_forward"]["mean"] == pytest.approx(
+            reports[0][section]["kl_forward"]["mean"], abs=1e-8
+        )
+    assert reports[1]["logits"]["top1_agreement"] == pytest.approx(
+        reports[0]["logits"]["top1_agreement"], abs=1e-12
+    )
 
 
 def _acceptance_metrics(kl: float, topn: float = 0.9, *, finite: bool = True) -> dict:

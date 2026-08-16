@@ -84,6 +84,15 @@ _EXTENSION_SPECS = (
         ),
     ),
     _ExtensionSpec(
+        name="diagnostic_metrics_cuda",
+        aliases=("metrics_cuda",),
+        resolve=lambda: _resolve_extension_attr(
+            "gptqmodel.utils.diagnostic_metrics", "_DIAGNOSTIC_METRICS_CUDA_EXTENSION"
+        ),
+        supported=lambda: _resolve_attr("torch.cuda", "is_available")(),
+        unsupported_error=lambda: "CUDA diagnostic metrics require CUDA.",
+    ),
+    _ExtensionSpec(
         name="awq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.awq", "_AWQ_TORCH_OPS_EXTENSION"),

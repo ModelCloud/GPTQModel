@@ -13,7 +13,13 @@ from typing import Any
 
 import torch
 
-from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
+from .cpp import (
+    TorchOpsJitExtension,
+    default_jit_cflags,
+    default_jit_cuda_cflags,
+    default_torch_ops_build_root,
+    is_nvcc_compatible,
+)
 
 _GLOBAL_METRIC_NAMES = (
     "finite",
@@ -56,6 +62,10 @@ def _source_path() -> Path:
     )
 
 
+def _cuda_source_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "diagnostic_metrics_cuda.cu"
+
+
 def _extra_cflags() -> list[str]:
     flags = ["-O3", "-fno-math-errno"]
     if platform.system() == "Linux":
@@ -81,6 +91,37 @@ _DIAGNOSTIC_METRICS_CPU_EXTENSION = TorchOpsJitExtension(
     extra_ldflags=_extra_ldflags,
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=False,
+)
+
+
+def _cuda_flags() -> list[str]:
+    flags = default_jit_cuda_cflags(
+        enable_bf16=False,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_ptxas_verbosity=False,
+        include_fatbin_compression=True,
+        include_diag_suppress=True,
+    )
+    if is_nvcc_compatible():
+        flags.insert(0, "-static-global-template-stub=false")
+    return flags
+
+
+_DIAGNOSTIC_METRICS_CUDA_EXTENSION = TorchOpsJitExtension(
+    name="gptqmodel_diagnostic_metrics_cuda",
+    namespace="gptqmodel_diagnostic_metrics",
+    required_ops=("primary_metrics_cuda",),
+    sources=lambda: [str(_cuda_source_path())],
+    build_root_env="GPTQMODEL_DIAGNOSTIC_METRICS_CUDA_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("diagnostic_metrics_cuda"),
+    display_name="diagnostic_metrics_cuda",
+    extra_cflags=lambda: default_jit_cflags(enable_bf16=False),
+    extra_cuda_cflags=_cuda_flags,
+    force_rebuild_env="GPTQMODEL_DIAGNOSTIC_METRICS_CUDA_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
 )
 
 
@@ -168,4 +209,21 @@ def native_tensor_metrics(
     return result
 
 
-__all__ = ["native_tensor_metrics"]
+def native_primary_metrics_cuda(
+    dense: torch.Tensor,
+    quantized: torch.Tensor,
+    *,
+    normalize_distribution: bool,
+    include_top10: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Run fused CUDA primary diagnostics, or return ``None`` when the extension is unavailable."""
+
+    if dense.device.type != "cuda" or quantized.device.type != "cuda":
+        return None
+    if not _DIAGNOSTIC_METRICS_CUDA_EXTENSION.load():
+        return None
+    operation = _DIAGNOSTIC_METRICS_CUDA_EXTENSION.op("primary_metrics_cuda")
+    return operation(dense, quantized, normalize_distribution, include_top10)
+
+
+__all__ = ["native_primary_metrics_cuda", "native_tensor_metrics"]

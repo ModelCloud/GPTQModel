@@ -13,6 +13,7 @@ import time
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -50,6 +51,7 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
+from gptqmodel.utils.diagnostic_metrics import native_primary_metrics_cuda
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 
 QKVO_SUFFIXES = (
@@ -289,6 +291,34 @@ def _parser() -> argparse.ArgumentParser:
         "--qvq-telemetry",
         action="store_true",
         help="Record nested QVQ phase timing and shape counters for each quantized module.",
+    )
+    parser.add_argument(
+        "--diagnostic-device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help=(
+            "Run row-streamed diagnostic capture, local replay, and reductions on CUDA when available. "
+            "Use `cpu` for the historical exact reference path or `cuda` to require the accelerated path."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-detail",
+        choices=("primary", "full"),
+        default="primary",
+        help=(
+            "`primary` records error statistics, forward KL, and final-logit Top-1/5/10 without expensive "
+            "auxiliary distribution diagnostics. `full` retains the historical exhaustive metric schema."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic-streams",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help=(
+            "CUDA diagnostic stream count. Two overlaps the fused metric reducer with the next model forward "
+            "using a bounded two-row pipeline; one provides a serial A/B reference."
+        ),
     )
     return parser
 
@@ -1362,8 +1392,708 @@ class _WeightedMetricAccumulator:
         return None if self.weight == 0 or key not in self.totals else self.totals[key] / self.weight
 
 
+def _device_summary(values: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Return the historical linear-interpolated summary without leaving the producer device."""
+
+    values = values.detach().float().flatten()
+    if values.numel() == 0:
+        zero = torch.zeros((), device=values.device, dtype=torch.float64)
+        return {name: zero for name in ("mean", "p50", "p95", "p99", "max")}
+    quantiles = []
+    last_index = values.numel() - 1
+    for probability in (0.50, 0.95, 0.99):
+        position = last_index * probability
+        lower_index = math.floor(position)
+        upper_index = math.ceil(position)
+        lower = values.kthvalue(lower_index + 1).values
+        if lower_index == upper_index:
+            quantiles.append(lower)
+            continue
+        upper = values.kthvalue(upper_index + 1).values
+        quantiles.append(lower + (upper - lower) * (position - lower_index))
+    return {
+        "mean": values.mean(dtype=torch.float64),
+        "p50": quantiles[0],
+        "p95": quantiles[1],
+        "p99": quantiles[2],
+        "max": values.max(),
+    }
+
+
+def _device_absolute_error_summary(values: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Select exact non-negative FP32 quantiles with a radix histogram instead of repeated full scans."""
+
+    values = values.detach().float().flatten().contiguous()
+    if values.numel() == 0:
+        return _device_summary(values)
+    # Absolute errors are non-negative, so their IEEE-754 bit patterns are
+    # already monotonically ordered. The upper 18 bits form exact coarse bins;
+    # only the bins containing the six interpolation ranks need selection.
+    keys = values.view(torch.int32).bitwise_right_shift(14).long()
+    cumulative = torch.bincount(keys, minlength=1 << 17).cumsum(0)
+    ranks = []
+    positions = []
+    for probability in (0.50, 0.95, 0.99):
+        position = (values.numel() - 1) * probability
+        positions.append(position)
+        ranks.extend((math.floor(position), math.ceil(position)))
+    rank_tensor = torch.tensor(ranks, device=values.device, dtype=torch.int64)
+    bins = torch.searchsorted(cumulative, rank_tensor + 1)
+    before = torch.where(bins == 0, 0, cumulative[(bins - 1).clamp_min(0)])
+    metadata = torch.stack((bins, before, rank_tensor), dim=1).cpu().tolist()
+    bin_values = {}
+    selected = []
+    for bin_index, preceding_count, rank in metadata:
+        if bin_index not in bin_values:
+            bin_values[bin_index] = values[keys == bin_index]
+        selected.append(bin_values[bin_index].kthvalue(rank - preceding_count + 1).values)
+    quantiles = []
+    for index, position in enumerate(positions):
+        lower = selected[2 * index]
+        upper = selected[2 * index + 1]
+        quantiles.append(lower + (upper - lower) * (position - math.floor(position)))
+    return {
+        "mean": values.mean(dtype=torch.float64),
+        "p50": quantiles[0],
+        "p95": quantiles[1],
+        "p99": quantiles[2],
+        "max": values.max(),
+    }
+
+
+def _device_global_moments(dense: torch.Tensor, quantized: torch.Tensor) -> torch.Tensor:
+    """Accumulate FP64 global moments in bounded chunks without materializing full FP64 clones."""
+
+    dense = dense.detach().float().flatten()
+    quantized = quantized.detach().float().flatten()
+    totals = torch.zeros(8, device=dense.device, dtype=torch.float64)
+    chunk_size = 4 * 1024 * 1024
+    for start in range(0, dense.numel(), chunk_size):
+        dense_chunk = dense[start : start + chunk_size].double()
+        quantized_chunk = quantized[start : start + chunk_size].double()
+        error_chunk = quantized_chunk - dense_chunk
+        totals += torch.stack(
+            (
+                dense_chunk.sum(),
+                quantized_chunk.sum(),
+                dense_chunk.square().sum(),
+                quantized_chunk.square().sum(),
+                error_chunk.sum(),
+                error_chunk.abs().sum(),
+                error_chunk.square().sum(),
+                (dense_chunk * quantized_chunk).sum(),
+            )
+        )
+    return totals
+
+
+def _cpu_compatible_topk_indices(
+    dense: torch.Tensor,
+    quantized: torch.Tensor,
+    *,
+    include_top10: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """Use CUDA Top-K for unique boundaries and CPU only for rows whose ties make backend order observable."""
+
+    maximum_k = min(10 if include_top10 else 5, dense.shape[-1])
+    probe_k = min(maximum_k + 1, dense.shape[-1])
+    dense_values, dense_indices = dense.topk(probe_k, dim=-1)
+    quantized_values, quantized_indices = quantized.topk(probe_k, dim=-1)
+    ambiguous = torch.zeros(dense.shape[0], device=dense.device, dtype=torch.bool)
+    if probe_k > 1:
+        ambiguous |= dense_values[:, 0] == dense_values[:, 1]
+        ambiguous |= quantized_values[:, 0] == quantized_values[:, 1]
+    for boundary in (5, 10):
+        if boundary <= maximum_k and probe_k > boundary:
+            ambiguous |= dense_values[:, boundary - 1] == dense_values[:, boundary]
+            ambiguous |= quantized_values[:, boundary - 1] == quantized_values[:, boundary]
+
+    dense_top5 = dense_indices[:, : min(5, maximum_k)]
+    quantized_top5 = quantized_indices[:, : min(5, maximum_k)]
+    dense_top10 = dense_indices[:, :maximum_k] if include_top10 else None
+    quantized_top10 = quantized_indices[:, :maximum_k] if include_top10 else None
+    ambiguous_rows = ambiguous.nonzero(as_tuple=False).flatten()
+    if ambiguous_rows.numel() == 0:
+        return dense_top5, quantized_top5, dense_top10, quantized_top10
+
+    row_indices = ambiguous_rows.cpu()
+    dense_cpu = dense.index_select(0, ambiguous_rows).cpu()
+    quantized_cpu = quantized.index_select(0, ambiguous_rows).cpu()
+    dense_top5 = dense_top5.clone()
+    quantized_top5 = quantized_top5.clone()
+    dense_top5[row_indices.to(dense.device)] = dense_cpu.topk(dense_top5.shape[-1], dim=-1).indices.to(dense.device)
+    quantized_top5[row_indices.to(dense.device)] = quantized_cpu.topk(quantized_top5.shape[-1], dim=-1).indices.to(
+        dense.device
+    )
+    if include_top10:
+        dense_top10 = dense_top10.clone()
+        quantized_top10 = quantized_top10.clone()
+        dense_top10[row_indices.to(dense.device)] = dense_cpu.topk(maximum_k, dim=-1).indices.to(dense.device)
+        quantized_top10[row_indices.to(dense.device)] = quantized_cpu.topk(maximum_k, dim=-1).indices.to(dense.device)
+    return dense_top5, quantized_top5, dense_top10, quantized_top10
+
+
 @torch.inference_mode()
-def _streaming_compare_models(
+def _device_tensor_metrics(
+    dense: torch.Tensor,
+    quantized: torch.Tensor,
+    *,
+    normalize_distribution: bool,
+    include_top10: bool = False,
+    cpu_compatible_topk: bool = False,
+) -> dict[str, object]:
+    """Compute the complete diagnostic schema while retaining scalar reductions on the accelerator."""
+
+    dense = dense.detach().float()
+    quantized = quantized.detach().float()
+    if dense.shape != quantized.shape:
+        raise ValueError(f"metric shape mismatch: {tuple(dense.shape)} != {tuple(quantized.shape)}")
+    if dense.device != quantized.device:
+        raise ValueError("device diagnostic tensors must share one device")
+
+    error = quantized - dense
+    dense_flat = dense.flatten()
+    quantized_flat = quantized.flatten()
+    error_flat = error.flatten()
+    dense_sum, quantized_sum, dense_energy, quantized_energy, error_sum, absolute_error_sum, error_energy, dot = (
+        _device_global_moments(dense, quantized).unbind()
+    )
+    count = dense_flat.numel()
+    count_float = float(count)
+    eps64 = torch.finfo(torch.float64).eps
+    dense_energy_floor = dense_energy.clamp_min(eps64)
+    error_energy_floor = error_energy.clamp_min(eps64)
+    dense_variance_sum = (dense_energy - dense_sum.square() / count_float).clamp_min(0)
+    quantized_variance_sum = (quantized_energy - quantized_sum.square() / count_float).clamp_min(0)
+    covariance_sum = dot - dense_sum * quantized_sum / count_float
+
+    dense_rows = dense.reshape(-1, dense.shape[-1])
+    quantized_rows = quantized.reshape(-1, quantized.shape[-1])
+    row_metrics: dict[str, list[torch.Tensor]] = defaultdict(list)
+    rows_per_chunk = max(1, (8 * 1024 * 1024) // dense_rows.shape[-1])
+    for start in range(0, dense_rows.shape[0], rows_per_chunk):
+        dense_chunk = dense_rows[start : start + rows_per_chunk]
+        quantized_chunk = quantized_rows[start : start + rows_per_chunk]
+        if normalize_distribution:
+            dense_mean = dense_chunk.mean(dim=-1, keepdim=True)
+            dense_std = dense_chunk.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+            dense_logits = (dense_chunk - dense_mean) / dense_std
+            quantized_logits = (quantized_chunk - dense_mean) / dense_std
+        else:
+            dense_logits = dense_chunk
+            quantized_logits = quantized_chunk
+
+        dense_log_prob = F.log_softmax(dense_logits, dim=-1)
+        quantized_log_prob = F.log_softmax(quantized_logits, dim=-1)
+        dense_prob = dense_log_prob.exp()
+        quantized_prob = quantized_log_prob.exp()
+        midpoint_log = ((dense_prob + quantized_prob) * 0.5).clamp_min(1e-30).log()
+        row_metrics["kl_forward"].append((dense_prob * (dense_log_prob - quantized_log_prob)).sum(dim=-1))
+        row_metrics["kl_reverse"].append((quantized_prob * (quantized_log_prob - dense_log_prob)).sum(dim=-1))
+        row_metrics["jensen_shannon"].append(
+            0.5
+            * (
+                (dense_prob * (dense_log_prob - midpoint_log)).sum(dim=-1)
+                + (quantized_prob * (quantized_log_prob - midpoint_log)).sum(dim=-1)
+            )
+        )
+        row_metrics["total_variation"].append(0.5 * (dense_prob - quantized_prob).abs().sum(dim=-1))
+        row_metrics["hellinger"].append(
+            ((dense_prob.sqrt() - quantized_prob.sqrt()).square().sum(dim=-1) * 0.5).sqrt()
+        )
+        row_metrics["dense_entropy"].append(-(dense_prob * dense_log_prob).sum(dim=-1))
+        row_metrics["dense_to_quantized_cross_entropy"].append(-(dense_prob * quantized_log_prob).sum(dim=-1))
+        row_metrics["row_cosine"].append(F.cosine_similarity(dense_chunk, quantized_chunk, dim=-1))
+
+        if cpu_compatible_topk:
+            dense_top5, quantized_top5, dense_top10, quantized_top10 = _cpu_compatible_topk_indices(
+                dense_logits,
+                quantized_logits,
+                include_top10=include_top10,
+            )
+        else:
+            top5 = min(5, dense.shape[-1])
+            dense_top5 = dense_logits.topk(top5, dim=-1).indices
+            quantized_top5 = quantized_logits.topk(top5, dim=-1).indices
+            if include_top10:
+                top10 = min(10, dense.shape[-1])
+                dense_top10 = dense_logits.topk(top10, dim=-1).indices
+                quantized_top10 = quantized_logits.topk(top10, dim=-1).indices
+            else:
+                dense_top10 = quantized_top10 = None
+        row_metrics["top5_overlap"].append(
+            (dense_top5.unsqueeze(-1) == quantized_top5.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+        )
+        row_metrics["top5_exact"].append(
+            (dense_top5.sort(dim=-1).values == quantized_top5.sort(dim=-1).values).all(dim=-1)
+        )
+        row_metrics["dense_top1_in_quantized_top5"].append((dense_top5[:, :1] == quantized_top5).any(dim=-1))
+        row_metrics["quantized_top1_in_dense_top5"].append((quantized_top5[:, :1] == dense_top5).any(dim=-1))
+        row_metrics["top1_agreement"].append(dense_top5[:, 0] == quantized_top5[:, 0])
+        if include_top10:
+            row_metrics["top10_overlap"].append(
+                (dense_top10.unsqueeze(-1) == quantized_top10.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+            )
+            row_metrics["top10_exact"].append(
+                (dense_top10.sort(dim=-1).values == quantized_top10.sort(dim=-1).values).all(dim=-1)
+            )
+            row_metrics["dense_top1_in_quantized_top10"].append(
+                (dense_top10[:, :1] == quantized_top10).any(dim=-1)
+            )
+            row_metrics["quantized_top1_in_dense_top10"].append(
+                (quantized_top10[:, :1] == dense_top10).any(dim=-1)
+            )
+    row_metrics = {name: torch.cat(values) for name, values in row_metrics.items()}
+    cosine_denominator = dense_energy.sqrt().clamp_min(1e-8) * quantized_energy.sqrt().clamp_min(1e-8)
+    pearson_denominator = dense_variance_sum.sqrt().clamp_min(1e-8) * quantized_variance_sum.sqrt().clamp_min(1e-8)
+
+    result: dict[str, object] = {
+        "shape": list(dense.shape),
+        "finite": torch.isfinite(quantized).all(),
+        "mae": absolute_error_sum / count_float,
+        "rmse": (error_energy / count_float).sqrt(),
+        "relative_l2": (error_energy / dense_energy_floor).sqrt(),
+        "sqnr_db": 10.0 * torch.log10(dense_energy_floor / error_energy_floor),
+        "max_abs_error": error_flat.abs().max(),
+        "abs_error": _device_absolute_error_summary(error_flat.abs()),
+        "bias": error_sum / count_float,
+        "error_std": (error_energy / count_float - (error_sum / count_float).square()).clamp_min(0).sqrt(),
+        "cosine": (dot / cosine_denominator).clamp(-1.0, 1.0),
+        "pearson": (covariance_sum / pearson_denominator).clamp(-1.0, 1.0),
+        "row_cosine": _device_summary(row_metrics["row_cosine"]),
+        "norm_ratio": quantized_energy.sqrt() / dense_energy.sqrt().clamp_min(eps64),
+        "sign_agreement": ((dense_flat >= 0) == (quantized_flat >= 0)).float().mean(),
+        "kl_forward": _device_summary(row_metrics["kl_forward"]),
+        "kl_reverse": _device_summary(row_metrics["kl_reverse"]),
+        "jensen_shannon": _device_summary(row_metrics["jensen_shannon"]),
+        "total_variation": _device_summary(row_metrics["total_variation"]),
+        "hellinger": _device_summary(row_metrics["hellinger"]),
+        "dense_entropy": _device_summary(row_metrics["dense_entropy"]),
+        "dense_to_quantized_cross_entropy": _device_summary(row_metrics["dense_to_quantized_cross_entropy"]),
+        "top1_agreement": row_metrics["top1_agreement"].float().mean(),
+        "top5_overlap": _device_summary(row_metrics["top5_overlap"]),
+        "top5_exact_agreement": row_metrics["top5_exact"].float().mean(),
+        "dense_top1_in_quantized_top5": row_metrics["dense_top1_in_quantized_top5"].float().mean(),
+        "quantized_top1_in_dense_top5": row_metrics["quantized_top1_in_dense_top5"].float().mean(),
+    }
+    if include_top10:
+        result.update(
+            {
+                "top10_overlap": _device_summary(row_metrics["top10_overlap"]),
+                "top10_exact_agreement": row_metrics["top10_exact"].float().mean(),
+                "dense_top1_in_quantized_top10": row_metrics["dense_top1_in_quantized_top10"].float().mean(),
+                "quantized_top1_in_dense_top10": row_metrics["quantized_top1_in_dense_top10"].float().mean(),
+            }
+        )
+    return result
+
+
+@torch.inference_mode()
+def _device_primary_metrics(
+    dense: torch.Tensor,
+    quantized: torch.Tensor,
+    *,
+    normalize_distribution: bool,
+    include_top10: bool = False,
+) -> dict[str, object]:
+    """Compute sweep-critical diagnostics without exhaustive auxiliary distributions or global quantiles."""
+
+    dense = dense.detach().float()
+    quantized = quantized.detach().float()
+    if dense.shape != quantized.shape:
+        raise ValueError(f"metric shape mismatch: {tuple(dense.shape)} != {tuple(quantized.shape)}")
+    if dense.device != quantized.device:
+        raise ValueError("device diagnostic tensors must share one device")
+    native = native_primary_metrics_cuda(
+        dense.contiguous(),
+        quantized.contiguous(),
+        normalize_distribution=normalize_distribution,
+        # Torch's CUDA Top-K is substantially faster for vocabulary-scale
+        # rows. Keep moments and KL fused while composing the tuned Top-K
+        # primitive instead of forcing every diagnostic into one CTA.
+        include_top10=False,
+    )
+    if native is not None:
+        stats, top_indices, ambiguous = native
+        count_float = float(dense.numel())
+        dense_sum = stats[:, 2].sum()
+        quantized_sum = stats[:, 3].sum()
+        dense_energy = stats[:, 4].sum()
+        quantized_energy = stats[:, 5].sum()
+        error_sum = stats[:, 6].sum()
+        absolute_error_sum = stats[:, 7].sum()
+        error_energy = stats[:, 8].sum()
+        dot = stats[:, 9].sum()
+        dense_energy_floor = dense_energy.clamp_min(torch.finfo(torch.float64).eps)
+        error_energy_floor = error_energy.clamp_min(torch.finfo(torch.float64).eps)
+        dense_variance_sum = (dense_energy - dense_sum.square() / count_float).clamp_min(0)
+        quantized_variance_sum = (quantized_energy - quantized_sum.square() / count_float).clamp_min(0)
+        covariance_sum = dot - dense_sum * quantized_sum / count_float
+        cosine_denominator = dense_energy.sqrt().clamp_min(1e-8) * quantized_energy.sqrt().clamp_min(1e-8)
+        pearson_denominator = dense_variance_sum.sqrt().clamp_min(1e-8) * quantized_variance_sum.sqrt().clamp_min(
+            1e-8
+        )
+        result: dict[str, object] = {
+            "shape": list(dense.shape),
+            "finite": stats[:, 1].bool().all(),
+            "mae": absolute_error_sum / count_float,
+            "rmse": (error_energy / count_float).sqrt(),
+            "relative_l2": (error_energy / dense_energy_floor).sqrt(),
+            "sqnr_db": 10.0 * torch.log10(dense_energy_floor / error_energy_floor),
+            "max_abs_error": stats[:, 10].max(),
+            "bias": error_sum / count_float,
+            "error_std": (error_energy / count_float - (error_sum / count_float).square()).clamp_min(0).sqrt(),
+            "cosine": (dot / cosine_denominator).clamp(-1.0, 1.0),
+            "pearson": (covariance_sum / pearson_denominator).clamp(-1.0, 1.0),
+            "norm_ratio": quantized_energy.sqrt() / dense_energy.sqrt().clamp_min(torch.finfo(torch.float64).eps),
+            "sign_agreement": stats[:, 11].sum() / count_float,
+            "kl_forward": _device_summary(stats[:, 12]),
+        }
+        if include_top10:
+            del top_indices, ambiguous
+            dense_top10 = dense.topk(10, dim=-1).indices
+            quantized_top10 = quantized.topk(10, dim=-1).indices
+            dense_top5 = dense_top10[:, :5]
+            quantized_top5 = quantized_top10[:, :5]
+            top5_overlap = (
+                (dense_top5.unsqueeze(-1) == quantized_top5.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+            )
+            top10_overlap = (
+                (dense_top10.unsqueeze(-1) == quantized_top10.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+            )
+            result.update(
+                {
+                    "top1_agreement": (dense_top5[:, 0] == quantized_top5[:, 0]).float().mean(),
+                    "top5_overlap": _device_summary(top5_overlap),
+                    "top10_overlap": _device_summary(top10_overlap),
+                }
+            )
+        return result
+    dense_flat = dense.flatten()
+    quantized_flat = quantized.flatten()
+    error = quantized_flat - dense_flat
+    dense_sum, quantized_sum, dense_energy, quantized_energy, error_sum, absolute_error_sum, error_energy, dot = (
+        _device_global_moments(dense, quantized).unbind()
+    )
+    count = dense_flat.numel()
+    count_float = float(count)
+    eps64 = torch.finfo(torch.float64).eps
+    dense_energy_floor = dense_energy.clamp_min(eps64)
+    error_energy_floor = error_energy.clamp_min(eps64)
+    dense_variance_sum = (dense_energy - dense_sum.square() / count_float).clamp_min(0)
+    quantized_variance_sum = (quantized_energy - quantized_sum.square() / count_float).clamp_min(0)
+    covariance_sum = dot - dense_sum * quantized_sum / count_float
+    cosine_denominator = dense_energy.sqrt().clamp_min(1e-8) * quantized_energy.sqrt().clamp_min(1e-8)
+    pearson_denominator = dense_variance_sum.sqrt().clamp_min(1e-8) * quantized_variance_sum.sqrt().clamp_min(1e-8)
+
+    dense_rows = dense.reshape(-1, dense.shape[-1])
+    quantized_rows = quantized.reshape(-1, quantized.shape[-1])
+    kl_forward_parts = []
+    top_metrics: dict[str, list[torch.Tensor]] = defaultdict(list)
+    rows_per_chunk = max(1, (8 * 1024 * 1024) // dense_rows.shape[-1])
+    for start in range(0, dense_rows.shape[0], rows_per_chunk):
+        dense_chunk = dense_rows[start : start + rows_per_chunk]
+        quantized_chunk = quantized_rows[start : start + rows_per_chunk]
+        if normalize_distribution:
+            dense_mean = dense_chunk.mean(dim=-1, keepdim=True)
+            dense_std = dense_chunk.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+            dense_logits = (dense_chunk - dense_mean) / dense_std
+            quantized_logits = (quantized_chunk - dense_mean) / dense_std
+        else:
+            dense_logits = dense_chunk
+            quantized_logits = quantized_chunk
+        dense_log_prob = F.log_softmax(dense_logits, dim=-1)
+        quantized_log_prob = F.log_softmax(quantized_logits, dim=-1)
+        kl_forward_parts.append((dense_log_prob.exp() * (dense_log_prob - quantized_log_prob)).sum(dim=-1))
+        if include_top10:
+            dense_top5, quantized_top5, dense_top10, quantized_top10 = _cpu_compatible_topk_indices(
+                dense_logits,
+                quantized_logits,
+                include_top10=True,
+            )
+            top_metrics["top1_agreement"].append(dense_top5[:, 0] == quantized_top5[:, 0])
+            top_metrics["top5_overlap"].append(
+                (dense_top5.unsqueeze(-1) == quantized_top5.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+            )
+            top_metrics["top10_overlap"].append(
+                (dense_top10.unsqueeze(-1) == quantized_top10.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+            )
+    kl_forward = torch.cat(kl_forward_parts)
+    result: dict[str, object] = {
+        "shape": list(dense.shape),
+        "finite": torch.isfinite(quantized).all(),
+        "mae": absolute_error_sum / count_float,
+        "rmse": (error_energy / count_float).sqrt(),
+        "relative_l2": (error_energy / dense_energy_floor).sqrt(),
+        "sqnr_db": 10.0 * torch.log10(dense_energy_floor / error_energy_floor),
+        "max_abs_error": error.abs().max(),
+        "bias": error_sum / count_float,
+        "error_std": (error_energy / count_float - (error_sum / count_float).square()).clamp_min(0).sqrt(),
+        "cosine": (dot / cosine_denominator).clamp(-1.0, 1.0),
+        "pearson": (covariance_sum / pearson_denominator).clamp(-1.0, 1.0),
+        "norm_ratio": quantized_energy.sqrt() / dense_energy.sqrt().clamp_min(eps64),
+        "sign_agreement": ((dense_flat >= 0) == (quantized_flat >= 0)).float().mean(),
+        "kl_forward": _device_summary(kl_forward),
+    }
+    if include_top10:
+        top_metrics = {name: torch.cat(values) for name, values in top_metrics.items()}
+        result.update(
+            {
+                "top1_agreement": top_metrics["top1_agreement"].float().mean(),
+                "top5_overlap": _device_summary(top_metrics["top5_overlap"]),
+                "top10_overlap": _device_summary(top_metrics["top10_overlap"]),
+            }
+        )
+    return result
+
+
+class _DeviceMetricAccumulator:
+    """Merge device scalar diagnostics and perform one host transfer when materializing a report."""
+
+    def __init__(self) -> None:
+        self.weight = 0
+        self.template = None
+        self.totals: dict[tuple[str, ...], torch.Tensor] = {}
+        self.maxima: dict[tuple[str, ...], torch.Tensor] = {}
+        self.booleans: dict[tuple[str, ...], torch.Tensor] = {}
+        self.shape: list[int] | None = None
+
+    def add(self, metrics: dict[str, object], *, rows: int) -> None:
+        if rows < 1:
+            raise ValueError("streamed metric rows must be positive")
+        if self.template is None:
+            self.template = metrics
+        self.weight += rows
+
+        def visit(value: object, path: tuple[str, ...]) -> None:
+            if isinstance(value, dict):
+                for name, child in value.items():
+                    visit(child, (*path, name))
+            elif path == ("shape",):
+                current = list(value)
+                if self.shape is None:
+                    self.shape = current
+                elif self.shape[1:] != current[1:]:
+                    raise ValueError("streamed metric feature shapes do not match")
+                else:
+                    self.shape[0] += int(current[0])
+            elif isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    raise ValueError(f"device metric at {path} must be scalar")
+                if value.dtype == torch.bool:
+                    self.booleans[path] = self.booleans.get(path, torch.ones_like(value)) & value
+                elif path[-1] in {"max", "max_abs_error"}:
+                    self.maxima[path] = torch.maximum(self.maxima.get(path, value), value)
+                else:
+                    weighted = value.double() * rows
+                    self.totals[path] = self.totals.get(path, torch.zeros_like(weighted)) + weighted
+            else:
+                raise TypeError(f"unsupported device metric value at {path}: {type(value).__name__}")
+
+        visit(metrics, ())
+
+    def _snapshot(self) -> dict[tuple[str, tuple[str, ...]], float]:
+        entries = [
+            *(("total", path, value) for path, value in self.totals.items()),
+            *(("maximum", path, value) for path, value in self.maxima.items()),
+            *(("boolean", path, value) for path, value in self.booleans.items()),
+        ]
+        if not entries:
+            return {}
+        grouped = defaultdict(list)
+        for index, (_, _, value) in enumerate(entries):
+            grouped[value.device].append((index, value))
+        host = [0.0] * len(entries)
+        for device_entries in grouped.values():
+            values = torch.stack([value.double() for _, value in device_entries]).cpu().tolist()
+            for (index, _), value in zip(device_entries, values, strict=True):
+                host[index] = value
+        return {(kind, path): float(value) for (kind, path, _), value in zip(entries, host, strict=True)}
+
+    def result(self) -> dict[str, object]:
+        if self.template is None or self.weight < 1:
+            raise ValueError("streamed metric accumulator is empty")
+        snapshot = self._snapshot()
+
+        def build(value: object, path: tuple[str, ...]) -> object:
+            if isinstance(value, dict):
+                return {name: build(child, (*path, name)) for name, child in value.items()}
+            if path == ("shape",):
+                return self.shape
+            if isinstance(value, torch.Tensor):
+                if value.dtype == torch.bool:
+                    return bool(snapshot[("boolean", path)])
+                if path[-1] in {"max", "max_abs_error"}:
+                    return snapshot[("maximum", path)]
+                return snapshot[("total", path)] / self.weight
+            raise TypeError(f"unsupported device metric template at {path}: {type(value).__name__}")
+
+        result = build(self.template, ())
+        result["aggregation"] = "exact token-weighted means; row-weighted auxiliary quantiles"
+        result["streamed_rows"] = self.weight
+        return result
+
+    def mean(self, *path: str) -> float | None:
+        key = tuple(path)
+        return None if self.weight == 0 or key not in self.totals else (self.totals[key] / self.weight).item()
+
+
+def _first_diagnostic_tensor(value: object) -> torch.Tensor:
+    """Extract the tensor payload emitted by Transformer modules and decoder layers."""
+
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, (tuple, list)):
+        for child in value:
+            try:
+                return _first_diagnostic_tensor(child)
+            except ValueError:
+                continue
+    raise ValueError(f"diagnostic hook output contains no tensor: {type(value).__name__}")
+
+
+class _CudaForwardCapture:
+    """Keep persistent hooks registered while retaining unpadded diagnostic tensors on CUDA."""
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        modules: Mapping[str, torch.nn.Module],
+        *,
+        capture_inputs: bool,
+        layer_count: int,
+    ) -> None:
+        self.model = model
+        self.capture_inputs = capture_inputs
+        self.active = False
+        self.inputs: dict[str, list[torch.Tensor]] = defaultdict(list)
+        self.outputs: dict[str, list[torch.Tensor]] = defaultdict(list)
+        self.handles = []
+        layers = list(model.model.layers)[:layer_count]
+        if len(layers) != layer_count:
+            raise ValueError(f"requested {layer_count} diagnostic layers, found {len(layers)}")
+        for name, module in modules.items():
+
+            def module_hook(_module, args, output, module_name=name):
+                if not self.active:
+                    return
+                if self.capture_inputs:
+                    input_tensor = _first_diagnostic_tensor(args).detach()
+                    self.inputs[module_name].append(input_tensor.reshape(-1, input_tensor.shape[-1]))
+                output_tensor = _first_diagnostic_tensor(output).detach()
+                self.outputs[module_name].append(output_tensor.reshape(-1, output_tensor.shape[-1]))
+
+            self.handles.append(module.register_forward_hook(module_hook))
+        for index, layer in enumerate(layers):
+
+            def layer_hook(_module, _args, output, layer_index=index):
+                if not self.active:
+                    return
+                output_tensor = _first_diagnostic_tensor(output).detach()
+                self.outputs[f"layer.{layer_index}.hidden"].append(
+                    output_tensor.reshape(-1, output_tensor.shape[-1])
+                )
+
+            self.handles.append(layer.register_forward_hook(layer_hook))
+
+    def run(
+        self,
+        row: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Capture one batch-1, fully unpadded row without a host synchronization."""
+
+        attention_mask = row.get("attention_mask")
+        if attention_mask is None or attention_mask.ndim != 2 or attention_mask.shape[0] != 1:
+            raise ValueError("accelerated diagnostics require a rank-2 batch-1 attention mask")
+        self.inputs.clear()
+        self.outputs.clear()
+        self.active = True
+        try:
+            logits = self.model(**row, use_cache=False).logits.detach()
+        finally:
+            self.active = False
+        merged_inputs = {name: torch.cat(values, dim=0) for name, values in self.inputs.items()}
+        merged_outputs = {name: torch.cat(values, dim=0) for name, values in self.outputs.items()}
+        return logits.reshape(-1, logits.shape[-1]), merged_inputs, merged_outputs
+
+    def close(self) -> None:
+        """Remove persistent hooks so later quantization/evaluation phases cannot retain captures."""
+
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+
+
+@dataclass(frozen=True)
+class _LocalReplayGroup:
+    """One module-tree-authorized same-input projection group and its resident FP32 weights."""
+
+    names: tuple[str, ...]
+    weight: torch.Tensor
+    biases: tuple[torch.Tensor | None, ...]
+    output_widths: tuple[int, ...]
+
+
+def _prepare_local_replay_groups(
+    model: torch.nn.Module,
+    modules: dict[str, torch.nn.Linear],
+    reconstructions: Mapping[str, torch.Tensor],
+    *,
+    device: torch.device,
+) -> tuple[_LocalReplayGroup, ...]:
+    """Stage reconstructed weights once and fuse QKV plus gate/up replay using the module tree."""
+
+    shared_groups = _shared_input_hessian_groups(model, modules)
+    grouped_names = {name for group in shared_groups for name in group}
+    groups = [*shared_groups, *((name,) for name in modules if name not in grouped_names)]
+    prepared = []
+    for names in groups:
+        weights = [reconstructions[name].to(device=device, dtype=torch.float32) for name in names]
+        biases = tuple(
+            None if modules[name].bias is None else modules[name].bias.detach().to(device=device, dtype=torch.float32)
+            for name in names
+        )
+        prepared.append(
+            _LocalReplayGroup(
+                names=names,
+                weight=torch.cat(weights, dim=0) if len(weights) > 1 else weights[0],
+                biases=biases,
+                output_widths=tuple(weight.shape[0] for weight in weights),
+            )
+        )
+    return tuple(prepared)
+
+
+def _replay_local_groups(
+    inputs: Mapping[str, torch.Tensor],
+    groups: tuple[_LocalReplayGroup, ...],
+) -> dict[str, torch.Tensor]:
+    """Replay grouped reconstructed projections in FP32 without device-to-host copies."""
+
+    outputs = {}
+    for group in groups:
+        group_input = inputs[group.names[0]]
+        for name in group.names[1:]:
+            candidate = inputs[name]
+            if (
+                candidate.shape != group_input.shape
+                or candidate.device != group_input.device
+                or candidate.dtype != group_input.dtype
+            ):
+                raise ValueError(f"module-tree shared-input group has incompatible runtime geometry: {group.names}")
+        joined = F.linear(group_input.float(), group.weight)
+        for name, output, bias in zip(
+            group.names,
+            joined.split(group.output_widths, dim=-1),
+            group.biases,
+            strict=True,
+        ):
+            outputs[name] = output if bias is None else output + bias
+    return outputs
+
+
+@torch.inference_mode()
+def _streaming_compare_models_cpu(
     dense_model: torch.nn.Module,
     quantized_model: torch.nn.Module,
     rows: tuple[dict[str, torch.Tensor], ...],
@@ -1459,6 +2189,215 @@ def _streaming_compare_models(
     if module_scope == "qkvo":
         result["local_qkvo"] = local_metrics
         result["live_qkvo"] = live_metrics
+    return result
+
+
+@torch.inference_mode()
+def _streaming_compare_models_cuda(
+    dense_model: torch.nn.Module,
+    quantized_model: torch.nn.Module,
+    rows: tuple[dict[str, torch.Tensor], ...],
+    dense_modules: dict[str, torch.nn.Linear],
+    quantized_modules: dict[str, torch.nn.Module],
+    reconstructions: dict[str, torch.Tensor],
+    *,
+    layer_count: int,
+    progress_label: str,
+    module_scope: str,
+    diagnostic_detail: str,
+    diagnostic_streams: int,
+) -> dict[str, object]:
+    """Run batch-1 diagnostics with persistent hooks, GPU replay, and device-resident reductions."""
+
+    if not rows or next(iter(rows[0].values())).device.type != "cuda":
+        raise ValueError("CUDA diagnostics require non-empty CUDA-resident rows")
+    if diagnostic_streams not in {1, 2}:
+        raise ValueError("CUDA diagnostics support one serial stream or two bounded pipeline streams")
+    device = next(iter(rows[0].values())).device
+    module_names = tuple(dense_modules)
+    replay_groups = _prepare_local_replay_groups(dense_model, dense_modules, reconstructions, device=device)
+    dense_capture = _CudaForwardCapture(
+        dense_model,
+        dense_modules,
+        capture_inputs=True,
+        layer_count=layer_count,
+    )
+    quantized_capture = _CudaForwardCapture(
+        quantized_model,
+        quantized_modules,
+        capture_inputs=False,
+        layer_count=layer_count,
+    )
+    local_accumulator = _DeviceMetricAccumulator()
+    live_accumulator = _DeviceMetricAccumulator()
+    layer_accumulators = {index: _DeviceMetricAccumulator() for index in range(layer_count)}
+    logit_accumulator = _DeviceMetricAccumulator()
+    previous_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    metric_function = _device_primary_metrics if diagnostic_detail == "primary" else _device_tensor_metrics
+    forward_stream = torch.cuda.current_stream(device)
+    metric_stream = torch.cuda.Stream(device=device) if diagnostic_streams == 2 else forward_stream
+    pipeline_events = [torch.cuda.Event() for _ in range(2)] if diagnostic_streams == 2 else []
+
+    def preserve_on_metric_stream(*collections: Mapping[str, torch.Tensor] | torch.Tensor) -> None:
+        if diagnostic_streams == 1:
+            return
+        for collection in collections:
+            tensors = collection.values() if isinstance(collection, Mapping) else (collection,)
+            for tensor in tensors:
+                tensor.record_stream(metric_stream)
+
+    try:
+        for row_index, row in enumerate(rows, start=1):
+            slot = (row_index - 1) % 2
+            if diagnostic_streams == 2 and row_index > 2:
+                # Bound retained captures to two rows. This is a device-side
+                # dependency, not a host synchronization.
+                forward_stream.wait_event(pipeline_events[slot])
+            dense_logits, dense_inputs, dense_outputs = dense_capture.run(row)
+            quantized_logits, _, live_outputs = quantized_capture.run(row)
+            token_count = dense_logits.shape[0]
+            with torch.cuda.stream(metric_stream):
+                if diagnostic_streams == 2:
+                    metric_stream.wait_stream(forward_stream)
+                    preserve_on_metric_stream(
+                        dense_logits,
+                        quantized_logits,
+                        dense_inputs,
+                        dense_outputs,
+                        live_outputs,
+                    )
+                local_outputs = _replay_local_groups(dense_inputs, replay_groups)
+                dense_joined = _joined(dense_outputs, module_names)
+                local_accumulator.add(
+                    metric_function(
+                        dense_joined,
+                        _joined(local_outputs, module_names),
+                        normalize_distribution=True,
+                    ),
+                    rows=token_count,
+                )
+                live_accumulator.add(
+                    metric_function(
+                        dense_joined,
+                        _joined(live_outputs, module_names),
+                        normalize_distribution=True,
+                    ),
+                    rows=token_count,
+                )
+                for layer_index, accumulator in layer_accumulators.items():
+                    accumulator.add(
+                        metric_function(
+                            dense_outputs[f"layer.{layer_index}.hidden"],
+                            live_outputs[f"layer.{layer_index}.hidden"],
+                            normalize_distribution=True,
+                        ),
+                        rows=token_count,
+                    )
+                logit_accumulator.add(
+                    metric_function(
+                        dense_logits,
+                        quantized_logits,
+                        normalize_distribution=False,
+                        include_top10=True,
+                        **({"cpu_compatible_topk": True} if diagnostic_detail == "full" else {}),
+                    ),
+                    rows=token_count,
+                )
+                if diagnostic_streams == 2:
+                    pipeline_events[slot].record(metric_stream)
+            if row_index % 16 == 0 or row_index == len(rows):
+                if diagnostic_streams == 2:
+                    # Progress is an explicit host-visible checkpoint. Wait
+                    # here so streamed scalar telemetry cannot report stale
+                    # values; ordinary rows remain fully asynchronous.
+                    metric_stream.synchronize()
+                print(
+                    f"{progress_label}: eval {row_index}/{len(rows)} rows, "
+                    f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
+                    f"top1={logit_accumulator.mean('top1_agreement'):.4f} "
+                    f"top5={logit_accumulator.mean('top5_overlap', 'mean'):.4f} "
+                    f"top10={logit_accumulator.mean('top10_overlap', 'mean'):.4f}",
+                    flush=True,
+                )
+        if diagnostic_streams == 2:
+            metric_stream.synchronize()
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous_tf32
+        dense_capture.close()
+        quantized_capture.close()
+
+    local_metrics = local_accumulator.result()
+    live_metrics = live_accumulator.result()
+    result = {
+        "local_modules": local_metrics,
+        "live_modules": live_metrics,
+        "layers": {str(index): accumulator.result() for index, accumulator in layer_accumulators.items()},
+        "logits": logit_accumulator.result(),
+        "diagnostic_device": "cuda",
+        "diagnostic_detail": diagnostic_detail,
+        "diagnostic_streams": diagnostic_streams,
+    }
+    if module_scope == "qkvo":
+        result["local_qkvo"] = local_metrics
+        result["live_qkvo"] = live_metrics
+    return result
+
+
+@torch.inference_mode()
+def _streaming_compare_models(
+    dense_model: torch.nn.Module,
+    quantized_model: torch.nn.Module,
+    rows: tuple[dict[str, torch.Tensor], ...],
+    dense_modules: dict[str, torch.nn.Linear],
+    quantized_modules: dict[str, torch.nn.Module],
+    reconstructions: dict[str, torch.Tensor],
+    *,
+    layer_count: int,
+    progress_label: str,
+    module_scope: str = "qkvo",
+    diagnostic_device: str = "auto",
+    diagnostic_detail: str = "primary",
+    diagnostic_streams: int = 2,
+) -> dict[str, object]:
+    """Dispatch to accelerated CUDA diagnostics while retaining the exact historical CPU reference."""
+
+    if diagnostic_device not in {"auto", "cpu", "cuda"}:
+        raise ValueError(f"unsupported diagnostic device: {diagnostic_device!r}")
+    if diagnostic_detail not in {"primary", "full"}:
+        raise ValueError(f"unsupported diagnostic detail: {diagnostic_detail!r}")
+    row_device = None if not rows else next(iter(rows[0].values())).device
+    use_cuda = diagnostic_device == "cuda" or (diagnostic_device == "auto" and row_device.type == "cuda")
+    if use_cuda:
+        if row_device is None or row_device.type != "cuda":
+            raise ValueError("CUDA diagnostics were requested for non-CUDA evaluation rows")
+        return _streaming_compare_models_cuda(
+            dense_model,
+            quantized_model,
+            rows,
+            dense_modules,
+            quantized_modules,
+            reconstructions,
+            layer_count=layer_count,
+            progress_label=progress_label,
+            module_scope=module_scope,
+            diagnostic_detail=diagnostic_detail,
+            diagnostic_streams=diagnostic_streams,
+        )
+    result = _streaming_compare_models_cpu(
+        dense_model,
+        quantized_model,
+        rows,
+        dense_modules,
+        quantized_modules,
+        reconstructions,
+        layer_count=layer_count,
+        progress_label=progress_label,
+        module_scope=module_scope,
+    )
+    result["diagnostic_device"] = "cpu"
+    result["diagnostic_detail"] = "full"
+    result["diagnostic_streams"] = 1
     return result
 
 
@@ -2163,6 +3102,9 @@ def main() -> None:
                 layer_count=args.layers,
                 progress_label=f"W{rate:g} {arm}",
                 module_scope=args.module_scope,
+                diagnostic_device=args.diagnostic_device,
+                diagnostic_detail=args.diagnostic_detail,
+                diagnostic_streams=args.diagnostic_streams,
             )
             codec_bpw = rate + selector_bpw
             selected_mlp_rates = (
