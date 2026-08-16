@@ -51,6 +51,8 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _device_tensor_metrics,
     _DeviceMetricAccumulator,
     _install_qvq_prefix_artifact,
+    _FullModelMlpAcceptanceEvaluator,
+    _LlamaMlpSuffixAcceptanceEvaluator,
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
     _mlp_layer_groups,
@@ -418,6 +420,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert args.evaluation_row_offset == 64
     assert args.mlp_acceptance_kl_regression_limit == 0.05
     assert args.mlp_acceptance_topn_regression_limit == 0.05
+    assert args.mlp_acceptance_execution == "auto"
     assert args.max_length is None
     assert args.qvq_telemetry is False
     assert ARM_CONFIG["v2b2-p32"] == {
@@ -965,6 +968,62 @@ def test_qvq_mlp_acceptance_device_reduction_matches_full_reference():
     assert actual["top1_agreement"] == expected["top1_agreement"]
     assert actual["top5_overlap"]["mean"] == pytest.approx(expected["top5_overlap"]["mean"], abs=1e-7)
     assert actual["top10_overlap"]["mean"] == pytest.approx(expected["top10_overlap"]["mean"], abs=1e-7)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemetry():
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(191)
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=3,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    dense = LlamaForCausalLM(config).cuda().eval()
+    candidate = LlamaForCausalLM(config).cuda().eval()
+    candidate.load_state_dict(dense.state_dict())
+    rows = (
+        {"input_ids": torch.randint(0, config.vocab_size, (1, 11), device="cuda")},
+        {"input_ids": torch.randint(0, config.vocab_size, (1, 17), device="cuda")},
+    )
+    full = _FullModelMlpAcceptanceEvaluator(dense, candidate, rows, progress_prefix="test")
+    suffix = _LlamaMlpSuffixAcceptanceEvaluator(dense, candidate, rows, progress_prefix="test")
+
+    metric_pairs = [(full("baseline"), suffix("baseline"))]
+    for layer_index, layer in enumerate(candidate.model.layers):
+        suffix.prepare_layer(layer_index)
+        with torch.no_grad():
+            layer.mlp.down_proj.weight.add_(0.001 * (layer_index + 1))
+        metric_pairs.append((full(f"layer_{layer_index}"), suffix(f"layer_{layer_index}")))
+
+    for expected, actual in metric_pairs:
+        assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=1e-7)
+        assert actual["top1_agreement"] == expected["top1_agreement"]
+        assert actual["top5_overlap"]["mean"] == expected["top5_overlap"]["mean"]
+        assert actual["top10_overlap"]["mean"] == expected["top10_overlap"]["mean"]
+
+    full_telemetry = full.telemetry()
+    suffix_telemetry = suffix.telemetry()
+    assert full_telemetry["historical_full_forward_calls"] == 16
+    assert full_telemetry["full_forward_equivalents"] == 16
+    assert suffix_telemetry["teacher_full_forward_calls"] == 2
+    assert suffix_telemetry["candidate_full_forward_calls"] == 2
+    assert suffix_telemetry["actual_full_forward_calls"] == 4
+    assert suffix_telemetry["full_forward_call_reduction"] == pytest.approx(0.75)
+    assert suffix_telemetry["teacher_cache_device"] == "cpu"
+    assert suffix_telemetry["teacher_cache_bytes"] > 0
+    assert suffix_telemetry["prefix_forward_calls"] == 6
+    assert suffix_telemetry["suffix_forward_calls"] == 6
+    assert suffix_telemetry["full_forward_equivalents"] == pytest.approx(10.0)
+    assert suffix_telemetry["full_forward_equivalent_reduction"] == pytest.approx(0.375)
+    for telemetry in (full_telemetry, suffix_telemetry):
+        assert telemetry["peak_allocated_bytes"] >= telemetry["start_allocated_bytes"]
+        assert telemetry["peak_reserved_bytes"] >= telemetry["start_reserved_bytes"]
 
 
 def test_qvq_mlp_acceptance_is_atomic_tree_derived_and_fail_closed():

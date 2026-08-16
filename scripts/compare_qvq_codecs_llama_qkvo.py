@@ -262,6 +262,16 @@ def _parser() -> argparse.ArgumentParser:
         default=0.05,
         help="Maximum relative final-logit KL increase; 0.05 permits a five-percent increase.",
     )
+    parser.add_argument(
+        "--mlp-acceptance-execution",
+        choices=("auto", "full", "suffix"),
+        default="auto",
+        help=(
+            "`suffix` caches teacher logits and each current-layer pre-MLP state, then replays only the MLP and "
+            "downstream decoder suffix. `full` retains the historical two-full-model reference. `auto` uses exact "
+            "suffix replay for compatible Llama models and otherwise falls back to `full`."
+        ),
+    )
     parser.add_argument("--yaqa-rows", type=int, default=512)
     parser.add_argument("--yaqa-row-offset", type=int)
     parser.add_argument("--yaqa-batch-size", type=int, default=8)
@@ -949,6 +959,8 @@ def _streaming_logit_metrics(
     dense_model: torch.nn.Module,
     candidate_model: torch.nn.Module,
     rows: tuple[dict[str, torch.Tensor], ...],
+    *,
+    cpu_topk_fallback_counter: list[int] | None = None,
 ) -> dict[str, object]:
     """Compare final logits row by row without retaining full-vocabulary tensors."""
 
@@ -956,22 +968,348 @@ def _streaming_logit_metrics(
     for row in rows:
         dense_logits = dense_model(**row, use_cache=False).logits
         candidate_logits = candidate_model(**row, use_cache=False).logits
-        if dense_logits.dtype == candidate_logits.dtype == torch.float32:
-            metrics = _acceptance_logit_metrics(dense_logits, candidate_logits)
-        else:
-            # CPU and CUDA top-k may resolve tied FP16/BF16 logits differently.
-            # Preserve the historical CPU ordering for those low-precision ties.
-            metrics = tensor_metrics(
-                dense_logits.detach().cpu().float().flatten(0, -2),
-                candidate_logits.detach().cpu().float().flatten(0, -2),
-                normalize_distribution=False,
-                include_top10=True,
-            )
+        metrics, used_cpu_fallback = _acceptance_metrics_preserving_topk_ties(dense_logits, candidate_logits)
+        if used_cpu_fallback and cpu_topk_fallback_counter is not None:
+            cpu_topk_fallback_counter[0] += 1
         accumulator.add(
             metrics,
             rows=dense_logits.numel() // dense_logits.shape[-1],
         )
     return accumulator.result()
+
+
+def _acceptance_metrics_preserving_topk_ties(
+    dense_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+) -> tuple[dict[str, object], bool]:
+    """Use CUDA unless a ranking-boundary tie requires historical CPU Top-K ordering."""
+
+    if dense_logits.shape != candidate_logits.shape:
+        raise ValueError(
+            f"cached acceptance logit shape mismatch: {tuple(dense_logits.shape)} != "
+            f"{tuple(candidate_logits.shape)}"
+        )
+    if candidate_logits.device.type == "cuda":
+        metric_dense_logits = dense_logits.to(candidate_logits.device, non_blocking=True)
+        dense = metric_dense_logits.detach().float().reshape(-1, metric_dense_logits.shape[-1])
+        candidate = candidate_logits.detach().float().reshape(-1, candidate_logits.shape[-1])
+
+        def boundary_tied(values: torch.Tensor) -> torch.Tensor:
+            width = min(11, values.shape[-1])
+            top_values = values.topk(width, dim=-1).values
+            tied = top_values[:, 0].eq(top_values[:, 1]) if width > 1 else torch.zeros((), device=values.device)
+            for boundary in (5, 10):
+                if width > boundary:
+                    tied = tied | top_values[:, boundary - 1].eq(top_values[:, boundary])
+            return tied.any()
+
+        ambiguous = bool(boundary_tied(dense) | boundary_tied(candidate))
+        if not ambiguous:
+            return _acceptance_logit_metrics(metric_dense_logits, candidate_logits), False
+    return (
+        tensor_metrics(
+            dense_logits.detach().cpu().float().flatten(0, -2),
+            candidate_logits.detach().cpu().float().flatten(0, -2),
+            normalize_distribution=False,
+            include_top10=True,
+        ),
+        True,
+    )
+
+
+@dataclass(frozen=True)
+class _LlamaMlpPrefixState:
+    """One row's exact state immediately before a selected Llama MLP."""
+
+    residual: torch.Tensor
+    mlp_input: torch.Tensor
+    layer_kwargs: dict[str, object]
+
+
+class _StopAfterMlpInput(RuntimeError):
+    """Internal control flow used to avoid executing an already-captured suffix."""
+
+
+class _MlpAcceptanceEvaluatorBase:
+    """Instrument MLP acceptance execution without changing its quality policy."""
+
+    def __init__(
+        self,
+        dense_model: torch.nn.Module,
+        candidate_model: torch.nn.Module,
+        rows: tuple[dict[str, torch.Tensor], ...],
+        *,
+        progress_prefix: str,
+        execution: str,
+    ) -> None:
+        if not rows:
+            raise ValueError("MLP acceptance requires at least one row")
+        self.dense_model = dense_model
+        self.candidate_model = candidate_model
+        self.rows = rows
+        self.progress_prefix = progress_prefix
+        self.execution = execution
+        self.device = next(iter(rows[0].values())).device
+        self.layer_count = len(candidate_model.model.layers)
+        self.started = time.perf_counter()
+        self.phase_seconds = Counter()
+        self.evaluation_calls = 0
+        self.teacher_full_forward_calls = 0
+        self.candidate_full_forward_calls = 0
+        self.prefix_forward_calls = 0
+        self.suffix_forward_calls = 0
+        self.prefix_layer_equivalents = 0.0
+        self.suffix_layer_equivalents = 0.0
+        self.cpu_topk_fallback_rows = 0
+        self.start_allocated_bytes = 0
+        self.start_reserved_bytes = 0
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            self.start_allocated_bytes = torch.cuda.memory_allocated(self.device)
+            self.start_reserved_bytes = torch.cuda.memory_reserved(self.device)
+            torch.cuda.reset_peak_memory_stats(self.device)
+
+    def prepare_layer(self, layer_index: int) -> None:
+        del layer_index
+
+    def _record_metrics(self, label: str, metrics: dict[str, object]) -> dict[str, object]:
+        print(
+            f"{self.progress_prefix} MLP gate {label}: "
+            f"KL={metrics['kl_forward']['mean']:.6f} "
+            f"top1={metrics['top1_agreement']:.4f} "
+            f"top5={metrics['top5_overlap']['mean']:.4f} "
+            f"top10={metrics['top10_overlap']['mean']:.4f}",
+            flush=True,
+        )
+        return metrics
+
+    def telemetry(self) -> dict[str, object]:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            peak_allocated = torch.cuda.max_memory_allocated(self.device)
+            peak_reserved = torch.cuda.max_memory_reserved(self.device)
+        else:
+            peak_allocated = peak_reserved = 0
+        historical_full_calls = 2 * self.evaluation_calls * len(self.rows)
+        actual_full_calls = self.teacher_full_forward_calls + self.candidate_full_forward_calls
+        full_forward_equivalents = (
+            self.teacher_full_forward_calls
+            + self.candidate_full_forward_calls
+            + (self.prefix_layer_equivalents + self.suffix_layer_equivalents) / max(1, self.layer_count)
+        )
+        return {
+            "execution": self.execution,
+            "evaluation_calls": self.evaluation_calls,
+            "rows": len(self.rows),
+            "teacher_cache_device": "cpu" if hasattr(self, "teacher_cache_bytes") else None,
+            "teacher_cache_bytes": getattr(self, "teacher_cache_bytes", 0),
+            "teacher_full_forward_calls": self.teacher_full_forward_calls,
+            "candidate_full_forward_calls": self.candidate_full_forward_calls,
+            "prefix_forward_calls": self.prefix_forward_calls,
+            "suffix_forward_calls": self.suffix_forward_calls,
+            "cpu_topk_fallback_rows": self.cpu_topk_fallback_rows,
+            "historical_full_forward_calls": historical_full_calls,
+            "actual_full_forward_calls": actual_full_calls,
+            "full_forward_call_reduction": (
+                0.0 if historical_full_calls == 0 else 1.0 - actual_full_calls / historical_full_calls
+            ),
+            "full_forward_equivalents": full_forward_equivalents,
+            "full_forward_equivalents_avoided": historical_full_calls - full_forward_equivalents,
+            "full_forward_equivalent_reduction": (
+                0.0 if historical_full_calls == 0 else 1.0 - full_forward_equivalents / historical_full_calls
+            ),
+            "phase_seconds": dict(self.phase_seconds),
+            "total_seconds": time.perf_counter() - self.started,
+            "start_allocated_bytes": self.start_allocated_bytes,
+            "start_reserved_bytes": self.start_reserved_bytes,
+            "peak_allocated_bytes": peak_allocated,
+            "peak_reserved_bytes": peak_reserved,
+            "incremental_peak_allocated_bytes": max(0, peak_allocated - self.start_allocated_bytes),
+            "incremental_peak_reserved_bytes": max(0, peak_reserved - self.start_reserved_bytes),
+        }
+
+
+class _FullModelMlpAcceptanceEvaluator(_MlpAcceptanceEvaluatorBase):
+    """Historical reference: execute dense and candidate full models for every proposal."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, execution="full", **kwargs)
+
+    @torch.inference_mode()
+    def __call__(self, label: str) -> dict[str, object]:
+        started = time.perf_counter()
+        fallback_counter = [0]
+        metrics = _streaming_logit_metrics(
+            self.dense_model,
+            self.candidate_model,
+            self.rows,
+            cpu_topk_fallback_counter=fallback_counter,
+        )
+        self.cpu_topk_fallback_rows += fallback_counter[0]
+        self.phase_seconds["full_model_evaluation"] += time.perf_counter() - started
+        self.evaluation_calls += 1
+        self.teacher_full_forward_calls += len(self.rows)
+        self.candidate_full_forward_calls += len(self.rows)
+        return self._record_metrics(label, metrics)
+
+
+class _LlamaMlpSuffixAcceptanceEvaluator(_MlpAcceptanceEvaluatorBase):
+    """Cache teacher logits and replay exact Llama states from the current MLP onward."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, execution="suffix", **kwargs)
+        if not self.supports(self.candidate_model):
+            raise ValueError("suffix MLP acceptance requires a compatible Llama causal language model")
+        started = time.perf_counter()
+        with torch.inference_mode():
+            self.dense_logits_by_row = tuple(
+                self.dense_model(**row, use_cache=False).logits.detach().cpu() for row in self.rows
+            )
+        self.teacher_cache_bytes = sum(logits.numel() * logits.element_size() for logits in self.dense_logits_by_row)
+        self.teacher_full_forward_calls = len(self.rows)
+        self.phase_seconds["teacher_cache"] += time.perf_counter() - started
+        self.active_layer_index: int | None = None
+        self.prefix_states: tuple[_LlamaMlpPrefixState, ...] = ()
+
+    @staticmethod
+    def supports(model: torch.nn.Module) -> bool:
+        if getattr(getattr(model, "config", None), "model_type", None) != "llama":
+            return False
+        base = getattr(model, "model", None)
+        layers = getattr(base, "layers", None)
+        return bool(
+            isinstance(layers, torch.nn.ModuleList)
+            and layers
+            and isinstance(getattr(base, "norm", None), torch.nn.Module)
+            and isinstance(getattr(model, "lm_head", None), torch.nn.Module)
+            and all(
+                isinstance(getattr(layer, "mlp", None), torch.nn.Module)
+                and isinstance(getattr(layer, "post_attention_layernorm", None), torch.nn.Module)
+                for layer in layers
+            )
+        )
+
+    @torch.inference_mode()
+    def prepare_layer(self, layer_index: int) -> None:
+        if not 0 <= layer_index < self.layer_count:
+            raise ValueError(f"MLP suffix layer index is out of range: {layer_index}")
+        layer = self.candidate_model.model.layers[layer_index]
+        states = []
+        started = time.perf_counter()
+        for row in self.rows:
+            captured: dict[str, object] = {}
+
+            def layer_pre_hook(_module, args, kwargs):
+                del args
+                captured["layer_kwargs"] = dict(kwargs)
+
+            def norm_pre_hook(_module, args):
+                captured["residual"] = args[0].detach()
+
+            def mlp_pre_hook(_module, args):
+                captured["mlp_input"] = args[0].detach()
+                raise _StopAfterMlpInput
+
+            handles = (
+                layer.register_forward_pre_hook(layer_pre_hook, with_kwargs=True),
+                layer.post_attention_layernorm.register_forward_pre_hook(norm_pre_hook),
+                layer.mlp.register_forward_pre_hook(mlp_pre_hook),
+            )
+            try:
+                try:
+                    self.candidate_model(**row, use_cache=False)
+                except _StopAfterMlpInput:
+                    pass
+            finally:
+                for handle in handles:
+                    handle.remove()
+            if set(captured) != {"layer_kwargs", "residual", "mlp_input"}:
+                raise RuntimeError("failed to capture the complete pre-MLP Llama suffix state")
+            layer_kwargs = captured["layer_kwargs"]
+            layer_kwargs.pop("hidden_states", None)
+            states.append(
+                _LlamaMlpPrefixState(
+                    residual=captured["residual"],
+                    mlp_input=captured["mlp_input"],
+                    layer_kwargs=layer_kwargs,
+                )
+            )
+        self.active_layer_index = layer_index
+        self.prefix_states = tuple(states)
+        self.prefix_forward_calls += len(self.rows)
+        self.prefix_layer_equivalents += len(self.rows) * (layer_index + 0.5)
+        self.phase_seconds["prefix_capture"] += time.perf_counter() - started
+
+    @torch.inference_mode()
+    def __call__(self, label: str) -> dict[str, object]:
+        accumulator = _WeightedMetricAccumulator()
+        if self.active_layer_index is None:
+            def full_logits():
+                for row in self.rows:
+                    forward_started = time.perf_counter()
+                    logits = self.candidate_model(**row, use_cache=False).logits.detach()
+                    self.phase_seconds["candidate_forward"] += time.perf_counter() - forward_started
+                    yield logits
+
+            candidate_logits_parts = full_logits()
+            self.candidate_full_forward_calls += len(self.rows)
+        else:
+            layer_index = self.active_layer_index
+            layers = self.candidate_model.model.layers
+            def suffix_logits():
+                for state in self.prefix_states:
+                    forward_started = time.perf_counter()
+                    hidden_states = state.residual + layers[layer_index].mlp(state.mlp_input)
+                    for layer in layers[layer_index + 1 :]:
+                        hidden_states = layer(hidden_states, **state.layer_kwargs)
+                    hidden_states = self.candidate_model.model.norm(hidden_states)
+                    logits = self.candidate_model.lm_head(hidden_states).detach()
+                    self.phase_seconds["candidate_forward"] += time.perf_counter() - forward_started
+                    yield logits
+
+            candidate_logits_parts = suffix_logits()
+            self.suffix_forward_calls += len(self.rows)
+            self.suffix_layer_equivalents += len(self.rows) * (self.layer_count - layer_index - 0.5)
+        for dense_logits, candidate_logits in zip(
+            self.dense_logits_by_row,
+            candidate_logits_parts,
+            strict=True,
+        ):
+            metrics_started = time.perf_counter()
+            row_metrics, used_cpu_fallback = _acceptance_metrics_preserving_topk_ties(dense_logits, candidate_logits)
+            self.cpu_topk_fallback_rows += int(used_cpu_fallback)
+            self.phase_seconds["metrics"] += time.perf_counter() - metrics_started
+            accumulator.add(row_metrics, rows=candidate_logits.numel() // candidate_logits.shape[-1])
+        metrics = accumulator.result()
+        self.evaluation_calls += 1
+        return self._record_metrics(label, metrics)
+
+
+def _build_mlp_acceptance_evaluator(
+    dense_model: torch.nn.Module,
+    candidate_model: torch.nn.Module,
+    rows: tuple[dict[str, torch.Tensor], ...],
+    *,
+    progress_prefix: str,
+    execution: str,
+) -> _MlpAcceptanceEvaluatorBase:
+    """Build the requested evaluator while making `auto` fallback explicit in telemetry."""
+
+    if execution not in {"auto", "full", "suffix"}:
+        raise ValueError(f"unsupported MLP acceptance execution: {execution!r}")
+    if execution == "suffix" or (execution == "auto" and _LlamaMlpSuffixAcceptanceEvaluator.supports(candidate_model)):
+        return _LlamaMlpSuffixAcceptanceEvaluator(
+            dense_model,
+            candidate_model,
+            rows,
+            progress_prefix=progress_prefix,
+        )
+    return _FullModelMlpAcceptanceEvaluator(
+        dense_model,
+        candidate_model,
+        rows,
+        progress_prefix=progress_prefix,
+    )
 
 
 def _select_mlp_layer_candidates(
@@ -1021,6 +1359,9 @@ def _select_mlp_layer_candidates(
     baseline = initial_baseline
     decisions = []
     for layer_index, group in enumerate(groups):
+        prepare_layer = getattr(evaluate, "prepare_layer", None)
+        if prepare_layer is not None:
+            prepare_layer(layer_index)
         # SwiGLU's three projections are not interchangeable: gate and up are
         # multiplied after the nonlinearity, while down consumes that product.
         # Evaluate every non-empty subset so one harmful projection cannot
@@ -1168,6 +1509,7 @@ def _select_mlp_layer_candidates(
                 "candidates": candidate_reports,
             }
         )
+    evaluation_telemetry = getattr(evaluate, "telemetry", None)
     return selected_reconstructions, {
         "enabled": True,
         "initial_qkvo_dense_mlp": initial_baseline,
@@ -1178,6 +1520,7 @@ def _select_mlp_layer_candidates(
         "fully_quantized_layers": sum(decision["selected_variant"] == "full" for decision in decisions),
         "total_layers": len(decisions),
         "decisions": decisions,
+        "evaluation_telemetry": None if evaluation_telemetry is None else evaluation_telemetry(),
     }
 
 
@@ -2705,13 +3048,14 @@ def main() -> None:
             "evaluation_batch_size": 1,
             "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
             "mlp_acceptance": mlp_acceptance_stats,
-            "mlp_acceptance_execution": (
+            "mlp_acceptance_contract": (
                 "atomic per-layer projection-subset final-logit gate against the QKVO+dense-MLP baseline"
                 if mlp_acceptance_enabled
                 else "disabled"
             ),
             "mlp_acceptance_topn_regression_limit": args.mlp_acceptance_topn_regression_limit,
             "mlp_acceptance_kl_regression_limit": args.mlp_acceptance_kl_regression_limit,
+            "mlp_acceptance_execution": args.mlp_acceptance_execution,
             "yaqa_sketch_b": yaqa_stats,
             "yaqa_spectral_ranks": list(args.yaqa_spectral_ranks),
             "yaqa_spectral_lambdas": list(args.yaqa_spectral_lambdas),
@@ -3015,18 +3359,13 @@ def main() -> None:
             mlp_acceptance_report = {"enabled": False}
             selector_bpw = 2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0
             if mlp_acceptance_enabled:
-
-                def evaluate_mlp_candidate(label: str) -> dict[str, object]:
-                    metrics = _streaming_logit_metrics(dense_model, model, mlp_acceptance_rows)
-                    print(
-                        f"W{rate:g} {arm} MLP gate {label}: "
-                        f"KL={metrics['kl_forward']['mean']:.6f} "
-                        f"top1={metrics['top1_agreement']:.4f} "
-                        f"top5={metrics['top5_overlap']['mean']:.4f} "
-                        f"top10={metrics['top10_overlap']['mean']:.4f}",
-                        flush=True,
-                    )
-                    return metrics
+                evaluate_mlp_candidate = _build_mlp_acceptance_evaluator(
+                    dense_model,
+                    model,
+                    mlp_acceptance_rows,
+                    progress_prefix=f"W{rate:g} {arm}",
+                    execution=args.mlp_acceptance_execution,
+                )
 
                 candidate_reconstructions_by_rate = (
                     {
