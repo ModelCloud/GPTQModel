@@ -54,6 +54,7 @@ class YaqaConfig:
     spectral_localized_max_segments: int = 8
     spectral_localized_max_changes: int = 1
     spectral_localized_replay_candidates: int = 0
+    spectral_localized_direct_replay_candidates: int = 0
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -147,6 +148,17 @@ class YaqaConfig:
         ):
             raise ValueError(
                 "YaqaConfig: `spectral_localized_replay_candidates` must be a nonnegative integer."
+            )
+        if (
+            isinstance(self.spectral_localized_direct_replay_candidates, bool)
+            or not isinstance(self.spectral_localized_direct_replay_candidates, int)
+            or self.spectral_localized_direct_replay_candidates < 0
+            or self.spectral_localized_direct_replay_candidates
+            > self.spectral_localized_replay_candidates
+        ):
+            raise ValueError(
+                "YaqaConfig: `spectral_localized_direct_replay_candidates` must be between zero and "
+                "`spectral_localized_replay_candidates`."
             )
 
 

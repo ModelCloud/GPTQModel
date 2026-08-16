@@ -174,9 +174,13 @@ def test_qvq_p4_baseline_only_is_explicit_and_default_off():
     defaults = _p4_parser().parse_args(required)
     assert not defaults.baseline_only
     assert defaults.replay_candidates == 0
+    assert defaults.direct_replay_candidates == 0
     assert defaults.replay_folds == 1
-    replay = _p4_parser().parse_args((*required, "--replay-candidates", "4"))
+    replay = _p4_parser().parse_args(
+        (*required, "--replay-candidates", "4", "--direct-replay-candidates", "1")
+    )
     assert replay.replay_candidates == 4
+    assert replay.direct_replay_candidates == 1
     assert _p4_parser().parse_args((*required, "--baseline-only")).baseline_only
 
 
@@ -1459,6 +1463,7 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
             spectral_localized_max_segments=12,
             spectral_localized_max_changes=3,
             spectral_localized_replay_candidates=4,
+            spectral_localized_direct_replay_candidates=1,
         ),
         offload_to_disk=False,
     )
@@ -1469,6 +1474,7 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
     assert reloaded.yaqa.spectral_localized_max_segments == 12
     assert reloaded.yaqa.spectral_localized_max_changes == 3
     assert reloaded.yaqa.spectral_localized_replay_candidates == 4
+    assert reloaded.yaqa.spectral_localized_direct_replay_candidates == 1
 
     with pytest.raises(ValueError, match="mutually exclusive"):
         YaqaConfig(spectral_push=True, spectral_localized=True)
@@ -1478,6 +1484,11 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
         YaqaConfig(spectral_localized_max_segments=2, spectral_localized_max_changes=3)
     with pytest.raises(ValueError, match="nonnegative integer"):
         YaqaConfig(spectral_localized_replay_candidates=-1)
+    with pytest.raises(ValueError, match="spectral_localized_direct_replay_candidates"):
+        YaqaConfig(
+            spectral_localized_replay_candidates=2,
+            spectral_localized_direct_replay_candidates=3,
+        )
 
 
 def test_qvq_v2b2_p32_localized_propagation_requires_the_exact_yaqa_mode():
@@ -1857,6 +1868,46 @@ def test_qvq_v2b2_p32_localized_spectral_refinement_composes_two_fixed_boundary_
     assert propagated_diagnostics["localized_replay_score"] < float((baseline[0] - source).square().sum().item())
     assert not torch.equal(propagated[0], baseline[0])
     assert len(propagated_calls) >= 2
+
+    direct_diagnostics = {}
+    direct_calls = []
+
+    def direct_score(candidate_weight, *_):
+        direct_calls.append(candidate_weight.clone())
+        return float((candidate_weight - source).square().sum().item())
+
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(0.25,),
+            max_segments=2,
+            max_changes=1,
+            replay_candidates=2,
+            direct_replay_candidates=1,
+            candidate_score=direct_score,
+            search_inputs=torch.eye(16),
+            search_target=baseline[0],
+            diagnostics=direct_diagnostics,
+            bits=2,
+        )
+
+    direct_records = {
+        key: record
+        for key, record in direct_diagnostics["spectral_candidates"].items()
+        if record.get("generator") == "direct_dense_reencode"
+    }
+    assert direct_records
+    assert any("replay_score" in record for record in direct_records.values())
+    assert direct_diagnostics["localized_direct_replay_candidates"] == 1
+    assert len(direct_calls) >= 2
 
 
 def test_qvq_v2b2_p32_localized_full_horizon_baseline_error_fails_closed():

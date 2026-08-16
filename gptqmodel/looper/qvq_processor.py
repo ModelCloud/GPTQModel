@@ -837,6 +837,9 @@ class QVQProcessor(LoopProcessor):
                 yaqa_spectral_localized_max_segments=module_qcfg.yaqa.spectral_localized_max_segments,
                 yaqa_spectral_localized_max_changes=module_qcfg.yaqa.spectral_localized_max_changes,
                 yaqa_spectral_localized_replay_candidates=module_qcfg.yaqa.spectral_localized_replay_candidates,
+                yaqa_spectral_localized_direct_replay_candidates=(
+                    module_qcfg.yaqa.spectral_localized_direct_replay_candidates
+                ),
                 viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
                 telemetry=telemetry,
                 bank_count=module_qcfg.bank_count,

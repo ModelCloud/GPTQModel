@@ -951,6 +951,15 @@ replay would remove exactly the locally unfavorable but propagation-cancelling d
 intended to find. The immutable full-horizon baseline score decides whether a replayed candidate advances. When no
 full-horizon scorer is present, the original strict local-improvement requirement remains in force.
 
+An optional direct-path portfolio adds a candidate family that is independent of the EoRA rank/alpha direction.
+For the highest-residual P32 segments it re-encodes the dense transformed weights while fixing the accepted entry and
+exit states. Thus every proposal is a legal replacement inside the same V2 chain, cannot disturb neighboring
+segments, and changes no serialized layout. If `D` of the `K` replay slots are reserved for direct candidates, the
+search cost remains exactly `1 + K * max_changes` full-model forwards; only portfolio composition changes. Exact
+duplicates of spectral candidates are removed before replay. Direct candidates are prioritized by segment residual
+energy and then local loss, but only the full-horizon score can select one. The default is `D=0` so historical P6
+behavior is preserved.
+
 The validation driver can also divide the fixed search rows into `F` round-robin folds without adding prompts or
 forwards. Let `K_f(Q)` be full-model teacher KL on fold `f` and let `Q_0` be the immutable serialized baseline. It
 ranks a candidate with the minimax relative score

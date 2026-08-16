@@ -4186,6 +4186,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     max_segments: int,
     max_changes: int = 1,
     replay_candidates: int = 0,
+    direct_replay_candidates: int = 0,
     candidate_score: Callable[
         [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], float
     ]
@@ -4232,6 +4233,13 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         raise ValueError("YAQA localized spectral replay_candidates must be a nonnegative integer.")
     if (candidate_score is None) != (replay_candidates == 0):
         raise ValueError("YAQA localized full-horizon scoring requires both a scorer and a positive shortlist.")
+    if (
+        isinstance(direct_replay_candidates, bool)
+        or not isinstance(direct_replay_candidates, int)
+        or direct_replay_candidates < 0
+        or direct_replay_candidates > replay_candidates
+    ):
+        raise ValueError("YAQA localized direct replay candidates must be between zero and replay_candidates.")
     if len(codebook_library) != 4:
         raise ValueError("YAQA localized V2B2-P32 requires canonical V2 plus three complementary families.")
 
@@ -4313,6 +4321,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
             .reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE, 2, 16)
         )
 
+    source_tiles = segment_view(source)
     baseline_tiles = segment_view(accepted)
     gradient_tiles = segment_view(gradient)
     state_tiles = baseline_states.reshape(tile_count, 128)
@@ -4432,6 +4441,70 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                         delta,
                     )
 
+    # Spectral proposals can fill a small replay budget with near-duplicate
+    # locally favorable directions. Optionally add exact fixed-boundary
+    # re-encodings toward the dense weight and reserve replay capacity for
+    # them. Their local loss is only a breadth-ordering heuristic; the
+    # full-horizon scorer remains the acceptance authority.
+    if direct_replay_candidates:
+        residual_priorities = (source - accepted).square()
+        residual_priorities = segment_view(residual_priorities).sum(dim=(2, 3)).reshape(-1)
+        direct_count = min(max_segments, residual_priorities.numel())
+        direct_segments = residual_priorities.topk(direct_count).indices
+        direct_tiles = direct_segments // QVQ_V2B2_P32_SEGMENTS_PER_TILE
+        direct_segment_ids = direct_segments % QVQ_V2B2_P32_SEGMENTS_PER_TILE
+        direct_starts = direct_segment_ids * QVQ_V2B2_P32_STEPS_PER_SEGMENT
+        direct_exits = direct_starts + QVQ_V2B2_P32_STEPS_PER_SEGMENT - 1
+        direct_entries = state_tiles[
+            direct_tiles,
+            torch.where(direct_starts == 0, torch.full_like(direct_starts, 127), direct_starts - 1),
+        ]
+        direct_required_exits = state_tiles[direct_tiles, direct_exits]
+        direct = fixed_boundary_v2b2_p32_segment_quantize(
+            source_tiles[direct_tiles, direct_segment_ids].reshape(
+                -1, QVQ_V2B2_P32_STEPS_PER_SEGMENT, 2
+            ),
+            pair_codebooks,
+            bits=bits,
+            entry_states=direct_entries,
+            exit_states=direct_required_exits,
+        )
+        direct_values = direct.values.reshape(-1, 2, 16).to(torch.float32)
+        direct_deltas = direct_values - baseline_tiles[direct_tiles, direct_segment_ids]
+        payloads_by_segment: dict[tuple[int, int], list[tuple[object, ...]]] = defaultdict(list)
+        for payload in candidate_payloads.values():
+            payloads_by_segment[(payload[0], payload[1])].append(payload)
+        for direct_index in range(direct_segments.numel()):
+            tile_index = int(direct_tiles[direct_index].item())
+            segment_index = int(direct_segment_ids[direct_index].item())
+            delta = direct_deltas[direct_index]
+            if not torch.count_nonzero(delta):
+                continue
+            duplicate = any(
+                payload[0] == tile_index
+                and payload[1] == segment_index
+                and torch.equal(payload[2], direct.states[direct_index])
+                and torch.equal(payload[4], direct.segment_bank_ids[direct_index])
+                for payload in payloads_by_segment.get((tile_index, segment_index), ())
+            )
+            if duplicate:
+                continue
+            candidate_key = f"direct_t{tile_index}_s{segment_index}"
+            candidate_records[candidate_key] = {
+                "generator": "direct_dense_reencode",
+                "tile": tile_index,
+                "segment": segment_index,
+                "selected": False,
+            }
+            candidate_payloads[candidate_key] = (
+                tile_index,
+                segment_index,
+                direct.states[direct_index],
+                direct.values[direct_index],
+                direct.segment_bank_ids[direct_index],
+                delta,
+            )
+
     refined_weight = baseline_weight.clone()
     refined_states = baseline_states.clone()
     refined_selectors = baseline_selectors.clone()
@@ -4500,7 +4573,15 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         if candidate_score is None:
             shortlisted = locally_ranked[:1]
         else:
-            shortlisted = locally_ranked[:replay_candidates]
+            direct_ranked = [item for item in locally_ranked if item[1].startswith("direct_")]
+            shortlisted = direct_ranked[:direct_replay_candidates]
+            shortlisted_keys = {item[1] for item in shortlisted}
+            shortlisted.extend(
+                item
+                for item in locally_ranked
+                if item[1] not in shortlisted_keys
+            )
+            shortlisted = shortlisted[:replay_candidates]
 
         best_key = None
         best_step_loss = current_loss
@@ -4603,6 +4684,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         diagnostics["localized_selected_changes"] = len(selected_candidate_keys)
         diagnostics["localized_selected_candidates"] = selected_candidate_keys
         diagnostics["localized_replay_candidates"] = replay_candidates
+        diagnostics["localized_direct_replay_candidates"] = direct_replay_candidates
         diagnostics["localized_replay_score"] = current_replay_score
         diagnostics["localized_replay_callback_error"] = replay_callback_error
         diagnostics["spectral_original_loss"] = float(baseline_loss.item())
@@ -4970,6 +5052,7 @@ def quantize_qvq_linear(
     yaqa_spectral_localized_max_segments: int = 8,
     yaqa_spectral_localized_max_changes: int = 1,
     yaqa_spectral_localized_replay_candidates: int = 0,
+    yaqa_spectral_localized_direct_replay_candidates: int = 0,
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
     trellis_window: int = 16,
@@ -5138,6 +5221,16 @@ def quantize_qvq_linear(
         or yaqa_spectral_localized_replay_candidates < 0
     ):
         raise ValueError("QVQ YAQA localized replay candidate count must be a nonnegative integer.")
+    if (
+        isinstance(yaqa_spectral_localized_direct_replay_candidates, bool)
+        or not isinstance(yaqa_spectral_localized_direct_replay_candidates, int)
+        or yaqa_spectral_localized_direct_replay_candidates < 0
+        or yaqa_spectral_localized_direct_replay_candidates
+        > yaqa_spectral_localized_replay_candidates
+    ):
+        raise ValueError(
+            "QVQ YAQA localized direct replay candidate count must be between zero and the replay shortlist."
+        )
     if damp_percent is None:
         damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
@@ -5656,6 +5749,7 @@ def quantize_qvq_linear(
                 max_segments=yaqa_spectral_localized_max_segments,
                 max_changes=yaqa_spectral_localized_max_changes,
                 replay_candidates=yaqa_spectral_localized_replay_candidates,
+                direct_replay_candidates=yaqa_spectral_localized_direct_replay_candidates,
                 candidate_score=localized_candidate_score,
                 search_inputs=localized_search_inputs,
                 search_target=localized_search_target,

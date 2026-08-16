@@ -545,6 +545,25 @@ and future portfolios, but it does not rescue P6 by itself. The next experiment 
 or reserve shortlist capacity for direct bank/path alternatives; increasing confirmation rows or repeating the same
 local-loss-ordered K=4 portfolio has no new causal value.
 
+#### P7 direct fixed-boundary replay portfolio
+
+P7 implements that materially different generator behind
+`yaqa.spectral_localized_direct_replay_candidates`. It ranks P32 segments by the remaining dense-weight residual,
+re-encodes each chosen segment directly toward the dense transformed weight under its exact accepted entry/exit
+states, removes candidates identical to an existing spectral path, and reserves `D` of the existing `K` replay slots
+for the best distinct direct candidates. This does not add replay forwards, checkpoint bytes, or inference work:
+
+```text
+K full-horizon replay slots
+  |- D direct dense-reencode paths
+  `- K-D best remaining local/spectral paths
+```
+
+The local score orders candidates but cannot veto them. Full-horizon search, minimum-effect confirmation, and exact
+baseline rollback remain unchanged. The first matched gate should repeat the W2 layer-1 Q 32/64/64 experiment with
+`K=4`, `D=1`, and two search folds. Compare candidate identities and fold scores against the recorded P6 portfolio
+before running another module.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

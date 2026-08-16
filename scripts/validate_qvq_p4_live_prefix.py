@@ -66,6 +66,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-segments", type=int, default=8)
     parser.add_argument("--max-changes", type=int, default=1)
     parser.add_argument("--replay-candidates", type=int, default=0)
+    parser.add_argument("--direct-replay-candidates", type=int, default=0)
     parser.add_argument("--replay-folds", type=int, default=1)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
     parser.add_argument("--minimum-relative-kl-improvement", type=float, default=0.001)
@@ -327,6 +328,8 @@ def main() -> None:
         raise ValueError("P4 live-prefix validation requires at least two decoder layers")
     if args.replay_candidates < 0:
         raise ValueError("full-horizon replay candidate count must be nonnegative")
+    if not 0 <= args.direct_replay_candidates <= args.replay_candidates:
+        raise ValueError("direct replay candidate count must be between zero and replay-candidates")
     if args.replay_folds < 1 or args.replay_folds > args.search_rows:
         raise ValueError("replay fold count must be between one and the search row count")
     if not 0 <= args.minimum_relative_kl_improvement < 1:
@@ -500,6 +503,7 @@ def main() -> None:
             yaqa_spectral_localized_max_segments=args.max_segments,
             yaqa_spectral_localized_max_changes=args.max_changes,
             yaqa_spectral_localized_replay_candidates=args.replay_candidates,
+            yaqa_spectral_localized_direct_replay_candidates=args.direct_replay_candidates,
             propagated_inputs=propagated_inputs,
             propagated_target_output=propagated_target,
             propagated_acceptance=confirmation_callback,
@@ -562,6 +566,7 @@ def main() -> None:
             "max_segments": args.max_segments,
             "max_changes": args.max_changes,
             "replay_candidates": args.replay_candidates,
+            "direct_replay_candidates": args.direct_replay_candidates,
             "replay_folds": args.replay_folds,
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
