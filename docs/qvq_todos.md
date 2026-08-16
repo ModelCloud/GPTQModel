@@ -431,6 +431,36 @@ diagnostic candidate generator, but do not enable it by default or spend a full 
 Future spectral work must first demonstrate materially larger selector/path churn and a predeclared, seed-stable
 held-out gain before task evaluation.
 
+#### P5 multi-change fixed-boundary refinement
+
+P5 removed P4's hard experimental cap of one changed P32 segment while preserving the same checkpoint and inference
+format. Candidate segments keep their exact entry and exit V2 states. The implementation greedily recomputes each
+remaining candidate's conditional gain after every accepted replacement, forbids selecting the same tile/segment
+twice, and retains the independently encoded V2B2-P32+YAQA artifact as the atomic rollback oracle. The default is
+still one change; `yaqa.spectral_localized_max_changes` only widens an explicitly enabled experiment.
+
+The first W2 Llama 3.2 1B test used the fixed seed-1 layer-0 QKVO prefix, seed-0 512-sequence YAQA factors, ranks
+8/16/32, alphas 0.25/0.5/1.0, at most 32 screened segments, and at most four composed changes. Search,
+confirmation, and evaluation used the same disjoint full-row splits as the P4 seed replication. Q selected three
+fixed-boundary replacements and K selected four. This proves that the former one-change cap was suppressing real
+path diversity rather than merely counting duplicate proposals.
+
+Short four-layer selection was unsafe: the combined Q/K coordinate path improved KL by `8.7987e-6` on rows
+`[1698,1762)` but worsened complete 16-layer KL by `1.6306e-5` on fresh rows `[1762,1826)`. A second gate therefore
+moved proposal confirmation itself to the complete 16-layer horizon. Both modules then failed closed:
+
+| Target | Proposed changes | Full-horizon baseline KL | Full-horizon proposal KL | Decision |
+| --- | ---: | ---: | ---: | :--- |
+| layer-1 `q_proj` | 3 | 0.0014115776 | 0.0014153905 | reject; serialize exact baseline |
+| layer-1 `k_proj` | 4 | 0.0038981916 | 0.0039030055 | reject; serialize exact baseline |
+
+Q's proposal improved confirmation Top-1 but regressed Top-5/10; K improved Top-1/5/10 but still regressed KL.
+Neither pattern satisfies the predeclared strict-KL gate. Because both selected artifacts are the independently
+encoded rollback baselines, no separate downstream task sweep is warranted. The result is useful negative evidence:
+multi-change composition is algebraically valid and generates more distinct paths, but short-horizon acceptance
+cannot be trusted. Keep the wider mode default-off and require a complete downstream confirmation horizon for any
+future low-rate promotion.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

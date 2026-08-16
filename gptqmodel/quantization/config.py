@@ -52,6 +52,7 @@ class YaqaConfig:
     spectral_localized: bool = False
     spectral_localized_alphas: tuple[float, ...] = (0.25, 0.5, 1.0)
     spectral_localized_max_segments: int = 8
+    spectral_localized_max_changes: int = 1
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -128,6 +129,16 @@ class YaqaConfig:
             or self.spectral_localized_max_segments < 1
         ):
             raise ValueError("YaqaConfig: `spectral_localized_max_segments` must be a positive integer.")
+        if (
+            isinstance(self.spectral_localized_max_changes, bool)
+            or not isinstance(self.spectral_localized_max_changes, int)
+            or self.spectral_localized_max_changes < 1
+            or self.spectral_localized_max_changes > self.spectral_localized_max_segments
+        ):
+            raise ValueError(
+                "YaqaConfig: `spectral_localized_max_changes` must be between 1 and "
+                "`spectral_localized_max_segments`."
+            )
 
 
 class _SharedTemporaryDirectory:

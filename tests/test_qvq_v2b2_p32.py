@@ -954,6 +954,8 @@ def test_qvq_v2b2_prefix_artifact_round_trips_packed_modules_without_dense_weigh
         "accepted": True,
         "selector_churn": result.yaqa_spectral_selector_churn,
         "family_changed": result.yaqa_spectral_family_changed,
+        "selected_changes": 0,
+        "selected_candidates": [],
     }
 
     model = torch.nn.Module()
@@ -1288,6 +1290,7 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
             spectral_ranks=[4, 8, 4],
             spectral_localized_alphas=[0.25, 0.5, 0.25],
             spectral_localized_max_segments=12,
+            spectral_localized_max_changes=3,
         ),
         offload_to_disk=False,
     )
@@ -1296,11 +1299,14 @@ def test_qvq_v2b2_p32_yaqa_localized_spectral_config_round_trip():
     assert reloaded.yaqa.spectral_ranks == (4, 8)
     assert reloaded.yaqa.spectral_localized_alphas == (0.25, 0.5)
     assert reloaded.yaqa.spectral_localized_max_segments == 12
+    assert reloaded.yaqa.spectral_localized_max_changes == 3
 
     with pytest.raises(ValueError, match="mutually exclusive"):
         YaqaConfig(spectral_push=True, spectral_localized=True)
     with pytest.raises(ValueError, match="positive integer"):
         YaqaConfig(spectral_localized_max_segments=0)
+    with pytest.raises(ValueError, match="between 1"):
+        YaqaConfig(spectral_localized_max_segments=2, spectral_localized_max_changes=3)
 
 
 def test_qvq_v2b2_p32_localized_propagation_requires_the_exact_yaqa_mode():
@@ -1506,6 +1512,100 @@ def test_qvq_v2b2_p32_localized_spectral_refinement_recovers_one_segment_without
     assert diagnostics["localized_boundary_preserved"] is True
     assert diagnostics["spectral_selected_loss"] == pytest.approx(0.0, abs=1e-6)
     assert sum(candidate["selected"] for candidate in diagnostics["spectral_candidates"].values()) == 1
+
+
+def test_qvq_v2b2_p32_localized_spectral_refinement_composes_two_fixed_boundary_segments():
+    generator = torch.Generator().manual_seed(20260827)
+    library = tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in range(4))
+    pair = torch.stack((library[0], library[2]))
+    baseline_path = tail_biting_v2b2_p32_quantize(
+        torch.randn((1, 128, 2), generator=generator),
+        pair,
+        bits=2,
+    )
+    segment_ids = (1, 6)
+    source = baseline_path.values.reshape(16, 16).clone()
+    expected_states = baseline_path.states.clone()
+    expected_selectors = baseline_path.segment_bank_ids.clone()
+    for segment_id in segment_ids:
+        start = segment_id * 16
+        stop = start + 16
+        alternate = fixed_boundary_v2b2_p32_segment_quantize(
+            torch.randn((1, 16, 2), generator=generator),
+            pair,
+            bits=2,
+            entry_states=baseline_path.states[:, start - 1],
+            exit_states=baseline_path.states[:, stop - 1],
+        )
+        assert not torch.equal(alternate.states, baseline_path.states[:, start:stop])
+        source[segment_id * 2 : segment_id * 2 + 2] = alternate.values.reshape(2, 16)
+        expected_states[:, start:stop] = alternate.states
+        expected_selectors[:, segment_id] = alternate.segment_bank_ids[:, 0]
+
+    baseline = (
+        baseline_path.values.reshape(16, 16),
+        baseline_path.states,
+        baseline_path.segment_bank_ids.reshape(-1),
+        torch.tensor([2], dtype=torch.uint8),
+    )
+    diagnostics = {}
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        refined = yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(1.0,),
+            max_segments=2,
+            max_changes=2,
+            diagnostics=diagnostics,
+            bits=2,
+        )
+
+    torch.testing.assert_close(refined[0], source, rtol=0, atol=0)
+    assert torch.equal(refined[1], expected_states)
+    assert torch.equal(refined[2], expected_selectors.reshape(-1))
+    assert diagnostics["localized_selected_changes"] == 2
+    assert len(diagnostics["localized_selected_candidates"]) == 2
+    assert sum(candidate["selected"] for candidate in diagnostics["spectral_candidates"].values()) == 2
+    assert diagnostics["spectral_selected_loss"] == pytest.approx(0.0, abs=1e-6)
+
+    # The second segment is locally useful for the dense source above but is
+    # harmful to this live-output target. Conditional recomputation must stop
+    # after the first replacement instead of summing stale standalone gains.
+    one_change_target = baseline[0].clone()
+    selected_segment = segment_ids[0]
+    selected_rows = slice(selected_segment * 2, selected_segment * 2 + 2)
+    one_change_target[selected_rows] = source[selected_rows]
+    conditional_diagnostics = {}
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        conditional = yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(1.0,),
+            max_segments=2,
+            max_changes=2,
+            search_inputs=torch.eye(16),
+            search_target=one_change_target,
+            diagnostics=conditional_diagnostics,
+            bits=2,
+        )
+
+    torch.testing.assert_close(conditional[0], one_change_target, rtol=0, atol=0)
+    assert conditional_diagnostics["localized_selected_changes"] == 1
+    assert sum(candidate["selected"] for candidate in conditional_diagnostics["spectral_candidates"].values()) == 1
 
 
 @pytest.mark.parametrize("bits", (2, 3, 3.5))

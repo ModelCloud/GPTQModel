@@ -4184,6 +4184,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     ranks: tuple[int, ...],
     alphas: tuple[float, ...],
     max_segments: int,
+    max_changes: int = 1,
     search_inputs: torch.Tensor | None = None,
     search_target: torch.Tensor | None = None,
     diagnostics: dict[str, object] | None = None,
@@ -4211,6 +4212,13 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         raise ValueError("YAQA localized spectral alphas must be finite and positive.")
     if isinstance(max_segments, bool) or not isinstance(max_segments, int) or max_segments < 1:
         raise ValueError("YAQA localized spectral max_segments must be a positive integer.")
+    if (
+        isinstance(max_changes, bool)
+        or not isinstance(max_changes, int)
+        or max_changes < 1
+        or max_changes > max_segments
+    ):
+        raise ValueError("YAQA localized spectral max_changes must be between 1 and max_segments.")
     if len(codebook_library) != 4:
         raise ValueError("YAQA localized V2B2-P32 requires canonical V2 plus three complementary families.")
 
@@ -4295,9 +4303,11 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     baseline_tiles = segment_view(accepted)
     gradient_tiles = segment_view(gradient)
     state_tiles = baseline_states.reshape(tile_count, 128)
-    best_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
-    best_record: tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor, str] | None = None
     candidate_records: dict[str, dict[str, object]] = {}
+    candidate_payloads: dict[
+        str,
+        tuple[int, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ] = {}
     eps = torch.finfo(torch.float32).eps
 
     for rank in usable_ranks:
@@ -4399,69 +4409,115 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                     ),
                     "selected": False,
                 }
-                if torch.isfinite(selection_loss) and selection_loss < best_loss:
-                    best_loss = selection_loss
-                    best_record = (
+                if torch.isfinite(selection_loss) and torch.count_nonzero(delta):
+                    candidate_payloads[candidate_key] = (
                         tile_index,
                         segment_index,
                         localized.states[candidate_index],
                         localized.values[candidate_index],
                         localized.segment_bank_ids[candidate_index],
-                        candidate_key,
+                        delta,
                     )
 
-    selected_candidate_key = None
-    if best_record is None:
-        result = baseline
-    else:
-        tile_index, segment_index, segment_states, segment_values, segment_bank, candidate_key = best_record
-        refined_weight = baseline_weight.clone()
-        refined_states = baseline_states.clone()
-        refined_selectors = baseline_selectors.clone()
+    refined_weight = baseline_weight.clone()
+    refined_states = baseline_states.clone()
+    refined_selectors = baseline_selectors.clone()
+    refined_selector_view = refined_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)
+    selected_candidate_keys: list[str] = []
+    selected_segments: set[tuple[int, int]] = set()
+    current_search_residual = None if search_residual is None else search_residual.clone()
+    current_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
+
+    # Every proposal preserves the accepted entry/exit state, so replacements
+    # for distinct P32 segments compose exactly. Greedy scoring is conditional:
+    # after each accepted delta, all remaining gains are recomputed against the
+    # current live-output residual (or complete Kronecker proxy). This avoids
+    # treating individually favorable candidates as additively independent.
+    for _ in range(max_changes):
+        best_key = None
+        best_step_loss = current_loss
+        for candidate_key, payload in candidate_payloads.items():
+            tile_index, segment_index, _segment_states, segment_values, _segment_bank, _delta = payload
+            if (tile_index, segment_index) in selected_segments:
+                continue
+            input_block = tile_index // output_blocks
+            output_block = tile_index % output_blocks
+            input_start = input_block * 16 + segment_index * 2
+            output_start = output_block * 16
+            if search_inputs_fp32 is not None:
+                candidate_delta = segment_values.reshape(2, 16).to(torch.float32) - refined_weight[
+                    input_start : input_start + 2, output_start : output_start + 16
+                ].to(torch.float32)
+                projected = search_inputs_fp32[:, input_start : input_start + 2] @ candidate_delta
+                residual_block = current_search_residual[:, output_start : output_start + 16]
+                step_loss = current_loss + (
+                    (residual_block - projected).square() - residual_block.square()
+                ).sum()
+            else:
+                candidate_weight = refined_weight.clone()
+                candidate_weight[input_start : input_start + 2, output_start : output_start + 16] = (
+                    segment_values.reshape(2, 16)
+                )
+                candidate_error = candidate_weight.to(torch.float32) - source
+                step_loss = torch.einsum(
+                    "ij,ik,kl,lj->", candidate_error, original_input, candidate_error, original_output
+                )
+            if torch.isfinite(step_loss) and step_loss < best_step_loss:
+                best_step_loss = step_loss
+                best_key = candidate_key
+
+        if best_key is None:
+            break
+        tile_index, segment_index, segment_states, segment_values, segment_bank, _delta = candidate_payloads[best_key]
         input_block = tile_index // output_blocks
         output_block = tile_index % output_blocks
         input_start = input_block * 16 + segment_index * 2
         output_start = output_block * 16
+        if current_search_residual is not None:
+            candidate_delta = segment_values.reshape(2, 16).to(torch.float32) - refined_weight[
+                input_start : input_start + 2, output_start : output_start + 16
+            ].to(torch.float32)
+            current_search_residual[:, output_start : output_start + 16].sub_(
+                search_inputs_fp32[:, input_start : input_start + 2] @ candidate_delta
+            )
         refined_weight[input_start : input_start + 2, output_start : output_start + 16] = segment_values.reshape(2, 16)
         state_start = segment_index * QVQ_V2B2_P32_STEPS_PER_SEGMENT
         refined_states[tile_index, state_start : state_start + QVQ_V2B2_P32_STEPS_PER_SEGMENT] = segment_states
-        refined_selectors.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)[tile_index, segment_index] = segment_bank
+        refined_selector_view[tile_index, segment_index] = segment_bank
+        selected_segments.add((tile_index, segment_index))
+        selected_candidate_keys.append(best_key)
+        candidate_records[best_key]["selected"] = True
+        candidate_records[best_key]["conditional_selection_loss"] = float(best_step_loss.item())
+        current_loss = best_step_loss
+
+    if selected_candidate_keys:
         exact_error = refined_weight.to(torch.float32) - source
         exact_proxy_loss = torch.einsum(
             "ij,ik,kl,lj->", exact_error, original_input, exact_error, original_output
         )
-        candidate_records[candidate_key]["screening_loss"] = candidate_records[candidate_key]["loss"]
-        candidate_records[candidate_key]["loss"] = float(exact_proxy_loss.item())
-        candidate_records[candidate_key]["relative_improvement"] = float(
-            ((baseline_loss - exact_proxy_loss) / baseline_loss.abs().clamp_min(eps)).item()
-        )
-        if search_inputs_fp32 is None:
-            exact_selection_loss = exact_proxy_loss
-        else:
-            exact_selection_loss = (search_target_fp32 - search_inputs_fp32 @ refined_weight.to(torch.float32)).square().sum()
-            candidate_records[candidate_key]["search_loss"] = float(exact_selection_loss.item())
-            candidate_records[candidate_key]["search_relative_improvement"] = float(
-                (
-                    (baseline_search_loss - exact_selection_loss)
-                    / baseline_search_loss.abs().clamp_min(eps)
-                ).item()
-            )
+        exact_selection_loss = exact_proxy_loss if search_inputs_fp32 is None else current_search_residual.square().sum()
         if torch.isfinite(exact_selection_loss) and exact_selection_loss < (
             baseline_search_loss if baseline_search_loss is not None else baseline_loss
         ):
-            best_loss = exact_selection_loss
-            candidate_records[candidate_key]["selected"] = True
-            selected_candidate_key = candidate_key
             result = refined_weight, refined_states, refined_selectors, baseline_alt_id
+            best_loss = exact_selection_loss
         else:
-            best_loss = baseline_loss
+            for candidate_key in selected_candidate_keys:
+                candidate_records[candidate_key]["selected"] = False
+            selected_candidate_keys = []
             result = baseline
+            best_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
+    else:
+        result = baseline
+        best_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
 
     if diagnostics is not None:
         diagnostics["spectral_method"] = "localized_p32"
         diagnostics["spectral_svd_device"] = spectral_device.type
         diagnostics["spectral_candidates"] = candidate_records
-        diagnostics["spectral_selected"] = selected_candidate_key is not None
+        diagnostics["spectral_selected"] = bool(selected_candidate_keys)
+        diagnostics["localized_selected_changes"] = len(selected_candidate_keys)
+        diagnostics["localized_selected_candidates"] = selected_candidate_keys
         diagnostics["spectral_original_loss"] = float(baseline_loss.item())
         selected_error = result[0].to(torch.float32) - source
         diagnostics["spectral_selected_loss"] = float(
@@ -4825,6 +4881,7 @@ def quantize_qvq_linear(
     yaqa_spectral_localized: bool = False,
     yaqa_spectral_localized_alphas: tuple[float, ...] = (0.25, 0.5, 1.0),
     yaqa_spectral_localized_max_segments: int = 8,
+    yaqa_spectral_localized_max_changes: int = 1,
     viterbi_minimum_proxy_improvement: float = 0.0,
     vector_size: int = 2,
     trellis_window: int = 16,
@@ -4979,6 +5036,13 @@ def quantize_qvq_linear(
         or yaqa_spectral_localized_max_segments < 1
     ):
         raise ValueError("QVQ YAQA localized spectral max_segments must be a positive integer.")
+    if (
+        isinstance(yaqa_spectral_localized_max_changes, bool)
+        or not isinstance(yaqa_spectral_localized_max_changes, int)
+        or yaqa_spectral_localized_max_changes < 1
+        or yaqa_spectral_localized_max_changes > yaqa_spectral_localized_max_segments
+    ):
+        raise ValueError("QVQ YAQA localized spectral max_changes must be between 1 and max_segments.")
     if damp_percent is None:
         damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
@@ -5453,6 +5517,7 @@ def quantize_qvq_linear(
                 ranks=yaqa_spectral_ranks,
                 alphas=yaqa_spectral_localized_alphas,
                 max_segments=yaqa_spectral_localized_max_segments,
+                max_changes=yaqa_spectral_localized_max_changes,
                 search_inputs=localized_search_inputs,
                 search_target=localized_search_target,
                 diagnostics=yaqa_bank_diagnostics,

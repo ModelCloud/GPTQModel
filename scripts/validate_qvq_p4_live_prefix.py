@@ -63,6 +63,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ranks", nargs="+", type=int, default=(8, 16, 32))
     parser.add_argument("--alphas", nargs="+", type=float, default=(0.25, 0.5, 1.0))
     parser.add_argument("--max-segments", type=int, default=8)
+    parser.add_argument("--max-changes", type=int, default=1)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
     parser.add_argument(
         "--baseline-only",
@@ -271,11 +272,15 @@ def _localized_summary(
 ) -> dict[str, object]:
     """Summarize only diagnostics exported by the stable result/callback contracts."""
 
+    candidates = result.yaqa_spectral_candidates or {}
+    selected_candidates = [name for name, record in candidates.items() if record.get("selected") is True]
     return {
         "proposed": "baseline" in callback_report and "proposal" in callback_report,
         "accepted": bool(callback_report.get("accepted", False)),
         "selector_churn": result.yaqa_spectral_selector_churn,
         "family_changed": result.yaqa_spectral_family_changed,
+        "selected_changes": len(selected_candidates),
+        "selected_candidates": selected_candidates,
     }
 
 
@@ -404,6 +409,7 @@ def main() -> None:
             yaqa_spectral_ranks=tuple(args.ranks),
             yaqa_spectral_localized_alphas=tuple(args.alphas),
             yaqa_spectral_localized_max_segments=args.max_segments,
+            yaqa_spectral_localized_max_changes=args.max_changes,
             propagated_inputs=propagated_inputs,
             propagated_target_output=propagated_target,
             propagated_acceptance=confirmation_callback,
@@ -463,6 +469,7 @@ def main() -> None:
             "ranks": list(args.ranks),
             "alphas": list(args.alphas),
             "max_segments": args.max_segments,
+            "max_changes": args.max_changes,
             "topn_regression_limit": args.topn_regression_limit,
             "baseline_only": args.baseline_only,
         },

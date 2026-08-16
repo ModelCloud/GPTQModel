@@ -893,9 +893,11 @@ region before they warrant another propagated gate.
 
 #### Fixed-boundary localized propagation P4
 
-P4 keeps the accepted V2B2-P32+YAQA artifact as an immutable rollback oracle and changes at most one 32-weight
-segment per module. For segment `j`, it fixes both the predecessor state entering the segment and the final state
-leaving it. The search therefore retains the complete V2 history before and after the segment:
+P4 keeps the accepted V2B2-P32+YAQA artifact as an immutable rollback oracle. By default it changes at most one
+32-weight segment per module. The optional `spectral_localized_max_changes` control can compose several disjoint
+segments for experiments, but it does not weaken rollback or alter the serialized format. For segment `j`, the
+search fixes both the predecessor state entering the segment and the final state leaving it. The search therefore
+retains the complete V2 history before and after the segment:
 
 ```text
 accepted YAQA path
@@ -913,9 +915,12 @@ restores the exact original trellis, selectors, family ID, `SV`, and dense recon
 
 This is default-off as `yaqa.spectral_localized`. V2B2 propagation must be explicitly enabled and supplied through
 `QVQProcessor.set_propagation_gate`; it never derives search rows by splitting ordinary Hessian calibration data.
-The checkpoint format, `0.03125`-bpw selector overhead, and inference kernels are unchanged. The one-segment limit is
-intentional for the first causal gate: broader coordinate or beam refinement is allowed only after disjoint
-full-model evidence shows that one localized change has useful downstream absorption.
+The checkpoint format, `0.03125`-bpw selector overhead, and inference kernels are unchanged. Multi-change mode uses
+greedy conditional composition: after each accepted fixed-boundary replacement, every remaining candidate is
+rescored against the current live residual, and a `(tile, segment)` can be selected only once. It therefore avoids
+the invalid assumption that standalone candidate gains add. The default remains one change. Broader composition is
+experimental and must pass a disjoint full-model confirmation horizon; module output or short-prefix improvement is
+not sufficient evidence below W3.
 
 #### V2B4-P64 implementation slice
 
