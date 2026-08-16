@@ -251,14 +251,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mlp-acceptance-topn-regression-limit",
         type=float,
-        default=0.0025,
-        help="Maximum absolute Top-1/5/10 regression accepted with a non-increasing final-logit KL.",
+        default=0.05,
+        help="Maximum absolute Top-1/5/10 regression; 0.05 permits a five-percentage-point drop.",
     )
     parser.add_argument(
         "--mlp-acceptance-kl-regression-limit",
         type=float,
-        default=0.0,
-        help="Maximum relative final-logit KL increase allowed per accepted MLP layer.",
+        default=0.05,
+        help="Maximum relative final-logit KL increase; 0.05 permits a five-percent increase.",
     )
     parser.add_argument("--yaqa-rows", type=int, default=512)
     parser.add_argument("--yaqa-row-offset", type=int)

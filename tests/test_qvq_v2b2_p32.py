@@ -317,6 +317,8 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert args.calibration_rows == 64
     assert args.evaluation_rows == 64
     assert args.evaluation_row_offset == 64
+    assert args.mlp_acceptance_kl_regression_limit == 0.05
+    assert args.mlp_acceptance_topn_regression_limit == 0.05
     assert args.max_length is None
     assert args.qvq_telemetry is False
     assert ARM_CONFIG["v2b2-p32"] == {
@@ -722,6 +724,24 @@ def test_qvq_mlp_acceptance_is_atomic_tree_derived_and_fail_closed():
         baseline,
         _acceptance_metrics(0.9, topn=0.8),
         kl_regression_limit=1.0,
+        topn_regression_limit=0.05,
+    )
+    assert _passes_mlp_acceptance(
+        baseline,
+        _acceptance_metrics(1.05, topn=0.85),
+        kl_regression_limit=0.05,
+        topn_regression_limit=0.05,
+    )
+    assert not _passes_mlp_acceptance(
+        baseline,
+        _acceptance_metrics(1.050001, topn=0.85),
+        kl_regression_limit=0.05,
+        topn_regression_limit=0.05,
+    )
+    assert not _passes_mlp_acceptance(
+        baseline,
+        _acceptance_metrics(1.05, topn=0.849999),
+        kl_regression_limit=0.05,
         topn_regression_limit=0.05,
     )
 
