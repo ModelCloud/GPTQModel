@@ -219,6 +219,12 @@ Perplexity, aggregate accuracy, one prompt, one top-1 token, or whole-model cosi
 
 Do not make one small or synthetic all-metric gate the only path to further investigation.
 
+Use synthetic tensors only to verify algebra, kernels, serialization, and adversarial corner cases. Never use a
+synthetic fixture to accept, reject, rank, or choose the default for a model-quality experiment. Start quality work
+with real checkpoint weights and real tokenized activations from a tractable model such as Llama 3.2 1B. A limited
+real-model slice is the initial screen; larger disjoint rows, deeper scope, more seeds, and task-like evaluation are
+the confirmation path.
+
 - **Promote** only when the predeclared locked gate passes on disjoint evidence.
 - **Escalate** when a candidate has a material improvement in a primary propagated metric, remains finite and
   coherent, and only a minority of guardrails regress by small amounts that could plausibly be sampling noise or

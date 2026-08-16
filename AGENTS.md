@@ -94,6 +94,10 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
    minority guardrail regressions should advance to a larger disjoint test across more rows, realistic layers,
    seeds, and task-like data instead of being discarded from one small synthetic gate. Escalation is not acceptance:
    keep the baseline artifact and do not enable a default until the expanded confirmation passes.
+9. Never use fake or synthetic tensors as evidence for quantization-quality decisions. Synthetic fixtures are only
+   for algebra, kernel, serialization, and corner-case correctness tests. Start every accuracy experiment with real
+   weights and real tokenized activations from a tractable model such as Llama 3.2 1B, using limited but disjoint
+   calibration and evaluation data; expand rows, layers, seeds, and tasks when the result merits confirmation.
 
 ## Typical checks
 
