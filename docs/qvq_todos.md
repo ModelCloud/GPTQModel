@@ -536,6 +536,15 @@ uses a zero-loss local target that rejects every changed path locally and proves
 full-horizon candidate is still replayed and selected. Independent confirmation remains mandatory and can still
 restore the exact baseline.
 
+The matched real-Llama rerun at commit `8c4b6127` produced the exact same four replay evaluations, selected
+`r16_a1_t19_s5`, and failed confirmation with the same metrics as the pre-fix run. Quantization took `954.56`
+seconds on this Apple run, but the host spent substantial time waiting on Metal; do not interpret the wall-time
+ratio as algorithm cost. The unchanged portfolio proves that K=4 was already filled by locally improving candidates,
+so removing the veto did not expose a new direction in this configuration. The fix remains required for correctness
+and future portfolios, but it does not rescue P6 by itself. The next experiment must diversify candidate generation
+or reserve shortlist capacity for direct bank/path alternatives; increasing confirmation rows or repeating the same
+local-loss-ordered K=4 portfolio has no new causal value.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
