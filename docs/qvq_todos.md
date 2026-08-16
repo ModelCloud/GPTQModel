@@ -5,6 +5,37 @@ tests showed local/proxy error reductions without dependable held-out final-KLD 
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
 
+### Unpromoted P-stage revalidation on real Llama 3.2 1B (2026-08-16)
+
+This revalidation uses the local `ModelCloud/Llama3.2-1B-Instruct` snapshot, `neuralmagic/calibration`, full
+untruncated rows, batch 1, and the first four decoder layers' Q/K/V/O projections. Ordinary calibration is rows
+`[0,64)`, YAQA rows are the disjoint slice `[128,192)`, and evaluation rows are `[64,128)` (27,455, 22,342, and
+20,384 valid-token scale, respectively). All CPU pools were capped at eight threads and execution was pinned to the
+Apple P-core set. These are real-weight/model gates; no synthetic tensors are used for quality decisions.
+
+The correctly serialized rerun completed the V2 and V2+YAQA controls before the banked arm was attempted:
+
+| Arm | Final KL | Top-1 | Top-5 | Top-10 | Classification |
+|---|---:|---:|---:|---:|---|
+| W2 V2 | 0.134190 | 62.93% | 67.41% | 68.47% | control |
+| W2 V2+YAQA | 0.094945 | 68.58% | 72.33% | 73.26% | clear propagated positive |
+
+The YAQA arm has substantially better final logits despite higher rel-L2 (`0.551903` versus V2 `0.343323`), which
+is a direct reminder that local error is not the promotion objective. The first four-layer matrix attempt initially
+completed the same V2 control but failed only because the driver was given a directory instead of a JSON output file;
+that run is not used as evidence. The corrected run wrote its output path correctly.
+
+`V2B2-P32+YAQA` was then started under the same contract. Its first real q-projection did not complete after roughly
+10 minutes of sustained CPU execution (the corresponding V2+YAQA q-projection took 115 seconds). The process was
+stopped to avoid monopolizing the Apple host. This is **resource-blocked / not revalidated**, not a quality failure;
+no B2 metric is inferred from the partial run. A CUDA run or a dedicated faster native recurrence is required before
+reclassifying B2 YAQA. The spectral P1/P3 and propagated P4--P9 experiments remain default-off. Their prior real-Llama
+records are retained below and are classified using effect size and disjoint confirmation: P3's large, monotonic
+proxy regressions are clear negative evidence; P4--P9's accepted-looking point estimates are near-noise or seed-
+unstable unless they survive independent full-horizon confirmation, so they are not promoted merely because one
+column improved. They should be rerun on a CUDA host or with a tractable one-layer real-model gate before any new
+default decision.
+
 ### Fixed-trellis SU/SV alignment promoted by noise-aware real-model gates (2026-08-16)
 
 The previous default-off decision below is historical and is superseded by the larger real-model confirmation. The
