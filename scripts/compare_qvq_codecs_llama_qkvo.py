@@ -1006,15 +1006,30 @@ def _acceptance_metrics_preserving_topk_ties(
         ambiguous = bool(boundary_tied(dense) | boundary_tied(candidate))
         if not ambiguous:
             return _acceptance_logit_metrics(metric_dense_logits, candidate_logits), False
-    return (
-        tensor_metrics(
+    metrics = tensor_metrics(
             dense_logits.detach().cpu().float().flatten(0, -2),
             candidate_logits.detach().cpu().float().flatten(0, -2),
             normalize_distribution=False,
             include_top10=True,
-        ),
-        True,
+        )
+    dense_cpu = dense_logits.detach().cpu().float().flatten(0, -2)
+    candidate_cpu = candidate_logits.detach().cpu().float().flatten(0, -2)
+
+    def stable_topk(values: torch.Tensor, width: int) -> torch.Tensor:
+        return torch.argsort(values, dim=-1, descending=True, stable=True)[:, :width]
+
+    dense_top10 = stable_topk(dense_cpu, min(10, dense_cpu.shape[-1]))
+    candidate_top10 = stable_topk(candidate_cpu, min(10, candidate_cpu.shape[-1]))
+    dense_top5 = dense_top10[:, : min(5, dense_top10.shape[-1])]
+    candidate_top5 = candidate_top10[:, : min(5, candidate_top10.shape[-1])]
+    metrics["top1_agreement"] = (dense_top5[:, 0] == candidate_top5[:, 0]).float().mean().item()
+    metrics["top5_overlap"]["mean"] = (
+        (dense_top5.unsqueeze(-1) == candidate_top5.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1).mean().item()
     )
+    metrics["top10_overlap"]["mean"] = (
+        (dense_top10.unsqueeze(-1) == candidate_top10.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1).mean().item()
+    )
+    return metrics, True
 
 
 def _pythonize_metric_scalars(value):
@@ -1212,10 +1227,26 @@ class _MlpAcceptanceEvaluatorBase:
                 self.acceptance_near_threshold_evaluations += 1
             exact = _WeightedMetricAccumulator()
             for dense_logits, candidate in zip(self.dense_logits_by_row, candidate_logits_factory(), strict=True):
-                candidate = candidate.detach().cpu()
-                metrics, used_cpu_fallback = _acceptance_metrics_preserving_topk_ties(dense_logits, candidate)
+                candidate_cpu = candidate.detach().cpu()
+                metrics = tensor_metrics(
+                    dense_logits.detach().cpu().float().flatten(0, -2),
+                    candidate_cpu.float().flatten(0, -2),
+                    normalize_distribution=False,
+                    include_top10=True,
+                )
+                deterministic = _fast_cuda_acceptance_metrics(dense_logits, candidate)
+                if deterministic is None:
+                    raise RuntimeError("CUDA acceptance metrics unexpectedly unavailable for a CUDA candidate")
+                for key in ("top1_agreement", "top5_overlap", "top10_overlap"):
+                    if key == "top1_agreement":
+                        metrics[key] = deterministic[key]
+                    else:
+                        # The exact path computes KL on CPU, but Top-N must use the
+                        # same native deterministic value-descending/index-ascending
+                        # ordering as the fast path, including percentile summaries.
+                        metrics[key] = deterministic[key]
                 self.exact_cpu_metric_calls += 1
-                self.cpu_topk_fallback_rows += int(used_cpu_fallback)
+                self.cpu_topk_fallback_rows += 1
                 exact.add(metrics, rows=candidate.numel() // candidate.shape[-1])
             return exact.result()
         exact = _WeightedMetricAccumulator()
@@ -1964,15 +1995,19 @@ def _cpu_compatible_topk_indices(
     quantized_cpu = quantized.index_select(0, ambiguous_rows).cpu()
     dense_top5 = dense_top5.clone()
     quantized_top5 = quantized_top5.clone()
-    dense_top5[row_indices.to(dense.device)] = dense_cpu.topk(dense_top5.shape[-1], dim=-1).indices.to(dense.device)
-    quantized_top5[row_indices.to(dense.device)] = quantized_cpu.topk(quantized_top5.shape[-1], dim=-1).indices.to(
+
+    def stable_topk(values: torch.Tensor, width: int) -> torch.Tensor:
+        return torch.argsort(values, dim=-1, descending=True, stable=True)[:, :width]
+
+    dense_top5[row_indices.to(dense.device)] = stable_topk(dense_cpu, dense_top5.shape[-1]).to(dense.device)
+    quantized_top5[row_indices.to(dense.device)] = stable_topk(quantized_cpu, quantized_top5.shape[-1]).to(
         dense.device
     )
     if include_top10:
         dense_top10 = dense_top10.clone()
         quantized_top10 = quantized_top10.clone()
-        dense_top10[row_indices.to(dense.device)] = dense_cpu.topk(maximum_k, dim=-1).indices.to(dense.device)
-        quantized_top10[row_indices.to(dense.device)] = quantized_cpu.topk(maximum_k, dim=-1).indices.to(dense.device)
+        dense_top10[row_indices.to(dense.device)] = stable_topk(dense_cpu, maximum_k).to(dense.device)
+        quantized_top10[row_indices.to(dense.device)] = stable_topk(quantized_cpu, maximum_k).to(dense.device)
     return dense_top5, quantized_top5, dense_top10, quantized_top10
 
 
@@ -2151,10 +2186,10 @@ def _device_primary_metrics(
         dense.contiguous(),
         quantized.contiguous(),
         normalize_distribution=normalize_distribution,
-        # Torch's CUDA Top-K is substantially faster for vocabulary-scale
-        # rows. Keep moments and KL fused while composing the tuned Top-K
-        # primitive instead of forcing every diagnostic into one CTA.
-        include_top10=False,
+        # The fused operator owns both reductions and deterministic Top-K.
+        # Its tie rule is value-descending, then token-index ascending, which
+        # is the same rule used by the CPU acceptance path below.
+        include_top10=include_top10,
     )
     if native is not None:
         stats, top_indices, ambiguous = native
@@ -2193,9 +2228,9 @@ def _device_primary_metrics(
             "kl_forward": _device_summary(stats[:, 12]),
         }
         if include_top10:
-            del top_indices, ambiguous
-            dense_top10 = dense.topk(10, dim=-1).indices
-            quantized_top10 = quantized.topk(10, dim=-1).indices
+            del ambiguous
+            dense_top10 = top_indices[0]
+            quantized_top10 = top_indices[1]
             dense_top5 = dense_top10[:, :5]
             quantized_top5 = quantized_top10[:, :5]
             top5_overlap = (
