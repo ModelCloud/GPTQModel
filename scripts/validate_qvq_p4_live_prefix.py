@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import time
 from collections.abc import Mapping, Sequence
@@ -66,6 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-changes", type=int, default=1)
     parser.add_argument("--replay-candidates", type=int, default=0)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
+    parser.add_argument("--minimum-relative-kl-improvement", type=float, default=0.001)
     parser.add_argument(
         "--baseline-only",
         action="store_true",
@@ -172,10 +174,18 @@ def _passes_confirmation(
     proposal: Mapping[str, object],
     *,
     topn_regression_limit: float,
+    minimum_relative_kl_improvement: float = 0.001,
 ) -> bool:
+    if not 0 <= minimum_relative_kl_improvement < 1:
+        raise ValueError("minimum relative KL improvement must be in [0, 1)")
     if not bool(proposal["finite"]):
         return False
-    if proposal["kl_forward"]["mean"] >= baseline["kl_forward"]["mean"]:
+    baseline_kl = float(baseline["kl_forward"]["mean"])
+    proposal_kl = float(proposal["kl_forward"]["mean"])
+    if not math.isfinite(baseline_kl) or not math.isfinite(proposal_kl) or baseline_kl < 0:
+        return False
+    required_improvement = baseline_kl * minimum_relative_kl_improvement
+    if baseline_kl - proposal_kl < required_improvement:
         return False
     for key in ("top1_agreement", "top5_overlap", "top10_overlap"):
         baseline_value = baseline[key] if key == "top1_agreement" else baseline[key]["mean"]
@@ -300,6 +310,8 @@ def main() -> None:
         raise ValueError("P4 live-prefix validation requires at least two decoder layers")
     if args.replay_candidates < 0:
         raise ValueError("full-horizon replay candidate count must be nonnegative")
+    if not 0 <= args.minimum_relative_kl_improvement < 1:
+        raise ValueError("minimum relative KL improvement must be in [0, 1)")
     if args.baseline_only and args.replay_candidates:
         raise ValueError("baseline-only mode cannot enable full-horizon candidate replay")
     torch.manual_seed(args.seed)
@@ -415,6 +427,7 @@ def main() -> None:
             baseline_metrics,
             proposal_metrics,
             topn_regression_limit=args.topn_regression_limit,
+            minimum_relative_kl_improvement=args.minimum_relative_kl_improvement,
         )
         callback_report.update({"baseline": baseline_metrics, "proposal": proposal_metrics, "accepted": accepted})
         with torch.no_grad():
@@ -504,6 +517,7 @@ def main() -> None:
             "max_changes": args.max_changes,
             "replay_candidates": args.replay_candidates,
             "topn_regression_limit": args.topn_regression_limit,
+            "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
             "baseline_only": args.baseline_only,
         },
         "quantization_seconds": quantization_seconds,

@@ -941,7 +941,9 @@ The search scorer is lower-is-better and is evaluated first on the immutable bas
 callback failures retain the exact baseline. Every later greedy step scores candidates on top of the already selected
 serialized path, so the procedure does not assume that standalone downstream gains add. This mode is default-off
 (`spectral_localized_replay_candidates=0`) because it adds up to `1 + K * max_changes` full-model search forwards per
-module. It changes neither checkpoint bytes nor inference operations.
+module. It changes neither checkpoint bytes nor inference operations. Independent confirmation also requires a
+minimum relative KL improvement (0.1% in the validation driver by default) in addition to the Top-N guard. Merely
+changing the sign of KL by an amount below that threshold is treated as no demonstrated improvement.
 
 #### V2B4-P64 implementation slice
 

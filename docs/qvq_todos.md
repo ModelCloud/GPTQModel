@@ -475,6 +475,17 @@ initial causal gate uses one changed segment and four replay candidates on layer
 confirmation. Promotion still requires strict confirmation KL improvement with bounded Top-1/5/10 regressions; a
 better search-split rank alone is not sufficient.
 
+The first 8-row search/8-row confirmation run selected one Q segment. Search KL improved from `0.0035915290` to
+`0.0035741710`; confirmation KL changed from `0.0014115776` to `0.0014115307`, and the permissive sign-only gate
+accepted it. K found a search winner but failed independent confirmation and restored its exact baseline. On 64
+fresh full rows `[1762,1826)`, the resulting Q-plus-rollback-K coordinate regressed KL by `5.1892e-6`, Top-1 by
+`0.0138` points, and Top-5 by `0.0046` points while improving Top-10 by `0.0037` points. The 8-row Q confirmation
+delta was only `0.0033%` of baseline KL and did not generalize.
+
+This is evidence that full-horizon ranking fixes the objective horizon but not sampling noise. The validation gate
+now requires at least 0.1% relative KL improvement by default, so the same Q proposal fails. The next experiment
+must use a materially larger disjoint confirmation set; no task evaluation is justified from the 8-row result.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

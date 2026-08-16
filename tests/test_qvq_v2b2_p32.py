@@ -1137,6 +1137,18 @@ def test_qvq_p4_confirmation_requires_kl_improvement_and_bounded_topn():
     assert _passes_confirmation(baseline, proposal, topn_regression_limit=0.0025)
     assert not _passes_confirmation(
         baseline,
+        {**proposal, "kl_forward": {"mean": 0.09995}},
+        topn_regression_limit=0.0025,
+        minimum_relative_kl_improvement=0.001,
+    )
+    assert _passes_confirmation(
+        baseline,
+        {**proposal, "kl_forward": {"mean": 0.0998}},
+        topn_regression_limit=0.0025,
+        minimum_relative_kl_improvement=0.001,
+    )
+    assert not _passes_confirmation(
+        baseline,
         {**proposal, "kl_forward": {"mean": 0.1}},
         topn_regression_limit=0.0025,
     )
