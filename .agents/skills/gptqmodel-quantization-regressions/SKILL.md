@@ -215,6 +215,24 @@ Report mean, median, p95, p99, and maximum KLD; top-1 agreement; top-k overlap; 
 sequence position. Report task-answer flips as correct-to-wrong and wrong-to-correct, not only net accuracy.
 Perplexity, aggregate accuracy, one prompt, one top-1 token, or whole-model cosine alone can conceal material drift.
 
+### Separate promotion from escalation
+
+Do not make one small or synthetic all-metric gate the only path to further investigation.
+
+- **Promote** only when the predeclared locked gate passes on disjoint evidence.
+- **Escalate** when a candidate has a material improvement in a primary propagated metric, remains finite and
+  coherent, and only a minority of guardrails regress by small amounts that could plausibly be sampling noise or
+  limited-scope behavior. Preserve the exact baseline and candidate, then expand the test before deciding.
+- Expand along the dimensions that were missing: more independent rows and valid tokens, realistic model depth and
+  module roles, full live propagation, multiple seeds, intended deployment domains, paired task flips, and the
+  production inference backend. Prefer paired confidence intervals or repeated splits to unpaired aggregate deltas.
+- Reject without escalation when a regression is material, repeats across independent splits, crosses a declared
+  safety limit, produces non-finite values, or appears at an independently verified correctness boundary.
+
+Escalation is not acceptance. Do not serialize the candidate as a default, relax the original gate after seeing the
+result, or average away a critical regression. Record which metrics triggered escalation and the larger confirmation
+contract before running it.
+
 ## Follow the first failing boundary
 
 | Earliest failing evidence | Leading area |

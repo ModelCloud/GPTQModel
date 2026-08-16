@@ -89,6 +89,11 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
 5. Gate architecture-specific code explicitly and retain a tested fallback. A successful compile is not evidence of runtime correctness or speed on hardware that is not present.
 6. Keep Python compatible with Ruff's 119-character line limit. Prefer existing test helpers and focused `pytest` invocations before broader suites.
 7. Log enough boundary metadata to reproduce kernel failures, but do not add noisy per-element logging to hot paths.
+8. Separate **promotion** from **escalation** in model-quality experiments. A candidate that passes every locked
+   metric may be promoted. A candidate with material primary-metric gains, no catastrophic failure, and only small
+   minority guardrail regressions should advance to a larger disjoint test across more rows, realistic layers,
+   seeds, and task-like data instead of being discarded from one small synthetic gate. Escalation is not acceptance:
+   keep the baseline artifact and do not enable a default until the expanded confirmation passes.
 
 ## Typical checks
 
