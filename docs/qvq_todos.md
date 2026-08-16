@@ -586,6 +586,30 @@ bytes, or inference work. Candidate identity and generator are exported beside r
 four-way result is auditable. If none improves every search fold, retire this dense-reencode generator rather than
 increasing its replay budget.
 
+P8 completed on that exact matched contract. Three of four direct candidates regressed at least one search fold.
+The fourth, `direct_t774_s7`, improved both folds, but its worst-fold gain was only `0.0099%`: one tenth of the
+predeclared `0.1%` minimum effect. It then regressed independent confirmation KL by `0.0090%` and was rolled back:
+
+| Candidate | Fold 0 KL | Fold 1 KL | Pooled KL | Minimax score | Decision |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| baseline | 0.0024100594 | 0.0033453477 | 0.0028417924 | 1.000000 | oracle |
+| `direct_t512_s5` | 0.0024110036 | 0.0033254998 | 0.0028331388 | 1.000392 | fold-0 regression |
+| `direct_t128_s0` | 0.0024103516 | 0.0033461360 | 0.0028423136 | 1.000236 | both folds regress |
+| `direct_t128_s4` | 0.0024074623 | 0.0033469538 | 0.0028411355 | 1.000480 | fold-1 regression |
+| `direct_t774_s7` | 0.0024098208 | 0.0033378181 | 0.0028381883 | 0.999901 | provisional winner |
+
+Confirmation KL was `0.0028031558` for the baseline and `0.0028034089` for the proposal. Quantization took
+`666.79` seconds; the serialized fallback again measured packed evaluation KL `0.0017531236`, Top-1 `98.2113%`,
+Top-5 overlap `97.5648%`, and Top-10 overlap `97.3217%`. The long host wall time came from repeated CPU diagnostic
+metrics over full-vocabulary logits, not Viterbi or bank search.
+
+This retires residual-energy-ranked dense re-encoding as the next recovery lever. Its best among four candidates is
+too small and unstable to justify a larger replay budget. The next materially different candidate generator should
+derive its ranking from the full-horizon teacher-KL gradient at the exact serialized baseline. For candidate delta
+`D`, rank by the downstream first-order term `tr(G^T D)`, optionally plus the original YAQA quadratic guard, then
+spend the same bounded replay budget on the best negative predicted deltas. This moves propagation into candidate
+generation instead of using it only after a local candidate portfolio has already been pruned.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
