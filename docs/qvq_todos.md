@@ -527,6 +527,15 @@ Further spectral P4/P6 promotion work should stop until candidate generation cha
 generator should search direct bank/path alternatives under live-prefix propagation rather than rescore more
 variants of the same EoRA-derived local direction.
 
+One reusable P6 defect was fixed before that next generator: replay mode still required `local_loss < current_loss`
+both when forming the shortlist and when validating the composed result. That silently excluded locally worse but
+downstream-helpful error directions, contradicting the sub-W3 propagation design. With a full-horizon scorer, finite
+local loss now orders the bounded shortlist only; the exact full-horizon score against the immutable baseline is the
+selection authority. The strict local gate remains unchanged when replay is disabled. A focused adversarial test
+uses a zero-loss local target that rejects every changed path locally and proves that an independently better
+full-horizon candidate is still replayed and selected. Independent confirmation remains mandatory and can still
+restore the exact baseline.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

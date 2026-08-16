@@ -945,6 +945,12 @@ module. It changes neither checkpoint bytes nor inference operations. Independen
 minimum relative KL improvement (0.1% in the validation driver by default) in addition to the Top-N guard. Merely
 changing the sign of KL by an amount below that threshold is treated as no demonstrated improvement.
 
+When the full-horizon scorer is present, local/module loss is only a cheap ordering heuristic for the top-`K`
+shortlist. It is not an eligibility gate and it is not the final rollback gate. Requiring local improvement before
+replay would remove exactly the locally unfavorable but propagation-cancelling directions this low-rate mode is
+intended to find. The immutable full-horizon baseline score decides whether a replayed candidate advances. When no
+full-horizon scorer is present, the original strict local-improvement requirement remains in force.
+
 The validation driver can also divide the fixed search rows into `F` round-robin folds without adding prompts or
 forwards. Let `K_f(Q)` be full-model teacher KL on fold `f` and let `Q_0` be the immutable serialized baseline. It
 ranks a candidate with the minimax relative score

@@ -4441,12 +4441,14 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     current_search_residual = None if search_residual is None else search_residual.clone()
     current_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
     current_replay_score = None
+    baseline_replay_score = None
     replay_callback_error = False
     if candidate_score is not None:
         try:
             current_replay_score = float(
                 candidate_score(refined_weight, refined_states, refined_selectors, baseline_alt_id)
             )
+            baseline_replay_score = current_replay_score
         except Exception:  # noqa: BLE001 - an external full-model scorer must fail closed
             current_replay_score = math.inf
             replay_callback_error = True
@@ -4488,7 +4490,10 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                 step_loss = torch.einsum(
                     "ij,ik,kl,lj->", candidate_error, original_input, candidate_error, original_output
                 )
-            if torch.isfinite(step_loss) and step_loss < current_loss:
+            # With a full-horizon scorer, local loss orders the bounded
+            # shortlist but must not veto a direction that propagates better.
+            # Without that scorer, retain the strict local improvement gate.
+            if torch.isfinite(step_loss) and (candidate_score is not None or step_loss < current_loss):
                 locally_ranked.append((float(step_loss.item()), candidate_key))
 
         locally_ranked.sort(key=lambda item: (item[0], item[1]))
@@ -4566,9 +4571,18 @@ def yaqa_localized_spectral_refine_v2b2_p32(
             "ij,ik,kl,lj->", exact_error, original_input, exact_error, original_output
         )
         exact_selection_loss = exact_proxy_loss if search_inputs_fp32 is None else current_search_residual.square().sum()
-        if torch.isfinite(exact_selection_loss) and exact_selection_loss < (
-            baseline_search_loss if baseline_search_loss is not None else baseline_loss
-        ):
+        if candidate_score is None:
+            accept_exact = torch.isfinite(exact_selection_loss) and exact_selection_loss < (
+                baseline_search_loss if baseline_search_loss is not None else baseline_loss
+            )
+        else:
+            accept_exact = (
+                baseline_replay_score is not None
+                and current_replay_score is not None
+                and math.isfinite(current_replay_score)
+                and current_replay_score < baseline_replay_score
+            )
+        if accept_exact:
             result = refined_weight, refined_states, refined_selectors, baseline_alt_id
             best_loss = exact_selection_loss
         else:

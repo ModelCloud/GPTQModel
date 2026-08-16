@@ -1704,6 +1704,45 @@ def test_qvq_v2b2_p32_localized_spectral_refinement_composes_two_fixed_boundary_
     assert replay_diagnostics["localized_replay_callback_error"] is False
     assert len(replay_calls) == 4
 
+    # A low-bit candidate may be worse under module-output loss while being
+    # better at the full-model horizon. Local loss may order the shortlist,
+    # but only the replay scorer is allowed to veto it in replay mode.
+    propagated_calls = []
+
+    def propagated_score(candidate_weight, *_):
+        propagated_calls.append(candidate_weight.clone())
+        return float((candidate_weight - source).square().sum().item())
+
+    propagated_diagnostics = {}
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        propagated = yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(1.0,),
+            max_segments=2,
+            max_changes=1,
+            replay_candidates=2,
+            candidate_score=propagated_score,
+            search_inputs=torch.eye(16),
+            search_target=baseline[0],
+            diagnostics=propagated_diagnostics,
+            bits=2,
+        )
+
+    assert propagated_diagnostics["localized_selected_changes"] == 1
+    assert propagated_diagnostics["localized_search_original_loss"] == pytest.approx(0.0, abs=1e-7)
+    assert propagated_diagnostics["localized_search_selected_loss"] > 0
+    assert propagated_diagnostics["localized_replay_score"] < float((baseline[0] - source).square().sum().item())
+    assert not torch.equal(propagated[0], baseline[0])
+    assert len(propagated_calls) >= 2
+
 
 def test_qvq_v2b2_p32_localized_full_horizon_baseline_error_fails_closed():
     generator = torch.Generator().manual_seed(20260901)
