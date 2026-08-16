@@ -1412,6 +1412,7 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
     segment_steps: int,
     overlap=None,
     step_weights=None,
+    mlx_codebooks=None,
 ):
     """Bridge Torch MPS calibration tensors to the native MLX recurrence.
 
@@ -1434,24 +1435,24 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
         copied = tensor.detach().to("cpu").contiguous()
         return mx.array(copied.numpy())
 
-    try:
-        codebook_version = codebooks._version
-    except RuntimeError:
-        # Quantization workers intentionally run under inference_mode, whose
-        # tensors have no mutation version counter. Reusing an identity-only
-        # cache entry would silently serve stale codebooks after an in-place
-        # update, so copy these small immutable-by-contract tables per call.
-        mlx_codebooks = copy_to_mlx(codebooks)
-    else:
-        global _V2_BANKED_TORCH_CODEBOOK_HOT
-        hot = _V2_BANKED_TORCH_CODEBOOK_HOT
-        if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
-            with _V2_BANKED_TORCH_CODEBOOK_LOCK:
-                hot = _V2_BANKED_TORCH_CODEBOOK_HOT
-                if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
-                    hot = (codebooks, codebook_version, copy_to_mlx(codebooks))
-                    _V2_BANKED_TORCH_CODEBOOK_HOT = hot
-        mlx_codebooks = hot[2]
+    if mlx_codebooks is None:
+        try:
+            codebook_version = codebooks._version
+        except RuntimeError:
+            # Inference-mode tensors have no mutation version counter. The
+            # quantizer supplies a call-scoped MLX copy for this case; retain
+            # the conservative per-call copy for standalone callers.
+            mlx_codebooks = copy_to_mlx(codebooks)
+        else:
+            global _V2_BANKED_TORCH_CODEBOOK_HOT
+            hot = _V2_BANKED_TORCH_CODEBOOK_HOT
+            if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
+                with _V2_BANKED_TORCH_CODEBOOK_LOCK:
+                    hot = _V2_BANKED_TORCH_CODEBOOK_HOT
+                    if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
+                        hot = (codebooks, codebook_version, copy_to_mlx(codebooks))
+                        _V2_BANKED_TORCH_CODEBOOK_HOT = hot
+            mlx_codebooks = hot[2]
     outputs = qvq_mlx_v2_banked_viterbi(
         copy_to_mlx(sequences),
         mlx_codebooks,
@@ -1469,6 +1470,17 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
     selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8).to(device=sequences.device)
     squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32).to(device=sequences.device)
     return states, selectors, squared_error
+
+
+def qvq_mlx_prepare_v2_banked_codebooks_from_torch_mps(codebooks):
+    """Make one call-scoped MLX bank stack for an MPS quantization pass."""
+
+    import mlx.core as mx
+    import torch
+
+    if codebooks.device.type != "mps" or codebooks.dtype != torch.float32 or not codebooks.is_contiguous():
+        raise ValueError("QVQ MLX bank codebooks require contiguous float32 Torch MPS tensors")
+    return mx.array(codebooks.detach().to("cpu").numpy())
 
 
 @functools.lru_cache(maxsize=128)

@@ -105,6 +105,10 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
     Borderline cases must be escalated on larger disjoint real-model evidence rather than silently accepted or rejected.
     Classify each metric explicitly as clear positive, noise-consistent, or clear negative. One noisy failure among
     otherwise meaningful gains is an escalation signal, not an automatic experiment failure; do not count columns.
+    Local reconstruction MSE/KL is a proxy, not the end goal: it may regress and should be tolerated when disjoint,
+    propagated final-logit KL and Top-K agreement improve materially, remain finite, and pass the predeclared
+    uncertainty/guardrail policy. Do not trade demonstrated final-model recovery for a lower local error solely to
+    make the proxy look better.
 
 ## Typical checks
 

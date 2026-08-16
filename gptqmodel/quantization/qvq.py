@@ -1327,6 +1327,7 @@ def _batched_v2_banked_viterbi_quantize(
     segment_steps: int,
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
+    mlx_codebooks=None,
 ) -> BankedTrellisQuantizationResult:
     """Exact min-sum recurrence over banked V2 segments.
 
@@ -1380,6 +1381,7 @@ def _batched_v2_banked_viterbi_quantize(
                 segment_steps=segment_steps,
                 overlap=overlap,
                 step_weights=None if step_weights is None else step_weights.contiguous(),
+                mlx_codebooks=mlx_codebooks,
             )
         except ModuleNotFoundError:
             pass
@@ -1707,6 +1709,7 @@ def _tail_biting_v2_banked_quantize(
     segment_steps: int,
     step_weights: torch.Tensor | None = None,
     candidate_count: int = 1,
+    mlx_codebooks=None,
 ) -> BankedTrellisQuantizationResult:
     """Apply the canonical two-pass tail-biting approximation to banked V2."""
 
@@ -1723,6 +1726,7 @@ def _tail_biting_v2_banked_quantize(
         bits=bits,
         segment_steps=segment_steps,
         step_weights=rotated_weights,
+        mlx_codebooks=mlx_codebooks,
     )
     shift = qvq_transition_bits(bits, vector_size=2)
     overlap = provisional.states[:, midpoint - 1] & ((1 << (16 - shift)) - 1)
@@ -1735,6 +1739,7 @@ def _tail_biting_v2_banked_quantize(
         segment_steps=segment_steps,
         overlap=overlap,
         step_weights=step_weights,
+        mlx_codebooks=mlx_codebooks,
     )
 
 
@@ -3463,6 +3468,13 @@ def yaqa_inner(
         )
         else None
     )
+    # MLX's banked Viterbi kernel exposes large device workspaces as outputs;
+    # Metal's allocator retains those buffers across the thousands of YAQA
+    # anti-diagonal calls. Keep MPS YAQA bank search on the bounded Torch CPU
+    # reference instead. Native MPS/MLX inference remains unchanged, and the
+    # same FP32 recurrence/traceback is used for serialized quantization.
+    yaqa_banked_cpu = segmented_v2 and source.device.type == "mps"
+    cpu_segmented_bank_stack = segmented_bank_stack.cpu() if yaqa_banked_cpu else None
 
     for diagonal in range(input_blocks + output_blocks - 2, -1, -1):
         first_input_block = max(0, diagonal - output_blocks + 1)
@@ -3504,20 +3516,23 @@ def yaqa_inner(
             segment_steps = (
                 QVQ_V2B2_P32_STEPS_PER_SEGMENT if v2b2_p32 else QVQ_V2B4_P64_STEPS_PER_SEGMENT
             )
+            segmented_batch_size = trellis_batch_size
             with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
-                for chunk in sequences.split(trellis_batch_size):
+                for chunk in sequences.split(segmented_batch_size):
                     if telemetry is not None:
                         telemetry.count("yaqa_segmented_v2_chunks")
+                    search_chunk = chunk.cpu() if yaqa_banked_cpu else chunk
+                    search_codebooks = cpu_segmented_bank_stack if yaqa_banked_cpu else segmented_bank_stack
                     result = _tail_biting_v2_banked_quantize(
-                        chunk,
-                        segmented_bank_stack,
+                        search_chunk,
+                        search_codebooks,
                         bits=bits,
                         segment_steps=segment_steps,
                         candidate_count=tail_biting_candidates,
                     )
-                    values.append(result.values)
-                    states_for_chunks.append(result.states)
-                    selectors.append(result.segment_bank_ids)
+                    values.append(result.values.to(source.device))
+                    states_for_chunks.append(result.states.to(source.device))
+                    selectors.append(result.segment_bank_ids.to(source.device))
             reconstructed = torch.cat(values).reshape(len(coordinates), tile_rows, tile_cols)
             states = torch.cat(states_for_chunks)
             segmented_selectors = torch.cat(selectors)

@@ -36,6 +36,22 @@ unstable unless they survive independent full-horizon confirmation, so they are 
 column improved. They should be rerun on a CUDA host or with a tractable one-layer real-model gate before any new
 default decision.
 
+**Decision rule:** local reconstruction MSE/KL is diagnostic, not authoritative. A candidate may retain or increase
+local error when disjoint live execution materially lowers final-logit KL and improves Top-K agreement, remains finite,
+and any guardrail changes are noise-consistent. YAQA can deliberately spend local error in directions that are less
+harmful after propagation. Reject clear downstream negatives or numerical instability, not a local-proxy miss alone.
+
+### MPS YAQA banked quantization memory bound (2026-08-16)
+
+The first real Llama 3.2 1B B2-P32+YAQA attempt on the M4 Max showed runaway Metal allocator pressure: the native
+MLX banked Viterbi bridge repeatedly materialized inference-mode codebook/workspace outputs across anti-diagonals.
+The process reached multi-gigabyte RSS without completing its first q-projection. The fix is two-part: bank codebooks
+are copied to MLX once per YAQA call (never once per tile when Torch has no mutation version), and MPS YAQA banked
+search uses the bounded Torch FP32 reference recurrence rather than retaining MLX Viterbi workspaces. Native MLX/MPS
+inference is unchanged. A real one-layer Llama smoke run stayed near 14 GB RSS for eight minutes, versus the prior
+unbounded growth, before being stopped for quantization-time cost. The recurrence and serialized payload are unchanged;
+the focused B2/YAQA suite passed 25 tests. CUDA retains its native banked quantization path.
+
 ### Fixed-trellis SU/SV alignment promoted by noise-aware real-model gates (2026-08-16)
 
 The previous default-off decision below is historical and is superseded by the larger real-model confirmation. The

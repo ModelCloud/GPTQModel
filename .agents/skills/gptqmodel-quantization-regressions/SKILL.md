@@ -231,6 +231,12 @@ importance. A tiny guardrail loss within uncertainty may be outweighed by a repr
 a material regression is still a blocker. If the uncertainty is unresolved, escalate with a larger disjoint real-model
 split and preserve the baseline instead of silently promoting or discarding the candidate.
 
+Local reconstruction MSE/KL is not the optimization endpoint. When a candidate has higher local error but materially
+lower disjoint final-logit KL and better Top-K agreement, that local miss is acceptable under the uncertainty-aware
+policy: the quantizer is judged by propagated model recovery, not an isolated module proxy. Preserve local metrics
+for diagnosis, but do not reject the candidate merely to improve them. The exception is a material local instability
+that causes non-finite values, activation blow-up, or a clear downstream regression.
+
 For every metric, report one of three classifications: clear positive (the uncertainty interval excludes zero in the
 desired direction), noise-consistent (the interval overlaps zero or the effect is below the predeclared practical
 threshold), or clear negative (a material adverse effect supported by the interval and effect size). Never reject a
