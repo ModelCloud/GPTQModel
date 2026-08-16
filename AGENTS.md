@@ -98,6 +98,11 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
    for algebra, kernel, serialization, and corner-case correctness tests. Start every accuracy experiment with real
    weights and real tokenized activations from a tractable model such as Llama 3.2 1B, using limited but disjoint
    calibration and evaluation data; expand rows, layers, seeds, and tasks when the result merits confirmation.
+10. Do not reduce model-quality decisions to binary all-column pass/fail when changes are close to measurement noise.
+    Record absolute and relative effect sizes, paired uncertainty or bootstrap intervals when possible, and the
+    practical importance of each metric. A small guardrail regression can be acceptable when it is within noise and
+    substantially outweighed by reproducible propagated-loss or task gains; material regressions remain blockers.
+    Borderline cases must be escalated on larger disjoint real-model evidence rather than silently accepted or rejected.
 
 ## Typical checks
 

@@ -225,6 +225,12 @@ with real checkpoint weights and real tokenized activations from a tractable mod
 real-model slice is the initial screen; larger disjoint rows, deeper scope, more seeds, and task-like evaluation are
 the confirmation path.
 
+Do not use a binary all-metrics pass/fail rule when observed changes may be noise. Compare absolute and relative effect
+sizes, paired bootstrap intervals or paired tests where the per-example data permit them, and practical metric
+importance. A tiny guardrail loss within uncertainty may be outweighed by a reproducible propagated-loss or task gain;
+a material regression is still a blocker. If the uncertainty is unresolved, escalate with a larger disjoint real-model
+split and preserve the baseline instead of silently promoting or discarding the candidate.
+
 - **Promote** only when the predeclared locked gate passes on disjoint evidence.
 - **Escalate** when a candidate has a material improvement in a primary propagated metric, remains finite and
   coherent, and only a minority of guardrails regress by small amounts that could plausibly be sampling noise or
