@@ -10,8 +10,8 @@ not selectable through configuration, lifecycle, loading, or inference. Continue
 The historical full-model W2 experiment remains the strongest positive zero-runtime-cost alignment result. Relative
 to its fixed-trellis baseline, SU/SV-only QTIP-math alignment lowered forward KLD by `19.66%`, lowered JSD by
 `18.14%`, raised Top-1 agreement by `4.42` percentage points, and raised Top-5 overlap by `3.15` points. The method
-does not add a tensor, byte, lookup, branch, or arithmetic operation at inference: it changes values in the existing
-serialized `SU`/`SV` vectors while leaving trellis states and bank selectors fixed.
+does not add a tensor, byte, lookup, branch, or arithmetic operation at inference: the strict arm changes values in
+the existing serialized `SU`/`SV` vectors while leaving trellis states and bank selectors fixed.
 
 That result did **not** establish that alignment is unconditionally safe on V2B2-P32+YAQA. A lifecycle audit found
 that the alignment attachment had been decoding banked V2 candidates as canonical V2 because it discarded the
@@ -21,12 +21,14 @@ runtime validation module. The audit also fixed Apple-only validation blockers: 
 normalization, activation-dtype preservation during replay, mutation-safe MLX codebook transfer for inference-mode
 tensors, same-backend reload validation, and removal of a non-serializable model config from tokenizer test metadata.
 
-The first corrected real-model gate used Llama 3.2 1B Instruct layer 0, all Q/K/V/O projections, W2 V2B2-P32,
+The first corrected real-model **sequential lifecycle** gate used Llama 3.2 1B Instruct layer 0, all Q/K/V/O
+projections, W2 V2B2-P32,
 Block-LDLQ, four full natural calibration rows (`2,442` valid tokens), batch 1, and MPS. Alignment used two training
 batches and one held-out validation batch. A matched rollback arm ran the identical sequential lifecycle but required
 an impossible `100%` relative improvement, so every candidate was transactionally rejected and the exact pre-align
 payload was serialized. This avoids confounding the comparison with the different Q/K/V grouping used when the
-attachment is absent.
+attachment is absent. This attachment freezes already-installed trellises but also adapts still-dense downstream
+siblings before their later quantization; it is therefore broader than the strict post-quant SU/SV-only arm.
 
 | Sequential pass | Dense validation MSE | Accepted MSE | Dense reduction | Runtime reduction | Accepted |
 |---:|---:|---:|---:|---:|:---:|
@@ -49,6 +51,26 @@ distributional loss. The external result is mixed—Top-1 and Top-5 improve slig
 slightly. The four-prompt lifecycle check was mixed in the opposite way (KLD/JSD improved about `27.0%`/`25.0%`,
 Top-1 was unchanged, and Top-5 fell `2.16` points), confirming that neither tiny prompt set can promote a default.
 
+A second test isolated the requested strict post-quant SU/SV-only operation. It started from the exact rollback
+checkpoint, froze every trellis, selector, alternative-family ID, dense weight, norm, embedding, and head, and trained
+only the `13,312` existing SU/SV scalars. The one-epoch MPS arm used 16 rows `[64,80)` for training, eight disjoint
+rows `[80,88)` for selection (`2,922` next-token distributions), and the same 64 full-length report-only rows
+`[128,192)` (`22,278` next-token distributions). QTIP-FP32 parameter math, Adam, learning rate `1e-5`, batch 1, and
+gradient accumulation 2 matched the existing reference driver.
+
+| Split | Arm | Final KLD | JSD | Top-1 | Top-5 |
+|:---|:---|---:|---:|---:|---:|
+| Validation | Baseline | 0.003793925 | 0.000938580 | 97.9124% | 96.3518% |
+| Validation | SU/SV candidate | 0.003584136 | 0.000887910 | 97.9466% | 96.2834% |
+| Evaluation | Baseline | 0.007940945 | 0.001933200 | 96.7636% | 94.9744% |
+| Evaluation | SU/SV candidate | 0.007707268 | 0.001876665 | 96.7995% | 94.9879% |
+
+The strict candidate improves every report-only evaluation metric (KLD `-2.94%`, JSD `-2.93%`, Top-1 `+0.0359`
+points, Top-5 `+0.0135` points), but the selection split's Top-5 overlap falls `0.0684` points. The predeclared
+all-metric validation gate therefore correctly rejects and does not serialize it. This is promising evidence that
+the zero-runtime-cost mechanism survives banked V2, but also direct evidence that it is not yet safe as an
+unconditional default.
+
 **Decision:** keep `output_alignment=None` as the default. The corrected machinery is a valid, format-free candidate
 and exact rollback makes it safe when explicitly requested, but default promotion requires the planned matched
 V2B2-P32+YAQA factorial with larger, mutually disjoint ordinary-calibration, YAQA-Fisher, alignment-train,
@@ -57,8 +79,9 @@ flips; and no material guardrail regression. The Apple YAQA lifecycle gate is cu
 owned inference-tensor Hessian-provenance fix, so the Block-LDLQ result must not be mislabeled as the YAQA factorial.
 
 Validation completed here: `25 passed, 3 skipped` in the output-alignment suite (CUDA-only cases skipped), `3 passed`
-for the focused MLX banked-quantization bridge, four accepted Q/K/V/O alignment passes, and bit-exact live/save/reload
-logits for both accepted and rollback artifacts.
+for the focused MLX banked-quantization bridge, `6 passed` for lifecycle attachment tests, four accepted Q/K/V/O
+sequential alignment passes, bit-exact live/save/reload logits for both accepted and rollback artifacts, and one
+strict post-quant SU/SV-only disjoint selection/evaluation gate.
 
 ## V2B2-P32 bring-up (2026-08-15)
 

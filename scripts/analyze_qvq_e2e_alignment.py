@@ -54,13 +54,20 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _load_dense(path: Path, device: str):
-    return AutoModelForCausalLM.from_pretrained(
-        path,
-        dtype=torch.float16,
-        device_map={"": device},
-        attn_implementation="eager",
-        local_files_only=True,
-    ).eval()
+    kwargs = {
+        "dtype": torch.float16,
+        "attn_implementation": "eager",
+        "local_files_only": True,
+    }
+    if torch.device(device).type == "mps":
+        # Direct sharded materialization onto MPS can terminate inside Metal.
+        # One CPU materialization followed by one transfer is stable.
+        return AutoModelForCausalLM.from_pretrained(
+            path,
+            low_cpu_mem_usage=True,
+            **kwargs,
+        ).to(device).eval()
+    return AutoModelForCausalLM.from_pretrained(path, device_map={"": device}, **kwargs).eval()
 
 
 def _encoded_rows(tokenizer, args, *, offset: int, rows: int) -> dict[str, torch.Tensor]:
