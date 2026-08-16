@@ -27,6 +27,7 @@ from gptqmodel.quantization.qvq import (
     reconstruct_qvq_inner_weight,
     rht_reconstruct_weight,
     rht_reconstruct_weight_adjoint,
+    stabilized_block_ldl_factor,
     tail_biting_v2b2_p32_quantize,
     tail_biting_viterbi_quantize,
     unpack_qvq_binary_bank_ids,
@@ -630,6 +631,21 @@ def test_qvq_shared_input_factorization_is_exact_reused_and_provenance_checked()
             trellis_batch_size=1,
             input_hessian_preparation=preparation,
         )
+
+
+def test_qvq_yaqa_factorization_accepts_inference_mode_hessians():
+    with torch.inference_mode():
+        hessian = torch.eye(16, dtype=torch.float32)
+        retry_damping = torch.tensor(1e-4, dtype=torch.float32)
+        factor = stabilized_block_ldl_factor(
+            hessian,
+            block_size=16,
+            retry_damping=retry_damping,
+        )
+        preparation = prepare_qvq_input_hessian(hessian, seed=17)
+
+    assert factor.hessian_version is None
+    assert preparation.source_version is None
 
 
 def test_qvq_all_linear_scope_has_distinct_yaqa_cache_metadata():

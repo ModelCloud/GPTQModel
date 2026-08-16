@@ -2067,7 +2067,7 @@ class BlockLDLFactorization:
     L: torch.Tensor
     D: torch.Tensor
     block_size: int
-    hessian_version: int
+    hessian_version: int | None
     effective_damping: torch.Tensor
     retry_count: int
 
@@ -2081,12 +2081,28 @@ class QVQInputHessianPreparation:
     damping: torch.Tensor
     source_hessian: torch.Tensor
     source_data_ptr: int
-    source_version: int
-    transformed_version: int
-    factor_versions: tuple[int, int]
+    source_version: int | None
+    transformed_version: int | None
+    factor_versions: tuple[int | None, int | None]
     block_size: int
     seed: int
     damp_percent: float
+
+
+def _safe_tensor_version(tensor: torch.Tensor) -> int | None:
+    """Return a tensor version when available, including inference-mode tensors.
+
+    Inference tensors intentionally do not track version counters.  Identity and
+    shape/device provenance checks remain available for those tensors, while
+    ordinary mutable tensors retain the version-based mutation check.
+    """
+
+    try:
+        return int(tensor._version)
+    except RuntimeError as error:
+        if "Inference tensors do not track version counter" not in str(error):
+            raise
+        return None
 
 
 def _validate_block_ldl_input(H: torch.Tensor, block_size: int) -> None:
@@ -2163,9 +2179,9 @@ def prepare_qvq_input_hessian(
         damping=damping,
         source_hessian=H,
         source_data_ptr=H.data_ptr(),
-        source_version=H._version,
-        transformed_version=transformed._version,
-        factor_versions=(factorization[0]._version, factorization[1]._version),
+        source_version=_safe_tensor_version(H),
+        transformed_version=_safe_tensor_version(transformed),
+        factor_versions=(_safe_tensor_version(factorization[0]), _safe_tensor_version(factorization[1])),
         block_size=16,
         seed=seed,
         damp_percent=damp_percent,
@@ -2219,7 +2235,7 @@ def stabilized_block_ldl_factor(
         L=L,
         D=D,
         block_size=block_size,
-        hessian_version=working._version,
+        hessian_version=_safe_tensor_version(working),
         effective_damping=effective_damping,
         retry_count=retry_count,
     )
@@ -3406,7 +3422,7 @@ def yaqa_inner(
             if (
                 factor.hessian is not hessian
                 or factor.block_size != block_size
-                or factor.hessian_version != hessian._version
+                or factor.hessian_version != _safe_tensor_version(hessian)
                 or factor.L.device != hessian.device
                 or factor.L.dtype != torch.float32
                 or tuple(factor.L.shape) != tuple(hessian.shape)
@@ -5426,10 +5442,13 @@ def quantize_qvq_linear(
             if (
                 preparation.source_hessian is not H
                 or preparation.source_data_ptr != H.data_ptr()
-                or preparation.source_version != H._version
-                or preparation.transformed_version != preparation.hessian._version
+                or preparation.source_version != _safe_tensor_version(H)
+                or preparation.transformed_version != _safe_tensor_version(preparation.hessian)
                 or preparation.factor_versions
-                != (preparation.factorization[0]._version, preparation.factorization[1]._version)
+                != (
+                    _safe_tensor_version(preparation.factorization[0]),
+                    _safe_tensor_version(preparation.factorization[1]),
+                )
                 or preparation.block_size != 16
                 or preparation.seed != seed
                 or preparation.damp_percent != damp_percent
