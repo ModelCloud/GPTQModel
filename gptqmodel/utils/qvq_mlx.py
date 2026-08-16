@@ -61,8 +61,8 @@ _HYB_REFERENCE_KERNEL: Any | None = None
 _HYB_REFERENCE_KERNEL_ERROR: str | None = None
 _HYB_REFERENCE_KERNEL_LOCK = threading.Lock()
 _PGC16_LEVELS_HOT: tuple[str, Any] | None = None
-_VITERBI_KERNEL: Any | None = None
-_VITERBI_KERNEL_ERROR: str | None = None
+_VITERBI_KERNELS: dict[str, Any] = {}
+_VITERBI_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_VITERBI_KERNEL: Any | None = None
 _V2_BANKED_VITERBI_KERNEL_ERROR: str | None = None
 _V2_BANKED_TORCH_CODEBOOK_HOT: tuple[Any, int, Any] | None = None
@@ -543,7 +543,10 @@ sum=simd_sum(sum);if(lane==0)out[m*N+n]=half(sum);
 _VITERBI_HEADER = r"""
 inline float qvq_emit(float2 target, device const float* codebook, uint state, float weight) {
   float x=target.x,y=target.y,cx=codebook[2*state],cy=codebook[2*state+1];
-  float tn=x*x+y*y,cn=cx*cx+cy*cy,dot=fma(y,cy,x*cx);
+  // Keep the scalar operation order aligned with the Torch FP32 oracle.  In
+  // particular, do not contract the second dot-product term into an FMA:
+  // near-tied Viterbi paths must have identical tie decisions across backends.
+  float tn=x*x+y*y,cn=cx*cx+cy*cy,dot=x*cx+y*cy;
   return max(tn+cn-2.0f*dot,0.0f)*weight;
 }
 """
@@ -565,9 +568,9 @@ threadgroup_barrier(mem_flags::mem_device);
 for(uint step=1;step<steps;++step){ulong target_offset=sb+ulong(step)*2;
   float2 target=float2(sequences[target_offset],sequences[target_offset+1]);
   float sw=weighted?step_weights[ulong(batch)*steps+step]:1.0f;
-  for(uint suffix=tid;suffix<suffix_count;suffix+=256){float best=current[suffix];uchar bp=0;
+  for(uint suffix=tid;suffix<suffix_count;suffix+=256){float best=current[suffix];__QVQ_BACKPOINTER_TYPE__ bp=0;
     for(uint prefix=1;prefix<prefix_count;++prefix){float v=current[ulong(prefix)*suffix_count+suffix];
-      if(v<best){best=v;bp=uchar(prefix);}}
+      if(v<best){best=v;bp=prefix;}}
     backpointers[pb+ulong(step-1)*suffix_count+suffix]=bp;
     for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
       following[state]=best+qvq_emit(target,codebook,state,sw);}}
@@ -1142,28 +1145,37 @@ def _hyb_reference_kernel():
     return _HYB_REFERENCE_KERNEL
 
 
-def _viterbi_kernel():
-    global _VITERBI_KERNEL, _VITERBI_KERNEL_ERROR
-    if _VITERBI_KERNEL is None:
-        with _KERNEL_LOCK:
-            if _VITERBI_KERNEL is None:
-                if _VITERBI_KERNEL_ERROR is not None:
-                    raise RuntimeError(_VITERBI_KERNEL_ERROR)
-                import mlx.core as mx
+def _viterbi_kernel(backpointer_dtype: str):
+    """Return the V2 YAQA recurrence specialized for its traceback width."""
 
-                try:
-                    _VITERBI_KERNEL = mx.fast.metal_kernel(
-                        name="gptqmodel_qvq_viterbi_lowrate",
-                        input_names=["sequences", "codebook", "overlap", "step_weights", "dims"],
-                        output_names=["costs", "next_costs", "backpointers", "states", "squared_error"],
-                        header=_VITERBI_HEADER,
-                        source=_VITERBI_SOURCE,
-                        ensure_row_contiguous=True,
-                    )
-                except Exception as exc:
-                    _VITERBI_KERNEL_ERROR = f"QVQ Viterbi MLX kernel creation failed: {exc}"
-                    raise RuntimeError(_VITERBI_KERNEL_ERROR) from exc
-    return _VITERBI_KERNEL
+    import mlx.core as mx
+
+    if backpointer_dtype not in ("uint16", "uint32"):
+        raise ValueError(f"unsupported QVQ MLX Viterbi backpointer dtype: {backpointer_dtype}")
+    kernel = _VITERBI_KERNELS.get(backpointer_dtype)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _VITERBI_KERNELS.get(backpointer_dtype)
+        if kernel is not None:
+            return kernel
+        source = _VITERBI_SOURCE.replace("__QVQ_BACKPOINTER_TYPE__", "ushort" if backpointer_dtype == "uint16" else "uint")
+        name = f"gptqmodel_qvq_viterbi_v2_{backpointer_dtype}"
+        try:
+            kernel = mx.fast.metal_kernel(
+                name=name,
+                input_names=["sequences", "codebook", "overlap", "step_weights", "dims"],
+                output_names=["costs", "next_costs", "backpointers", "states", "squared_error"],
+                header=_VITERBI_HEADER,
+                source=source,
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            message = f"QVQ V2 YAQA MLX kernel creation failed ({backpointer_dtype}): {exc}"
+            _VITERBI_KERNEL_ERRORS[backpointer_dtype] = message
+            raise RuntimeError(message) from exc
+        _VITERBI_KERNELS[backpointer_dtype] = kernel
+        return kernel
 
 
 def _v2_banked_viterbi_kernel():
@@ -1205,13 +1217,13 @@ def _v2_banked_viterbi_kernel():
 
 
 def qvq_mlx_viterbi(sequences, codebook, bits: float, overlap=None, step_weights=None):
-    """Run the persistent W1/W1.5 Viterbi recurrence using an MLX Metal kernel."""
+    """Run the V2 YAQA Viterbi recurrence using an MLX Metal kernel."""
 
     import mlx.core as mx
 
     transition_bits = qvq_transition_bits(bits)
-    if transition_bits not in (2, 3):
-        raise ValueError("QVQ MLX Viterbi currently supports W1 and W1.5")
+    if transition_bits not in range(2, 8):
+        raise ValueError("QVQ MLX Viterbi supports W1 through W3.5")
     if sequences.ndim != 3 or sequences.shape[2] != 2:
         raise ValueError("QVQ MLX Viterbi sequences must have shape [batch, steps, 2]")
     if codebook.shape != (1 << 16, 2):
@@ -1246,7 +1258,9 @@ def qvq_mlx_viterbi(sequences, codebook, bits: float, overlap=None, step_weights
         step_weights = mx.zeros((1,), dtype=mx.float32)
     suffix_count = (1 << 16) >> transition_bits
     dims = mx.array([batch, steps, int(constrained), int(weighted)], dtype=mx.uint32)
-    outputs = _viterbi_kernel()(
+    backpointer_name = "uint16" if transition_bits <= 15 else "uint32"
+    backpointer_dtype = mx.uint16 if transition_bits <= 15 else mx.uint32
+    outputs = _viterbi_kernel(backpointer_name)(
         inputs=[sequences, codebook, overlap, step_weights, dims],
         template=[("EdgeBits", transition_bits)],
         grid=(batch * 256, 1, 1),
@@ -1258,7 +1272,7 @@ def qvq_mlx_viterbi(sequences, codebook, bits: float, overlap=None, step_weights
             (batch, steps),
             (batch,),
         ],
-        output_dtypes=[mx.float32, mx.float32, mx.uint8, mx.uint32, mx.float32],
+        output_dtypes=[mx.float32, mx.float32, backpointer_dtype, mx.uint32, mx.float32],
     )
     return outputs[3], outputs[4]
 
@@ -1470,6 +1484,44 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
     selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8).to(device=sequences.device)
     squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32).to(device=sequences.device)
     return states, selectors, squared_error
+
+
+def qvq_mlx_viterbi_from_torch_mps(
+    sequences,
+    codebook,
+    bits: float,
+    overlap=None,
+    step_weights=None,
+):
+    """Run the standard V2 YAQA recurrence through the fused MLX kernel."""
+
+    import mlx.core as mx
+    import numpy as np
+    import torch
+
+    if sequences.device.type != "mps" or codebook.device != sequences.device:
+        raise ValueError("QVQ MLX Viterbi bridge requires Torch tensors on one MPS device")
+    if sequences.dtype != torch.float32 or codebook.dtype != torch.float32:
+        raise TypeError("QVQ MLX Viterbi bridge requires float32 Torch tensors")
+    if not sequences.is_contiguous() or not codebook.is_contiguous():
+        raise ValueError("QVQ MLX Viterbi bridge requires contiguous tensors")
+
+    def copy_to_mlx(tensor):
+        return mx.array(tensor.detach().to("cpu").contiguous().numpy())
+
+    outputs = qvq_mlx_viterbi(
+        copy_to_mlx(sequences),
+        copy_to_mlx(codebook),
+        bits,
+        overlap=None
+        if overlap is None
+        else mx.array(overlap.detach().to("cpu", torch.uint32).contiguous().numpy()),
+        step_weights=None if step_weights is None else copy_to_mlx(step_weights),
+    )
+    mx.eval(*outputs)
+    states = torch.from_numpy(np.asarray(outputs[0])).to(torch.long).to(device=sequences.device)
+    squared_error = torch.from_numpy(np.asarray(outputs[1])).to(torch.float32).to(device=sequences.device)
+    return states, squared_error
 
 
 def qvq_mlx_prepare_v2_banked_codebooks_from_torch_mps(codebooks):

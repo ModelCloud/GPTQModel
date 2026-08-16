@@ -224,3 +224,25 @@ unsupported-format fallbacks are unchanged.
 4. Add shape buckets only when both MPS and MLX show repeatable wins or maintain separate backend policies when their
    compilers demonstrably diverge.
 5. Preserve the implicit decoder, exact planar payload, FP32 accumulation, and tested fallback for every change.
+
+## Backend deduplication decision (2026-08-17)
+
+MLX is now the fused Metal implementation for quantization-time V2 YAQA and V2B2-P32/V2B4-P64 YAQA recurrence
+paths. The standard V2 MLX recurrence is explicitly available through `qvq_mlx_viterbi` and is limited to W1--W3.5
+for exact-path parity; W4+ uses the native MPS recurrence or the Torch reference path.
+
+We measured matched warmed kernels on the Apple M4 Max at `(M,K,N)=(1,2048,2048)`, W2. Inner GEMV was 0.151 ms
+on MPS versus 0.422 ms on MLX (MLX 2.80x slower). Standard V2 YAQA Viterbi on one 128-pair tile measured:
+
+| Rate | MPS Viterbi | MLX Viterbi | MLX/MPS |
+|---:|---:|---:|---:|
+| W1 | 2.693 ms | 3.773 ms | 1.40x |
+| W2 | 2.959 ms | 3.028 ms | 1.02x |
+| W2.5 | 4.654 ms | 6.483 ms | 1.39x |
+| W3 | 3.119 ms | 3.353 ms | 1.08x |
+| W3.5 | 4.580 ms | 6.554 ms | 1.43x |
+
+Therefore MPS kernels are retained where they are measurably faster, rather than deleting a faster implementation merely
+to deduplicate source. The MLX V2 recurrence remains the canonical implementation for MLX-native callers and for
+banked YAQA quantization, while MPS Viterbi/GEMV remain the faster Torch-MPS paths. All comparisons used FP32
+accumulation and dense-reference parity gates; a backend is not removed based on source-count preference alone.

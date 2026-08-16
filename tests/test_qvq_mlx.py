@@ -439,7 +439,7 @@ def test_qvq_mlx_model_conversion_replaces_matching_linear(monkeypatch):
     assert empty.dtype == mx.float16
 
 
-@pytest.mark.parametrize("bits", (1, 1.5))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_low_rate_mlx_viterbi_matches_weighted_constrained_cpu_oracle(bits):
     generator = torch.Generator().manual_seed(20261011 + int(bits * 2))
     codebook = pgc16_codebook(dtype=torch.float32)
@@ -470,7 +470,7 @@ def test_qvq_low_rate_mlx_viterbi_matches_weighted_constrained_cpu_oracle(bits):
     )
 
 
-@pytest.mark.parametrize("bits", (1, 1.5))
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_mlx_viterbi_minimum_sequence_matches_cpu_oracle(bits):
     sequences = torch.tensor([[[0.25, -0.75]]], dtype=torch.float32)
     codebook = pgc16_codebook(dtype=torch.float32)
