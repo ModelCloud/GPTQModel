@@ -4191,6 +4191,8 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], float
     ]
     | None = None,
+    replay_gradient: torch.Tensor | None = None,
+    replay_gradient_error: bool = False,
     search_inputs: torch.Tensor | None = None,
     search_target: torch.Tensor | None = None,
     diagnostics: dict[str, object] | None = None,
@@ -4240,6 +4242,10 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         or direct_replay_candidates > replay_candidates
     ):
         raise ValueError("YAQA localized direct replay candidates must be between zero and replay_candidates.")
+    if not isinstance(replay_gradient_error, bool):
+        raise TypeError("YAQA localized replay-gradient error state must be boolean.")
+    if replay_gradient is not None and candidate_score is None:
+        raise ValueError("YAQA localized replay-gradient ranking requires full-horizon candidate scoring.")
     if len(codebook_library) != 4:
         raise ValueError("YAQA localized V2B2-P32 requires canonical V2 plus three complementary families.")
 
@@ -4248,6 +4254,12 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     accepted = baseline_weight.to(torch.float32)
     if source.ndim != 2 or source.shape != accepted.shape or source.shape[0] % 16 or source.shape[1] % 16:
         raise ValueError("YAQA localized V2B2-P32 requires matching 16-aligned weight matrices.")
+    if replay_gradient is not None:
+        if replay_gradient.shape != source.shape or not replay_gradient.is_floating_point():
+            raise ValueError("YAQA localized replay gradient must match the inner-weight geometry.")
+        if replay_gradient.device != source.device or not torch.isfinite(replay_gradient).all():
+            raise ValueError("YAQA localized replay gradient must be finite and share the source device.")
+        replay_gradient = replay_gradient.to(torch.float32)
     input_blocks = source.shape[0] // 16
     output_blocks = source.shape[1] // 16
     tile_count = input_blocks * output_blocks
@@ -4515,8 +4527,8 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     current_loss = baseline_search_loss if baseline_search_loss is not None else baseline_loss
     current_replay_score = None
     baseline_replay_score = None
-    replay_callback_error = False
-    if candidate_score is not None:
+    replay_callback_error = replay_gradient_error
+    if candidate_score is not None and not replay_gradient_error:
         try:
             current_replay_score = float(
                 candidate_score(refined_weight, refined_states, refined_selectors, baseline_alt_id)
@@ -4527,8 +4539,8 @@ def yaqa_localized_spectral_refine_v2b2_p32(
             replay_callback_error = True
         if not math.isfinite(current_replay_score):
             replay_callback_error = True
-        if replay_callback_error:
-            candidate_payloads.clear()
+    if replay_callback_error:
+        candidate_payloads.clear()
 
     # Every proposal preserves the accepted entry/exit state, so replacements
     # for distinct P32 segments compose exactly. Greedy scoring is conditional:
@@ -4536,7 +4548,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
     # current live-output residual (or complete Kronecker proxy). This avoids
     # treating individually favorable candidates as additively independent.
     for _ in range(max_changes):
-        locally_ranked: list[tuple[float, str]] = []
+        locally_ranked: list[tuple[float, str, float]] = []
         for candidate_key, payload in candidate_payloads.items():
             tile_index, segment_index, _segment_states, segment_values, _segment_bank, _delta = payload
             if (tile_index, segment_index) in selected_segments:
@@ -4545,10 +4557,10 @@ def yaqa_localized_spectral_refine_v2b2_p32(
             output_block = tile_index % output_blocks
             input_start = input_block * 16 + segment_index * 2
             output_start = output_block * 16
+            candidate_delta = segment_values.reshape(2, 16).to(torch.float32) - refined_weight[
+                input_start : input_start + 2, output_start : output_start + 16
+            ].to(torch.float32)
             if search_inputs_fp32 is not None:
-                candidate_delta = segment_values.reshape(2, 16).to(torch.float32) - refined_weight[
-                    input_start : input_start + 2, output_start : output_start + 16
-                ].to(torch.float32)
                 projected = search_inputs_fp32[:, input_start : input_start + 2] @ candidate_delta
                 residual_block = current_search_residual[:, output_start : output_start + 16]
                 step_loss = current_loss + (
@@ -4564,10 +4576,23 @@ def yaqa_localized_spectral_refine_v2b2_p32(
                     "ij,ik,kl,lj->", candidate_error, original_input, candidate_error, original_output
                 )
             # With a full-horizon scorer, local loss orders the bounded
-            # shortlist but must not veto a direction that propagates better.
+            # shortlist unless an exact baseline teacher-KL gradient is
+            # available. The gradient then ranks by the downstream first-order
+            # term <G,D>; replay remains the nonlinear selection authority.
             # Without that scorer, retain the strict local improvement gate.
             if torch.isfinite(step_loss) and (candidate_score is not None or step_loss < current_loss):
-                locally_ranked.append((float(step_loss.item()), candidate_key))
+                local_loss = float(step_loss.item())
+                ranking_score = local_loss
+                if replay_gradient is not None:
+                    propagated_first_order = float(
+                        (
+                            replay_gradient[input_start : input_start + 2, output_start : output_start + 16]
+                            * candidate_delta
+                        ).sum().item()
+                    )
+                    candidate_records[candidate_key]["propagated_first_order"] = propagated_first_order
+                    ranking_score = propagated_first_order
+                locally_ranked.append((ranking_score, candidate_key, local_loss))
 
         locally_ranked.sort(key=lambda item: (item[0], item[1]))
         if candidate_score is None:
@@ -4586,7 +4611,7 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         best_key = None
         best_step_loss = current_loss
         best_replay_score = current_replay_score
-        for local_loss, candidate_key in shortlisted:
+        for _ranking_score, candidate_key, local_loss in shortlisted:
             if candidate_score is None:
                 best_key = candidate_key
                 best_step_loss = torch.as_tensor(local_loss, device=current_loss.device)
@@ -4685,6 +4710,8 @@ def yaqa_localized_spectral_refine_v2b2_p32(
         diagnostics["localized_selected_candidates"] = selected_candidate_keys
         diagnostics["localized_replay_candidates"] = replay_candidates
         diagnostics["localized_direct_replay_candidates"] = direct_replay_candidates
+        diagnostics["localized_replay_gradient_ranked"] = replay_gradient is not None
+        diagnostics["localized_replay_gradient_callback_error"] = replay_gradient_error
         diagnostics["localized_replay_score"] = current_replay_score
         diagnostics["localized_replay_callback_error"] = replay_callback_error
         diagnostics["spectral_original_loss"] = float(baseline_loss.item())
@@ -4774,6 +4801,46 @@ def rht_reconstruct_weight(
     work = work * SU.to(work.dtype).unsqueeze(1)
     work = matmul_hadU(work) * SV.to(work.dtype).unsqueeze(0)
     return work.transpose(0, 1).contiguous()
+
+
+def rht_reconstruct_weight_adjoint(
+    weight_gradient: torch.Tensor,
+    SU: torch.Tensor,
+    SV: torch.Tensor,
+) -> torch.Tensor:
+    """Map a dense-weight gradient into the exact QVQ inner-weight basis.
+
+    ``rht_reconstruct_weight`` is linear in its inner weight.  Its adjoint is
+    therefore the unique map satisfying ``<G, R(D)> = <R*(G), D>``.  Build it
+    through autograd so the gradient remains exactly coupled to the production
+    RHT implementation instead of duplicating its transpose/sign convention.
+    """
+
+    if weight_gradient.ndim != 2 or not weight_gradient.is_floating_point():
+        raise ValueError("QVQ reconstruction gradient must be a floating-point matrix.")
+    out_features, in_features = weight_gradient.shape
+    if tuple(SU.shape) != (in_features,) or tuple(SV.shape) != (out_features,):
+        raise ValueError("QVQ reconstruction gradient and RHT scales have incompatible shapes.")
+    if weight_gradient.device != SU.device or weight_gradient.device != SV.device:
+        raise ValueError("QVQ reconstruction gradient and RHT scales must share one device.")
+    if not torch.isfinite(weight_gradient).all():
+        raise ValueError("QVQ reconstruction gradient must contain only finite values.")
+    _validate_fp32_representable(weight_gradient, name="QVQ reconstruction gradient")
+    with torch.enable_grad():
+        inner = torch.zeros(
+            (in_features, out_features),
+            device=weight_gradient.device,
+            dtype=torch.float32,
+            requires_grad=True,
+        )
+        reconstructed = rht_reconstruct_weight(inner, SU, SV)
+        (inner_gradient,) = torch.autograd.grad(
+            reconstructed,
+            inner,
+            grad_outputs=weight_gradient.to(torch.float32),
+            create_graph=False,
+        )
+    return inner_gradient.detach().contiguous()
 
 
 def qvq_proxy_loss(weight: torch.Tensor, reconstructed_weight: torch.Tensor, H: torch.Tensor) -> torch.Tensor:
@@ -5066,6 +5133,7 @@ def quantize_qvq_linear(
     propagated_target_output: torch.Tensor | None = None,
     propagated_acceptance: Callable[[torch.Tensor, torch.Tensor], bool] | None = None,
     propagated_candidate_score: Callable[[torch.Tensor], float] | None = None,
+    propagated_candidate_gradient: Callable[[torch.Tensor], torch.Tensor] | None = None,
     input_hessian_preparation: QVQInputHessianPreparation | None = None,
 ) -> QVQLinearQuantizationResult:
     """Run RHT, BlockLDLQ/YAQA, PGC16 TCQ, and planar packing for a linear.
@@ -5306,12 +5374,16 @@ def quantize_qvq_linear(
         raise TypeError("QVQ propagated acceptance gate must be callable.")
     if propagated_candidate_score is not None and not callable(propagated_candidate_score):
         raise TypeError("QVQ propagated candidate scorer must be callable.")
+    if propagated_candidate_gradient is not None and not callable(propagated_candidate_gradient):
+        raise TypeError("QVQ propagated candidate gradient must be callable.")
     if propagated_inputs is not None and propagated_acceptance is None:
         raise ValueError("QVQ propagated bank selection requires an explicit acceptance gate.")
     if (propagated_candidate_score is None) != (yaqa_spectral_localized_replay_candidates == 0):
         raise ValueError(
             "QVQ localized full-horizon scoring requires both a candidate scorer and a positive shortlist."
         )
+    if propagated_candidate_gradient is not None and propagated_candidate_score is None:
+        raise ValueError("QVQ propagated candidate gradient requires full-horizon candidate scoring.")
 
     device = weight.device
     if telemetry is not None:
@@ -5702,6 +5774,58 @@ def quantize_qvq_linear(
                 heldout_target / (SV_sign.to(torch.float32) * scale), transpose=True
             )
 
+        def localized_serialized_weight(
+            candidate_inner: torch.Tensor,
+            candidate_states: torch.Tensor,
+            candidate_bank_ids: torch.Tensor,
+            candidate_alt_id: torch.Tensor,
+        ) -> torch.Tensor:
+            candidate_trellis = pack_trellis_states(
+                candidate_states,
+                bits=bits,
+                vector_size=2,
+                trellis_window=16,
+            )
+            serialized_inner = reconstruct_qvq_inner_weight(
+                candidate_trellis,
+                bits=bits,
+                vector_size=2,
+                trellis_window=16,
+                in_features=in_features,
+                out_features=out_features,
+                codebook_version=codebook_version,
+                bank_ids=candidate_bank_ids,
+                v2b2_p32=True,
+                bank_alt_id=candidate_alt_id,
+            )
+            if not torch.equal(serialized_inner.to(dtype=candidate_inner.dtype), candidate_inner):
+                raise ValueError("QVQ localized replay candidate failed exact serialized reconstruction.")
+            return rht_reconstruct_weight(
+                serialized_inner.to(dtype=candidate_inner.dtype),
+                SU,
+                SV_sign * scale,
+            )
+
+        localized_replay_gradient = None
+        localized_gradient_callback_error = False
+        if propagated_candidate_gradient is not None:
+            try:
+                baseline_candidate_weight = localized_serialized_weight(*baseline_encoded)
+                full_gradient = propagated_candidate_gradient(baseline_candidate_weight)
+                if not isinstance(full_gradient, torch.Tensor):
+                    raise TypeError("QVQ propagated candidate gradient callback must return a tensor.")
+                if full_gradient.shape != baseline_candidate_weight.shape or not full_gradient.is_floating_point():
+                    raise ValueError("QVQ propagated candidate gradient must match the dense weight geometry.")
+                if full_gradient.device != device or not torch.isfinite(full_gradient).all():
+                    raise ValueError("QVQ propagated candidate gradient must be finite and share the quantization device.")
+                localized_replay_gradient = rht_reconstruct_weight_adjoint(
+                    full_gradient.to(torch.float32),
+                    SU,
+                    SV_sign * scale,
+                )
+            except Exception:  # noqa: BLE001 - an external gradient callback must fail closed
+                localized_gradient_callback_error = True
+
         localized_candidate_score = None
         if propagated_candidate_score is not None:
             def localized_candidate_score(
@@ -5710,30 +5834,11 @@ def quantize_qvq_linear(
                 candidate_bank_ids: torch.Tensor,
                 candidate_alt_id: torch.Tensor,
             ) -> float:
-                candidate_trellis = pack_trellis_states(
+                candidate_weight = localized_serialized_weight(
+                    candidate_inner,
                     candidate_states,
-                    bits=bits,
-                    vector_size=2,
-                    trellis_window=16,
-                )
-                serialized_inner = reconstruct_qvq_inner_weight(
-                    candidate_trellis,
-                    bits=bits,
-                    vector_size=2,
-                    trellis_window=16,
-                    in_features=in_features,
-                    out_features=out_features,
-                    codebook_version=codebook_version,
-                    bank_ids=candidate_bank_ids,
-                    v2b2_p32=True,
-                    bank_alt_id=candidate_alt_id,
-                )
-                if not torch.equal(serialized_inner.to(dtype=candidate_inner.dtype), candidate_inner):
-                    raise ValueError("QVQ localized replay candidate failed exact serialized reconstruction.")
-                candidate_weight = rht_reconstruct_weight(
-                    serialized_inner.to(dtype=candidate_inner.dtype),
-                    SU,
-                    SV_sign * scale,
+                    candidate_bank_ids,
+                    candidate_alt_id,
                 )
                 score = float(propagated_candidate_score(candidate_weight))
                 return score if math.isfinite(score) else math.inf
@@ -5751,6 +5856,8 @@ def quantize_qvq_linear(
                 replay_candidates=yaqa_spectral_localized_replay_candidates,
                 direct_replay_candidates=yaqa_spectral_localized_direct_replay_candidates,
                 candidate_score=localized_candidate_score,
+                replay_gradient=localized_replay_gradient,
+                replay_gradient_error=localized_gradient_callback_error,
                 search_inputs=localized_search_inputs,
                 search_target=localized_search_target,
                 diagnostics=yaqa_bank_diagnostics,

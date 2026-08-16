@@ -960,6 +960,30 @@ duplicates of spectral candidates are removed before replay. Direct candidates a
 energy and then local loss, but only the full-horizon score can select one. The default is `D=0` so historical P6
 behavior is preserved.
 
+An optional P9 ranking stage moves downstream information into candidate generation. Let the full-model search loss
+at the exact serialized baseline be teacher forward KL and define
+
+```text
+G_W = d KL_teacher / d W
+G_I = R*(G_W)
+```
+
+where `R` is QVQ's complete inner-to-dense RHT reconstruction, including `SU`, `SV`, and the selected module scale,
+and `R*` is its adjoint. For a legal fixed-boundary inner-weight delta `D`, the first-order downstream prediction is
+
+```text
+Delta KL = <G_I, D> + O(||D||^2).
+```
+
+P9 ranks the bounded portfolio by this term rather than residual energy or module-output loss. Negative values are
+predicted improvements, but they are proposals only: exact serialized full-model replay, fold minimax scoring, and
+independent confirmation remain the selection authorities. The implementation obtains `R*` from the production RHT
+with autograd and unit-tests the adjoint identity `<G_W,R(D)> = <R*(G_W),D>`, avoiding a duplicated sign/transpose
+formula. The teacher-KL gradient is accumulated in FP32 one full sequence at a time through the live quantized
+prefix and suffix. This adds one backward sweep over the search rows, but no checkpoint bytes or inference work.
+Gradient callback failure, non-finite output, wrong geometry, or serialization mismatch fails closed to the immutable
+baseline. The gradient uses the search split and therefore is not confirmation evidence.
+
 The validation driver can also divide the fixed search rows into `F` round-robin folds without adding prompts or
 forwards. Let `K_f(Q)` be full-model teacher KL on fold `f` and let `Q_0` be the immutable serialized baseline. It
 ranks a candidate with the minimax relative score

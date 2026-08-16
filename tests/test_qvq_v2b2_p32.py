@@ -25,6 +25,8 @@ from gptqmodel.quantization.qvq import (
     prepare_qvq_input_hessian,
     quantize_qvq_linear,
     reconstruct_qvq_inner_weight,
+    rht_reconstruct_weight,
+    rht_reconstruct_weight_adjoint,
     tail_biting_v2b2_p32_quantize,
     tail_biting_viterbi_quantize,
     unpack_qvq_binary_bank_ids,
@@ -86,6 +88,7 @@ from scripts.validate_qvq_p4_live_prefix import (
     _localized_summary,
     _minimax_relative_replay_score,
     _passes_confirmation,
+    _teacher_kl_weight_gradient,
     _validate_disjoint_splits,
 )
 from scripts.validate_qvq_p4_live_prefix import (
@@ -104,6 +107,79 @@ class _SharedInputHarness(torch.nn.Module):
         del attention_mask, use_cache
         hidden = input_ids.float().unsqueeze(-1).expand(-1, -1, 4)
         return self.q(hidden) + self.k(hidden) + self.v(hidden)
+
+
+class _GradientLogitHarness(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = torch.nn.Linear(4, 4, bias=False)
+
+    def forward(self, input_ids, attention_mask=None):
+        del attention_mask
+        hidden = torch.nn.functional.one_hot(input_ids, num_classes=4).to(torch.float32)
+        return SimpleNamespace(logits=self.proj(hidden))
+
+
+def test_qvq_rht_reconstruction_adjoint_preserves_inner_product_and_rejects_bad_geometry():
+    generator = torch.Generator().manual_seed(20260902)
+    inner_delta = torch.randn((16, 16), generator=generator)
+    dense_gradient = torch.randn((16, 16), generator=generator)
+    SU = torch.randint(0, 2, (16,), generator=generator).mul(2).sub(1).to(torch.float32)
+    SV = torch.randn((16,), generator=generator).abs().add_(0.1)
+    inner_gradient = rht_reconstruct_weight_adjoint(dense_gradient, SU, SV)
+
+    dense_delta = rht_reconstruct_weight(inner_delta, SU, SV)
+    torch.testing.assert_close(
+        (dense_gradient * dense_delta).sum(),
+        (inner_gradient * inner_delta).sum(),
+        rtol=2e-5,
+        atol=2e-5,
+    )
+    with pytest.raises(ValueError, match="incompatible shapes"):
+        rht_reconstruct_weight_adjoint(dense_gradient, SU[:-1], SV)
+    invalid = dense_gradient.clone()
+    invalid[0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        rht_reconstruct_weight_adjoint(invalid, SU, SV)
+
+
+@pytest.mark.parametrize("device_name", ("cpu", "mps"))
+def test_qvq_full_horizon_teacher_kl_gradient_matches_functional_reference(device_name):
+    if device_name == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    device = torch.device(device_name)
+    generator = torch.Generator().manual_seed(20260903)
+    model = _GradientLogitHarness().eval().to(device)
+    rows = (
+        {"input_ids": torch.tensor([[0, 1, 2, 3]], device=device)},
+        {"input_ids": torch.tensor([[3, 1, 0]], device=device)},
+    )
+    teacher_weight = torch.randn((4, 4), generator=generator).to(device)
+    teacher = tuple(
+        torch.nn.functional.linear(
+            torch.nn.functional.one_hot(row["input_ids"], num_classes=4).to(torch.float32),
+            teacher_weight,
+        )[:, :-1].cpu()
+        for row in rows
+    )
+    candidate = torch.randn((4, 4), generator=generator).to(device)
+    actual = _teacher_kl_weight_gradient(model, model.proj, rows, teacher, candidate)
+
+    reference_candidate = candidate.clone().requires_grad_(True)
+    total_tokens = sum(logits.shape[1] for logits in teacher)
+    reference_loss = torch.zeros((), dtype=torch.float32, device=device)
+    for row, dense_logits in zip(rows, teacher, strict=True):
+        hidden = torch.nn.functional.one_hot(row["input_ids"], num_classes=4).to(torch.float32)
+        student_logits = torch.nn.functional.linear(hidden, reference_candidate)[:, :-1]
+        reference_loss = reference_loss + torch.nn.functional.kl_div(
+            torch.nn.functional.log_softmax(student_logits, dim=-1),
+            torch.nn.functional.log_softmax(dense_logits.to(device), dim=-1),
+            reduction="sum",
+            log_target=True,
+        ) / total_tokens
+    (expected,) = torch.autograd.grad(reference_loss, reference_candidate)
+    torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+    assert model.proj.weight.requires_grad
 
 
 class _EarlyStopHarness(torch.nn.Module):
@@ -176,12 +252,21 @@ def test_qvq_p4_baseline_only_is_explicit_and_default_off():
     assert not defaults.baseline_only
     assert defaults.replay_candidates == 0
     assert defaults.direct_replay_candidates == 0
+    assert not defaults.gradient_ranked_direct
     assert defaults.replay_folds == 1
     replay = _p4_parser().parse_args(
-        (*required, "--replay-candidates", "4", "--direct-replay-candidates", "1")
+        (
+            *required,
+            "--replay-candidates",
+            "4",
+            "--direct-replay-candidates",
+            "1",
+            "--gradient-ranked-direct",
+        )
     )
     assert replay.replay_candidates == 4
     assert replay.direct_replay_candidates == 1
+    assert replay.gradient_ranked_direct
     assert _p4_parser().parse_args((*required, "--baseline-only")).baseline_only
 
 
@@ -1144,6 +1229,7 @@ def test_qvq_v2b2_prefix_artifact_round_trips_packed_modules_without_dense_weigh
             "alpha": None,
             "tile": 3,
             "segment": 4,
+            "propagated_first_order": None,
             "replay_score": 1.0004,
             "selected": False,
         },
@@ -1154,6 +1240,7 @@ def test_qvq_v2b2_prefix_artifact_round_trips_packed_modules_without_dense_weigh
             "alpha": 1.0,
             "tile": 7,
             "segment": 2,
+            "propagated_first_order": None,
             "replay_score": 0.9988,
             "selected": True,
         },
@@ -1960,6 +2047,74 @@ def test_qvq_v2b2_p32_localized_spectral_refinement_composes_two_fixed_boundary_
     assert direct_diagnostics["localized_direct_replay_candidates"] == 1
     assert len(direct_calls) >= 2
 
+    direct_portfolio = []
+
+    def capture_direct_portfolio(candidate_weight, *_):
+        direct_portfolio.append(candidate_weight.clone())
+        return -float(len(direct_portfolio))
+
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(0.25,),
+            max_segments=2,
+            max_changes=1,
+            replay_candidates=2,
+            direct_replay_candidates=2,
+            candidate_score=capture_direct_portfolio,
+            diagnostics={},
+            bits=2,
+        )
+
+    assert len(direct_portfolio) == 3
+    local_first, local_second = direct_portfolio[1:]
+    assert not torch.equal(local_first, local_second)
+    gradient = -(local_second - local_first)
+    gradient_ranked = []
+    gradient_diagnostics = {}
+
+    def capture_gradient_ranked(candidate_weight, *_):
+        gradient_ranked.append(candidate_weight.clone())
+        return -float(len(gradient_ranked))
+
+    with patch(
+        "gptqmodel.eora.eora._eora_compute_svd",
+        side_effect=lambda matrix, rank, algo: torch.linalg.svd(matrix, full_matrices=False),
+    ):
+        yaqa_localized_spectral_refine_v2b2_p32(
+            source,
+            torch.eye(16),
+            torch.eye(16),
+            library,
+            baseline,
+            ranks=(4,),
+            alphas=(0.25,),
+            max_segments=2,
+            max_changes=1,
+            replay_candidates=1,
+            direct_replay_candidates=1,
+            candidate_score=capture_gradient_ranked,
+            replay_gradient=gradient,
+            diagnostics=gradient_diagnostics,
+            bits=2,
+        )
+
+    assert len(gradient_ranked) == 2
+    torch.testing.assert_close(gradient_ranked[1], local_second, rtol=0, atol=0)
+    assert gradient_diagnostics["localized_replay_gradient_ranked"] is True
+    assert any(
+        record.get("propagated_first_order") is not None
+        for record in gradient_diagnostics["spectral_candidates"].values()
+    )
+
 
 def test_qvq_v2b2_p32_localized_full_horizon_baseline_error_fails_closed():
     generator = torch.Generator().manual_seed(20260901)
@@ -2605,6 +2760,34 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
         **common,
         **localized,
     )
+    gradient_baselines = []
+
+    def propagated_gradient(candidate):
+        gradient_baselines.append(candidate.clone())
+        return torch.ones_like(candidate)
+
+    gradient_replayed = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        propagated_acceptance=lambda proposal, rollback: True,
+        propagated_candidate_score=replay_score,
+        propagated_candidate_gradient=propagated_gradient,
+        yaqa_spectral_localized_replay_candidates=2,
+        yaqa_spectral_localized_direct_replay_candidates=1,
+        **common,
+        **localized,
+    )
+    gradient_error = quantize_qvq_linear(
+        weight,
+        input_hessian,
+        propagated_acceptance=lambda proposal, rollback: True,
+        propagated_candidate_score=replay_score,
+        propagated_candidate_gradient=lambda candidate: (_ for _ in ()).throw(RuntimeError("gradient failed")),
+        yaqa_spectral_localized_replay_candidates=2,
+        yaqa_spectral_localized_direct_replay_candidates=1,
+        **common,
+        **localized,
+    )
     callback_error = quantize_qvq_linear(
         weight,
         input_hessian,
@@ -2618,6 +2801,12 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
     assert callback_error.yaqa_spectral_selected is False
     assert accepted.yaqa_spectral_selected is True
     assert replayed.yaqa_spectral_selected is True
+    assert gradient_baselines
+    assert gradient_replayed.yaqa_spectral_candidates is not None
+    assert any(
+        candidate.get("propagated_first_order") is not None
+        for candidate in gradient_replayed.yaqa_spectral_candidates.values()
+    )
     assert len(replayed_weights) >= 2
     assert any(torch.equal(candidate, replayed.weight) for candidate in replayed_weights)
     torch.testing.assert_close(callback_pairs[0][1], baseline.weight, rtol=0, atol=0)
@@ -2625,6 +2814,7 @@ def test_qvq_v2b2_p32_localized_propagation_accepts_or_atomically_rolls_back():
     for name in ("trellis", "bank_ids", "bank_alt_id"):
         assert torch.equal(rejected.serialized_tensors()[name], baseline.serialized_tensors()[name])
         assert torch.equal(callback_error.serialized_tensors()[name], baseline.serialized_tensors()[name])
+        assert torch.equal(gradient_error.serialized_tensors()[name], baseline.serialized_tensors()[name])
     torch.testing.assert_close(rejected.weight, baseline.weight, rtol=0, atol=0)
     assert not torch.equal(accepted.trellis, baseline.trellis)
     decoded = reconstruct_qvq_inner_weight(

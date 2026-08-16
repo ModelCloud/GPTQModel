@@ -610,6 +610,21 @@ derive its ranking from the full-horizon teacher-KL gradient at the exact serial
 spend the same bounded replay budget on the best negative predicted deltas. This moves propagation into candidate
 generation instead of using it only after a local candidate portfolio has already been pruned.
 
+#### P9 full-horizon-gradient candidate ranking
+
+P9 implements that next generator behind the validation driver's `--gradient-ranked-direct` switch. It computes one
+token-mean teacher-KL gradient at the exact serialized V2B2-P32+YAQA baseline, maps it into the inner basis through
+the exact adjoint of QVQ's production RHT, and ranks legal fixed-boundary candidates by `<G_inner,D>`. The selected
+portfolio still receives the same exact full-model replay and independent confirmation as P8. Candidate records now
+export the predicted first-order term beside the measured replay score so their rank correlation is inspectable.
+
+The implementation is fail-closed and serialization-neutral. It uses an FP32 substituted target-weight leaf while
+the model executes in its native dtype, processes one full search sequence per backward graph, restores every model
+parameter's original gradient state, and restores the dense module image after the callback. An exact adjoint test,
+a functional teacher-KL gradient test, a gradient-ranking test, and callback-error rollback coverage accompany the
+change. The first matched gate remains W2 layer-1 `q_proj`, 32/64/64 rows, two search folds, `K=4`, `D=4`; only the
+portfolio ordering changes from P8.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

@@ -67,6 +67,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-changes", type=int, default=1)
     parser.add_argument("--replay-candidates", type=int, default=0)
     parser.add_argument("--direct-replay-candidates", type=int, default=0)
+    parser.add_argument(
+        "--gradient-ranked-direct",
+        action="store_true",
+        help="Rank localized candidates by one full-horizon teacher-KL gradient at the serialized baseline.",
+    )
     parser.add_argument("--replay-folds", type=int, default=1)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
     parser.add_argument("--minimum-relative-kl-improvement", type=float, default=0.001)
@@ -169,6 +174,61 @@ def _compare_logits(
             rows=flattened_dense.shape[0],
         )
     return accumulator.result()
+
+
+def _teacher_kl_weight_gradient(
+    model: torch.nn.Module,
+    target: torch.nn.Linear,
+    rows: Sequence[Mapping[str, torch.Tensor]],
+    teacher: Sequence[torch.Tensor],
+    candidate_weight: torch.Tensor,
+) -> torch.Tensor:
+    """Differentiate token-mean teacher KL through the live quantized suffix.
+
+    A forward hook substitutes an FP32 leaf for the target weight. This avoids
+    accumulating the propagation gradient in an FP16 model parameter while
+    preserving the model's native forward dtype and complete downstream graph.
+    Rows are differentiated one at a time so full-sequence activations are
+    released between backward passes.
+    """
+
+    if len(rows) != len(teacher) or not rows:
+        raise ValueError("P9 gradient rows and teacher logits must be non-empty and aligned")
+    if candidate_weight.shape != target.weight.shape or not candidate_weight.is_floating_point():
+        raise ValueError("P9 candidate weight must match the target linear")
+    device = target.weight.device
+    candidate = candidate_weight.detach().to(device=device, dtype=torch.float32).requires_grad_(True)
+    total_tokens = sum(int(logits.shape[0] * logits.shape[1]) for logits in teacher)
+    if total_tokens < 1:
+        raise ValueError("P9 teacher logits must contain at least one next-token target")
+    requires_grad = tuple((parameter, parameter.requires_grad) for parameter in model.parameters())
+    for parameter, _ in requires_grad:
+        parameter.requires_grad_(False)
+
+    def substitute_weight(module, args, _output):
+        hidden = args[0]
+        return F.linear(hidden, candidate.to(hidden.dtype), module.bias)
+
+    handle = target.register_forward_hook(substitute_weight)
+    accumulated = torch.zeros_like(candidate)
+    try:
+        for row, dense_logits in zip(rows, teacher, strict=True):
+            student_logits = model(**row).logits[:, :-1].to(torch.float32)
+            teacher_log_probs = F.log_softmax(dense_logits.to(device=device, dtype=torch.float32), dim=-1)
+            student_log_probs = F.log_softmax(student_logits, dim=-1)
+            loss = F.kl_div(
+                student_log_probs,
+                teacher_log_probs,
+                reduction="sum",
+                log_target=True,
+            ) / total_tokens
+            (row_gradient,) = torch.autograd.grad(loss, candidate, create_graph=False)
+            accumulated.add_(row_gradient)
+    finally:
+        handle.remove()
+        for parameter, enabled in requires_grad:
+            parameter.requires_grad_(enabled)
+    return accumulated.detach()
 
 
 def _passes_confirmation(
@@ -311,6 +371,7 @@ def _localized_summary(
             "alpha": record.get("alpha"),
             "tile": record.get("tile"),
             "segment": record.get("segment"),
+            "propagated_first_order": record.get("propagated_first_order"),
             "replay_score": record["replay_score"],
             "selected": record.get("selected") is True,
         }
@@ -345,6 +406,8 @@ def main() -> None:
         raise ValueError("full-horizon replay candidate count must be nonnegative")
     if not 0 <= args.direct_replay_candidates <= args.replay_candidates:
         raise ValueError("direct replay candidate count must be between zero and replay-candidates")
+    if args.gradient_ranked_direct and args.direct_replay_candidates < 1:
+        raise ValueError("gradient-ranked direct search requires at least one direct replay candidate")
     if args.replay_folds < 1 or args.replay_folds > args.search_rows:
         raise ValueError("replay fold count must be between one and the search row count")
     if not 0 <= args.minimum_relative_kl_improvement < 1:
@@ -429,6 +492,7 @@ def main() -> None:
     callback_report: dict[str, object] = {}
     callback_weights: dict[str, torch.Tensor] = {}
     replay_scores: list[dict[str, object]] = []
+    gradient_report: dict[str, object] = {"enabled": args.gradient_ranked_direct}
     replay_baseline_fold_kl: list[float] | None = None
     replay_row_folds = tuple(
         tuple(row_sets["search"][fold_index :: args.replay_folds])
@@ -473,6 +537,31 @@ def main() -> None:
                 }
             )
             return score
+        finally:
+            with torch.no_grad():
+                target.weight.copy_(source_weight.to(device=device, dtype=target.weight.dtype))
+
+    def full_horizon_candidate_gradient(candidate: torch.Tensor) -> torch.Tensor:
+        assert search_teacher is not None
+        started_gradient = time.perf_counter()
+        try:
+            gradient = _teacher_kl_weight_gradient(
+                student_model,
+                target,
+                row_sets["search"],
+                search_teacher,
+                candidate,
+            )
+            gradient_report.update(
+                {
+                    "seconds": time.perf_counter() - started_gradient,
+                    "valid_tokens": sum(int(logits.shape[0] * logits.shape[1]) for logits in search_teacher),
+                    "l2_norm": float(torch.linalg.vector_norm(gradient.to(torch.float32)).item()),
+                    "max_abs": float(gradient.abs().max().item()),
+                    "finite": bool(torch.isfinite(gradient).all()),
+                }
+            )
+            return gradient
         finally:
             with torch.no_grad():
                 target.weight.copy_(source_weight.to(device=device, dtype=target.weight.dtype))
@@ -523,6 +612,9 @@ def main() -> None:
             propagated_target_output=propagated_target,
             propagated_acceptance=confirmation_callback,
             propagated_candidate_score=(full_horizon_candidate_score if args.replay_candidates else None),
+            propagated_candidate_gradient=(
+                full_horizon_candidate_gradient if args.gradient_ranked_direct else None
+            ),
         )
     result = quantize_qvq_linear(
         source_weight,
@@ -582,6 +674,7 @@ def main() -> None:
             "max_changes": args.max_changes,
             "replay_candidates": args.replay_candidates,
             "direct_replay_candidates": args.direct_replay_candidates,
+            "gradient_ranked_direct": args.gradient_ranked_direct,
             "replay_folds": args.replay_folds,
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
@@ -594,6 +687,7 @@ def main() -> None:
             "enabled": bool(args.replay_candidates),
             "evaluations": replay_scores,
         },
+        "full_horizon_gradient": gradient_report,
         "confirmation": callback_report,
         "evaluation": {
             "rollback_dense": rollback_evaluation,
