@@ -508,6 +508,25 @@ It reuses the same search prompts and forwards, but rejects any candidate that r
 search criterion more robust at no model-format or inference cost. It does not turn either fold into confirmation;
 the disjoint 64-row confirmation gate remains authoritative.
 
+The matched two-fold run selected the same `r16_a1_t19_s5` proposal. It improved both round-robin search folds, but
+still failed the independent confirmation horizon:
+
+| Horizon | Baseline KL | Proposal KL | Relative/worst-fold result |
+| --- | ---: | ---: | ---: |
+| search fold 0 | 0.0024100594 | 0.0024068049 | -0.1350% |
+| search fold 1 | 0.0033453477 | 0.0033416025 | -0.1119% |
+| pooled search | 0.0028417924 | 0.0028383114 | -0.1225% |
+| independent confirmation | 0.0028031558 | 0.0028038107 | +0.0234%; reject |
+
+Confirmation Top-1/5/10 point estimates improved, but the predeclared KL authority regressed, so the exact baseline
+was serialized. Quantization took `548.67` seconds. The untouched packed evaluation artifact measured final KL
+`0.0017531236`, Top-1 `98.2113%`, Top-5 overlap `97.5648%`, and Top-10 overlap `97.3217%`; these are baseline
+metrics because the proposal was rejected. The result excludes a simple two-fold-consensus fix: the candidate's
+tiny improvement is consistent across the 32-row search split yet does not transfer to the later 64-row split.
+Further spectral P4/P6 promotion work should stop until candidate generation changes materially. The next candidate
+generator should search direct bank/path alternatives under live-prefix propagation rather than rescore more
+variants of the same EoRA-derived local direction.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32
