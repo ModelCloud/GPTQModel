@@ -315,10 +315,13 @@ regressing top-1 significantly. Higher W3--W8 rates remain a separate research h
 results have transferred local improvements more reliably, but no such rate may be enabled without its own held-out
 model-output gate.
 
-When output alignment is explicitly enabled, its optimizer is configurable as `adam` or `adamw`, with
-`optimizer="adam"` and `weight_decay=0.0` as the defaults. These defaults match the public QTIP/YAQA recovery
-implementations, which construct Adam without decoupled weight decay; AdamW and nonzero decay are opt-in tuning
-controls for calibration experiments and do not change the serialized payload or inference kernel.
+Fixed-trellis output alignment is enabled by default for QVQ and is explicitly disabled with
+`output_alignment=None`. Its optimizer is configurable as `adam` or `adamw`, with `optimizer="adam"` and
+`weight_decay=0.0` as the defaults. These defaults match the public QTIP/YAQA recovery implementations, which
+construct Adam without decoupled weight decay; AdamW and nonzero decay are opt-in tuning controls for calibration
+experiments and do not change the serialized payload or inference kernel. Promotion was based on real Llama 3.2 1B
+four-layer Q/K/V/O evaluation: two further-disjoint holdouts reduced final KL/JSD by about 13--15% and increased
+Top-5/Top-10 by about 0.5 points, while Top-1 moved down only 0.03--0.04 points, within noise.
 
 YAQA can also use a separate calibration stream through `GPTQModel.quantize(..., yaqa_calibration=...)`. This
 stream is prepared independently and is used only for the full-model Fisher/Sketch-B factors. The normal

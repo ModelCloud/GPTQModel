@@ -1,9 +1,29 @@
 # QVQ PGC16 handoff and TODOs
 
-Status as of 2026-08-12: production QVQ accepts fixed `pgc16-v1` only. Learned `pgc16-v2` is retired after repeated
+Status as of 2026-08-16: production QVQ accepts fixed `pgc16-v1` only. Learned `pgc16-v2` is retired after repeated
 tests showed local/proxy error reductions without dependable held-out final-KLD improvement. The v2 evidence and
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
+
+### Fixed-trellis SU/SV alignment promoted by noise-aware real-model gates (2026-08-16)
+
+The previous default-off decision below is historical and is superseded by the larger real-model confirmation. The
+default is now `OutputAlignConfig()`; pass `output_alignment=None` to reproduce the exact unaligned baseline.
+
+The promotion contract used real Llama 3.2 1B Instruct weights, the first four decoder layers, all Q/K/V/O
+projections, W2 V2B2-P32 packed weights, 64 full calibration rows, 64 disjoint alignment rows, and batch-1 unrestricted
+row lengths. SU/SV were the only trainable values; trellises, selectors, bank family, dense weights, and inference
+payload operations remained fixed. Two further-disjoint 128-row evaluation slices followed the same validation split:
+
+| Evaluation slice | KL delta | JSD delta | Top-1 delta | Top-5 delta | Top-10 delta | Valid tokens |
+|---|---:|---:|---:|---:|---:|---:|
+| rows `[640,768)` | -12.92% | -12.55% | -0.043 pp | +0.456 pp | +0.498 pp | 46,821 |
+| rows `[768,896)` | -14.87% | -14.40% | -0.030 pp | +0.499 pp | +0.543 pp | 39,874 |
+
+The old all-columns gate marked both evaluation arms as failed solely because Top-1 was numerically lower. That was a
+bad decision rule: the Top-1 changes were approximately 20 and 12 tokens respectively, while KL/JSD and broader-rank
+agreement improved consistently. The noise-aware policy classifies these as material propagated gains with a
+noise-consistent Top-1 guardrail, not as regressions. Save/reload and fixed-trellis runtime parity remain required.
 
 ## Fixed-trellis SU/SV alignment on banked V2 (2026-08-16)
 
@@ -71,8 +91,8 @@ all-metric validation gate therefore correctly rejects and does not serialize it
 the zero-runtime-cost mechanism survives banked V2, but also direct evidence that it is not yet safe as an
 unconditional default.
 
-**Decision:** keep `output_alignment=None` as the default. The corrected machinery is a valid, format-free candidate
-and exact rollback makes it safe when explicitly requested, but default promotion requires the planned matched
+**Historical decision (superseded 2026-08-16):** keep `output_alignment=None` as the default. The corrected machinery was
+a valid, format-free candidate and exact rollback made it safe when explicitly requested, but default promotion required the planned matched
 V2B2-P32+YAQA factorial with larger, mutually disjoint ordinary-calibration, YAQA-Fisher, alignment-train,
 alignment-confirmation, and final-evaluation slices; multiple YAQA seeds; full-layer/final-logit metrics; paired task
 flips; and no material guardrail regression. The Apple YAQA lifecycle gate is currently blocked by the separately

@@ -5774,9 +5774,9 @@ class EXL3Config(BaseQuantizeConfig):
 class OutputAlignConfig:
     """Offline decoder-layer output alignment for fixed QVQ trellises.
 
-    Supplying this object opts into the additional calibration stage. ``None``
-    on :class:`QVQConfig` is the default-disabled control and remains bitwise
-    identical to the normal QVQ lifecycle.
+    QVQ enables this stage by default. Passing ``output_alignment=None`` to
+    :class:`QVQConfig` is the explicit opt-out control for a baseline or
+    rollback comparison.
     """
 
     learning_rate: float = 1e-5
@@ -5789,7 +5789,7 @@ class OutputAlignConfig:
     minimum_relative_improvement: float = 0.0
     # QTIP derives every input Hessian from the untouched dense model before
     # committing blockwise corrections. Keep that contract inside the
-    # default-disabled output-alignment experiment instead of mixing later
+    # Keep QTIP's pristine dense-Hessian contract instead of mixing later
     # layers with activations already perturbed by earlier QVQ layers.
     pristine_hessian: bool = True
 
@@ -5888,7 +5888,7 @@ class QVQConfig(BaseQuantizeConfig):
     viterbi_objective: str = field(default="euclidean")
     tail_biting_candidates: int = field(default=1)
     viterbi_minimum_proxy_improvement: float = field(default=0.0)
-    output_alignment: Optional[OutputAlignConfig] = field(default=None)
+    output_alignment: Optional[OutputAlignConfig] = field(default_factory=OutputAlignConfig)
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -6046,7 +6046,9 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: `viterbi_minimum_proxy_improvement` requires `hessian_diagonal` objective.")
         self.output_alignment = _normalize_qvq_output_alignment_config(self.output_alignment)
         if self.output_alignment is not None and self.lm_head:
-            raise ValueError("QVQ output alignment currently supports decoder layers, not `lm_head` quantization.")
+            raise ValueError(
+                "QVQ output alignment currently supports decoder layers, not language-model head (`lm_head`) quantization."
+            )
         if self.rounding == "yaqa" and self.output_channel_scale_optimization:
             raise ValueError("QVQConfig: YAQA does not support independent output-channel scale optimization.")
         if self.rounding == "yaqa" and self.module_scale_search:

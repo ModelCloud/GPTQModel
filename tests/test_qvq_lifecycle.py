@@ -221,15 +221,17 @@ def test_qvq_lifecycle_forwards_module_scale_search_and_reports_the_guarded_deci
     assert isinstance(stat["module_scale_reencoded"], bool)
 
 
-def test_qvq_output_alignment_is_disabled_without_explicit_config():
+def test_qvq_output_alignment_is_enabled_by_default_and_explicitly_disablable():
     processor = _processor()
     inputs = [[torch.ones(1, 1, 16)]]
 
-    assert processor._output_alignment is None
-    assert processor.uses_grouped_optimization() is False
-    assert processor.needs_pristine_layer_clone() is False
-    assert processor.clean_group_layer_inputs(layer_index=0, layer_inputs=inputs) is inputs
-    assert processor.receive_clean_layer_inputs(layer_index=0, layer_inputs=inputs) is None
+    assert processor._output_alignment is not None
+    disabled = _processor(qcfg=QVQConfig(bits=2, output_alignment=None, device="cpu", offload_to_disk=False))
+    assert disabled._output_alignment is None
+    assert disabled.uses_grouped_optimization() is False
+    assert disabled.needs_pristine_layer_clone() is False
+    assert disabled.clean_group_layer_inputs(layer_index=0, layer_inputs=inputs) is inputs
+    assert disabled.receive_clean_layer_inputs(layer_index=0, layer_inputs=inputs) is None
 
 
 def test_qvq_output_alignment_delegates_pristine_stream_ownership_to_attachment():
@@ -421,7 +423,7 @@ def test_qvq_pristine_hessian_empty_capture_failure_cleans_context():
             device="cpu",
             offload_to_disk=False,
         ),
-        QVQConfig(bits=2, rounding="yaqa", device="cpu", offload_to_disk=False),
+        QVQConfig(bits=2, rounding="yaqa", output_alignment=None, device="cpu", offload_to_disk=False),
     ],
 )
 def test_qvq_pristine_hessian_capture_is_inert_when_disabled_or_yaqa(qcfg):
@@ -649,6 +651,7 @@ def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quanti
         bits=bits,
         rounding="yaqa",
         yaqa={"seed": 787, "minimum_sequences": 2},
+        output_alignment=None,
         device="cpu",
         offload_to_disk=False,
     )
@@ -705,6 +708,24 @@ def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quanti
         module_scale_multiplier=1.0,
         module_scale_reencoded=False,
         telemetry=None,
+        bank_ids=None,
+        bank_alt_id=None,
+        yaqa_bank_fallback_to_v2=None,
+        yaqa_selector_churn=None,
+        yaqa_family_changed=None,
+        yaqa_block_family_id=None,
+        yaqa_spectral_selected=None,
+        yaqa_spectral_method=None,
+        yaqa_spectral_rank=None,
+        yaqa_spectral_lambda=None,
+        yaqa_spectral_alpha=None,
+        yaqa_spectral_svd_device=None,
+        yaqa_spectral_concentration=None,
+        yaqa_spectral_oracle_losses=None,
+        yaqa_spectral_candidates=None,
+        yaqa_spectral_absorption_efficiency=None,
+        yaqa_spectral_selector_churn=None,
+        yaqa_spectral_family_changed=None,
         serialized_tensors=lambda: {
             "trellis": fake_result.trellis,
             "SU": fake_result.SU,
