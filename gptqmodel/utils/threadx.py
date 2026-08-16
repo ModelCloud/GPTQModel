@@ -1498,6 +1498,12 @@ class DeviceThreadPool:
     # --------------- Internals ---------------
 
     def _key(self, dev: torch.device) -> str:
+        # PyTorch may report tensors on the single Apple accelerator as
+        # ``mps:0`` even though device discovery registers it as ``mps``.
+        # MPS has no independently addressable device index, so both spellings
+        # must resolve to the one owner lane and lock.
+        if dev.type == "mps":
+            return "mps"
         idx = "" if dev.index is None else f":{dev.index}"
         return f"{dev.type}{idx}"
 

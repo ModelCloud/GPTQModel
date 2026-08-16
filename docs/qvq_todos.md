@@ -5,6 +5,61 @@ tests showed local/proxy error reductions without dependable held-out final-KLD 
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
 
+## Fixed-trellis SU/SV alignment on banked V2 (2026-08-16)
+
+The historical full-model W2 experiment remains the strongest positive zero-runtime-cost alignment result. Relative
+to its fixed-trellis baseline, SU/SV-only QTIP-math alignment lowered forward KLD by `19.66%`, lowered JSD by
+`18.14%`, raised Top-1 agreement by `4.42` percentage points, and raised Top-5 overlap by `3.15` points. The method
+does not add a tensor, byte, lookup, branch, or arithmetic operation at inference: it changes values in the existing
+serialized `SU`/`SV` vectors while leaving trellis states and bank selectors fixed.
+
+That result did **not** establish that alignment is unconditionally safe on V2B2-P32+YAQA. A lifecycle audit found
+that the alignment attachment had been decoding banked V2 candidates as canonical V2 because it discarded the
+serialized `v2b2_p32` flag and module-level `bank_alt_id`. The corrected attachment now preserves the complete
+runtime tuple, P32 selectors, and alternative-family ID in both its differentiable temporary module and its exact
+runtime validation module. The audit also fixed Apple-only validation blockers: `mps`/`mps:0` owner-lane
+normalization, activation-dtype preservation during replay, mutation-safe MLX codebook transfer for inference-mode
+tensors, same-backend reload validation, and removal of a non-serializable model config from tokenizer test metadata.
+
+The first corrected real-model gate used Llama 3.2 1B Instruct layer 0, all Q/K/V/O projections, W2 V2B2-P32,
+Block-LDLQ, four full natural calibration rows (`2,442` valid tokens), batch 1, and MPS. Alignment used two training
+batches and one held-out validation batch. A matched rollback arm ran the identical sequential lifecycle but required
+an impossible `100%` relative improvement, so every candidate was transactionally rejected and the exact pre-align
+payload was serialized. This avoids confounding the comparison with the different Q/K/V grouping used when the
+attachment is absent.
+
+| Sequential pass | Dense validation MSE | Accepted MSE | Dense reduction | Runtime reduction | Accepted |
+|---:|---:|---:|---:|---:|:---:|
+| 1 | 1.661989e-6 | 1.278036e-6 | 23.10% | 21.94% | yes |
+| 2 | 1.420996e-6 | 1.209125e-6 | 14.91% | 14.51% | yes |
+| 3 | 1.562209e-6 | 1.433690e-6 | 8.23% | 8.46% | yes |
+| 4 | 3.057022e-6 | 2.881533e-6 | 5.74% | 5.36% | yes |
+
+Both the accepted and rollback artifacts passed save/reload with bit-exact logits on MPS. Their first external check
+used 64 disjoint full-length rows `[128,192)`, producing `22,278` valid next-token distributions:
+
+| Arm | Final KLD | JSD | Top-1 | Top-5 |
+|:---|---:|---:|---:|---:|
+| Exact rollback baseline | 0.007940945 | 0.001933200 | 96.7636% | 94.9744% |
+| Accepted SU/SV alignment | 0.008004634 | 0.001934543 | 96.9387% | 95.0193% |
+| Alignment delta | +0.80% | +0.07% | +0.1751 pp | +0.0449 pp |
+
+This is the low-rate lesson again: substantial clean layer-MSE recovery does not guarantee better propagated
+distributional loss. The external result is mixed—Top-1 and Top-5 improve slightly, while KLD and JSD regress
+slightly. The four-prompt lifecycle check was mixed in the opposite way (KLD/JSD improved about `27.0%`/`25.0%`,
+Top-1 was unchanged, and Top-5 fell `2.16` points), confirming that neither tiny prompt set can promote a default.
+
+**Decision:** keep `output_alignment=None` as the default. The corrected machinery is a valid, format-free candidate
+and exact rollback makes it safe when explicitly requested, but default promotion requires the planned matched
+V2B2-P32+YAQA factorial with larger, mutually disjoint ordinary-calibration, YAQA-Fisher, alignment-train,
+alignment-confirmation, and final-evaluation slices; multiple YAQA seeds; full-layer/final-logit metrics; paired task
+flips; and no material guardrail regression. The Apple YAQA lifecycle gate is currently blocked by the separately
+owned inference-tensor Hessian-provenance fix, so the Block-LDLQ result must not be mislabeled as the YAQA factorial.
+
+Validation completed here: `25 passed, 3 skipped` in the output-alignment suite (CUDA-only cases skipped), `3 passed`
+for the focused MLX banked-quantization bridge, four accepted Q/K/V/O alignment passes, and bit-exact live/save/reload
+logits for both accepted and rollback artifacts.
+
 ## V2B2-P32 bring-up (2026-08-15)
 
 V2B2-P32 is now the first banked-V2 A/B arm. It uses the same one-byte-per-tile selector payload as V2B4-P64 but

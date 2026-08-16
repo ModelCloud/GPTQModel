@@ -1190,7 +1190,10 @@ Run these after or alongside the `L16/V4` reference:
 2. **Fixed-trellis `SU`/`SV` alignment.** Apply blockwise clean-target alignment followed by short full-model
    soft-target alignment with disjoint validation and rollback. It adds no inference byte or operation. Existing W2
    diagnostics lowered KLD/JSD by about 19.66%/18.14% and raised top-1/top-5 by 4.42/3.15 points, making this the
-   strongest demonstrated zero-runtime-cost recovery control; task-level promotion remains pending.
+   strongest demonstrated zero-runtime-cost recovery control. A corrected W2 V2B2-P32 layer-0 gate nevertheless
+   produced a mixed 64-row propagated result: Top-1/Top-5 rose by 0.175/0.045 points while final KLD/JSD regressed by
+   0.80%/0.07%. Keep it explicit and transactional; default promotion requires a larger disjoint B2-P32+YAQA
+   factorial rather than clean layer-MSE acceptance alone. The full audit is recorded in `docs/qvq_todos.md`.
 3. **Fused low-rank residual fallback.** If joint shaping and existing-scale alignment leave a diffuse residual, fit
    a propagation-aware rank-`r` correction and fuse its two small matmuls. FP16 factors add
 

@@ -72,16 +72,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bits", type=float, default=2.0)
     parser.add_argument(
         "--format",
-        choices=("qvq", "qvq_v4"),
+        choices=("qvq", "qvq_v4", "qvq_v2b2_p32", "qvq_v2b4_p64"),
         default="qvq",
-        help="QVQ codec format: legacy V2 (`qvq`) or four-coordinate V4 (`qvq_v4`).",
+        help="QVQ codec format, including segmented banked-V2 lifecycle validation formats.",
     )
     parser.add_argument(
         "--bank-count",
         type=int,
-        choices=(1, 4),
+        choices=(1, 2, 4),
         default=1,
-        help="QVQ V4 bank count; 4 enables rate-keyed bank selectors in the CUDA/Torch lifecycle.",
+        help="QVQ bank count: 2 for V2B2-P32, 4 for V4/V2B4-P64, otherwise 1.",
     )
     parser.add_argument(
         "--attention-bits",
@@ -285,13 +285,27 @@ def main() -> None:
         # after quantization and cannot safely be moved as a whole with .to().
         offload_to_disk=False,
     )
-    reference_model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        dtype=QVQ_INFERENCE_DTYPE,
-        device_map={"": args.device},
-        attn_implementation="eager",
-        trust_remote_code=args.trust_remote_code,
-    )
+    reference_load_kwargs = {
+        "dtype": QVQ_INFERENCE_DTYPE,
+        "attn_implementation": "eager",
+        "trust_remote_code": args.trust_remote_code,
+    }
+    if torch.device(args.device).type == "mps":
+        # Transformers/Accelerate direct-to-MPS loading can terminate the
+        # process while materializing sharded weights. CPU materialization
+        # followed by one explicit transfer is stable and leaves the dense
+        # reference numerically unchanged.
+        reference_model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            low_cpu_mem_usage=True,
+            **reference_load_kwargs,
+        ).to(args.device)
+    else:
+        reference_model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            device_map={"": args.device},
+            **reference_load_kwargs,
+        )
     reference_module_names = {name for name, _ in reference_model.named_modules()}
     missing_exclusions = sorted(set(args.exclude_module) - reference_module_names)
     if missing_exclusions:
@@ -402,19 +416,34 @@ def main() -> None:
         for module in model.model.modules()
         if isinstance(module, QVQLinear)
     )
-    qvq_payload_bytes = sum(
+    qvq_trellis_bytes = sum(
         module.trellis.numel() * module.trellis.element_size()
         for module in model.model.modules()
         if isinstance(module, QVQLinear)
     )
+    qvq_selector_bytes = sum(
+        0 if module.bank_ids is None else module.bank_ids.numel() * module.bank_ids.element_size()
+        for module in model.model.modules()
+        if isinstance(module, QVQLinear)
+    )
+    qvq_payload_bytes = qvq_trellis_bytes + qvq_selector_bytes
     qvq_auxiliary_bytes = sum(
         tensor.numel() * tensor.element_size()
         for module in model.model.modules()
         if isinstance(module, QVQLinear)
         for tensor in (module.SU, module.SV)
     )
+    qvq_bank_metadata_bytes = sum(
+        0 if module.bank_alt_id is None else module.bank_alt_id.numel() * module.bank_alt_id.element_size()
+        for module in model.model.modules()
+        if isinstance(module, QVQLinear)
+    )
+    qvq_auxiliary_bytes += qvq_bank_metadata_bytes
     qvq_storage = {
         "weight_numel": qvq_weight_numel,
+        "trellis_bytes": qvq_trellis_bytes,
+        "selector_bytes": qvq_selector_bytes,
+        "bank_metadata_bytes": qvq_bank_metadata_bytes,
         "payload_bytes": qvq_payload_bytes,
         "auxiliary_bytes": qvq_auxiliary_bytes,
         "payload_bits_per_weight": qvq_payload_bytes * 8 / qvq_weight_numel,
@@ -432,6 +461,14 @@ def main() -> None:
     live_accuracy = _accuracy_metrics(dense_logits, live_logits)
     _assert_dense_accuracy(live_accuracy, args)
 
+    # GPTQModel's tokenizer loader may retain the model `config` as a runtime
+    # initialization kwarg. It is not tokenizer metadata and Transformers
+    # cannot JSON-serialize it into tokenizer_config.json.
+    tokenizer_init_kwargs = getattr(model.tokenizer, "init_kwargs", None)
+    if isinstance(tokenizer_init_kwargs, dict):
+        tokenizer_init_kwargs.pop("config", None)
+        tokenizer_init_kwargs.pop("model_config", None)
+
     save_started = time.perf_counter()
     model.save(str(output))
     save_seconds = time.perf_counter() - save_started
@@ -448,7 +485,10 @@ def main() -> None:
         str(output),
         backend=BACKEND.QVQ,
         dtype=QVQ_INFERENCE_DTYPE,
-        device_map="auto",
+        # Reload onto the same backend as the live model. `auto` can place a
+        # partially quantized MPS checkpoint on CPU, turning a serialization
+        # parity assertion into a cross-backend numerical comparison.
+        device_map={"": args.device},
         attn_implementation="eager",
         trust_remote_code=args.trust_remote_code,
     )

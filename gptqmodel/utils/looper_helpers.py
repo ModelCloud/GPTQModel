@@ -179,6 +179,10 @@ def _canonical_device(device: torch.device) -> torch.device:
     if device.type in {"cuda", "xpu", "npu"}:
         index = device.index if device.index is not None else 0
         return torch.device(f"{device.type}:{index}")
+    if device.type == "mps":
+        # Apple exposes one process-wide MPS device. Tensor.device may spell
+        # it as mps:0 while configuration and worker ownership use mps.
+        return torch.device("mps")
     return device
 
 

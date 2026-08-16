@@ -1434,17 +1434,27 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
         copied = tensor.detach().to("cpu").contiguous()
         return mx.array(copied.numpy())
 
-    global _V2_BANKED_TORCH_CODEBOOK_HOT
-    hot = _V2_BANKED_TORCH_CODEBOOK_HOT
-    if hot is None or hot[0] is not codebooks or hot[1] != codebooks._version:
-        with _V2_BANKED_TORCH_CODEBOOK_LOCK:
-            hot = _V2_BANKED_TORCH_CODEBOOK_HOT
-            if hot is None or hot[0] is not codebooks or hot[1] != codebooks._version:
-                hot = (codebooks, codebooks._version, copy_to_mlx(codebooks))
-                _V2_BANKED_TORCH_CODEBOOK_HOT = hot
+    try:
+        codebook_version = codebooks._version
+    except RuntimeError:
+        # Quantization workers intentionally run under inference_mode, whose
+        # tensors have no mutation version counter. Reusing an identity-only
+        # cache entry would silently serve stale codebooks after an in-place
+        # update, so copy these small immutable-by-contract tables per call.
+        mlx_codebooks = copy_to_mlx(codebooks)
+    else:
+        global _V2_BANKED_TORCH_CODEBOOK_HOT
+        hot = _V2_BANKED_TORCH_CODEBOOK_HOT
+        if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
+            with _V2_BANKED_TORCH_CODEBOOK_LOCK:
+                hot = _V2_BANKED_TORCH_CODEBOOK_HOT
+                if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
+                    hot = (codebooks, codebook_version, copy_to_mlx(codebooks))
+                    _V2_BANKED_TORCH_CODEBOOK_HOT = hot
+        mlx_codebooks = hot[2]
     outputs = qvq_mlx_v2_banked_viterbi(
         copy_to_mlx(sequences),
-        hot[2],
+        mlx_codebooks,
         bits,
         segment_steps=segment_steps,
         overlap=(

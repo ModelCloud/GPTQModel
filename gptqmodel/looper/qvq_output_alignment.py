@@ -18,8 +18,8 @@ from torch import nn
 from ..models.base import module_tree_flags_are_moe
 from ..nn_modules.hooked_linear import HookedLinear
 from ..nn_modules.qlinear.qvq import (
-    QVQLinear,
     _FP16_STABLE_HADAMARD_MIN_WIDTH,
+    QVQLinear,
     _qvq_fp16_emulated_hadamard_fallback,
 )
 from ..quantization.config import OutputAlignConfig
@@ -31,7 +31,6 @@ from ..utils.logger import setup_logger
 from ..utils.model import recurse_getattr, recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from .named_module import NamedModule
-
 
 log = setup_logger()
 
@@ -79,7 +78,16 @@ class _FixedTrellisAlignmentLinear(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         input_shape = inputs.shape
         work = inputs.reshape(-1, input_shape[-1])
-        output_dtype = self.output_dtype or inputs.dtype
+        # Production QVQLinear returns the activation dtype. CUDA alone needs
+        # the remembered module dtype to select its range-safe FP16 surrogate
+        # while replay may be entered through autocast with FP32 inputs.
+        # MPS has no equivalent autocast here; using a stale/materialization
+        # weight dtype can turn one Q/K/V projection FP32 and break attention.
+        output_dtype = (
+            self.output_dtype
+            if inputs.device.type == "cuda" and self.output_dtype is not None
+            else inputs.dtype
+        )
         fp16_cuda = work.device.type == "cuda" and output_dtype == torch.float16
         if fp16_cuda:
             # Match the production FP16 decoder's operation ordering while
@@ -365,12 +373,19 @@ class QVQOutputAlignmentAttachment:
             runtime_config = module.state["_qvq_runtime_config"]
             bits, codebook = runtime_config[:2]
             vector_size = runtime_config[2] if len(runtime_config) > 2 else 2
+            trellis_window = runtime_config[4] if len(runtime_config) > 4 else 16
+            dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
+            v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
+            v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
             trellis = module.state["trellis"].to(device=device)
             SU = module.state["SU"].to(device=device)
             SV = module.state["SV"].to(device=device)
             bank_ids = module.state.get("bank_ids")
             if bank_ids is not None:
                 bank_ids = bank_ids.to(device=device)
+            bank_alt_id = module.state.get("bank_alt_id")
+            if bank_alt_id is not None:
+                bank_alt_id = bank_alt_id.to(device=device)
         inner = reconstruct_qvq_inner_weight(
             trellis,
             bits=bits,
@@ -378,7 +393,12 @@ class QVQOutputAlignmentAttachment:
             out_features=module.module.out_features,
             codebook_version=codebook,
             vector_size=vector_size,
+            trellis_window=trellis_window,
             bank_ids=bank_ids,
+            dual_v2=dual_v2,
+            v2b4_p64=v2b4_p64,
+            v2b2_p32=v2b2_p32,
+            bank_alt_id=bank_alt_id,
         )
         return _FixedTrellisAlignmentLinear(
             inner_weight=inner,
@@ -403,10 +423,17 @@ class QVQOutputAlignmentAttachment:
             bits, codebook = runtime_config[:2]
             vector_size = runtime_config[2] if len(runtime_config) > 2 else 2
             bank_count = runtime_config[3] if len(runtime_config) > 3 else 1
+            trellis_window = runtime_config[4] if len(runtime_config) > 4 else 16
+            dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
+            v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
+            v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
             trellis = module.state["trellis"].to(device=device)
             bank_ids = module.state.get("bank_ids")
             if bank_ids is not None:
                 bank_ids = bank_ids.to(device=device)
+            bank_alt_id = module.state.get("bank_alt_id")
+            if bank_alt_id is not None:
+                bank_alt_id = bank_alt_id.to(device=device)
         runtime = QVQLinear(
             bits=bits,
             in_features=module.module.in_features,
@@ -420,6 +447,7 @@ class QVQOutputAlignmentAttachment:
                 "SU": SU.detach().to(device=device, dtype=torch.float32),
                 "SV": SV.detach().to(device=device, dtype=torch.float32),
                 **({} if bank_ids is None else {"bank_ids": bank_ids}),
+                **({} if bank_alt_id is None else {"bank_alt_id": bank_alt_id}),
                 **(
                     {}
                     if module.module.bias is None
@@ -428,7 +456,11 @@ class QVQOutputAlignmentAttachment:
             },
             codebook_version=codebook,
             vector_size=vector_size,
+            trellis_window=trellis_window,
             bank_count=bank_count,
+            dual_v2=dual_v2,
+            v2b4_p64=v2b4_p64,
+            v2b2_p32=v2b2_p32,
         )
         runtime.eval()
         runtime.post_init()

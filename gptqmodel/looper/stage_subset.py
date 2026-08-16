@@ -1237,7 +1237,7 @@ def _run_single_subset_pass(
         if module_weight is not None and expected_device is not None:
             target_device = expected_device if isinstance(expected_device, torch.device) else torch.device(expected_device)
             actual_device = get_device(module_weight)
-            assert actual_device == META or actual_device == target_device, (
+            assert actual_device == META or normalize_device_like(actual_device) == normalize_device_like(target_device), (
                 f"Device mismatch for '{module_label}' process task: "
                 f"module weight on {actual_device}, thread target {target_device}."
             )

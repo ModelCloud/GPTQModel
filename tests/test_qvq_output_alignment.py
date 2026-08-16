@@ -15,14 +15,20 @@ from gptqmodel.looper.qvq_output_alignment import (
     _LayerAlignmentState,
     _ReplayBatch,
 )
-from gptqmodel.nn_modules.qlinear.qvq import _qvq_fp16_emulated_hadamard_fallback
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
+from gptqmodel.nn_modules.qlinear.qvq import _qvq_fp16_emulated_hadamard_fallback
 from gptqmodel.quantization import OutputAlignConfig
-from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight, rht_reconstruct_weight
+from gptqmodel.quantization.qvq import (
+    pack_qvq_binary_bank_ids,
+    reconstruct_qvq_inner_weight,
+    rht_reconstruct_weight,
+)
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU_stable
+from gptqmodel.utils.looper_helpers import normalize_device_like
 from gptqmodel.utils.python import has_gil_disabled
+from gptqmodel.utils.threadx import DeviceThreadPool
 
 
 class _TinyDecoderLayer(torch.nn.Module):
@@ -215,6 +221,89 @@ def test_qvq_output_alignment_fixed_trellis_reduces_heldout_layer_error_and_upda
     )
     torch.testing.assert_close(layer.proj.weight, expected, rtol=1e-5, atol=1e-5)
     assert layer.saved.dtype == torch.float64
+
+
+def test_qvq_output_alignment_preserves_v2b2_p32_family_and_selector_geometry():
+    torch.manual_seed(20260816)
+    layer = _TinyDecoderLayer()
+    trellis = torch.randint(
+        torch.iinfo(torch.int32).min,
+        torch.iinfo(torch.int32).max,
+        (1, qvq_words_per_tile(2)),
+        dtype=torch.int32,
+    )
+    dense_selectors = torch.tensor([0, 1, 1, 0, 1, 0, 0, 1], dtype=torch.uint8)
+    packed_selectors = pack_qvq_binary_bank_ids(dense_selectors)
+    bank_alt_id = torch.tensor([2], dtype=torch.uint8)
+    SU = torch.ones(16, dtype=torch.float32)
+    SV = torch.ones(16, dtype=torch.float32)
+    named = NamedModule(layer.proj, name="proj", full_name="model.layers.0.proj", layer_index=0)
+    named.state.update(
+        {
+            "trellis": trellis,
+            "SU": SU,
+            "SV": SV,
+            "bank_ids": packed_selectors,
+            "bank_alt_id": bank_alt_id,
+            "_qvq_runtime_config": (2.0, PGC16_CODEBOOK_VERSION, 2, 2, 16, False, False, True),
+            "module_tree_flags": frozenset(),
+        }
+    )
+    attachment = QVQOutputAlignmentAttachment(OutputAlignConfig())
+
+    expected_inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        vector_size=2,
+        trellis_window=16,
+        bank_ids=packed_selectors,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    canonical_inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=2,
+        in_features=16,
+        out_features=16,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+    )
+    temporary = attachment._build_temporary_module(named, torch.device("cpu"))
+    runtime = attachment._build_runtime_module(named, torch.device("cpu"), SU=SU, SV=SV)
+
+    assert not torch.equal(expected_inner, canonical_inner)
+    torch.testing.assert_close(temporary.inner_weight, expected_inner, rtol=0, atol=0)
+    torch.testing.assert_close(runtime.get_inner_weight_tensor(dtype=torch.float32), expected_inner, rtol=0, atol=0)
+    assert runtime.v2b2_p32 is True
+    assert runtime.bank_count == 2
+    torch.testing.assert_close(runtime.bank_alt_id, bank_alt_id, rtol=0, atol=0)
+
+
+def test_qvq_output_alignment_mps_tensor_device_resolves_to_single_owner_lane():
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+
+    assert pool._key(torch.device("mps")) == "mps"
+    assert pool._key(torch.device("mps:0")) == "mps"
+    assert normalize_device_like(torch.device("mps:0")) == torch.device("mps")
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is required")
+def test_fixed_trellis_alignment_mps_preserves_activation_dtype():
+    module = _FixedTrellisAlignmentLinear(
+        inner_weight=torch.eye(16, device="mps"),
+        SU=torch.ones(16, device="mps"),
+        SV=torch.ones(16, device="mps"),
+        bias=None,
+        # Materialized module metadata can be FP32 even when the live model
+        # activation contract is FP16.
+        output_dtype=torch.float32,
+    )
+
+    output = module(torch.randn(2, 16, device="mps", dtype=torch.float16))
+
+    assert output.dtype == torch.float16
 
 
 def test_qvq_output_alignment_restores_a_buffer_cleared_during_candidate_construction():

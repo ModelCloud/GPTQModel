@@ -589,6 +589,25 @@ def test_qvq_mps_banked_v2_quantization_auto_dispatches_to_mlx(monkeypatch, kind
     torch.testing.assert_close(actual.squared_error.cpu(), expected.squared_error, rtol=2e-5, atol=2e-4)
 
 
+def test_qvq_mps_banked_v2_quantization_accepts_inference_mode_codebooks():
+    """The stage worker creates codec tables under inference mode."""
+
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    bits = 2
+    generator = torch.Generator().manual_seed(32191)
+    sequences = torch.randn((1, 128, 2), generator=generator)
+    codebooks = torch.stack(tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in (0, 2)))
+    expected = tail_biting_v2b2_p32_quantize(sequences, codebooks, bits=bits)
+
+    with torch.inference_mode():
+        actual = tail_biting_v2b2_p32_quantize(sequences.to("mps"), codebooks.to("mps"), bits=bits)
+
+    assert torch.equal(actual.states.cpu(), expected.states)
+    assert torch.equal(actual.segment_bank_ids.cpu(), expected.segment_bank_ids)
+    torch.testing.assert_close(actual.squared_error.cpu(), expected.squared_error, rtol=2e-5, atol=2e-4)
+
+
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
 def test_qvq_mps_banked_v2_yaqa_auto_dispatches_corrected_tiles_to_mlx(monkeypatch, kind):
     from gptqmodel.utils import qvq_mlx
