@@ -3,6 +3,7 @@
 
 import math
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1106,7 +1107,57 @@ def test_qvq_v2b2_prefix_artifact_round_trips_packed_modules_without_dense_weigh
         "family_changed": result.yaqa_spectral_family_changed,
         "selected_changes": 0,
         "selected_candidates": [],
+        "replayed_candidates": [],
     }
+
+    replayed_result = replace(
+        result,
+        yaqa_spectral_candidates={
+            "direct_t3_s4": {
+                "generator": "direct_dense_reencode",
+                "tile": 3,
+                "segment": 4,
+                "replay_score": 1.0004,
+                "selected": False,
+            },
+            "r16_a1_t7_s2": {
+                "rank": 16,
+                "alpha": 1.0,
+                "tile": 7,
+                "segment": 2,
+                "replay_score": 0.9988,
+                "selected": True,
+            },
+            "not_replayed": {"rank": 8, "alpha": 0.5, "selected": False},
+        },
+    )
+    replay_summary = _localized_summary(
+        replayed_result,
+        {"baseline": {}, "proposal": {}, "accepted": False},
+    )
+    assert replay_summary["selected_candidates"] == ["r16_a1_t7_s2"]
+    assert replay_summary["replayed_candidates"] == [
+        {
+            "name": "direct_t3_s4",
+            "generator": "direct_dense_reencode",
+            "rank": None,
+            "alpha": None,
+            "tile": 3,
+            "segment": 4,
+            "replay_score": 1.0004,
+            "selected": False,
+        },
+        {
+            "name": "r16_a1_t7_s2",
+            "generator": "spectral_push",
+            "rank": 16,
+            "alpha": 1.0,
+            "tile": 7,
+            "segment": 2,
+            "replay_score": 0.9988,
+            "selected": True,
+        },
+    ]
 
     model = torch.nn.Module()
     model.layer = torch.nn.Module()

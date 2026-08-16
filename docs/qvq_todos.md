@@ -564,6 +564,28 @@ baseline rollback remain unchanged. The first matched gate should repeat the W2 
 `K=4`, `D=1`, and two search folds. Compare candidate identities and fold scores against the recorded P6 portfolio
 before running another module.
 
+That matched P7 gate completed on the same model, prefix, YAQA factors, row splits, and two-fold score. The reserved
+direct candidate was the first non-baseline replay evaluation. It improved pooled KL but regressed search fold 0, so
+its minimax score was worse than baseline. The known spectral candidate remained the only search winner and again
+failed independent confirmation:
+
+| Candidate | Generator | Fold 0 KL | Fold 1 KL | Pooled KL | Minimax score | Result |
+| :--- | :--- | ---: | ---: | ---: | ---: | :--- |
+| baseline | immutable V2B2-P32+YAQA | 0.0024100594 | 0.0033453477 | 0.0028417924 | 1.000000 | oracle |
+| direct slot 1 | fixed-boundary dense re-encode | 0.0024110036 | 0.0033254998 | 0.0028331388 | 1.000392 | reject on fold 0 |
+| `r16_a1_t19_s5` | spectral push | 0.0024068049 | 0.0033416025 | 0.0028383114 | 0.998880 | provisional winner |
+
+The provisional spectral winner changed one segment, then regressed 64-row confirmation KL from `0.0028031558` to
+`0.0028038107` (`+0.0234%`) and was rolled back exactly. Quantization took `584.72` seconds. The packed evaluation
+therefore remains the baseline: KL `0.0017531236`, Top-1 `98.2113%`, Top-5 overlap `97.5648%`, and Top-10 overlap
+`97.3217%`. P7 proves that the top locally ranked direct path is genuinely different but not downstream-safe.
+
+P8 keeps the replay cost fixed and allocates all four slots to distinct direct fixed-boundary candidates (`K=4`,
+`D=4`). This tests whether local ranking merely chose the wrong direct segment; it does not add forwards, checkpoint
+bytes, or inference work. Candidate identity and generator are exported beside replay scores before this run so the
+four-way result is auditable. If none improves every search fold, retire this dense-reencode generator rather than
+increasing its replay budget.
+
 ### Completed four-layer V2/V2B2-P32/V2B4-P64 comparison
 
 The V2/V2B4-P64 result was captured from commit `393114880c7032ed9a0c8dd7e938a3d6ca77a96c`. The matched V2B2-P32

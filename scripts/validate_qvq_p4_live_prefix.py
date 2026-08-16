@@ -303,6 +303,20 @@ def _localized_summary(
 
     candidates = result.yaqa_spectral_candidates or {}
     selected_candidates = [name for name, record in candidates.items() if record.get("selected") is True]
+    replayed_candidates = [
+        {
+            "name": name,
+            "generator": record.get("generator", "spectral_push"),
+            "rank": record.get("rank"),
+            "alpha": record.get("alpha"),
+            "tile": record.get("tile"),
+            "segment": record.get("segment"),
+            "replay_score": record["replay_score"],
+            "selected": record.get("selected") is True,
+        }
+        for name, record in candidates.items()
+        if "replay_score" in record
+    ]
     return {
         "proposed": "baseline" in callback_report and "proposal" in callback_report,
         "accepted": bool(callback_report.get("accepted", False)),
@@ -310,6 +324,7 @@ def _localized_summary(
         "family_changed": result.yaqa_spectral_family_changed,
         "selected_changes": len(selected_candidates),
         "selected_candidates": selected_candidates,
+        "replayed_candidates": replayed_candidates,
     }
 
 
