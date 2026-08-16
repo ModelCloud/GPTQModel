@@ -103,6 +103,8 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
     practical importance of each metric. A small guardrail regression can be acceptable when it is within noise and
     substantially outweighed by reproducible propagated-loss or task gains; material regressions remain blockers.
     Borderline cases must be escalated on larger disjoint real-model evidence rather than silently accepted or rejected.
+    Classify each metric explicitly as clear positive, noise-consistent, or clear negative. One noisy failure among
+    otherwise meaningful gains is an escalation signal, not an automatic experiment failure; do not count columns.
 
 ## Typical checks
 

@@ -231,6 +231,13 @@ importance. A tiny guardrail loss within uncertainty may be outweighed by a repr
 a material regression is still a blocker. If the uncertainty is unresolved, escalate with a larger disjoint real-model
 split and preserve the baseline instead of silently promoting or discarding the candidate.
 
+For every metric, report one of three classifications: clear positive (the uncertainty interval excludes zero in the
+desired direction), noise-consistent (the interval overlaps zero or the effect is below the predeclared practical
+threshold), or clear negative (a material adverse effect supported by the interval and effect size). Never reject a
+candidate merely because one of five columns is numerically lower. If that column is noise-consistent while the other
+gains are material, escalate the candidate and retain the baseline for rollback; only a clear negative should block
+the experiment at that stage.
+
 - **Promote** only when the predeclared locked gate passes on disjoint evidence.
 - **Escalate** when a candidate has a material improvement in a primary propagated metric, remains finite and
   coherent, and only a minority of guardrails regress by small amounts that could plausibly be sampling noise or
