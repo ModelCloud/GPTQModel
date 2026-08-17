@@ -394,6 +394,30 @@ Complete-family replay is a useful candidate mechanism, but its search estimator
 requires independent confirmation. The next decisive test is Q under another YAQA/RHT seed; no production lifecycle
 promotion should precede that seed-stability gate.
 
+## Q-projection codec-seed replication (P18)
+
+P18 repeated P14's layer-2 Q gate with codec/RHT seed 0 while holding the 512-row YAQA factor estimate and all prompt
+splits fixed. Family 1 again won. Its two-fold search margin was smaller (`0.995143`, at least `0.486%` better in both
+folds) but remained above the locked `0.1%` minimum. Family 2 regressed; family 3 improved only `0.050%` in its worst
+fold and was excluded as sub-threshold.
+
+Family 1 passed packed confirmation and untouched evaluation:
+
+| Metric | 30-row confirmation | 64-row untouched evaluation |
+|---|---:|---:|
+| Final KL | **-1.4351%** | **-0.2846%** |
+| JSD | **-1.4824%** | **-0.6162%** |
+| Top-1 | -0.0772 pp | effectively 0 pp |
+| Top-5 overlap | +0.0733 pp | +0.0395 pp |
+| Top-10 overlap | +0.0550 pp | +0.0345 pp |
+
+The confirmation Top-1 change is noise-scale and disappears on the larger untouched split, while the primary
+distribution metrics and Top-5/10 improve on both. Together P14 and P18 establish codec-seed stability for Q-family
+1. The magnitude is seed-dependent, so the lifecycle must still search and confirm rather than cache a role-wide
+winner. This clears implementation of an **optional per-module complete-family propagation stage** with canonical
+V2+YAQA rollback. It does not yet clear default enablement; a new Fisher sampling seed and broader module/depth sweep
+remain required.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -412,3 +436,5 @@ promotion should precede that seed-stability gate.
 - `artifacts/qvq_p16_complete_family_v_gate/selected_packed.safetensors`
 - `artifacts/qvq_p17_complete_family_o_gate/report_packed.json`
 - `artifacts/qvq_p17_complete_family_o_gate/selected_packed.safetensors`
+- `artifacts/qvq_p18_complete_family_q_seed0_gate/report_packed.json`
+- `artifacts/qvq_p18_complete_family_q_seed0_gate/selected_packed.safetensors`
