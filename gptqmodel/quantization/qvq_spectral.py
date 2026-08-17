@@ -6,6 +6,28 @@ from __future__ import annotations
 import torch
 
 
+def realized_propagation_product(
+    gradient: torch.Tensor,
+    candidate: torch.Tensor,
+    baseline: torch.Tensor,
+) -> torch.Tensor:
+    """Return the exact first-order product of a realized serialized delta."""
+
+    tensors = (gradient, candidate, baseline)
+    if any(not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point() for tensor in tensors):
+        raise TypeError("QVQ realized propagation tensors must be floating-point tensors.")
+    if candidate.shape != baseline.shape or gradient.shape != baseline.shape:
+        raise ValueError("QVQ realized propagation tensors must have identical shapes.")
+    if candidate.device != baseline.device or gradient.device != baseline.device:
+        raise ValueError("QVQ realized propagation tensors must share one device.")
+    if any(not torch.isfinite(tensor).all() for tensor in tensors):
+        raise ValueError("QVQ realized propagation tensors must contain only finite values.")
+    product = (gradient.to(torch.float32) * (candidate.to(torch.float32) - baseline.to(torch.float32))).sum()
+    if not torch.isfinite(product):
+        raise ValueError("QVQ realized propagation product became non-finite.")
+    return product
+
+
 def _validate_spectral_geometry(
     input_root: torch.Tensor,
     output_root: torch.Tensor,

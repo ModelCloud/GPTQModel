@@ -7,6 +7,7 @@ import torch
 from gptqmodel.quantization.qvq_spectral import (
     favorable_propagation_spectral_modes,
     propagation_spectral_mode_products,
+    realized_propagation_product,
     reconstruct_propagation_spectral_modes,
     select_propagation_shaped_svd,
 )
@@ -50,6 +51,17 @@ def test_propagation_spectral_products_match_explicit_unwhitened_atoms():
         expected.append((gradient * atom).sum())
 
     torch.testing.assert_close(actual, torch.stack(expected), rtol=2e-5, atol=2e-6)
+
+
+def test_realized_propagation_product_scores_the_serialized_delta_not_its_teacher():
+    gradient = torch.tensor([[2.0, -1.0], [0.5, 3.0]])
+    baseline = torch.tensor([[1.0, 2.0], [-1.0, 0.0]])
+    candidate = torch.tensor([[0.5, 3.0], [-1.0, -0.5]])
+
+    actual = realized_propagation_product(gradient, candidate, baseline)
+
+    expected = (gradient * (candidate - baseline)).sum()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_favorable_modes_preserve_atoms_and_order_by_predicted_decrease():

@@ -178,6 +178,52 @@ delta*, not only its continuous spectral teacher—for example, require a favora
 then use cross-fitted replay across more independent rows/seeds before confirmation. Merely widening ranks or
 alphas is not supported.
 
+## Realized serialized-gradient gate (P11)
+
+P11 tested that next boundary directly. For every legal fixed-boundary candidate it computed
+
+\[
+g_{\mathrm{realized}}=
+\left\langle\nabla_W KL,
+Q_{\mathrm{candidate}}-Q_{\mathrm{baseline}}\right\rangle
+\]
+
+on the actual reconstructed dense weight that would be serialized. A candidate with
+`g_realized >= 0` was rejected before expensive full-model replay. To avoid merely deleting P10's sole changed
+path, the matched run retained ranks 8/16/32 and used stronger shaped pushes `alpha in {1,2,4}`. All model, prefix,
+factor, gradient, search, confirmation, and evaluation rows otherwise remained identical to P9/P10.
+
+The stronger pushes produced four changed candidates and all four had favorable realized products. Their local
+metrics were allowed to regress because downstream recovery is the primary objective. The selected
+`r32_a4_t7_s5` candidate is the clearest example:
+
+- realized propagated first-order product: `-6.24844e-6`;
+- original YAQA proxy: `+1.5826%` worse;
+- held-out target-module output proxy: `+0.0769%` worse;
+- search fold final KL: `-0.2372%` and `-0.2127%`;
+- token-weighted search final KL: `-0.2263%`.
+
+Thus P11 proves that a locally worse candidate can be directionally useful after full propagation, and the
+localized YAQA/module proxies must not veto it. However, the independent confirmation split reversed again:
+
+| Confirmation metric | P11 proposal versus exact YAQA rollback |
+|---|---:|
+| Final KL | +0.3391% |
+| JSD | +0.3410% |
+| Top-1 | +0.0773 pp |
+| Top-5 overlap | +0.0000 pp |
+| Top-10 overlap | +0.0026 pp |
+
+The Top-N changes are flat-to-positive, but the predeclared primary final-KL gate materially regressed, so the
+proposal was rejected and the exact rollback was serialized. P11 remains default-off.
+
+This changes the diagnosis. P10 lacked useful realized directions; P11 found several and replayed four of them.
+The remaining failure is generalization across small prompt splits: one gradient split plus two search folds can
+still select a candidate whose final-KL direction reverses on confirmation. The next experiment should therefore
+change the estimation contract rather than widen the same candidate sweep: use cross-fitted gradients and replay,
+require a candidate to remain favorable across independent gradient/search folds, and reserve a fresh dataset or
+task-like split for confirmation. No additional format or inference work is justified before that gate.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -185,3 +231,4 @@ alphas is not supported.
 - `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1970_2048_nogradient.json`
 - `artifacts/qvq_p10_propagation_shaped_spectral/layer2_q_w2_rows1954_2048.json`
+- `artifacts/qvq_p11_realized_gradient_gate/layer2_q_w2_rows1954_2048.json`

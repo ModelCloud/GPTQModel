@@ -21,7 +21,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 import gptqmodel.quantization.qvq as qvq_module
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import QVQLinearQuantizationResult, quantize_qvq_linear
-from gptqmodel.quantization.qvq_spectral import select_propagation_shaped_svd
+from gptqmodel.quantization.qvq_spectral import (
+    realized_propagation_product,
+    select_propagation_shaped_svd,
+)
 from scripts.analyze_gptq_low_bit_grid import load_nm_evaluation_batch, tensor_metrics
 from scripts.compare_qvq_codecs_llama_qkvo import (
     _install_qvq_prefix_artifact,
@@ -90,6 +93,11 @@ def _parser() -> argparse.ArgumentParser:
         "--gradient-shaped-spectral",
         action="store_true",
         help="Generate localized candidates from complete signed spectral atoms favored by a disjoint teacher-KL gradient.",
+    )
+    parser.add_argument(
+        "--require-favorable-realized-gradient",
+        action="store_true",
+        help="Skip full replay when the actual serialized candidate delta has a non-favorable gradient product.",
     )
     parser.add_argument("--replay-folds", type=int, default=1)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
@@ -454,6 +462,8 @@ def main() -> None:
         raise ValueError("gradient-shaped spectral search requires at least one replay candidate")
     if args.gradient_shaped_spectral and "gradient" not in splits:
         raise ValueError("gradient-shaped spectral search requires an explicit disjoint gradient split")
+    if args.require_favorable_realized_gradient and not gradient_enabled:
+        raise ValueError("realized-gradient gating requires a propagated-gradient strategy")
     if args.replay_folds < 1 or args.replay_folds > args.search_rows:
         raise ValueError("replay fold count must be between one and the search row count")
     if not 0 <= args.minimum_relative_kl_improvement < 1:
@@ -553,6 +563,8 @@ def main() -> None:
             else "disabled"
         ),
     }
+    full_horizon_gradient_weight: torch.Tensor | None = None
+    gradient_baseline_weight: torch.Tensor | None = None
     replay_baseline_fold_kl: list[float] | None = None
     replay_row_folds = tuple(
         tuple(row_sets["search"][fold_index :: args.replay_folds])
@@ -562,6 +574,26 @@ def main() -> None:
     def full_horizon_candidate_score(candidate: torch.Tensor) -> float:
         nonlocal replay_baseline_fold_kl
         assert search_teacher is not None
+        if args.require_favorable_realized_gradient:
+            if full_horizon_gradient_weight is None or gradient_baseline_weight is None:
+                raise RuntimeError("realized-gradient gate was invoked before gradient generation")
+            if not torch.equal(candidate, gradient_baseline_weight):
+                product = float(
+                    realized_propagation_product(
+                        full_horizon_gradient_weight,
+                        candidate,
+                        gradient_baseline_weight,
+                    ).item()
+                )
+                if product >= 0:
+                    replay_scores.append(
+                        {
+                            "score": None,
+                            "gated": "non-favorable realized gradient",
+                            "realized_propagated_first_order": product,
+                        }
+                    )
+                    return math.inf
         try:
             with torch.no_grad():
                 target.weight.copy_(candidate.to(device=device, dtype=target.weight.dtype))
@@ -602,6 +634,7 @@ def main() -> None:
                 target.weight.copy_(source_weight.to(device=device, dtype=target.weight.dtype))
 
     def full_horizon_candidate_gradient(candidate: torch.Tensor) -> torch.Tensor:
+        nonlocal full_horizon_gradient_weight, gradient_baseline_weight
         assert search_teacher is not None
         gradient_rows = row_sets.get("gradient", row_sets["search"])
         gradient_targets = gradient_teacher if gradient_teacher is not None else search_teacher
@@ -623,6 +656,8 @@ def main() -> None:
                     "finite": bool(torch.isfinite(gradient).all()),
                 }
             )
+            full_horizon_gradient_weight = gradient.detach().clone()
+            gradient_baseline_weight = candidate.detach().clone()
             return gradient
         finally:
             with torch.no_grad():
@@ -793,6 +828,7 @@ def main() -> None:
             "direct_replay_candidates": args.direct_replay_candidates,
             "gradient_ranked_direct": args.gradient_ranked_direct,
             "gradient_shaped_spectral": args.gradient_shaped_spectral,
+            "require_favorable_realized_gradient": args.require_favorable_realized_gradient,
             "replay_folds": args.replay_folds,
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
