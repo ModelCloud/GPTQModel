@@ -85,8 +85,18 @@ _QVQ_YAQA_FAMILY_STREAM_LOCK = threading.Lock()
 _QVQ_YAQA_FAMILY_STREAMS: dict[tuple[str, int], tuple[torch.cuda.Stream, ...]] = {}
 _QVQ_YAQA_SCHEDULE_LOCK = threading.Lock()
 _QVQ_YAQA_SCHEDULE_CACHE: dict[
-    tuple[str, int, int],
-    tuple[tuple[tuple[tuple[int, int], ...], torch.Tensor, torch.Tensor, torch.Tensor], ...],
+    tuple[str, int, int, int, int],
+    tuple[
+        tuple[
+            tuple[tuple[int, int], ...],
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ],
+        ...,
+    ],
 ] = {}
 
 
@@ -107,10 +117,22 @@ def _yaqa_anti_diagonal_schedule(
     device: torch.device,
     input_blocks: int,
     output_blocks: int,
-) -> tuple[tuple[tuple[tuple[int, int], ...], torch.Tensor, torch.Tensor, torch.Tensor], ...]:
+    tile_rows: int = 16,
+    tile_cols: int = 16,
+) -> tuple[
+    tuple[
+        tuple[tuple[int, int], ...],
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ],
+    ...,
+]:
     """Reuse immutable YAQA coordinates and device index tensors by geometry."""
 
-    key = (str(device), input_blocks, output_blocks)
+    key = (str(device), input_blocks, output_blocks, tile_rows, tile_cols)
     with _QVQ_YAQA_SCHEDULE_LOCK:
         schedule = _QVQ_YAQA_SCHEDULE_CACHE.get(key)
         if schedule is None:
@@ -134,6 +156,14 @@ def _yaqa_anti_diagonal_schedule(
                         input_indices,
                         output_indices,
                         input_indices * output_blocks + output_indices,
+                        (
+                            input_indices[:, None] * tile_rows
+                            + torch.arange(tile_rows, dtype=torch.long, device=device)[None]
+                        ).reshape(-1),
+                        (
+                            output_indices[:, None] * tile_cols
+                            + torch.arange(tile_cols, dtype=torch.long, device=device)[None]
+                        ),
                     )
                 )
             schedule = tuple(entries)
@@ -3728,10 +3758,8 @@ def yaqa_inner(
     error_blocks = error.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
     incremental_cuda_feedback = _incremental_cuda_feedback and feedback_device.type == "cuda"
     transformed_error = None
-    committed = None
     feedback_temp = None
     if incremental_cuda_feedback:
-        committed = torch.zeros_like(source)
         feedback_temp = torch.empty_like(source)
         transformed_error = torch.empty_like(source)
         torch.mm(input_L.transpose(0, 1), error, out=feedback_temp)
@@ -3795,8 +3823,14 @@ def yaqa_inner(
     # the exact MLX Metal recurrence.  Only one compact anti-diagonal batch and
     # its traceback cross the shared-memory runtime boundary at a time.
 
-    anti_diagonal_schedule = _yaqa_anti_diagonal_schedule(feedback_device, input_blocks, output_blocks)
-    for coordinates, input_indices, output_indices, flat_tile_indices in anti_diagonal_schedule:
+    anti_diagonal_schedule = _yaqa_anti_diagonal_schedule(
+        feedback_device,
+        input_blocks,
+        output_blocks,
+        tile_rows,
+        tile_cols,
+    )
+    for coordinates, input_indices, output_indices, flat_tile_indices, input_rows, output_rows in anti_diagonal_schedule:
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
             if incremental_cuda_feedback:
                 assert transformed_error is not None
@@ -4045,43 +4079,23 @@ def yaqa_inner(
             elif bank_codebooks is not None:
                 bank_ids[flat_tile_indices] = winners.to(torch.uint8)
         if incremental_cuda_feedback:
-            assert committed is not None and feedback_temp is not None and transformed_error is not None
+            assert feedback_temp is not None and transformed_error is not None
             with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
-                # One anti-diagonal touches a contiguous span of input/output
-                # blocks and is zero everywhere outside that span. Preserve
-                # the original two-GEMM association while removing those
-                # guaranteed-zero rows and columns from both contractions.
-                first_input_block = min(coordinate[0] for coordinate in coordinates)
-                first_output_block = min(coordinate[1] for coordinate in coordinates)
+                # The anti-diagonal consists of independent 16x16 tiles. Form
+                # their right projections as one batch, then concatenate the
+                # matching input factors into one low-rank update. This avoids
+                # materializing a mostly-zero committed matrix while retaining
+                # the exact selected trellis artifact in the reference gate.
                 diagonal_blocks = len(coordinates)
-                input_span = diagonal_blocks * tile_rows
-                output_span = diagonal_blocks * tile_cols
-                committed_panel = committed[:input_span, :output_span]
-                committed_panel.zero_()
-                committed_panel_blocks = committed_panel.view(
-                    diagonal_blocks,
-                    tile_rows,
-                    diagonal_blocks,
-                    tile_cols,
-                ).permute(0, 2, 1, 3)
-                committed_panel_blocks[
-                    input_indices - first_input_block,
-                    output_indices - first_output_block,
-                ] = reconstructed
-                feedback_panel = feedback_temp[:, :output_span]
-                torch.mm(
-                    input_L[
-                        first_input_block * tile_rows : first_input_block * tile_rows + input_span
-                    ].transpose(0, 1),
-                    committed_panel,
-                    out=feedback_panel,
-                )
+                left_factor = input_L[input_rows].transpose(0, 1)
+                right_factor = torch.bmm(
+                    reconstructed,
+                    output_L[output_rows],
+                ).reshape(diagonal_blocks * tile_rows, out_features)
                 torch.addmm(
                     transformed_error,
-                    feedback_panel,
-                    output_L[
-                        first_output_block * tile_cols : first_output_block * tile_cols + output_span
-                    ],
+                    left_factor,
+                    right_factor,
                     beta=1,
                     alpha=-1,
                     out=transformed_error,
@@ -4356,6 +4370,8 @@ def yaqa_inner_v2b2_p32(
             inner_weight.device,
             inner_weight.shape[0] // kwargs.get("tile_rows", 16),
             inner_weight.shape[1] // kwargs.get("tile_cols", 16),
+            kwargs.get("tile_rows", 16),
+            kwargs.get("tile_cols", 16),
         )
         candidate_streams = _yaqa_family_streams(inner_weight.device, len(alternative_ids) + 1)
         canonical_stream, family_streams = candidate_streams[0], candidate_streams[1:]

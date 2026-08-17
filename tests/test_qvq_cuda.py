@@ -1255,8 +1255,8 @@ def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_b2_and_b4
 
 @pytest.mark.parametrize("shape", ((32, 48), (48, 32)))
 @pytest.mark.parametrize("bits", (1.0, 2.5, 3.5))
-def test_qvq_cuda_cropped_incremental_yaqa_feedback_is_exact_for_rectangular_b2(shape, bits):
-    """Cropped anti-diagonal GEMMs must preserve the complete rectangular B2 artifact."""
+def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2(shape, bits):
+    """Factored anti-diagonal GEMMs must preserve the complete rectangular B2 artifact."""
 
     in_features, out_features = shape
     generator = torch.Generator(device="cpu").manual_seed(20260822 + in_features + int(bits * 10))
