@@ -47,6 +47,7 @@ from gptqmodel.quantization.rotation.hadamard_utils import (
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
+    _qvq_cuda_viterbi_trusted,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     qvq_cuda_gemv,
@@ -1078,6 +1079,34 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits
         assert result.telemetry["counters"]["yaqa_segmented_v2_chunks"] >= 1
 
 
+def test_qvq_v2b2_p32_yaqa_reselection_uses_non_default_producer_stream_safely():
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260876)
+    kwargs = {
+        "bits": 2.5,
+        "output_hessian": output_hessian,
+        "rounding": "yaqa",
+        "trellis_batch_size": 1,
+        "bank_count": 2,
+        "v2b2_p32": True,
+        "yaqa_v2b2_family_mode": "reselect",
+    }
+    expected = quantize_qvq_linear(weight, input_hessian, **kwargs)
+    torch.cuda.synchronize()
+
+    producer = torch.cuda.Stream()
+    with torch.cuda.stream(producer):
+        actual = quantize_qvq_linear(weight, input_hessian, **kwargs)
+        completion = torch.cuda.Event()
+        completion.record(producer)
+    completion.synchronize()
+
+    assert torch.equal(actual.inner_weight, expected.inner_weight)
+    assert torch.equal(actual.trellis, expected.trellis)
+    assert torch.equal(actual.bank_ids, expected.bank_ids)
+    assert torch.equal(actual.bank_alt_id, expected.bank_alt_id)
+    assert actual.kronecker_proxy_loss == expected.kronecker_proxy_loss
+
+
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b4_p64_yaqa_is_exact_and_independent_v2_yaqa_safe(bits):
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260840 + int(bits * 10))
@@ -1346,6 +1375,30 @@ def test_qvq_cuda_viterbi_contract_guards():
     for args, kwargs, error, message in cases:
         with pytest.raises(error, match=message):
             qvq_cuda_viterbi(*args, **kwargs)
+
+
+@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+def test_qvq_cuda_trusted_v2_viterbi_is_bit_exact_after_yaqa_style_prevalidation(bits):
+    generator = torch.Generator(device="cpu").manual_seed(20260817 + int(bits * 10))
+    sequences = torch.randn((3, 128, 2), generator=generator, dtype=torch.float32).cuda().contiguous()
+    codebook = pgc16_codebook_v2_bank(
+        0,
+        bits=bits,
+        device="cuda",
+        dtype=torch.float16,
+    ).contiguous()
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+
+    public_states, public_loss = qvq_cuda_viterbi(sequences, codebook, bits)
+    trusted_states, trusted_loss = _qvq_cuda_viterbi_trusted(sequences, codebook, bits)
+    overlap = (public_states[:, -1] & ((1 << (16 - transition_bits)) - 1)).contiguous()
+    public_constrained = qvq_cuda_viterbi(sequences, codebook, bits, overlap)
+    trusted_constrained = _qvq_cuda_viterbi_trusted(sequences, codebook, bits, overlap)
+
+    assert torch.equal(trusted_states, public_states)
+    assert torch.equal(trusted_loss, public_loss)
+    assert torch.equal(trusted_constrained[0], public_constrained[0])
+    assert torch.equal(trusted_constrained[1], public_constrained[1])
 
 
 def _noncontiguous_viterbi_tensor(values: torch.Tensor) -> torch.Tensor:

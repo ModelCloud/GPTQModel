@@ -34,6 +34,7 @@ _QVQ_CUDA_OPS_NAME = "gptqmodel_qvq_cuda_ops"
 _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"
 _QVQ_CUDA_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V4_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_BANKED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP: Callable | None = None
@@ -87,6 +88,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "gemv",
         "gemv_v4",
         "viterbi",
+        "viterbi_trusted",
         "viterbi_v4",
         "viterbi_banked",
         "viterbi_v2_segment_banked",
@@ -144,6 +146,17 @@ def _qvq_cuda_viterbi_op() -> Callable:
             if _QVQ_CUDA_VITERBI_OP is None:
                 _QVQ_CUDA_VITERBI_OP = _extension_api().op("qvq_cuda", "viterbi")
     return _QVQ_CUDA_VITERBI_OP
+
+
+def _qvq_cuda_viterbi_trusted_op() -> Callable:
+    """Resolve YAQA's structurally checked, value-prevalidated V2 operator."""
+
+    global _QVQ_CUDA_VITERBI_TRUSTED_OP
+    if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
+                _QVQ_CUDA_VITERBI_TRUSTED_OP = _extension_api().op("qvq_cuda", "viterbi_trusted")
+    return _QVQ_CUDA_VITERBI_TRUSTED_OP
 
 
 def _qvq_cuda_hadamard_op() -> Callable:
@@ -290,6 +303,19 @@ def qvq_cuda_viterbi(
         raise RuntimeError("QVQ CUDA Viterbi requires a compute capability >= 8.0 device")
     op = _qvq_cuda_viterbi_op() if vector_size == 2 else _qvq_cuda_viterbi_v4_op()
     return op(sequences, codebook, transition_bits, overlap, step_weights)
+
+
+def _qvq_cuda_viterbi_trusted(
+    sequences: torch.Tensor,
+    codebook: torch.Tensor,
+    bits: float,
+    overlap: torch.Tensor | None = None,
+    step_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run V2 after YAQA has deferred all dynamic value/range checks."""
+
+    transition_bits = qvq_transition_bits(normalize_qvq_rate(bits), vector_size=2)
+    return _qvq_cuda_viterbi_trusted_op()(sequences, codebook, transition_bits, overlap, step_weights)
 
 
 def qvq_cuda_viterbi_banked(

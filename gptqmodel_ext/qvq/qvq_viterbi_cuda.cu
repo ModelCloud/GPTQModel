@@ -1422,7 +1422,8 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
     int64_t transition_bits,
     const c10::optional<at::Tensor>& overlap,
     const c10::optional<at::Tensor>& step_weights,
-    int64_t bank_count = 1) {
+    int64_t bank_count = 1,
+    bool validate_values = true) {
   TORCH_CHECK(sequences.is_cuda() && codebook.is_cuda(), "sequences and codebook must be CUDA tensors");
   TORCH_CHECK((sequences.dim() == 3 && sequences.size(2) == VectorSize) ||
                   (bank_count > 1 && sequences.dim() == 4 && sequences.size(3) == VectorSize),
@@ -1457,9 +1458,11 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
                     transition_bits == 16,
                 "V4 transition_bits must be one of 4, 6, 8, 10, 12, 14, 16");
   }
-  TORCH_CHECK(at::isfinite(sequences).all().item<bool>() &&
-                  at::isfinite(codebook).all().item<bool>(),
-              "sequences and codebook must be finite");
+  if (validate_values) {
+    TORCH_CHECK(at::isfinite(sequences).all().item<bool>() &&
+                    at::isfinite(codebook).all().item<bool>(),
+                "sequences and codebook must be finite");
+  }
   const bool bank_specific_sequences = sequences.dim() == 4;
   const bool constrained = overlap.has_value();
   const int batch = static_cast<int>(sequences.size(bank_specific_sequences ? 1 : 0));
@@ -1479,9 +1482,11 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
     TORCH_CHECK(overlap_tensor.dim() == 1 && overlap_tensor.size(0) == launch_batch,
                 "overlap must have shape [bank_count * batch]");
     const int64_t overlap_limit = int64_t{1} << (16 - transition_bits);
-    TORCH_CHECK(overlap_tensor.ge(0).all().item<bool>() &&
-                    overlap_tensor.lt(overlap_limit).all().item<bool>(),
-                "overlap values are outside the transition width");
+    if (validate_values) {
+      TORCH_CHECK(overlap_tensor.ge(0).all().item<bool>() &&
+                      overlap_tensor.lt(overlap_limit).all().item<bool>(),
+                  "overlap values are outside the transition width");
+    }
   }
   const bool weighted = step_weights.has_value();
   const at::Tensor step_weights_tensor = weighted ? *step_weights : at::Tensor();
@@ -1493,9 +1498,11 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
     TORCH_CHECK(step_weights_tensor.dim() == 2 && step_weights_tensor.size(0) == batch &&
                     step_weights_tensor.size(1) == steps,
                 "step_weights must have shape [batch, steps]");
-    TORCH_CHECK(at::isfinite(step_weights_tensor).all().item<bool>() &&
-                    step_weights_tensor.ge(0).all().item<bool>(),
-                "step_weights must be finite and nonnegative");
+    if (validate_values) {
+      TORCH_CHECK(at::isfinite(step_weights_tensor).all().item<bool>() &&
+                      step_weights_tensor.ge(0).all().item<bool>(),
+                  "step_weights must be finite and nonnegative");
+    }
   }
   // The emission uses the expanded squared-distance identity in FP32.  A
   // finite input can still make ||x||^2 or ||c||^2 overflow, after which
@@ -1504,15 +1511,17 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
   // step, so include the worst-case number and weight of terms.  Reject that
   // domain at the native boundary instead of clamping and corrupting state
   // selection.
-  const double maximum_weight = weighted ? step_weights_tensor.abs().amax().item<double>() : 1.0;
-  const double accumulation_terms = std::max(1.0, static_cast<double>(steps) * maximum_weight);
-  const double safe_magnitude = std::sqrt(static_cast<double>(std::numeric_limits<float>::max()) /
-                                           accumulation_terms) /
-      (2.0 * std::sqrt(static_cast<double>(VectorSize)));
-  TORCH_CHECK(
-      sequences.abs().amax().item<double>() <= safe_magnitude &&
-          codebook.abs().amax().item<double>() <= safe_magnitude,
-      "sequences and codebook magnitudes are too large for finite FP32 squared-distance arithmetic");
+  if (validate_values) {
+    const double maximum_weight = weighted ? step_weights_tensor.abs().amax().item<double>() : 1.0;
+    const double accumulation_terms = std::max(1.0, static_cast<double>(steps) * maximum_weight);
+    const double safe_magnitude = std::sqrt(static_cast<double>(std::numeric_limits<float>::max()) /
+                                             accumulation_terms) /
+        (2.0 * std::sqrt(static_cast<double>(VectorSize)));
+    TORCH_CHECK(
+        sequences.abs().amax().item<double>() <= safe_magnitude &&
+            codebook.abs().amax().item<double>() <= safe_magnitude,
+        "sequences and codebook magnitudes are too large for finite FP32 squared-distance arithmetic");
+  }
 
   const c10::cuda::CUDAGuard device_guard(sequences.device());
   cudaDeviceProp properties{};
@@ -1632,6 +1641,16 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda(
     const c10::optional<at::Tensor>& overlap,
     const c10::optional<at::Tensor>& step_weights) {
   return qvq_viterbi_cuda_impl<2>(sequences, codebook, transition_bits, overlap, step_weights);
+}
+
+std::tuple<at::Tensor, at::Tensor> qvq_viterbi_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebook,
+    int64_t transition_bits,
+    const c10::optional<at::Tensor>& overlap,
+    const c10::optional<at::Tensor>& step_weights) {
+  return qvq_viterbi_cuda_impl<2>(
+      sequences, codebook, transition_bits, overlap, step_weights, 1, false);
 }
 
 std::tuple<at::Tensor, at::Tensor> qvq_viterbi_v4_cuda(
@@ -1972,6 +1991,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_trust
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("viterbi(Tensor sequences, Tensor codebook, int transition_bits, Tensor? overlap=None, "
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
+  m.def("viterbi_trusted(Tensor sequences, Tensor codebook, int transition_bits, Tensor? overlap=None, "
+        "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_v4(Tensor sequences, Tensor codebook, int transition_bits, Tensor? overlap=None, "
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_banked(Tensor sequences, Tensor codebooks, int transition_bits, Tensor? overlap=None, "
@@ -1988,6 +2009,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi", &qvq_viterbi_cuda);
+  m.impl("viterbi_trusted", &qvq_viterbi_trusted_cuda);
   m.impl("viterbi_v4", &qvq_viterbi_v4_cuda);
   m.impl("viterbi_banked", &qvq_viterbi_banked_cuda);
   m.impl("viterbi_v2_segment_banked", &qvq_viterbi_v2_segment_banked_cuda);

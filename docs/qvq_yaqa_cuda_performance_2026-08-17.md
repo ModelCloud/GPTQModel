@@ -148,3 +148,36 @@ is a family-batched YAQA recurrence: carry the three error histories in one
 lockstep anti-diagonal scheduler and submit all family/tile work through one
 native work queue. That removes repeated Python scheduling and fills the GPU
 without changing the complete candidate set or full-proxy winner contract.
+
+### Deferred canonical validation and four-way overlap
+
+Canonical V2 YAQA previously repeated finite, overlap, and FP32-distance-range
+reductions at every provisional and constrained native Viterbi call. A private
+V2-only trusted operator now retains all structural checks while deferring
+dynamic value validation to YAQA's existing device-side recurrence flag. The
+public CUDA operator remains fail-closed. The generated provisional overlap is
+also trusted after the native recurrence, avoiding a host-synchronizing
+transition assertion that cannot fail without a native-kernel defect.
+
+With those synchronization points removed, canonical V2 can execute on a
+fourth persistent stream concurrently with the three independent B2 family
+candidates. The producer stream is joined by explicit events, output lifetimes
+are recorded on the selecting stream, and the final full-proxy argmin retains
+canonical-first and lower-family tie precedence.
+
+```text
++-------------------------------+-----------+-----------+---------+-----------+-----------+----------------------+
+| Full W2.5 B2 reselect 512x512 | Before    | Trusted   | Overlap | Total gain| Peak VRAM | Quantization parity  |
++-------------------------------+-----------+-----------+---------+-----------+-----------+----------------------+
+| PG506-230 A                   | 1683.30ms | 1449.99ms |1373.82ms|     1.23x | 88.24 MiB | bit-exact repeated   |
+| PG506-230 B                   | 1683.30ms | 1449.99ms |1347.50ms|     1.25x | 88.24 MiB | bit-exact repeated   |
++-------------------------------+-----------+-----------+---------+-----------+-----------+----------------------+
+```
+
+The trusted boundary contributes `1.16x`; canonical/family overlap adds a
+further `1.06-1.08x`. Peak allocation rises from `80.11 MiB` to `88.24 MiB`.
+Six W1--W3.5 public/trusted unconstrained and constrained comparisons are
+bit-exact. The complete B2 YAQA CUDA gate passes all six rates plus a partial
+multi-tile batch. This exceeds the quantization requirement (`1e-6`) because
+states, losses, reconstructed weights, selectors, and family IDs are exact.
+Inference code is unchanged and retains its separate `2e-3` tolerance.
