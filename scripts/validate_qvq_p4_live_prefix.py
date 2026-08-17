@@ -381,6 +381,22 @@ def _localized_summary(
             "alpha": record.get("alpha"),
             "tile": record.get("tile"),
             "segment": record.get("segment"),
+            **(
+                {
+                    "original_yaqa_loss": record["loss"],
+                    "original_yaqa_relative_improvement": record.get("relative_improvement"),
+                }
+                if "loss" in record
+                else {}
+            ),
+            **(
+                {
+                    "module_search_loss": record["search_loss"],
+                    "module_search_relative_improvement": record.get("search_relative_improvement"),
+                }
+                if "search_loss" in record
+                else {}
+            ),
             "propagated_first_order": record.get("propagated_first_order"),
             "replay_score": record["replay_score"],
             "selected": record.get("selected") is True,
