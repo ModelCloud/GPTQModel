@@ -204,3 +204,23 @@ are unchanged.
 The dispatch is restricted to Apple host feedback, L16/V2 codebooks, and `tail_biting_candidates=1`. Dual-V2,
 V4, widened tail candidates, and unsupported codebooks retain their existing paths. The complete MLX gate passes
 `316/316` tests.
+
+### Real-Llama validation of canonical fusion
+
+The same real-Llama contract retained identical final metrics and produced the following profile change:
+
+| Region | Before canonical fusion | After | Speedup |
+|---|---:|---:|---:|
+| Canonical V2 YAQA | 22.420 s | 11.020 s | 2.034x |
+| Canonical V2 tail recurrence | 18.807 s | 7.351 s | 2.558x |
+| Four Q/K/V/O module quantization | 78.825 s | 66.936 s | 1.178x |
+| Complete quantize-and-evaluate arm | 124.535 s | 112.748 s | 1.105x |
+
+Relative to the earlier matched 112.98-second module baseline, module quantization is now 1.69x faster. Relative
+to the 146.094-second complete-arm measurement, the current arm is 1.30x faster. Final-logit KL remains
+`0.003401`, with Top-1/5/10 at `99.71%`, `92.06%`, and `91.90%`.
+
+The profile is now concentrated: the three B2 family candidates consume 55.824 seconds, including 45.373 seconds
+of segmented Metal recurrence, while all canonical V2 work consumes 11.020 seconds and CPU feedback across all
+four passes consumes 12.592 seconds. A 2x module target requires the family region to fall from 55.824 seconds to
+roughly 22 seconds or less; canonical and feedback-only tuning cannot provide that bound by themselves.
