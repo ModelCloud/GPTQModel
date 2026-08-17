@@ -191,3 +191,91 @@ poor use of quantization time until a candidate generator demonstrates materiall
 original objective. The next justified experiment is the separately gated spectral-push proposal: use the ideal
 low-rank direction only to generate candidates, retain the original YAQA factors for scoring, and require exact
 fallback to the independently encoded V2B2-P32+YAQA artifact.
+
+## Eight-layer P1 output-eigenspace sweep
+
+A larger follow-up tested whether the earlier neutral result was caused by four-layer scope or by the single
+`rank=16, lambda=0.25` setting. It doubled the live model scope and evaluated the complete configured P1 grid:
+
+- real Llama 3.2 1B Instruct decoder layers 0--7, all 32 Q/K/V/O projections;
+- ordinary calibration rows 0--511: 188,256 valid tokens;
+- held-out evaluation rows 512--1023: 172,367 scored tokens;
+- independent YAQA Sketch-B rows 1024--1535: 163,324 valid tokens;
+- full rows, batch 1 for calibration/evaluation, no concatenation or truncation;
+- W2 V2B2-P32+YAQA, fixed alternative-family ID, ranks `{8,16,32}`, and lambdas `{0.1,0.25,0.5,1.0}`;
+- Apple M4 Max MPS with all 12 P cores, Torch `2.14.0.dev20260806`, Python 3.10.11;
+- base commit `ba4c60d46dec2f1c7326b2f4a831a4f43487eb93`; the concurrently modified quantizer and harness used by the
+  run have SHA-256 `ede7129222305ae9fc78d32c1b0986e1c7510d52159fd1a2dc8267a99056bd90` and
+  `bf90a85ebd12adf8368e4582bf2aa9c854f062818a7fc46f8865910e35142ea2`, respectively;
+- local result artifact `artifacts/qvq_spectral_p1_large_8layer/w2_fixed_fullgrid.json`, SHA-256
+  `2d6bd46e0fa8b12c8f2a6a1df30758016697eaf9630a07bb8468c3c3e22776cf`.
+
+| W2 arm | BPW | Weight rel-L2 | Local KL | Live KL | Layer-7 KL | Final KL | JSD | Top-1 | Top-5 | Top-10 | Time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| B2-P32+YAQA | 2.03125 | 0.433550 | 0.015691 | 0.028361 | 0.028240 | 0.100153 | 0.024298 | 59.82% | 65.92% | 67.74% | 1,161 s |
+| + P1 fixed-family full grid | 2.03125 | 0.433637 | 0.015350 | 0.028178 | 0.027829 | 0.100100 | 0.024285 | 59.60% | 66.01% | 67.79% | 4,598 s |
+
+P1 changed weight relative L2 by `+0.020%`, Local KL by `-2.176%`, Live KL by `-0.646%`, Layer-7 KL by
+`-1.456%`, Final KL by `-0.052%`, and JSD by `-0.054%`. Top-1 changed `-0.217` percentage points, while Top-5
+and Top-10 changed `+0.092` and `+0.052` points. These are mixed, immaterial propagated point estimates, not an
+EoRA-like recovery. The full-grid arm was `3.96x` slower end to end; exact quantization of its 12 proposals cost
+roughly nine times the baseline quantization work, while held-out replay was common to both arms.
+
+### Why the EoRA expectation did not transfer to P1
+
+The implementation's tensor orientation is correct. For inner-orientation error `E[in,out]` and Cholesky factors
+
+```text
+H_I = C_I C_I.T,
+H_O = C_O C_O.T,
+M   = C_I.T E C_O,
+```
+
+the YAQA proxy is exactly `J(E)=||M||_F^2`. A continuous rank-`r` EoRA-style correction retains the paired signed
+SVD modes:
+
+```text
+M = U diag(sigma) V.T,
+C_I.T L_r C_O = U_r diag(sigma_r) V_r.T,
+J(E - L_r) = J(E) - sum_{i<=r} sigma_i^2.
+```
+
+P1 does not apply or serialize `L_r`. It discards `U_r`, the signs/pairing between `U_r` and `V_r`, and the
+singular-value magnitudes. Its trace-normalized output-factor proposal instead optimizes
+
+```text
+J_lambda(E) = ||M||_F^2 + lambda * c_r * ||M V_r||_F^2,
+c_r = trace(H_O) / trace(C_O V_r V_r.T C_O.T).
+```
+
+Thus the unconstrained continuous optimum remains the dense weight for both objectives. P1 can help only when the
+reweighted metric moves the discrete V2B2 trellis across a path or selector boundary. In the isotropic case,
+`c_r=d_out/r`, so full-trace normalization also concentrates the nominal strength into the selected modes; it does
+not represent a gentle per-mode multiplier. Rollback makes that safe, but many proposals are either unchanged or
+make a large discrete jump.
+
+The measured behavior matches this prediction:
+
+| Diagnostic | Result |
+|---|---:|
+| Accepted spectral candidates | 13/32 modules |
+| Accepted projection roles | Q/K only; no V/O module accepted |
+| Selected ranks | rank 8: 9; rank 16: 3; rank 32: 1 |
+| Selected lambdas | 0.1: 5; 0.25: 5; 0.5: 3; 1.0: 0 |
+| Mean / median absorption efficiency | 0.032 / 0.000 |
+| Mean absorption among accepted modules | 0.079 |
+| Mean / median selector churn | 0.190 / 0.000 |
+| Mean selector churn among accepted modules | 0.467 |
+| Mean / median rank-32 residual concentration | 0.233 / 0.193 |
+
+The larger test therefore confirms that the original result was not primarily small-test noise or a transposed
+Hessian/SVD bug. The residual has useful spectral concentration, but P1's unsigned output-subspace reweighting
+does not preserve enough of EoRA's continuous correction to exploit it. Nearly half-selector path jumps recover
+only a small fraction of the continuous upper bound, and lower local/live/layer KL does not survive as material
+final-logit recovery.
+
+Decision: keep P1 default-off and do not expand family reselection. A justified successor must preserve the paired
+`U_r diag(sigma_r) V_r.T` direction while constraining discrete path churn—for example localized, fixed-boundary
+candidate generation followed by the original YAQA proxy and disjoint propagated confirmation. Changing only the
+trace normalization is a useful ablation, but it cannot restore the discarded left/right mode pairing and should
+not be expected to reproduce full EoRA.
