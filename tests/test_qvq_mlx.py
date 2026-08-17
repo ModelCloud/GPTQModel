@@ -553,7 +553,7 @@ def test_qvq_mlx_banked_v2_tail_biting_matches_torch_oracle(kind, bits):
     assert torch.equal(selectors, expected.segment_bank_ids)
     torch.testing.assert_close(squared_error, expected.squared_error, rtol=2e-5, atol=2e-4)
 
-    prepared = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks)
+    prepared = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks, allow_implicit=False)
     fused = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
         sequences,
         codebooks,
@@ -565,6 +565,19 @@ def test_qvq_mlx_banked_v2_tail_biting_matches_torch_oracle(kind, bits):
     assert torch.equal(fused[0], expected.states)
     assert torch.equal(fused[1], expected.segment_bank_ids)
     torch.testing.assert_close(fused[2], expected.squared_error, rtol=2e-5, atol=2e-4)
+
+    implicit = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks)
+    implicit_fused = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+        sequences,
+        codebooks,
+        bits,
+        segment_steps=16 if kind == "v2b2_p32" else 32,
+        step_weights=weights,
+        mlx_codebooks=implicit,
+    )
+    assert torch.equal(implicit_fused[0], fused[0])
+    assert torch.equal(implicit_fused[1], fused[1])
+    assert torch.equal(implicit_fused[2], fused[2])
 
 
 def test_qvq_mlx_prepared_banked_codebooks_reject_mutated_source():
@@ -586,9 +599,15 @@ def test_qvq_mlx_prepared_banked_codebooks_use_exact_fp16_or_fp32_fallback():
     pgc_codebooks = torch.stack(
         tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in (0, 3))
     ).contiguous()
-    prepared_pgc = qvq_mlx_prepare_v2_banked_codebooks_from_torch(pgc_codebooks)
+    prepared_pgc = qvq_mlx_prepare_v2_banked_codebooks_from_torch(pgc_codebooks, allow_implicit=False)
     assert prepared_pgc.lease.array.dtype == mx.float16
     assert torch.equal(pgc_codebooks, pgc_codebooks.to(torch.float16).to(torch.float32))
+
+    prepared_implicit = qvq_mlx_prepare_v2_banked_codebooks_from_torch(pgc_codebooks)
+    assert prepared_implicit.lease is None
+    assert prepared_implicit.norms is None
+    assert prepared_implicit.implicit_levels.dtype == mx.float16
+    assert prepared_implicit.implicit_masks.dtype == mx.uint16
 
     non_fp16_codebooks = pgc_codebooks.clone()
     non_fp16_codebooks[0, 0, 0] = torch.nextafter(
@@ -598,6 +617,7 @@ def test_qvq_mlx_prepared_banked_codebooks_use_exact_fp16_or_fp32_fallback():
     assert not torch.equal(non_fp16_codebooks, non_fp16_codebooks.to(torch.float16).to(torch.float32))
     prepared_fp32 = qvq_mlx_prepare_v2_banked_codebooks_from_torch(non_fp16_codebooks)
     assert prepared_fp32.lease.array.dtype == mx.float32
+    assert prepared_fp32.implicit_levels is None
 
 
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))

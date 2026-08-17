@@ -145,3 +145,27 @@ Final-logit KL remained `0.003401`; Top-1, Top-5, and Top-10 agreement remained 
 The result confirms that the table-traffic optimization survives realistic execution, but also confirms that
 micro-kernel tuning alone cannot reach the 2--4x end-to-end target. The three independent family histories now
 account for 67.344 seconds and remain the dominant exact-search target.
+
+## Implicit PGC search decoder
+
+Expanded banks are unnecessary for the frozen PGC graph portfolio. Each scalar pair is exactly
+
+```text
+state XOR rate-keyed bank mask
+  -> PGC16 xor/multiply/xor bijection
+  -> two indices into the frozen 256-entry FP16 compander
+```
+
+The Apple search kernel now performs that decode directly. It replaces two 65,536-vector bank tables and their
+FP32 norm tables with one 256-entry FP16 level table plus two 16-bit masks. Candidate costs remain FP32. Before
+enabling the path, preparation compares every supplied bank against the frozen portfolio and requires one unique
+mask identity; learned or modified banks automatically use the expanded FP16/FP32 fallback.
+
+At W2 B2-P32 and 32 tiles per launch, the implicit kernel measured 9.135 ms versus 11.507 ms for expanded FP16,
+an additional 1.260x speedup. Relative to the original 13.831 ms FP32-table path, the combined table changes are
+about 1.51x. B2-P32 and B4-P64 tests at every W1--W3.5 half-step produced bit-exact states, selectors, and reported
+losses between implicit and expanded search. The complete MLX suite remains `310/310` passing.
+
+This is a quantization-only optimization. It does not alter checkpoint layout, bank identity, inference decode, or
+the separately permitted `2e-3` inference tolerance. The quantized artifact is bit-exact, satisfying the stricter
+quantization contract rather than relying on its `1e-6` numerical allowance.

@@ -21,6 +21,7 @@ from ..quantization.qvq_codecs import (
     PGC16_CODEBOOK_VERSION,
     PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS,
     PGC16_V4_BANK_XOR_MASKS_BY_TRANSITION_BITS,
+    pgc16_codebook_v2_bank,
     pgc16_levels_for_version,
 )
 from ..quantization.qvq_rates import (
@@ -68,6 +69,8 @@ _V2_BANKED_VITERBI_KERNEL: Any | None = None
 _V2_BANKED_VITERBI_KERNEL_ERROR: str | None = None
 _V2_BANKED_TAIL_KERNELS: dict[str, Any] = {}
 _V2_BANKED_TAIL_KERNEL_ERRORS: dict[str, str] = {}
+_V2_BANKED_TAIL_IMPLICIT_KERNEL: Any | None = None
+_V2_BANKED_TAIL_IMPLICIT_KERNEL_ERROR: str | None = None
 _V2_BANKED_TORCH_CODEBOOK_HOT: tuple[Any, int, Any] | None = None
 _V2_BANKED_TORCH_CODEBOOK_LOCK = threading.Lock()
 _QVQ_YAQA_MLX_CACHE_LIMIT_BYTES = 512 << 20
@@ -132,13 +135,16 @@ class _QVQMLXPreparedBankedCodebooks:
 
     source: Any
     source_version: int
-    lease: _TorchMLXReadOnlyLease
-    norms: Any
+    lease: _TorchMLXReadOnlyLease | None
+    norms: Any | None
+    implicit_levels: Any | None = None
+    implicit_masks: Any | None = None
 
     def verify_source(self, source) -> None:
         if source is not self.source or source._version != self.source_version:
             raise RuntimeError("QVQ prepared MLX bank codebooks no longer match the Torch source tensor")
-        self.lease.verify_unchanged()
+        if self.lease is not None:
+            self.lease.verify_unchanged()
 
 
 class _TorchMLXStagingPool:
@@ -773,6 +779,16 @@ _V2_BANKED_TAIL_FP16_HEADER = _V2_BANKED_VITERBI_HEADER.replace(
     "float x=target.x,y=target.y,cx=codebooks[offset],cy=codebooks[offset+1u];",
     "float x=target.x,y=target.y,cx=float(codebooks[offset]),cy=float(codebooks[offset+1u]);",
 )
+
+_V2_BANKED_TAIL_IMPLICIT_HEADER = r"""
+inline float qvq_emit_banked(float2 target, device const half* levels,
+    constant const ushort* bank_masks, uint bank, uint state, float weight) {
+  uint p=state^uint(bank_masks[bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  float x=target.x,y=target.y,cx=float(levels[p>>8]),cy=float(levels[p&255u]);
+  float tn=x*x+y*y,cn=cx*cx+cy*cy,dot=fma(y,cy,x*cx);
+  return max(tn+cn-2.0f*dot,0.0f)*weight;
+}
+"""
 
 _V2_BANKED_VITERBI_SOURCE = r"""
 constexpr uint state_count=65536,prefix_count=1u<<EdgeBits,suffix_count=state_count/prefix_count;
@@ -1539,6 +1555,42 @@ def _v2_banked_tail_kernel(codebook_dtype: str):
     return kernel
 
 
+def _v2_banked_tail_implicit_kernel():
+    global _V2_BANKED_TAIL_IMPLICIT_KERNEL, _V2_BANKED_TAIL_IMPLICIT_KERNEL_ERROR
+    if _V2_BANKED_TAIL_IMPLICIT_KERNEL is None:
+        with _KERNEL_LOCK:
+            if _V2_BANKED_TAIL_IMPLICIT_KERNEL is None:
+                if _V2_BANKED_TAIL_IMPLICIT_KERNEL_ERROR is not None:
+                    raise RuntimeError(_V2_BANKED_TAIL_IMPLICIT_KERNEL_ERROR)
+                import mlx.core as mx
+
+                try:
+                    _V2_BANKED_TAIL_IMPLICIT_KERNEL = mx.fast.metal_kernel(
+                        name="gptqmodel_qvq_tail_v2_banked_implicit",
+                        # Keep the source-level identifiers shared with the
+                        # expanded-table recurrence; the implicit header gives
+                        # these inputs their actual half/ushort types.
+                        input_names=["sequences", "codebooks", "codebook_norms", "step_weights", "dims"],
+                        output_names=[
+                            "costs",
+                            "next_costs",
+                            "backpointers",
+                            "states",
+                            "segment_bank_ids",
+                            "squared_error",
+                        ],
+                        header=_V2_BANKED_TAIL_IMPLICIT_HEADER,
+                        source=_V2_BANKED_TAIL_SOURCE,
+                        ensure_row_contiguous=True,
+                    )
+                except Exception as exc:
+                    _V2_BANKED_TAIL_IMPLICIT_KERNEL_ERROR = (
+                        f"QVQ implicit banked-V2 tail-biting MLX kernel creation failed: {exc}"
+                    )
+                    raise RuntimeError(_V2_BANKED_TAIL_IMPLICIT_KERNEL_ERROR) from exc
+    return _V2_BANKED_TAIL_IMPLICIT_KERNEL
+
+
 def qvq_mlx_viterbi(sequences, codebook, bits: float, overlap=None, step_weights=None):
     """Run the V2 YAQA Viterbi recurrence using an MLX Metal kernel."""
 
@@ -1743,6 +1795,60 @@ def _qvq_mlx_v2_banked_tail_launch(
     dims = mx.array([batch, steps, 0, int(weighted)], dtype=mx.uint32)
     outputs = _v2_banked_tail_kernel("float16" if codebooks.dtype == mx.float16 else "float32")(
         inputs=[sequences, codebooks, codebook_norms, step_weights, dims],
+        template=[
+            ("EdgeBits", transition_bits),
+            ("BankCount", bank_count),
+            ("SegmentSteps", segment_steps),
+        ],
+        grid=(batch * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[
+            (batch, bank_count, 1 << 16),
+            (batch, bank_count, 1 << 16),
+            (batch, steps - 1, bank_count, suffix_count),
+            (batch, steps),
+            (batch, segment_count),
+            (batch,),
+        ],
+        output_dtypes=[
+            mx.float32,
+            mx.float32,
+            mx.uint16 if transition_bits == 7 else mx.uint8,
+            mx.uint32,
+            mx.uint8,
+            mx.float32,
+        ],
+    )
+    return outputs[3], outputs[4], outputs[5]
+
+
+def _qvq_mlx_v2_banked_tail_implicit_launch(
+    sequences,
+    levels,
+    bank_masks,
+    *,
+    transition_bits: int,
+    segment_steps: int,
+    step_weights,
+    weighted: bool,
+):
+    """Run the identical recurrence while reconstructing frozen PGC banks from 256 levels."""
+
+    import mlx.core as mx
+
+    batch, steps, _ = sequences.shape
+    bank_count = bank_masks.shape[0]
+    suffix_count = (1 << 16) >> transition_bits
+    segment_count = steps // segment_steps
+    dimensions = (
+        batch * bank_count * (1 << 16),
+        batch * (steps - 1) * bank_count * suffix_count,
+    )
+    if max(*dimensions, batch * steps, batch * segment_count) > 2**32 - 1:
+        raise ValueError("QVQ MLX implicit banked-V2 tail-biting workspace exceeds the uint32 kernel limit")
+    dims = mx.array([batch, steps, 0, int(weighted)], dtype=mx.uint32)
+    outputs = _v2_banked_tail_implicit_kernel()(
+        inputs=[sequences, levels, bank_masks, step_weights, dims],
         template=[
             ("EdgeBits", transition_bits),
             ("BankCount", bank_count),
@@ -2017,20 +2123,37 @@ def qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
             codebook_lease = mlx_codebooks.lease
         else:
             raise TypeError("QVQ prepared MLX codebooks must retain their guarded Torch ownership lease")
-        leases.append(codebook_lease)
+        if codebook_lease is not None:
+            leases.append(codebook_lease)
         weight_lease = None
         if step_weights is not None:
             weight_lease = _TORCH_MLX_STAGING_POOL.stage(step_weights, name="host banked-V2 step weights")
             leases.append(weight_lease)
 
-        outputs = _qvq_mlx_tail_biting_v2_banked(
-            sequence_lease.array,
-            codebook_lease.array,
-            bits,
-            segment_steps=segment_steps,
-            step_weights=None if weight_lease is None else weight_lease.array,
-            prepared_norms=None if mlx_codebooks is None else mlx_codebooks.norms,
-        )
+        if (
+            isinstance(mlx_codebooks, _QVQMLXPreparedBankedCodebooks)
+            and mlx_codebooks.implicit_levels is not None
+        ):
+            assert mlx_codebooks.implicit_masks is not None
+            outputs = _qvq_mlx_v2_banked_tail_implicit_launch(
+                sequence_lease.array,
+                mlx_codebooks.implicit_levels,
+                mlx_codebooks.implicit_masks,
+                transition_bits=qvq_transition_bits(bits),
+                segment_steps=segment_steps,
+                step_weights=mx.zeros((1,), dtype=mx.float32) if weight_lease is None else weight_lease.array,
+                weighted=weight_lease is not None,
+            )
+        else:
+            assert codebook_lease is not None
+            outputs = _qvq_mlx_tail_biting_v2_banked(
+                sequence_lease.array,
+                codebook_lease.array,
+                bits,
+                segment_steps=segment_steps,
+                step_weights=None if weight_lease is None else weight_lease.array,
+                prepared_norms=None if mlx_codebooks is None else mlx_codebooks.norms,
+            )
         mx.eval(*outputs)
         mx.synchronize()
         for lease in leases:
@@ -2100,7 +2223,12 @@ def qvq_mlx_viterbi_from_torch_mps(
         return states, squared_error
 
 
-def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks):
+@functools.lru_cache(maxsize=6)
+def _canonical_v2_banks_for_rate(bits: float):
+    return tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in range(4))
+
+
+def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks, *, allow_implicit: bool = True):
     """Make one guarded call-scoped MLX bank stack for an Apple quantization pass."""
 
     import mlx.core as mx
@@ -2111,6 +2239,32 @@ def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks):
     if not torch.isfinite(codebooks).all():
         raise ValueError("QVQ MLX bank codebooks must contain only finite values")
     with _TORCH_MLX_BRIDGE_LOCK:
+        if allow_implicit and codebooks.device.type == "cpu":
+            bank_masks = []
+            known_rates = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5)
+            for codebook in codebooks:
+                matching_masks = {
+                    PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS[qvq_transition_bits(rate)][bank_id]
+                    for rate in known_rates
+                    for bank_id, candidate in enumerate(_canonical_v2_banks_for_rate(rate))
+                    if torch.equal(codebook, candidate)
+                }
+                if len(matching_masks) != 1:
+                    bank_masks = []
+                    break
+                bank_masks.append(matching_masks.pop())
+            if bank_masks:
+                implicit_levels = _pgc16_levels(PGC16_CODEBOOK_VERSION)
+                implicit_masks = mx.array(bank_masks, dtype=mx.uint16)
+                mx.eval(implicit_levels, implicit_masks)
+                return _QVQMLXPreparedBankedCodebooks(
+                    source=codebooks,
+                    source_version=codebooks._version,
+                    lease=None,
+                    norms=None,
+                    implicit_levels=implicit_levels,
+                    implicit_masks=implicit_masks,
+                )
         fp16_codebooks = codebooks.to(dtype=torch.float16)
         use_fp16 = torch.equal(codebooks, fp16_codebooks.to(dtype=torch.float32))
         prepared_source = fp16_codebooks.contiguous() if use_fp16 else codebooks
