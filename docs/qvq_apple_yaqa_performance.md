@@ -169,3 +169,20 @@ losses between implicit and expanded search. The complete MLX suite remains `310
 This is a quantization-only optimization. It does not alter checkpoint layout, bank identity, inference decode, or
 the separately permitted `2e-3` inference tolerance. The quantized artifact is bit-exact, satisfying the stricter
 quantization contract rather than relying on its `1e-6` numerical allowance.
+
+### Real-Llama validation of implicit PGC search
+
+The matched one-layer W2 B2-P32+YAQA run produced the same weights and quality metrics while shifting the profile:
+
+| Region | Expanded FP16 | Implicit PGC | Speedup |
+|---|---:|---:|---:|
+| Four Q/K/V/O module quantization | 89.685 s | 78.825 s | 1.138x |
+| Segmented MLX Viterbi | 56.691 s | 45.383 s | 1.249x |
+| Three B2 family candidates | 67.344 s | 56.302 s | 1.196x |
+| Complete quantize-and-evaluate arm | 135.494 s | 124.535 s | 1.088x |
+
+Against the 112.98-second matched module baseline before the accepted Apple recurrence changes, current module
+quantization is 1.43x faster. Final-logit KL remained `0.003401`; Top-1/5/10 remained `99.71%`, `92.06%`, and
+`91.90%`. CPU feedback is now 12.992 seconds and canonical V2 YAQA is 22.420 seconds, while the three family
+candidates still consume 56.302 seconds. The exact 2--4x target therefore remains open, but expanded bank-table
+bandwidth is no longer the dominant family-search cost.
