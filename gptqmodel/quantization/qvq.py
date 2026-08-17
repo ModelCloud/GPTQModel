@@ -3579,6 +3579,22 @@ def yaqa_inner(
         # values and their norms without revalidating a distinct MPS alias.
         host_segmented_bank_stack = segmented_bank_stack.detach().to("cpu").contiguous()
         mlx_segmented_bank_stack = qvq_mlx_prepare_v2_banked_codebooks_from_torch(host_segmented_bank_stack)
+    host_canonical_codebook_stack = None
+    mlx_canonical_codebook_stack = None
+    if (
+        apple_host_feedback
+        and not segmented_v2
+        and bank_codebooks is None
+        and not dual_v2
+        and codebook.shape[1] == 2
+        and tail_biting_candidates == 1
+    ):
+        from ..utils.qvq_mlx import qvq_mlx_prepare_v2_banked_codebooks_from_torch
+
+        host_canonical_codebook_stack = codebook.detach().to("cpu").unsqueeze(0).contiguous()
+        mlx_canonical_codebook_stack = qvq_mlx_prepare_v2_banked_codebooks_from_torch(
+            host_canonical_codebook_stack
+        )
     banked_codebooks = (
         bank_codebook_stack if bank_codebook_stack is not None else torch.stack(active_banks).contiguous()
         if (
@@ -3739,16 +3755,36 @@ def yaqa_inner(
             for candidate_codebook in active_banks:
                 values, states_for_bank = [], []
                 with _qvq_phase(telemetry, "yaqa_viterbi", quantization_device):
-                    for chunk in sequences.split(trellis_batch_size):
-                        search_chunk = chunk.to(quantization_device) if apple_host_feedback else chunk
-                        result = tail_biting_viterbi_quantize(
-                            search_chunk,
-                            candidate_codebook,
-                            bits=bits,
-                            candidate_count=tail_biting_candidates,
+                    if host_canonical_codebook_stack is not None:
+                        from ..utils.qvq_mlx import qvq_mlx_tail_biting_v2_banked_from_torch_cpu
+
+                        assert mlx_canonical_codebook_stack is not None
+                        apple_auto_batch = 32 if bits <= 2 or bits == 3 else 128
+                        canonical_batch_size = max(
+                            trellis_batch_size,
+                            min(logical_batch_size, apple_auto_batch),
                         )
-                        values.append(result.values.to(feedback_device))
-                        states_for_bank.append(result.states.to(feedback_device))
+                        for chunk in sequences.split(canonical_batch_size):
+                            states, _, _ = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+                                chunk.contiguous(),
+                                host_canonical_codebook_stack,
+                                bits,
+                                segment_steps=steps_per_tile // 2,
+                                mlx_codebooks=mlx_canonical_codebook_stack,
+                            )
+                            values.append(host_canonical_codebook_stack[0][states])
+                            states_for_bank.append(states)
+                    else:
+                        for chunk in sequences.split(trellis_batch_size):
+                            search_chunk = chunk.to(quantization_device) if apple_host_feedback else chunk
+                            result = tail_biting_viterbi_quantize(
+                                search_chunk,
+                                candidate_codebook,
+                                bits=bits,
+                                candidate_count=tail_biting_candidates,
+                            )
+                            values.append(result.values.to(feedback_device))
+                            states_for_bank.append(result.states.to(feedback_device))
                 candidate_value = torch.cat(values)
                 candidate_state = torch.cat(states_for_bank)
                 if dual_v2:

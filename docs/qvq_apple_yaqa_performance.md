@@ -186,3 +186,21 @@ quantization is 1.43x faster. Final-logit KL remained `0.003401`; Top-1/5/10 rem
 `91.90%`. CPU feedback is now 12.992 seconds and canonical V2 YAQA is 22.420 seconds, while the three family
 candidates still consume 56.302 seconds. The exact 2--4x target therefore remains open, but expanded bank-table
 bandwidth is no longer the dominant family-search cost.
+
+## Canonical V2 host-to-MLX tail search
+
+The independent V2+YAQA oracle previously moved every CPU-corrected anti-diagonal into Torch MPS and invoked the
+older tail path. Canonical V2 is exactly the one-bank special case of the segmented recurrence. Apple YAQA now
+keeps those tiles on the host, uses the same guarded staging arena, runs the fused provisional/constrained implicit
+PGC kernel with one bank, and returns only traceback results. A synthetic segment boundary at the half-tile point
+does not alter the recurrence when only one bank exists.
+
+At W2 and 32 tiles, the old Torch-MPS path measured 7.213 ms and the fused host-MLX path measured 4.300 ms, a
+1.677x speedup. States were exact. The reported accumulated loss differed by at most `9.54e-6` between those two
+backend reduction orders, while the independent CPU-oracle tests for all W1--W3.5 half-steps pass the required
+`1e-6` loss tolerance and exact state gate. Since serialization depends on the exact states, the quantized weights
+are unchanged.
+
+The dispatch is restricted to Apple host feedback, L16/V2 codebooks, and `tail_biting_candidates=1`. Dual-V2,
+V4, widened tail candidates, and unsupported codebooks retain their existing paths. The complete MLX gate passes
+`316/316` tests.

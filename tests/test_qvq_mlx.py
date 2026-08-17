@@ -17,6 +17,7 @@ from gptqmodel.quantization.qvq import (
     reconstruct_qvq_inner_weight,
     tail_biting_v2b2_p32_quantize,
     tail_biting_v2b4_p64_quantize,
+    tail_biting_viterbi_quantize,
 )
 from gptqmodel.quantization.qvq_codecs import pgc16_codebook, pgc16_codebook_v2_bank
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits
@@ -620,6 +621,27 @@ def test_qvq_mlx_prepared_banked_codebooks_use_exact_fp16_or_fp32_fallback():
     assert prepared_fp32.implicit_levels is None
 
 
+@pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
+def test_qvq_mlx_implicit_single_bank_tail_matches_canonical_v2(bits):
+    generator = torch.Generator().manual_seed(32300 + int(bits * 10))
+    sequences = torch.randn((2, 128, 2), generator=generator)
+    codebook = pgc16_codebook_v2_bank(0, bits=bits).contiguous()
+    expected = tail_biting_viterbi_quantize(sequences, codebook, bits=bits)
+    codebook_stack = codebook.unsqueeze(0).contiguous()
+    prepared = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebook_stack)
+    states, selectors, squared_error = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+        sequences,
+        codebook_stack,
+        bits,
+        segment_steps=64,
+        mlx_codebooks=prepared,
+    )
+
+    assert torch.equal(states, expected.states)
+    assert torch.count_nonzero(selectors) == 0
+    torch.testing.assert_close(squared_error, expected.squared_error, rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
 def test_qvq_mps_banked_v2_quantization_auto_dispatches_to_mlx(monkeypatch, kind):
     from gptqmodel.utils import qvq_mlx
@@ -821,7 +843,7 @@ def test_qvq_mps_banked_v2_yaqa_auto_dispatches_corrected_tiles_to_mlx(monkeypat
     )
 
     assert launches
-    assert set(launches) == ({16} if kind == "v2b2_p32" else {32})
+    assert set(launches) == ({16, 64} if kind == "v2b2_p32" else {32, 64})
     assert result.rounding == "yaqa"
     assert result.bank_ids is not None
     assert torch.isfinite(result.kronecker_proxy_loss)
