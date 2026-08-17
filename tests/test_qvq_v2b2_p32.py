@@ -60,6 +60,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     _load_qvq_prefix_artifact,
     _load_yaqa_factor_cache,
     _mlp_layer_groups,
+    _MlpAcceptanceEvaluatorBase,
     _padded_batch_chunks,
     _parse_target_rate_ladders,
     _parser,
@@ -1071,6 +1072,19 @@ def test_qvq_mlp_acceptance_cuda_kl_reference_matches_cpu(dtype):
     assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=1e-6)
 
 
+def test_qvq_mlp_acceptance_rechecks_only_within_fused_kl_error_bound():
+    evaluator = object.__new__(_MlpAcceptanceEvaluatorBase)
+    evaluator.acceptance_baseline = _acceptance_metrics(1.0)
+    evaluator.kl_regression_limit = 0.05
+    evaluator.topn_regression_limit = 0.05
+
+    assert evaluator._near_acceptance_threshold(_acceptance_metrics(1.05 + 0.5e-6))
+    assert not evaluator._near_acceptance_threshold(_acceptance_metrics(1.05 + 2e-6))
+    # Deterministic integer Top-N reductions do not need a floating-point
+    # uncertainty recheck even when a score lies on the policy boundary.
+    assert not evaluator._near_acceptance_threshold(_acceptance_metrics(0.9, topn=0.85))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemetry():
     from transformers import LlamaConfig, LlamaForCausalLM
@@ -1118,6 +1132,10 @@ def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemet
     assert suffix_telemetry["full_forward_call_reduction"] == pytest.approx(0.75)
     assert suffix_telemetry["teacher_cache_device"] == "cpu"
     assert suffix_telemetry["teacher_cache_bytes"] > 0
+    assert suffix_telemetry["acceptance_cuda_cache_bytes"] > 0
+    assert suffix_telemetry["acceptance_cuda_candidate_peak_bytes"] > 0
+    assert suffix_telemetry["batched_cuda_metric_calls"] == 4
+    assert suffix_telemetry["batched_cuda_metric_fallbacks"] == 0
     assert suffix_telemetry["prefix_forward_calls"] == 6
     assert suffix_telemetry["suffix_forward_calls"] == 6
     assert suffix_telemetry["full_forward_equivalents"] == pytest.approx(10.0)

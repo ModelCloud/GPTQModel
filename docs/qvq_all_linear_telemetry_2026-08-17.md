@@ -206,3 +206,26 @@ FA2 were both measured regressions and remain disabled.
 A wide YAQA TF32 feedback experiment was also rejected. It preserved states/weights in the tested 1024 x 4096
 identity and SPD probes but improved wall time by only 1.07--1.11x; process-global TF32 state and unproven near-tie
 behavior do not justify weakening the exact quantization contract.
+
+## Batched acceptance reduction and bounded exact rechecks
+
+The remaining 33.09-second acceptance metric phase was not limited by the native fused reducer. On the exact
+2,702-token by 128,256-vocabulary geometry, one fused KL/Top-10 pass takes 34.8 ms on the local `sm_80` A100-class
+GPU. The cost came from invoking the reducer once per source row and from 528 broad PyTorch log-softmax rechecks.
+
+The evaluator now caches the immutable teacher logits once in allocator-bounded FP32 CUDA storage, streams each
+proposal into one flat FP32 buffer, and invokes the fused reducer once per proposal. Baseline and genuinely
+ambiguous proposals reuse that same buffer for the exact KL check, avoiding a second suffix forward. Exact
+rechecks are limited to the measured `1e-6` fused-KL uncertainty interval around the acceptance boundary. Top-N
+uses deterministic value-descending/index-ascending indices and therefore needs no floating-point margin.
+
+Matched 113-proposal scheduling microbenchmark, including the historical 66 exact rechecks:
+
+| Path | Device | Shape | Wall (s) | Speedup | KL delta | Top-1 delta | Top-5 delta | Top-10 delta |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Rowwise + 66 broad rechecks | PG506-230 `sm_80` | 2702 x 128256 | 24.437 | reference | reference | reference | reference | reference |
+| Batched + bounded recheck | PG506-230 `sm_80` | 2702 x 128256 | 3.964 | **6.16x** | 2.17e-19 | 6.38e-8 | 1.11e-16 | 0 |
+
+The tiny Top-1 fraction delta is only the order used to average identical integer token decisions. It is far below
+the `2e-3` inference tolerance; KL remains far below the `1e-6` quantization gate. Telemetry records batched calls,
+allocator fallbacks, persistent teacher-cache bytes, and transient candidate-buffer bytes.
