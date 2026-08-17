@@ -1335,6 +1335,29 @@ def batched_viterbi_quantize(
         )
         return TrellisQuantizationResult(states=states, values=codebook[states], squared_error=squared_error)
 
+    if (
+        sequences.device.type == "cpu"
+        and state_count == 1 << 16
+        and vector_size in (2, 4)
+        and shift in range(2, 17)
+        and sequences.dtype == torch.float32
+        and codebook.dtype == torch.float32
+        and sequences.is_contiguous()
+        and codebook.is_contiguous()
+    ):
+        from ..utils.qvq_cpu import qvq_cpu_viterbi, qvq_cpu_supported
+
+        if qvq_cpu_supported():
+            native_step_weights = None if step_weights is None else step_weights.to(torch.float32).contiguous()
+            states, squared_error = qvq_cpu_viterbi(
+                sequences,
+                codebook,
+                shift,
+                overlap=overlap_i64,
+                step_weights=native_step_weights,
+            )
+            return TrellisQuantizationResult(states=states, values=codebook[states], squared_error=squared_error)
+
     work_sequence = sequences.to(work_dtype)
     work_codebook = codebook.to(work_dtype)
     work_step_weights = None if step_weights is None else step_weights.to(work_dtype)
