@@ -111,47 +111,30 @@ void unpack_tile_codes(const int32_t* tile_words, int E, uint16_t* codes) {
   }
 }
 
-// Precomputed sliding-window state extraction.
-struct StepWindow {
-  uint8_t code_idx[16];
-  uint16_t bit_mask[16];
-  uint8_t state_shift[16];
-};
-
-void build_step_windows(int E, StepWindow* windows) {
-  int total_bits = 128 * E;
-  for (int step = 0; step < 128; ++step) {
-    int start = ((step + 1) * E) - 16;
-    start %= total_bits;
-    if (start < 0) start += total_bits;
-    for (int b = 0; b < 16; ++b) {
-      int pos = start + b;
-      if (pos >= total_bits) pos -= total_bits;
-      int code_idx = pos / E;
-      int bit_in_code = E - 1 - (pos % E);
-      windows[step].code_idx[b] = static_cast<uint8_t>(code_idx);
-      windows[step].bit_mask[b] = static_cast<uint16_t>(1u << bit_in_code);
-      windows[step].state_shift[b] = static_cast<uint8_t>(15 - b);
-    }
-  }
-}
-
-// Decode one tile into 256 row-major float weights.
-void decode_tile(
+// Decode one tile into 256 row-major float weights using a 16-bit shift register.
+// The 128 E-bit codes form a circular bitstream; each step's state is the 16-bit
+// window ending at (s + 1) * E, equivalent to the gather-based decode_tile used
+// before this optimization.
+inline void decode_tile(
+    int E,
     const uint16_t* codes,
-    const StepWindow* windows,
     int segments_per_tile,
     int states_per_segment,
     const uint16_t* seg_masks,
     float* tile_weights) {
-  for (int s = 0; s < 128; ++s) {
-    uint16_t state = 0;
-    const StepWindow& w = windows[s];
-    for (int b = 0; b < 16; ++b) {
-      if (codes[w.code_idx[b]] & w.bit_mask[b]) {
-        state |= static_cast<uint16_t>(1u << w.state_shift[b]);
-      }
+  uint16_t state = 0;
+  if (E < 16) {
+    // Prime the shift register with the last (16 - E) bits of the stream so the
+    // first output corresponds to the original circular window.
+    int n = 15 / E;
+    for (int idx = 128 - n; idx < 128; ++idx) {
+      state = static_cast<uint16_t>((static_cast<uint32_t>(state) << E) | static_cast<uint32_t>(codes[idx]));
     }
+    uint16_t tail_mask = static_cast<uint16_t>((1u << (16 - E)) - 1u);
+    state &= tail_mask;
+  }
+  for (int s = 0; s < 128; ++s) {
+    state = static_cast<uint16_t>((static_cast<uint32_t>(state) << E) | static_cast<uint32_t>(codes[s]));
     uint16_t mask = seg_masks[s / states_per_segment];
     const float* vals = g_state_values[state ^ mask];
     tile_weights[2 * s] = vals[0];
@@ -194,7 +177,6 @@ void accumulate_tile_m1_avx512(
     int K,
     const int32_t* trellis,
     int E,
-    const StepWindow* windows,
     const uint8_t* bank_ids,
     int segments_per_tile,
     int states_per_segment,
@@ -212,7 +194,7 @@ void accumulate_tile_m1_avx512(
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
     }
-    decode_tile(codes, windows, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+    decode_tile(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
     const float* x_row = x + tr * 16;
     for (int i = 0; i < 16; ++i) {
       __m512 w = _mm512_loadu_ps(tile_weights + i * 16);
@@ -235,7 +217,6 @@ void accumulate_tile_mn_avx512(
     int N,
     const int32_t* trellis,
     int E,
-    const StepWindow* windows,
     const uint8_t* bank_ids,
     int segments_per_tile,
     int states_per_segment,
@@ -255,7 +236,7 @@ void accumulate_tile_mn_avx512(
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
     }
-    decode_tile(codes, windows, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+    decode_tile(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
 
     for (int i = 0; i < 16; ++i) {
       __m512 w = _mm512_loadu_ps(tile_weights + i * 16);
@@ -285,7 +266,6 @@ void accumulate_tile_scalar(
     int N,
     const int32_t* trellis,
     int E,
-    const StepWindow* windows,
     const uint8_t* bank_ids,
     int segments_per_tile,
     int states_per_segment,
@@ -307,7 +287,7 @@ void accumulate_tile_scalar(
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
     }
-    decode_tile(codes, windows, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+    decode_tile(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
 
     for (int i = 0; i < 16; ++i) {
       const float* w = tile_weights + i * 16;
@@ -331,7 +311,6 @@ using TileFn = void (*)(
     int N,
     const int32_t* trellis,
     int E,
-    const StepWindow* windows,
     const uint8_t* bank_ids,
     int segments_per_tile,
     int states_per_segment,
@@ -350,7 +329,6 @@ void tile_avx512_dispatch(
     int N,
     const int32_t* trellis,
     int E,
-    const StepWindow* windows,
     const uint8_t* bank_ids,
     int segments_per_tile,
     int states_per_segment,
@@ -359,11 +337,11 @@ void tile_avx512_dispatch(
     float* out) {
   if (M == 1) {
     accumulate_tile_m1_avx512(
-        I, O, tc, x, K, trellis, E, windows, bank_ids, segments_per_tile,
+        I, O, tc, x, K, trellis, E, bank_ids, segments_per_tile,
         states_per_segment, v2b2_p32, bank_alt_id, out);
   } else {
     accumulate_tile_mn_avx512(
-        M, I, O, tc, x, K, N, trellis, E, windows, bank_ids, segments_per_tile,
+        M, I, O, tc, x, K, N, trellis, E, bank_ids, segments_per_tile,
         states_per_segment, v2b2_p32, bank_alt_id, out);
   }
 }
@@ -378,7 +356,6 @@ void tile_dispatch(
     int N,
     const int32_t* trellis,
     int E,
-    const StepWindow* windows,
     const uint8_t* bank_ids,
     int segments_per_tile,
     int states_per_segment,
@@ -387,11 +364,11 @@ void tile_dispatch(
     float* out) {
   if (cpu_has_avx512()) {
     tile_avx512_dispatch(
-        M, I, O, tc, x, K, N, trellis, E, windows, bank_ids, segments_per_tile,
+        M, I, O, tc, x, K, N, trellis, E, bank_ids, segments_per_tile,
         states_per_segment, v2b2_p32, bank_alt_id, out);
   } else {
     accumulate_tile_scalar(
-        M, I, O, tc, x, K, N, trellis, E, windows, bank_ids, segments_per_tile,
+        M, I, O, tc, x, K, N, trellis, E, bank_ids, segments_per_tile,
         states_per_segment, v2b2_p32, bank_alt_id, out);
   }
 }
@@ -469,9 +446,6 @@ torch::Tensor qvq_gemv_cpu(
     bank_ptr = bank_ids->data_ptr<uint8_t>();
   }
 
-  StepWindow windows[128];
-  build_step_windows(E, windows);
-
   int64_t num_threads = at::get_num_threads();
   int64_t grain = std::max<int64_t>(1, O / num_threads);
 
@@ -487,7 +461,6 @@ torch::Tensor qvq_gemv_cpu(
           static_cast<int>(N),
           trellis_ptr,
           E,
-          windows,
           bank_ptr,
           segments_per_tile,
           states_per_segment,

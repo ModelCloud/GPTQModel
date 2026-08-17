@@ -56,5 +56,19 @@ Done (AVX-512 SIMD pass):
     - All arms report `exact: yes`.
 - `ruff check` and `git diff --check` pass.
 
+Done (GEMV shift-register decode pass):
+- Replaced the gather-based `decode_tile` in `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp` with a 16-bit shift register over the 128 E-bit codes.
+- This reduces per-tile decode work from `128 * 16` bit-gather operations to 128 table lookups plus a small tail preload, while remaining bit-exact for `E = 2..16`.
+- Removed the `StepWindow` helper array and `build_step_windows`; `decode_tile` is now `inline` and takes `E` directly.
+- Accuracy:
+  - `tests/test_qvq_v2b2_p32.py`: 119 passed, 12 skipped.
+  - `tests/test_qvq.py -k "viterbi or tail_biting"`: 89 passed, 112 skipped, 1 failed (same pre-existing `squared_error` 1.19e-6 tolerance edge case; CPU result matches Python fallback exactly).
+  - CPU GEMV max abs diff vs dense reference for `bits = [2, 3, 3.5, 4, 5, 6, 7, 8]` and V2B2-P32 `bits=3.5` is `<= 2.3e-4`, within the 2e-3 inference tolerance.
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - Raw `qvq_cpu_gemv` for `x=[1,2048] weight=[2048,2048] bits=3.5`: 104.8 ms (Python fallback) -> 1.09 ms (~96.6x)
+  - Dense `torch.matmul` for the same shape: ~0.04 ms.
+  - V2B2-P32 small-shape check also passes within tolerance.
+- `ruff check` and `git diff --check` pass.
+
 Next:
-- Benchmark CPU GEMV vs dense `x @ inner` and add focused tests.
+- Continue reducing the gap to dense matmul by fusing decode + FMA over output-channel tiles and vectorizing `unpack_tile_codes`.
