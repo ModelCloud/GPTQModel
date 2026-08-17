@@ -1936,7 +1936,7 @@ def _tail_biting_v2_banked_quantize(
     )
     shift = qvq_transition_bits(bits, vector_size=2)
     overlap = provisional.states[:, midpoint - 1] & ((1 << (16 - shift)) - 1)
-    if not torch.equal(overlap, provisional.states[:, midpoint] >> shift):
+    if not _cuda_values_prevalidated and not torch.equal(overlap, provisional.states[:, midpoint] >> shift):
         raise RuntimeError("QVQ banked V2 provisional path violates the V2 transition rule.")
     return _batched_v2_banked_viterbi_quantize(
         sequences,

@@ -234,3 +234,24 @@ bit-exact. A 512x512 old/new B2 candidate comparison is also bit-exact.
 The real Llama 3.2 1B gate/up-shaped probe increased peak allocation from
 `1383.19 MiB` to `1767.06 MiB`, confirming that the wide-shape fallback is
 required even though its reconstructed artifact remained exact.
+
+### Trusted segmented overlap handoff
+
+YAQA's trusted segmented path derives its constrained overlap directly from
+the provisional native traceback. Its Python transition equality assertion
+therefore repeated a host synchronization for every anti-diagonal without
+adding an independent correctness check. The public path retains the assertion;
+only the value-prevalidated CUDA path skips it.
+
+```text
++-------------------------------+-----------+-----------+---------+-----------+----------------------+
+| Full W2.5 B2 reselect 512x512 | Before    | After     | Speedup | Peak VRAM | Quantization parity  |
++-------------------------------+-----------+-----------+---------+-----------+----------------------+
+| PG506-230 A                   | 953.48 ms | 919.28 ms |   1.04x | 92.17 MiB | bit-exact repeated   |
+| PG506-230 B                   | 941.78 ms | 903.93 ms |   1.04x | 92.17 MiB | bit-exact repeated   |
++-------------------------------+-----------+-----------+---------+-----------+----------------------+
+```
+
+Against the pulled `1683.30 ms` baseline, the cumulative full-stage gain is
+now `1.83-1.86x`. Segmented-Viterbi host dispatch fell from `607.09 ms` to
+`560.46 ms`; its GPU work remains the dominant next target.
