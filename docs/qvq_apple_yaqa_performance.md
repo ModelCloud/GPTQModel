@@ -272,3 +272,14 @@ Final-logit KL remained `0.003401`; Top-1/5/10 remained `99.71%`, `92.06%`, and 
 quantization is now 1.99x faster than the original matched 112.98-second Apple baseline, essentially reaching the
 lower end of the requested 2--4x target. The full arm is 1.43x faster than the earlier 146.094-second measurement
 because dataset capture and model evaluation are intentionally unchanged.
+
+### Rejected scheduling variants
+
+- Cross-family coalescing was bit-exact at W1--W3.5, but combining three family workspaces crossed the M4
+  occupancy knee. At 32 and 64 tiles per family it ran at only `0.689x` and `0.654x` the speed of three serial
+  family launches. It was removed rather than hidden behind a dispatch heuristic.
+- A 1,024-thread recurrence was also bit-exact. It was 2--6% slower than 512 threads for batches 8--64, which
+  dominate real W2 execution; its batch-128 win did not compensate under the bounded batch-32 policy.
+- Forced full unrolling of bank, prefix, and edge loops preserved all reported quality metrics, but increased the
+  matched real-Llama module time from 56.762 seconds to approximately 57.86 seconds. Metal's default optimizer is
+  better balanced for this kernel, so the explicit unroll directives were removed.
