@@ -257,6 +257,33 @@ size is now the limiting variable. The next matched test should give each gradie
 retaining a separate confirmation set. Previously reported rollback-only evaluation rows may be reassigned for this
 development test, but any eventual promotion still requires a genuinely fresh dataset/task split.
 
+## Expanded cross-fit evidence (P13)
+
+P13 tested the sample-size hypothesis before changing the algorithm again. It doubled gradient generation to 32
+rows and search to 32 rows, yielding 16 rows per gradient fold and 16 rows per search fold. It retained 30 separate
+confirmation rows and moved untouched evaluation to a disjoint 64-row block. The codec, packed prefix, YAQA factors,
+ranks, alphas, candidate count, and acceptance rules remained unchanged.
+
+The gradient folds now contained 6,866 and 4,529 valid tokens. Consensus retained only 12 signed modes. Four changed
+serialized candidates reached the bounded shortlist:
+
+- two were rejected before replay because their realized first-order product changed sign across gradient folds;
+- the two all-gradient-fold candidates both failed nonlinear search replay;
+- their worst-fold KL ratios were `1.0009404` and `1.0013051`, corresponding to regressions of `+0.0940%` and
+  `+0.1305%`;
+- no candidate was selected, confirmation was not invoked, and the exact YAQA rollback was serialized.
+
+This invalidates the interpretation that P12 merely needed modestly more rows. The small P11/P12 search gains were
+selection effects that disappeared under the doubled evidence budget. Cross-fitted signed-spectrum P32 refinement
+is therefore **rejected for promotion and should not receive a wider rank/alpha sweep**. Keep the implementation as
+a default-off research diagnostic, but move the next accuracy effort to a materially different degree of freedom.
+
+The most credible next target is complete-module propagation-aware bank-family selection. It should independently
+encode the canonical V2+YAQA oracle and each legal B2 alternate-family artifact, replay those complete serialized
+modules through the live quantized prefix, and choose by cross-fitted final-logit loss before independent
+confirmation. This avoids the fragile one-segment spectral projection while testing whether B2's coarse family
+diversity supplies a stable downstream error direction.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -266,3 +293,4 @@ development test, but any eventual promotion still requires a genuinely fresh da
 - `artifacts/qvq_p10_propagation_shaped_spectral/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p11_realized_gradient_gate/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p12_crossfit_gradient_gate/layer2_q_w2_rows1954_2048.json`
+- `artifacts/qvq_p13_crossfit_expanded_gate/layer2_q_w2_expanded.json`
