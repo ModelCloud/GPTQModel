@@ -218,6 +218,40 @@ unsupported-format fallbacks are unchanged.
 ## Next measured work
 
 1. Extend the guarded K64 shared-decode sweep to additional real Q/K/V/O/MLP and MoE shapes before widening dispatch.
+
+## Fixed-trellis SU/SV alignment: MLX acceleration boundary (2026-08-17)
+
+Fixed-trellis SU/SV alignment is a **quantization-time differentiable optimization**, not an inference decode. The
+temporary decoder in `gptqmodel/looper/qvq_output_alignment.py` must expose gradients through `SV` (and through dense
+future siblings in the sequential lifecycle), then update them with Torch Adam/AdamW. The MLX QVQ kernels are
+inference-only array functions and do not participate in Torch autograd or the layer's Transformer execution graph.
+Replacing the temporary decoder with `qvq_mlx_gemv` would therefore remove the gradient path and silently change the
+optimization objective; it is not a valid drop-in speedup.
+
+With the default `OutputAlignConfig()` (`epochs=1`, `maximum_train_batches=32`, `maximum_validation_batches=16`),
+one alignment pass performs approximately:
+
+```text
+alignment disabled:                         0 alignment forwards / backwards
+alignment enabled: 4 + 32 + 16 = 52 forwards,
+                  32 backward passes, and 32 optimizer steps
+```
+
+The four fixed forwards are the baseline/runtime checks and final candidate checks; the 32 training forwards also
+carry backward graphs. Thus an MLX frozen-forward substitute could affect only a small fraction of the pass and cannot
+remove the dominant backward/optimizer cost. A future MLX implementation would require an MLX-native decoder-layer
+graph plus differentiable optimizer, not merely a faster GEMV.
+
+The focused alignment suite at commit `68471b7e` passed `25` tests with `3` CUDA-only skips in `3.41 s` wall time;
+the measured tiny fixed-trellis alignment cases took `0.007--0.015 s` on CPU. A realistic two-layer MPS lifecycle
+comparison was attempted with Llama 3.2 1B W2 V2B2-P32 and eight full calibration rows, but the disabled-control run
+hit a Metal command-buffer assertion during the existing banked MPS quantization path before alignment timing was
+available. This is a backend/resource failure, not evidence that alignment is slow or inaccurate.
+
+Current decision: **do not add an MLX bridge to alignment yet**. Keep the native Torch/MPS differentiable path and
+measure `output_alignment_seconds`, optimizer steps, and quantization wall time on CUDA. If acceleration is required,
+the first safe optimization is to reduce redundant validation forwards or fuse the Torch FP32 Hadamard/GEMM path while
+preserving autograd and exact fixed-trellis rollback; an MLX inference-only call cannot satisfy that contract.
 2. Benchmark complete `QVQLinear` calls including SU, Hadamard transforms, SV, and bias; inner GEMV is only one stage.
 3. Profile Metal occupancy, threadgroup-barrier cost, register pressure, and memory traffic before adding more
    decoded values per synchronization.
