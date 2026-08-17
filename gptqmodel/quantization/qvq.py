@@ -3432,17 +3432,27 @@ def yaqa_inner(
         input_L = input_factor.L
         output_L = output_factor.L
     # Canonical, B2-family, and B4 candidates share these immutable factors.
-    input_feedback = input_L.clone()
-    output_feedback = output_L.clone()
+    # MPSGraph specializes every shrinking suffix GEMM below.  Real projection
+    # shapes consequently compile thousands of one-use graphs, while the M4
+    # CPU executes the same small/skinny FP32 products directly through
+    # Accelerate.  Keep the feedback recurrence in host memory on Apple and
+    # transfer only compact anti-diagonal trellis batches to native Metal.
+    quantization_device = inner_weight.device
+    apple_host_feedback = quantization_device.type == "mps"
+    feedback_device = torch.device("cpu") if apple_host_feedback else quantization_device
+    input_feedback = input_L.to(device=feedback_device, copy=True)
+    output_feedback = output_L.to(device=feedback_device, copy=True)
     input_feedback.diagonal().sub_(1)
     output_feedback.diagonal().sub_(1)
-    source = inner_weight.to(torch.float32)
-    rounding_bias = None if _rounding_bias is None else _rounding_bias.to(torch.float32)
+    source = inner_weight.to(device=feedback_device, dtype=torch.float32)
+    rounding_bias = (
+        None if _rounding_bias is None else _rounding_bias.to(device=feedback_device, dtype=torch.float32)
+    )
     # Bank scoring and the full rollback proxy use one stable accumulation
     # dtype. Calibration may provide FP64, BF16, or FP16 Hessians; mixing
     # those factors directly with FP32 errors otherwise rejects einsum.
-    input_hessian_fp32 = input_hessian.to(torch.float32)
-    output_hessian_fp32 = output_hessian.to(torch.float32)
+    input_hessian_fp32 = input_hessian.to(device=feedback_device, dtype=torch.float32)
+    output_hessian_fp32 = output_hessian.to(device=feedback_device, dtype=torch.float32)
     input_hessian_blocks = torch.stack(
         [input_hessian_fp32[index : index + tile_rows, index : index + tile_rows]
          for index in range(0, in_features, tile_rows)]
@@ -3452,11 +3462,13 @@ def yaqa_inner(
          for index in range(0, out_features, tile_cols)]
     )
     quantized = torch.zeros_like(source)
+    quantized_blocks = quantized.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
+    source_blocks = source.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
     steps_per_tile = tile_rows * tile_cols // codebook.shape[1]
     tile_states = torch.empty(
         (input_blocks, output_blocks, steps_per_tile),
         dtype=torch.long,
-        device=inner_weight.device,
+        device=feedback_device,
     )
     segments_per_tile = (
         QVQ_V2B2_P32_SEGMENTS_PER_TILE
@@ -3468,9 +3480,10 @@ def yaqa_inner(
     bank_ids = torch.zeros(
         input_blocks * output_blocks * segments_per_tile,
         dtype=torch.uint8,
-        device=inner_weight.device,
+        device=feedback_device,
     )
     error = source.clone()
+    error_blocks = error.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
     active_banks = bank_codebooks if bank_codebooks is not None else (codebook,)
     if segmented_v2 and segmented_bank_stack is None:
         segmented_bank_stack = torch.stack(active_banks).contiguous()
@@ -3484,13 +3497,9 @@ def yaqa_inner(
         )
         else None
     )
-    # MLX's banked Viterbi kernel exposes large device workspaces as outputs;
-    # Metal's allocator retains those buffers across the thousands of YAQA
-    # anti-diagonal calls. Keep MPS YAQA bank search on the bounded Torch CPU
-    # reference instead. Native MPS/MLX inference remains unchanged, and the
-    # same FP32 recurrence/traceback is used for serialized quantization.
-    yaqa_banked_cpu = segmented_v2 and source.device.type == "mps"
-    cpu_segmented_bank_stack = segmented_bank_stack.cpu() if yaqa_banked_cpu else None
+    # Apple feedback stays on the CPU, but segmented trellis search still uses
+    # the exact MLX Metal recurrence.  Only one compact anti-diagonal batch and
+    # its traceback cross the shared-memory runtime boundary at a time.
 
     for diagonal in range(input_blocks + output_blocks - 2, -1, -1):
         first_input_block = max(0, diagonal - output_blocks + 1)
@@ -3537,8 +3546,8 @@ def yaqa_inner(
                 for chunk in sequences.split(segmented_batch_size):
                     if telemetry is not None:
                         telemetry.count("yaqa_segmented_v2_chunks")
-                    search_chunk = chunk.cpu() if yaqa_banked_cpu else chunk
-                    search_codebooks = cpu_segmented_bank_stack if yaqa_banked_cpu else segmented_bank_stack
+                    search_chunk = chunk.to(quantization_device) if apple_host_feedback else chunk
+                    search_codebooks = segmented_bank_stack
                     result = _tail_biting_v2_banked_quantize(
                         search_chunk,
                         search_codebooks,
@@ -3588,15 +3597,17 @@ def yaqa_inner(
         else:
             for candidate_codebook in active_banks:
                 values, states_for_bank = [], []
-                for chunk in sequences.split(trellis_batch_size):
-                    result = tail_biting_viterbi_quantize(
-                        chunk,
-                        candidate_codebook,
-                        bits=bits,
-                        candidate_count=tail_biting_candidates,
-                    )
-                    values.append(result.values)
-                    states_for_bank.append(result.states)
+                with _qvq_phase(telemetry, "yaqa_viterbi", quantization_device):
+                    for chunk in sequences.split(trellis_batch_size):
+                        search_chunk = chunk.to(quantization_device) if apple_host_feedback else chunk
+                        result = tail_biting_viterbi_quantize(
+                            search_chunk,
+                            candidate_codebook,
+                            bits=bits,
+                            candidate_count=tail_biting_candidates,
+                        )
+                        values.append(result.values.to(feedback_device))
+                        states_for_bank.append(result.states.to(feedback_device))
                 candidate_value = torch.cat(values)
                 candidate_state = torch.cat(states_for_bank)
                 if dual_v2:
@@ -3636,29 +3647,27 @@ def yaqa_inner(
             reconstructed = candidates[winners, torch.arange(len(coordinates), device=source.device)]
             states = torch.stack(candidate_states)[winners, torch.arange(len(coordinates), device=source.device)]
         with _qvq_phase(telemetry, "yaqa_commit", source.device):
-            for coordinate_index, (input_block, output_block) in enumerate(coordinates):
-                input_start = input_block * tile_rows
-                output_start = output_block * tile_cols
-                quantized[
-                    input_start : input_start + tile_rows,
-                    output_start : output_start + tile_cols,
-                ] = reconstructed[coordinate_index]
-                error[input_start : input_start + tile_rows, output_start : output_start + tile_cols] = (
-                    source[input_start : input_start + tile_rows, output_start : output_start + tile_cols]
-                    - reconstructed[coordinate_index]
-                )
-                tile_states[input_block, output_block] = states[coordinate_index]
-                if segmented_v2:
-                    tile_index = input_block * output_blocks + output_block
-                    selector_start = tile_index * segments_per_tile
-                    bank_ids[selector_start : selector_start + segments_per_tile] = segmented_selectors[coordinate_index]
-                elif bank_codebooks is not None:
-                    bank_ids[input_block * output_blocks + output_block] = winners[coordinate_index].to(torch.uint8)
+            input_indices = torch.tensor(
+                [coordinate[0] for coordinate in coordinates], dtype=torch.long, device=feedback_device
+            )
+            output_indices = torch.tensor(
+                [coordinate[1] for coordinate in coordinates], dtype=torch.long, device=feedback_device
+            )
+            quantized_blocks[input_indices, output_indices] = reconstructed
+            error_blocks[input_indices, output_indices] = (
+                source_blocks[input_indices, output_indices] - reconstructed
+            )
+            tile_states[input_indices, output_indices] = states
+            flat_tile_indices = input_indices * output_blocks + output_indices
+            if segmented_v2:
+                bank_ids.view(input_blocks * output_blocks, segments_per_tile)[flat_tile_indices] = segmented_selectors
+            elif bank_codebooks is not None:
+                bank_ids[flat_tile_indices] = winners.to(torch.uint8)
 
     if bank_codebooks is not None:
         with _qvq_phase(telemetry, "yaqa_full_proxy", source.device):
             mixed_error = quantized.to(torch.float32) - source
-            bank0_error = bank0_reference.to(torch.float32) - source
+            bank0_error = bank0_reference.to(device=feedback_device, dtype=torch.float32) - source
             mixed_loss = torch.einsum(
                 "ij,ik,kl,lj->", mixed_error, input_hessian_fp32, mixed_error, output_hessian_fp32
             )
@@ -3667,7 +3676,7 @@ def yaqa_inner(
             )
         fallback_to_bank0 = not torch.isfinite(mixed_loss) or mixed_loss >= bank0_loss
         if _diagnostics is not None:
-            bank0_states = bank0_reference_states.reshape_as(tile_states)
+            bank0_states = bank0_reference_states.to(feedback_device).reshape_as(tile_states)
             _diagnostics["mixed_loss_before_fallback"] = float(mixed_loss.item())
             _diagnostics["bank0_loss"] = float(bank0_loss.item())
             _diagnostics["pre_fallback_selector_churn"] = float(
@@ -3677,15 +3686,20 @@ def yaqa_inner(
                 (tile_states != bank0_states).to(torch.float32).mean().item()
             )
         if fallback_to_bank0:
-            quantized = bank0_reference.to(dtype=inner_weight.dtype)
-            tile_states = bank0_reference_states.reshape(input_blocks, output_blocks, steps_per_tile)
+            quantized = bank0_reference.to(device=feedback_device, dtype=inner_weight.dtype)
+            tile_states = bank0_reference_states.to(feedback_device).reshape(
+                input_blocks, output_blocks, steps_per_tile
+            )
             bank_ids.zero_()
         if telemetry is not None:
             telemetry.count("yaqa_bank0_fallback", int(fallback_to_bank0))
         if _diagnostics is not None:
             _diagnostics["fallback_to_bank0"] = bool(fallback_to_bank0)
-    result = (quantized.to(dtype=inner_weight.dtype), tile_states.reshape(-1, steps_per_tile))
-    return (*result, bank_ids) if bank_codebooks is not None else result
+    result = (
+        quantized.to(device=quantization_device, dtype=inner_weight.dtype),
+        tile_states.reshape(-1, steps_per_tile).to(quantization_device),
+    )
+    return (*result, bank_ids.to(quantization_device)) if bank_codebooks is not None else result
 
 
 def yaqa_inner_v2b4_p64(

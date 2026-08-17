@@ -1483,6 +1483,13 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
     states = torch.from_numpy(np.asarray(outputs[0])).to(torch.long).to(device=sequences.device)
     selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8).to(device=sequences.device)
     squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32).to(device=sequences.device)
+    # The custom kernel exposes its recurrence workspaces as outputs.  YAQA
+    # invokes this bridge for every anti-diagonal, so retaining MLX's buffer
+    # cache scales memory with module tile count instead of live batch size.
+    # Results have been copied into Torch above; release only reusable buffers,
+    # not the compiled pipeline or immutable codebook cache.
+    del outputs
+    mx.clear_cache()
     return states, selectors, squared_error
 
 
