@@ -9,6 +9,7 @@ from gptqmodel.quantization.qvq_spectral import (
     propagation_spectral_mode_products,
     realized_propagation_product,
     reconstruct_propagation_spectral_modes,
+    select_crossfit_propagation_shaped_svd,
     select_propagation_shaped_svd,
 )
 
@@ -158,6 +159,40 @@ def test_select_propagation_shaped_svd_preserves_complete_signed_atoms_in_downst
         torch.arange(2),
     )
     torch.testing.assert_close(selected_sum, atoms[0] + atoms[1])
+
+
+def test_crossfit_shaping_requires_every_gradient_fold_to_favor_the_mode():
+    dtype = torch.float64
+    input_root = torch.eye(2, dtype=dtype)
+    output_root = torch.eye(2, dtype=dtype)
+    left_vectors = torch.eye(2, dtype=dtype)
+    singular_values = torch.tensor([2.0, 1.0], dtype=dtype)
+    right_vectors_h = torch.eye(2, dtype=dtype)
+    gradients = torch.stack(
+        (
+            torch.tensor([[-2.0, 0.0], [0.0, -1.0]], dtype=dtype),
+            torch.tensor([[0.5, 0.0], [0.0, -3.0]], dtype=dtype),
+        )
+    )
+
+    selected_left, selected_singular, selected_right_h, fold_products, worst_products, indices = (
+        select_crossfit_propagation_shaped_svd(
+            input_root,
+            output_root,
+            left_vectors,
+            singular_values,
+            right_vectors_h,
+            gradients,
+            maximum_modes=2,
+        )
+    )
+
+    assert indices.tolist() == [1]
+    torch.testing.assert_close(fold_products, torch.tensor([[-4.0, -1.0], [1.0, -3.0]], dtype=dtype))
+    torch.testing.assert_close(worst_products, torch.tensor([1.0, -1.0], dtype=dtype))
+    assert torch.equal(selected_left, left_vectors[:, 1:2])
+    assert torch.equal(selected_singular, singular_values[1:2])
+    assert torch.equal(selected_right_h, right_vectors_h[1:2])
 
 
 def test_propagation_spectral_helpers_reject_invalid_geometry():

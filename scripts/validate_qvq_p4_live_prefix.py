@@ -23,6 +23,7 @@ from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import QVQLinearQuantizationResult, quantize_qvq_linear
 from gptqmodel.quantization.qvq_spectral import (
     realized_propagation_product,
+    select_crossfit_propagation_shaped_svd,
     select_propagation_shaped_svd,
 )
 from scripts.analyze_gptq_low_bit_grid import load_nm_evaluation_batch, tensor_metrics
@@ -71,6 +72,12 @@ def _parser() -> argparse.ArgumentParser:
         "--gradient-rows",
         type=int,
         help="Number of optional disjoint P9 gradient-generation rows (defaults to search rows).",
+    )
+    parser.add_argument(
+        "--gradient-folds",
+        type=int,
+        default=1,
+        help="Interleaved independent folds used for robust propagation-gradient consensus.",
     )
     parser.add_argument("--confirmation-row-offset", type=int, default=1610)
     parser.add_argument("--confirmation-rows", type=int, default=8)
@@ -462,6 +469,10 @@ def main() -> None:
         raise ValueError("gradient-shaped spectral search requires at least one replay candidate")
     if args.gradient_shaped_spectral and "gradient" not in splits:
         raise ValueError("gradient-shaped spectral search requires an explicit disjoint gradient split")
+    if args.gradient_folds < 1 or (
+        args.gradient_rows is not None and args.gradient_folds > args.gradient_rows
+    ):
+        raise ValueError("gradient folds must be between one and the gradient row count")
     if args.require_favorable_realized_gradient and not gradient_enabled:
         raise ValueError("realized-gradient gating requires a propagated-gradient strategy")
     if args.replay_folds < 1 or args.replay_folds > args.search_rows:
@@ -565,6 +576,7 @@ def main() -> None:
     }
     full_horizon_gradient_weight: torch.Tensor | None = None
     gradient_baseline_weight: torch.Tensor | None = None
+    full_horizon_gradient_folds: tuple[torch.Tensor, ...] = ()
     replay_baseline_fold_kl: list[float] | None = None
     replay_row_folds = tuple(
         tuple(row_sets["search"][fold_index :: args.replay_folds])
@@ -578,19 +590,17 @@ def main() -> None:
             if full_horizon_gradient_weight is None or gradient_baseline_weight is None:
                 raise RuntimeError("realized-gradient gate was invoked before gradient generation")
             if not torch.equal(candidate, gradient_baseline_weight):
-                product = float(
-                    realized_propagation_product(
-                        full_horizon_gradient_weight,
-                        candidate,
-                        gradient_baseline_weight,
-                    ).item()
-                )
-                if product >= 0:
+                fold_gradients = full_horizon_gradient_folds or (full_horizon_gradient_weight,)
+                products = [
+                    float(realized_propagation_product(gradient, candidate, gradient_baseline_weight).item())
+                    for gradient in fold_gradients
+                ]
+                if any(product >= 0 for product in products):
                     replay_scores.append(
                         {
                             "score": None,
                             "gated": "non-favorable realized gradient",
-                            "realized_propagated_first_order": product,
+                            "realized_propagated_first_order_folds": products,
                         }
                     )
                     return math.inf
@@ -634,18 +644,31 @@ def main() -> None:
                 target.weight.copy_(source_weight.to(device=device, dtype=target.weight.dtype))
 
     def full_horizon_candidate_gradient(candidate: torch.Tensor) -> torch.Tensor:
-        nonlocal full_horizon_gradient_weight, gradient_baseline_weight
+        nonlocal full_horizon_gradient_folds, full_horizon_gradient_weight, gradient_baseline_weight
         assert search_teacher is not None
         gradient_rows = row_sets.get("gradient", row_sets["search"])
         gradient_targets = gradient_teacher if gradient_teacher is not None else search_teacher
         started_gradient = time.perf_counter()
         try:
-            gradient = _teacher_kl_weight_gradient(
-                student_model,
-                target,
-                gradient_rows,
-                gradient_targets,
-                candidate,
+            gradients = []
+            fold_tokens = []
+            for fold_index in range(args.gradient_folds):
+                fold_rows = tuple(gradient_rows[fold_index :: args.gradient_folds])
+                fold_targets = tuple(gradient_targets[fold_index :: args.gradient_folds])
+                gradients.append(
+                    _teacher_kl_weight_gradient(
+                        student_model,
+                        target,
+                        fold_rows,
+                        fold_targets,
+                        candidate,
+                    )
+                )
+                fold_tokens.append(sum(int(logits.shape[0] * logits.shape[1]) for logits in fold_targets))
+            total_tokens = sum(fold_tokens)
+            gradient = sum(
+                fold_gradient * (tokens / total_tokens)
+                for fold_gradient, tokens in zip(gradients, fold_tokens, strict=True)
             )
             gradient_report.update(
                 {
@@ -654,10 +677,19 @@ def main() -> None:
                     "l2_norm": float(torch.linalg.vector_norm(gradient.to(torch.float32)).item()),
                     "max_abs": float(gradient.abs().max().item()),
                     "finite": bool(torch.isfinite(gradient).all()),
+                    "folds": [
+                        {
+                            "valid_tokens": tokens,
+                            "l2_norm": float(torch.linalg.vector_norm(fold_gradient.to(torch.float32)).item()),
+                            "max_abs": float(fold_gradient.abs().max().item()),
+                        }
+                        for fold_gradient, tokens in zip(gradients, fold_tokens, strict=True)
+                    ],
                 }
             )
             full_horizon_gradient_weight = gradient.detach().clone()
             gradient_baseline_weight = candidate.detach().clone()
+            full_horizon_gradient_folds = tuple(fold_gradient.detach().clone() for fold_gradient in gradients)
             return gradient
         finally:
             with torch.no_grad():
@@ -732,15 +764,33 @@ def main() -> None:
         def propagation_shaped_svd(matrix: torch.Tensor, rank: int, algo: str = "lowrank"):
             left, singular, right_h = original_svd(matrix, rank, algo=algo)
             spectral_device = input_root.device
-            selected_left, selected_singular, selected_right_h, products, indices = select_propagation_shaped_svd(
+            spectral_args = (
                 input_root,
                 output_root,
                 left.to(device=spectral_device, dtype=torch.float32),
                 singular.to(device=spectral_device, dtype=torch.float32),
                 right_h.to(device=spectral_device, dtype=torch.float32),
-                replay_gradient.to(device=spectral_device, dtype=torch.float32),
-                maximum_modes=rank,
             )
+            if len(full_horizon_gradient_folds) > 1:
+                (
+                    selected_left,
+                    selected_singular,
+                    selected_right_h,
+                    fold_products,
+                    products,
+                    indices,
+                ) = select_crossfit_propagation_shaped_svd(
+                    *spectral_args,
+                    torch.stack(full_horizon_gradient_folds).to(device=spectral_device, dtype=torch.float32),
+                    maximum_modes=rank,
+                )
+                gradient_report["spectral_mode_product_folds"] = fold_products.detach().cpu().tolist()
+            else:
+                selected_left, selected_singular, selected_right_h, products, indices = select_propagation_shaped_svd(
+                    *spectral_args,
+                    replay_gradient.to(device=spectral_device, dtype=torch.float32),
+                    maximum_modes=rank,
+                )
             gradient_report.update(
                 {
                     "shaping_status": "applied" if indices.numel() else "no favorable signed modes",
@@ -828,6 +878,7 @@ def main() -> None:
             "direct_replay_candidates": args.direct_replay_candidates,
             "gradient_ranked_direct": args.gradient_ranked_direct,
             "gradient_shaped_spectral": args.gradient_shaped_spectral,
+            "gradient_folds": args.gradient_folds,
             "require_favorable_realized_gradient": args.require_favorable_realized_gradient,
             "replay_folds": args.replay_folds,
             "topn_regression_limit": args.topn_regression_limit,

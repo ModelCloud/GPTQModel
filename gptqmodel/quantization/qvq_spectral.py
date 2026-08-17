@@ -198,6 +198,55 @@ def select_propagation_shaped_svd(
     )
 
 
+def select_crossfit_propagation_shaped_svd(
+    input_root: torch.Tensor,
+    output_root: torch.Tensor,
+    left_vectors: torch.Tensor,
+    singular_values: torch.Tensor,
+    right_vectors_h: torch.Tensor,
+    gradients: torch.Tensor,
+    *,
+    maximum_modes: int,
+    minimum_predicted_decrease: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Select signed atoms favorable under every independent gradient fold.
+
+    Modes are ranked by their worst (largest) first-order product. Requiring
+    that worst product to be negative prevents a large gain on one fold from
+    hiding a direction reversal on another fold.
+    """
+
+    if not isinstance(gradients, torch.Tensor) or gradients.ndim != 3 or gradients.shape[0] < 2:
+        raise ValueError("QVQ cross-fit propagation gradients must have shape [folds>=2, input, output].")
+    fold_products = torch.stack(
+        [
+            propagation_spectral_mode_products(
+                input_root,
+                output_root,
+                left_vectors,
+                singular_values,
+                right_vectors_h,
+                gradient,
+            )
+            for gradient in gradients
+        ]
+    )
+    worst_products = fold_products.amax(dim=0)
+    mode_indices = favorable_propagation_spectral_modes(
+        worst_products,
+        maximum_modes=maximum_modes,
+        minimum_predicted_decrease=minimum_predicted_decrease,
+    )
+    return (
+        left_vectors[:, mode_indices],
+        singular_values[mode_indices],
+        right_vectors_h[mode_indices],
+        fold_products,
+        worst_products,
+        mode_indices,
+    )
+
+
 def reconstruct_propagation_spectral_modes(
     input_root: torch.Tensor,
     output_root: torch.Tensor,

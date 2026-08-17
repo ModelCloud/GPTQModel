@@ -224,6 +224,39 @@ change the estimation contract rather than widen the same candidate sweep: use c
 require a candidate to remain favorable across independent gradient/search folds, and reserve a fresh dataset or
 task-like split for confirmation. No additional format or inference work is justified before that gate.
 
+## Cross-fitted gradient consensus (P12)
+
+P12 split the same 16 disjoint gradient rows into two interleaved folds. A continuous signed spectral atom survived
+only when both fold products were negative, and modes were ranked by their worse (largest) fold product. The actual
+serialized candidate delta then had to satisfy the same all-fold rule before full replay. The token-weighted mean
+gradient remained available only as the core shortlist ordering signal; it could not override a fold disagreement.
+
+The two folds contained 3,161 and 1,651 valid tokens. Their gradient L2 norms were `0.05372` and `0.03816`. Cross-fit
+consensus retained only 16 signed modes, versus 46 modes with a negative pooled coefficient in P11. Of the four
+shortlisted serialized candidates, three were rejected before replay because the first gradient fold was favorable
+but the second was adverse. The sole all-fold candidate, `r16_a4_t7425_s0`, produced:
+
+| Stage or metric | P12 proposal versus exact YAQA rollback |
+|---|---:|
+| Search fold 0 final KL | -0.5680% |
+| Search fold 1 final KL | -0.1878% |
+| Token-weighted search final KL | -0.3992% |
+| Independent-confirmation final KL | +0.1832% |
+| Independent-confirmation JSD | +0.1721% |
+| Independent-confirmation Top-1 | +0.0000 pp |
+| Independent-confirmation Top-5 overlap | +0.0052 pp |
+| Independent-confirmation Top-10 overlap | +0.0000 pp |
+
+The robust estimator therefore halved P11's confirmation KL regression (`+0.3391%` to `+0.1832%`) and removed its
+confirmation Top-1 movement, but it did not reverse the primary metric. The locked gate rejected the proposal and
+serialized the exact rollback. P12 remains default-off.
+
+This is evidence that fold consensus filters unstable directions, not evidence that eight-row gradient folds are
+sufficient. Candidate capacity is present and the all-fold search result is reproducibly positive; estimator sample
+size is now the limiting variable. The next matched test should give each gradient and search fold more rows while
+retaining a separate confirmation set. Previously reported rollback-only evaluation rows may be reassigned for this
+development test, but any eventual promotion still requires a genuinely fresh dataset/task split.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -232,3 +265,4 @@ task-like split for confirmation. No additional format or inference work is just
 - `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1970_2048_nogradient.json`
 - `artifacts/qvq_p10_propagation_shaped_spectral/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p11_realized_gradient_gate/layer2_q_w2_rows1954_2048.json`
+- `artifacts/qvq_p12_crossfit_gradient_gate/layer2_q_w2_rows1954_2048.json`
