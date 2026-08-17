@@ -395,16 +395,13 @@ def _minimax_relative_replay_score(
     return max(ratios)
 
 
-def _replace_target_with_result(
-    model: torch.nn.Module,
+def _qvq_module_from_result(
+    current: torch.nn.Linear,
     *,
     target_name: str,
     result: QVQLinearQuantizationResult,
     bits: float,
 ) -> QVQLinear:
-    current = model.get_submodule(target_name)
-    if not isinstance(current, torch.nn.Linear):
-        raise TypeError("P4 selected target must replace a dense torch.nn.Linear")
     replacement = QVQLinear(
         bits=bits,
         in_features=current.in_features,
@@ -419,6 +416,20 @@ def _replace_target_with_result(
         v2b2_p32=True,
     ).eval()
     replacement.post_init()
+    return replacement
+
+
+def _replace_target_with_result(
+    model: torch.nn.Module,
+    *,
+    target_name: str,
+    result: QVQLinearQuantizationResult,
+    bits: float,
+) -> QVQLinear:
+    current = model.get_submodule(target_name)
+    if not isinstance(current, torch.nn.Linear):
+        raise TypeError("P4 selected target must replace a dense torch.nn.Linear")
+    replacement = _qvq_module_from_result(current, target_name=target_name, result=result, bits=bits)
     parent_name, _, child_name = target_name.rpartition(".")
     setattr(model.get_submodule(parent_name), child_name, replacement)
     return replacement
@@ -737,6 +748,56 @@ def main() -> None:
             with torch.no_grad():
                 target.weight.copy_(source_weight.to(device=device, dtype=target.weight.dtype))
 
+    target_parent_name, _, target_child_name = args.target.rpartition(".")
+    target_parent = student_model.get_submodule(target_parent_name)
+
+    def install_target(module: torch.nn.Module) -> None:
+        setattr(target_parent, target_child_name, module)
+
+    def full_horizon_serialized_score(result: QVQLinearQuantizationResult) -> float:
+        """Replay one actual packed QVQLinear and restore the original dense target atomically."""
+
+        nonlocal replay_baseline_fold_kl
+        assert search_teacher is not None
+        replacement = _qvq_module_from_result(target, target_name=args.target, result=result, bits=args.bits)
+        install_target(replacement)
+        try:
+            fold_metrics = []
+            for fold_index, fold_rows in enumerate(replay_row_folds):
+                fold_teacher = tuple(search_teacher[fold_index :: args.replay_folds])
+                fold_metrics.append(_compare_logits(student_model, fold_rows, fold_teacher))
+            fold_kl = [float(metrics["kl_forward"]["mean"]) for metrics in fold_metrics]
+            if replay_baseline_fold_kl is None:
+                replay_baseline_fold_kl = fold_kl
+                score = 1.0
+            else:
+                score = _minimax_relative_replay_score(fold_kl, replay_baseline_fold_kl)
+            fold_tokens = [int(metrics["shape"][0]) for metrics in fold_metrics]
+            total_tokens = sum(fold_tokens)
+
+            def weighted(name: str) -> float:
+                values = [
+                    metrics[name] if name == "top1_agreement" else metrics[name]["mean"]
+                    for metrics in fold_metrics
+                ]
+                return sum(float(value) * rows for value, rows in zip(values, fold_tokens, strict=True)) / total_tokens
+
+            replay_scores.append(
+                {
+                    "score": score,
+                    "fold_kl_forward": fold_kl,
+                    "kl_forward": sum(value * rows for value, rows in zip(fold_kl, fold_tokens, strict=True))
+                    / total_tokens,
+                    "top1": weighted("top1_agreement"),
+                    "top5": weighted("top5_overlap"),
+                    "top10": weighted("top10_overlap"),
+                    "runtime": "packed_qvqlinear",
+                }
+            )
+            return score
+        finally:
+            install_target(target)
+
     def full_horizon_candidate_gradient(candidate: torch.Tensor) -> torch.Tensor:
         nonlocal full_horizon_gradient_folds, full_horizon_gradient_weight, gradient_baseline_weight
         assert search_teacher is not None
@@ -808,6 +869,37 @@ def main() -> None:
         callback_report.update({"baseline": baseline_metrics, "proposal": proposal_metrics, "accepted": accepted})
         with torch.no_grad():
             target.weight.copy_(rollback.to(device=device, dtype=target.weight.dtype))
+        return accepted
+
+    def serialized_confirmation_callback(
+        proposal: QVQLinearQuantizationResult,
+        rollback: QVQLinearQuantizationResult,
+    ) -> bool:
+        assert confirmation_teacher is not None
+
+        def metrics_for(result: QVQLinearQuantizationResult) -> dict[str, object]:
+            install_target(_qvq_module_from_result(target, target_name=args.target, result=result, bits=args.bits))
+            try:
+                return _compare_logits(student_model, row_sets["confirmation"], confirmation_teacher)
+            finally:
+                install_target(target)
+
+        baseline_metrics = metrics_for(rollback)
+        proposal_metrics = metrics_for(proposal)
+        accepted = _passes_confirmation(
+            baseline_metrics,
+            proposal_metrics,
+            topn_regression_limit=args.topn_regression_limit,
+            minimum_relative_kl_improvement=args.minimum_relative_kl_improvement,
+        )
+        callback_report.update(
+            {
+                "baseline": baseline_metrics,
+                "proposal": proposal_metrics,
+                "accepted": accepted,
+                "runtime": "packed_qvqlinear",
+            }
+        )
         return accepted
 
     mode = (
@@ -922,7 +1014,6 @@ def main() -> None:
         assert search_teacher is not None and confirmation_teacher is not None
         original_family_quantizer = qvq_module.yaqa_inner_v2b2_p32
         family_results: list[QVQLinearQuantizationResult] = []
-        family_weights: list[torch.Tensor] = []
         for family_id in range(4):
             family_started = time.perf_counter()
             with patch.object(
@@ -938,9 +1029,8 @@ def main() -> None:
                 )
             serialized_weight = _serialized_v2b2_weight(family_result, bits=args.bits).to(device)
             replay_index = len(replay_scores)
-            replay_score = full_horizon_candidate_score(serialized_weight)
+            replay_score = full_horizon_serialized_score(family_result)
             family_results.append(family_result)
-            family_weights.append(serialized_weight)
             selectors = family_result.bank_ids
             nonzero = 0.0 if selectors is None else float((selectors != 0).float().mean().item())
             complete_family_report.append(
@@ -973,7 +1063,10 @@ def main() -> None:
             if complete_family_report[index]["replay_score"] < 1 - args.minimum_relative_kl_improvement
         ]
         selected_family = min(eligible, key=lambda index: complete_family_report[index]["replay_score"]) if eligible else 0
-        if selected_family and confirmation_callback(family_weights[selected_family], family_weights[0]):
+        if selected_family and serialized_confirmation_callback(
+            family_results[selected_family],
+            family_results[0],
+        ):
             result = family_results[selected_family]
         else:
             selected_family = 0
@@ -998,7 +1091,12 @@ def main() -> None:
     elif not callback_report:
         callback_report = {"accepted": False, "reason": "localized proposal unchanged; callback not invoked"}
 
-    rollback_weight = callback_weights.get("rollback", result.weight).detach().float().clone()
+    rollback_result = family_results[0] if args.complete_family_selection else None
+    rollback_weight = (
+        rollback_result.weight
+        if rollback_result is not None
+        else callback_weights.get("rollback", result.weight)
+    ).detach().float().clone()
     with torch.no_grad():
         target.weight.copy_(rollback_weight.to(device=device, dtype=target.weight.dtype))
     rollback_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
@@ -1007,6 +1105,11 @@ def main() -> None:
     selected_dense_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
     with torch.no_grad():
         target.weight.copy_(rollback_weight.to(dtype=target.weight.dtype))
+    rollback_packed_evaluation = None
+    if rollback_result is not None:
+        install_target(_qvq_module_from_result(target, target_name=args.target, result=rollback_result, bits=args.bits))
+        rollback_packed_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
+        install_target(target)
     _replace_target_with_result(student_model, target_name=args.target, result=result, bits=args.bits)
     selected_packed_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
 
@@ -1066,6 +1169,7 @@ def main() -> None:
         "confirmation": callback_report,
         "evaluation": {
             "rollback_dense": rollback_evaluation,
+            "rollback_packed": rollback_packed_evaluation,
             "selected_dense": selected_dense_evaluation,
             "selected_packed": selected_packed_evaluation,
         },
