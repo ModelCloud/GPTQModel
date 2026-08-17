@@ -276,3 +276,18 @@ Matched Llama 3.2 1B layer-0 q_proj, sampled-96 B2-P32+YAQA family selection, th
 CUDA 13.0 (`nvcc 13.0.88`) tests cover all six rates, B2-P32 and B4-P64, weighted and unweighted objectives,
 batches 1/3/17, and three deterministic repeats: 72/72 passed with exact overlap equality. The middle-rate
 regressions measured approximately 1--5%, which is why they are not routed to this specialization.
+
+At W3.5, the segmented recurrence previously assigned one 128-prefix scan to each of only 512 active threads in a
+1024-thread CTA. The cooperative specialization gives the two 512-thread halves disjoint 64-prefix scans and merges
+their minima by the exact `(loss, prefix)` order. It preserves every candidate emission and tie rule.
+
+| Format | Batch | Previous grid | Cooperative grid | Speedup | Accuracy |
+|---|---:|---:|---:|---:|---|
+| B2-P32 | 1 | 2.279 ms | 1.583 ms | 1.44x | SHA-256-identical outputs |
+| B2-P32 | 16 | 2.445 ms | 1.644 ms | 1.49x | SHA-256-identical outputs |
+| B4-P64 | 1 | 2.216 ms | 1.551 ms | 1.43x | SHA-256-identical outputs |
+| B4-P64 | 16 | 2.362 ms | 1.601 ms | 1.48x | SHA-256-identical outputs |
+
+On the same real W3.5 Llama q_proj case, segmented-Viterbi GPU time fell from 1461.77 to 1254.36 ms and module
+median from 3.032 to 2.804 seconds (1.08x). Peak allocation remained 401.48 MiB and the complete weight, state,
+selector, and family artifact was bit-exact. Canonical V2 recurrence is unchanged and now limits the module gain.

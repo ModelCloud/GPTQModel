@@ -1220,6 +1220,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   extern __shared__ float shared_frontiers[];
   float* g_previous = shared_frontiers;
   float* g_scratch = shared_frontiers + suffix_count;
+  float* partial_values = shared_frontiers + 2 * suffix_count;
+  int* partial_prefixes = reinterpret_cast<int*>(partial_values + (shift == 7 ? kThreads : 0));
 
   if (segment_index == 0) {
     const float* target = sequences + sequence_base;
@@ -1227,10 +1229,12 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
     const float target_norm = __fadd_rn(
         __fmul_rn(target[0], target[0]),
         __fmul_rn(target[1], target[1]));
-    for (int x = thread; x < suffix_count; x += kThreads) {
+    if constexpr (shift == 7) {
+      const int x = thread & (suffix_count - 1);
+      const int first_h = thread >> 9;
       float best = CUDART_INF_F;
-      int best_h = 0;
-      for (int h = 0; h < prefix_count; ++h) {
+      int best_h = first_h;
+      for (int h = first_h; h < prefix_count; h += 2) {
         const int state = h * suffix_count + x;
         float candidate = emission<2, CodebookScalar>(
             target, bank_codebook, bank_norm, state, weight, target_norm);
@@ -1242,13 +1246,47 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
           best_h = h;
         }
       }
-      g_previous[x] = best;
-      if constexpr (!MidpointOnly) {
-        backpointers[pointer_base + bank * suffix_count + x] =
-            static_cast<BackpointerScalar>(best_h);
+      partial_values[thread] = best;
+      partial_prefixes[thread] = best_h;
+      __syncthreads();
+      if (thread < suffix_count) {
+        const float other = partial_values[thread + suffix_count];
+        const int other_h = partial_prefixes[thread + suffix_count];
+        if (lower_pair(other, other_h, best, best_h)) {
+          best = other;
+          best_h = other_h;
+        }
+        g_previous[x] = best;
+        if constexpr (!MidpointOnly) {
+          backpointers[pointer_base + bank * suffix_count + x] =
+              static_cast<BackpointerScalar>(best_h);
+        }
       }
+      __syncthreads();
+    } else {
+      for (int x = thread; x < suffix_count; x += kThreads) {
+        float best = CUDART_INF_F;
+        int best_h = 0;
+        for (int h = 0; h < prefix_count; ++h) {
+          const int state = h * suffix_count + x;
+          float candidate = emission<2, CodebookScalar>(
+              target, bank_codebook, bank_norm, state, weight, target_norm);
+          if (constrained && (state >> shift) != required_overlap) {
+            candidate = CUDART_INF_F;
+          }
+          if (lower_pair(candidate, h, best, best_h)) {
+            best = candidate;
+            best_h = h;
+          }
+        }
+        g_previous[x] = best;
+        if constexpr (!MidpointOnly) {
+          backpointers[pointer_base + bank * suffix_count + x] =
+              static_cast<BackpointerScalar>(best_h);
+        }
+      }
+      __syncthreads();
     }
-    __syncthreads();
   } else if constexpr (FuseBoundary) {
     for (int x = thread; x < suffix_count; x += kThreads) {
       const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
@@ -1290,10 +1328,12 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
     const float target_norm = __fadd_rn(
         __fmul_rn(target[0], target[0]),
         __fmul_rn(target[1], target[1]));
-    for (int x = thread; x < suffix_count; x += kThreads) {
+    if constexpr (shift == 7) {
+      const int x = thread & (suffix_count - 1);
+      const int first_h = thread >> 9;
       float best = CUDART_INF_F;
-      int best_h = 0;
-      for (int h = 0; h < prefix_count; ++h) {
+      int best_h = first_h;
+      for (int h = first_h; h < prefix_count; h += 2) {
         const int state = h * suffix_count + x;
         const int predecessor_suffix = state >> shift;
         float predecessor_cost;
@@ -1319,16 +1359,67 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
           best_h = h;
         }
       }
-      g_scratch[x] = best;
-      if constexpr (!MidpointOnly) {
-        backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
-                     bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
-      } else if (step >= first_pointer_step) {
-        backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
-                     bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+      partial_values[thread] = best;
+      partial_prefixes[thread] = best_h;
+      __syncthreads();
+      if (thread < suffix_count) {
+        const float other = partial_values[thread + suffix_count];
+        const int other_h = partial_prefixes[thread + suffix_count];
+        if (lower_pair(other, other_h, best, best_h)) {
+          best = other;
+          best_h = other_h;
+        }
+        g_scratch[x] = best;
+        if constexpr (!MidpointOnly) {
+          backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
+                       bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+        } else if (step >= first_pointer_step) {
+          backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
+                       bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+        }
       }
+      __syncthreads();
+    } else {
+      for (int x = thread; x < suffix_count; x += kThreads) {
+        float best = CUDART_INF_F;
+        int best_h = 0;
+        for (int h = 0; h < prefix_count; ++h) {
+          const int state = h * suffix_count + x;
+          const int predecessor_suffix = state >> shift;
+          float predecessor_cost;
+          if constexpr (FuseBoundary) {
+            predecessor_cost = g_previous[predecessor_suffix];
+          } else {
+            const int previous_bank = boundary
+                ? static_cast<int>(boundary_banks[
+                      boundary_base + static_cast<int64_t>(boundary_index) * suffix_count +
+                      predecessor_suffix])
+                : bank;
+            predecessor_cost = boundary
+                ? g_input_all[static_cast<int64_t>(sequence) * bank_suffix_count +
+                              previous_bank * suffix_count + predecessor_suffix]
+                : g_previous[predecessor_suffix];
+          }
+          const float candidate = __fadd_rn(
+              predecessor_cost,
+              emission<2, CodebookScalar>(
+                  target, bank_codebook, bank_norm, state, weight, target_norm));
+          if (lower_pair(candidate, h, best, best_h)) {
+            best = candidate;
+            best_h = h;
+          }
+        }
+        g_scratch[x] = best;
+        if constexpr (!MidpointOnly) {
+          backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
+                       bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+        } else if (step >= first_pointer_step) {
+          backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
+                       bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+        }
+      }
+      __syncthreads();
     }
-    __syncthreads();
     float* swap = g_previous;
     g_previous = g_scratch;
     g_scratch = swap;
@@ -1885,7 +1976,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   do {                                                                                                \
     constexpr bool qvq_fuse_boundary =                                                               \
         (BANKS == 2 && BITS != 7) || (BANKS == 4 && BITS >= 3 && BITS <= 6);                         \
-    constexpr int qvq_segment_shared_bytes = 2 * (1 << (16 - BITS)) * sizeof(float);                  \
+    constexpr int qvq_segment_shared_bytes =                                                         \
+        2 * (1 << (16 - BITS)) * sizeof(float) +                                                      \
+        (BITS == 7 ? kThreads * (sizeof(float) + sizeof(int)) : 0);                                  \
     C10_CUDA_CHECK(cudaFuncSetAttribute(                                                              \
         qvq_v2_segment_grid_kernel<                                                                   \
             BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, CODEBOOK_TYPE, POINTER_TYPE>, \
