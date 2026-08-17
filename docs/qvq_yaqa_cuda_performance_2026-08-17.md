@@ -40,6 +40,12 @@ by CUDA events/stream waits; no temporary thread pool is created. The canonical
 artifact remains first in deterministic full-proxy argmin order, preserving
 canonical and lower-family tie precedence.
 
+YAQA anti-diagonal coordinates and CUDA index tensors are immutable for a
+module geometry. They are now cached per device/geometry instead of allocating
+three index tensors for every anti-diagonal in every candidate. Besides
+removing allocation overhead, this avoids allocator ordering pressure among
+the three family streams.
+
 Native traceback values are explicitly promoted from immutable FP16 codebook
 storage to YAQA's FP32 feedback dtype before advanced indexed commits. This
 also fixes the previously latent FP16-codebook YAQA dtype failure.
@@ -58,13 +64,17 @@ PG506-230/232 96 GB. Times are synchronized medians.
 | Tail-biting B2       | W2.5  | 1     | 5.077 ms | 3.082 ms |   1.65x | bit-exact              |
 | Tail-biting B2       | W3    | 1     | 5.114 ms | 3.027 ms |   1.69x | bit-exact              |
 | Full B2 reselect     | W2.5  | 32x64 | 142.97ms | 114.80ms |   1.25x | bit-exact cross-commit |
-| Full B2 reselect     | W2.5  |128x512|1176.15ms |1008.18ms |   1.17x | bit-exact repeated     |
+| Full B2 reselect     | W2.5  |128x512|1176.15ms | 804.67ms |   1.46x | bit-exact repeated     |
 +----------------------+-------+-------+----------+----------+---------+------------------------+
 ```
 
 The 128x512 side-stream run increases measured peak allocation from `28.68 MiB`
 to `53.06 MiB`. This remains small relative to model Hessians, but must be
 included in larger-shape/real-module gates.
+
+The schedule-cache increment alone improves the post-stream 128x512 median
+from `1008.18 ms` to `804.67 ms` (`1.25x`) with unchanged peak allocation and
+bit-exact repeated artifacts on four GPUs.
 
 Cross-commit checks for W1, W1.5, W2, W2.5, W3, and W3.5 found zero difference
 in dense inner weight, trellis states, selectors, or family ID. This is stronger

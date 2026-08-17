@@ -61,6 +61,11 @@ _QVQ_V2B4_BANK_STACK_CACHE: dict[tuple[str, float, str, torch.dtype], torch.Tens
 _QVQ_V2B2_PAIR_STACK_CACHE: dict[tuple[str, float, str, torch.dtype], tuple[torch.Tensor, ...]] = {}
 _QVQ_YAQA_FAMILY_STREAM_LOCK = threading.Lock()
 _QVQ_YAQA_FAMILY_STREAMS: dict[tuple[str, int], tuple[torch.cuda.Stream, ...]] = {}
+_QVQ_YAQA_SCHEDULE_LOCK = threading.Lock()
+_QVQ_YAQA_SCHEDULE_CACHE: dict[
+    tuple[str, int, int],
+    tuple[tuple[tuple[tuple[int, int], ...], torch.Tensor, torch.Tensor, torch.Tensor], ...],
+] = {}
 
 
 def _yaqa_family_streams(device: torch.device, count: int) -> tuple[torch.cuda.Stream, ...]:
@@ -74,6 +79,44 @@ def _yaqa_family_streams(device: torch.device, count: int) -> tuple[torch.cuda.S
             streams = tuple(torch.cuda.Stream(device=device) for _ in range(count))
             _QVQ_YAQA_FAMILY_STREAMS[key] = streams
     return streams[:count]
+
+
+def _yaqa_anti_diagonal_schedule(
+    device: torch.device,
+    input_blocks: int,
+    output_blocks: int,
+) -> tuple[tuple[tuple[tuple[int, int], ...], torch.Tensor, torch.Tensor, torch.Tensor], ...]:
+    """Reuse immutable YAQA coordinates and device index tensors by geometry."""
+
+    key = (str(device), input_blocks, output_blocks)
+    with _QVQ_YAQA_SCHEDULE_LOCK:
+        schedule = _QVQ_YAQA_SCHEDULE_CACHE.get(key)
+        if schedule is None:
+            entries = []
+            for diagonal in range(input_blocks + output_blocks - 2, -1, -1):
+                first_input_block = max(0, diagonal - output_blocks + 1)
+                last_input_block = min(input_blocks - 1, diagonal)
+                coordinates = tuple(
+                    (input_block, diagonal - input_block)
+                    for input_block in range(first_input_block, last_input_block + 1)
+                )
+                input_indices = torch.tensor(
+                    [coordinate[0] for coordinate in coordinates], dtype=torch.long, device=device
+                )
+                output_indices = torch.tensor(
+                    [coordinate[1] for coordinate in coordinates], dtype=torch.long, device=device
+                )
+                entries.append(
+                    (
+                        coordinates,
+                        input_indices,
+                        output_indices,
+                        input_indices * output_blocks + output_indices,
+                    )
+                )
+            schedule = tuple(entries)
+            _QVQ_YAQA_SCHEDULE_CACHE[key] = schedule
+    return schedule
 
 
 def _canonical_qvq_codebook(
@@ -3564,12 +3607,8 @@ def yaqa_inner(
     # the exact MLX Metal recurrence.  Only one compact anti-diagonal batch and
     # its traceback cross the shared-memory runtime boundary at a time.
 
-    for diagonal in range(input_blocks + output_blocks - 2, -1, -1):
-        first_input_block = max(0, diagonal - output_blocks + 1)
-        last_input_block = min(input_blocks - 1, diagonal)
-        coordinates = [
-            (input_block, diagonal - input_block) for input_block in range(first_input_block, last_input_block + 1)
-        ]
+    anti_diagonal_schedule = _yaqa_anti_diagonal_schedule(feedback_device, input_blocks, output_blocks)
+    for coordinates, input_indices, output_indices, flat_tile_indices in anti_diagonal_schedule:
         corrected_tiles = []
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
             for input_block, output_block in coordinates:
@@ -3753,18 +3792,11 @@ def yaqa_inner(
         # require an exact dtype match rather than promoting implicitly.
         reconstructed = reconstructed.to(source.dtype)
         with _qvq_phase(telemetry, "yaqa_commit", source.device):
-            input_indices = torch.tensor(
-                [coordinate[0] for coordinate in coordinates], dtype=torch.long, device=feedback_device
-            )
-            output_indices = torch.tensor(
-                [coordinate[1] for coordinate in coordinates], dtype=torch.long, device=feedback_device
-            )
             quantized_blocks[input_indices, output_indices] = reconstructed
             error_blocks[input_indices, output_indices] = (
                 source_blocks[input_indices, output_indices] - reconstructed
             )
             tile_states[input_indices, output_indices] = states
-            flat_tile_indices = input_indices * output_blocks + output_indices
             if segmented_v2:
                 bank_ids.view(input_blocks * output_blocks, segments_per_tile)[flat_tile_indices] = segmented_selectors
             elif bank_codebooks is not None:
@@ -3945,6 +3977,11 @@ def yaqa_inner_v2b2_p32(
     parallel_families = inner_weight.device.type == "cuda" and len(alternative_ids) > 1
     if parallel_families:
         current_stream = torch.cuda.current_stream(inner_weight.device)
+        _yaqa_anti_diagonal_schedule(
+            inner_weight.device,
+            inner_weight.shape[0] // kwargs.get("tile_rows", 16),
+            inner_weight.shape[1] // kwargs.get("tile_cols", 16),
+        )
         candidate_records = []
         for alt_id, family_stream in zip(
             alternative_ids,
