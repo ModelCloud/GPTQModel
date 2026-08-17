@@ -66,7 +66,69 @@ Keep P4 default-off. The next credible change must improve candidate diversity o
 material, seed-stable gain on every search fold before independent confirmation and untouched evaluation. Merely
 widening ranks, alphas, or replay count is not supported by this result.
 
+## Disjoint teacher-KL gradient ranking follow-up
+
+The next matched experiment tested whether P4 failed only because local YAQA/module-output ordering discarded the
+right fixed-boundary candidates. It used the same model, packed prefix, W2 layer-2 Q target, ranks, alphas, and four
+candidate replay budget. The 94 remaining untouched dataset rows were assigned without overlap:
+
+- gradient generation: `[1954,1970)`, 4,812 valid tokens;
+- two-fold search: `[1970,1986)`;
+- confirmation: `[1986,2002)`;
+- untouched evaluation: `[2002,2048)`.
+
+The finite full-model teacher-KL gradient had L2 norm `0.0378667`, maximum magnitude `0.00181752`, and required
+14.44 seconds. It ranked a portfolio containing three signed spectral candidates and one direct fixed-boundary
+candidate by the first-order term
+
+\[
+\langle \nabla_W KL,\Delta W\rangle,
+\]
+
+then retained nonlinear two-fold replay and independent confirmation as the selection authorities.
+
+The selected `r32_a1_t4352_s5` candidate improved search KL by `0.4123%`; both folds improved independently by
+`0.6011%` and `0.1760%`. Search Top-1 and Top-5 improved by `0.0152` and `0.0243` points while Top-10 changed by
+`-0.0061` points. Independent confirmation reversed direction:
+
+| Confirmation metric | Gradient-ranked proposal versus YAQA rollback |
+|---|---:|
+| Final KL | +0.3550% |
+| JSD | +0.3635% |
+| Top-1 | +0.0000 pp |
+| Top-5 overlap | +0.0103 pp |
+| Top-10 overlap | +0.0180 pp |
+
+The confirmation gate rejected the proposal and serialized the exact rollback.
+
+A matched control omitted only the disjoint gradient and used identical search, confirmation, and evaluation rows.
+It selected the exact same spectral candidate, produced the exact same search and confirmation metrics, and also
+rolled back. Gradient ranking changed the other three shortlisted candidates but did not change the winner.
+Quantization took 194.91 seconds with gradient ranking and 168.54 seconds without it, a `15.6%` increase.
+
+This rejects **ranking-only P9 for this gate**. The next candidate generator must change the spectral direction
+rather than reorder the existing portfolio. A mathematically distinct option is to project the downstream gradient
+into the YAQA-whitened residual atom basis. For
+
+\[
+M=U\Sigma V^\top,\qquad
+A_i=C_I^{-T}u_i v_i^\top C_O^{-1},
+\]
+
+compute each mode's first-order downstream coefficient
+
+\[
+c_i=\sigma_i\langle \nabla_W KL,A_i\rangle.
+\]
+
+Generate fixed-boundary targets from only modes with `c_i < 0`, ordered by `-c_i`, while retaining each selected
+atom's signed `u_i sigma_i v_i^T` contribution. This is materially different from P9: propagation changes candidate
+generation instead of only shortlist order. It must remain default-off and retain the independent ordinary-YAQA
+oracle, exact serialization check, two-fold replay, confirmation, and untouched evaluation gates.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.safetensors`
+- `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1954_2048.json`
+- `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1970_2048_nogradient.json`
