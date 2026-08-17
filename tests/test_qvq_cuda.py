@@ -53,11 +53,13 @@ from gptqmodel.quantization.rotation.hadamard_utils import (
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
+    _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_supported,
@@ -680,6 +682,82 @@ def test_qvq_cuda_segmented_v2_midpoint_matches_full_traceback(
     for _ in range(3):
         actual = midpoint_op(sequences, codebooks, transition_bits, segment_steps, step_weights)
         assert torch.equal(expected, actual)
+
+
+@pytest.mark.parametrize("bits", (1.5, 2.0, 2.5, 3.0))
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("batch", (1, 7))
+def test_qvq_cuda_fused_segmented_tail_matches_two_pass(
+    bits,
+    bank_count,
+    segment_steps,
+    weighted,
+    batch,
+):
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260824 + int(bits * 2) * 1_000 + bank_count * 100 + int(weighted) * 10 + batch
+    )
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    step_weights = (
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+    rotated = torch.roll(sequences, 64, dims=1).contiguous()
+    rotated_weights = None if step_weights is None else torch.roll(step_weights, 64, dims=1).contiguous()
+    provisional = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        rotated,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        None,
+        rotated_weights,
+    )
+    overlap = (provisional[0][:, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
+    expected = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        overlap,
+        step_weights,
+    )
+    actual = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(
+        sequences,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        step_weights,
+    )
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
+
+
+@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("batch", (1, 7))
+def test_qvq_cuda_fused_canonical_tail_matches_two_pass(bits, weighted, batch):
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260825 + int(bits * 2) * 100 + int(weighted) * 10 + batch
+    )
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
+    codebook = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to(
+        device="cuda",
+        dtype=torch.float16,
+    )
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    step_weights = (
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+    rotated = torch.roll(sequences, 64, dims=1).contiguous()
+    rotated_weights = None if step_weights is None else torch.roll(step_weights, 64, dims=1).contiguous()
+    provisional = _qvq_cuda_viterbi_trusted(rotated, codebook, bits, step_weights=rotated_weights)
+    overlap = (provisional[0][:, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
+    expected = _qvq_cuda_viterbi_trusted(sequences, codebook, bits, overlap, step_weights)
+    actual = _qvq_cuda_viterbi_tail_trusted_op()(sequences, codebook, transition_bits, step_weights)
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))

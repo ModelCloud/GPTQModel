@@ -343,3 +343,33 @@ codebook dependency chain at a time. The SM80 specialization now advances both s
 | Real W2.5 B2-P32+YAQA q_proj | 2.375 s | 2.350 s | 1.011x | complete artifact identical |
 
 The segmented recurrence is unchanged and now dominates the W2.5 family candidate, limiting the module-level gain.
+
+## Fused trusted tail-biting dispatch
+
+YAQA validates corrected CUDA tiles once, but its canonical and segmented tail-biting helpers previously crossed
+Python twice per anti-diagonal: roll the sequence, dispatch the provisional recurrence, materialize and slice its
+traceback, then dispatch the constrained recurrence. The trusted CUDA operators now own that orchestration. They
+preserve the same `torch.roll`, provisional recurrence, midpoint overlap, constrained recurrence, FP32 arithmetic,
+and tie ordering; only temporary lifetime and host dispatch move behind one native boundary.
+
+Matched Llama 3.2 1B layer-0 q_proj, W2.5 B2-P32+YAQA, sampled-96 family selection, three runs after warm-up on a
+PG506-230 `sm_80` GPU with CUDA 13.0:
+
+| Path | Python two-pass | Native fused two-pass | Delta | Accuracy |
+|---|---:|---:|---:|---|
+| Full module median | 2.3100 s | 2.2327 s | 1.035x | complete artifact SHA-256 identical |
+| Segmented host dispatch | 962.12 ms | 172.54 ms | 5.58x | bit-exact states/loss/selectors |
+| Canonical host dispatch | 123.05 ms | 53.66 ms | 2.29x | bit-exact states/loss |
+| Segmented GPU time | 1037.12 ms | 974.25 ms | 1.06x | bit-exact states/loss/selectors |
+| Peak allocated VRAM | 470.20 MiB | 467.51 MiB | -2.69 MiB | unchanged quantization result |
+
+The CUDA test matrix covers canonical W1--W3.5 and segmented W1.5--W3, weighted and unweighted objectives,
+B2-P32 and B4-P64, and batches 1/7. All 56 focused pytest cases passed; independent batches 1/7/16/33 also matched
+bit-for-bit. Quantization drift is therefore zero, stricter than the 1e-6 gate.
+
+Nsight Compute confirms why another arithmetic-only 2x is not available from the current W2.5 CTA. A batch-one
+segment launches two 1024-thread CTAs across 108 SMs, reports 0.01 waves/SM, and takes 165.66 us. L1/TEX reaches
+65.95% while DRAM is only 0.27%; math-pipe and long-scoreboard stalls dominate. A two-lane prefix search was tested
+and rejected: despite halving each lane's serial prefix chain, shuffle/reduction overhead regressed exact grid time
+by 20--21% at batches 1--16 and 18% at batch 64. The next material gain requires work aggregation across independent
+modules/families or a cooperative multi-CTA recurrence, not another local unroll.

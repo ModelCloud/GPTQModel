@@ -35,12 +35,14 @@ _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"
 _QVQ_CUDA_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_TRUSTED_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V4_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_BANKED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_MIDPOINT_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP: Callable | None = None
 
@@ -91,12 +93,14 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "gemv_v4",
         "viterbi",
         "viterbi_trusted",
+        "viterbi_tail_trusted",
         "viterbi_v4",
         "viterbi_banked",
         "viterbi_v2_segment_banked",
         "viterbi_v2_segment_g",
         "viterbi_v2_segment_grid",
         "viterbi_v2_segment_grid_trusted",
+        "viterbi_v2_segment_tail_trusted",
         "viterbi_v2_segment_midpoint_trusted",
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
@@ -161,6 +165,19 @@ def _qvq_cuda_viterbi_trusted_op() -> Callable:
             if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
                 _QVQ_CUDA_VITERBI_TRUSTED_OP = _extension_api().op("qvq_cuda", "viterbi_trusted")
     return _QVQ_CUDA_VITERBI_TRUSTED_OP
+
+
+def _qvq_cuda_viterbi_tail_trusted_op() -> Callable:
+    """Resolve YAQA's fused canonical two-pass V2 operator."""
+
+    global _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP
+    if _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP is None:
+                _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_tail_trusted"
+                )
+    return _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP
 
 
 def _qvq_cuda_hadamard_op() -> Callable:
@@ -246,6 +263,19 @@ def _qvq_cuda_viterbi_v2_segment_grid_trusted_op() -> Callable:
                     "qvq_cuda", "viterbi_v2_segment_grid_trusted"
                 )
     return _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP
+
+
+def _qvq_cuda_viterbi_v2_segment_tail_trusted_op() -> Callable:
+    """Resolve YAQA's fused two-pass segmented V2 operator."""
+
+    global _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP
+    if _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP is None:
+                _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_v2_segment_tail_trusted"
+                )
+    return _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP
 
 
 def _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op() -> Callable:

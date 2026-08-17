@@ -1976,6 +1976,28 @@ def _tail_biting_v2_banked_quantize(
     if midpoint % segment_steps:
         raise ValueError("QVQ banked V2 tail rotation must preserve segment boundaries.")
     shift = qvq_transition_bits(bits, vector_size=2)
+    if (
+        _cuda_values_prevalidated
+        and sequences.device.type == "cuda"
+        and torch.cuda.get_device_capability(sequences.device) == (8, 0)
+        and shift in (3, 4, 5, 6)
+    ):
+        from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_tail_trusted_op
+
+        states, squared_error, segment_bank_ids = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(
+            sequences,
+            codebooks,
+            shift,
+            segment_steps,
+            None if step_weights is None else step_weights.to(torch.float32).contiguous(),
+        )
+        path_banks = segment_bank_ids.to(torch.long).repeat_interleave(segment_steps, dim=1)
+        return BankedTrellisQuantizationResult(
+            states=states,
+            values=codebooks[path_banks, states],
+            squared_error=squared_error,
+            segment_bank_ids=segment_bank_ids,
+        )
     rotated = torch.roll(sequences, shifts=midpoint, dims=1)
     rotated_weights = None if step_weights is None else torch.roll(step_weights, shifts=midpoint, dims=1)
     if (
@@ -2105,6 +2127,27 @@ def tail_biting_viterbi_quantize(
             bits=bits,
             step_weights=step_weights,
             _cuda_values_prevalidated=_cuda_values_prevalidated,
+        )
+
+    if (
+        candidate_count == 1
+        and _cuda_values_prevalidated
+        and sequences.device.type == "cuda"
+        and vector_size == 2
+        and torch.cuda.get_device_capability(sequences.device) >= (8, 0)
+    ):
+        from ..utils.qvq_cuda import _qvq_cuda_viterbi_tail_trusted_op
+
+        states, squared_error = _qvq_cuda_viterbi_tail_trusted_op()(
+            sequences,
+            codebook,
+            shift,
+            None if step_weights is None else step_weights.to(torch.float32).contiguous(),
+        )
+        return TrellisQuantizationResult(
+            states=states,
+            values=codebook[states],
+            squared_error=squared_error,
         )
 
     midpoint = sequences.shape[1] // 2

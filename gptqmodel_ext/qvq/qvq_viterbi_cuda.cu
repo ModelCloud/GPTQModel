@@ -1857,6 +1857,25 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_trusted_cuda(
       sequences, codebook, transition_bits, overlap, step_weights, 1, false);
 }
 
+std::tuple<at::Tensor, at::Tensor> qvq_viterbi_tail_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebook,
+    int64_t transition_bits,
+    const c10::optional<at::Tensor>& step_weights) {
+  const int64_t midpoint = sequences.size(1) / 2;
+  auto rotated_sequences = at::roll(sequences, {midpoint}, {1}).contiguous();
+  c10::optional<at::Tensor> rotated_weights = c10::nullopt;
+  if (step_weights.has_value()) {
+    rotated_weights = at::roll(*step_weights, {midpoint}, {1}).contiguous();
+  }
+  auto provisional = qvq_viterbi_cuda_impl<2>(
+      rotated_sequences, codebook, transition_bits, c10::nullopt, rotated_weights, 1, false);
+  const int64_t overlap_mask = (int64_t{1} << (16 - transition_bits)) - 1;
+  auto overlap = std::get<0>(provisional).select(1, midpoint - 1).bitwise_and(overlap_mask).contiguous();
+  return qvq_viterbi_cuda_impl<2>(
+      sequences, codebook, transition_bits, overlap, step_weights, 1, false);
+}
+
 std::tuple<at::Tensor, at::Tensor> qvq_viterbi_v4_cuda(
     const at::Tensor& sequences,
     const at::Tensor& codebook,
@@ -2220,6 +2239,33 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_trust
       sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& step_weights) {
+  constexpr int64_t midpoint = 64;
+  auto rotated_sequences = at::roll(sequences, {midpoint}, {1}).contiguous();
+  c10::optional<at::Tensor> rotated_weights = c10::nullopt;
+  if (step_weights.has_value()) {
+    rotated_weights = at::roll(*step_weights, {midpoint}, {1}).contiguous();
+  }
+  auto provisional = qvq_viterbi_v2_segment_banked_cuda_impl(
+      rotated_sequences,
+      codebooks,
+      transition_bits,
+      segment_steps,
+      c10::nullopt,
+      rotated_weights,
+      2,
+      false);
+  const int64_t overlap_mask = (int64_t{1} << (16 - transition_bits)) - 1;
+  auto overlap = std::get<0>(provisional).select(1, midpoint - 1).bitwise_and(overlap_mask).contiguous();
+  return qvq_viterbi_v2_segment_banked_cuda_impl(
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
+}
+
 at::Tensor qvq_viterbi_v2_segment_midpoint_trusted_cuda(
     const at::Tensor& sequences,
     const at::Tensor& codebooks,
@@ -2294,6 +2340,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_trusted(Tensor sequences, Tensor codebook, int transition_bits, Tensor? overlap=None, "
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
+  m.def("viterbi_tail_trusted(Tensor sequences, Tensor codebook, int transition_bits, "
+        "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_v4(Tensor sequences, Tensor codebook, int transition_bits, Tensor? overlap=None, "
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_banked(Tensor sequences, Tensor codebooks, int transition_bits, Tensor? overlap=None, "
@@ -2306,6 +2354,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+  m.def("viterbi_v2_segment_tail_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
+        "Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_midpoint_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? step_weights=None) -> Tensor");
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
@@ -2315,12 +2365,14 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi", &qvq_viterbi_cuda);
   m.impl("viterbi_trusted", &qvq_viterbi_trusted_cuda);
+  m.impl("viterbi_tail_trusted", &qvq_viterbi_tail_trusted_cuda);
   m.impl("viterbi_v4", &qvq_viterbi_v4_cuda);
   m.impl("viterbi_banked", &qvq_viterbi_banked_cuda);
   m.impl("viterbi_v2_segment_banked", &qvq_viterbi_v2_segment_banked_cuda);
   m.impl("viterbi_v2_segment_g", &qvq_viterbi_v2_segment_g_cuda);
   m.impl("viterbi_v2_segment_grid", &qvq_viterbi_v2_segment_grid_cuda);
   m.impl("viterbi_v2_segment_grid_trusted", &qvq_viterbi_v2_segment_grid_trusted_cuda);
+  m.impl("viterbi_v2_segment_tail_trusted", &qvq_viterbi_v2_segment_tail_trusted_cuda);
   m.impl("viterbi_v2_segment_midpoint_trusted", &qvq_viterbi_v2_segment_midpoint_trusted_cuda);
   m.impl("viterbi_v2_segment_family_grid_trusted", &qvq_viterbi_v2_segment_family_grid_trusted_cuda);
 }
