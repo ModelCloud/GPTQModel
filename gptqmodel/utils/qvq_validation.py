@@ -57,11 +57,17 @@ def qvq_accuracy_metrics(reference: torch.Tensor, candidate: torch.Tensor) -> di
                 + (candidate_prob * (candidate_log_prob - midpoint_log)).sum(dim=-1)
             )
         ).clamp_min(0)
-    topk = min(5, reference.shape[-1])
-    reference_topk = reference.topk(topk, dim=-1).indices
-    candidate_topk = candidate.topk(topk, dim=-1).indices
+    top5 = min(5, reference.shape[-1])
+    reference_top5 = reference.topk(top5, dim=-1).indices
+    candidate_top5 = candidate.topk(top5, dim=-1).indices
     top5_overlap = (
-        (reference_topk.unsqueeze(-1) == candidate_topk.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+        (reference_top5.unsqueeze(-1) == candidate_top5.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
+    )
+    top10 = min(10, reference.shape[-1])
+    reference_top10 = reference.topk(top10, dim=-1).indices
+    candidate_top10 = candidate.topk(top10, dim=-1).indices
+    top10_overlap = (
+        (reference_top10.unsqueeze(-1) == candidate_top10.unsqueeze(-2)).any(dim=-1).float().mean(dim=-1)
     )
     return {
         "finite": candidate_finite,
@@ -76,6 +82,7 @@ def qvq_accuracy_metrics(reference: torch.Tensor, candidate: torch.Tensor) -> di
         "jensen_shannon": float(jsd.mean().item()),
         "top1_agreement": float((candidate.argmax(dim=-1) == reference.argmax(dim=-1)).float().mean().item()),
         "top5_overlap": float(top5_overlap.mean().item()),
+        "top10_overlap": float(top10_overlap.mean().item()),
         "max_abs": float(error.abs().max().item()),
     }
 

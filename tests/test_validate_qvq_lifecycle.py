@@ -141,7 +141,7 @@ def test_qvq_lifecycle_metrics_cover_exact_and_deviating_logits():
     assert exact["mae"] == exact["mse"] == exact["rmse"] == exact["relative_l2"] == 0
     assert exact["forward_kld"] == exact["reverse_kld"] == exact["jensen_shannon"] == 0
     assert exact["cosine"] == pytest.approx(1.0)
-    assert exact["top1_agreement"] == exact["top5_overlap"] == 1.0
+    assert exact["top1_agreement"] == exact["top5_overlap"] == exact["top10_overlap"] == 1.0
     assert exact["max_abs"] == 0
 
     candidate = reference.clone()
@@ -155,6 +155,7 @@ def test_qvq_lifecycle_metrics_cover_exact_and_deviating_logits():
     assert changed["jensen_shannon"] > 0
     assert changed["top1_agreement"] == 0.5
     assert changed["top5_overlap"] == 1.0
+    assert changed["top10_overlap"] == 1.0
 
 
 def test_qvq_lifecycle_metrics_fail_closed_on_shape_and_nonfinite_values():
