@@ -3647,6 +3647,7 @@ def yaqa_inner(
                 bank_codebooks=None,
                 factorization=factorization,
                 _rounding_bias=_rounding_bias,
+                _incremental_cuda_feedback=_incremental_cuda_feedback,
             )
         elif _bank0_oracle is not None:
             bank0_reference, bank0_reference_states = _bank0_oracle
@@ -6288,6 +6289,11 @@ def quantize_qvq_linear(
         normalized_weight = transformed_weight / candidate_scale
         if rounding == "yaqa":
             assert transformed_output_hessian is not None
+            # The exact incremental recurrence avoids hundreds of shrinking
+            # suffix products on attention-sized CUDA projections.  MLP
+            # matrices outside the measured 2048-dimension envelope retain
+            # the lower-workspace suffix path.
+            incremental_cuda_feedback = device.type == "cuda" and max(normalized_weight.shape) <= 2048
             if v2b4_p64:
                 assert bank_codebooks is not None
                 return yaqa_inner_v2b4_p64(
@@ -6303,6 +6309,7 @@ def quantize_qvq_linear(
                     factorization=prepared_yaqa_factorization,
                     segmented_bank_stack=segmented_bank_stack,
                     telemetry=telemetry,
+                    _incremental_cuda_feedback=incremental_cuda_feedback,
                 )
             if v2b2_p32:
                 assert bank_codebooks is not None
@@ -6335,6 +6342,7 @@ def quantize_qvq_linear(
                 dual_v2=dual_v2,
                 factorization=prepared_yaqa_factorization,
                 telemetry=telemetry,
+                _incremental_cuda_feedback=incremental_cuda_feedback,
             )
         if v2b4_p64:
             assert bank_codebooks is not None

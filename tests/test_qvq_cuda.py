@@ -18,6 +18,7 @@ from gptqmodel.quantization.qvq import (
     _batched_v2_banked_viterbi_quantize,
     _canonical_qvq_codebook,
     _canonical_qvq_v2b2_pair_stacks,
+    _canonical_qvq_v2b4_bank_stack,
     _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
     batched_viterbi_quantize,
@@ -1155,8 +1156,24 @@ def _nontrivial_yaqa_fixture(seed: int):
     return weight, input_hessian, output_hessian
 
 
+def test_qvq_cuda_production_yaqa_dispatch_enables_exact_incremental_feedback():
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260879)
+    with patch("gptqmodel.quantization.qvq.yaqa_inner", wraps=yaqa_inner) as wrapped:
+        quantize_qvq_linear(
+            weight,
+            input_hessian,
+            bits=2,
+            output_hessian=output_hessian,
+            rounding="yaqa",
+            trellis_batch_size=1,
+        )
+
+    assert wrapped.call_count == 1
+    assert wrapped.call_args.kwargs["_incremental_cuda_feedback"] is True
+
+
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
-def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_and_b2(bits):
+def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_b2_and_b4(bits):
     generator = torch.Generator(device="cpu").manual_seed(20260877 + int(bits * 10))
     weight = (torch.randn((32, 32), generator=generator) * 0.05).cuda()
     input_samples = torch.randn((47, 32), generator=generator).cuda()
@@ -1178,6 +1195,12 @@ def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_and_b2(bi
         codebook_version=PGC16_CODEBOOK_VERSION,
         dtype=canonical_codebook.dtype,
     )[0]
+    v2b4_stack = _canonical_qvq_v2b4_bank_stack(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=canonical_codebook.dtype,
+    )
     common = {
         "bits": bits,
         "trellis_batch_size": 1,
@@ -1191,6 +1214,14 @@ def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_and_b2(bi
                 "bank_codebooks": tuple(pair_stack[bank] for bank in range(2)),
                 "segmented_bank_stack": pair_stack,
                 "v2b2_p32": True,
+            },
+        ),
+        (
+            v2b4_stack[0],
+            {
+                "bank_codebooks": tuple(v2b4_stack[bank] for bank in range(4)),
+                "segmented_bank_stack": v2b4_stack,
+                "v2b4_p64": True,
             },
         ),
     )

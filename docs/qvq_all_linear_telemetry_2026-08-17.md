@@ -70,3 +70,34 @@ policy. A matched 512-row, all-linear, 16-layer real-model replay produced:
 
 A separate 16-layer, 320-token raw-output stress microbenchmark measured 4.83x replay speedup, 2.78e-4 maximum
 absolute output drift, and 7.69e-6 relative L2, all inside the `2e-3` inference-analysis tolerance.
+
+## YAQA feedback A/B
+
+Telemetry from the full YAQA sweep exposed a lifecycle gap: canonical V2+YAQA still used the shrinking-suffix
+feedback path, while the exact incremental CUDA recurrence was enabled only by the B2 wrapper. The production
+dispatcher now enables the incremental path for every CUDA YAQA format within its measured 2,048-dimension
+envelope, including the independent bank-zero oracle.
+
+| Shape | Hessian | Path | Wall (s) | Feedback GPU (ms) | Viterbi GPU (ms) | Weight/state parity |
+|---|---|---|---:|---:|---:|---|
+| 2048 x 2048 | identity | suffix | 3.678 | 2468.7 | 990.4 | reference |
+| 2048 x 2048 | identity | incremental | 1.460 | 2.9 | 932.2 | bit-exact |
+| 1024 x 1024 | nontrivial dense SPD | suffix | 1.084 | 389.0 | 524.9 | reference |
+| 1024 x 1024 | nontrivial dense SPD | incremental | 0.519 | 1.6 | 449.1 | bit-exact |
+
+This is a **2.52x** module speedup at 2,048 square and **2.09x** with a nontrivial 1,024 square Hessian. Exact
+CUDA parity now covers canonical V2, B2-P32, and B4-P64 at every half-step W1--W3.5; the production-dispatch test
+also verifies that canonical V2+YAQA selects the optimized recurrence.
+
+## Rejected final-forward experiments
+
+The dense and quantized model forwards remain the two largest individual final-evaluation phases. Two matched
+512-row experiments were rejected:
+
+| Experiment | Baseline wall (s) | Candidate wall (s) | Result |
+|---|---:|---:|---|
+| Concurrent dense/quantized CUDA streams | 42.104 | 43.086 | 2.3% regression; metrics bit-identical |
+| Explicit FlashAttention 2 | 42.104 | 47.604 | 11.6% regression; floating-point ordering changed |
+
+The forward pair already saturates the same SM resources under batch-1 full-row evaluation, so stream overlap
+causes contention. Transformers' default SDPA is faster than FA2 for this exact variable-length workload.
