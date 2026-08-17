@@ -245,3 +245,30 @@ The matched real-Llama W2 B2-P32+YAQA contract measured:
 Final-logit KL remained `0.003401`; Top-1/5/10 remained `99.71%`, `92.06%`, and `91.90%`. The result is a free
 exact win, but it also reinforces the profile conclusion: segmented Metal recurrence remains 45.418 seconds and
 requires cross-family batching or a deeper exact-kernel change to reach the requested 2--4x module speedup.
+
+## 512-thread implicit recurrence
+
+The implicit PGC recurrence assigns independent states and suffixes to Metal threads. Increasing its threadgroup
+from 256 to 512 halves each thread's state loop while preserving every predecessor scan, FP32 operation, strict
+comparison, tie rule, and traceback. The expanded/custom-table fallback remains at 256 threads; the new default
+applies only to the verified implicit PGC portfolio.
+
+W1--W3.5 tests compare the 256- and 512-thread outputs directly and require bit-exact states, selectors, and FP32
+losses. Separate CPU-oracle tests also pass at every supported half-step, which is stronger than the `1e-6`
+quantization tolerance. The W2 kernel microbench improved by 1.31--1.38x for anti-diagonal batches below 32 and by
+1.41x at batch 128. W2.5 and W3.5 batch-32 recurrences improved by approximately 1.84x.
+
+The matched real-Llama W2 B2-P32+YAQA run retained every reported quality metric and measured:
+
+| Region | 256 threads | 512 threads | Speedup |
+|---|---:|---:|---:|
+| Segmented Metal recurrence | 45.418 s | 39.088 s | 1.162x |
+| Three B2 family candidates | 54.232 s | 47.615 s | 1.139x |
+| Canonical V2 YAQA | 10.333 s | 8.636 s | 1.197x |
+| Four Q/K/V/O module quantization | 64.668 s | 56.762 s | 1.139x |
+| Complete quantize-and-evaluate arm | 110.458 s | 102.293 s | 1.080x |
+
+Final-logit KL remained `0.003401`; Top-1/5/10 remained `99.71%`, `92.06%`, and `91.90%`. Cumulatively, module
+quantization is now 1.99x faster than the original matched 112.98-second Apple baseline, essentially reaching the
+lower end of the requested 2--4x target. The full arm is 1.43x faster than the earlier 146.094-second measurement
+because dataset capture and model evaluation are intentionally unchanged.

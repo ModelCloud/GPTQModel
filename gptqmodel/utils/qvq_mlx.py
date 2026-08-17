@@ -950,6 +950,13 @@ if(tid==0){for(uint lane=1;lane<256u;++lane){float v=rcost[lane];uint flat=rflat
     if(((step-1u)%segment_steps)==0u)segment_bank_ids[bb+(step-1u)/segment_steps]=uchar(bank);}}
 """
 
+# Keep one source for controlled threadgroup A/B tests. ThreadCount changes
+# ownership of independent states/suffixes only; every predecessor scan and
+# tie-break remains in the original scalar order.
+_V2_BANKED_TAIL_SOURCE = _V2_BANKED_TAIL_SOURCE.replace("256u", "ThreadCount").replace(
+    "[256]", "[ThreadCount]"
+)
+
 
 def _kernel():
     global _KERNEL, _KERNEL_ERROR
@@ -1777,12 +1784,15 @@ def _qvq_mlx_v2_banked_tail_launch(
     segment_steps: int,
     step_weights,
     weighted: bool,
+    thread_count: int = 256,
 ):
     """Run both canonical tail-biting recurrences in one Metal command."""
 
     import mlx.core as mx
 
     batch, steps, _ = sequences.shape
+    if thread_count not in (128, 256, 512):
+        raise ValueError("QVQ MLX tail-biting thread count must be 128, 256, or 512")
     bank_count = codebooks.shape[0]
     suffix_count = (1 << 16) >> transition_bits
     segment_count = steps // segment_steps
@@ -1799,9 +1809,10 @@ def _qvq_mlx_v2_banked_tail_launch(
             ("EdgeBits", transition_bits),
             ("BankCount", bank_count),
             ("SegmentSteps", segment_steps),
+            ("ThreadCount", thread_count),
         ],
-        grid=(batch * 256, 1, 1),
-        threadgroup=(256, 1, 1),
+        grid=(batch * thread_count, 1, 1),
+        threadgroup=(thread_count, 1, 1),
         output_shapes=[
             (batch, bank_count, 1 << 16),
             (batch, bank_count, 1 << 16),
@@ -1831,12 +1842,15 @@ def _qvq_mlx_v2_banked_tail_implicit_launch(
     segment_steps: int,
     step_weights,
     weighted: bool,
+    thread_count: int = 512,
 ):
     """Run the identical recurrence while reconstructing frozen PGC banks from 256 levels."""
 
     import mlx.core as mx
 
     batch, steps, _ = sequences.shape
+    if thread_count not in (128, 256, 512):
+        raise ValueError("QVQ MLX implicit tail-biting thread count must be 128, 256, or 512")
     bank_count = bank_masks.shape[0]
     suffix_count = (1 << 16) >> transition_bits
     segment_count = steps // segment_steps
@@ -1853,9 +1867,10 @@ def _qvq_mlx_v2_banked_tail_implicit_launch(
             ("EdgeBits", transition_bits),
             ("BankCount", bank_count),
             ("SegmentSteps", segment_steps),
+            ("ThreadCount", thread_count),
         ],
-        grid=(batch * 256, 1, 1),
-        threadgroup=(256, 1, 1),
+        grid=(batch * thread_count, 1, 1),
+        threadgroup=(thread_count, 1, 1),
         output_shapes=[
             (batch, bank_count, 1 << 16),
             (batch, bank_count, 1 << 16),
