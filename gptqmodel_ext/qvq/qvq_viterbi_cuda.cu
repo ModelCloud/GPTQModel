@@ -86,6 +86,7 @@ __device__ __forceinline__ float emission(
     float step_weight,
     float target_norm) {
   float dot = 0.0f;
+  float norm;
   if constexpr (VectorSize == 4 && std::is_same_v<CodebookScalar, float>) {
     const float4 target4 = *reinterpret_cast<const float4*>(target);
     const float4 code4 = reinterpret_cast<const float4*>(codebook)[state];
@@ -93,6 +94,7 @@ __device__ __forceinline__ float emission(
     dot = __fmaf_rn(target4.y, code4.y, dot);
     dot = __fmaf_rn(target4.z, code4.z, dot);
     dot = __fmaf_rn(target4.w, code4.w, dot);
+    norm = codebook_norm[state];
   } else if constexpr (VectorSize == 4) {
     const float4 target4 = *reinterpret_cast<const float4*>(target);
     const half2 code01 = reinterpret_cast<const half2*>(codebook)[2 * state];
@@ -103,17 +105,26 @@ __device__ __forceinline__ float emission(
     dot = __fmaf_rn(target4.y, code01f.y, dot);
     dot = __fmaf_rn(target4.z, code23f.x, dot);
     dot = __fmaf_rn(target4.w, code23f.y, dot);
+    norm = codebook_norm[state];
   } else if constexpr (std::is_same_v<CodebookScalar, float>) {
     #pragma unroll
     for (int i = 0; i < VectorSize; ++i) {
       dot = __fmaf_rn(target[i], codebook[VectorSize * state + i], dot);
     }
+    norm = codebook_norm[state];
   } else {
-    const float2 code2 = __half22float2(reinterpret_cast<const half2*>(codebook)[state]);
+    // V2's immutable FP16 coordinates and their cached FP32 norm occupy one
+    // aligned 64-bit record. One scoreboard dependency now supplies both
+    // values without changing either bit pattern or the FP32 operation order.
+    const uint64_t packed = reinterpret_cast<const uint64_t*>(codebook_norm)[state];
+    const uint32_t code_bits = static_cast<uint32_t>(packed);
+    const half2 code2_half = *reinterpret_cast<const half2*>(&code_bits);
+    const float2 code2 = __half22float2(code2_half);
+    norm = __uint_as_float(static_cast<uint32_t>(packed >> 32));
     dot = __fmaf_rn(target[0], code2.x, dot);
     dot = __fmaf_rn(target[1], code2.y, dot);
   }
-  const float distance = __fsub_rn(__fadd_rn(target_norm, codebook_norm[state]), __fmul_rn(2.0f, dot));
+  const float distance = __fsub_rn(__fadd_rn(target_norm, norm), __fmul_rn(2.0f, dot));
   return __fmul_rn(fmaxf(distance, 0.0f), step_weight);
 }
 
@@ -163,6 +174,25 @@ __global__ void qvq_codebook_norm_kernel(
   }
 }
 
+__global__ void qvq_half2_codebook_norm_pack_kernel(
+    const half* __restrict__ codebook,
+    uint64_t* __restrict__ packed_codebook_norm,
+    int bank_count) {
+  const int total_states = kStateCount * bank_count;
+  for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+       index < total_states;
+       index += static_cast<int>(gridDim.x * blockDim.x)) {
+    const half2 code2_half = reinterpret_cast<const half2*>(codebook)[index];
+    const float2 code2 = __half22float2(code2_half);
+    float norm = 0.0f;
+    norm = __fadd_rn(norm, __fmul_rn(code2.x, code2.x));
+    norm = __fadd_rn(norm, __fmul_rn(code2.y, code2.y));
+    const uint32_t code_bits = *reinterpret_cast<const uint32_t*>(&code2_half);
+    packed_codebook_norm[index] = static_cast<uint64_t>(code_bits) |
+        (static_cast<uint64_t>(__float_as_uint(norm)) << 32);
+  }
+}
+
 template <int VectorSize, typename CodebookScalar>
 __global__ void qvq_memoryless_kernel(
     const float* __restrict__ sequences,
@@ -187,7 +217,9 @@ __global__ void qvq_memoryless_kernel(
   const float* target = sequences + sequence_bank_base +
       (static_cast<int64_t>(batch) * steps + step) * VectorSize;
   codebook += static_cast<int64_t>(bank) * kStateCount * VectorSize;
-  codebook_norm += static_cast<int64_t>(bank) * kStateCount;
+  constexpr int norm_values_per_state =
+      VectorSize == 2 && std::is_same_v<CodebookScalar, half> ? 2 : 1;
+  codebook_norm += static_cast<int64_t>(bank) * kStateCount * norm_values_per_state;
   const float weight = step_weights == nullptr ? 1.0f : step_weights[static_cast<int64_t>(batch) * steps + step];
   float target_norm = 0.0f;
   #pragma unroll
@@ -252,15 +284,27 @@ void record_norm_cache_use(const at::Tensor& codebook, const at::Tensor& norm, c
 template <int VectorSize, typename CodebookScalar>
 at::Tensor build_codebook_norm(const at::Tensor& codebook, int bank_count, cudaStream_t stream) {
   at::Tensor norm;
-  if (bank_count == 1) {
-    norm = at::empty({kStateCount}, codebook.options().dtype(at::kFloat));
+  if constexpr (VectorSize == 2 && std::is_same_v<CodebookScalar, half>) {
+    if (bank_count == 1) {
+      norm = at::empty({kStateCount, 2}, codebook.options().dtype(at::kFloat));
+    } else {
+      norm = at::empty({bank_count, kStateCount, 2}, codebook.options().dtype(at::kFloat));
+    }
+    qvq_half2_codebook_norm_pack_kernel<<<256 * bank_count, 256, 0, stream>>>(
+        reinterpret_cast<const half*>(codebook.const_data_ptr()),
+        reinterpret_cast<uint64_t*>(norm.mutable_data_ptr<float>()),
+        bank_count);
   } else {
-    norm = at::empty({bank_count, kStateCount}, codebook.options().dtype(at::kFloat));
+    if (bank_count == 1) {
+      norm = at::empty({kStateCount}, codebook.options().dtype(at::kFloat));
+    } else {
+      norm = at::empty({bank_count, kStateCount}, codebook.options().dtype(at::kFloat));
+    }
+    qvq_codebook_norm_kernel<VectorSize, CodebookScalar>
+        <<<256 * bank_count, 256, 0, stream>>>(
+            reinterpret_cast<const CodebookScalar*>(codebook.const_data_ptr()),
+            norm.mutable_data_ptr<float>(), bank_count);
   }
-  qvq_codebook_norm_kernel<VectorSize, CodebookScalar>
-      <<<256 * bank_count, 256, 0, stream>>>(
-          reinterpret_cast<const CodebookScalar*>(codebook.const_data_ptr()),
-          norm.mutable_data_ptr<float>(), bank_count);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return norm;
 }
@@ -383,7 +427,9 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
   const int batch = launch_batch % batch_size;
   const int bank = launch_batch / batch_size;
   codebook += static_cast<int64_t>(bank) * kStateCount * VectorSize;
-  codebook_norm += static_cast<int64_t>(bank) * kStateCount;
+  constexpr int norm_values_per_state =
+      VectorSize == 2 && std::is_same_v<CodebookScalar, half> ? 2 : 1;
+  codebook_norm += static_cast<int64_t>(bank) * kStateCount * norm_values_per_state;
   const int64_t sequence_base = (bank_specific_sequences
       ? static_cast<int64_t>(bank) * batch_size * steps * VectorSize
       : 0) + static_cast<int64_t>(batch) * steps * VectorSize;
@@ -795,7 +841,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
       const int bank = flat / kStateCount;
       const int state = flat - bank * kStateCount;
       const CodebookScalar* bank_codebook = codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount *
+          (std::is_same_v<CodebookScalar, half> ? 2 : 1);
       float value = emission<2, CodebookScalar>(
           target, bank_codebook, bank_norm, state, weight, target_norm);
       if (constrained && (state >> shift) != required_overlap) {
@@ -849,7 +896,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_banked_kernel(
       const int state = flat - bank * kStateCount;
       const int predecessor_suffix = state >> shift;
       const CodebookScalar* bank_codebook = codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount *
+          (std::is_same_v<CodebookScalar, half> ? 2 : 1);
       next_costs[flat] = __fadd_rn(
           batch_reduced[bank * suffix_count + predecessor_suffix],
           emission<2, CodebookScalar>(
@@ -975,7 +1023,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_g_kernel(
       const int x = flat - bank * suffix_count;
       const CodebookScalar* bank_codebook =
           codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount *
+          (std::is_same_v<CodebookScalar, half> ? 2 : 1);
       float best = CUDART_INF_F;
       int best_h = 0;
       for (int h = 0; h < prefix_count; ++h) {
@@ -1031,7 +1080,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_g_kernel(
       const int x = flat - bank * suffix_count;
       const CodebookScalar* bank_codebook =
           codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount *
+          (std::is_same_v<CodebookScalar, half> ? 2 : 1);
       float best = CUDART_INF_F;
       int best_h = 0;
       for (int h = 0; h < prefix_count; ++h) {
@@ -1075,7 +1125,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_g_kernel(
     const int state = flat - bank * kStateCount;
     const CodebookScalar* bank_codebook =
         codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-    const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+    const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount *
+        (std::is_same_v<CodebookScalar, half> ? 2 : 1);
     float candidate = __fadd_rn(
         g_previous[bank * suffix_count + (state >> shift)],
         emission<2, CodebookScalar>(
@@ -1216,7 +1267,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   const int physical_bank = family * bank_count + bank;
   const CodebookScalar* bank_codebook =
       codebooks + static_cast<int64_t>(physical_bank) * kStateCount * 2;
-  const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount;
+  const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount *
+      (std::is_same_v<CodebookScalar, half> ? 2 : 1);
   extern __shared__ float shared_frontiers[];
   float* g_previous = shared_frontiers;
   float* g_scratch = shared_frontiers + suffix_count;
@@ -1489,7 +1541,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
     const int physical_bank = family * bank_count + bank;
     const CodebookScalar* bank_codebook =
         codebooks + static_cast<int64_t>(physical_bank) * kStateCount * 2;
-    const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount;
+    const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount *
+        (std::is_same_v<CodebookScalar, half> ? 2 : 1);
     float candidate = __fadd_rn(
         g_previous[g_base + bank * suffix_count + (state >> shift)],
         emission<2, CodebookScalar>(

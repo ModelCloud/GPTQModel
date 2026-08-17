@@ -291,3 +291,37 @@ their minima by the exact `(loss, prefix)` order. It preserves every candidate e
 On the same real W3.5 Llama q_proj case, segmented-Viterbi GPU time fell from 1461.77 to 1254.36 ms and module
 median from 3.032 to 2.804 seconds (1.08x). Peak allocation remained 401.48 MiB and the complete weight, state,
 selector, and family artifact was bit-exact. Canonical V2 recurrence is unchanged and now limits the module gain.
+
+## Packed V2 emission cache
+
+Nsight Compute on the cooperative W3.5 recurrence showed 49.97% achieved occupancy, 50.75% L1/TEX utilization,
+only 0.20% DRAM utilization, and 0.13 waves per SM. The recurrence was therefore latency- and underfill-bound,
+not bandwidth-bound. V2 FP16 emission previously loaded its two coordinates and FP32 norm through separate
+dependency chains. The cache now stores their exact bits in one aligned 64-bit record. The emission arithmetic,
+FP16 coordinate bits, FP32 norm bits, FMA order, and tie rules are unchanged. V4 and FP32 codebooks retain their
+existing layouts.
+
+Matched cross-binary CUDA 13.0 A/B, PG506-230 `sm_80`, batch 16, weighted constrained/unconstrained recurrence:
+
+| Rate | Canonical before (ms) | Canonical packed (ms) | Speedup | Segmented before (ms) | Segmented packed (ms) | Speedup | Accuracy |
+|---|---:|---:|---:|---:|---:|---:|---|
+| W1 | 1.8212 | 1.4572 | 1.25x | 1.5964 | 1.4546 | 1.10x | SHA-256 identical |
+| W1.5 | 1.7582 | 1.4449 | 1.22x | 1.3640 | 1.2083 | 1.13x | SHA-256 identical |
+| W2 | 1.7736 | 1.3875 | 1.28x | 1.3204 | 1.2575 | 1.05x | SHA-256 identical |
+| W2.5 | 1.8780 | 1.6712 | 1.12x | 1.3046 | 1.2452 | 1.05x | SHA-256 identical |
+| W3 | 2.0695 | 1.5350 | 1.35x | 1.3414 | 1.2227 | 1.10x | SHA-256 identical |
+| W3.5 | 2.1750 | 2.1135 | 1.03x | 1.6456 | 1.5892 | 1.04x | SHA-256 identical |
+
+Real Llama 3.2 1B layer-0 q_proj, B2-P32+YAQA, sampled-96 family selection, three measured runs after warm-up:
+
+| Rate | Previous module (s) | Packed module (s) | Speedup | Peak VRAM delta | Accuracy |
+|---|---:|---:|---:|---:|---|
+| W2.5 | 2.541 | 2.364 | 1.07x | +6.75 MiB | weight/state/selector/family exact |
+| W3 | 2.564 | 2.254 | 1.14x | +6.91 MiB | weight/state/selector/family exact |
+
+The additional cache footprint is four bytes per retained V2 state because the original immutable codebook remains
+the cache identity and lifetime owner. This is an intentional quantization-time VRAM-for-latency tradeoff. The
+measured norm/code load remains hot in cache, but one dependency now supplies both values. The full CUDA gate
+completed 1,032 passes and five backend skips; its sole failure is a pre-existing BF16 output-dtype expectation in
+`test_qvq_cuda_composite_input_width_retries_overflow_in_bfloat16`, which is independent of Viterbi and reproduces
+without this kernel change.
