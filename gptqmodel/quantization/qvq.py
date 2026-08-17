@@ -4225,23 +4225,73 @@ def yaqa_inner_v2b2_p32(
         ).to("cpu", torch.float32)
         family_losses = []
         with _qvq_phase(telemetry, "yaqa_v2b2_sampled_family_selection", inner_weight.device):
-            for alt_id in (1, 2, 3):
-                pair_stack = (
+            pair_stacks = tuple(
+                (
                     torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
                     if bank_codebook_pair_stacks is None
                     else bank_codebook_pair_stacks[alt_id - 1]
                 )
-                result = _tail_biting_v2_banked_quantize(
-                    source_tiles_device.reshape(sample_count, 128, 2),
-                    pair_stack,
-                    bits=kwargs["bits"],
-                    segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                    candidate_count=kwargs.get("tail_biting_candidates", 1),
+                for alt_id in (1, 2, 3)
+            )
+            if inner_weight.device.type == "cuda" and kwargs.get("tail_biting_candidates", 1) == 1:
+                from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+
+                family_codebooks = torch.stack(pair_stacks).contiguous()
+                family_sequences = (
+                    source_tiles_device.reshape(sample_count, 128, 2)
+                    .unsqueeze(0)
+                    .expand(3, -1, -1, -1)
+                    .contiguous()
                 )
-                error = result.values.to("cpu", torch.float32).reshape(sample_count, 16, 16) - source_tiles
-                family_losses.append(
-                    torch.einsum("bij,bik,bkl,blj->", error, input_blocks_h, error, output_blocks_h)
+                transition_bits = qvq_transition_bits(kwargs["bits"], vector_size=2)
+                midpoint = family_sequences.shape[2] // 2
+                provisional_states, _, _ = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+                    torch.roll(family_sequences, shifts=midpoint, dims=2).contiguous(),
+                    family_codebooks,
+                    transition_bits,
+                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                    None,
+                    None,
                 )
+                overlap_mask = (1 << (16 - transition_bits)) - 1
+                overlaps = (provisional_states[:, :, midpoint - 1] & overlap_mask).contiguous()
+                family_states, _, family_selectors = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+                    family_sequences,
+                    family_codebooks,
+                    transition_bits,
+                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                    overlaps,
+                    None,
+                )
+                path_banks = family_selectors.to(torch.long).repeat_interleave(
+                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                    dim=2,
+                )
+                family_indices = torch.arange(3, device=inner_weight.device).view(3, 1, 1)
+                family_values = family_codebooks[family_indices, path_banks, family_states]
+                for family_index in range(3):
+                    error = (
+                        family_values[family_index]
+                        .to("cpu", torch.float32)
+                        .reshape(sample_count, 16, 16)
+                        - source_tiles
+                    )
+                    family_losses.append(
+                        torch.einsum("bij,bik,bkl,blj->", error, input_blocks_h, error, output_blocks_h)
+                    )
+            else:
+                for pair_stack in pair_stacks:
+                    result = _tail_biting_v2_banked_quantize(
+                        source_tiles_device.reshape(sample_count, 128, 2),
+                        pair_stack,
+                        bits=kwargs["bits"],
+                        segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                        candidate_count=kwargs.get("tail_biting_candidates", 1),
+                    )
+                    error = result.values.to("cpu", torch.float32).reshape(sample_count, 16, 16) - source_tiles
+                    family_losses.append(
+                        torch.einsum("bij,bik,bkl,blj->", error, input_blocks_h, error, output_blocks_h)
+                    )
         block_alt_id = int(torch.stack(family_losses).argmin().item()) + 1
         block_selectors = None
         if telemetry is not None:

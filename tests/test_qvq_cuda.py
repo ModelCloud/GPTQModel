@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import gptqmodel.utils.qvq_cuda as qvq_cuda_utils
 from gptqmodel.looper.qvq_output_alignment import _FixedTrellisAlignmentLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear, QVQReferenceLinear
 from gptqmodel.quantization.qvq import (
@@ -17,6 +18,7 @@ from gptqmodel.quantization.qvq import (
     _batched_v2_banked_viterbi_quantize,
     _canonical_qvq_codebook,
     _canonical_qvq_v2b2_pair_stacks,
+    _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
     batched_viterbi_quantize,
     block_ldlq_inner,
@@ -31,6 +33,7 @@ from gptqmodel.quantization.qvq import (
     reconstruct_qvq_inner_weight,
     unpack_trellis_states,
     yaqa_inner,
+    yaqa_inner_v2b2_p32,
     yaqa_proxy_loss,
 )
 from gptqmodel.quantization.qvq_codecs import (
@@ -686,6 +689,64 @@ def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(bits,
 
     for family in range(families):
         assert all(torch.equal(expected[family][index], actual[index][family]) for index in range(3))
+
+
+def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch):
+    bits = 2.5
+    generator = torch.Generator(device="cuda").manual_seed(20260820)
+    source = (torch.randn((32, 32), generator=generator, device="cuda") * 0.05).to(torch.float16)
+    input_samples = torch.randn((41, 32), generator=generator, device="cuda")
+    output_samples = torch.randn((37, 32), generator=generator, device="cuda")
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    input_hessian.diagonal().add_(0.1)
+    output_hessian.diagonal().add_(0.1)
+    banks = _canonical_qvq_v2b4_banks(
+        device=source.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float16,
+    )
+    pair_stacks = _canonical_qvq_v2b2_pair_stacks(
+        device=source.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float16,
+    )
+
+    native_resolver = qvq_cuda_utils._qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+
+    def serial_family_op(sequences, codebooks, transition_bits, segment_steps, overlap, step_weights):
+        results = tuple(
+            _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+                sequences[family],
+                codebooks[family],
+                transition_bits,
+                segment_steps,
+                None if overlap is None else overlap[family],
+                None if step_weights is None else step_weights[family],
+            )
+            for family in range(sequences.shape[0])
+        )
+        return tuple(torch.stack(tuple(result[index] for result in results)) for index in range(3))
+
+    common = {
+        "bits": bits,
+        "family_mode": "reselect",
+        "sample_strategy": "32_16x16",
+        "block_family_id": 1,
+        "bank_codebook_pair_stacks": pair_stacks,
+    }
+    monkeypatch.setattr(
+        qvq_cuda_utils,
+        "_qvq_cuda_viterbi_v2_segment_family_grid_trusted_op",
+        lambda: serial_family_op,
+    )
+    expected = yaqa_inner_v2b2_p32(source, input_hessian, output_hessian, banks, **common)
+    monkeypatch.setattr(qvq_cuda_utils, "_qvq_cuda_viterbi_v2_segment_family_grid_trusted_op", native_resolver)
+    actual = yaqa_inner_v2b2_p32(source, input_hessian, output_hessian, banks, **common)
+
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))

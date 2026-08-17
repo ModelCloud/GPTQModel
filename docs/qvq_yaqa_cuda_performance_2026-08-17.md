@@ -285,3 +285,20 @@ constrained overlap, weighted and unweighted recurrence, three distinct family
 codebook pairs, states, losses, and selector schedules. The next integration
 stage is a lockstep family YAQA scheduler that uses this ABI only at the
 measured small-grid knee.
+
+The sampled-family selector is a separate serial workload: it evaluates the
+same sampled tiles against all three family pairs before choosing one complete
+YAQA candidate. It now uses the family ABI for both provisional and constrained
+tail passes. Warm eight-sample wall medians at 96 tiles are:
+
+| Rate | Three serial families (ms) | Family batch (ms) | Speedup | Quantization parity |
+|:--|--:|--:|--:|:--|
+| W1.5 | 18.680 | 15.937 | 1.17x | bit-exact |
+| W2 | 15.708 | 13.804 | 1.14x | bit-exact |
+| W2.5 | 15.569 | 13.850 | 1.12x | bit-exact |
+| W3 | 14.999 | 13.951 | 1.08x | bit-exact |
+| W3.5 | 20.628 | 17.804 | 1.16x | bit-exact |
+
+An end-to-end CUDA regression replaces the family op with three independent
+trusted searches, then verifies that sampled selection produces identical
+weights, states, selectors, and family ID through the complete YAQA candidate.
