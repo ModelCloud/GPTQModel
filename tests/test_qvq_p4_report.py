@@ -45,4 +45,3 @@ def test_localized_summary_preserves_original_yaqa_and_module_search_diagnostics
             "selected": True,
         }
     ]
-
