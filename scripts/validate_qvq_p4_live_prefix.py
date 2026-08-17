@@ -20,7 +20,11 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import gptqmodel.quantization.qvq as qvq_module
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization.qvq import QVQLinearQuantizationResult, quantize_qvq_linear
+from gptqmodel.quantization.qvq import (
+    QVQLinearQuantizationResult,
+    quantize_qvq_linear,
+    rht_reconstruct_weight,
+)
 from gptqmodel.quantization.qvq_spectral import (
     realized_propagation_product,
     select_crossfit_propagation_shaped_svd,
@@ -114,7 +118,91 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Serialize ordinary V2B2-P32+YAQA without localized P4 candidate generation.",
     )
+    parser.add_argument(
+        "--complete-family-selection",
+        action="store_true",
+        help=(
+            "Independently quantize canonical V2+YAQA and all three fixed B2-P32 families, then select only by "
+            "cross-fitted full-horizon replay plus disjoint confirmation."
+        ),
+    )
     return parser
+
+
+def _fixed_v2b2_yaqa_family(
+    original,
+    family_id: int,
+):
+    """Force one independently encoded YAQA family; family zero is exact canonical V2."""
+
+    if isinstance(family_id, bool) or not isinstance(family_id, int) or family_id not in range(4):
+        raise ValueError("complete-family YAQA family ID must be 0, 1, 2, or 3")
+
+    def fixed_family(*args, **kwargs):
+        if family_id:
+            kwargs["family_mode"] = "fixed_block_ldlq"
+            kwargs["sample_strategy"] = "full"
+            kwargs["block_family_id"] = family_id
+            return original(*args, **kwargs)
+
+        inner_weight, input_hessian, output_hessian, codebook_library = args[:4]
+        allowed = {
+            name: kwargs[name]
+            for name in (
+                "bits",
+                "tile_rows",
+                "tile_cols",
+                "trellis_batch_size",
+                "tail_biting_candidates",
+                "factorization",
+                "telemetry",
+                "_incremental_cuda_feedback",
+                "_trusted_inputs",
+            )
+            if name in kwargs
+        }
+        canonical_weight, canonical_states = qvq_module.yaqa_inner(
+            inner_weight,
+            input_hessian,
+            output_hessian,
+            codebook_library[0],
+            **allowed,
+        )
+        selectors = torch.zeros(
+            canonical_states.shape[0] * 8,
+            dtype=torch.uint8,
+            device=canonical_states.device,
+        )
+        inactive_family = torch.ones((), dtype=torch.uint8, device=canonical_states.device)
+        return canonical_weight, canonical_states, selectors, inactive_family
+
+    return fixed_family
+
+
+def _serialized_v2b2_weight(result: QVQLinearQuantizationResult, *, bits: float) -> torch.Tensor:
+    """Reconstruct the exact B2-P32 checkpoint payload instead of trusting its staging tensor."""
+
+    module = QVQLinear(
+        bits=bits,
+        in_features=result.SU.numel(),
+        out_features=result.SV.numel(),
+        tensors={name: value.detach().clone() for name, value in result.serialized_tensors().items()},
+        dtype=result.weight.dtype,
+        out_dtype=result.weight.dtype,
+        vector_size=2,
+        trellis_window=16,
+        bank_count=2,
+        v2b2_p32=True,
+    ).eval()
+    module.post_init()
+    inner = module.get_inner_weight_tensor(dtype=torch.float32)
+    reconstructed = rht_reconstruct_weight(inner, module.SU, module.SV).to(result.weight.dtype)
+    maximum_error = float((reconstructed - result.weight).abs().max().item())
+    if maximum_error > 1e-6:
+        raise RuntimeError(
+            f"serialized B2-P32 reconstruction differs from the quantizer result by {maximum_error:.9g}"
+        )
+    return reconstructed
 
 
 def _validate_disjoint_splits(splits: Mapping[str, tuple[int, int]]) -> None:
@@ -441,6 +529,10 @@ def _localized_summary(
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.complete_family_selection and args.baseline_only:
+        raise ValueError("complete-family selection and baseline-only mode are mutually exclusive")
+    if args.complete_family_selection and (args.gradient_ranked_direct or args.gradient_shaped_spectral):
+        raise ValueError("complete-family selection cannot be combined with localized gradient searches")
     if args.gradient_ranked_direct and args.gradient_shaped_spectral:
         raise ValueError("gradient-ranked and gradient-shaped spectral searches are mutually exclusive")
     gradient_enabled = args.gradient_ranked_direct or args.gradient_shaped_spectral
@@ -481,6 +573,8 @@ def main() -> None:
         raise ValueError("minimum relative KL improvement must be in [0, 1)")
     if args.baseline_only and args.replay_candidates:
         raise ValueError("baseline-only mode cannot enable full-horizon candidate replay")
+    if args.complete_family_selection and args.replay_candidates:
+        raise ValueError("complete-family selection enumerates its four arms and does not use --replay-candidates")
     torch.manual_seed(args.seed)
 
     config = AutoConfig.from_pretrained(args.model, local_files_only=True)
@@ -549,7 +643,7 @@ def main() -> None:
         print("Capturing live-prefix search inputs with target-boundary early stop", flush=True)
         propagated_inputs = _capture_target_inputs(student_model, target, row_sets["search"])
         propagated_target = F.linear(propagated_inputs, source_weight, source_bias)
-        if args.replay_candidates:
+        if args.replay_candidates or args.complete_family_selection:
             print("Caching dense teacher logits for full-horizon search reranking", flush=True)
             search_teacher = _teacher_logits(dense_model, row_sets["search"])
             if gradient_enabled:
@@ -716,7 +810,13 @@ def main() -> None:
             target.weight.copy_(rollback.to(device=device, dtype=target.weight.dtype))
         return accepted
 
-    mode = "ordinary YAQA baseline" if args.baseline_only else "localized P4"
+    mode = (
+        "ordinary YAQA baseline"
+        if args.baseline_only
+        else "complete serialized YAQA family selection"
+        if args.complete_family_selection
+        else "localized P4"
+    )
     print(f"Starting {mode} quantization for {args.target}", flush=True)
     started = time.perf_counter()
     quantization_kwargs = {
@@ -728,7 +828,7 @@ def main() -> None:
         "v2b2_p32": True,
         "yaqa_v2b2_family_mode": "reselect",
     }
-    if not args.baseline_only:
+    if not args.baseline_only and not args.complete_family_selection:
         quantization_kwargs.update(
             yaqa_spectral_localized=True,
             yaqa_spectral_ranks=tuple(args.ranks),
@@ -817,13 +917,81 @@ def main() -> None:
         if args.gradient_shaped_spectral
         else nullcontext()
     )
-    with localized_context:
-        result = quantize_qvq_linear(
-            source_weight,
-            input_hessians[args.target].to(device),
-            bits=args.bits,
-            **quantization_kwargs,
-        )
+    complete_family_report: list[dict[str, object]] = []
+    if args.complete_family_selection:
+        assert search_teacher is not None and confirmation_teacher is not None
+        original_family_quantizer = qvq_module.yaqa_inner_v2b2_p32
+        family_results: list[QVQLinearQuantizationResult] = []
+        family_weights: list[torch.Tensor] = []
+        for family_id in range(4):
+            family_started = time.perf_counter()
+            with patch.object(
+                qvq_module,
+                "yaqa_inner_v2b2_p32",
+                _fixed_v2b2_yaqa_family(original_family_quantizer, family_id),
+            ):
+                family_result = quantize_qvq_linear(
+                    source_weight,
+                    input_hessians[args.target].to(device),
+                    bits=args.bits,
+                    **quantization_kwargs,
+                )
+            serialized_weight = _serialized_v2b2_weight(family_result, bits=args.bits).to(device)
+            replay_index = len(replay_scores)
+            replay_score = full_horizon_candidate_score(serialized_weight)
+            family_results.append(family_result)
+            family_weights.append(serialized_weight)
+            selectors = family_result.bank_ids
+            nonzero = 0.0 if selectors is None else float((selectors != 0).float().mean().item())
+            complete_family_report.append(
+                {
+                    "family_id": family_id,
+                    "seconds": time.perf_counter() - family_started,
+                    "serialized_max_abs_error": float((serialized_weight - family_result.weight).abs().max().item()),
+                    "proxy_loss": float(family_result.proxy_loss.item()),
+                    "kronecker_proxy_loss": (
+                        None
+                        if family_result.kronecker_proxy_loss is None
+                        else float(family_result.kronecker_proxy_loss.item())
+                    ),
+                    "selector_nonzero_fraction": nonzero,
+                    "fallback_to_v2": family_result.yaqa_bank_fallback_to_v2,
+                    "replay": replay_scores[replay_index],
+                    "replay_score": replay_score,
+                }
+            )
+            print(
+                f"Family {family_id}: score={replay_score:.8f} selectors={nonzero:.4f} "
+                f"time={complete_family_report[-1]['seconds']:.2f}s",
+                flush=True,
+            )
+
+        result = family_results[0]
+        eligible = [
+            index
+            for index in range(1, 4)
+            if complete_family_report[index]["replay_score"] < 1 - args.minimum_relative_kl_improvement
+        ]
+        selected_family = min(eligible, key=lambda index: complete_family_report[index]["replay_score"]) if eligible else 0
+        if selected_family and confirmation_callback(family_weights[selected_family], family_weights[0]):
+            result = family_results[selected_family]
+        else:
+            selected_family = 0
+            if not callback_report:
+                callback_report = {
+                    "accepted": False,
+                    "reason": "no complete family improved every search fold by the required margin",
+                }
+        for record in complete_family_report:
+            record["selected"] = record["family_id"] == selected_family
+    else:
+        with localized_context:
+            result = quantize_qvq_linear(
+                source_weight,
+                input_hessians[args.target].to(device),
+                bits=args.bits,
+                **quantization_kwargs,
+            )
     quantization_seconds = time.perf_counter() - started
     if args.baseline_only:
         callback_report = {"accepted": False, "reason": "baseline-only ordinary YAQA oracle"}
@@ -884,14 +1052,16 @@ def main() -> None:
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
             "baseline_only": args.baseline_only,
+            "complete_family_selection": args.complete_family_selection,
         },
         "quantization_seconds": quantization_seconds,
         "search_valid_tokens": 0 if propagated_inputs is None else int(propagated_inputs.shape[0]),
         "localized": _localized_summary(result, callback_report),
         "full_horizon_search": {
-            "enabled": bool(args.replay_candidates),
+            "enabled": bool(args.replay_candidates or args.complete_family_selection),
             "evaluations": replay_scores,
         },
+        "complete_family_selection": complete_family_report,
         "full_horizon_gradient": gradient_report,
         "confirmation": callback_report,
         "evaluation": {
