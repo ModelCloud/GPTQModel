@@ -126,3 +126,22 @@ so the quantized weights remain exact rather than merely within tolerance.
 Validation on the M4 Max: all 310 MLX tests pass, including an explicit guard that canonical PGC banks take the
 FP16 path while arbitrary non-FP16 banks fall back to FP32. Inference accuracy remains governed by the separate
 `2e-3` output tolerance; this change affects quantization-time table storage only.
+
+### Real-Llama validation of FP16 prepared tables
+
+The same one-layer Llama 3.2 1B W2 B2-P32+YAQA contract above was rerun after merging remote schedule reuse and
+enabling exact-FP16 prepared tables. The dataset slices, seed, full-row batch-1 execution, factors, candidate set,
+and evaluation contract were unchanged.
+
+| Region | Previous | Current | Speedup |
+|---|---:|---:|---:|
+| Four Q/K/V/O module quantization | 99.810 s | 89.685 s | 1.113x |
+| Segmented MLX Viterbi | 65.224 s | 56.691 s | 1.151x |
+| Three B2 family candidates | 77.282 s | 67.344 s | 1.148x |
+| YAQA feedback | 14.083 s | 12.611 s | 1.117x |
+| Complete quantize-and-evaluate arm | 146.094 s | 135.494 s | 1.078x |
+
+Final-logit KL remained `0.003401`; Top-1, Top-5, and Top-10 agreement remained `99.71%`, `92.06%`, and `91.90%`.
+The result confirms that the table-traffic optimization survives realistic execution, but also confirms that
+micro-kernel tuning alone cannot reach the 2--4x end-to-end target. The three independent family histories now
+account for 67.344 seconds and remain the dominant exact-search target.
