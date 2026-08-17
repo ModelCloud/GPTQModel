@@ -17,6 +17,20 @@ from scripts.compare_qvq_codecs_llama_qkvo import _device_primary_metrics
 from scripts.validate_qvq_lifecycle import DEFAULT_PROMPTS, QVQ_INFERENCE_DTYPE, _masked_logits
 
 
+def _jsonable(value):
+    """Convert nested CUDA scalar tensors returned by diagnostic reductions to JSON values."""
+
+    if isinstance(value, torch.Tensor):
+        if value.ndim != 0:
+            raise TypeError(f"Expected scalar diagnostic tensor, got shape {tuple(value.shape)}")
+        return value.detach().cpu().item()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-model", required=True)
@@ -55,10 +69,7 @@ def main() -> None:
         normalize_distribution=False,
         include_top10=True,
     )
-    metrics = {
-        key: (float(value.detach().cpu().item()) if isinstance(value, torch.Tensor) and value.ndim == 0 else value)
-        for key, value in device_metrics.items()
-    }
+    metrics = _jsonable(device_metrics)
     payload = {
         "reference_model": args.reference_model,
         "checkpoint": args.checkpoint,
