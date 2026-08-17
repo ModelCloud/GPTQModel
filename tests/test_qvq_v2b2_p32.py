@@ -436,6 +436,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
         "bank_count": 2,
     }
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
+    assert ARM_CONFIG["v2b2-p32-yaqa-sampled"]["yaqa_v2b2_family_mode"] == "sampled_proxy"
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-push-fixed"]["yaqa_spectral_push"] is True
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-push"]["yaqa_v2b2_family_mode"] == "reselect"
@@ -1866,7 +1867,7 @@ def test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq():
         )
 
 
-@pytest.mark.parametrize("family_mode", ("fixed_block_ldlq", "reselect"))
+@pytest.mark.parametrize("family_mode", ("fixed_block_ldlq", "sampled_proxy", "reselect"))
 def test_qvq_v2b2_p32_yaqa_family_mode_config_round_trip(family_mode):
     config = QVQConfig(
         bits=2,
@@ -3426,6 +3427,80 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
             "pre_fallback_selector_churn": None,
             "pre_fallback_state_churn": None,
         }
+
+
+def test_qvq_v2b2_p32_sampled_proxy_scores_all_families_then_runs_one_complete_candidate():
+    weight = torch.zeros((16, 16))
+    hessian = torch.eye(16)
+    states = torch.zeros((1, 128), dtype=torch.long)
+    codebooks = tuple(torch.full((1 << 16, 2), family_id, dtype=torch.float32) for family_id in range(4))
+    sampled_values = {1: 1.0, 2: 0.2, 3: 0.5}
+
+    def fake_tail(_tiles, pair_stack, **_kwargs):
+        family_id = int(pair_stack[1, 0, 0].item())
+        return SimpleNamespace(values=torch.full((1, 128, 2), sampled_values[family_id]))
+
+    def fake_yaqa(*_args, bank_codebooks=None, **_kwargs):
+        if bank_codebooks is None:
+            return torch.ones_like(weight), states
+        return torch.full_like(weight, 0.1), states, torch.ones((8,), dtype=torch.uint8)
+
+    telemetry = QVQQuantizationTelemetry()
+    with (
+        patch("gptqmodel.quantization.qvq._tail_biting_v2_banked_quantize", side_effect=fake_tail) as sampled,
+        patch("gptqmodel.quantization.qvq.yaqa_inner", side_effect=fake_yaqa) as complete,
+    ):
+        _, _, selectors, family = yaqa_inner_v2b2_p32(
+            weight,
+            hessian,
+            hessian,
+            codebooks,
+            bits=2,
+            family_mode="sampled_proxy",
+            telemetry=telemetry,
+        )
+
+    assert sampled.call_count == 3
+    assert complete.call_count == 2  # independent canonical oracle plus one selected family
+    assert int(family.item()) == 2
+    assert torch.equal(selectors, torch.ones_like(selectors))
+    counters = telemetry.finalize()["counters"]
+    assert counters["yaqa_v2b2_sampled_family_tiles"] == 1
+    assert counters["yaqa_v2b2_sampled_family_2"] == 1
+    assert counters["yaqa_v2b2_family_candidates"] == 1
+
+
+def test_qvq_v2b2_p32_sampled_proxy_matches_an_independent_selected_family_run_exactly():
+    generator = torch.Generator().manual_seed(20260817)
+    weight = torch.randn((16, 16), generator=generator) * 0.1
+    input_source = torch.randn((32, 16), generator=generator)
+    output_source = torch.randn((32, 16), generator=generator)
+    input_hessian = input_source.T @ input_source / input_source.shape[0] + torch.eye(16) * 0.1
+    output_hessian = output_source.T @ output_source / output_source.shape[0] + torch.eye(16) * 0.1
+    library = tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in range(4))
+
+    sampled = yaqa_inner_v2b2_p32(
+        weight,
+        input_hessian,
+        output_hessian,
+        library,
+        bits=2,
+        family_mode="sampled_proxy",
+        trellis_batch_size=1,
+    )
+    selected_family = int(sampled[3].item())
+    independent = yaqa_inner_v2b2_p32(
+        weight,
+        input_hessian,
+        output_hessian,
+        library,
+        bits=2,
+        family_mode="fixed_block_ldlq",
+        block_family_id=selected_family,
+        trellis_batch_size=1,
+    )
+
+    assert all(torch.equal(left, right) for left, right in zip(sampled, independent, strict=True))
 
 
 def test_qvq_sweep_telemetry_aggregate_preserves_shape_attribution():

@@ -4109,12 +4109,70 @@ def yaqa_inner_v2b2_p32(
         or any(tuple(stack.shape) != (2, 1 << 16, 2) for stack in bank_codebook_pair_stacks)
     ):
         raise ValueError("YAQA V2B2-P32 pair stacks must contain three [2, 65536, 2] tensors.")
-    if family_mode not in {"fixed_block_ldlq", "reselect"}:
-        raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if family_mode not in {"fixed_block_ldlq", "sampled_proxy", "reselect"}:
+        raise ValueError(
+            "YAQA V2B2-P32 family mode must be `fixed_block_ldlq`, `sampled_proxy`, or `reselect`."
+        )
     if telemetry is not None:
         telemetry.count("yaqa_v2b2_modules")
         telemetry.count("yaqa_v2b2_reselect_modules", int(family_mode == "reselect"))
-    if block_family_id is None:
+    if family_mode == "sampled_proxy":
+        input_blocks = inner_weight.shape[0] // 16
+        output_blocks = inner_weight.shape[1] // 16
+        tile_count = input_blocks * output_blocks
+        sample_count = min(64, tile_count)
+        sample_indices_cpu = torch.linspace(
+            0,
+            tile_count - 1,
+            sample_count,
+            dtype=torch.float64,
+        ).round().to(torch.long)
+        sample_indices = sample_indices_cpu.to(inner_weight.device)
+        sample_input_blocks = torch.div(sample_indices, output_blocks, rounding_mode="floor")
+        sample_output_blocks = sample_indices.remainder(output_blocks)
+        source_tiles_device = (
+            inner_weight.view(input_blocks, 16, output_blocks, 16)
+            .permute(0, 2, 1, 3)[sample_input_blocks, sample_output_blocks]
+            .to(torch.float32)
+        ).contiguous()
+        source_tiles = source_tiles_device.to("cpu")
+        input_blocks_h = torch.stack(
+            [
+                input_hessian[index * 16 : (index + 1) * 16, index * 16 : (index + 1) * 16]
+                for index in torch.div(sample_indices_cpu, output_blocks, rounding_mode="floor").tolist()
+            ]
+        ).to("cpu", torch.float32)
+        output_blocks_h = torch.stack(
+            [
+                output_hessian[index * 16 : (index + 1) * 16, index * 16 : (index + 1) * 16]
+                for index in sample_indices_cpu.remainder(output_blocks).tolist()
+            ]
+        ).to("cpu", torch.float32)
+        family_losses = []
+        with _qvq_phase(telemetry, "yaqa_v2b2_sampled_family_selection", inner_weight.device):
+            for alt_id in (1, 2, 3):
+                pair_stack = (
+                    torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
+                    if bank_codebook_pair_stacks is None
+                    else bank_codebook_pair_stacks[alt_id - 1]
+                )
+                result = _tail_biting_v2_banked_quantize(
+                    source_tiles_device.reshape(sample_count, 128, 2),
+                    pair_stack,
+                    bits=kwargs["bits"],
+                    segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                    candidate_count=kwargs.get("tail_biting_candidates", 1),
+                )
+                error = result.values.to("cpu", torch.float32).reshape(sample_count, 16, 16) - source_tiles
+                family_losses.append(
+                    torch.einsum("bij,bik,bkl,blj->", error, input_blocks_h, error, output_blocks_h)
+                )
+        block_alt_id = int(torch.stack(family_losses).argmin().item()) + 1
+        block_selectors = None
+        if telemetry is not None:
+            telemetry.count("yaqa_v2b2_sampled_family_tiles", sample_count)
+            telemetry.count(f"yaqa_v2b2_sampled_family_{block_alt_id}")
+    elif block_family_id is None:
         with _qvq_phase(telemetry, "yaqa_v2b2_block_family_selection", inner_weight.device):
             _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
                 inner_weight,
@@ -4133,7 +4191,7 @@ def yaqa_inner_v2b2_p32(
             raise ValueError("YAQA V2B2-P32 cached Block-LDLQ family ID must be 1, 2, or 3.")
         block_alt_id = block_family_id
         block_selectors = None
-    alternative_ids = (block_alt_id,) if family_mode == "fixed_block_ldlq" else (1, 2, 3)
+    alternative_ids = (block_alt_id,) if family_mode != "reselect" else (1, 2, 3)
     parallel_families = inner_weight.device.type == "cuda" and len(alternative_ids) > 1
     current_stream = None
     canonical_completion = None
@@ -5744,8 +5802,10 @@ def quantize_qvq_linear(
     if not isinstance(yaqa_v2b2_family_mode, str):
         raise TypeError("QVQ YAQA V2B2 family mode must be a string.")
     yaqa_v2b2_family_mode = yaqa_v2b2_family_mode.strip().lower()
-    if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
-        raise ValueError("QVQ YAQA V2B2 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "sampled_proxy", "reselect"}:
+        raise ValueError(
+            "QVQ YAQA V2B2 family mode must be `fixed_block_ldlq`, `sampled_proxy`, or `reselect`."
+        )
     if not isinstance(yaqa_spectral_refinement, bool):
         raise TypeError("QVQ YAQA spectral refinement must be boolean.")
     if not isinstance(yaqa_spectral_push, bool):

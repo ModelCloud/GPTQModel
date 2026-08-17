@@ -124,6 +124,15 @@ ARM_CONFIG = {
         "rounding": "yaqa",
         "yaqa_v2b2_family_mode": "reselect",
     },
+    "v2b2-p32-yaqa-sampled": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "sampled_proxy",
+    },
     "v2b2-p32-yaqa-spectral": {
         "vector_size": 2,
         "trellis_window": 16,

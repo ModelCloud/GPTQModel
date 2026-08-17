@@ -283,3 +283,49 @@ because dataset capture and model evaluation are intentionally unchanged.
 - Forced full unrolling of bank, prefix, and edge loops preserved all reported quality metrics, but increased the
   matched real-Llama module time from 56.762 seconds to approximately 57.86 seconds. Metal's default optimizer is
   better balanced for this kernel, so the explicit unroll directives were removed.
+
+## Sampled family proxy: another 2.20x module gain
+
+The exact three-family YAQA ceiling spends three complete feedback/recurrence histories to select one module-level
+alternative family. The experimental `sampled_proxy` mode instead evaluates all three families on 64 evenly spaced
+real weight tiles using the matching diagonal 16x16 input/output Hessian blocks:
+
+```text
+64 real module tiles
+  -> score family 1, 2, 3 with tr(E H_I,block E^T H_O,block)
+  -> choose one family for the module
+  -> run canonical V2+YAQA independently
+  -> run one complete B2-P32+YAQA family candidate
+  -> compare both under the original full-module Kronecker proxy
+```
+
+This is deliberately a different candidate-generation policy, not an approximation inside the selected YAQA pass.
+The chosen complete family artifact is bit-exact to an independent fixed-family run; states, selectors, feedback,
+and final proxy arithmetic are unchanged. The canonical V2+YAQA oracle remains independently encoded and is restored
+on a tie, non-finite result, or proxy regression.
+
+Matched contract: real Llama 3.2 1B Instruct, layer-0 Q/K/V/O, W2 B2-P32+YAQA, `neuralmagic/calibration` rows
+`[0,64)` (27,455 valid tokens), disjoint evaluation rows `[64,128)` (20,384 tokens), further-disjoint YAQA rows
+`[128,192)` (22,342 tokens), full rows, batch 1, MPS model shell, native MLX recurrence, and all 12 M4 Max P cores.
+
+| Measurement | Full three-family reselect | 64-tile sampled proxy | Change |
+|---|---:|---:|---:|
+| Four-module quantization | 56.714 s | 25.778 s | **2.200x faster** |
+| Complete arm (capture excluded, evaluation included) | 102.704 s | 71.348 s | 1.440x faster |
+| Sampled family choice | - | 0.557 s | 0.54% of old arm |
+| Complete family histories | 3 per module | 1 per module | 3x -> 1x |
+| Final-logit KL | 0.003401 | 0.003251 | **-4.42%** |
+| Top-1 agreement | 99.706% | 99.715% | +0.010 pp |
+| Top-5 overlap | 92.058% | 92.011% | -0.047 pp |
+| Top-10 overlap | 91.904% | 91.821% | -0.083 pp |
+| Layer KL | 0.040268 | 0.039665 | -1.50% |
+
+The small Top-5/10 movements are noise-scale guardrails, while final KL and layer KL improve. Local reconstruction
+does not uniformly improve: mean relative weight L2 is 0.690088 versus 0.689651 for full reselection. That is
+acceptable evidence for escalation because post-quant propagated recovery is the objective; it is not evidence for
+making this mode the default yet. Confirm W1.5/W2/W2.5 across more layers and seeds before promotion.
+
+Relative to the original matched 112.98-second Apple module baseline, sampled-family quantization is **4.38x
+faster**. The next profile is now canonical V2+YAQA (8.80 s), the selected B2 family (16.02 s), and shared feedback
+(5.28 s, overlapping those passes). Another exact 2x from this point requires sharing or concurrently scheduling the
+canonical and selected-family histories; further tuning of the 0.56-second sampler cannot materially move the bound.

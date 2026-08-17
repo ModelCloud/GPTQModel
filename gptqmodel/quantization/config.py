@@ -73,9 +73,9 @@ class YaqaConfig:
         if not isinstance(self.v2b2_family_mode, str):
             raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
         self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()
-        if self.v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
+        if self.v2b2_family_mode not in {"fixed_block_ldlq", "sampled_proxy", "reselect"}:
             raise ValueError(
-                "YaqaConfig: `v2b2_family_mode` must be `fixed_block_ldlq` or `reselect`."
+                "YaqaConfig: `v2b2_family_mode` must be `fixed_block_ldlq`, `sampled_proxy`, or `reselect`."
             )
         if not isinstance(self.spectral_refinement, bool):
             raise TypeError("YaqaConfig: `spectral_refinement` must be boolean.")

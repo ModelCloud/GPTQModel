@@ -790,6 +790,11 @@ module
 - `yaqa.v2b2_family_mode="reselect"` (default) evaluates all three family IDs as complete YAQA module artifacts and
   retains the strict best full-Kronecker result. This measures the combined ceiling because an input-Hessian winner
   need not be the winner under the two-sided YAQA objective.
+- `yaqa.v2b2_family_mode="sampled_proxy"` is an experimental fast mode. It scores every family on 64 evenly spaced
+  real module tiles with the corresponding diagonal input/output Hessian blocks, then runs a complete YAQA pass only
+  for the selected family. The final candidate is still compared with an independently encoded canonical V2+YAQA
+  oracle under the complete Kronecker proxy. The sampling step changes candidate generation, not YAQA arithmetic or
+  the serialized format, so it needs propagated held-out confirmation rather than an algebraic equivalence claim.
 
 Both modes independently encode canonical V2+YAQA. A non-finite, tied, or worse banked candidate restores that exact
 artifact and all-zero selectors. The result reports fallback, selector churn, Block-LDLQ family ID, and family change;
