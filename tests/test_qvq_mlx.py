@@ -29,8 +29,10 @@ from gptqmodel.utils.qvq_mlx import (
     _v4_row_tile,
     _v4_use_mma,
     qvq_mlx_gemv,
+    qvq_mlx_prepare_v2_banked_codebooks_from_torch,
     qvq_mlx_tail_biting_v2b2_p32,
     qvq_mlx_tail_biting_v2b4_p64,
+    qvq_mlx_tail_biting_v2_banked_from_torch_cpu,
     qvq_mlx_viterbi,
 )
 
@@ -550,6 +552,34 @@ def test_qvq_mlx_banked_v2_tail_biting_matches_torch_oracle(kind, bits):
     assert torch.equal(states.to(torch.long), expected.states)
     assert torch.equal(selectors, expected.segment_bank_ids)
     torch.testing.assert_close(squared_error, expected.squared_error, rtol=2e-5, atol=2e-4)
+
+    prepared = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks)
+    fused = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+        sequences,
+        codebooks,
+        bits,
+        segment_steps=16 if kind == "v2b2_p32" else 32,
+        step_weights=weights,
+        mlx_codebooks=prepared,
+    )
+    assert torch.equal(fused[0], expected.states)
+    assert torch.equal(fused[1], expected.segment_bank_ids)
+    torch.testing.assert_close(fused[2], expected.squared_error, rtol=2e-5, atol=2e-4)
+
+
+def test_qvq_mlx_prepared_banked_codebooks_reject_mutated_source():
+    codebooks = torch.stack(tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in (0, 1))).contiguous()
+    prepared = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks)
+    codebooks[0, 0, 0].add_(1)
+
+    with pytest.raises(RuntimeError, match="no longer match the Torch source tensor"):
+        qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+            torch.zeros((1, 128, 2), dtype=torch.float32),
+            codebooks,
+            2,
+            segment_steps=16,
+            mlx_codebooks=prepared,
+        )
 
 
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))

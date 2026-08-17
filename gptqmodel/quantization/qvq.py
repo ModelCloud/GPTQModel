@@ -3492,12 +3492,12 @@ def yaqa_inner(
     if segmented_v2 and apple_host_feedback:
         from ..utils.qvq_mlx import qvq_mlx_prepare_v2_banked_codebooks_from_torch
 
-        # Borrow the immutable MPS codebooks directly through read-only
-        # DLPack. Keep a host copy only for reconstructing the compact
-        # traceback result; corrected CPU tiles use the reusable MLX staging
-        # arena at the MLX boundary.
-        mlx_segmented_bank_stack = qvq_mlx_prepare_v2_banked_codebooks_from_torch(segmented_bank_stack)
+        # Bind the prepared MLX norms to the same immutable host bank stack
+        # used to reconstruct compact traceback results.  This incurs one
+        # setup copy per family and lets every tile reuse both the staged bank
+        # values and their norms without revalidating a distinct MPS alias.
         host_segmented_bank_stack = segmented_bank_stack.detach().to("cpu").contiguous()
+        mlx_segmented_bank_stack = qvq_mlx_prepare_v2_banked_codebooks_from_torch(host_segmented_bank_stack)
     banked_codebooks = (
         bank_codebook_stack if bank_codebook_stack is not None else torch.stack(active_banks).contiguous()
         if (
@@ -3552,7 +3552,19 @@ def yaqa_inner(
             segment_steps = (
                 QVQ_V2B2_P32_STEPS_PER_SEGMENT if v2b2_p32 else QVQ_V2B4_P64_STEPS_PER_SEGMENT
             )
-            segmented_batch_size = trellis_batch_size
+            # The native MLX recurrence assigns one independent threadgroup to
+            # each tile.  Large low-rate suffix workspaces reduce Metal
+            # occupancy before the unified-memory limit is reached: measured
+            # W1--W2 throughput peaks around 32 tiles on M4 Max, whereas W2.5
+            # and W3.5 benefit from the full 128-tile coalescing window.  Keep
+            # explicit larger caller batches intact and retain the caller's
+            # exact policy on every other backend.
+            apple_auto_batch = 32 if bits <= 2 or bits == 3 else 128
+            segmented_batch_size = (
+                max(trellis_batch_size, min(logical_batch_size, apple_auto_batch))
+                if apple_host_feedback
+                else trellis_batch_size
+            )
             with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
                 for chunk in sequences.split(segmented_batch_size):
                     if telemetry is not None:

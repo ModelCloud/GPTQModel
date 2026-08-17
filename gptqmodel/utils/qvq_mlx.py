@@ -66,8 +66,11 @@ _VITERBI_KERNELS: dict[str, Any] = {}
 _VITERBI_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_VITERBI_KERNEL: Any | None = None
 _V2_BANKED_VITERBI_KERNEL_ERROR: str | None = None
+_V2_BANKED_TAIL_KERNEL: Any | None = None
+_V2_BANKED_TAIL_KERNEL_ERROR: str | None = None
 _V2_BANKED_TORCH_CODEBOOK_HOT: tuple[Any, int, Any] | None = None
 _V2_BANKED_TORCH_CODEBOOK_LOCK = threading.Lock()
+_QVQ_YAQA_MLX_CACHE_LIMIT_BYTES = 512 << 20
 _TORCH_MLX_BRIDGE_LOCK = threading.RLock()
 _TORCH_MLX_STAGING_MAX_BYTES = 128 * 1024 * 1024
 _FP32_KERNELS: dict[str, Any] = {}
@@ -121,6 +124,21 @@ class _TorchMLXStagingSlot:
     numpy_storage: Any
     torch_storage: Any
     generation: int = 0
+
+
+@dataclass(frozen=True)
+class _QVQMLXPreparedBankedCodebooks:
+    """One validated bank stack and its immutable FP32 state norms."""
+
+    source: Any
+    source_version: int
+    lease: _TorchMLXReadOnlyLease
+    norms: Any
+
+    def verify_source(self, source) -> None:
+        if source is not self.source or source._version != self.source_version:
+            raise RuntimeError("QVQ prepared MLX bank codebooks no longer match the Torch source tensor")
+        self.lease.verify_unchanged()
 
 
 class _TorchMLXStagingPool:
@@ -802,6 +820,112 @@ if(tid==0){for(uint lane=1;lane<256u;++lane){float v=rcost[lane];uint flat=rflat
     if(((step-1u)%segment_steps)==0u)segment_bank_ids[bb+(step-1u)/segment_steps]=uchar(bank);}}
 """
 
+_V2_BANKED_TAIL_SOURCE = r"""
+constexpr uint state_count=65536,prefix_count=1u<<EdgeBits,suffix_count=state_count/prefix_count;
+constexpr uint bank_count=BankCount,segment_steps=SegmentSteps;
+constexpr uint overlap_mask=(1u<<(16-EdgeBits))-1u;
+uint batch=threadgroup_position_in_grid.x,tid=thread_index_in_threadgroup;
+uint steps=dims[1],midpoint=steps/2u,segments=steps/segment_steps;bool weighted=dims[3]!=0;
+ulong sb=ulong(batch)*steps*2u,cb=ulong(batch)*bank_count*state_count;
+ulong pb=ulong(batch)*(steps-1u)*bank_count*suffix_count,stb=ulong(batch)*steps;
+ulong bb=ulong(batch)*segments;
+device float* current=costs+cb;device float* following=next_costs+cb;
+
+// Provisional recurrence over the half-rotated sequence.  Only transitions
+// needed to trace the winning endpoint back to midpoint-1 are retained.
+uint first_index=midpoint;float first_weight=weighted?step_weights[ulong(batch)*steps+first_index]:1.0f;
+float2 first_target=float2(sequences[sb+ulong(first_index)*2u],sequences[sb+ulong(first_index)*2u+1u]);
+for(uint bank=0;bank<bank_count;++bank){for(uint state=tid;state<state_count;state+=256u){
+  current[ulong(bank)*state_count+state]=
+    qvq_emit_banked(first_target,codebooks,codebook_norms,bank,state,first_weight);}}
+threadgroup_barrier(mem_flags::mem_device);
+for(uint step=1u;step<steps;++step){uint sequence_step=step+midpoint;
+  if(sequence_step>=steps)sequence_step-=steps;ulong target_offset=sb+ulong(sequence_step)*2u;
+  float2 target=float2(sequences[target_offset],sequences[target_offset+1u]);
+  float sw=weighted?step_weights[ulong(batch)*steps+sequence_step]:1.0f;
+  bool boundary=(step%segment_steps)==0u;
+  if(boundary){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){float best=current[suffix];uint bp=0;
+      for(uint bank=0;bank<bank_count;++bank){for(uint prefix=0;prefix<prefix_count;++prefix){
+        if(bank==0u&&prefix==0u)continue;float v=current[ulong(bank)*state_count+ulong(prefix)*suffix_count+suffix];
+        if(v<best){best=v;bp=bank*prefix_count+prefix;}}}
+      for(uint next_bank=0;next_bank<bank_count;++next_bank){
+        if(step>=midpoint)
+          backpointers[pb+(ulong(step-midpoint)*bank_count+next_bank)*suffix_count+suffix]=bp;
+        for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
+          following[ulong(next_bank)*state_count+state]=best+
+            qvq_emit_banked(target,codebooks,codebook_norms,next_bank,state,sw);}}}}
+  else{for(uint bank=0;bank<bank_count;++bank){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){
+      float best=current[ulong(bank)*state_count+suffix];uint bp=0;
+      for(uint prefix=1;prefix<prefix_count;++prefix){
+        float v=current[ulong(bank)*state_count+ulong(prefix)*suffix_count+suffix];
+        if(v<best){best=v;bp=prefix;}}
+      if(step>=midpoint)backpointers[pb+(ulong(step-midpoint)*bank_count+bank)*suffix_count+suffix]=bp;
+      for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
+        following[ulong(bank)*state_count+state]=best+
+          qvq_emit_banked(target,codebooks,codebook_norms,bank,state,sw);}}}}
+  threadgroup_barrier(mem_flags::mem_device);device float* tmp=current;current=following;following=tmp;}
+threadgroup float rcost[256];threadgroup uint rflat[256];float best=INFINITY;
+uint best_flat=bank_count*state_count;
+for(uint flat=tid;flat<bank_count*state_count;flat+=256u){float v=current[flat];
+  if(v<best||(v==best&&flat<best_flat)){best=v;best_flat=flat;}}
+rcost[tid]=best;rflat[tid]=best_flat;threadgroup_barrier(mem_flags::mem_threadgroup);
+threadgroup uint required_overlap;
+if(tid==0){for(uint lane=1;lane<256u;++lane){float v=rcost[lane];uint flat=rflat[lane];
+    if(v<best||(v==best&&flat<best_flat)){best=v;best_flat=flat;}}
+  uint bank=best_flat/state_count,state=best_flat%state_count;
+  for(uint step=steps-1u;step>=midpoint;--step){uint suffix=state>>EdgeBits;
+    uint pointer=uint(backpointers[pb+(ulong(step-midpoint)*bank_count+bank)*suffix_count+suffix]);
+    if((step%segment_steps)==0u)bank=pointer/prefix_count;
+    state=(pointer%prefix_count)*suffix_count+suffix;}
+  required_overlap=state&overlap_mask;}
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+// Exact constrained recurrence in original sequence order.  Reuse both cost
+// buffers and overwrite provisional traceback with the serialized winner.
+uint required=required_overlap;first_weight=weighted?step_weights[ulong(batch)*steps]:1.0f;
+first_target=float2(sequences[sb],sequences[sb+1u]);
+for(uint bank=0;bank<bank_count;++bank){for(uint state=tid;state<state_count;state+=256u){
+  float v=qvq_emit_banked(first_target,codebooks,codebook_norms,bank,state,first_weight);
+  if((state>>EdgeBits)!=required)v=INFINITY;current[ulong(bank)*state_count+state]=v;}}
+threadgroup_barrier(mem_flags::mem_device);
+for(uint step=1u;step<steps;++step){ulong target_offset=sb+ulong(step)*2u;
+  float2 target=float2(sequences[target_offset],sequences[target_offset+1u]);
+  float sw=weighted?step_weights[ulong(batch)*steps+step]:1.0f;bool boundary=(step%segment_steps)==0u;
+  if(boundary){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){float winner=current[suffix];uint bp=0;
+      for(uint bank=0;bank<bank_count;++bank){for(uint prefix=0;prefix<prefix_count;++prefix){
+        if(bank==0u&&prefix==0u)continue;float v=current[ulong(bank)*state_count+ulong(prefix)*suffix_count+suffix];
+        if(v<winner){winner=v;bp=bank*prefix_count+prefix;}}}
+      for(uint next_bank=0;next_bank<bank_count;++next_bank){
+        backpointers[pb+(ulong(step-1u)*bank_count+next_bank)*suffix_count+suffix]=bp;
+        for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
+          following[ulong(next_bank)*state_count+state]=winner+
+            qvq_emit_banked(target,codebooks,codebook_norms,next_bank,state,sw);}}}}
+  else{for(uint bank=0;bank<bank_count;++bank){for(uint suffix=tid;suffix<suffix_count;suffix+=256u){
+      float winner=current[ulong(bank)*state_count+suffix];uint bp=0;
+      for(uint prefix=1;prefix<prefix_count;++prefix){
+        float v=current[ulong(bank)*state_count+ulong(prefix)*suffix_count+suffix];
+        if(v<winner){winner=v;bp=prefix;}}
+      backpointers[pb+(ulong(step-1u)*bank_count+bank)*suffix_count+suffix]=bp;
+      for(uint edge=0;edge<prefix_count;++edge){uint state=suffix*prefix_count+edge;
+        following[ulong(bank)*state_count+state]=winner+
+          qvq_emit_banked(target,codebooks,codebook_norms,bank,state,sw);}}}}
+  threadgroup_barrier(mem_flags::mem_device);device float* tmp=current;current=following;following=tmp;}
+best=INFINITY;best_flat=bank_count*state_count;
+for(uint flat=tid;flat<bank_count*state_count;flat+=256u){uint state=flat%state_count;
+  if((state&overlap_mask)!=required)continue;float v=current[flat];
+  if(v<best||(v==best&&flat<best_flat)){best=v;best_flat=flat;}}
+rcost[tid]=best;rflat[tid]=best_flat;threadgroup_barrier(mem_flags::mem_threadgroup);
+if(tid==0){for(uint lane=1;lane<256u;++lane){float v=rcost[lane];uint flat=rflat[lane];
+    if(v<best||(v==best&&flat<best_flat)){best=v;best_flat=flat;}}
+  squared_error[batch]=best;uint bank=best_flat/state_count,state=best_flat%state_count;
+  states[stb+steps-1u]=state;segment_bank_ids[bb+(steps-1u)/segment_steps]=uchar(bank);
+  for(uint step=steps-1u;step>0u;--step){uint suffix=state>>EdgeBits;
+    uint pointer=uint(backpointers[pb+(ulong(step-1u)*bank_count+bank)*suffix_count+suffix]);
+    if((step%segment_steps)==0u)bank=pointer/prefix_count;
+    state=(pointer%prefix_count)*suffix_count+suffix;states[stb+step-1u]=state;
+    if(((step-1u)%segment_steps)==0u)segment_bank_ids[bb+(step-1u)/segment_steps]=uchar(bank);}}
+"""
+
 
 def _kernel():
     global _KERNEL, _KERNEL_ERROR
@@ -1367,6 +1491,37 @@ def _v2_banked_viterbi_kernel():
     return _V2_BANKED_VITERBI_KERNEL
 
 
+def _v2_banked_tail_kernel():
+    global _V2_BANKED_TAIL_KERNEL, _V2_BANKED_TAIL_KERNEL_ERROR
+    if _V2_BANKED_TAIL_KERNEL is None:
+        with _KERNEL_LOCK:
+            if _V2_BANKED_TAIL_KERNEL is None:
+                if _V2_BANKED_TAIL_KERNEL_ERROR is not None:
+                    raise RuntimeError(_V2_BANKED_TAIL_KERNEL_ERROR)
+                import mlx.core as mx
+
+                try:
+                    _V2_BANKED_TAIL_KERNEL = mx.fast.metal_kernel(
+                        name="gptqmodel_qvq_tail_v2_banked",
+                        input_names=["sequences", "codebooks", "codebook_norms", "step_weights", "dims"],
+                        output_names=[
+                            "costs",
+                            "next_costs",
+                            "backpointers",
+                            "states",
+                            "segment_bank_ids",
+                            "squared_error",
+                        ],
+                        header=_V2_BANKED_VITERBI_HEADER,
+                        source=_V2_BANKED_TAIL_SOURCE,
+                        ensure_row_contiguous=True,
+                    )
+                except Exception as exc:
+                    _V2_BANKED_TAIL_KERNEL_ERROR = f"QVQ banked-V2 tail-biting MLX kernel creation failed: {exc}"
+                    raise RuntimeError(_V2_BANKED_TAIL_KERNEL_ERROR) from exc
+    return _V2_BANKED_TAIL_KERNEL
+
+
 def qvq_mlx_viterbi(sequences, codebook, bits: float, overlap=None, step_weights=None):
     """Run the V2 YAQA Viterbi recurrence using an MLX Metal kernel."""
 
@@ -1453,7 +1608,6 @@ def qvq_mlx_v2_banked_viterbi(
     if sequences.dtype != mx.float32 or codebooks.dtype != mx.float32:
         raise TypeError("QVQ MLX banked-V2 sequences and codebooks must use float32")
     batch, steps, _ = sequences.shape
-    bank_count = codebooks.shape[0]
     if batch < 1 or steps < 2 or segment_steps < 1 or steps % segment_steps:
         raise ValueError("QVQ MLX banked-V2 requires nonempty sequences split into complete segments")
     if not bool(mx.all(mx.isfinite(sequences)).item()) or not bool(mx.all(mx.isfinite(codebooks)).item()):
@@ -1475,6 +1629,38 @@ def qvq_mlx_v2_banked_viterbi(
             raise ValueError("QVQ MLX banked-V2 step weights must be finite and nonnegative")
     else:
         step_weights = mx.zeros((1,), dtype=mx.float32)
+    codebook_norms = mx.sum(codebooks * codebooks, axis=-1)
+    return _qvq_mlx_v2_banked_viterbi_launch(
+        sequences,
+        codebooks,
+        codebook_norms,
+        transition_bits=transition_bits,
+        segment_steps=segment_steps,
+        overlap=overlap,
+        step_weights=step_weights,
+        constrained=constrained,
+        weighted=weighted,
+    )
+
+
+def _qvq_mlx_v2_banked_viterbi_launch(
+    sequences,
+    codebooks,
+    codebook_norms,
+    *,
+    transition_bits: int,
+    segment_steps: int,
+    overlap,
+    step_weights,
+    constrained: bool,
+    weighted: bool,
+):
+    """Launch after the caller has validated values and immutable geometry."""
+
+    import mlx.core as mx
+
+    batch, steps, _ = sequences.shape
+    bank_count = codebooks.shape[0]
     suffix_count = (1 << 16) >> transition_bits
     segment_count = steps // segment_steps
     dimensions = (
@@ -1483,7 +1669,6 @@ def qvq_mlx_v2_banked_viterbi(
     )
     if max(*dimensions, batch * steps, batch * segment_count) > 2**32 - 1:
         raise ValueError("QVQ MLX banked-V2 Viterbi workspace exceeds the uint32 kernel limit")
-    codebook_norms = mx.sum(codebooks * codebooks, axis=-1)
     dims = mx.array([batch, steps, int(constrained), int(weighted)], dtype=mx.uint32)
     outputs = _v2_banked_viterbi_kernel()(
         inputs=[sequences, codebooks, codebook_norms, overlap, step_weights, dims],
@@ -1514,30 +1699,127 @@ def qvq_mlx_v2_banked_viterbi(
     return outputs[3], outputs[4], outputs[5]
 
 
-def _qvq_mlx_tail_biting_v2_banked(sequences, codebooks, bits: float, *, segment_steps: int, step_weights=None):
+def _qvq_mlx_v2_banked_tail_launch(
+    sequences,
+    codebooks,
+    codebook_norms,
+    *,
+    transition_bits: int,
+    segment_steps: int,
+    step_weights,
+    weighted: bool,
+):
+    """Run both canonical tail-biting recurrences in one Metal command."""
+
+    import mlx.core as mx
+
+    batch, steps, _ = sequences.shape
+    bank_count = codebooks.shape[0]
+    suffix_count = (1 << 16) >> transition_bits
+    segment_count = steps // segment_steps
+    dimensions = (
+        batch * bank_count * (1 << 16),
+        batch * (steps - 1) * bank_count * suffix_count,
+    )
+    if max(*dimensions, batch * steps, batch * segment_count) > 2**32 - 1:
+        raise ValueError("QVQ MLX banked-V2 tail-biting workspace exceeds the uint32 kernel limit")
+    dims = mx.array([batch, steps, 0, int(weighted)], dtype=mx.uint32)
+    outputs = _v2_banked_tail_kernel()(
+        inputs=[sequences, codebooks, codebook_norms, step_weights, dims],
+        template=[
+            ("EdgeBits", transition_bits),
+            ("BankCount", bank_count),
+            ("SegmentSteps", segment_steps),
+        ],
+        grid=(batch * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[
+            (batch, bank_count, 1 << 16),
+            (batch, bank_count, 1 << 16),
+            (batch, steps - 1, bank_count, suffix_count),
+            (batch, steps),
+            (batch, segment_count),
+            (batch,),
+        ],
+        output_dtypes=[
+            mx.float32,
+            mx.float32,
+            mx.uint16 if transition_bits == 7 else mx.uint8,
+            mx.uint32,
+            mx.uint8,
+            mx.float32,
+        ],
+    )
+    return outputs[3], outputs[4], outputs[5]
+
+
+def _qvq_mlx_tail_biting_v2_banked(
+    sequences,
+    codebooks,
+    bits: float,
+    *,
+    segment_steps: int,
+    step_weights=None,
+    prepared_norms=None,
+):
     import mlx.core as mx
 
     midpoint = sequences.shape[1] // 2
     if sequences.shape[1] % 2 or midpoint % segment_steps:
         raise ValueError("QVQ MLX banked-V2 tail rotation must preserve segment boundaries")
+    transition_bits = qvq_transition_bits(bits)
+    if prepared_norms is not None:
+        return _qvq_mlx_v2_banked_tail_launch(
+            sequences,
+            codebooks,
+            prepared_norms,
+            transition_bits=transition_bits,
+            segment_steps=segment_steps,
+            step_weights=mx.zeros((1,), dtype=mx.float32) if step_weights is None else step_weights,
+            weighted=step_weights is not None,
+        )
     rotated = mx.roll(sequences, shift=midpoint, axis=1)
     rotated_weights = None if step_weights is None else mx.roll(step_weights, shift=midpoint, axis=1)
-    provisional_states, _, _ = qvq_mlx_v2_banked_viterbi(
-        rotated,
-        codebooks,
-        bits,
-        segment_steps=segment_steps,
-        step_weights=rotated_weights,
-    )
-    transition_bits = qvq_transition_bits(bits)
+    if prepared_norms is None:
+        provisional_states, _, _ = qvq_mlx_v2_banked_viterbi(
+            rotated,
+            codebooks,
+            bits,
+            segment_steps=segment_steps,
+            step_weights=rotated_weights,
+        )
+    else:
+        provisional_states, _, _ = _qvq_mlx_v2_banked_viterbi_launch(
+            rotated,
+            codebooks,
+            prepared_norms,
+            transition_bits=transition_bits,
+            segment_steps=segment_steps,
+            overlap=mx.zeros((1,), dtype=mx.uint32),
+            step_weights=mx.zeros((1,), dtype=mx.float32) if rotated_weights is None else rotated_weights,
+            constrained=False,
+            weighted=rotated_weights is not None,
+        )
     overlap = (provisional_states[:, midpoint - 1] & ((1 << (16 - transition_bits)) - 1)).astype(mx.uint32)
-    return qvq_mlx_v2_banked_viterbi(
+    if prepared_norms is None:
+        return qvq_mlx_v2_banked_viterbi(
+            sequences,
+            codebooks,
+            bits,
+            segment_steps=segment_steps,
+            overlap=overlap,
+            step_weights=step_weights,
+        )
+    return _qvq_mlx_v2_banked_viterbi_launch(
         sequences,
         codebooks,
-        bits,
+        prepared_norms,
+        transition_bits=transition_bits,
         segment_steps=segment_steps,
         overlap=overlap,
-        step_weights=step_weights,
+        step_weights=mx.zeros((1,), dtype=mx.float32) if step_weights is None else step_weights,
+        constrained=True,
+        weighted=step_weights is not None,
     )
 
 
@@ -1622,8 +1904,9 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
                             )
                             _V2_BANKED_TORCH_CODEBOOK_HOT = hot
                 codebook_lease = hot[2]
-        elif isinstance(mlx_codebooks, _TorchMLXReadOnlyLease):
-            codebook_lease = mlx_codebooks
+        elif isinstance(mlx_codebooks, _QVQMLXPreparedBankedCodebooks):
+            mlx_codebooks.verify_source(codebooks)
+            codebook_lease = mlx_codebooks.lease
         else:
             raise TypeError("QVQ prepared MLX codebooks must retain their guarded Torch ownership lease")
         leases.append(codebook_lease)
@@ -1691,12 +1974,20 @@ def qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
         raise TypeError("QVQ host-to-MLX tail biting requires float32 Torch tensors")
     if not sequences.is_contiguous() or not codebooks.is_contiguous():
         raise ValueError("QVQ host-to-MLX tail biting requires contiguous tensors")
+    if not torch.isfinite(sequences).all():
+        raise ValueError("QVQ host-to-MLX tail biting requires finite sequences")
+    if mlx_codebooks is None and not torch.isfinite(codebooks).all():
+        raise ValueError("QVQ host-to-MLX tail biting requires finite codebooks")
     if step_weights is not None and (
         step_weights.device.type != "cpu"
         or step_weights.dtype != torch.float32
         or not step_weights.is_contiguous()
     ):
         raise ValueError("QVQ host-to-MLX tail-biting weights must be contiguous CPU float32")
+    if step_weights is not None and (
+        not torch.isfinite(step_weights).all() or bool(torch.any(step_weights < 0).item())
+    ):
+        raise ValueError("QVQ host-to-MLX tail-biting weights must be finite and nonnegative")
 
     with _TORCH_MLX_BRIDGE_LOCK:
         leases: list[_TorchMLXReadOnlyLease] = []
@@ -1704,8 +1995,9 @@ def qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
         leases.append(sequence_lease)
         if mlx_codebooks is None:
             codebook_lease = _TORCH_MLX_STAGING_POOL.stage(codebooks, name="host banked-V2 codebooks")
-        elif isinstance(mlx_codebooks, _TorchMLXReadOnlyLease):
-            codebook_lease = mlx_codebooks
+        elif isinstance(mlx_codebooks, _QVQMLXPreparedBankedCodebooks):
+            mlx_codebooks.verify_source(codebooks)
+            codebook_lease = mlx_codebooks.lease
         else:
             raise TypeError("QVQ prepared MLX codebooks must retain their guarded Torch ownership lease")
         leases.append(codebook_lease)
@@ -1720,6 +2012,7 @@ def qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
             bits,
             segment_steps=segment_steps,
             step_weights=None if weight_lease is None else weight_lease.array,
+            prepared_norms=None if mlx_codebooks is None else mlx_codebooks.norms,
         )
         mx.eval(*outputs)
         mx.synchronize()
@@ -1729,7 +2022,12 @@ def qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
         selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8)
         squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32)
         del outputs
-        mx.clear_cache()
+        # Reusing equal-shaped recurrence workspaces saves an allocator/cache
+        # round trip on every anti-diagonal chunk.  Keep this bounded: real
+        # modules encounter several tail batch shapes, and retaining all of
+        # them was the source of the former unified-memory growth.
+        if mx.get_cache_memory() > _QVQ_YAQA_MLX_CACHE_LIMIT_BYTES:
+            mx.clear_cache()
         return states, selectors, squared_error
 
 
@@ -1788,15 +2086,27 @@ def qvq_mlx_viterbi_from_torch_mps(
 def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks):
     """Make one guarded call-scoped MLX bank stack for an Apple quantization pass."""
 
+    import mlx.core as mx
     import torch
 
     if codebooks.device.type not in ("cpu", "mps") or codebooks.dtype != torch.float32 or not codebooks.is_contiguous():
         raise ValueError("QVQ MLX bank codebooks require contiguous float32 Torch CPU or MPS tensors")
+    if not torch.isfinite(codebooks).all():
+        raise ValueError("QVQ MLX bank codebooks must contain only finite values")
     with _TORCH_MLX_BRIDGE_LOCK:
         if codebooks.device.type == "cpu":
-            return _TORCH_MLX_STAGING_POOL.stage(codebooks, name="prepared banked-V2 codebooks")
-        torch.mps.synchronize()
-        return _torch_to_mlx_read_only(codebooks, name="prepared banked-V2 codebooks")
+            lease = _TORCH_MLX_STAGING_POOL.stage(codebooks, name="prepared banked-V2 codebooks")
+        else:
+            torch.mps.synchronize()
+            lease = _torch_to_mlx_read_only(codebooks, name="prepared banked-V2 codebooks")
+        norms = mx.sum(lease.array * lease.array, axis=-1)
+        mx.eval(norms)
+        return _QVQMLXPreparedBankedCodebooks(
+            source=codebooks,
+            source_version=codebooks._version,
+            lease=lease,
+            norms=norms,
+        )
 
 
 @functools.lru_cache(maxsize=128)
