@@ -1,0 +1,54 @@
+# QVQ all-linear telemetry sweep — 2026-08-17
+
+## Workload
+
+- Model: Llama 3.2 1B Instruct, all 16 decoder layers.
+- Modules: Q/K/V/O plus gate/up/down (112 linear modules); embeddings and LM head remain dense.
+- Calibration: 512 full, independent rows at offsets 0–511; batch 1; no concatenation or length limit.
+- Evaluation: 512 disjoint rows at offsets 512–1023.
+- YAQA Sketch-B: 512 further-disjoint rows at offsets 1024–1535; batch 8.
+- Hardware: NVIDIA PG506-230/232, compute capability 8.0, 124 SMs, CUDA 13.0, Torch 2.13.0+cu130.
+
+## Completed V2 phase attribution
+
+`baseline_encode` contains `block_ldl_viterbi` and must not be added to it. The MLP gate and final evaluation are
+wall-clock stages, while Viterbi and evaluation subphases are CUDA-event work sums.
+
+| Rate | Total (s) | Encode wall (s) | MLP gate (s) | Final eval (s) | Viterbi GPU (s) | Local replay GPU (s) | Dense forward GPU (s) | Quant forward GPU (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | 692.6 | 114.1 | 308.2 | 59.2 | 112.8 | 20.3 | 11.7 | 10.1 |
+| W1.5 | 710.3 | 126.2 | 297.7 | 62.5 | 124.9 | 23.2 | 11.4 | 10.2 |
+| W2 | 647.0 | 107.2 | 287.4 | 57.8 | 106.3 | 20.3 | 11.2 | 9.8 |
+| W2.5 | 663.8 | 112.6 | 296.4 | 59.1 | 111.6 | 20.2 | 11.6 | 10.3 |
+| W3 | 684.7 | 129.3 | 297.6 | 58.9 | 128.2 | 20.3 | 11.6 | 10.2 |
+| W3.5 | 700.9 | 112.7 | 319.8 | 59.5 | 111.8 | 20.3 | 11.9 | 10.3 |
+
+The top quantization stages are MLP acceptance and native Viterbi. The top final-evaluation GPU work is grouped
+local replay, followed by dense model forward; quantized forward is a close third.
+
+## MLP acceptance exact-KL A/B
+
+The gate previously invoked the general CPU diagnostic metric suite for every near-threshold candidate, although
+acceptance consumes only final-logit KL and Top-1/5/10. The optimized path recomputes only CPU FP32 KL and retains
+the existing deterministic CUDA Top-N values.
+
+| Arm | Model | Layers | Rows | Proposals | Total (s) | Metrics (s) | Candidate forward (s) | Max KL delta | Top-N delta |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Baseline full CPU diagnostics | Llama 3.2 1B | 16 | 8 | 112 + baseline | 91.775 | 88.991 | 7.407 | — | — |
+| Lean exact CPU KL | Llama 3.2 1B | 16 | 8 | 112 + baseline | 45.736 | 43.319 | 6.908 | 9.83e-7 | 0 |
+
+The end-to-end gate speedup is **2.01x**, the metric phase speedup is **2.05x**, all Top-1/5/10 fingerprints are
+identical, and worst KL drift remains below the declared `1e-6` quantization-analysis tolerance.
+
+## Rejected Viterbi experiments
+
+Nsight Compute on the W2 FP16-codebook recurrence reported 72.23% SM throughput, 56.27% L2 throughput, 64
+registers/thread, 40.96 KiB dynamic plus 8.19 KiB static shared memory per CTA, and 48.75% achieved occupancy. The
+dominant sampled stalls were math-pipe throttle, dispatch, long scoreboard, and wait.
+
+- Replacing the final serial 1,024-entry reduction with a warp/block reduction was not consistently faster across
+  W1–W3.5 and was rejected.
+- A 512-thread CTA plus maximum shared-memory carveout preserved exact states but regressed a matched raw two-pass
+  496-sequence benchmark (W3: 19.991 ms to 22.546 ms; W3.5: 18.187 ms to 19.454 ms) and was rejected.
+
+Profile artifact: `/private/monster/data/model/qvq_all_linear_telemetry_20260817/reports/viterbi-w2-sm80.ncu-rep`.

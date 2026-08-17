@@ -1014,6 +1014,24 @@ def _acceptance_logit_metrics(dense_logits: torch.Tensor, candidate_logits: torc
 
 
 @torch.inference_mode()
+def _acceptance_kl_only_cpu(dense_logits: torch.Tensor, candidate_logits: torch.Tensor) -> dict[str, object]:
+    """Recompute only the exact CPU statistic used by the MLP acceptance gate."""
+
+    dense = dense_logits.detach().cpu().float().reshape(-1, dense_logits.shape[-1])
+    candidate = candidate_logits.detach().cpu().float().reshape(-1, candidate_logits.shape[-1])
+    if dense.shape != candidate.shape or dense.shape[0] < 1:
+        raise ValueError(f"acceptance logit shape mismatch: {tuple(dense.shape)} != {tuple(candidate.shape)}")
+    dense_log_prob = F.log_softmax(dense, dim=-1)
+    candidate_log_prob = F.log_softmax(candidate, dim=-1)
+    kl_forward = (dense_log_prob.exp() * (dense_log_prob - candidate_log_prob)).sum(dim=-1)
+    return {
+        "shape": list(dense.shape),
+        "finite": bool(torch.isfinite(candidate).all()),
+        "kl_forward": {"mean": kl_forward.mean().item()},
+    }
+
+
+@torch.inference_mode()
 def _streaming_logit_metrics(
     dense_model: torch.nn.Module,
     candidate_model: torch.nn.Module,
@@ -1286,24 +1304,15 @@ class _MlpAcceptanceEvaluatorBase:
                 self.acceptance_near_threshold_evaluations += 1
             exact = _WeightedMetricAccumulator()
             for dense_logits, candidate in zip(self.dense_logits_by_row, candidate_logits_factory(), strict=True):
-                candidate_cpu = candidate.detach().cpu()
-                metrics = tensor_metrics(
-                    dense_logits.detach().cpu().float().flatten(0, -2),
-                    candidate_cpu.float().flatten(0, -2),
-                    normalize_distribution=False,
-                    include_top10=True,
-                )
+                metrics = _acceptance_kl_only_cpu(dense_logits, candidate)
                 deterministic = _fast_cuda_acceptance_metrics(dense_logits, candidate)
                 if deterministic is None:
                     raise RuntimeError("CUDA acceptance metrics unexpectedly unavailable for a CUDA candidate")
                 for key in ("top1_agreement", "top5_overlap", "top10_overlap"):
-                    if key == "top1_agreement":
-                        metrics[key] = deterministic[key]
-                    else:
-                        # The exact path computes KL on CPU, but Top-N must use the
-                        # same native deterministic value-descending/index-ascending
-                        # ordering as the fast path, including percentile summaries.
-                        metrics[key] = deterministic[key]
+                    # The exact path computes KL on CPU, but Top-N must use the
+                    # same native deterministic value-descending/index-ascending
+                    # ordering as the fast path, including percentile summaries.
+                    metrics[key] = deterministic[key]
                 self.exact_cpu_metric_calls += 1
                 self.cpu_topk_fallback_rows += 1
                 exact.add(metrics, rows=candidate.numel() // candidate.shape[-1])

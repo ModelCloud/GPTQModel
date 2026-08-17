@@ -46,6 +46,7 @@ from scripts.analyze_gptq_low_bit_grid import (
 from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
+    _acceptance_kl_only_cpu,
     _acceptance_logit_metrics,
     _aggregate_qvq_telemetry,
     _all_linear_dependency_stages,
@@ -1011,6 +1012,25 @@ def test_qvq_mlp_acceptance_device_reduction_matches_full_reference():
     assert actual["top1_agreement"] == expected["top1_agreement"]
     assert actual["top5_overlap"]["mean"] == pytest.approx(expected["top5_overlap"]["mean"], abs=1e-7)
     assert actual["top10_overlap"]["mean"] == pytest.approx(expected["top10_overlap"]["mean"], abs=1e-7)
+
+
+def test_qvq_mlp_acceptance_kl_only_cpu_matches_full_reference():
+    generator = torch.Generator().manual_seed(20260817)
+    dense = torch.randn((2, 3, 17), generator=generator)
+    candidate = dense + 0.1 * torch.randn((2, 3, 17), generator=generator)
+    expected = tensor_metrics(
+        dense.flatten(0, -2),
+        candidate.flatten(0, -2),
+        normalize_distribution=False,
+        include_top10=True,
+    )
+
+    actual = _acceptance_kl_only_cpu(dense, candidate)
+
+    assert set(actual) == {"shape", "finite", "kl_forward"}
+    assert actual["shape"] == [6, 17]
+    assert actual["finite"] is True
+    assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=1e-7)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
