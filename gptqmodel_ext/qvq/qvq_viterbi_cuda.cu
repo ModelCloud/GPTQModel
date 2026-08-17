@@ -1180,6 +1180,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
     BackpointerScalar* __restrict__ backpointers,
     uint8_t* __restrict__ boundary_banks,
     int batch,
+    int family_batch,
     int segment_index,
     bool constrained,
     bool weighted) {
@@ -1207,9 +1208,11 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   const int64_t g_base = static_cast<int64_t>(sequence) * bank_suffix_count + bank * suffix_count;
   const int64_t pointer_base = static_cast<int64_t>(sequence) * 127 * bank_suffix_count;
   const int64_t boundary_base = static_cast<int64_t>(sequence) * (segment_count - 1) * suffix_count;
+  const int family = family_batch == 0 ? 0 : sequence / family_batch;
+  const int physical_bank = family * bank_count + bank;
   const CodebookScalar* bank_codebook =
-      codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-  const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+      codebooks + static_cast<int64_t>(physical_bank) * kStateCount * 2;
+  const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount;
   extern __shared__ float shared_frontiers[];
   float* g_previous = shared_frontiers;
   float* g_scratch = shared_frontiers + suffix_count;
@@ -1343,6 +1346,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
     uint8_t* __restrict__ segment_bank_ids,
     float* __restrict__ squared_error,
     int batch,
+    int family_batch,
     bool constrained,
     bool weighted) {
   constexpr int shift = Shift;
@@ -1375,9 +1379,11 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
   for (int flat = thread; flat < bank_count * kStateCount; flat += kThreads) {
     const int bank = flat / kStateCount;
     const int state = flat - bank * kStateCount;
+    const int family = family_batch == 0 ? 0 : sequence / family_batch;
+    const int physical_bank = family * bank_count + bank;
     const CodebookScalar* bank_codebook =
-        codebooks + static_cast<int64_t>(bank) * kStateCount * 2;
-    const float* bank_norm = codebook_norms + static_cast<int64_t>(bank) * kStateCount;
+        codebooks + static_cast<int64_t>(physical_bank) * kStateCount * 2;
+    const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount;
     float candidate = __fadd_rn(
         g_previous[g_base + bank * suffix_count + (state >> shift)],
         emission<2, CodebookScalar>(
@@ -1692,20 +1698,27 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     const c10::optional<at::Tensor>& overlap,
     const c10::optional<at::Tensor>& step_weights,
     int kernel_mode,
-    bool validate_values = true) {
+    bool validate_values = true,
+    int family_batch = 0,
+    int bank_count_override = 0) {
   const bool g_only = kernel_mode != 0;
   bool grid_parallel = kernel_mode == 2;
   TORCH_CHECK(sequences.is_cuda() && codebooks.is_cuda(),
               "segmented-bank V2 sequences and codebooks must be CUDA tensors");
   TORCH_CHECK(sequences.dim() == 3 && sequences.size(1) == 128 && sequences.size(2) == 2,
               "segmented-bank V2 sequences must have shape [batch, 128, 2]");
-  TORCH_CHECK(codebooks.dim() == 3 && (codebooks.size(0) == 2 || codebooks.size(0) == 4) &&
+  TORCH_CHECK(codebooks.dim() == 3 &&
+                  ((bank_count_override == 0 && (codebooks.size(0) == 2 || codebooks.size(0) == 4)) ||
+                   (bank_count_override == 2 && codebooks.size(0) % 2 == 0)) &&
                   codebooks.size(1) == kStateCount && codebooks.size(2) == 2,
               "segmented-bank V2 codebooks must have shape [2|4, 65536, 2]");
   const int batch = static_cast<int>(sequences.size(0));
-  const int bank_count = static_cast<int>(codebooks.size(0));
+  const int bank_count = bank_count_override == 0 ? static_cast<int>(codebooks.size(0)) : bank_count_override;
   constexpr int steps = 128;
   TORCH_CHECK(batch > 0, "segmented-bank V2 sequences must contain at least one batch");
+  TORCH_CHECK(family_batch == 0 || (family_batch > 0 && batch % family_batch == 0 &&
+                  codebooks.size(0) == (batch / family_batch) * bank_count),
+              "family-batched segmented V2 tensors have inconsistent family dimensions");
   TORCH_CHECK(transition_bits >= 2 && transition_bits <= 7,
               "segmented-bank V2 transition_bits must be in [2, 7]");
   TORCH_CHECK((bank_count == 2 && segment_steps == 16) ||
@@ -1851,7 +1864,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),   \
         overlap_ptr, weight_ptr, qvq_frontier_b, qvq_frontier_a,                                     \
         backpointers.mutable_data_ptr<POINTER_TYPE>(), boundary_banks.mutable_data_ptr<uint8_t>(),     \
-        batch, 0, constrained, weighted);                                                             \
+        batch, family_batch, 0, constrained, weighted);                                               \
     for (int segment = 1; segment < segments; ++segment) {                                            \
       const float* qvq_segment_input = segment % 2 == 1 ? qvq_frontier_a : qvq_frontier_b;            \
       float* qvq_segment_output = segment % 2 == 1 ? qvq_frontier_b : qvq_frontier_a;                 \
@@ -1866,7 +1879,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
           sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(), \
           overlap_ptr, weight_ptr, qvq_segment_input, qvq_segment_output,                             \
           backpointers.mutable_data_ptr<POINTER_TYPE>(), boundary_banks.mutable_data_ptr<uint8_t>(),   \
-          batch, segment, constrained, weighted);                                                     \
+          batch, family_batch, segment, constrained, weighted);                                       \
     }                                                                                                 \
     const float* qvq_final_frontier = segments % 2 == 1 ? qvq_frontier_a : qvq_frontier_b;           \
     qvq_v2_segment_grid_finalize_kernel<                                                              \
@@ -1875,7 +1888,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         overlap_ptr, weight_ptr, qvq_final_frontier,                                                  \
         backpointers.const_data_ptr<POINTER_TYPE>(), boundary_banks.const_data_ptr<uint8_t>(),         \
         states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),              \
-        squared_error.mutable_data_ptr<float>(), batch, constrained, weighted);                        \
+        squared_error.mutable_data_ptr<float>(), batch, family_batch, constrained, weighted);          \
   } while (0)
 #define QVQ_V2_SEGMENT_GRID_DISPATCH(BITS, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)             \
   do {                                                                                                \
@@ -1986,6 +1999,52 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_trust
       sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_family_grid_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& overlap,
+    const c10::optional<at::Tensor>& step_weights) {
+  TORCH_CHECK(sequences.dim() == 4 && sequences.size(2) == 128 && sequences.size(3) == 2,
+              "family-batched segmented V2 sequences must have shape [families, batch, 128, 2]");
+  TORCH_CHECK(codebooks.dim() == 4 && codebooks.size(0) == sequences.size(0) && codebooks.size(1) == 2 &&
+                  codebooks.size(2) == kStateCount && codebooks.size(3) == 2,
+              "family-batched segmented V2 codebooks must have shape [families, 2, 65536, 2]");
+  const int64_t families = sequences.size(0);
+  const int64_t family_batch = sequences.size(1);
+  const at::Tensor flat_sequences = sequences.view({families * family_batch, 128, 2});
+  const at::Tensor flat_codebooks = codebooks.view({families * 2, kStateCount, 2});
+  c10::optional<at::Tensor> flat_overlap = c10::nullopt;
+  if (overlap.has_value()) {
+    TORCH_CHECK(overlap->sizes() == at::IntArrayRef({families, family_batch}),
+                "family-batched segmented V2 overlap must have shape [families, batch]");
+    flat_overlap = overlap->view({families * family_batch});
+  }
+  c10::optional<at::Tensor> flat_weights = c10::nullopt;
+  if (step_weights.has_value()) {
+    TORCH_CHECK(step_weights->sizes() == at::IntArrayRef({families, family_batch, 128}),
+                "family-batched segmented V2 weights must have shape [families, batch, 128]");
+    flat_weights = step_weights->view({families * family_batch, 128});
+  }
+  auto result = qvq_viterbi_v2_segment_banked_cuda_impl(
+      flat_sequences,
+      flat_codebooks,
+      transition_bits,
+      segment_steps,
+      flat_overlap,
+      flat_weights,
+      2,
+      false,
+      static_cast<int>(family_batch),
+      2);
+  return {
+      std::get<0>(result).view({families, family_batch, 128}),
+      std::get<1>(result).view({families, family_batch}),
+      std::get<2>(result).view({families, family_batch, 8}),
+  };
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
@@ -2005,6 +2064,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+  m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
+        "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
@@ -2016,4 +2077,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi_v2_segment_g", &qvq_viterbi_v2_segment_g_cuda);
   m.impl("viterbi_v2_segment_grid", &qvq_viterbi_v2_segment_grid_cuda);
   m.impl("viterbi_v2_segment_grid_trusted", &qvq_viterbi_v2_segment_grid_trusted_cuda);
+  m.impl("viterbi_v2_segment_family_grid_trusted", &qvq_viterbi_v2_segment_family_grid_trusted_cuda);
 }

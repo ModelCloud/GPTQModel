@@ -41,6 +41,7 @@ _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP: Callable | None = None
 
 
 def _validate_viterbi_distance_range(
@@ -95,6 +96,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_g",
         "viterbi_v2_segment_grid",
         "viterbi_v2_segment_grid_trusted",
+        "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
     ),
     sources=_qvq_cuda_sources,
@@ -242,6 +244,19 @@ def _qvq_cuda_viterbi_v2_segment_grid_trusted_op() -> Callable:
                     "qvq_cuda", "viterbi_v2_segment_grid_trusted"
                 )
     return _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP
+
+
+def _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op() -> Callable:
+    """Resolve the family-batched B2-P32 segmented V2 operator."""
+
+    global _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP
+    if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP is None:
+                _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_v2_segment_family_grid_trusted"
+                )
+    return _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP
 
 
 def qvq_cuda_viterbi(

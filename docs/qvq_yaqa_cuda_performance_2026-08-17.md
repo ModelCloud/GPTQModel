@@ -255,3 +255,33 @@ only the value-prevalidated CUDA path skips it.
 Against the pulled `1683.30 ms` baseline, the cumulative full-stage gain is
 now `1.83-1.86x`. Segmented-Viterbi host dispatch fell from `607.09 ms` to
 `560.46 ms`; its GPU work remains the dominant next target.
+
+### Family-batched small anti-diagonals
+
+Three independent B2-P32 family searches previously entered CUDA through
+three side streams. That is effective once every family supplies enough tiles,
+but small YAQA anti-diagonals still submit only a fraction of one GPU wave. A
+new trusted native ABI accepts sequences shaped `[family, tile, 128, 2]` and
+codebooks shaped `[family, 2, 65536, 2]`. It flattens the independent family
+dimension into one grid without changing any recurrence, emission, reduction,
+tie, state, loss, or selector arithmetic.
+
+Warm 15-sample wall medians compare three persistent CUDA streams against one
+family-batched launch on PG506 sm_80. Each family has eight tiles and uses
+constrained FP32-weighted recurrence.
+
+| Rate | Three streams (ms) | Family batch (ms) | Speedup | Quantization parity |
+|:--|--:|--:|--:|:--|
+| W1.5 | 1.883 | 1.408 | 1.34x | bit-exact |
+| W2 | 1.600 | 1.350 | 1.19x | bit-exact |
+| W2.5 | 1.555 | 1.322 | 1.18x | bit-exact |
+| W3 | 1.671 | 1.399 | 1.19x | bit-exact |
+| W3.5 | 2.709 | 2.467 | 1.10x | bit-exact |
+
+At 16 tiles per family, W2.5 measured `3.975 ms` batched versus `3.689 ms`
+with side streams, so the ABI is intentionally a small-anti-diagonal primitive
+rather than an unconditional replacement. Exact tests cover W1--W3.5,
+constrained overlap, weighted and unweighted recurrence, three distinct family
+codebook pairs, states, losses, and selector schedules. The next integration
+stage is a lockstep family YAQA scheduler that uses this ABI only at the
+measured small-grid knee.
