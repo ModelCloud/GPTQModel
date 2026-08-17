@@ -89,6 +89,13 @@ This is a **2.52x** module speedup at 2,048 square and **2.09x** with a nontrivi
 CUDA parity now covers canonical V2, B2-P32, and B4-P64 at every half-step W1--W3.5; the production-dispatch test
 also verifies that canonical V2+YAQA selects the optimized recurrence.
 
+The incremental update now uses one in-place `addmm(beta=1, alpha=-1)` for its second projection and subtraction,
+removing one full-matrix workspace and one launch per anti-diagonal. At 1,024 square, update GPU work fell from
+39.27 ms to 34.32 ms (1.14x); at 2,048 square, combined commit/update work fell from 469.96 ms to 465.91 ms
+(1.009x). End-to-end module wall time changed by less than 0.2%, so the retained benefit is primarily lower
+workspace and clearer `yaqa_feedback_update` telemetry. Weight/state outputs remained bit-exact in the W1--W3.5
+gate.
+
 ## Rejected final-forward experiments
 
 The dense and quantized model forwards remain the two largest individual final-evaluation phases. Two matched

@@ -3730,11 +3730,9 @@ def yaqa_inner(
     transformed_error = None
     committed = None
     feedback_temp = None
-    feedback_update = None
     if incremental_cuda_feedback:
         committed = torch.zeros_like(source)
         feedback_temp = torch.empty_like(source)
-        feedback_update = torch.empty_like(source)
         transformed_error = torch.empty_like(source)
         torch.mm(input_L.transpose(0, 1), error, out=feedback_temp)
         torch.mm(feedback_temp, output_L, out=transformed_error)
@@ -4046,9 +4044,9 @@ def yaqa_inner(
                 bank_ids.view(input_blocks * output_blocks, segments_per_tile)[flat_tile_indices] = segmented_selectors
             elif bank_codebooks is not None:
                 bank_ids[flat_tile_indices] = winners.to(torch.uint8)
-            if incremental_cuda_feedback:
-                assert committed is not None and feedback_temp is not None and feedback_update is not None
-                assert transformed_error is not None
+        if incremental_cuda_feedback:
+            assert committed is not None and feedback_temp is not None and transformed_error is not None
+            with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
                 committed.zero_()
                 committed_blocks = committed.view(
                     input_blocks,
@@ -4058,8 +4056,14 @@ def yaqa_inner(
                 ).permute(0, 2, 1, 3)
                 committed_blocks[input_indices, output_indices] = reconstructed
                 torch.mm(input_L.transpose(0, 1), committed, out=feedback_temp)
-                torch.mm(feedback_temp, output_L, out=feedback_update)
-                transformed_error.sub_(feedback_update)
+                torch.addmm(
+                    transformed_error,
+                    feedback_temp,
+                    output_L,
+                    beta=1,
+                    alpha=-1,
+                    out=transformed_error,
+                )
 
     if (
         yaqa_cuda_invalid is not None
