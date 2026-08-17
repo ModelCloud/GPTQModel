@@ -3510,6 +3510,7 @@ def yaqa_inner(
     _diagnostics: dict[str, object] | None = None,
     _defer_segmented_cuda_checks: bool = False,
     _incremental_cuda_feedback: bool = False,
+    _trusted_inputs: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
 
@@ -3526,9 +3527,11 @@ def yaqa_inner(
     into later anti-diagonals; checkpoint packing and inference are unchanged.
     """
 
+    if not isinstance(_trusted_inputs, bool):
+        raise TypeError("YAQA trusted-input flag must be bool.")
     if inner_weight.ndim != 2 or not inner_weight.is_floating_point():
         raise ValueError("YAQA inner weight must be a floating-point matrix.")
-    if not torch.isfinite(inner_weight).all():
+    if not _trusted_inputs and not torch.isfinite(inner_weight).all():
         raise ValueError("YAQA inner weight must contain only finite values.")
     if _rounding_bias is not None:
         if (
@@ -3538,9 +3541,10 @@ def yaqa_inner(
             or _rounding_bias.device != inner_weight.device
         ):
             raise ValueError("YAQA rounding bias must match the floating-point inner-weight geometry and device.")
-        if not torch.isfinite(_rounding_bias).all():
+        if not _trusted_inputs and not torch.isfinite(_rounding_bias).all():
             raise ValueError("YAQA rounding bias must contain only finite values.")
-        _validate_fp32_representable(_rounding_bias, name="YAQA rounding bias")
+        if not _trusted_inputs:
+            _validate_fp32_representable(_rounding_bias, name="YAQA rounding bias")
     if isinstance(tile_rows, bool) or not isinstance(tile_rows, int) or tile_rows < 1:
         raise ValueError("YAQA tile rows must be a positive integer.")
     if isinstance(tile_cols, bool) or not isinstance(tile_cols, int) or tile_cols < 1:
@@ -3617,21 +3621,22 @@ def yaqa_inner(
         raise ValueError("YAQA codebook must be a non-empty matrix.")
     if not codebook.is_floating_point():
         raise TypeError("YAQA codebook must use a floating-point dtype.")
-    if bank_codebooks is not None:
+    if bank_codebooks is not None and not _trusted_inputs:
         if any(not torch.isfinite(bank).all() for bank in bank_codebooks):
             raise ValueError("YAQA bank codebooks must contain only finite values.")
-    elif not torch.isfinite(codebook).all():
+    elif bank_codebooks is None and not _trusted_inputs and not torch.isfinite(codebook).all():
         raise ValueError("YAQA codebook must contain only finite values.")
-    for name, tensor in (
-        ("YAQA inner weight", inner_weight),
-        ("YAQA input Hessian", input_hessian),
-        ("YAQA output Hessian", output_hessian),
-        ("YAQA codebook", codebook),
-    ):
-        _validate_fp32_representable(tensor, name=name)
-    if bank_codebooks is not None:
-        for bank_index, bank in enumerate(bank_codebooks[1:], start=1):
-            _validate_fp32_representable(bank, name=f"YAQA bank codebook {bank_index}")
+    if not _trusted_inputs:
+        for name, tensor in (
+            ("YAQA inner weight", inner_weight),
+            ("YAQA input Hessian", input_hessian),
+            ("YAQA output Hessian", output_hessian),
+            ("YAQA codebook", codebook),
+        ):
+            _validate_fp32_representable(tensor, name=name)
+        if bank_codebooks is not None:
+            for bank_index, bank in enumerate(bank_codebooks[1:], start=1):
+                _validate_fp32_representable(bank, name=f"YAQA bank codebook {bank_index}")
     if (
         inner_weight.device != input_hessian.device
         or inner_weight.device != output_hessian.device
@@ -3650,7 +3655,9 @@ def yaqa_inner(
         raise ValueError("YAQA output Hessian must match the inner-weight output dimension.")
     if not input_hessian.is_floating_point() or not output_hessian.is_floating_point():
         raise TypeError("YAQA Hessians must use floating-point dtypes.")
-    if not torch.isfinite(input_hessian).all() or not torch.isfinite(output_hessian).all():
+    if not _trusted_inputs and (
+        not torch.isfinite(input_hessian).all() or not torch.isfinite(output_hessian).all()
+    ):
         raise ValueError("YAQA Hessians must contain only finite values.")
     if tile_rows * tile_cols % codebook.shape[1]:
         raise ValueError("YAQA tile size must be divisible by the codebook vector size.")
@@ -6375,6 +6382,7 @@ def quantize_qvq_linear(
                     segmented_bank_stack=segmented_bank_stack,
                     telemetry=telemetry,
                     _incremental_cuda_feedback=incremental_cuda_feedback,
+                    _trusted_inputs=True,
                 )
             if v2b2_p32:
                 assert bank_codebooks is not None
@@ -6393,6 +6401,7 @@ def quantize_qvq_linear(
                     factorization=prepared_yaqa_factorization,
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,
                     telemetry=telemetry,
+                    _trusted_inputs=True,
                 )
             return yaqa_inner(
                 normalized_weight,
@@ -6408,6 +6417,7 @@ def quantize_qvq_linear(
                 factorization=prepared_yaqa_factorization,
                 telemetry=telemetry,
                 _incremental_cuda_feedback=incremental_cuda_feedback,
+                _trusted_inputs=True,
             )
         if v2b4_p64:
             assert bank_codebooks is not None

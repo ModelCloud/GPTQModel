@@ -325,3 +325,9 @@ measured norm/code load remains hot in cache, but one dependency now supplies bo
 completed 1,032 passes and five backend skips; its sole failure is a pre-existing BF16 output-dtype expectation in
 `test_qvq_cuda_composite_input_width_retries_overflow_in_bfloat16`, which is independent of Viterbi and reproduces
 without this kernel change.
+
+The public linear quantizer already performs finite/range checks on the weight and both YAQA Hessians before RHT.
+Nested canonical and family encoders no longer repeat those synchronizing full-tensor scans. Direct `yaqa_inner`
+callers retain the complete validation contract. On the same W2.5 q_proj case this reduced the median from 2.395 to
+2.375 seconds (1.008x), with identical weight, state, selector, family, and peak-VRAM results. This is intentionally
+a small validation-overhead cleanup rather than a recurrence-speed claim.
