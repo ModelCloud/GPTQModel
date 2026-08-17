@@ -1167,6 +1167,7 @@ template <
     int BankCount,
     int SegmentSteps,
     bool FuseBoundary,
+    bool MidpointOnly,
     typename CodebookScalar,
     typename BackpointerScalar>
 __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
@@ -1206,7 +1207,10 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   const int required_overlap = constrained ? static_cast<int>(overlap[sequence]) : 0;
   const int64_t sequence_base = static_cast<int64_t>(sequence) * 128 * 2;
   const int64_t g_base = static_cast<int64_t>(sequence) * bank_suffix_count + bank * suffix_count;
-  const int64_t pointer_base = static_cast<int64_t>(sequence) * 127 * bank_suffix_count;
+  constexpr int first_pointer_step = MidpointOnly ? 63 : 0;
+  constexpr int stored_pointer_steps = 127 - first_pointer_step;
+  const int64_t pointer_base =
+      static_cast<int64_t>(sequence) * stored_pointer_steps * bank_suffix_count;
   const int64_t boundary_base = static_cast<int64_t>(sequence) * (segment_count - 1) * suffix_count;
   const int family = family_batch == 0 ? 0 : sequence / family_batch;
   const int physical_bank = family * bank_count + bank;
@@ -1239,8 +1243,10 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
         }
       }
       g_previous[x] = best;
-      backpointers[pointer_base + bank * suffix_count + x] =
-          static_cast<BackpointerScalar>(best_h);
+      if constexpr (!MidpointOnly) {
+        backpointers[pointer_base + bank * suffix_count + x] =
+            static_cast<BackpointerScalar>(best_h);
+      }
     }
     __syncthreads();
   } else if constexpr (FuseBoundary) {
@@ -1314,8 +1320,13 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
         }
       }
       g_scratch[x] = best;
-      backpointers[pointer_base + static_cast<int64_t>(step) * bank_suffix_count +
-                   bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+      if constexpr (!MidpointOnly) {
+        backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
+                     bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+      } else if (step >= first_pointer_step) {
+        backpointers[pointer_base + static_cast<int64_t>(step - first_pointer_step) * bank_suffix_count +
+                     bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+      }
     }
     __syncthreads();
     float* swap = g_previous;
@@ -1331,6 +1342,7 @@ template <
     int Shift,
     int BankCount,
     int SegmentSteps,
+    bool MidpointOnly,
     typename CodebookScalar,
     typename BackpointerScalar>
 __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
@@ -1364,7 +1376,10 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
   const int required_overlap = constrained ? static_cast<int>(overlap[sequence]) : 0;
   const int64_t sequence_base = static_cast<int64_t>(sequence) * 128 * 2;
   const int64_t g_base = static_cast<int64_t>(sequence) * bank_suffix_count;
-  const int64_t pointer_base = static_cast<int64_t>(sequence) * 127 * bank_suffix_count;
+  constexpr int first_pointer_step = MidpointOnly ? 63 : 0;
+  constexpr int stored_pointer_steps = 127 - first_pointer_step;
+  const int64_t pointer_base =
+      static_cast<int64_t>(sequence) * stored_pointer_steps * bank_suffix_count;
   const int64_t boundary_base = static_cast<int64_t>(sequence) * (segment_count - 1) * suffix_count;
   const int64_t state_base = static_cast<int64_t>(sequence) * 128;
   const int64_t selector_base = static_cast<int64_t>(sequence) * segment_count;
@@ -1399,24 +1414,34 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
   block_argmin(best, best_flat);
 
   if (thread == 0) {
-    squared_error[sequence] = best;
     int current_bank = best_flat / kStateCount;
     int current_state = best_flat - current_bank * kStateCount;
-    states[state_base + 127] = current_state;
-    segment_bank_ids[selector_base + segment_count - 1] = static_cast<uint8_t>(current_bank);
-    for (int step = 127; step > 0; --step) {
+    if constexpr (!MidpointOnly) {
+      squared_error[sequence] = best;
+      states[state_base + 127] = current_state;
+      segment_bank_ids[selector_base + segment_count - 1] = static_cast<uint8_t>(current_bank);
+    }
+    constexpr int final_traceback_step = MidpointOnly ? 63 : 0;
+    for (int step = 127; step > final_traceback_step; --step) {
       const int predecessor_suffix = current_state >> shift;
       if (step % segment_steps == 0) {
         const int boundary_index = step / segment_steps - 1;
         current_bank = static_cast<int>(boundary_banks[
             boundary_base + static_cast<int64_t>(boundary_index) * suffix_count + predecessor_suffix]);
-        segment_bank_ids[selector_base + boundary_index] = static_cast<uint8_t>(current_bank);
+        if constexpr (!MidpointOnly) {
+          segment_bank_ids[selector_base + boundary_index] = static_cast<uint8_t>(current_bank);
+        }
       }
       const int prefix = static_cast<int>(backpointers[
-          pointer_base + static_cast<int64_t>(step - 1) * bank_suffix_count +
+          pointer_base + static_cast<int64_t>(step - 1 - first_pointer_step) * bank_suffix_count +
           current_bank * suffix_count + predecessor_suffix]);
       current_state = prefix * suffix_count + predecessor_suffix;
-      states[state_base + step - 1] = current_state;
+      if constexpr (!MidpointOnly) {
+        states[state_base + step - 1] = current_state;
+      }
+    }
+    if constexpr (MidpointOnly) {
+      states[sequence] = current_state & overlap_mask;
     }
   }
 }
@@ -1700,7 +1725,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     int kernel_mode,
     bool validate_values = true,
     int family_batch = 0,
-    int bank_count_override = 0) {
+    int bank_count_override = 0,
+    bool midpoint_only = false) {
   const bool g_only = kernel_mode != 0;
   bool grid_parallel = kernel_mode == 2;
   TORCH_CHECK(sequences.is_cuda() && codebooks.is_cuda(),
@@ -1741,6 +1767,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   }
 
   const bool constrained = overlap.has_value();
+  TORCH_CHECK(!midpoint_only || (!constrained && kernel_mode == 2),
+              "midpoint-only segmented V2 requires an unconstrained grid recurrence");
   const at::Tensor overlap_tensor = constrained ? *overlap : at::Tensor();
   if (constrained) {
     TORCH_CHECK(overlap_tensor.is_cuda() && overlap_tensor.device() == sequences.device() &&
@@ -1792,6 +1820,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   // Ada exposes less opt-in shared memory per CTA than Ampere/Hopper. Preserve
   // the exact persistent G-only path when a rate's two frontiers do not fit.
   grid_parallel = grid_parallel && grid_shared_bytes <= properties.sharedMemPerBlockOptin;
+  TORCH_CHECK(!midpoint_only || (grid_parallel && properties.major == 8 && properties.minor == 0),
+              "midpoint-only segmented V2 currently requires an sm_80 grid recurrence");
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
   const int segments = steps / static_cast<int>(segment_steps);
   const auto float_options = sequences.options().dtype(at::kFloat);
@@ -1805,14 +1835,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   // flattened pointer needs nine bits. G-only stores its bank choice
   // separately, so its prefix always fits a byte.
   at::Tensor backpointers = at::empty(
-      {batch, steps - 1, bank_count, suffix_count},
+      {batch, midpoint_only ? steps / 2 : steps - 1, bank_count, suffix_count},
       sequences.options().dtype(!g_only && transition_bits == 7 ? at::kShort : at::kByte));
-  at::Tensor states = at::empty({batch, steps}, sequences.options().dtype(at::kLong));
-  at::Tensor segment_bank_ids = at::empty({batch, segments}, sequences.options().dtype(at::kByte));
+  at::Tensor states = at::empty(
+      midpoint_only ? at::IntArrayRef({batch}) : at::IntArrayRef({batch, steps}),
+      sequences.options().dtype(at::kLong));
+  at::Tensor segment_bank_ids = at::empty(
+      midpoint_only ? at::IntArrayRef({0}) : at::IntArrayRef({batch, segments}),
+      sequences.options().dtype(at::kByte));
   at::Tensor boundary_banks = g_only
       ? at::empty({batch, segments - 1, suffix_count}, sequences.options().dtype(at::kByte))
       : at::Tensor();
-  at::Tensor squared_error = at::empty({batch}, float_options);
+  at::Tensor squared_error = at::empty(midpoint_only ? at::IntArrayRef({0}) : at::IntArrayRef({batch}), float_options);
   at::Tensor codebook_norm = codebooks.scalar_type() == at::kHalf
       ? cached_banked_codebook_norm<2, half>(codebooks, stream)
       : cached_banked_codebook_norm<2, float>(codebooks, stream);
@@ -1847,19 +1881,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     }                                                                                                  \
   } while (0)
 #define QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                  \
-    BITS, BANKS, SEGMENT_STEPS, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)                       \
+    BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)        \
   do {                                                                                                \
     constexpr bool qvq_fuse_boundary =                                                               \
         (BANKS == 2 && BITS != 7) || (BANKS == 4 && BITS >= 3 && BITS <= 6);                         \
     constexpr int qvq_segment_shared_bytes = 2 * (1 << (16 - BITS)) * sizeof(float);                  \
     C10_CUDA_CHECK(cudaFuncSetAttribute(                                                              \
         qvq_v2_segment_grid_kernel<                                                                   \
-            BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, CODEBOOK_TYPE, POINTER_TYPE>,             \
+            BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, CODEBOOK_TYPE, POINTER_TYPE>, \
         cudaFuncAttributeMaxDynamicSharedMemorySize, qvq_segment_shared_bytes));                      \
     float* qvq_frontier_a = costs_a.mutable_data_ptr<float>();                                        \
     float* qvq_frontier_b = costs_b.mutable_data_ptr<float>();                                        \
     qvq_v2_segment_grid_kernel<                                                                       \
-        BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, CODEBOOK_TYPE, POINTER_TYPE><<<                \
+        BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, CODEBOOK_TYPE, POINTER_TYPE><<< \
         batch * BANKS, kThreads, qvq_segment_shared_bytes, stream>>>(                                 \
         sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),   \
         overlap_ptr, weight_ptr, qvq_frontier_b, qvq_frontier_a,                                     \
@@ -1874,7 +1908,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
             batch, segment - 1);                                                                      \
       }                                                                                               \
       qvq_v2_segment_grid_kernel<                                                                     \
-          BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, CODEBOOK_TYPE, POINTER_TYPE><<<              \
+          BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, CODEBOOK_TYPE, POINTER_TYPE><<< \
           batch * BANKS, kThreads, qvq_segment_shared_bytes, stream>>>(                               \
           sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(), \
           overlap_ptr, weight_ptr, qvq_segment_input, qvq_segment_output,                             \
@@ -1883,29 +1917,36 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     }                                                                                                 \
     const float* qvq_final_frontier = segments % 2 == 1 ? qvq_frontier_a : qvq_frontier_b;           \
     qvq_v2_segment_grid_finalize_kernel<                                                              \
-        BITS, BANKS, SEGMENT_STEPS, CODEBOOK_TYPE, POINTER_TYPE><<<batch, kThreads, 0, stream>>>(     \
+        BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, CODEBOOK_TYPE, POINTER_TYPE><<<                    \
+        batch, kThreads, 0, stream>>>(                                                                \
         sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),   \
         overlap_ptr, weight_ptr, qvq_final_frontier,                                                  \
         backpointers.const_data_ptr<POINTER_TYPE>(), boundary_banks.const_data_ptr<uint8_t>(),         \
         states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),              \
         squared_error.mutable_data_ptr<float>(), batch, family_batch, constrained, weighted);          \
   } while (0)
-#define QVQ_V2_SEGMENT_GRID_DISPATCH(BITS, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)             \
+#define QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                 \
+    BITS, MIDPOINT_ONLY, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)                               \
   do {                                                                                                \
     if (bank_count == 2) {                                                                            \
       QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                     \
-          BITS, 2, 16, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                                \
+          BITS, 2, 16, MIDPOINT_ONLY, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                 \
     } else {                                                                                          \
       QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                     \
-          BITS, 4, 32, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                                \
+          BITS, 4, 32, MIDPOINT_ONLY, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                 \
     }                                                                                                 \
   } while (0)
 #define QVQ_V2_SEGMENT_DISPATCH(BITS, POINTER_TYPE)                                                    \
   do {                                                                                                 \
     if (codebooks.scalar_type() == at::kHalf) {                                                        \
       if (grid_parallel) {                                                                              \
-        QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                   \
-            BITS, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()), POINTER_TYPE);      \
+        if (midpoint_only) {                                                                             \
+          QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                  \
+              BITS, true, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()), POINTER_TYPE); \
+        } else {                                                                                         \
+          QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                  \
+              BITS, false, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()), POINTER_TYPE); \
+        }                                                                                                \
       } else if (g_only) {                                                                              \
         QVQ_V2_SEGMENT_G_DISPATCH(                                                                      \
             BITS, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()), POINTER_TYPE);      \
@@ -1915,8 +1956,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       }                                                                                                 \
     } else {                                                                                           \
       if (grid_parallel) {                                                                              \
-        QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                   \
-            BITS, float, codebooks.const_data_ptr<float>(), POINTER_TYPE);                             \
+        if (midpoint_only) {                                                                             \
+          QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                  \
+              BITS, true, float, codebooks.const_data_ptr<float>(), POINTER_TYPE);                      \
+        } else {                                                                                         \
+          QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                  \
+              BITS, false, float, codebooks.const_data_ptr<float>(), POINTER_TYPE);                     \
+        }                                                                                                \
       } else if (g_only) {                                                                              \
         QVQ_V2_SEGMENT_G_DISPATCH(                                                                      \
             BITS, float, codebooks.const_data_ptr<float>(), POINTER_TYPE);                              \
@@ -1999,6 +2045,27 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_trust
       sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
 }
 
+at::Tensor qvq_viterbi_v2_segment_midpoint_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& step_weights) {
+  auto result = qvq_viterbi_v2_segment_banked_cuda_impl(
+      sequences,
+      codebooks,
+      transition_bits,
+      segment_steps,
+      c10::nullopt,
+      step_weights,
+      2,
+      false,
+      0,
+      0,
+      true);
+  return std::get<0>(result);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_family_grid_trusted_cuda(
     const at::Tensor& sequences,
     const at::Tensor& codebooks,
@@ -2064,6 +2131,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+  m.def("viterbi_v2_segment_midpoint_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
+        "int segment_steps, Tensor? step_weights=None) -> Tensor");
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
 }
@@ -2077,5 +2146,6 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi_v2_segment_g", &qvq_viterbi_v2_segment_g_cuda);
   m.impl("viterbi_v2_segment_grid", &qvq_viterbi_v2_segment_grid_cuda);
   m.impl("viterbi_v2_segment_grid_trusted", &qvq_viterbi_v2_segment_grid_trusted_cuda);
+  m.impl("viterbi_v2_segment_midpoint_trusted", &qvq_viterbi_v2_segment_midpoint_trusted_cuda);
   m.impl("viterbi_v2_segment_family_grid_trusted", &qvq_viterbi_v2_segment_family_grid_trusted_cuda);
 }

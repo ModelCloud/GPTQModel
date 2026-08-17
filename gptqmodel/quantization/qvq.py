@@ -1975,21 +1975,39 @@ def _tail_biting_v2_banked_quantize(
     midpoint = sequences.shape[1] // 2
     if midpoint % segment_steps:
         raise ValueError("QVQ banked V2 tail rotation must preserve segment boundaries.")
+    shift = qvq_transition_bits(bits, vector_size=2)
     rotated = torch.roll(sequences, shifts=midpoint, dims=1)
     rotated_weights = None if step_weights is None else torch.roll(step_weights, shifts=midpoint, dims=1)
-    provisional = _batched_v2_banked_viterbi_quantize(
-        rotated,
-        codebooks,
-        bits=bits,
-        segment_steps=segment_steps,
-        step_weights=rotated_weights,
-        mlx_codebooks=mlx_codebooks,
-        _cuda_values_prevalidated=_cuda_values_prevalidated,
-    )
-    shift = qvq_transition_bits(bits, vector_size=2)
-    overlap = provisional.states[:, midpoint - 1] & ((1 << (16 - shift)) - 1)
-    if not _cuda_values_prevalidated and not torch.equal(overlap, provisional.states[:, midpoint] >> shift):
-        raise RuntimeError("QVQ banked V2 provisional path violates the V2 transition rule.")
+    if (
+        _cuda_values_prevalidated
+        and sequences.device.type == "cuda"
+        and torch.cuda.get_device_capability(sequences.device) == (8, 0)
+        # Midpoint-only traceback wins at the two edge rates on SM80.  The
+        # complete provisional result remains faster for the middle rates.
+        and shift in (2, 7)
+    ):
+        from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op
+
+        overlap = _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op()(
+            rotated.contiguous(),
+            codebooks,
+            shift,
+            segment_steps,
+            None if rotated_weights is None else rotated_weights.to(torch.float32).contiguous(),
+        )
+    else:
+        provisional = _batched_v2_banked_viterbi_quantize(
+            rotated,
+            codebooks,
+            bits=bits,
+            segment_steps=segment_steps,
+            step_weights=rotated_weights,
+            mlx_codebooks=mlx_codebooks,
+            _cuda_values_prevalidated=_cuda_values_prevalidated,
+        )
+        overlap = provisional.states[:, midpoint - 1] & ((1 << (16 - shift)) - 1)
+        if not _cuda_values_prevalidated and not torch.equal(overlap, provisional.states[:, midpoint] >> shift):
+            raise RuntimeError("QVQ banked V2 provisional path violates the V2 transition rule.")
     return _batched_v2_banked_viterbi_quantize(
         sequences,
         codebooks,

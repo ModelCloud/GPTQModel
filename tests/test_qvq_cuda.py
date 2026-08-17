@@ -57,6 +57,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_supported,
@@ -638,6 +639,47 @@ def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(bits, bank_c
         step_weights,
     )
     assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
+
+
+@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("batch", (1, 3, 17))
+def test_qvq_cuda_segmented_v2_midpoint_matches_full_traceback(
+    bits,
+    bank_count,
+    segment_steps,
+    weighted,
+    batch,
+):
+    if torch.cuda.get_device_capability() != (8, 0):
+        pytest.skip("midpoint-only segmented V2 is an SM80 specialization")
+
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260821 + int(bits * 2) * 1_000 + bank_count * 100 + int(weighted) * 10 + batch
+    )
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    step_weights = (
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+
+    full_states = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        None,
+        step_weights,
+    )[0]
+    expected = full_states[:, 63] & ((1 << (16 - transition_bits)) - 1)
+    midpoint_op = _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op()
+    for _ in range(3):
+        actual = midpoint_op(sequences, codebooks, transition_bits, segment_steps, step_weights)
+        assert torch.equal(expected, actual)
 
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))

@@ -258,3 +258,21 @@ small repeatable win even when sampled selection leaves only one complete altern
 PG506-230 `sm_80` GPUs were 2.499 s and 2.521 s versus the 2.635 s serialized median (1.05x). A focused CUDA test
 confirms the fixed-family parallel and serialized artifacts are bit-exact. Full three-family reselection retains
 its existing concurrent-stream path.
+
+## Midpoint-only segmented provisional traceback
+
+Tail-biting consumes only the provisional state overlap at transition 63. The SM80 midpoint specialization stores
+backpointers for transitions 63--126 and traces only to that overlap, instead of materializing the complete
+provisional states, selectors, and loss. A complete W1--W3.5 B2/B4 sweep found this profitable only at W1 and W3.5,
+so production dispatch is rate-gated; W1.5--W3 retain the faster complete provisional implementation.
+
+Matched Llama 3.2 1B layer-0 q_proj, sampled-96 B2-P32+YAQA family selection, three measured runs after warm-up:
+
+| Rate | Complete provisional | Midpoint provisional | Module speedup | Segmented-Viterbi GPU | Accuracy |
+|---|---:|---:|---:|---:|---|
+| W1 | 2.694 s | 2.643 s | 1.02x | 1325.95 -> 1278.72 ms | bit-exact artifact |
+| W3.5 | 3.120 s | 2.971 s | 1.05x | 1579.04 -> 1455.68 ms | bit-exact artifact |
+
+CUDA 13.0 (`nvcc 13.0.88`) tests cover all six rates, B2-P32 and B4-P64, weighted and unweighted objectives,
+batches 1/3/17, and three deterministic repeats: 72/72 passed with exact overlap equality. The middle-rate
+regressions measured approximately 1--5%, which is why they are not routed to this specialization.
