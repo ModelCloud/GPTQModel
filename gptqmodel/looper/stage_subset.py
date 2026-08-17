@@ -782,6 +782,7 @@ def _run_single_subset_pass(
                 layer_index,
                 subset_index + 1,
                 subset_total,
+                getattr(processor, "name", type(processor).__name__),
                 len(subset),
             )
         else:
