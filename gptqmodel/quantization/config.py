@@ -81,10 +81,10 @@ class YaqaConfig:
         if not isinstance(self.sample_strategy, str):
             raise TypeError("YaqaConfig: `sample_strategy` must be a string.")
         self.sample_strategy = self.sample_strategy.strip().lower()
-        if self.sample_strategy not in {"full", "32_16x16", "64_16x16", "128_16x16", "256_16x16"}:
+        if self.sample_strategy not in {"full", "32_16x16", "64_16x16", "96_16x16", "128_16x16", "256_16x16"}:
             raise ValueError(
-                "YaqaConfig: `sample_strategy` must be `full`, `32_16x16`, `64_16x16`, `128_16x16`, "
-                "or `256_16x16`."
+                "YaqaConfig: `sample_strategy` must be `full`, `32_16x16`, `64_16x16`, `96_16x16`, "
+                "`128_16x16`, or `256_16x16`."
             )
         if self.v2b2_family_mode != "reselect" and self.sample_strategy != "full":
             raise ValueError("YaqaConfig: sampled family selection requires `v2b2_family_mode=reselect`.")

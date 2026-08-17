@@ -54,6 +54,7 @@ QVQ_YAQA_SAMPLE_TILE_COUNTS = {
     "full": None,
     "32_16x16": 32,
     "64_16x16": 64,
+    "96_16x16": 96,
     "128_16x16": 128,
     "256_16x16": 256,
 }
@@ -4187,7 +4188,8 @@ def yaqa_inner_v2b2_p32(
         raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
     if sample_strategy not in QVQ_YAQA_SAMPLE_TILE_COUNTS:
         raise ValueError(
-            "YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `128_16x16`, or `256_16x16`."
+            "YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `96_16x16`, `128_16x16`, "
+            "or `256_16x16`."
         )
     if family_mode != "reselect" and sample_strategy != "full":
         raise ValueError("YAQA sampled family selection requires `family_mode=reselect`.")
@@ -5884,7 +5886,8 @@ def quantize_qvq_linear(
     yaqa_sample_strategy = yaqa_sample_strategy.strip().lower()
     if yaqa_sample_strategy not in QVQ_YAQA_SAMPLE_TILE_COUNTS:
         raise ValueError(
-            "QVQ YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `128_16x16`, or `256_16x16`."
+            "QVQ YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `96_16x16`, `128_16x16`, "
+            "or `256_16x16`."
         )
     if yaqa_v2b2_family_mode != "reselect" and yaqa_sample_strategy != "full":
         raise ValueError("QVQ YAQA sampled family selection requires `yaqa_v2b2_family_mode=reselect`.")

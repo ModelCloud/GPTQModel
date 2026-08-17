@@ -791,8 +791,8 @@ module
   `yaqa.sample_strategy` controls the amount of evidence used for that choice:
   - `full` (default) evaluates all three family IDs as complete YAQA module artifacts and retains the strict best
     full-Kronecker result. This is the quality-ceiling reference.
-  - `32_16x16`, `64_16x16`, `128_16x16`, and `256_16x16` score all three families on exactly that many deterministic,
-    evenly spaced real 16x16 weight tiles, clipped only when the module contains fewer tiles. The screen uses the
+  - `32_16x16`, `64_16x16`, `96_16x16`, `128_16x16`, and `256_16x16` score all three families on exactly that many
+    deterministic, evenly spaced real 16x16 weight tiles, clipped only when the module contains fewer tiles. The screen uses the
     matching diagonal input/output Hessian blocks, then runs one complete YAQA pass for the selected family.
 
 Every sampled strategy still runs an independently encoded canonical V2+YAQA oracle and compares the selected

@@ -439,6 +439,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
     assert ARM_CONFIG["v2b2-p32-yaqa-sampled-32"]["yaqa_sample_strategy"] == "32_16x16"
     assert ARM_CONFIG["v2b2-p32-yaqa-sampled-64"]["yaqa_sample_strategy"] == "64_16x16"
+    assert ARM_CONFIG["v2b2-p32-yaqa-sampled-96"]["yaqa_sample_strategy"] == "96_16x16"
     assert ARM_CONFIG["v2b2-p32-yaqa-sampled-128"]["yaqa_sample_strategy"] == "128_16x16"
     assert ARM_CONFIG["v2b2-p32-yaqa-sampled-256"]["yaqa_sample_strategy"] == "256_16x16"
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
@@ -1884,7 +1885,9 @@ def test_qvq_v2b2_p32_yaqa_family_mode_config_round_trip(family_mode):
     assert reloaded.yaqa.v2b2_family_mode == family_mode
 
 
-@pytest.mark.parametrize("sample_strategy", ("full", "32_16x16", "64_16x16", "128_16x16", "256_16x16"))
+@pytest.mark.parametrize(
+    "sample_strategy", ("full", "32_16x16", "64_16x16", "96_16x16", "128_16x16", "256_16x16")
+)
 def test_qvq_v2b2_p32_yaqa_sample_strategy_config_round_trip(sample_strategy):
     config = QVQConfig(
         bits=2,
@@ -2041,7 +2044,7 @@ def test_qvq_v2b2_p32_sample_strategy_requires_reselected_yaqa_family():
 
 @pytest.mark.parametrize(
     ("sample_strategy", "expected_count"),
-    (("32_16x16", 32), ("64_16x16", 64), ("128_16x16", 128), ("256_16x16", 256)),
+    (("32_16x16", 32), ("64_16x16", 64), ("96_16x16", 96), ("128_16x16", 128), ("256_16x16", 256)),
 )
 def test_qvq_v2b2_p32_sample_strategy_selects_exact_evenly_spaced_tile_count(
     sample_strategy,
@@ -3483,7 +3486,7 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
         }
 
 
-@pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "128_16x16", "256_16x16"))
+@pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "96_16x16", "128_16x16", "256_16x16"))
 def test_qvq_v2b2_p32_sampled_strategy_scores_all_families_then_runs_one_complete_candidate(sample_strategy):
     weight = torch.zeros((16, 16))
     hessian = torch.eye(16)
@@ -3527,7 +3530,7 @@ def test_qvq_v2b2_p32_sampled_strategy_scores_all_families_then_runs_one_complet
     assert counters["yaqa_v2b2_family_candidates"] == 1
 
 
-@pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "128_16x16", "256_16x16"))
+@pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "96_16x16", "128_16x16", "256_16x16"))
 def test_qvq_v2b2_p32_sampled_strategy_matches_an_independent_selected_family_run_exactly(sample_strategy):
     generator = torch.Generator().manual_seed(20260817)
     weight = torch.randn((16, 16), generator=generator) * 0.1

@@ -144,6 +144,16 @@ ARM_CONFIG = {
         "yaqa_v2b2_family_mode": "reselect",
         "yaqa_sample_strategy": "64_16x16",
     },
+    "v2b2-p32-yaqa-sampled-96": {
+        "vector_size": 2,
+        "trellis_window": 16,
+        "dual_v2": False,
+        "v2b2_p32": True,
+        "bank_count": 2,
+        "rounding": "yaqa",
+        "yaqa_v2b2_family_mode": "reselect",
+        "yaqa_sample_strategy": "96_16x16",
+    },
     "v2b2-p32-yaqa-sampled-128": {
         "vector_size": 2,
         "trellis_window": 16,

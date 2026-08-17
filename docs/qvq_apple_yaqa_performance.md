@@ -287,11 +287,12 @@ because dataset capture and model evaluation are intentionally unchanged.
 ## Sampled family strategies: another 2.20x module gain
 
 The exact three-family YAQA ceiling spends three complete feedback/recurrence histories to select one module-level
-alternative family. `YaqaConfig.sample_strategy` optionally evaluates all three families on 32, 64, 128, or 256 evenly
-spaced real 16x16 weight tiles using the matching diagonal input/output Hessian blocks. The default remains `full`:
+alternative family. `YaqaConfig.sample_strategy` optionally evaluates all three families on 32, 64, 96, 128, or 256
+evenly spaced real 16x16 weight tiles using the matching diagonal input/output Hessian blocks. The default remains
+`full`:
 
 ```text
-N real module tiles, N in {32, 64, 128, 256}
+N real module tiles, N in {32, 64, 96, 128, 256}
   -> score family 1, 2, 3 with tr(E H_I,block E^T H_O,block)
   -> choose one family for the module
   -> run canonical V2+YAQA independently
@@ -328,17 +329,28 @@ runtime contract:
 | `full` | 56.714 s | 102.704 s | 0.003401 | 0.040268 | 99.706% | 92.058% | 91.904% | all 3 complete candidates |
 | `32_16x16` | 26.285 s | 72.287 s | 0.003336 | **0.038784** | 99.696% | 91.913% | 91.894% | 0 / 1 / 2 / 1 |
 | `64_16x16` | 25.669 s | 70.948 s | 0.003251 | 0.039665 | **99.715%** | 92.011% | 91.821% | 0 / 1 / 2 / 1 |
+| `96_16x16` | 26.063 s | 71.199 s | 0.003370 | 0.039941 | 99.676% | 91.985% | 91.810% | 0 / 2 / 1 / 1 |
 | `128_16x16` | 27.647 s | 73.163 s | **0.003194** | 0.040867 | 99.701% | **92.016%** | **91.843%** | 0 / 2 / 0 / 2 |
 | `256_16x16` | 28.393 s | 74.160 s | 0.003258 | 0.041306 | 99.696% | 91.953% | 91.807% | 0 / 1 / 2 / 1 |
 
 The strategy is not monotonic in sample count. At this seed, 128 tiles gives the best final KL, 32 gives the best
-layer KL, 64 gives the best Top-1, and 256 loses to both 64 and 128 despite selecting the same family-count histogram
-as 32 and 64. Histograms do not
+layer KL, 64 gives the best Top-1, and 96 lies between 64 and 128 in cost but not in quality. The 256-tile screen
+loses to both 64 and 128 despite selecting the same family-count histogram as 32 and 64. Histograms do not
 identify which projection received each family, and equal family IDs would still not prove equal paths if the
 selected modules differ. This is expected from a proposal screen: its diagonal-block proxy omits cross-tile terms,
 while the accepted artifact is produced by complete sequential YAQA feedback. No sampled strategy is the default;
 `full` remains the conservative ceiling reference until multi-layer, multi-rate, and multi-seed propagated evidence
 supports a different policy.
+
+Mathematically, `256_16x16` is the closest sampled estimator to `full` in coverage and sampling variance, while
+`full` is the only algebraically exact search mode. If tile contributions were independent with finite variance,
+the standard error of a sample mean would decrease approximately as `1/sqrt(N)`; deterministic evenly spaced tiles
+and correlated Hessian geometry make that only a useful scaling heuristic here. Increasing `N` cannot remove the
+structural bias from omitted off-diagonal Hessian blocks or from not running complete sequential YAQA feedback for
+the discarded families. Because family selection is an argmin, even a smaller score-estimation error can cross a
+near-tie and produce a discontinuously different module family, V2 path, selector schedule, and downstream error
+direction. The observed best final KL at 128 rather than 256 is therefore possible without contradicting the
+variance argument and must be confirmed across seeds and deeper propagated execution.
 
 The small Top-5/10 movements are noise-scale guardrails, while final KL and layer KL improve. Local reconstruction
 does not uniformly improve: mean relative weight L2 is 0.690088 versus 0.689651 for full reselection. That is
