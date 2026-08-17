@@ -181,3 +181,56 @@ bit-exact. The complete B2 YAQA CUDA gate passes all six rates plus a partial
 multi-tile batch. This exceeds the quantization requirement (`1e-6`) because
 states, losses, reconstructed weights, selectors, and family IDs are exact.
 Inference code is unchanged and retains its separate `2e-3` tolerance.
+
+### Incremental two-sided feedback
+
+For an uncommitted YAQA tile, `E_tile == source_tile`, so the corrected target
+is exactly the corresponding block of:
+
+```text
+T = L_input.T @ E @ L_output
+```
+
+After an anti-diagonal commits reconstruction `Q_d`, the error changes by
+`-Q_d` only on those independent tiles. CUDA now maintains `T` incrementally:
+
+```text
+T_next = T - L_input.T @ sparse(Q_d) @ L_output
+```
+
+Three reusable FP32 workspaces replace the overlapping suffix projections and
+thousands of small per-tile GEMM dispatches. CPU/MPS, non-B2 paths, and CUDA
+geometries with either dimension above 2048 retain the previous recurrence.
+The explicit dimension gate prevents dense updates from increasing large-MLP
+workspace without a meaningful speed gain.
+
+```text
++-------------------------------+-----------+-----------+---------+-----------+----------------------+
+| Full W2.5 B2 reselect 512x512 | Previous  | Incremental| Speedup | Peak VRAM | Quantization parity  |
++-------------------------------+-----------+-----------+---------+-----------+----------------------+
+| PG506-230 A                   | 1373.82ms | 953.48 ms |   1.44x | 92.17 MiB | bit-exact repeated   |
+| PG506-230 B                   | 1347.50ms | 941.78 ms |   1.43x | 92.17 MiB | bit-exact repeated   |
++-------------------------------+-----------+-----------+---------+-----------+----------------------+
+```
+
+Relative to the pulled `1683.30 ms` baseline, the cumulative gain is
+`1.77-1.79x`. Peak allocation is `12.06 MiB` above that baseline. Direct
+old/new comparisons cover canonical V2 and B2-P32 at every W1--W3.5 rate on
+nontrivial multi-tile Hessians; weights, states, selectors, and family IDs are
+bit-exact. A 512x512 old/new B2 candidate comparison is also bit-exact.
+
+```text
++---------------------+------------+------------+---------+----------------------+---------------------+
+| W2.5 B2 candidate   | Suffix     | Incremental| Speedup | Quantization parity  | Decision            |
++---------------------+------------+------------+---------+----------------------+---------------------+
+| 1024x1024           | 1031.77 ms |  597.35 ms |   1.73x | bit-exact            | enable              |
+| 512x2048            | 1267.63 ms |  717.34 ms |   1.77x | bit-exact            | enable              |
+| 2048x512            | 1154.67 ms |  736.22 ms |   1.57x | bit-exact            | enable              |
+| 2048x2048           | 4810.77 ms | 2375.22 ms |   2.03x | bit-exact            | enable              |
+| 2048x8192 gate/up   |17508.27 ms |17277.86 ms |   1.01x | bit-exact            | retain suffix path  |
++---------------------+------------+------------+---------+----------------------+---------------------+
+```
+
+The real Llama 3.2 1B gate/up-shaped probe increased peak allocation from
+`1383.19 MiB` to `1767.06 MiB`, confirming that the wide-shape fallback is
+required even though its reconstructed artifact remained exact.

@@ -3439,6 +3439,7 @@ def yaqa_inner(
     _rounding_bias: torch.Tensor | None = None,
     _diagnostics: dict[str, object] | None = None,
     _defer_segmented_cuda_checks: bool = False,
+    _incremental_cuda_feedback: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
 
@@ -3702,6 +3703,18 @@ def yaqa_inner(
     )
     error = source.clone()
     error_blocks = error.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
+    incremental_cuda_feedback = _incremental_cuda_feedback and feedback_device.type == "cuda"
+    transformed_error = None
+    committed = None
+    feedback_temp = None
+    feedback_update = None
+    if incremental_cuda_feedback:
+        committed = torch.zeros_like(source)
+        feedback_temp = torch.empty_like(source)
+        feedback_update = torch.empty_like(source)
+        transformed_error = torch.empty_like(source)
+        torch.mm(input_L.transpose(0, 1), error, out=feedback_temp)
+        torch.mm(feedback_temp, output_L, out=transformed_error)
     active_banks = bank_codebooks if bank_codebooks is not None else (codebook,)
     if segmented_v2 and segmented_bank_stack is None:
         segmented_bank_stack = torch.stack(active_banks).contiguous()
@@ -3763,33 +3776,50 @@ def yaqa_inner(
 
     anti_diagonal_schedule = _yaqa_anti_diagonal_schedule(feedback_device, input_blocks, output_blocks)
     for coordinates, input_indices, output_indices, flat_tile_indices in anti_diagonal_schedule:
-        corrected_tiles = []
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
-            for input_block, output_block in coordinates:
-                input_start = input_block * tile_rows
-                input_stop = input_start + tile_rows
-                output_start = output_block * tile_cols
-                output_stop = output_start + tile_cols
-                left_feedback = input_feedback[input_start:, input_start:input_stop].transpose(0, 1)
-                right_feedback = output_feedback[output_start:, output_start:output_stop]
-                # The left-projected full suffix is already required by the
-                # two-sided term. Reuse its leading tile columns for the
-                # one-sided input term instead of issuing an identical
-                # reduction through a second, skinny GEMM.
-                left_projected_error = left_feedback @ error[input_start:, output_start:]
-                corrected_tiles.append(
-                    source[input_start:input_stop, output_start:output_stop]
-                    + (
-                        0.0
-                        if rounding_bias is None
-                        else rounding_bias[input_start:input_stop, output_start:output_stop]
+            if incremental_cuda_feedback:
+                assert transformed_error is not None
+                transformed_blocks = transformed_error.view(
+                    input_blocks,
+                    tile_rows,
+                    output_blocks,
+                    tile_cols,
+                ).permute(0, 2, 1, 3)
+                corrected_tile_stack = transformed_blocks[input_indices, output_indices]
+                if rounding_bias is not None:
+                    bias_blocks = rounding_bias.view(
+                        input_blocks,
+                        tile_rows,
+                        output_blocks,
+                        tile_cols,
+                    ).permute(0, 2, 1, 3)
+                    corrected_tile_stack = corrected_tile_stack + bias_blocks[input_indices, output_indices]
+            else:
+                corrected_tiles = []
+                for input_block, output_block in coordinates:
+                    input_start = input_block * tile_rows
+                    input_stop = input_start + tile_rows
+                    output_start = output_block * tile_cols
+                    output_stop = output_start + tile_cols
+                    left_feedback = input_feedback[input_start:, input_start:input_stop].transpose(0, 1)
+                    right_feedback = output_feedback[output_start:, output_start:output_stop]
+                    # The left-projected full suffix is already required by the
+                    # two-sided term. Reuse its leading tile columns for the
+                    # one-sided input term instead of issuing an identical
+                    # reduction through a second, skinny GEMM.
+                    left_projected_error = left_feedback @ error[input_start:, output_start:]
+                    corrected_tiles.append(
+                        source[input_start:input_stop, output_start:output_stop]
+                        + (
+                            0.0
+                            if rounding_bias is None
+                            else rounding_bias[input_start:input_stop, output_start:output_stop]
+                        )
+                        + left_projected_error @ right_feedback
+                        + left_projected_error[:, :tile_cols]
+                        + error[input_start:input_stop, output_start:] @ right_feedback
                     )
-                    + left_projected_error @ right_feedback
-                    + left_projected_error[:, :tile_cols]
-                    + error[input_start:input_stop, output_start:] @ right_feedback
-                )
-
-        corrected_tile_stack = torch.stack(corrected_tiles)
+                corrected_tile_stack = torch.stack(corrected_tiles)
         sequences = corrected_tile_stack.reshape(len(coordinates), steps_per_tile, codebook.shape[1])
         logical_batch_size = sequences.shape[0]
         cuda_values_prevalidated = sequences.device.type == "cuda"
@@ -3993,6 +4023,20 @@ def yaqa_inner(
                 bank_ids.view(input_blocks * output_blocks, segments_per_tile)[flat_tile_indices] = segmented_selectors
             elif bank_codebooks is not None:
                 bank_ids[flat_tile_indices] = winners.to(torch.uint8)
+            if incremental_cuda_feedback:
+                assert committed is not None and feedback_temp is not None and feedback_update is not None
+                assert transformed_error is not None
+                committed.zero_()
+                committed_blocks = committed.view(
+                    input_blocks,
+                    tile_rows,
+                    output_blocks,
+                    tile_cols,
+                ).permute(0, 2, 1, 3)
+                committed_blocks[input_indices, output_indices] = reconstructed
+                torch.mm(input_L.transpose(0, 1), committed, out=feedback_temp)
+                torch.mm(feedback_temp, output_L, out=feedback_update)
+                transformed_error.sub_(feedback_update)
 
     if (
         yaqa_cuda_invalid is not None
@@ -4101,6 +4145,14 @@ def yaqa_inner_v2b2_p32(
     """Select one complementary V2 family per module under YAQA's full proxy."""
 
     telemetry = kwargs.get("telemetry")
+    # Dense transformed-error updates win decisively on attention-sized
+    # matrices, but their cubic GEMMs only break even on very wide MLP
+    # projections and retain substantially more workspace. Keep the measured
+    # 2048-dimension envelope explicit until a sparse update kernel extends it.
+    kwargs.setdefault(
+        "_incremental_cuda_feedback",
+        inner_weight.device.type == "cuda" and max(inner_weight.shape) <= 2048,
+    )
 
     if len(codebook_library) != 4:
         raise ValueError("YAQA V2B2-P32 requires canonical V2 plus three complementary candidates.")

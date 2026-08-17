@@ -16,6 +16,7 @@ from gptqmodel.quantization.qvq import (
     QVQQuantizationTelemetry,
     _batched_v2_banked_viterbi_quantize,
     _canonical_qvq_codebook,
+    _canonical_qvq_v2b2_pair_stacks,
     _canonical_qvq_v4_banks,
     batched_viterbi_quantize,
     block_ldlq_inner,
@@ -29,6 +30,7 @@ from gptqmodel.quantization.qvq import (
     qvq_proxy_loss,
     reconstruct_qvq_inner_weight,
     unpack_trellis_states,
+    yaqa_inner,
     yaqa_proxy_loss,
 )
 from gptqmodel.quantization.qvq_codecs import (
@@ -1032,6 +1034,68 @@ def _nontrivial_yaqa_fixture(seed: int):
         output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(16, device="cuda") * 0.1
     )
     return weight, input_hessian, output_hessian
+
+
+@pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_and_b2(bits):
+    generator = torch.Generator(device="cpu").manual_seed(20260877 + int(bits * 10))
+    weight = (torch.randn((32, 32), generator=generator) * 0.05).cuda()
+    input_samples = torch.randn((47, 32), generator=generator).cuda()
+    output_samples = torch.randn((43, 32), generator=generator).cuda()
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0] + torch.eye(32, device="cuda") * 0.1
+    output_hessian = (
+        output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(32, device="cuda") * 0.1
+    )
+    canonical_codebook = _canonical_qvq_codebook(
+        device=weight.device,
+        vector_size=2,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    pair_stack = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=canonical_codebook.dtype,
+    )[0]
+    common = {
+        "bits": bits,
+        "trellis_batch_size": 1,
+        "_defer_segmented_cuda_checks": True,
+    }
+    formats = (
+        (canonical_codebook, {}),
+        (
+            pair_stack[0],
+            {
+                "bank_codebooks": tuple(pair_stack[bank] for bank in range(2)),
+                "segmented_bank_stack": pair_stack,
+                "v2b2_p32": True,
+            },
+        ),
+    )
+
+    for codebook, format_kwargs in formats:
+        reference = yaqa_inner(
+            weight,
+            input_hessian,
+            output_hessian,
+            codebook,
+            **common,
+            **format_kwargs,
+        )
+        incremental = yaqa_inner(
+            weight,
+            input_hessian,
+            output_hessian,
+            codebook,
+            _incremental_cuda_feedback=True,
+            **common,
+            **format_kwargs,
+        )
+        assert len(incremental) == len(reference)
+        assert all(torch.equal(actual, expected) for actual, expected in zip(incremental, reference, strict=True))
 
 
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
