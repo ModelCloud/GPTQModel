@@ -608,6 +608,109 @@ def test_qvq_mps_banked_v2_quantization_accepts_inference_mode_codebooks():
     torch.testing.assert_close(actual.squared_error.cpu(), expected.squared_error, rtol=2e-5, atol=2e-4)
 
 
+@pytest.mark.parametrize("device", ("cpu", "mps"))
+def test_qvq_torch_to_mlx_read_only_lease_requires_zero_copy_and_detects_alias_writes(monkeypatch, device):
+    from gptqmodel.utils import qvq_mlx
+
+    if device == "mps" and not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    source = torch.arange(32, dtype=torch.float32, device=device)
+    if device == "mps":
+        torch.mps.synchronize()
+    original_from_dlpack = mx.from_dlpack
+    calls = []
+
+    def checked_from_dlpack(value, *, copy=None):
+        calls.append((isinstance(value, torch.utils.dlpack.ReadOnlyTensorWrapper), copy))
+        return original_from_dlpack(value, copy=copy)
+
+    monkeypatch.setattr(mx, "from_dlpack", checked_from_dlpack)
+    lease = qvq_mlx._torch_to_mlx_read_only(source, name=f"{device} test tensor")
+
+    assert calls == [(True, False)]
+    assert np.asarray(lease.array).tolist() == list(range(32))
+    source.add_(1)
+    if device == "mps":
+        assert lease.zero_copy
+        with pytest.raises(RuntimeError, match="mutated by a Torch alias"):
+            lease.verify_unchanged()
+    else:
+        # Ordinary Torch CPU allocations are not guaranteed to meet Metal's
+        # page-alignment requirement. copy=False fails closed and the bridge
+        # preserves its safe compatibility copy.
+        assert not lease.zero_copy
+        lease.verify_unchanged()
+        assert np.asarray(lease.array).tolist() == list(range(32))
+
+
+def test_qvq_mps_banked_v2_zero_copy_consumer_does_not_mutate_inputs(monkeypatch):
+    from gptqmodel.utils import qvq_mlx
+
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    bits = 2
+    generator = torch.Generator().manual_seed(32192)
+    sequences = torch.randn((1, 128, 2), generator=generator).to("mps")
+    codebooks = torch.stack(tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in (0, 2))).to("mps")
+    sequences_before = sequences.cpu().clone()
+    codebooks_before = codebooks.cpu().clone()
+    calls = []
+    original_from_dlpack = mx.from_dlpack
+
+    def checked_from_dlpack(value, *, copy=None):
+        calls.append(copy)
+        return original_from_dlpack(value, copy=copy)
+
+    monkeypatch.setattr(mx, "from_dlpack", checked_from_dlpack)
+    qvq_mlx.qvq_mlx_v2_banked_viterbi_from_torch_mps(
+        sequences,
+        codebooks,
+        bits,
+        segment_steps=16,
+    )
+    torch.mps.synchronize()
+
+    assert calls and set(calls) == {False}
+    assert torch.equal(sequences.cpu(), sequences_before)
+    assert torch.equal(codebooks.cpu(), codebooks_before)
+
+
+def test_qvq_cpu_to_mlx_staging_pool_reuses_guarded_mps_storage(monkeypatch):
+    from gptqmodel.utils import qvq_mlx
+
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    qvq_mlx._TORCH_MLX_STAGING_POOL.clear()
+    original_from_dlpack = mx.from_dlpack
+    calls = []
+
+    def checked_from_dlpack(value, *, copy=None):
+        calls.append((isinstance(value, torch.utils.dlpack.ReadOnlyTensorWrapper), copy))
+        return original_from_dlpack(value, copy=copy)
+
+    monkeypatch.setattr(mx, "from_dlpack", checked_from_dlpack)
+    first_source = torch.arange(128, dtype=torch.float32).reshape(2, 32, 2)
+    second_source = torch.arange(128, dtype=torch.float32).reshape(2, 32, 2) + 10
+    with qvq_mlx._TORCH_MLX_BRIDGE_LOCK:
+        first_lease = qvq_mlx._TORCH_MLX_STAGING_POOL.stage(first_source, name="staging reuse test")
+        first_storage = first_lease.source.untyped_storage().data_ptr()
+        assert first_lease.zero_copy
+        assert np.asarray(first_lease.array).reshape(first_source.shape).tolist() == first_source.tolist()
+        first_lease.verify_unchanged()
+
+        second_lease = qvq_mlx._TORCH_MLX_STAGING_POOL.stage(second_source, name="staging reuse test")
+        second_storage = second_lease.source.untyped_storage().data_ptr()
+        assert second_lease.zero_copy
+        assert np.asarray(second_lease.array).reshape(second_source.shape).tolist() == second_source.tolist()
+        second_lease.verify_unchanged()
+        with pytest.raises(RuntimeError, match="staging storage was reused"):
+            first_lease.verify_unchanged()
+
+    assert first_storage == second_storage
+    # MLX owns the arena already, so CPU staging needs no DLPack conversion.
+    assert calls == []
+
+
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))
 def test_qvq_mps_banked_v2_yaqa_auto_dispatches_corrected_tiles_to_mlx(monkeypatch, kind):
     from gptqmodel.utils import qvq_mlx
@@ -621,14 +724,14 @@ def test_qvq_mps_banked_v2_yaqa_auto_dispatches_corrected_tiles_to_mlx(monkeypat
     output_samples = torch.randn((53, width), generator=generator)
     input_hessian = (input_samples.T @ input_samples / input_samples.shape[0]).to("mps")
     output_hessian = (output_samples.T @ output_samples / output_samples.shape[0]).to("mps")
-    original = qvq_mlx.qvq_mlx_v2_banked_viterbi_from_torch_mps
+    original = qvq_mlx.qvq_mlx_tail_biting_v2_banked_from_torch_cpu
     launches = []
 
     def counted(*args, **kwargs):
         launches.append(kwargs["segment_steps"])
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(qvq_mlx, "qvq_mlx_v2_banked_viterbi_from_torch_mps", counted)
+    monkeypatch.setattr(qvq_mlx, "qvq_mlx_tail_biting_v2_banked_from_torch_cpu", counted)
     canonical = quantize_qvq_linear(
         weight,
         input_hessian,

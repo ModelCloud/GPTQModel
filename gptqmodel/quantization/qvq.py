@@ -3487,6 +3487,17 @@ def yaqa_inner(
     active_banks = bank_codebooks if bank_codebooks is not None else (codebook,)
     if segmented_v2 and segmented_bank_stack is None:
         segmented_bank_stack = torch.stack(active_banks).contiguous()
+    host_segmented_bank_stack = None
+    mlx_segmented_bank_stack = None
+    if segmented_v2 and apple_host_feedback:
+        from ..utils.qvq_mlx import qvq_mlx_prepare_v2_banked_codebooks_from_torch
+
+        # Borrow the immutable MPS codebooks directly through read-only
+        # DLPack. Keep a host copy only for reconstructing the compact
+        # traceback result; corrected CPU tiles use the reusable MLX staging
+        # arena at the MLX boundary.
+        mlx_segmented_bank_stack = qvq_mlx_prepare_v2_banked_codebooks_from_torch(segmented_bank_stack)
+        host_segmented_bank_stack = segmented_bank_stack.detach().to("cpu").contiguous()
     banked_codebooks = (
         bank_codebook_stack if bank_codebook_stack is not None else torch.stack(active_banks).contiguous()
         if (
@@ -3546,15 +3557,32 @@ def yaqa_inner(
                 for chunk in sequences.split(segmented_batch_size):
                     if telemetry is not None:
                         telemetry.count("yaqa_segmented_v2_chunks")
-                    search_chunk = chunk.to(quantization_device) if apple_host_feedback else chunk
-                    search_codebooks = segmented_bank_stack
-                    result = _tail_biting_v2_banked_quantize(
-                        search_chunk,
-                        search_codebooks,
-                        bits=bits,
-                        segment_steps=segment_steps,
-                        candidate_count=tail_biting_candidates,
-                    )
+                    if apple_host_feedback:
+                        from ..utils.qvq_mlx import qvq_mlx_tail_biting_v2_banked_from_torch_cpu
+
+                        assert host_segmented_bank_stack is not None and mlx_segmented_bank_stack is not None
+                        states, segment_ids, squared_error = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+                            chunk.contiguous(),
+                            host_segmented_bank_stack,
+                            bits,
+                            segment_steps=segment_steps,
+                            mlx_codebooks=mlx_segmented_bank_stack,
+                        )
+                        path_banks = segment_ids.repeat_interleave(segment_steps, dim=1).to(torch.long)
+                        result = BankedTrellisQuantizationResult(
+                            states=states,
+                            values=host_segmented_bank_stack[path_banks, states],
+                            squared_error=squared_error,
+                            segment_bank_ids=segment_ids,
+                        )
+                    else:
+                        result = _tail_biting_v2_banked_quantize(
+                            chunk,
+                            segmented_bank_stack,
+                            bits=bits,
+                            segment_steps=segment_steps,
+                            candidate_count=tail_biting_candidates,
+                        )
                     values.append(result.values.to(source.device))
                     states_for_chunks.append(result.states.to(source.device))
                     selectors.append(result.segment_bank_ids.to(source.device))

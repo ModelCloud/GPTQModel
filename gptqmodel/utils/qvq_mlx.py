@@ -8,6 +8,7 @@ from __future__ import annotations
 import functools
 import operator
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,6 +68,8 @@ _V2_BANKED_VITERBI_KERNEL: Any | None = None
 _V2_BANKED_VITERBI_KERNEL_ERROR: str | None = None
 _V2_BANKED_TORCH_CODEBOOK_HOT: tuple[Any, int, Any] | None = None
 _V2_BANKED_TORCH_CODEBOOK_LOCK = threading.Lock()
+_TORCH_MLX_BRIDGE_LOCK = threading.RLock()
+_TORCH_MLX_STAGING_MAX_BYTES = 128 * 1024 * 1024
 _FP32_KERNELS: dict[str, Any] = {}
 _FP32_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
@@ -76,6 +79,154 @@ _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
 @dataclass(frozen=True)
 class _QVQMLXPreparedCompander:
     levels: Any
+
+
+@dataclass(frozen=True)
+class _TorchMLXReadOnlyLease:
+    """Guard one borrowed Torch allocation for the duration of MLX work.
+
+    DLPack's read-only flag is a consumer contract, not memory protection: an
+    alias to the original Torch tensor can still enqueue a write.  Keep the
+    producer alive and verify its mutation counter after MLX completes.  MLX
+    kernels receive the borrowed array only as an input; their output buffers
+    are independently allocated.
+    """
+
+    source: Any
+    array: Any
+    version: int | None
+    zero_copy: bool
+    name: str
+    generation_owner: Any | None = None
+    generation: int | None = None
+
+    def verify_unchanged(self) -> None:
+        if self.generation_owner is not None and self.generation_owner.generation != self.generation:
+            raise RuntimeError(f"QVQ {self.name} staging storage was reused while MLX still held a read-only view")
+        if not self.zero_copy or self.version is None:
+            return
+        try:
+            current_version = self.source._version
+        except RuntimeError as exc:  # pragma: no cover - guarded before borrowing.
+            raise RuntimeError(f"QVQ {self.name} lost its Torch mutation guard during MLX execution") from exc
+        if current_version != self.version:
+            raise RuntimeError(
+                f"QVQ {self.name} was mutated by a Torch alias while MLX held a zero-copy read-only view"
+            )
+
+
+@dataclass
+class _TorchMLXStagingSlot:
+    mlx_storage: Any
+    numpy_storage: Any
+    torch_storage: Any
+    generation: int = 0
+
+
+class _TorchMLXStagingPool:
+    """Bounded reusable MLX storage with a Torch CPU writer alias.
+
+    MLX owns the shared Metal allocation. A persistent NumPy/Torch CPU view
+    writes directly into that allocation, so staging performs exactly one CPU
+    memcpy without opening Torch's MPS command queue. Calls are serialized by
+    ``_TORCH_MLX_BRIDGE_LOCK``, so a slot cannot be overwritten while MLX reads
+    it.
+    """
+
+    def __init__(self, max_bytes: int):
+        self.max_bytes = max_bytes
+        self._slots: OrderedDict[tuple[Any, ...], _TorchMLXStagingSlot] = OrderedDict()
+        self._bytes = 0
+
+    def stage(self, source, *, name: str):
+        import mlx.core as mx
+        import numpy as np
+        import torch
+
+        if source.device.type != "cpu" or not source.is_contiguous():
+            raise ValueError(f"QVQ {name} staging requires a contiguous Torch CPU tensor")
+        if source.dtype != torch.float32:
+            raise TypeError(f"QVQ {name} staging currently requires float32")
+        key = (name, source.dtype, tuple(source.shape))
+        slot = self._slots.pop(key, None)
+        if slot is None:
+            slot_bytes = source.numel() * source.element_size()
+            while self._slots and self._bytes + slot_bytes > self.max_bytes:
+                _, evicted = self._slots.popitem(last=False)
+                self._bytes -= evicted.torch_storage.numel() * evicted.torch_storage.element_size()
+            mlx_storage = mx.zeros(source.shape, dtype=mx.float32)
+            mx.eval(mlx_storage)
+            # MLX's NumPy export is a writable zero-copy CPU view of its shared
+            # Metal allocation. Torch writes through that view without another
+            # allocation or framework transfer.
+            with torch.inference_mode(False):
+                numpy_storage = np.asarray(mlx_storage)
+                torch_storage = torch.from_numpy(numpy_storage)
+            slot = _TorchMLXStagingSlot(mlx_storage, numpy_storage, torch_storage)
+            if slot_bytes <= self.max_bytes:
+                self._bytes += slot_bytes
+        if slot.torch_storage.numel() * slot.torch_storage.element_size() <= self.max_bytes:
+            self._slots[key] = slot
+
+        np.copyto(
+            slot.numpy_storage,
+            source.detach().numpy(),
+            casting="no",
+        )
+        slot.generation += 1
+        return _TorchMLXReadOnlyLease(
+            slot.torch_storage,
+            slot.mlx_storage,
+            None,
+            True,
+            name,
+            generation_owner=slot,
+            generation=slot.generation,
+        )
+
+    def clear(self) -> None:
+        self._slots.clear()
+        self._bytes = 0
+
+
+_TORCH_MLX_STAGING_POOL = _TorchMLXStagingPool(_TORCH_MLX_STAGING_MAX_BYTES)
+
+
+def _torch_to_mlx_read_only(tensor, *, name: str) -> _TorchMLXReadOnlyLease:
+    """Borrow a contiguous Torch CPU/MPS tensor through read-only DLPack.
+
+    ``copy=False`` makes MLX fail rather than silently copy an unsupported
+    private Metal allocation.  Older stacks and inference-mode tensors lack a
+    guardable read-only exchange, so retain the compatibility copy for those
+    cases instead of exposing an unguarded shared allocation.
+    """
+
+    import mlx.core as mx
+    import torch
+
+    if tensor.device.type not in ("cpu", "mps"):
+        raise ValueError(f"QVQ {name} must be a Torch CPU or MPS tensor")
+    if not tensor.is_contiguous():
+        raise ValueError(f"QVQ {name} must be contiguous before the Torch/MLX boundary")
+
+    try:
+        version = tensor._version
+    except RuntimeError:
+        version = None
+    read_only_wrapper = getattr(torch.utils.dlpack, "ReadOnlyTensorWrapper", None)
+    from_dlpack = getattr(mx, "from_dlpack", None)
+    if version is not None and read_only_wrapper is not None and from_dlpack is not None:
+        try:
+            array = from_dlpack(read_only_wrapper(tensor.detach()), copy=False)
+        except (TypeError, ValueError):
+            # Private MPS buffers and older DLPack implementations cannot
+            # provide a guarded zero-copy view. Preserve the portable path.
+            pass
+        else:
+            return _TorchMLXReadOnlyLease(tensor, array, version, True, name)
+
+    copied = tensor.detach().to("cpu").contiguous() if tensor.device.type == "mps" else tensor.detach()
+    return _TorchMLXReadOnlyLease(tensor, mx.array(copied.numpy()), None, False, name)
 
 
 def _integer_argument(value: int, name: str) -> int:
@@ -1430,14 +1581,13 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
 ):
     """Bridge Torch MPS calibration tensors to the native MLX recurrence.
 
-    PyTorch MPS and MLX expose incompatible Metal DLPack ownership on the
-    supported stack, so use explicit bounded host copies. The immutable
-    bank codebooks are cached; only the current tile batch and compact
-    traceback result cross the runtime boundary for each recurrence pass.
+    Current Torch/MLX stacks share non-private Metal buffers through DLPack.
+    The bridge synchronizes the producer queue, exports read-only views, and
+    verifies Torch mutation counters before returning. Unsupported or
+    unguardable allocations retain the bounded compatibility copy.
     """
 
     import mlx.core as mx
-    import numpy as np
     import torch
 
     if sequences.device.type != "mps" or codebooks.device != sequences.device:
@@ -1445,61 +1595,142 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
     if sequences.dtype != torch.float32 or codebooks.dtype != torch.float32:
         raise TypeError("QVQ MLX quantization bridge requires float32 Torch tensors")
 
-    # PyTorch MPS and MLX own separate command queues on the same Metal
-    # device.  A real YAQA module reaches this bridge with factorization and
-    # feedback work still queued by PyTorch; starting MLX while that encoder is
-    # open triggers AGX's "command encoder is already encoding" assertion.
-    # The bridge is already a synchronous host-copy boundary, so make that
-    # ownership transfer explicit before MLX submits its recurrence.
-    torch.mps.synchronize()
+    with _TORCH_MLX_BRIDGE_LOCK:
+        # PyTorch MPS and MLX own separate command queues. Finish all producer
+        # writes before MLX borrows the underlying MTLBuffers.
+        torch.mps.synchronize()
+        leases: list[_TorchMLXReadOnlyLease] = []
 
-    def copy_to_mlx(tensor):
-        copied = tensor.detach().to("cpu").contiguous()
-        return mx.array(copied.numpy())
-
-    if mlx_codebooks is None:
-        try:
-            codebook_version = codebooks._version
-        except RuntimeError:
-            # Inference-mode tensors have no mutation version counter. The
-            # quantizer supplies a call-scoped MLX copy for this case; retain
-            # the conservative per-call copy for standalone callers.
-            mlx_codebooks = copy_to_mlx(codebooks)
+        sequence_lease = _torch_to_mlx_read_only(sequences, name="banked-V2 sequences")
+        leases.append(sequence_lease)
+        if mlx_codebooks is None:
+            try:
+                codebook_version = codebooks._version
+            except RuntimeError:
+                codebook_lease = _torch_to_mlx_read_only(codebooks, name="banked-V2 codebooks")
+            else:
+                global _V2_BANKED_TORCH_CODEBOOK_HOT
+                hot = _V2_BANKED_TORCH_CODEBOOK_HOT
+                if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
+                    with _V2_BANKED_TORCH_CODEBOOK_LOCK:
+                        hot = _V2_BANKED_TORCH_CODEBOOK_HOT
+                        if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
+                            hot = (
+                                codebooks,
+                                codebook_version,
+                                _torch_to_mlx_read_only(codebooks, name="banked-V2 codebooks"),
+                            )
+                            _V2_BANKED_TORCH_CODEBOOK_HOT = hot
+                codebook_lease = hot[2]
+        elif isinstance(mlx_codebooks, _TorchMLXReadOnlyLease):
+            codebook_lease = mlx_codebooks
         else:
-            global _V2_BANKED_TORCH_CODEBOOK_HOT
-            hot = _V2_BANKED_TORCH_CODEBOOK_HOT
-            if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
-                with _V2_BANKED_TORCH_CODEBOOK_LOCK:
-                    hot = _V2_BANKED_TORCH_CODEBOOK_HOT
-                    if hot is None or hot[0] is not codebooks or hot[1] != codebook_version:
-                        hot = (codebooks, codebook_version, copy_to_mlx(codebooks))
-                        _V2_BANKED_TORCH_CODEBOOK_HOT = hot
-            mlx_codebooks = hot[2]
-    outputs = qvq_mlx_v2_banked_viterbi(
-        copy_to_mlx(sequences),
-        mlx_codebooks,
-        bits,
-        segment_steps=segment_steps,
-        overlap=(
-            None
-            if overlap is None
-            else mx.array(overlap.detach().to("cpu", torch.uint32).contiguous().numpy())
-        ),
-        step_weights=None if step_weights is None else copy_to_mlx(step_weights),
-    )
-    mx.eval(*outputs)
-    mx.synchronize()
-    states = torch.from_numpy(np.asarray(outputs[0])).to(torch.long).to(device=sequences.device)
-    selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8).to(device=sequences.device)
-    squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32).to(device=sequences.device)
-    # The custom kernel exposes its recurrence workspaces as outputs.  YAQA
-    # invokes this bridge for every anti-diagonal, so retaining MLX's buffer
-    # cache scales memory with module tile count instead of live batch size.
-    # Results have been copied into Torch above; release only reusable buffers,
-    # not the compiled pipeline or immutable codebook cache.
-    del outputs
-    mx.clear_cache()
-    return states, selectors, squared_error
+            raise TypeError("QVQ prepared MLX codebooks must retain their guarded Torch ownership lease")
+        leases.append(codebook_lease)
+
+        overlap_lease = None
+        if overlap is not None:
+            overlap_tensor = overlap.detach().to("cpu", torch.uint32).contiguous()
+            overlap_lease = _torch_to_mlx_read_only(overlap_tensor, name="banked-V2 overlap")
+            leases.append(overlap_lease)
+        weight_lease = None
+        if step_weights is not None:
+            weight_lease = _torch_to_mlx_read_only(step_weights, name="banked-V2 step weights")
+            leases.append(weight_lease)
+
+        outputs = qvq_mlx_v2_banked_viterbi(
+            sequence_lease.array,
+            codebook_lease.array,
+            bits,
+            segment_steps=segment_steps,
+            overlap=None if overlap_lease is None else overlap_lease.array,
+            step_weights=None if weight_lease is None else weight_lease.array,
+        )
+        mx.eval(*outputs)
+        mx.synchronize()
+        for lease in leases:
+            lease.verify_unchanged()
+
+        # MLX owns these fresh output buffers and stops using them after this
+        # handoff. Torch can therefore import the Metal results without a host
+        # staging copy; dtype conversions allocate Torch-owned destinations.
+        shared_outputs = tuple(torch.from_dlpack(output) for output in outputs)
+        states = shared_outputs[0].to(torch.long)
+        selectors = shared_outputs[1].to(torch.uint8)
+        squared_error = shared_outputs[2].to(torch.float32)
+        del outputs, shared_outputs
+        mx.clear_cache()
+        return states, selectors, squared_error
+
+
+def qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+    sequences,
+    codebooks,
+    bits: float,
+    *,
+    segment_steps: int,
+    step_weights=None,
+    mlx_codebooks=None,
+):
+    """Run both banked-V2 tail-biting passes from host YAQA tensors.
+
+    Apple YAQA forms corrected tiles through Accelerate on the CPU.  Keeping
+    those tiles in host memory until this boundary avoids a redundant
+    CPU->MPS->CPU round trip, and retaining both recurrences in one MLX graph
+    avoids a Torch synchronization between the provisional and constrained
+    passes.  Only compact traceback outputs return to Torch.
+    """
+
+    import mlx.core as mx
+    import numpy as np
+    import torch
+
+    if sequences.device.type != "cpu" or codebooks.device.type != "cpu":
+        raise ValueError("QVQ host-to-MLX tail biting requires CPU Torch tensors")
+    if sequences.dtype != torch.float32 or codebooks.dtype != torch.float32:
+        raise TypeError("QVQ host-to-MLX tail biting requires float32 Torch tensors")
+    if not sequences.is_contiguous() or not codebooks.is_contiguous():
+        raise ValueError("QVQ host-to-MLX tail biting requires contiguous tensors")
+    if step_weights is not None and (
+        step_weights.device.type != "cpu"
+        or step_weights.dtype != torch.float32
+        or not step_weights.is_contiguous()
+    ):
+        raise ValueError("QVQ host-to-MLX tail-biting weights must be contiguous CPU float32")
+
+    with _TORCH_MLX_BRIDGE_LOCK:
+        leases: list[_TorchMLXReadOnlyLease] = []
+        sequence_lease = _TORCH_MLX_STAGING_POOL.stage(sequences, name="host banked-V2 sequences")
+        leases.append(sequence_lease)
+        if mlx_codebooks is None:
+            codebook_lease = _TORCH_MLX_STAGING_POOL.stage(codebooks, name="host banked-V2 codebooks")
+        elif isinstance(mlx_codebooks, _TorchMLXReadOnlyLease):
+            codebook_lease = mlx_codebooks
+        else:
+            raise TypeError("QVQ prepared MLX codebooks must retain their guarded Torch ownership lease")
+        leases.append(codebook_lease)
+        weight_lease = None
+        if step_weights is not None:
+            weight_lease = _TORCH_MLX_STAGING_POOL.stage(step_weights, name="host banked-V2 step weights")
+            leases.append(weight_lease)
+
+        outputs = _qvq_mlx_tail_biting_v2_banked(
+            sequence_lease.array,
+            codebook_lease.array,
+            bits,
+            segment_steps=segment_steps,
+            step_weights=None if weight_lease is None else weight_lease.array,
+        )
+        mx.eval(*outputs)
+        mx.synchronize()
+        for lease in leases:
+            lease.verify_unchanged()
+        states = torch.from_numpy(np.asarray(outputs[0])).to(torch.long)
+        selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8)
+        squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32)
+        del outputs
+        mx.clear_cache()
+        return states, selectors, squared_error
 
 
 def qvq_mlx_viterbi_from_torch_mps(
@@ -1512,7 +1743,6 @@ def qvq_mlx_viterbi_from_torch_mps(
     """Run the standard V2 YAQA recurrence through the fused MLX kernel."""
 
     import mlx.core as mx
-    import numpy as np
     import torch
 
     if sequences.device.type != "mps" or codebook.device != sequences.device:
@@ -1522,33 +1752,51 @@ def qvq_mlx_viterbi_from_torch_mps(
     if not sequences.is_contiguous() or not codebook.is_contiguous():
         raise ValueError("QVQ MLX Viterbi bridge requires contiguous tensors")
 
-    def copy_to_mlx(tensor):
-        return mx.array(tensor.detach().to("cpu").contiguous().numpy())
+    with _TORCH_MLX_BRIDGE_LOCK:
+        torch.mps.synchronize()
+        leases = [
+            _torch_to_mlx_read_only(sequences, name="V2 sequences"),
+            _torch_to_mlx_read_only(codebook, name="V2 codebook"),
+        ]
+        overlap_lease = None
+        if overlap is not None:
+            overlap_tensor = overlap.detach().to("cpu", torch.uint32).contiguous()
+            overlap_lease = _torch_to_mlx_read_only(overlap_tensor, name="V2 overlap")
+            leases.append(overlap_lease)
+        weight_lease = None
+        if step_weights is not None:
+            weight_lease = _torch_to_mlx_read_only(step_weights, name="V2 step weights")
+            leases.append(weight_lease)
 
-    outputs = qvq_mlx_viterbi(
-        copy_to_mlx(sequences),
-        copy_to_mlx(codebook),
-        bits,
-        overlap=None
-        if overlap is None
-        else mx.array(overlap.detach().to("cpu", torch.uint32).contiguous().numpy()),
-        step_weights=None if step_weights is None else copy_to_mlx(step_weights),
-    )
-    mx.eval(*outputs)
-    states = torch.from_numpy(np.asarray(outputs[0])).to(torch.long).to(device=sequences.device)
-    squared_error = torch.from_numpy(np.asarray(outputs[1])).to(torch.float32).to(device=sequences.device)
-    return states, squared_error
+        outputs = qvq_mlx_viterbi(
+            leases[0].array,
+            leases[1].array,
+            bits,
+            overlap=None if overlap_lease is None else overlap_lease.array,
+            step_weights=None if weight_lease is None else weight_lease.array,
+        )
+        mx.eval(*outputs)
+        mx.synchronize()
+        for lease in leases:
+            lease.verify_unchanged()
+        shared_outputs = tuple(torch.from_dlpack(output) for output in outputs)
+        states = shared_outputs[0].to(torch.long)
+        squared_error = shared_outputs[1].to(torch.float32)
+        return states, squared_error
 
 
-def qvq_mlx_prepare_v2_banked_codebooks_from_torch_mps(codebooks):
-    """Make one call-scoped MLX bank stack for an MPS quantization pass."""
+def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks):
+    """Make one guarded call-scoped MLX bank stack for an Apple quantization pass."""
 
-    import mlx.core as mx
     import torch
 
-    if codebooks.device.type != "mps" or codebooks.dtype != torch.float32 or not codebooks.is_contiguous():
-        raise ValueError("QVQ MLX bank codebooks require contiguous float32 Torch MPS tensors")
-    return mx.array(codebooks.detach().to("cpu").numpy())
+    if codebooks.device.type not in ("cpu", "mps") or codebooks.dtype != torch.float32 or not codebooks.is_contiguous():
+        raise ValueError("QVQ MLX bank codebooks require contiguous float32 Torch CPU or MPS tensors")
+    with _TORCH_MLX_BRIDGE_LOCK:
+        if codebooks.device.type == "cpu":
+            return _TORCH_MLX_STAGING_POOL.stage(codebooks, name="prepared banked-V2 codebooks")
+        torch.mps.synchronize()
+        return _torch_to_mlx_read_only(codebooks, name="prepared banked-V2 codebooks")
 
 
 @functools.lru_cache(maxsize=128)
