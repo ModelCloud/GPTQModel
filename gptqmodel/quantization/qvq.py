@@ -4204,6 +4204,7 @@ def yaqa_inner_v2b2_p32(
     block_input_hessian: torch.Tensor | None = None,
     block_family_id: int | None = None,
     diagnostics: dict[str, object] | None = None,
+    _parallel_candidates: bool = True,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select one complementary V2 family per module under YAQA's full proxy."""
@@ -4359,7 +4360,11 @@ def yaqa_inner_v2b2_p32(
         block_alt_id = block_family_id
         block_selectors = None
     alternative_ids = (block_alt_id,) if family_mode != "reselect" or sample_strategy != "full" else (1, 2, 3)
-    parallel_families = inner_weight.device.type == "cuda" and len(alternative_ids) > 1
+    parallel_families = (
+        _parallel_candidates
+        and inner_weight.device.type == "cuda"
+        and len(alternative_ids) >= 1
+    )
     current_stream = None
     canonical_completion = None
     canonical_diagnostics: dict[str, object] = {}

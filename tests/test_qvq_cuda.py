@@ -1297,6 +1297,47 @@ def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2
     assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
 
 
+def test_qvq_cuda_fixed_b2_yaqa_parallel_candidate_is_bit_exact():
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260823)
+    bits = 2.5
+    banks = _canonical_qvq_v2b4_banks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    pairs = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    kwargs = {
+        "bits": bits,
+        "block_family_id": 2,
+        "family_mode": "fixed_block_ldlq",
+        "bank_codebook_pair_stacks": pairs,
+        "trellis_batch_size": 1,
+    }
+    reference = yaqa_inner_v2b2_p32(
+        weight,
+        input_hessian,
+        output_hessian,
+        banks,
+        _parallel_candidates=False,
+        **kwargs,
+    )
+    actual = yaqa_inner_v2b2_p32(
+        weight,
+        input_hessian,
+        output_hessian,
+        banks,
+        _parallel_candidates=True,
+        **kwargs,
+    )
+    assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
+
+
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits):
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260830 + int(bits * 10))

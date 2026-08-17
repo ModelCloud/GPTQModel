@@ -252,3 +252,9 @@ An implicit-PGC16 emission experiment was rejected. It was bit-exact across 72 c
 weighted, and unweighted rate/bank cases, but integer state mixing increased the real segmented phase from about
 1.09 seconds to 1.94 seconds and module time to 4.14 seconds. The measured 99.97% codebook L2 hit rate makes the
 cached table loads cheaper than reconstructing every state in the recurrence.
+
+With dense feedback removed, overlapping the independent canonical and selected B2-family artifacts becomes a
+small repeatable win even when sampled selection leaves only one complete alternative. Matched medians on two
+PG506-230 `sm_80` GPUs were 2.499 s and 2.521 s versus the 2.635 s serialized median (1.05x). A focused CUDA test
+confirms the fixed-family parallel and serialized artifacts are bit-exact. Full three-family reselection retains
+its existing concurrent-stream path.
