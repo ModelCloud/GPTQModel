@@ -15,11 +15,11 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...quantization.qvq import (
     QVQ_BITS,
-    pack_qvq_binary_bank_ids,
     pack_qvq_bank_ids,
+    pack_qvq_binary_bank_ids,
     reconstruct_qvq_inner_weight,
-    unpack_qvq_binary_bank_ids,
     unpack_qvq_bank_ids,
+    unpack_qvq_binary_bank_ids,
 )
 from ...quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from ...quantization.qvq_rates import qvq_words_per_tile
@@ -31,6 +31,7 @@ from ...utils.qvq_cuda import (
     qvq_cuda_hadamard,
 )
 from . import BaseQuantLinear, FormatSupport
+
 
 _QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id")
 # The real Llama/Qwen transforms that exposed delayed-normalization overflow
@@ -839,6 +840,35 @@ class QVQLinear(BaseQuantLinear):
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
                 bank_alt_id=cuda_bank_alt_id,
+            )
+        if x.device.type == "cpu":
+            from ...utils.qvq_cpu import qvq_cpu_gemv, qvq_cpu_supported
+
+            if (
+                self.trellis_window != 16
+                or self.vector_size != 2
+                or self.dual_v2
+                or not qvq_cpu_supported()
+            ):
+                return self._reference_inner_forward(x)
+            bank_alt_id = 0
+            cpu_bank_ids = None
+            if self.bank_ids is not None:
+                if self.v2b2_p32:
+                    bank_alt_id = int(self.bank_alt_id.detach().item())
+                    if not 1 <= bank_alt_id <= 3:
+                        return self._reference_inner_forward(x)
+                cpu_bank_ids = self.bank_ids.to(torch.uint8).contiguous()
+            return qvq_cpu_gemv(
+                x.contiguous(),
+                self.trellis.contiguous(),
+                self.bits,
+                out_features=self.out_features,
+                vector_size=self.vector_size,
+                bank_ids=cpu_bank_ids,
+                v2b4_p64=self.v2b4_p64,
+                v2b2_p32=self.v2b2_p32,
+                bank_alt_id=bank_alt_id,
             )
         return self._reference_inner_forward(x)
 

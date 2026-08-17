@@ -72,6 +72,13 @@ _EXTENSION_SPECS = (
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.qvq_cuda", "qvq_cuda_error")(),
     ),
     _ExtensionSpec(
+        name="qvq_cpu",
+        aliases=("qvq_gemv_cpu",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qvq_cpu", "_QVQ_CPU_TORCH_OPS_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.qvq_cpu", "qvq_cpu_supported")(),
+        unsupported_error=lambda: _resolve_attr("gptqmodel.utils.qvq_cpu", "qvq_cpu_error")(),
+    ),
+    _ExtensionSpec(
         name="floatx_cpu",
         aliases=("floatx", "quant_dtype_cpu"),
         resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_floatx_cpu_extension"),
