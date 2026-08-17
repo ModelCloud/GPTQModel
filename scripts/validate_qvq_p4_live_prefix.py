@@ -9,15 +9,19 @@ import math
 import platform
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from itertools import pairwise
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+import gptqmodel.quantization.qvq as qvq_module
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import QVQLinearQuantizationResult, quantize_qvq_linear
+from gptqmodel.quantization.qvq_spectral import select_propagation_shaped_svd
 from scripts.analyze_gptq_low_bit_grid import load_nm_evaluation_batch, tensor_metrics
 from scripts.compare_qvq_codecs_llama_qkvo import (
     _install_qvq_prefix_artifact,
@@ -81,6 +85,11 @@ def _parser() -> argparse.ArgumentParser:
         "--gradient-ranked-direct",
         action="store_true",
         help="Rank localized candidates by one full-horizon teacher-KL gradient at the serialized baseline.",
+    )
+    parser.add_argument(
+        "--gradient-shaped-spectral",
+        action="store_true",
+        help="Generate localized candidates from complete signed spectral atoms favored by a disjoint teacher-KL gradient.",
     )
     parser.add_argument("--replay-folds", type=int, default=1)
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
@@ -417,6 +426,9 @@ def _localized_summary(
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.gradient_ranked_direct and args.gradient_shaped_spectral:
+        raise ValueError("gradient-ranked and gradient-shaped spectral searches are mutually exclusive")
+    gradient_enabled = args.gradient_ranked_direct or args.gradient_shaped_spectral
     splits = {
         "search": (args.search_row_offset, args.search_rows),
         "confirmation": (args.confirmation_row_offset, args.confirmation_rows),
@@ -438,6 +450,10 @@ def main() -> None:
         raise ValueError("direct replay candidate count must be between zero and replay-candidates")
     if args.gradient_ranked_direct and args.direct_replay_candidates < 1:
         raise ValueError("gradient-ranked direct search requires at least one direct replay candidate")
+    if args.gradient_shaped_spectral and args.replay_candidates < 1:
+        raise ValueError("gradient-shaped spectral search requires at least one replay candidate")
+    if args.gradient_shaped_spectral and "gradient" not in splits:
+        raise ValueError("gradient-shaped spectral search requires an explicit disjoint gradient split")
     if args.replay_folds < 1 or args.replay_folds > args.search_rows:
         raise ValueError("replay fold count must be between one and the search row count")
     if not 0 <= args.minimum_relative_kl_improvement < 1:
@@ -515,9 +531,9 @@ def main() -> None:
         if args.replay_candidates:
             print("Caching dense teacher logits for full-horizon search reranking", flush=True)
             search_teacher = _teacher_logits(dense_model, row_sets["search"])
-            if args.gradient_ranked_direct:
+            if gradient_enabled:
                 gradient_rows = row_sets.get("gradient", row_sets["search"])
-                print("Caching dense teacher logits for disjoint P9 gradient generation", flush=True)
+                print("Caching dense teacher logits for disjoint propagation-gradient generation", flush=True)
                 gradient_teacher = _teacher_logits(dense_model, gradient_rows)
         print("Caching dense teacher logits for confirmation and untouched evaluation", flush=True)
         confirmation_teacher = _teacher_logits(dense_model, row_sets["confirmation"])
@@ -527,7 +543,16 @@ def main() -> None:
     callback_report: dict[str, object] = {}
     callback_weights: dict[str, torch.Tensor] = {}
     replay_scores: list[dict[str, object]] = []
-    gradient_report: dict[str, object] = {"enabled": args.gradient_ranked_direct}
+    gradient_report: dict[str, object] = {
+        "enabled": gradient_enabled,
+        "strategy": (
+            "shaped_spectral"
+            if args.gradient_shaped_spectral
+            else "ranked_direct"
+            if args.gradient_ranked_direct
+            else "disabled"
+        ),
+    }
     replay_baseline_fold_kl: list[float] | None = None
     replay_row_folds = tuple(
         tuple(row_sets["search"][fold_index :: args.replay_folds])
@@ -650,15 +675,70 @@ def main() -> None:
             propagated_acceptance=confirmation_callback,
             propagated_candidate_score=(full_horizon_candidate_score if args.replay_candidates else None),
             propagated_candidate_gradient=(
-                full_horizon_candidate_gradient if args.gradient_ranked_direct else None
+                full_horizon_candidate_gradient if gradient_enabled else None
             ),
         )
-    result = quantize_qvq_linear(
-        source_weight,
-        input_hessians[args.target].to(device),
-        bits=args.bits,
-        **quantization_kwargs,
+    original_localized_refiner = qvq_module.yaqa_localized_spectral_refine_v2b2_p32
+
+    def gradient_shaped_localized_refiner(*refiner_args, **refiner_kwargs):
+        replay_gradient = refiner_kwargs.get("replay_gradient")
+        if replay_gradient is None:
+            gradient_report["shaping_status"] = "gradient unavailable; exact localized baseline retained"
+            return refiner_args[4]
+        input_hessian = refiner_args[1].to(torch.float32)
+        output_hessian = refiner_args[2].to(torch.float32)
+        input_root = torch.linalg.cholesky(input_hessian)
+        output_root = torch.linalg.cholesky(output_hessian)
+
+        from gptqmodel.eora import eora as eora_module
+
+        original_svd = eora_module._eora_compute_svd
+
+        def propagation_shaped_svd(matrix: torch.Tensor, rank: int, algo: str = "lowrank"):
+            left, singular, right_h = original_svd(matrix, rank, algo=algo)
+            spectral_device = input_root.device
+            selected_left, selected_singular, selected_right_h, products, indices = select_propagation_shaped_svd(
+                input_root,
+                output_root,
+                left.to(device=spectral_device, dtype=torch.float32),
+                singular.to(device=spectral_device, dtype=torch.float32),
+                right_h.to(device=spectral_device, dtype=torch.float32),
+                replay_gradient.to(device=spectral_device, dtype=torch.float32),
+                maximum_modes=rank,
+            )
+            gradient_report.update(
+                {
+                    "shaping_status": "applied" if indices.numel() else "no favorable signed modes",
+                    "spectral_mode_products": products.detach().cpu().tolist(),
+                    "selected_original_mode_indices": indices.detach().cpu().tolist(),
+                    "favorable_mode_count": int(indices.numel()),
+                }
+            )
+            return (
+                selected_left.to(device=matrix.device, dtype=left.dtype),
+                selected_singular.to(device=matrix.device, dtype=singular.dtype),
+                selected_right_h.to(device=matrix.device, dtype=right_h.dtype),
+            )
+
+        with patch.object(eora_module, "_eora_compute_svd", propagation_shaped_svd):
+            return original_localized_refiner(*refiner_args, **refiner_kwargs)
+
+    localized_context = (
+        patch.object(
+            qvq_module,
+            "yaqa_localized_spectral_refine_v2b2_p32",
+            gradient_shaped_localized_refiner,
+        )
+        if args.gradient_shaped_spectral
+        else nullcontext()
     )
+    with localized_context:
+        result = quantize_qvq_linear(
+            source_weight,
+            input_hessians[args.target].to(device),
+            bits=args.bits,
+            **quantization_kwargs,
+        )
     quantization_seconds = time.perf_counter() - started
     if args.baseline_only:
         callback_report = {"accepted": False, "reason": "baseline-only ordinary YAQA oracle"}
@@ -712,6 +792,7 @@ def main() -> None:
             "replay_candidates": args.replay_candidates,
             "direct_replay_candidates": args.direct_replay_candidates,
             "gradient_ranked_direct": args.gradient_ranked_direct,
+            "gradient_shaped_spectral": args.gradient_shaped_spectral,
             "replay_folds": args.replay_folds,
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,

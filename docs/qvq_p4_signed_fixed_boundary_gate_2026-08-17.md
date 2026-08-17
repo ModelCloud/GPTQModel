@@ -126,9 +126,62 @@ atom's signed `u_i sigma_i v_i^T` contribution. This is materially different fro
 generation instead of only shortlist order. It must remain default-off and retain the independent ordinary-YAQA
 oracle, exact serialization check, two-fold replay, confirmation, and untouched evaluation gates.
 
+## Propagation-shaped signed-spectrum follow-up (P10)
+
+P10 implemented that distinct generator without changing the checkpoint or inference format. It used the exact
+same real Llama model, packed prefix, W2 layer-2 Q target, 512-row YAQA factors, ranks, alphas, and disjoint P9
+splits. For the YAQA-whitened residual
+
+\[
+M=U\Sigma V^\top,
+\]
+
+it evaluated every oversampled signed atom with
+
+\[
+c_i=\left\langle \nabla_W KL,
+C_I^{-T}(\sigma_i u_i v_i^\top)C_O^{-1}\right\rangle,
+\]
+
+discarded modes with `c_i >= 0`, and reordered the remaining complete atoms from most to least favorable. It did
+not alter singular-vector signs, singular values, or atom magnitudes. The existing ranks therefore became prefixes
+of the propagation-favorable signed spectrum rather than prefixes of descending local spectral energy.
+
+The disjoint gradient reproduced the P9 norm and magnitude. The randomized rank-32 SVD exposed 64 oversampled
+modes; 46 had a favorable negative first-order coefficient and the 32 most favorable were retained. This changed
+candidate generation materially: P10 selected `r32_a1_t384_s0`, rather than P9's `r32_a1_t4352_s5`.
+
+| Stage or metric | P10 proposal versus exact YAQA rollback |
+|---|---:|
+| Search fold 0 final KL | -0.4676% |
+| Search fold 1 final KL | -0.2000% |
+| Token-weighted search final KL | -0.3487% |
+| Independent-confirmation final KL | +0.0240% |
+| Independent-confirmation JSD | +0.0468% |
+| Independent-confirmation Top-1 | -0.0515 pp |
+| Independent-confirmation Top-5 overlap | +0.0000 pp |
+| Independent-confirmation Top-10 overlap | +0.0206 pp |
+
+The candidate improved both search folds and therefore reached confirmation, but confirmation reversed direction.
+The gate rejected it and serialized the exact rollback. Untouched evaluation consequently matches the rollback;
+the reported packed-versus-dense differences remain ordinary backend numerical drift, not an accepted P10 change.
+
+One diagnostic is especially important. Although every retained continuous spectral atom had `c_i < 0`, the final
+discrete fixed-boundary segment replacement had a slightly positive propagated first-order product
+(`1.20915e-6`). Projection into a constrained trellis segment is not sign preserving: a target assembled from
+favorable continuous atoms can cross to a representable discrete delta pointing in a different direction. Search
+replay rescued this particular candidate on the search rows, but did not generalize to confirmation.
+
+P10 is therefore **rejected as a default** on this matched gate. It is a valid experimental generator, remains
+default-off, and keeps exact rollback. The next iteration should constrain or rerank the *realized serialized
+delta*, not only its continuous spectral teacher—for example, require a favorable realized first-order product and
+then use cross-fitted replay across more independent rows/seeds before confirmation. Merely widening ranks or
+alphas is not supported.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.safetensors`
 - `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p4_gradient_ranked_fixed_boundary_gate/layer2_q_w2_rows1970_2048_nogradient.json`
+- `artifacts/qvq_p10_propagation_shaped_spectral/layer2_q_w2_rows1954_2048.json`

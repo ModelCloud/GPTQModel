@@ -136,6 +136,46 @@ def favorable_propagation_spectral_modes(
     return favorable[ordering[:maximum_modes]]
 
 
+def select_propagation_shaped_svd(
+    input_root: torch.Tensor,
+    output_root: torch.Tensor,
+    left_vectors: torch.Tensor,
+    singular_values: torch.Tensor,
+    right_vectors_h: torch.Tensor,
+    gradient: torch.Tensor,
+    *,
+    maximum_modes: int,
+    minimum_predicted_decrease: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Keep exact signed SVD atoms whose first-order propagated effect is favorable.
+
+    The returned factors are only filtered and reordered; no singular-vector
+    sign, singular value, or atom magnitude is changed. Prefix ranks therefore
+    retain the most favorable complete atoms instead of a local-energy prefix.
+    """
+
+    mode_products = propagation_spectral_mode_products(
+        input_root,
+        output_root,
+        left_vectors,
+        singular_values,
+        right_vectors_h,
+        gradient,
+    )
+    mode_indices = favorable_propagation_spectral_modes(
+        mode_products,
+        maximum_modes=maximum_modes,
+        minimum_predicted_decrease=minimum_predicted_decrease,
+    )
+    return (
+        left_vectors[:, mode_indices],
+        singular_values[mode_indices],
+        right_vectors_h[mode_indices],
+        mode_products,
+        mode_indices,
+    )
+
+
 def reconstruct_propagation_spectral_modes(
     input_root: torch.Tensor,
     output_root: torch.Tensor,

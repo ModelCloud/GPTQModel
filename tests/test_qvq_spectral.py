@@ -8,6 +8,7 @@ from gptqmodel.quantization.qvq_spectral import (
     favorable_propagation_spectral_modes,
     propagation_spectral_mode_products,
     reconstruct_propagation_spectral_modes,
+    select_propagation_shaped_svd,
 )
 
 
@@ -97,6 +98,54 @@ def test_favorable_modes_can_fail_closed_to_an_exact_zero_correction():
 
     assert selected.numel() == 0
     torch.testing.assert_close(correction, torch.zeros_like(correction), rtol=0, atol=0)
+
+
+def test_select_propagation_shaped_svd_preserves_complete_signed_atoms_in_downstream_order():
+    dtype = torch.float64
+    input_root = torch.tensor([[1.5, 0.0], [0.2, 1.1]], dtype=dtype)
+    output_root = torch.tensor([[1.2, 0.0], [-0.1, 1.4]], dtype=dtype)
+    left_vectors = torch.eye(2, dtype=dtype)
+    singular_values = torch.tensor([3.0, 2.0], dtype=dtype)
+    right_vectors_h = torch.eye(2, dtype=dtype)
+    atoms = [
+        reconstruct_propagation_spectral_modes(
+            input_root,
+            output_root,
+            left_vectors,
+            singular_values,
+            right_vectors_h,
+            torch.tensor([index]),
+        )
+        for index in range(2)
+    ]
+    # Mode 1 is more favorable despite carrying less local spectral energy.
+    gradient = -0.25 * atoms[0] / atoms[0].square().sum() - 2.0 * atoms[1] / atoms[1].square().sum()
+
+    selected_left, selected_singular, selected_right_h, products, indices = select_propagation_shaped_svd(
+        input_root,
+        output_root,
+        left_vectors,
+        singular_values,
+        right_vectors_h,
+        gradient,
+        maximum_modes=2,
+    )
+
+    assert indices.tolist() == [1, 0]
+    expected_products = torch.stack([(gradient * atom).sum() for atom in atoms])
+    torch.testing.assert_close(products, expected_products)
+    assert torch.equal(selected_left, left_vectors[:, indices])
+    assert torch.equal(selected_singular, singular_values[indices])
+    assert torch.equal(selected_right_h, right_vectors_h[indices])
+    selected_sum = reconstruct_propagation_spectral_modes(
+        input_root,
+        output_root,
+        selected_left,
+        selected_singular,
+        selected_right_h,
+        torch.arange(2),
+    )
+    torch.testing.assert_close(selected_sum, atoms[0] + atoms[1])
 
 
 def test_propagation_spectral_helpers_reject_invalid_geometry():
