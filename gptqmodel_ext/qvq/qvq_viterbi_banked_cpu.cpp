@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 ModelCloud.ai
+// SPDX-License-Identifier: Apache-2.0
+
 #include <torch/extension.h>
 
 #include <algorithm>
@@ -7,6 +10,8 @@
 #include <vector>
 
 #include <ATen/Parallel.h>
+
+#include "qvq_viterbi_simd.h"
 
 namespace qvq_cpu {
 
@@ -20,30 +25,6 @@ inline int log2_state_count(int64_t state_count) {
     ++l;
   }
   return l;
-}
-
-float compute_distance(
-    const float* target,
-    const float* codebook_row,
-    float target_norm,
-    float codebook_norm,
-    int64_t vector_size) {
-  float dot = 0.0f;
-  if (vector_size == 2) {
-    dot += target[0] * codebook_row[0];
-    dot += target[1] * codebook_row[1];
-  } else if (vector_size == 4) {
-    dot += target[0] * codebook_row[0];
-    dot += target[1] * codebook_row[1];
-    dot += target[2] * codebook_row[2];
-    dot += target[3] * codebook_row[3];
-  } else {
-    for (int64_t v = 0; v < vector_size; ++v) {
-      dot += target[v] * codebook_row[v];
-    }
-  }
-  float dist = target_norm + codebook_norm - 2.0f * dot;
-  return dist > 0.0f ? dist : 0.0f;
 }
 
 }  // namespace
@@ -126,7 +107,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   TORCH_CHECK(!(has_overlap && (has_entry || has_exit)), "qvq_viterbi_banked_cpu: overlap and entry/exit are mutually exclusive");
 
   const float* seq_ptr = sequences.data_ptr<float>();
-  const float* cb_ptr = codebooks.data_ptr<float>();
 
   torch::Tensor states = torch::empty({batch_size, step_count}, torch::dtype(torch::kInt64).device(sequences.device()));
   torch::Tensor squared_error = torch::empty({batch_size}, torch::dtype(torch::kFloat32).device(sequences.device()));
@@ -137,20 +117,26 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   float* se_ptr = squared_error.data_ptr<float>();
   uint8_t* seg_bank_ptr = segment_bank_ids.data_ptr<uint8_t>();
 
+  // Transpose codebooks to [bank_count, vector_size, state_count] for
+  // contiguous per-coordinate AVX-512 loads.
+  torch::Tensor codebooks_t = codebooks.permute({0, 2, 1}).contiguous();
+  const float* codebooks_t_ptr = codebooks_t.data_ptr<float>();
+
   // Precompute codebook norms.
   std::vector<float> codebook_norm(static_cast<size_t>(bank_count) * state_count, 0.0f);
   for (int64_t bank = 0; bank < bank_count; ++bank) {
+    const float* bank_t = codebooks_t_ptr + bank * (vector_size * state_count);
     for (int64_t s = 0; s < state_count; ++s) {
       float norm = 0.0f;
       for (int64_t v = 0; v < vector_size; ++v) {
-        float c = cb_ptr[(bank * state_count + s) * vector_size + v];
+        float c = bank_t[v * state_count + s];
         norm += c * c;
       }
       codebook_norm[static_cast<size_t>(bank) * state_count + s] = norm;
     }
   }
 
-  // Backpointers: (step_count - 1) x batch x ...
+  // Backpointers.
   const bool use_int16 = transition_bits <= 15;
   torch::Tensor prefix_backpointers;
   torch::Tensor boundary_backpointers;
@@ -170,160 +156,233 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
     }
   }
 
+  std::vector<float> costs(static_cast<size_t>(batch_size) * bank_count * state_count, 0.0f);
+  std::vector<float> next_costs(static_cast<size_t>(batch_size) * bank_count * state_count, 0.0f);
+  std::vector<float> emission_buf(static_cast<size_t>(batch_size) * bank_count * state_count, 0.0f);
+  std::vector<float> best_cost(static_cast<size_t>(batch_size) * bank_count * suffix_count, 0.0f);
+  std::vector<int32_t> best_prefix(static_cast<size_t>(batch_size) * bank_count * suffix_count, 0);
+  std::vector<float> best_cost_boundary(static_cast<size_t>(batch_size) * suffix_count, 0.0f);
+  std::vector<int32_t> best_arg_boundary(static_cast<size_t>(batch_size) * suffix_count, 0);
+
+  auto* costs_a = costs.data();
+  auto* next_costs_a = next_costs.data();
+  auto* emission_a = emission_buf.data();
+  auto* best_cost_a = best_cost.data();
+  auto* best_prefix_a = best_prefix.data();
+  auto* best_cost_boundary_a = best_cost_boundary.data();
+  auto* best_arg_boundary_a = best_arg_boundary.data();
+
   const float inf = std::numeric_limits<float>::infinity();
 
-  at::parallel_for(0, batch_size, 0, [&](int64_t start_batch, int64_t end_batch) {
-    // Per-batch DP buffers.
-    std::vector<float> costs(static_cast<size_t>(bank_count) * state_count, 0.0f);
-    std::vector<float> next_costs(static_cast<size_t>(bank_count) * state_count, 0.0f);
-    std::vector<float> best_cost(static_cast<size_t>(bank_count) * suffix_count, 0.0f);
-    // For boundary steps we only need suffix_count entries; reuse the start.
-
-    for (int64_t b = start_batch; b < end_batch; ++b) {
-      // Step 0: emission for all banks.
-      const float* target = seq_ptr + b * step_count * vector_size;
-      float target_norm = 0.0f;
+  // Precompute per-step target norms.
+  std::vector<float> target_norms(static_cast<size_t>(batch_size) * step_count, 0.0f);
+  for (int64_t b = 0; b < batch_size; ++b) {
+    for (int64_t step = 0; step < step_count; ++step) {
+      const float* target = seq_ptr + (b * step_count + step) * vector_size;
+      float norm = 0.0f;
       for (int64_t v = 0; v < vector_size; ++v) {
-        target_norm += target[v] * target[v];
+        norm += target[v] * target[v];
       }
-      float w0 = has_step_weights ? step_weights_ptr[b * step_count] : 1.0f;
+      target_norms[b * step_count + step] = norm;
+    }
+  }
 
-      for (int64_t bank = 0; bank < bank_count; ++bank) {
-        float* b_costs = costs.data() + bank * state_count;
-        for (int64_t s = 0; s < state_count; ++s) {
-          float dist = compute_distance(
-              target,
-              cb_ptr + ((bank * state_count + s) * vector_size),
-              target_norm,
-              codebook_norm[static_cast<size_t>(bank) * state_count + s],
-              vector_size);
-          dist *= w0;
-          if (has_entry) {
-            int64_t required = entry_ptr[b] & overlap_mask;
-            if ((s >> transition_bits) != required) {
-              dist = inf;
-            }
-          } else if (has_overlap) {
-            int64_t ov = overlap_ptr[b];
-            if ((s >> transition_bits) != ov) {
-              dist = inf;
-            }
-          }
-          b_costs[s] = dist;
-        }
-      }
+  for (int64_t step = 0; step < step_count; ++step) {
+    bool is_boundary = (step > 0) && (step % segment_steps == 0);
 
-      // Forward recurrence.
-      for (int64_t step = 1; step < step_count; ++step) {
-        target = seq_ptr + (b * step_count + step) * vector_size;
-        target_norm = 0.0f;
-        for (int64_t v = 0; v < vector_size; ++v) {
-          target_norm += target[v] * target[v];
-        }
+    // 1. Emission distances for all (batch, bank) pairs.
+    int64_t grain = std::max<int64_t>(256, state_count / (at::get_num_threads() * 4));
+    at::parallel_for(0, state_count, grain, [&](int64_t start_state, int64_t end_state) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        const float* target = seq_ptr + (b * step_count + step) * vector_size;
+        float target_norm = target_norms[b * step_count + step];
         float w = has_step_weights ? step_weights_ptr[b * step_count + step] : 1.0f;
-        bool is_boundary = (step % segment_steps == 0);
+        for (int64_t bank = 0; bank < bank_count; ++bank) {
+          float* emission_b = emission_a + (b * bank_count + bank) * state_count;
+          const float* bank_codebook_t = codebooks_t_ptr + bank * (vector_size * state_count);
+          const float* bank_norm = codebook_norm.data() + bank * state_count;
+          emit_distance(
+              state_count,
+              vector_size,
+              bank_codebook_t,
+              bank_norm,
+              target,
+              target_norm,
+              w,
+              emission_b,
+              start_state,
+              end_state);
+        }
+      }
+    });
 
-        if (is_boundary) {
-          // Reduce over previous bank and prefix for each suffix.
-          for (int64_t col = 0; col < suffix_count; ++col) {
-            float best = inf;
-            int32_t arg = 0;
-            for (int64_t prev_bank = 0; prev_bank < bank_count; ++prev_bank) {
-              const float* b_costs = costs.data() + prev_bank * state_count;
-              for (int64_t prefix = 0; prefix < prefix_count; ++prefix) {
-                int64_t state = prefix * suffix_count + col;
-                float c = b_costs[state];
-                if (c < best) {
-                  best = c;
-                  arg = static_cast<int32_t>(prev_bank * prefix_count + prefix);
-                }
+    if (step == 0) {
+      // Apply start constraints and copy emissions into costs.
+      for (int64_t b = 0; b < batch_size; ++b) {
+        int64_t required = -1;
+        if (has_entry) {
+          required = entry_ptr[b] & overlap_mask;
+        } else if (has_overlap) {
+          required = overlap_ptr[b];
+        }
+        for (int64_t bank = 0; bank < bank_count; ++bank) {
+          float* costs_b = costs_a + (b * bank_count + bank) * state_count;
+          const float* emission_b = emission_a + (b * bank_count + bank) * state_count;
+          std::memcpy(costs_b, emission_b, static_cast<size_t>(state_count) * sizeof(float));
+          if (required >= 0) {
+            for (int64_t s = 0; s < state_count; ++s) {
+              if ((s >> transition_bits) != required) {
+                costs_b[s] = inf;
               }
             }
-            best_cost[col] = best;
-            if (use_int16) {
-              int16_t* bp = static_cast<int16_t*>(boundary_bp_ptr) + ((step - 1) * batch_size + b) * suffix_count;
-              bp[col] = static_cast<int16_t>(arg);
-            } else {
-              int32_t* bp = static_cast<int32_t*>(boundary_bp_ptr) + ((step - 1) * batch_size + b) * suffix_count;
-              bp[col] = arg;
+          }
+        }
+      }
+      continue;
+    }
+
+    // 2. Reduce over previous prefix (and previous bank at boundaries).
+    int64_t suffix_grain = std::max<int64_t>(16, suffix_count / (at::get_num_threads() * 4));
+    if (is_boundary) {
+      at::parallel_for(0, suffix_count, suffix_grain, [&](int64_t start_suffix, int64_t end_suffix) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+          const float* costs_b = costs_a + b * bank_count * state_count;
+          float* best_cost_b = best_cost_boundary_a + b * suffix_count;
+          int32_t* best_arg_b = best_arg_boundary_a + b * suffix_count;
+          column_argmin(
+              costs_b,
+              bank_count * prefix_count,
+              suffix_count,
+              best_cost_b,
+              best_arg_b,
+              start_suffix,
+              end_suffix);
+        }
+      });
+    } else {
+      at::parallel_for(0, suffix_count, suffix_grain, [&](int64_t start_suffix, int64_t end_suffix) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+          for (int64_t bank = 0; bank < bank_count; ++bank) {
+            const float* costs_b = costs_a + (b * bank_count + bank) * state_count;
+            float* best_cost_b = best_cost_a + (b * bank_count + bank) * suffix_count;
+            int32_t* best_prefix_b = best_prefix_a + (b * bank_count + bank) * suffix_count;
+            column_argmin(
+                costs_b,
+                prefix_count,
+                suffix_count,
+                best_cost_b,
+                best_prefix_b,
+                start_suffix,
+                end_suffix);
+          }
+        }
+      });
+    }
+
+    // 3. Add transition cost and store backpointers.
+    int64_t prefix_grain = std::max<int64_t>(prefix_count, state_count / (at::get_num_threads() * 4));
+    prefix_grain = ((prefix_grain + prefix_count - 1) / prefix_count) * prefix_count;
+    at::parallel_for(0, state_count, prefix_grain, [&](int64_t start_state, int64_t end_state) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        if (is_boundary) {
+          const float* best_cost_b = best_cost_boundary_a + b * suffix_count;
+          for (int64_t bank = 0; bank < bank_count; ++bank) {
+            const float* emission_b = emission_a + (b * bank_count + bank) * state_count;
+            float* next_b = next_costs_a + (b * bank_count + bank) * state_count;
+            broadcast_add(
+                emission_b,
+                best_cost_b,
+                prefix_count,
+                suffix_count,
+                next_b,
+                start_state,
+                end_state);
+          }
+        } else {
+          for (int64_t bank = 0; bank < bank_count; ++bank) {
+            const float* emission_b = emission_a + (b * bank_count + bank) * state_count;
+            const float* best_cost_b = best_cost_a + (b * bank_count + bank) * suffix_count;
+            float* next_b = next_costs_a + (b * bank_count + bank) * state_count;
+            broadcast_add(
+                emission_b,
+                best_cost_b,
+                prefix_count,
+                suffix_count,
+                next_b,
+                start_state,
+                end_state);
+          }
+        }
+      }
+    });
+
+    // 4. Apply end constraints if this is the final step.
+    if (step == step_count - 1) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t bank = 0; bank < bank_count; ++bank) {
+          float* next_b = next_costs_a + (b * bank_count + bank) * state_count;
+          if (has_exit) {
+            int64_t required = exit_ptr[b];
+            for (int64_t s = 0; s < state_count; ++s) {
+              if (s != required) next_b[s] = inf;
+            }
+          } else if (has_overlap) {
+            int64_t required = overlap_ptr[b];
+            for (int64_t s = 0; s < state_count; ++s) {
+              if ((s & overlap_mask) != required) next_b[s] = inf;
             }
           }
+        }
+      }
+    }
 
+    // 5. Store backpointers for this transition.
+    for (int64_t b = 0; b < batch_size; ++b) {
+      int64_t bp_step = step - 1;
+      if (is_boundary) {
+        if (use_int16) {
+          int16_t* bp = static_cast<int16_t*>(boundary_bp_ptr) + (bp_step * batch_size + b) * suffix_count;
+          const int32_t* bp_src = best_arg_boundary_a + b * suffix_count;
+          for (int64_t col = 0; col < suffix_count; ++col) {
+            bp[col] = static_cast<int16_t>(bp_src[col]);
+          }
+        } else {
+          int32_t* bp = static_cast<int32_t*>(boundary_bp_ptr) + (bp_step * batch_size + b) * suffix_count;
+          const int32_t* bp_src = best_arg_boundary_a + b * suffix_count;
+          std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
+        }
+      } else {
+        if (use_int16) {
           for (int64_t bank = 0; bank < bank_count; ++bank) {
-            float* b_next = next_costs.data() + bank * state_count;
-            for (int64_t s = 0; s < state_count; ++s) {
-              int64_t col = s >> transition_bits;
-              float trans = best_cost[col];
-              float dist = compute_distance(
-                  target,
-                  cb_ptr + ((bank * state_count + s) * vector_size),
-                  target_norm,
-                  codebook_norm[static_cast<size_t>(bank) * state_count + s],
-                  vector_size);
-              b_next[s] = trans + dist * w;
+            int16_t* bp = static_cast<int16_t*>(prefix_bp_ptr) + ((bp_step * batch_size + b) * bank_count + bank) * suffix_count;
+            const int32_t* bp_src = best_prefix_a + (b * bank_count + bank) * suffix_count;
+            for (int64_t col = 0; col < suffix_count; ++col) {
+              bp[col] = static_cast<int16_t>(bp_src[col]);
             }
           }
         } else {
-          // Reduce over prefix per (bank, suffix).
           for (int64_t bank = 0; bank < bank_count; ++bank) {
-            const float* b_costs = costs.data() + bank * state_count;
-            float* b_best = best_cost.data() + bank * suffix_count;
-            for (int64_t col = 0; col < suffix_count; ++col) {
-              float best = inf;
-              int32_t arg = 0;
-              for (int64_t prefix = 0; prefix < prefix_count; ++prefix) {
-                int64_t state = prefix * suffix_count + col;
-                float c = b_costs[state];
-                if (c < best) {
-                  best = c;
-                  arg = static_cast<int32_t>(prefix);
-                }
-              }
-              b_best[col] = best;
-              if (use_int16) {
-                int16_t* bp = static_cast<int16_t*>(prefix_bp_ptr) + ((step - 1) * batch_size + b) * bank_count * suffix_count + bank * suffix_count;
-                bp[col] = static_cast<int16_t>(arg);
-              } else {
-                int32_t* bp = static_cast<int32_t*>(prefix_bp_ptr) + ((step - 1) * batch_size + b) * bank_count * suffix_count + bank * suffix_count;
-                bp[col] = arg;
-              }
-            }
-          }
-
-          for (int64_t bank = 0; bank < bank_count; ++bank) {
-            const float* b_best = best_cost.data() + bank * suffix_count;
-            float* b_next = next_costs.data() + bank * state_count;
-            for (int64_t s = 0; s < state_count; ++s) {
-              int64_t col = s >> transition_bits;
-              float trans = b_best[col];
-              float dist = compute_distance(
-                  target,
-                  cb_ptr + ((bank * state_count + s) * vector_size),
-                  target_norm,
-                  codebook_norm[static_cast<size_t>(bank) * state_count + s],
-                  vector_size);
-              b_next[s] = trans + dist * w;
-            }
+            int32_t* bp = static_cast<int32_t*>(prefix_bp_ptr) + ((bp_step * batch_size + b) * bank_count + bank) * suffix_count;
+            const int32_t* bp_src = best_prefix_a + (b * bank_count + bank) * suffix_count;
+            std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
           }
         }
-
-        std::swap(costs, next_costs);
       }
+    }
 
-      // Apply end constraints and find best final (bank, state).
+    std::swap(costs_a, next_costs_a);
+  }
+
+  // Find best final (bank, state) per batch and traceback.
+  at::parallel_for(0, batch_size, 0, [&](int64_t start_batch, int64_t end_batch) {
+    for (int64_t b = start_batch; b < end_batch; ++b) {
       float best_final = inf;
       int64_t best_bank = 0;
       int64_t end_state = 0;
       for (int64_t bank = 0; bank < bank_count; ++bank) {
-        const float* b_costs = costs.data() + bank * state_count;
+        const float* costs_b = costs_a + (b * bank_count + bank) * state_count;
         for (int64_t s = 0; s < state_count; ++s) {
-          float c = b_costs[s];
-          if (has_exit) {
-            if (s != exit_ptr[b]) continue;
-          } else if (has_overlap) {
-            int64_t ov = overlap_ptr[b];
-            if ((s & overlap_mask) != ov) continue;
-          }
+          float c = costs_b[s];
           if (c < best_final) {
             best_final = c;
             best_bank = bank;
@@ -336,7 +395,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
       states_ptr[b * step_count + step_count - 1] = end_state;
       int64_t current_bank = best_bank;
 
-      // Traceback to fill states and segment banks.
       std::vector<uint8_t> path_banks(static_cast<size_t>(step_count), 0);
       path_banks[step_count - 1] = static_cast<uint8_t>(current_bank);
       for (int64_t step = step_count - 1; step > 0; --step) {
@@ -359,10 +417,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
         } else {
           int32_t prefix = 0;
           if (use_int16) {
-            const int16_t* bp = static_cast<const int16_t*>(prefix_bp_ptr) + ((step - 1) * batch_size + b) * bank_count * suffix_count + current_bank * suffix_count;
+            const int16_t* bp = static_cast<const int16_t*>(prefix_bp_ptr) + (((step - 1) * batch_size + b) * bank_count + current_bank) * suffix_count;
             prefix = static_cast<int32_t>(bp[col]);
           } else {
-            const int32_t* bp = static_cast<const int32_t*>(prefix_bp_ptr) + ((step - 1) * batch_size + b) * bank_count * suffix_count + current_bank * suffix_count;
+            const int32_t* bp = static_cast<const int32_t*>(prefix_bp_ptr) + (((step - 1) * batch_size + b) * bank_count + current_bank) * suffix_count;
             prefix = bp[col];
           }
           prev_state = static_cast<int64_t>(prefix) * suffix_count + col;

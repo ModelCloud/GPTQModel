@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 ModelCloud.ai
+// SPDX-License-Identifier: Apache-2.0
+
 #include <torch/extension.h>
 
 #include <algorithm>
@@ -7,6 +10,8 @@
 #include <vector>
 
 #include <ATen/Parallel.h>
+
+#include "qvq_viterbi_simd.h"
 
 namespace qvq_cpu {
 
@@ -20,30 +25,6 @@ inline int log2_state_count(int64_t state_count) {
     ++l;
   }
   return l;
-}
-
-float compute_distance(
-    const float* target,
-    const float* codebook_row,
-    float target_norm,
-    float codebook_norm,
-    int64_t vector_size) {
-  float dot = 0.0f;
-  if (vector_size == 2) {
-    dot += target[0] * codebook_row[0];
-    dot += target[1] * codebook_row[1];
-  } else if (vector_size == 4) {
-    dot += target[0] * codebook_row[0];
-    dot += target[1] * codebook_row[1];
-    dot += target[2] * codebook_row[2];
-    dot += target[3] * codebook_row[3];
-  } else {
-    for (int64_t v = 0; v < vector_size; ++v) {
-      dot += target[v] * codebook_row[v];
-    }
-  }
-  float dist = target_norm + codebook_norm - 2.0f * dot;
-  return dist > 0.0f ? dist : 0.0f;
 }
 
 }  // namespace
@@ -100,15 +81,20 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
   }
 
   const float* seq_ptr = sequences.data_ptr<float>();
-  const float* cb_ptr = codebook.data_ptr<float>();
 
   torch::Tensor states = torch::empty({batch_size, step_count}, torch::dtype(torch::kInt64).device(sequences.device()));
   torch::Tensor squared_error = torch::empty({batch_size}, torch::dtype(torch::kFloat32).device(sequences.device()));
   int64_t* states_ptr = states.data_ptr<int64_t>();
   float* se_ptr = squared_error.data_ptr<float>();
 
+  // Transpose codebook to [vector_size, state_count] so each coordinate is
+  // contiguous across states and can be loaded with contiguous AVX-512 vectors.
+  torch::Tensor codebook_t = codebook.transpose(0, 1).contiguous();
+  const float* codebook_t_ptr = codebook_t.data_ptr<float>();
+
   // Precompute codebook norms.
   std::vector<float> codebook_norm(state_count, 0.0f);
+  const float* cb_ptr = codebook.data_ptr<float>();
   for (int64_t s = 0; s < state_count; ++s) {
     float norm = 0.0f;
     for (int64_t v = 0; v < vector_size; ++v) {
@@ -119,7 +105,6 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
   }
 
   // Backpointers: (step_count-1) x batch x suffix_count.
-  // Use int16 when prefix_count fits; otherwise int32.
   const bool use_int16 = transition_bits <= 15;
   torch::Tensor backpointers;
   void* bp_ptr = nullptr;
@@ -133,134 +118,180 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
     }
   }
 
-  // Per-batch cost buffers.
   std::vector<float> costs(static_cast<size_t>(batch_size) * state_count, 0.0f);
   std::vector<float> next_costs(static_cast<size_t>(batch_size) * state_count, 0.0f);
+  std::vector<float> emission_buf(static_cast<size_t>(batch_size) * state_count, 0.0f);
   std::vector<float> best_cost(static_cast<size_t>(batch_size) * suffix_count, 0.0f);
   std::vector<int32_t> best_prefix(static_cast<size_t>(batch_size) * suffix_count, 0);
 
   auto* costs_a = costs.data();
   auto* next_costs_a = next_costs.data();
+  auto* emission_a = emission_buf.data();
   auto* best_cost_a = best_cost.data();
   auto* best_prefix_a = best_prefix.data();
 
   const float inf = std::numeric_limits<float>::infinity();
 
-  // We parallelize over batch slices. Each thread owns a contiguous slice
-  // and does the full DP for that slice, avoiding cross-thread writes.
-  at::parallel_for(0, batch_size, 0, [&](int64_t start_batch, int64_t end_batch) {
-    for (int64_t b = start_batch; b < end_batch; ++b) {
-      // Step 0.
-      const float* target = seq_ptr + b * step_count * vector_size;
-      float target_norm = 0.0f;
+  // Precompute per-step targets and norms for quick access.
+  std::vector<float> target_norms(static_cast<size_t>(batch_size) * step_count, 0.0f);
+  for (int64_t b = 0; b < batch_size; ++b) {
+    for (int64_t step = 0; step < step_count; ++step) {
+      const float* target = seq_ptr + (b * step_count + step) * vector_size;
+      float norm = 0.0f;
       for (int64_t v = 0; v < vector_size; ++v) {
-        target_norm += target[v] * target[v];
+        norm += target[v] * target[v];
       }
-      float* b_costs = costs_a + b * state_count;
-      for (int64_t s = 0; s < state_count; ++s) {
-        float dist = compute_distance(target, cb_ptr + s * vector_size, target_norm, codebook_norm[s], vector_size);
-        if (has_step_weights) {
-          dist *= step_weights_ptr[b * step_count];
-        }
-        if (has_overlap) {
-          int64_t overlap_val = overlap_ptr[b];
-          int64_t state_high = s >> transition_bits;
-          if (state_high != overlap_val) {
-            dist = inf;
-          }
-        }
-        b_costs[s] = dist;
-      }
+      target_norms[b * step_count + step] = norm;
+    }
+  }
 
-      for (int64_t step = 1; step < step_count; ++step) {
-        target = seq_ptr + (b * step_count + step) * vector_size;
-        target_norm = 0.0f;
-        for (int64_t v = 0; v < vector_size; ++v) {
-          target_norm += target[v] * target[v];
-        }
+  // Process the DP step by step.  Emission and the per-step reductions are
+  // parallelised over the state/suffix dimension so all CPU cores are used even
+  // for batch_size == 1.
+  for (int64_t step = 0; step < step_count; ++step) {
+    // 1. Emission distances for all batches.
+    int64_t grain = std::max<int64_t>(256, state_count / (at::get_num_threads() * 4));
+    at::parallel_for(0, state_count, grain, [&](int64_t start_state, int64_t end_state) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        const float* target = seq_ptr + (b * step_count + step) * vector_size;
+        float target_norm = target_norms[b * step_count + step];
         float w = has_step_weights ? step_weights_ptr[b * step_count + step] : 1.0f;
+        float* emission_b = emission_a + b * state_count;
+        emit_distance(
+            state_count,
+            vector_size,
+            codebook_t_ptr,
+            codebook_norm.data(),
+            target,
+            target_norm,
+            w,
+            emission_b,
+            start_state,
+            end_state);
+      }
+    });
 
-        // Reduce over prefix for each suffix column.
-        float* b_best_cost = best_cost_a + b * suffix_count;
-        int32_t* b_best_prefix = best_prefix_a + b * suffix_count;
-        for (int64_t col = 0; col < suffix_count; ++col) {
-          float best = inf;
-          int32_t arg = 0;
-          for (int64_t prefix = 0; prefix < prefix_count; ++prefix) {
-            int64_t state = prefix * suffix_count + col;
-            float c = b_costs[state];
-            if (c < best) {
-              best = c;
-              arg = static_cast<int32_t>(prefix);
-            }
-          }
-          b_best_cost[col] = best;
-          b_best_prefix[col] = arg;
+    if (step == 0) {
+      // First step: costs are just the (masked) emission.
+      if (has_overlap) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+          float* costs_b = costs_a + b * state_count;
+          const float* emission_b = emission_a + b * state_count;
+          int64_t overlap_val = overlap_ptr[b];
+          // Only the block of states whose high bits equal overlap_val is legal.
+          int64_t block_start = overlap_val * prefix_count;
+          int64_t block_end = block_start + prefix_count;
+          if (block_start < 0) block_start = 0;
+          if (block_end > state_count) block_end = state_count;
+          std::memcpy(costs_b, emission_b, static_cast<size_t>(state_count) * sizeof(float));
+          for (int64_t s = 0; s < block_start; ++s) costs_b[s] = inf;
+          for (int64_t s = block_end; s < state_count; ++s) costs_b[s] = inf;
         }
+      } else {
+        std::memcpy(costs_a, emission_a, costs.size() * sizeof(float));
+      }
+      continue;
+    }
 
-        // Store backpointer for this transition.
-        if (step > 0) {
-          int64_t bp_step = step - 1;
-          if (use_int16) {
-            int16_t* bp = static_cast<int16_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
-            for (int64_t col = 0; col < suffix_count; ++col) {
-              bp[col] = static_cast<int16_t>(b_best_prefix[col]);
-            }
-          } else {
-            int32_t* bp = static_cast<int32_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
-            for (int64_t col = 0; col < suffix_count; ++col) {
-              bp[col] = b_best_prefix[col];
-            }
-          }
-        }
+    // 2. Reduce previous costs over prefix dimension per (batch, suffix).
+    int64_t suffix_grain = std::max<int64_t>(16, suffix_count / (at::get_num_threads() * 4));
+    at::parallel_for(0, suffix_count, suffix_grain, [&](int64_t start_suffix, int64_t end_suffix) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        const float* costs_b = costs_a + b * state_count;
+        float* best_cost_b = best_cost_a + b * suffix_count;
+        int32_t* best_prefix_b = best_prefix_a + b * suffix_count;
+        column_argmin(
+            costs_b,
+            prefix_count,
+            suffix_count,
+            best_cost_b,
+            best_prefix_b,
+            start_suffix,
+            end_suffix);
+      }
+    });
 
-        float* b_next = next_costs_a + b * state_count;
+    // 3. Combine transition cost with emission for the next costs.
+    int64_t prefix_grain = std::max<int64_t>(prefix_count, state_count / (at::get_num_threads() * 4));
+    // Round grain up to a multiple of prefix_count to keep broadcast_add block-aligned.
+    prefix_grain = ((prefix_grain + prefix_count - 1) / prefix_count) * prefix_count;
+    at::parallel_for(0, state_count, prefix_grain, [&](int64_t start_state, int64_t end_state) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        const float* emission_b = emission_a + b * state_count;
+        const float* best_cost_b = best_cost_a + b * suffix_count;
+        float* next_b = next_costs_a + b * state_count;
+        broadcast_add(
+            emission_b,
+            best_cost_b,
+            prefix_count,
+            suffix_count,
+            next_b,
+            start_state,
+            end_state);
+      }
+    });
+
+    // 4. Apply end-of-sequence overlap mask if requested.
+    if (has_overlap && step == step_count - 1) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        float* next_b = next_costs_a + b * state_count;
+        int64_t overlap_val = overlap_ptr[b];
         for (int64_t s = 0; s < state_count; ++s) {
-          int64_t col = s >> transition_bits;
-          float trans = b_best_cost[col];
-          float dist = compute_distance(target, cb_ptr + s * vector_size, target_norm, codebook_norm[s], vector_size);
-          dist = trans + dist * w;
-          if (has_overlap && step == step_count - 1) {
-            int64_t overlap_val = overlap_ptr[b];
-            if ((s & overlap_mask) != overlap_val) {
-              dist = inf;
-            }
+          if ((s & overlap_mask) != overlap_val) {
+            next_b[s] = inf;
           }
-          b_next[s] = dist;
         }
-        std::swap(b_costs, b_next);
-      }
-
-      // Find end state.
-      float* final_costs = b_costs;
-      float best_final = inf;
-      int64_t end_state = 0;
-      for (int64_t s = 0; s < state_count; ++s) {
-        float c = final_costs[s];
-        if (c < best_final) {
-          best_final = c;
-          end_state = s;
-        }
-      }
-      se_ptr[b] = best_final;
-      states_ptr[b * step_count + step_count - 1] = end_state;
-
-      // Traceback.
-      for (int64_t step = step_count - 1; step > 0; --step) {
-        int64_t s = states_ptr[b * step_count + step];
-        int64_t col = s >> transition_bits;
-        int32_t prefix = 0;
-        if (use_int16) {
-          const int16_t* bp = static_cast<const int16_t*>(bp_ptr) + ((step - 1) * batch_size + b) * suffix_count;
-          prefix = static_cast<int32_t>(bp[col]);
-        } else {
-          const int32_t* bp = static_cast<const int32_t*>(bp_ptr) + ((step - 1) * batch_size + b) * suffix_count;
-          prefix = bp[col];
-        }
-        states_ptr[b * step_count + step - 1] = static_cast<int64_t>(prefix) * suffix_count + col;
       }
     }
-  });
+
+    // 5. Store backpointers.
+    for (int64_t b = 0; b < batch_size; ++b) {
+      int64_t bp_step = step - 1;
+      if (use_int16) {
+        int16_t* bp = static_cast<int16_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
+        const int32_t* bp_src = best_prefix_a + b * suffix_count;
+        for (int64_t col = 0; col < suffix_count; ++col) {
+          bp[col] = static_cast<int16_t>(bp_src[col]);
+        }
+      } else {
+        int32_t* bp = static_cast<int32_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
+        const int32_t* bp_src = best_prefix_a + b * suffix_count;
+        std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
+      }
+    }
+
+    std::swap(costs_a, next_costs_a);
+  }
+
+  // Find end state per batch and traceback.
+  for (int64_t b = 0; b < batch_size; ++b) {
+    float* final_costs = costs_a + b * state_count;
+    float best_final = inf;
+    int64_t end_state = 0;
+    for (int64_t s = 0; s < state_count; ++s) {
+      float c = final_costs[s];
+      if (c < best_final) {
+        best_final = c;
+        end_state = s;
+      }
+    }
+    se_ptr[b] = best_final;
+    states_ptr[b * step_count + step_count - 1] = end_state;
+
+    for (int64_t step = step_count - 1; step > 0; --step) {
+      int64_t s = states_ptr[b * step_count + step];
+      int64_t col = s >> transition_bits;
+      int32_t prefix = 0;
+      if (use_int16) {
+        const int16_t* bp = static_cast<const int16_t*>(bp_ptr) + ((step - 1) * batch_size + b) * suffix_count;
+        prefix = static_cast<int32_t>(bp[col]);
+      } else {
+        const int32_t* bp = static_cast<const int32_t*>(bp_ptr) + ((step - 1) * batch_size + b) * suffix_count;
+        prefix = bp[col];
+      }
+      states_ptr[b * step_count + step - 1] = static_cast<int64_t>(prefix) * suffix_count + col;
+    }
+  }
 
   return std::make_tuple(states, squared_error);
 }

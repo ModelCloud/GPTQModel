@@ -2,7 +2,7 @@
 
 Targets:
 - QVQ V2 and V2B2-P32 inference GEMV
-- QVQ Viterbi and YAQA quantization (pending)
+- QVQ Viterbi and YAQA quantization
 
 Accuracy targets:
 - Quantization kernels: max abs error <= 1e-6 vs reference
@@ -22,7 +22,6 @@ Done:
 - Registered `viterbi_cpu` in the same `gptqmodel_qvq` torch.ops namespace and `qvq_cpu` extension.
 - `batched_viterbi_quantize` and `tail_biting_viterbi_quantize` now dispatch to the CPU kernel for `[65536, V]` FP32 codebooks and FP32 sequences on CPU.
 - Validated V2 (V=2, bits 1-3.5), V4 (V=4, bits 2-4), overlap tail-biting, per-step weights, and tail-biting candidates against the Python reference: states match exactly; squared-error maxdiff <= 4.8e-7; reconstructed values maxdiff 0.0.
-- Measured up to ~4x speedup vs the eager FP32 reference on batch/steps shapes representative of QVQ tile quantization.
 - YAQA non-banked CPU quantization is accelerated because `yaqa_inner` routes tile Viterbi through `tail_biting_viterbi_quantize`.
 
 Done:
@@ -31,6 +30,31 @@ Done:
 - This covers `block_ldlq_inner_v2b2_p32` and all banked YAQA modes (`yaqa_inner_v2b2_p32`, `yaqa_output_spectral_refine_v2b2_p32`, `yaqa_spectral_push_v2b2_p32`, `yaqa_localized_spectral_refine_v2b2_p32`).
 - `tests/test_qvq_v2b2_p32.py` passes: 92 passed, 9 skipped.
 - `tests/test_qvq.py -k "viterbi or tail_biting"` passes except `test_qvq_l18_v4_torch_viterbi_recovers_exact_transition_consistent_path`, which fails because the float32 Python reference DP cost is `1.19e-6` (just above its `1e-6` tolerance); the selected values are bit-exact.
+
+Done (AVX-512 SIMD pass):
+- Added shared `gptqmodel_ext/qvq/qvq_viterbi_simd.h` with AVX-512F/BW/VL/DQ/FMA intrinsics for:
+  - `emit_distance` (squared Euclidean distance, V=2 and V=4 specializations, clamped to `[0, inf)`)
+  - `column_argmin` (row-min and argmin over prefix states)
+  - `broadcast_add` (broadcast transition cost over emission states)
+- Rewrote `qvq_viterbi_cpu.cpp` and `qvq_viterbi_banked_cpu.cpp` to:
+  - Transpose codebook(s) to `[..., vector_size, state_count]` for contiguous 16-state loads.
+  - Precompute codebook norms once.
+  - Parallelize over `state_count` and `suffix_count` with `at::parallel_for` instead of only over batch.
+  - Use `__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,fma")))` SIMD helpers with scalar fallbacks and runtime `__builtin_cpu_supports` dispatch.
+- Accuracy:
+  - `tests/test_qvq_v2b2_p32.py`: 92 passed, 9 skipped.
+  - `tests/test_qvq.py -k "viterbi or tail_biting"`: 89 passed, 112 skipped, 1 failed (same pre-existing `squared_error` 1.19e-6 tolerance edge case; CPU result matches Python fallback exactly).
+  - Raw op micro-benchmark: CPU and Python fallback produce identical `squared_error` (diff = 0).
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - Raw `viterbi_cpu`: 18.408 ms -> 2.183 ms (~8.4x)
+  - Raw `viterbi_banked_cpu`: 78.203 ms -> 5.423 ms (~14.4x)
+  - End-to-end `scripts/benchmark_qvq_banked_yaqa.py --device cpu --bits 3.5`:
+    - V2: 669.944 ms -> 43.829 ms (~15.3x)
+    - B2 fixed: 1966.070 ms -> 102.556 ms (~19.2x)
+    - B2 reselect: 4631.295 ms -> 234.168 ms (~19.8x)
+    - B4: 5755.283 ms -> 262.696 ms (~21.9x)
+    - All arms report `exact: yes`.
+- `ruff check` and `git diff --check` pass.
 
 Next:
 - Benchmark CPU GEMV vs dense `x @ inner` and add focused tests.
