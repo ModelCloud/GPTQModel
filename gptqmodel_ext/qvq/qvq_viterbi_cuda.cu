@@ -543,7 +543,35 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
       target_norm = __fadd_rn(target_norm, __fmul_rn(target[i], target[i]));
     }
     if (!multi_thread_suffix) {
-      for (int m = 0; m < suffixes_per_thread; ++m) {
+      if constexpr (shift == 5) {
+        const int x0 = thread;
+        const int x1 = thread + kThreads;
+        float best0 = CUDART_INF_F;
+        float best1 = CUDART_INF_F;
+        int best_h0 = 0;
+        int best_h1 = 0;
+        for (int h = 0; h < (1 << shift); ++h) {
+          const int s0 = (h << (16 - shift)) | x0;
+          const int s1 = (h << (16 - shift)) | x1;
+          const float value0 = G_prev[s0 >> shift] + emission<VectorSize, CodebookScalar>(
+              target, codebook, codebook_norm, s0, step_weight, target_norm);
+          const float value1 = G_prev[s1 >> shift] + emission<VectorSize, CodebookScalar>(
+              target, codebook, codebook_norm, s1, step_weight, target_norm);
+          if (lower_pair(value0, h, best0, best_h0)) {
+            best0 = value0;
+            best_h0 = h;
+          }
+          if (lower_pair(value1, h, best1, best_h1)) {
+            best1 = value1;
+            best_h1 = h;
+          }
+        }
+        G_next[x0] = best0;
+        G_next[x1] = best1;
+        backpointers[pointer_base + static_cast<int64_t>(step) * suffix_count + x0] = best_h0;
+        backpointers[pointer_base + static_cast<int64_t>(step) * suffix_count + x1] = best_h1;
+      } else {
+        for (int m = 0; m < suffixes_per_thread; ++m) {
         const int x = (m << 10) | thread;
         const int h0 = x >> (16 - shift);
         float best = CUDART_INF_F;
@@ -576,6 +604,7 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
         }
         G_next[x] = best;
         backpointers[pointer_base + static_cast<int64_t>(step) * suffix_count + x] = best_h;
+        }
       }
       __syncthreads();
     } else {

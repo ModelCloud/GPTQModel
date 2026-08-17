@@ -331,3 +331,15 @@ Nested canonical and family encoders no longer repeat those synchronizing full-t
 callers retain the complete validation contract. On the same W2.5 q_proj case this reduced the median from 2.395 to
 2.375 seconds (1.008x), with identical weight, state, selector, family, and peak-VRAM results. This is intentionally
 a small validation-overhead cleanup rather than a recurrence-speed claim.
+
+At W2.5 each canonical V2 thread owns two independent suffixes. Processing the suffixes serially exposed one short
+codebook dependency chain at a time. The SM80 specialization now advances both suffix minima in the same rolled
+32-candidate loop. Each suffix retains ascending-prefix evaluation, exact FP32 arithmetic, and the original tie rule.
+
+| Path | Packed serial suffixes | Two rolled suffix chains | Speedup | Accuracy |
+|---|---:|---:|---:|---|
+| Canonical, unconstrained | 1.6742 ms | 1.5288 ms | 1.095x | SHA-256 identical |
+| Canonical, constrained | 1.6742 ms | 1.5299 ms | 1.094x | SHA-256 identical |
+| Real W2.5 B2-P32+YAQA q_proj | 2.375 s | 2.350 s | 1.011x | complete artifact identical |
+
+The segmented recurrence is unchanged and now dominates the W2.5 family candidate, limiting the module-level gain.
