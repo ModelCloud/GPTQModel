@@ -81,6 +81,35 @@ in dense inner weight, trellis states, selectors, or family ID. This is stronger
 than the quantization tolerance of `1e-6`. Inference kernels were unchanged;
 their accepted numerical drift remains at most `2e-3`.
 
+### Occupancy-aware default anti-diagonal batches
+
+The segmented grid launches two CTAs per B2 sequence. CUDA YAQA's historical
+default `trellis_batch_size=16` therefore launched only 32 CTAs at a time on
+the 124-SM test GPUs. The default CUDA policy now coalesces up to 64 independent
+tiles from one anti-diagonal (32 at W1, where each CTA uses 128 KiB shared
+memory). Explicit non-default caller batch sizes remain unchanged.
+
+Full B2 family-reselection A/B measurements used one 512x512 FP32 matrix,
+identical SPD input/output Hessians, three alternative families, and four warm
+synchronized samples per arm. The only changed input was batch 16 versus 64.
+
+```text
++-------+-----------+-----------+---------+------------------------+
+| Rate  | Batch 16  | Batch 64  | Speedup | Quantization parity    |
++-------+-----------+-----------+---------+------------------------+
+| W1.5  | 2624.03ms | 1899.03ms |   1.38x | bit-exact              |
+| W2    | 2107.50ms | 1586.87ms |   1.33x | bit-exact              |
+| W2.5  | 2209.78ms | 1630.29ms |   1.36x | bit-exact              |
+| W3    | 2144.49ms | 1647.52ms |   1.30x | bit-exact              |
++-------+-----------+-----------+---------+------------------------+
+```
+
+At W2.5 the measured peak allocation changed from `76.06 MiB` to `78.07 MiB`
+for this geometry. Focused CUDA validation passed all six W1--W3.5 B2 YAQA
+rates plus the multi-tile partial-batch test (`7 passed`). A pure policy test
+covers the CUDA default, W1 memory cap, partial anti-diagonal, explicit caller,
+non-CUDA, and Apple branches.
+
 ## Nsight result and remaining target
 
 For W2.5 batch 16, Nsight Compute reports only 32 CTAs on a 124-SM GPU

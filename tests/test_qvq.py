@@ -1341,6 +1341,18 @@ def test_qvq_reference_quantizer_uses_rate_aware_backend_batches():
         default_qvq_trellis_batch_size(3, "mps", trellis_window=18)
 
 
+def test_yaqa_segmented_batch_policy_fills_cuda_without_overriding_explicit_batches():
+    policy = qvq_module._yaqa_segmented_batch_size
+
+    assert policy(128, 16, 1, apple_host_feedback=False, cuda_feedback=True) == 32
+    assert policy(128, 16, 2.5, apple_host_feedback=False, cuda_feedback=True) == 64
+    assert policy(31, 16, 2.5, apple_host_feedback=False, cuda_feedback=True) == 31
+    assert policy(128, 8, 2.5, apple_host_feedback=False, cuda_feedback=True) == 8
+    assert policy(128, 96, 2.5, apple_host_feedback=False, cuda_feedback=True) == 96
+    assert policy(128, 16, 2.5, apple_host_feedback=False, cuda_feedback=False) == 16
+    assert policy(128, 16, 2.5, apple_host_feedback=True, cuda_feedback=False) == 128
+
+
 def test_qvq_l18_implicit_batch_policy_reaches_quantizer_without_changing_math(monkeypatch):
     observed = []
     original_policy = qvq_module.default_qvq_trellis_batch_size

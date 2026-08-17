@@ -119,6 +119,25 @@ def _yaqa_anti_diagonal_schedule(
     return schedule
 
 
+def _yaqa_segmented_batch_size(
+    logical_batch_size: int,
+    requested_batch_size: int,
+    bits: float,
+    *,
+    apple_host_feedback: bool,
+    cuda_feedback: bool,
+) -> int:
+    """Choose an occupancy-aware YAQA tile batch without overriding explicit CUDA tuning."""
+
+    if apple_host_feedback:
+        apple_auto_batch = 32 if bits <= 2 or bits == 3 else 128
+        return max(requested_batch_size, min(logical_batch_size, apple_auto_batch))
+    if cuda_feedback and requested_batch_size == 16:
+        cuda_auto_batch = 32 if bits == 1 else 64
+        return min(logical_batch_size, cuda_auto_batch)
+    return requested_batch_size
+
+
 def _canonical_qvq_codebook(
     *,
     device: torch.device,
@@ -3666,11 +3685,17 @@ def yaqa_inner(
             # and W3.5 benefit from the full 128-tile coalescing window.  Keep
             # explicit larger caller batches intact and retain the caller's
             # exact policy on every other backend.
-            apple_auto_batch = 32 if bits <= 2 or bits == 3 else 128
-            segmented_batch_size = (
-                max(trellis_batch_size, min(logical_batch_size, apple_auto_batch))
-                if apple_host_feedback
-                else trellis_batch_size
+            # Two bank-grid CTAs are launched per sequence. The historical
+            # CUDA default of 16 therefore submits only 32 CTAs to 100+ SM
+            # datacenter GPUs, leaving most of the device idle. Coalesce
+            # independent tiles from one anti-diagonal into a one-wave launch;
+            # explicit non-default caller batch policies remain authoritative.
+            segmented_batch_size = _yaqa_segmented_batch_size(
+                logical_batch_size,
+                trellis_batch_size,
+                bits,
+                apple_host_feedback=apple_host_feedback,
+                cuda_feedback=source.device.type == "cuda",
             )
             cuda_values_prevalidated = sequences.device.type == "cuda"
             if cuda_values_prevalidated:
