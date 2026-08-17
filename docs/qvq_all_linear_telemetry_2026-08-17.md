@@ -101,3 +101,24 @@ The dense and quantized model forwards remain the two largest individual final-e
 
 The forward pair already saturates the same SM resources under batch-1 full-row evaluation, so stream overlap
 causes contention. Transformers' default SDPA is faster than FA2 for this exact variable-length workload.
+
+## Sketch-B accumulator residency A/B
+
+Sketch-B previously copied every quadratic input/output Gram update to CPU and accumulated it there after every
+batch. For wide gate/up projections this repeatedly moved the complete factor footprint over PCIe and introduced
+host synchronization inside every module hook. The collector now retains accumulators on CUDA when an
+allocator-aware check can preserve at least 25% of device memory (and at least 16 GiB), then performs one final
+host transfer. CPU remains the exact low-memory fallback.
+
+Matched real Llama 3.2 1B A/B: first two layers, all four gate/up modules, 32 independent full rows, Sketch batch
+8, FP32 factors, checkpointed full-model backward.
+
+| Accumulator | Wall (s) | CUDA work (s) | Peak VRAM (GiB) | Factor footprint (GiB) | Max factor drift |
+|---|---:|---:|---:|---:|---:|
+| CPU per-batch | 7.604 | 6.976 | 7.79 | 1.06 | reference |
+| CUDA then one host transfer | 4.127 | 2.647 | 8.86 | 1.06 | 4.06e-7 |
+
+The end-to-end collection speedup is **1.84x** with 1.07 GiB extra peak VRAM. The measured drift is below the
+declared `1e-6` quantization tolerance. Tiny-model CUDA/CPU accumulation, activation-checkpointing, repeated-seed,
+and factor-output tests remain bit-exact; telemetry now records residency, allocated factor bytes, capture wall/CUDA
+time, and final transfer time.

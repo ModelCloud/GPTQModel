@@ -900,6 +900,11 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
     # sequence is processed so MPS does not retain quadratic Gram matrices.
     assert input_hessians["proj"].device == torch.device("cpu")
     assert output_hessians["proj"].device == torch.device("cpu")
+    assert stats.pop("accumulator_device") == "cpu"
+    assert stats.pop("accumulator_bytes") == 32
+    assert stats.pop("capture_wall_seconds") >= 0
+    assert stats.pop("capture_cuda_ms") is None
+    assert stats.pop("final_host_transfer_seconds") >= 0
     assert stats == {
         "method": "YAQA-v3 Sketch B real Fisher",
         "full_model_backward": True,
@@ -1190,6 +1195,32 @@ def test_yaqa_diagnostic_sketch_b_requires_eval_mode_and_target_modules():
     model.eval()
     with pytest.raises(ValueError, match="at least one target"):
         capture_yaqa_sketch_b(model, [batch], {}, device=torch.device("cpu"))
+
+
+def test_yaqa_diagnostic_sketch_b_rejects_invalid_accumulator_devices():
+    model = _TinyCausalModel().eval()
+    batch = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "attention_mask": torch.ones(1, 2, dtype=torch.long),
+    }
+    modules = {"proj": model.model.layers[0].proj}
+
+    with pytest.raises(ValueError, match="CPU or CUDA"):
+        capture_yaqa_sketch_b(
+            model,
+            [batch],
+            modules,
+            device=torch.device("cpu"),
+            accumulator_device=torch.device("meta"),
+        )
+    with pytest.raises(ValueError, match="require CUDA collection"):
+        capture_yaqa_sketch_b(
+            model,
+            [batch],
+            modules,
+            device=torch.device("cpu"),
+            accumulator_device=torch.device("cuda"),
+        )
 
 
 @pytest.mark.parametrize(

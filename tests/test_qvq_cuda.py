@@ -187,6 +187,7 @@ def test_yaqa_cuda_activation_checkpointing_is_bit_exact_and_deterministic(seed)
         {"proj": baseline_model.model.layers[0].proj},
         device=torch.device("cuda"),
         seed=seed,
+        accumulator_device=torch.device("cpu"),
     )
 
     for _ in range(10):
@@ -205,6 +206,10 @@ def test_yaqa_cuda_activation_checkpointing_is_bit_exact_and_deterministic(seed)
         assert torch.equal(actual_output["proj"], baseline_output["proj"])
         assert stats["activation_checkpointing"] is True
         assert stats["checkpointed_modules"] == 2
+        assert stats["accumulator_device"] == "cuda"
+        assert stats["accumulator_bytes"] == 128
+        assert stats["capture_cuda_ms"] > 0
+        assert stats["final_host_transfer_seconds"] >= 0
         assert all("forward" not in layer.__dict__ for layer in layers)
 
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -156,6 +157,7 @@ def capture_yaqa_sketch_b(
     first_decoder_layer: nn.Module | None = None,
     checkpoint_modules: Sequence[nn.Module] = (),
     progress_callback: Callable[[dict[str, int]], None] | None = None,
+    accumulator_device: torch.device | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -173,6 +175,12 @@ def capture_yaqa_sketch_b(
         raise ValueError("YAQA Sketch B target modules must be unique")
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("YAQA Sketch B progress callback must be callable")
+    if accumulator_device is not None:
+        accumulator_device = torch.device(accumulator_device)
+        if accumulator_device.type not in {"cpu", "cuda"}:
+            raise ValueError("YAQA Sketch-B accumulators support CPU or CUDA storage")
+        if accumulator_device.type == "cuda" and device.type != "cuda":
+            raise ValueError("YAQA CUDA accumulators require CUDA collection")
     if first_decoder_layer is None:
         first_decoder_layer = _default_first_decoder_layer(model)
     if not isinstance(first_decoder_layer, nn.Module):
@@ -202,6 +210,17 @@ def capture_yaqa_sketch_b(
             "add independent calibration sequences or explicitly reduce the minimum for a diagnostic-only run"
         )
 
+    factor_bytes = sum(
+        (module.in_features * module.in_features + module.out_features * module.out_features) * 4
+        for module in modules.values()
+    )
+    if accumulator_device is None:
+        accumulator_device = torch.device("cpu")
+        if device.type == "cuda":
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+            reserve_bytes = max(16 * 1024**3, total_bytes // 4)
+            if factor_bytes <= max(0, free_bytes - reserve_bytes):
+                accumulator_device = device
     input_accumulators: dict[str, torch.Tensor] = {}
     output_accumulators: dict[str, torch.Tensor] = {}
     sequence_counts = dict.fromkeys(modules, 0)
@@ -214,6 +233,15 @@ def capture_yaqa_sketch_b(
     parameters = tuple(model.parameters())
     parameter_requires_grad = tuple(parameter.requires_grad for parameter in parameters)
     generator = torch.Generator(device=device).manual_seed(seed)
+    nonfinite_update = (
+        torch.zeros((), dtype=torch.bool, device=device) if accumulator_device.type == "cuda" else None
+    )
+    capture_started = time.perf_counter()
+    capture_start_event = capture_end_event = None
+    if device.type == "cuda":
+        capture_start_event = torch.cuda.Event(enable_timing=True)
+        capture_end_event = torch.cuda.Event(enable_timing=True)
+        capture_start_event.record()
 
     def seed_decoder_gradient(_module, args, kwargs):
         if args:
@@ -245,27 +273,20 @@ def capture_yaqa_sketch_b(
             raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
         input_update = torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0)
         output_update = torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0)
-        if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
-            raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
-        # Keep the quadratic Sketch-B accumulators on host memory.  Leaving one
-        # input and one output Gram matrix per target on MPS makes the unified
-        # memory allocator retain several gigabytes for a two-layer 1B model;
-        # the factors are consumed by the quantizer on CPU later anyway.  The
-        # matrix products above still run on the requested device, so this is a
-        # residency/allocator fix, not a change to the Fisher objective.
-        input_update_cpu = input_update.detach().to(device="cpu")
-        output_update_cpu = output_update.detach().to(device="cpu")
-        if module_name in input_accumulators:
-            input_accumulators[module_name].add_(input_update_cpu)
-            output_accumulators[module_name].add_(output_update_cpu)
+        if nonfinite_update is None:
+            if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
+                raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
         else:
-            input_accumulators[module_name] = input_update_cpu.contiguous()
-            output_accumulators[module_name] = output_update_cpu.contiguous()
-        del input_update, output_update, input_update_cpu, output_update_cpu
-        if not torch.isfinite(input_accumulators[module_name]).all() or not torch.isfinite(
-            output_accumulators[module_name]
-        ).all():
-            raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B accumulator")
+            nonfinite_update.logical_or_(~torch.isfinite(input_update).all())
+            nonfinite_update.logical_or_(~torch.isfinite(output_update).all())
+        input_update = input_update.detach().to(device=accumulator_device)
+        output_update = output_update.detach().to(device=accumulator_device)
+        if module_name in input_accumulators:
+            input_accumulators[module_name].add_(input_update)
+            output_accumulators[module_name].add_(output_update)
+        else:
+            input_accumulators[module_name] = input_update.contiguous()
+            output_accumulators[module_name] = output_update.contiguous()
         sequence_counts[module_name] += per_sequence_gradient.shape[0]
 
     for name, module in modules.items():
@@ -370,6 +391,26 @@ def capture_yaqa_sketch_b(
 
     if total_sequences < 1:
         raise ValueError("YAQA Sketch B observed no independent calibration sequences")
+    for name in modules:
+        if sequence_counts[name] != total_sequences or name not in input_accumulators:
+            raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
+
+    if capture_end_event is not None:
+        capture_end_event.record()
+    transfer_started = time.perf_counter()
+    if nonfinite_update is not None and bool(nonfinite_update):
+        raise ValueError("YAQA produced a non-finite Sketch-B Gram update")
+    for name in modules:
+        input_accumulators[name] = input_accumulators[name].to(device="cpu")
+        output_accumulators[name] = output_accumulators[name].to(device="cpu")
+        if not torch.isfinite(input_accumulators[name]).all() or not torch.isfinite(
+            output_accumulators[name]
+        ).all():
+            raise ValueError(f"YAQA module {name} produced an overflowing Sketch-B accumulator")
+    transfer_seconds = time.perf_counter() - transfer_started
+    capture_cuda_ms = (
+        None if capture_start_event is None else capture_start_event.elapsed_time(capture_end_event)
+    )
 
     input_hessians: dict[str, torch.Tensor] = {}
     output_hessians: dict[str, torch.Tensor] = {}
@@ -394,6 +435,11 @@ def capture_yaqa_sketch_b(
             "sequence_loss_reduction": "per_sequence_token_sum",
             "activation_checkpointing": bool(checkpoint_modules),
             "checkpointed_modules": len(checkpoint_modules),
+            "accumulator_device": accumulator_device.type,
+            "accumulator_bytes": factor_bytes,
+            "capture_wall_seconds": time.perf_counter() - capture_started,
+            "capture_cuda_ms": capture_cuda_ms,
+            "final_host_transfer_seconds": transfer_seconds,
             "minimum_sequences": minimum_sequences,
             "factor_dtype": "float32",
             "input_factor_elements": input_factor_elements,
