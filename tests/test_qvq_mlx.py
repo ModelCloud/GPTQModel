@@ -30,9 +30,9 @@ from gptqmodel.utils.qvq_mlx import (
     _v4_use_mma,
     qvq_mlx_gemv,
     qvq_mlx_prepare_v2_banked_codebooks_from_torch,
+    qvq_mlx_tail_biting_v2_banked_from_torch_cpu,
     qvq_mlx_tail_biting_v2b2_p32,
     qvq_mlx_tail_biting_v2b4_p64,
-    qvq_mlx_tail_biting_v2_banked_from_torch_cpu,
     qvq_mlx_viterbi,
 )
 
@@ -580,6 +580,24 @@ def test_qvq_mlx_prepared_banked_codebooks_reject_mutated_source():
             segment_steps=16,
             mlx_codebooks=prepared,
         )
+
+
+def test_qvq_mlx_prepared_banked_codebooks_use_exact_fp16_or_fp32_fallback():
+    pgc_codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in (0, 3))
+    ).contiguous()
+    prepared_pgc = qvq_mlx_prepare_v2_banked_codebooks_from_torch(pgc_codebooks)
+    assert prepared_pgc.lease.array.dtype == mx.float16
+    assert torch.equal(pgc_codebooks, pgc_codebooks.to(torch.float16).to(torch.float32))
+
+    non_fp16_codebooks = pgc_codebooks.clone()
+    non_fp16_codebooks[0, 0, 0] = torch.nextafter(
+        non_fp16_codebooks[0, 0, 0],
+        torch.tensor(float("inf")),
+    )
+    assert not torch.equal(non_fp16_codebooks, non_fp16_codebooks.to(torch.float16).to(torch.float32))
+    prepared_fp32 = qvq_mlx_prepare_v2_banked_codebooks_from_torch(non_fp16_codebooks)
+    assert prepared_fp32.lease.array.dtype == mx.float32
 
 
 @pytest.mark.parametrize("kind", ("v2b2_p32", "v2b4_p64"))

@@ -66,8 +66,8 @@ _VITERBI_KERNELS: dict[str, Any] = {}
 _VITERBI_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_VITERBI_KERNEL: Any | None = None
 _V2_BANKED_VITERBI_KERNEL_ERROR: str | None = None
-_V2_BANKED_TAIL_KERNEL: Any | None = None
-_V2_BANKED_TAIL_KERNEL_ERROR: str | None = None
+_V2_BANKED_TAIL_KERNELS: dict[str, Any] = {}
+_V2_BANKED_TAIL_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_TORCH_CODEBOOK_HOT: tuple[Any, int, Any] | None = None
 _V2_BANKED_TORCH_CODEBOOK_LOCK = threading.Lock()
 _QVQ_YAQA_MLX_CACHE_LIMIT_BYTES = 512 << 20
@@ -163,8 +163,8 @@ class _TorchMLXStagingPool:
 
         if source.device.type != "cpu" or not source.is_contiguous():
             raise ValueError(f"QVQ {name} staging requires a contiguous Torch CPU tensor")
-        if source.dtype != torch.float32:
-            raise TypeError(f"QVQ {name} staging currently requires float32")
+        if source.dtype not in (torch.float16, torch.float32):
+            raise TypeError(f"QVQ {name} staging requires float16 or float32")
         key = (name, source.dtype, tuple(source.shape))
         slot = self._slots.pop(key, None)
         if slot is None:
@@ -172,7 +172,7 @@ class _TorchMLXStagingPool:
             while self._slots and self._bytes + slot_bytes > self.max_bytes:
                 _, evicted = self._slots.popitem(last=False)
                 self._bytes -= evicted.torch_storage.numel() * evicted.torch_storage.element_size()
-            mlx_storage = mx.zeros(source.shape, dtype=mx.float32)
+            mlx_storage = mx.zeros(source.shape, dtype=mx.float16 if source.dtype == torch.float16 else mx.float32)
             mx.eval(mlx_storage)
             # MLX's NumPy export is a writable zero-copy CPU view of its shared
             # Metal allocation. Torch writes through that view without another
@@ -765,6 +765,14 @@ inline float qvq_emit_banked(float2 target, device const float* codebooks,
   return max(tn+codebook_norms[ulong(bank)*65536u+state]-2.0f*dot,0.0f)*weight;
 }
 """
+
+_V2_BANKED_TAIL_FP16_HEADER = _V2_BANKED_VITERBI_HEADER.replace(
+    "device const float* codebooks",
+    "device const half* codebooks",
+).replace(
+    "float x=target.x,y=target.y,cx=codebooks[offset],cy=codebooks[offset+1u];",
+    "float x=target.x,y=target.y,cx=float(codebooks[offset]),cy=float(codebooks[offset+1u]);",
+)
 
 _V2_BANKED_VITERBI_SOURCE = r"""
 constexpr uint state_count=65536,prefix_count=1u<<EdgeBits,suffix_count=state_count/prefix_count;
@@ -1491,18 +1499,21 @@ def _v2_banked_viterbi_kernel():
     return _V2_BANKED_VITERBI_KERNEL
 
 
-def _v2_banked_tail_kernel():
-    global _V2_BANKED_TAIL_KERNEL, _V2_BANKED_TAIL_KERNEL_ERROR
-    if _V2_BANKED_TAIL_KERNEL is None:
+def _v2_banked_tail_kernel(codebook_dtype: str):
+    if codebook_dtype not in ("float16", "float32"):
+        raise ValueError(f"unsupported QVQ banked-V2 tail codebook dtype: {codebook_dtype}")
+    kernel = _V2_BANKED_TAIL_KERNELS.get(codebook_dtype)
+    if kernel is None:
         with _KERNEL_LOCK:
-            if _V2_BANKED_TAIL_KERNEL is None:
-                if _V2_BANKED_TAIL_KERNEL_ERROR is not None:
-                    raise RuntimeError(_V2_BANKED_TAIL_KERNEL_ERROR)
+            kernel = _V2_BANKED_TAIL_KERNELS.get(codebook_dtype)
+            if kernel is None:
+                if codebook_dtype in _V2_BANKED_TAIL_KERNEL_ERRORS:
+                    raise RuntimeError(_V2_BANKED_TAIL_KERNEL_ERRORS[codebook_dtype])
                 import mlx.core as mx
 
                 try:
-                    _V2_BANKED_TAIL_KERNEL = mx.fast.metal_kernel(
-                        name="gptqmodel_qvq_tail_v2_banked",
+                    kernel = mx.fast.metal_kernel(
+                        name=f"gptqmodel_qvq_tail_v2_banked_{codebook_dtype}",
                         input_names=["sequences", "codebooks", "codebook_norms", "step_weights", "dims"],
                         output_names=[
                             "costs",
@@ -1512,14 +1523,20 @@ def _v2_banked_tail_kernel():
                             "segment_bank_ids",
                             "squared_error",
                         ],
-                        header=_V2_BANKED_VITERBI_HEADER,
+                        header=(
+                            _V2_BANKED_TAIL_FP16_HEADER
+                            if codebook_dtype == "float16"
+                            else _V2_BANKED_VITERBI_HEADER
+                        ),
                         source=_V2_BANKED_TAIL_SOURCE,
                         ensure_row_contiguous=True,
                     )
                 except Exception as exc:
-                    _V2_BANKED_TAIL_KERNEL_ERROR = f"QVQ banked-V2 tail-biting MLX kernel creation failed: {exc}"
-                    raise RuntimeError(_V2_BANKED_TAIL_KERNEL_ERROR) from exc
-    return _V2_BANKED_TAIL_KERNEL
+                    message = f"QVQ banked-V2 tail-biting MLX kernel creation failed ({codebook_dtype}): {exc}"
+                    _V2_BANKED_TAIL_KERNEL_ERRORS[codebook_dtype] = message
+                    raise RuntimeError(message) from exc
+                _V2_BANKED_TAIL_KERNELS[codebook_dtype] = kernel
+    return kernel
 
 
 def qvq_mlx_viterbi(sequences, codebook, bits: float, overlap=None, step_weights=None):
@@ -1724,7 +1741,7 @@ def _qvq_mlx_v2_banked_tail_launch(
     if max(*dimensions, batch * steps, batch * segment_count) > 2**32 - 1:
         raise ValueError("QVQ MLX banked-V2 tail-biting workspace exceeds the uint32 kernel limit")
     dims = mx.array([batch, steps, 0, int(weighted)], dtype=mx.uint32)
-    outputs = _v2_banked_tail_kernel()(
+    outputs = _v2_banked_tail_kernel("float16" if codebooks.dtype == mx.float16 else "float32")(
         inputs=[sequences, codebooks, codebook_norms, step_weights, dims],
         template=[
             ("EdgeBits", transition_bits),
@@ -2094,12 +2111,16 @@ def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks):
     if not torch.isfinite(codebooks).all():
         raise ValueError("QVQ MLX bank codebooks must contain only finite values")
     with _TORCH_MLX_BRIDGE_LOCK:
-        if codebooks.device.type == "cpu":
-            lease = _TORCH_MLX_STAGING_POOL.stage(codebooks, name="prepared banked-V2 codebooks")
+        fp16_codebooks = codebooks.to(dtype=torch.float16)
+        use_fp16 = torch.equal(codebooks, fp16_codebooks.to(dtype=torch.float32))
+        prepared_source = fp16_codebooks.contiguous() if use_fp16 else codebooks
+        if prepared_source.device.type == "cpu":
+            lease = _TORCH_MLX_STAGING_POOL.stage(prepared_source, name="prepared banked-V2 codebooks")
         else:
             torch.mps.synchronize()
-            lease = _torch_to_mlx_read_only(codebooks, name="prepared banked-V2 codebooks")
-        norms = mx.sum(lease.array * lease.array, axis=-1)
+            lease = _torch_to_mlx_read_only(prepared_source, name="prepared banked-V2 codebooks")
+        fp32_values = lease.array.astype(mx.float32)
+        norms = mx.sum(fp32_values * fp32_values, axis=-1)
         mx.eval(norms)
         return _QVQMLXPreparedBankedCodebooks(
             source=codebooks,

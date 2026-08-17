@@ -107,3 +107,22 @@ Promising exact directions, in priority order:
    maintained.
 4. Offer fixed-family YAQA only as an explicitly different fast-quality mode after a matched real-model quality
    comparison; do not report it as an exact acceleration of family reselection.
+
+## Exact-FP16 prepared bank tables
+
+The canonical PGC16 V2 bank tables are generated from frozen FP16 bit patterns. An exhaustive W1--W3.5 check
+confirmed that every FP32 table value round-trips through FP16 exactly. The Apple tail-biting kernel now stores
+those prepared tables as FP16 and converts each loaded scalar to FP32 before the unchanged emission arithmetic.
+This halves bank-table traffic without changing the representable codebook, state winner, or selector winner.
+Tables containing any value that is not exactly FP16-representable remain on the FP32 kernel path.
+
+For W2 B2-P32 with 32 tiles per launch on the M4 Max, the same prepared PGC tables measured 13.831 ms in FP32 and
+11.451 ms in FP16, a 1.208x kernel speedup. States, selectors, and the MLX loss result were bit-exact between the two
+storage paths. Against the independent Torch oracle, states and selectors were exact for every half-step from W1
+through W3.5; the diagnostic accumulated loss differed by at most `7.63e-6` because the existing Metal and Torch
+reduction orders differ. The serialized quantization result is determined by the exact state and selector winners,
+so the quantized weights remain exact rather than merely within tolerance.
+
+Validation on the M4 Max: all 310 MLX tests pass, including an explicit guard that canonical PGC banks take the
+FP16 path while arbitrary non-FP16 banks fall back to FP32. Inference accuracy remains governed by the separate
+`2e-3` output tolerance; this change affects quantization-time table storage only.
