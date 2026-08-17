@@ -233,6 +233,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Use the arm codec or canonical V2 independently for MLP projections.",
     )
     parser.add_argument("--arms", nargs="+", choices=tuple(ARM_CONFIG), default=DEFAULT_ARMS)
+    parser.add_argument(
+        "--output-alignment",
+        action="store_true",
+        help=(
+            "Request fixed-trellis output alignment. The comparison harness does not yet implement this stage; "
+            "enabling it fails closed instead of silently running an unaligned comparison."
+        ),
+    )
     parser.add_argument("--calibration-rows", type=int, default=64)
     parser.add_argument("--evaluation-rows", type=int, default=64)
     parser.add_argument("--evaluation-row-offset", type=int, default=64)
@@ -2881,6 +2889,11 @@ def _streaming_compare_models(
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.output_alignment:
+        raise RuntimeError(
+            "--output-alignment is not implemented by compare_qvq_codecs_llama_qkvo.py; "
+            "use scripts/analyze_qvq_e2e_alignment.py for the supported fixed-trellis alignment workflow."
+        )
     if args.layers < 1:
         raise ValueError("layer count must be positive")
     if args.prepare_yaqa_only and args.yaqa_factor_cache is None:

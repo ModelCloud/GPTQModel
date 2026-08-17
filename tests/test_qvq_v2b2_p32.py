@@ -424,6 +424,10 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert args.mlp_acceptance_execution == "auto"
     assert args.max_length is None
     assert args.qvq_telemetry is False
+    assert args.output_alignment is False
+    assert _parser().parse_args(
+        ("--model", "model", "--dataset", "dataset", "--output", "report.json", "--output-alignment")
+    ).output_alignment is True
     assert ARM_CONFIG["v2b2-p32"] == {
         "vector_size": 2,
         "trellis_window": 16,
