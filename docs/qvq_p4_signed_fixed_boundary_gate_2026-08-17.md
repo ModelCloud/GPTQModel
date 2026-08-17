@@ -356,6 +356,23 @@ positive for Q and strongly negative for K under the same rate, YAQA factors, pr
 or local-proxy choice is therefore unsupported. The production design must remain optional per module, score the
 actual packed runtime, and preserve atomic canonical rollback.
 
+## Sequential V-projection replication (P16)
+
+P16 added the canonical K rollback to the live prefix and repeated the packed gate for layer-2 `v_proj`. Again, no
+alternate family improved both search folds:
+
+| Family | Worst-fold final-KL ratio | Selector nonzero fraction | Decision |
+|---:|---:|---:|---|
+| canonical V2 | 1.000000 | 0.00% | selected rollback |
+| 1 | 1.028622 | 49.59% | reject |
+| 2 | 1.024808 | 49.73% | reject |
+| 3 | 1.018731 | 49.76% | reject |
+
+The alternative banks were used heavily, but the added discrete capacity produced the wrong propagated directions.
+The optimized negative path skipped duplicate selected-artifact endpoint passes and completed in `95.60 s`. P15 and
+P16 together reinforce that occupancy and local capacity are not promotion evidence; only the live propagated gate
+can decide whether a family is useful for a specific module.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -370,3 +387,5 @@ actual packed runtime, and preserve atomic canonical rollback.
 - `artifacts/qvq_p14_complete_family_gate/selected_packed.safetensors`
 - `artifacts/qvq_p15_complete_family_k_gate/report_packed.json`
 - `artifacts/qvq_p15_complete_family_k_gate/selected_packed.safetensors`
+- `artifacts/qvq_p16_complete_family_v_gate/report_packed.json`
+- `artifacts/qvq_p16_complete_family_v_gate/selected_packed.safetensors`
