@@ -31,6 +31,7 @@ def _qvq_cpu_sources() -> list[str]:
         str(_qvq_cpu_root() / "qvq_gemv_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_viterbi_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_viterbi_banked_cpu.cpp"),
+        str(_qvq_cpu_root() / "qvq_hadamard_cpu.cpp"),
     ]
 
 
@@ -48,7 +49,7 @@ def _qvq_cpu_extra_ldflags() -> list[str]:
 _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_CPU_OPS_NAME,
     namespace=_QVQ_CPU_NAMESPACE,
-    required_ops=("gemv_cpu", "viterbi_cpu", "viterbi_banked_cpu"),
+    required_ops=("gemv_cpu", "viterbi_cpu", "viterbi_banked_cpu", "hadamard"),
     sources=_qvq_cpu_sources,
     build_root_env="GPTQMODEL_QVQ_CPU_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_cpu"),
@@ -209,6 +210,72 @@ def _qvq_cpu_viterbi_banked_op() -> Callable:
             if _QVQ_CPU_VITERBI_BANKED_OP is None:
                 _QVQ_CPU_VITERBI_BANKED_OP = _extension_api().op("qvq_cpu", "viterbi_banked_cpu")
     return _QVQ_CPU_VITERBI_BANKED_OP
+
+
+_QVQ_CPU_HADAMARD_OP: Callable | None = None
+
+
+def _qvq_cpu_hadamard_op() -> Callable:
+    global _QVQ_CPU_HADAMARD_OP
+    if _QVQ_CPU_HADAMARD_OP is None:
+        with _QVQ_CPU_OP_LOCK:
+            if _QVQ_CPU_HADAMARD_OP is None:
+                _QVQ_CPU_HADAMARD_OP = _extension_api().op("qvq_cpu", "hadamard")
+    return _QVQ_CPU_HADAMARD_OP
+
+
+def qvq_cpu_hadamard(
+    x: torch.Tensor,
+    *,
+    pre_scale: torch.Tensor | None = None,
+    post_scale: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    scale_mode: int = 0,
+) -> torch.Tensor:
+    """Native CPU fused Walsh-Hadamard transform with optional SU/SV/bias.
+
+    Args:
+        x: [... , n] float32 CPU tensor; n must be a power-of-two <= 16384.
+        pre_scale: optional 1D float32 CPU tensor of length n.
+        post_scale: optional 1D float32 CPU tensor of length n.
+        bias: optional 1D float32 CPU tensor of length n.
+        scale_mode: 0 = normalize first (stable), 1 = normalize last,
+            2/3/4 handled as their FP32 equivalents.
+
+    Returns:
+        Transformed tensor with the same shape as x.
+    """
+
+    if not qvq_cpu_supported():
+        raise RuntimeError("QVQ CPU kernel requires x86-64 (AMD64).")
+    if x.device.type != "cpu":
+        raise ValueError("qvq_cpu_hadamard requires a CPU tensor")
+    if x.dtype != torch.float32:
+        raise TypeError("qvq_cpu_hadamard only supports float32 input")
+    if x.dim() < 1:
+        raise ValueError("qvq_cpu_hadamard requires at least rank-one input")
+
+    n = x.shape[-1]
+    if n < 2 or (n & (n - 1)) or n > 16384:
+        raise ValueError(f"qvq_cpu_hadamard requires a power-of-two last dim in [2, 16384], got {n}")
+
+    for name, tensor in (("pre_scale", pre_scale), ("post_scale", post_scale), ("bias", bias)):
+        if tensor is not None:
+            if tensor.device.type != "cpu":
+                raise ValueError(f"qvq_cpu_hadamard: {name} must be a CPU tensor")
+            if tensor.dtype != torch.float32:
+                raise TypeError(f"qvq_cpu_hadamard: {name} must be float32")
+            if tensor.numel() != n:
+                raise ValueError(f"qvq_cpu_hadamard: {name} must have {n} elements")
+
+    x = x.contiguous()
+    return _qvq_cpu_hadamard_op()(
+        x,
+        pre_scale,
+        post_scale,
+        bias,
+        scale_mode,
+    )
 
 
 def qvq_cpu_viterbi_banked(

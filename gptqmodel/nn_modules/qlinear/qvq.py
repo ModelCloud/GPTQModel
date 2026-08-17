@@ -82,7 +82,7 @@ def _qvq_hadamard_fused(
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
 ) -> torch.Tensor:
-    """One fused CUDA Hadamard launch (fp16, pow2); Python butterfly fallback otherwise.
+    """One fused Hadamard launch (CUDA or CPU AVX-512); Python butterfly fallback otherwise.
 
     ``scale_mode`` mirrors the original dispatch: 0 (stable, width >= 2048) or
     1 (end-scale, narrower widths). The fused kernel is bitwise-identical to the
@@ -96,6 +96,24 @@ def _qvq_hadamard_fused(
         # already range-reduced transform result to FP16.
         scaled = x.to(torch.float32) * pre_scale.to(torch.float32)
         return matmul_hadU_stable(scaled) if n >= _FP16_STABLE_HADAMARD_MIN_WIDTH else matmul_hadU(scaled)
+    if (
+        x.device.type == "cpu"
+        and x.dtype == torch.float32
+        and x.is_contiguous()
+        and n >= 2
+        and n & (n - 1) == 0
+        and n <= _QVQ_HADAMARD_MAX_WIDTH
+    ):
+        from ...utils.qvq_cpu import qvq_cpu_hadamard, qvq_cpu_supported
+
+        if qvq_cpu_supported():
+            return qvq_cpu_hadamard(
+                x,
+                pre_scale=pre_scale,
+                post_scale=post_scale,
+                bias=bias,
+                scale_mode=scale_mode,
+            )
     if (
         x.device.type == "cuda"
         and x.dtype in (torch.float16, torch.float32)

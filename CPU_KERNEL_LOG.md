@@ -70,5 +70,23 @@ Done (GEMV shift-register decode pass):
   - V2B2-P32 small-shape check also passes within tolerance.
 - `ruff check` and `git diff --check` pass.
 
+Done (native CPU Hadamard kernel):
+- Added `gptqmodel_ext/qvq/qvq_hadamard_cpu.cpp` implementing a fused fast Walsh-Hadamard transform with AVX-512 butterfly add/sub, optional pre/post scale, bias, and scale modes 0-4.
+- Registered the `hadamard` op for `gptqmodel_qvq` CPU dispatch and added it to `gptqmodel/utils/qvq_cpu.py` as `qvq_cpu_hadamard`.
+- Updated `QVQLinear._qvq_hadamard_fused` to route CPU float32, power-of-two, contiguous inputs through the native kernel instead of the Python `matmul_hadU` fallback.
+- Non-power-of-two widths and non-contiguous/non-float32 inputs still fall back to the existing Python path, preserving the previous behavior.
+- Accuracy:
+  - Bit-exact vs `matmul_hadU` / `matmul_hadU_stable` for unsigned/random-sign inputs (`max abs diff = 0.0`).
+  - With arbitrary float32 `pre_scale`/`post_scale`/`bias`, max abs diff is `<= 9.5e-7`, well inside the 2e-3 inference tolerance (and below 1e-6 for quantization if the kernel were used there).
+  - `tests/test_qvq_v2b2_p32.py`: 119 passed, 12 skipped.
+  - `tests/test_qvq.py -k "viterbi or tail_biting"`: 89 passed, 112 skipped, 1 failed (same pre-existing `squared_error` 1.19e-6 tolerance edge case).
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - Python `matmul_hadU` -> native CPU Hadamard for `n = [1024, 2048, 4096]`:
+    - m=1: ~0.24-0.32 ms -> ~0.008-0.016 ms (~19-30x)
+    - m=4: ~0.29-0.42 ms -> ~0.010-0.022 ms (~20-28x)
+    - m=16: ~0.36-0.73 ms -> ~0.016-0.031 ms (~21-24x)
+  - This removes the Python Hadamard overhead from the QVQ CPU inference path, where it previously sat next to the ~1 ms GEMV kernel.
+- `ruff check` and `git diff --check` pass.
+
 Next:
-- Continue reducing the gap to dense matmul by fusing decode + FMA over output-channel tiles and vectorizing `unpack_tile_codes`.
+- Continue reducing the gap to dense matmul by fusing decode + FMA over output-channel tiles and vectorizing `unpack_tile_codes`, or explore dense-weight precompute fallback for larger batch regimes.
