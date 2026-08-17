@@ -1253,6 +1253,50 @@ def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_b2_and_b4
         assert all(torch.equal(actual, expected) for actual, expected in zip(incremental, reference, strict=True))
 
 
+@pytest.mark.parametrize("shape", ((32, 48), (48, 32)))
+@pytest.mark.parametrize("bits", (1.0, 2.5, 3.5))
+def test_qvq_cuda_cropped_incremental_yaqa_feedback_is_exact_for_rectangular_b2(shape, bits):
+    """Cropped anti-diagonal GEMMs must preserve the complete rectangular B2 artifact."""
+
+    in_features, out_features = shape
+    generator = torch.Generator(device="cpu").manual_seed(20260822 + in_features + int(bits * 10))
+    weight = (torch.randn(shape, generator=generator) * 0.05).cuda()
+    input_samples = torch.randn((47, in_features), generator=generator).cuda()
+    output_samples = torch.randn((43, out_features), generator=generator).cuda()
+    input_hessian = (
+        input_samples.T @ input_samples / input_samples.shape[0]
+        + torch.eye(in_features, device="cuda") * 0.1
+    )
+    output_hessian = (
+        output_samples.T @ output_samples / output_samples.shape[0]
+        + torch.eye(out_features, device="cuda") * 0.1
+    )
+    pair_stack = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )[1]
+    kwargs = {
+        "bits": bits,
+        "trellis_batch_size": 1,
+        "bank_codebooks": tuple(pair_stack),
+        "segmented_bank_stack": pair_stack,
+        "v2b2_p32": True,
+        "_defer_segmented_cuda_checks": True,
+    }
+    reference = yaqa_inner(weight, input_hessian, output_hessian, pair_stack[0], **kwargs)
+    actual = yaqa_inner(
+        weight,
+        input_hessian,
+        output_hessian,
+        pair_stack[0],
+        _incremental_cuda_feedback=True,
+        **kwargs,
+    )
+    assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
+
+
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits):
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260830 + int(bits * 10))

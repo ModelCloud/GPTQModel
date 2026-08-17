@@ -229,3 +229,26 @@ Matched 113-proposal scheduling microbenchmark, including the historical 66 exac
 The tiny Top-1 fraction delta is only the order used to average identical integer token decisions. It is far below
 the `2e-3` inference tolerance; KL remains far below the `1e-6` quantization gate. Telemetry records batched calls,
 allocator fallbacks, persistent teacher-cache bytes, and transient candidate-buffer bytes.
+
+## Cropped anti-diagonal YAQA feedback update
+
+The incremental CUDA recurrence previously rebuilt each anti-diagonal update with two full-matrix GEMMs even
+though the committed matrix is zero outside one contiguous input/output block span. The optimized path preserves
+the original two-GEMM association but contracts only that nonzero span. It therefore removes guaranteed-zero
+FMA work without changing YAQA's FP32 feedback geometry.
+
+Matched Llama 3.2 1B layer-0 q_proj, 2048 x 2048, W2.5 B2-P32+YAQA, sampled-96 family selection, three measured
+runs after warm-up:
+
+| Path | Feedback-update GPU | Module median | Phase speedup | Module speedup | Accuracy |
+|---|---:|---:|---:|---:|---|
+| Full-matrix anti-diagonal GEMMs | 913.61 ms | 3.295 s | reference | reference | reference artifact |
+| Cropped nonzero-span GEMMs | 408.99 ms | 2.849 s | **2.23x** | **1.16x** | weights/states/selectors/family bit-exact |
+
+The CUDA reference gate also compared the incremental result against the direct YAQA recurrence across W1--W3.5,
+canonical V2, B2-P32, B4-P64, and both 32 x 48 and 48 x 32 rectangular B2 geometries: 12/12 focused cases passed.
+
+An implicit-PGC16 emission experiment was rejected. It was bit-exact across 72 constrained, unconstrained,
+weighted, and unweighted rate/bank cases, but integer state mixing increased the real segmented phase from about
+1.09 seconds to 1.94 seconds and module time to 4.14 seconds. The measured 99.97% codebook L2 hit rate makes the
+cached table loads cheaper than reconstructing every state in the recurrence.

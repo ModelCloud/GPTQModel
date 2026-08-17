@@ -4047,19 +4047,41 @@ def yaqa_inner(
         if incremental_cuda_feedback:
             assert committed is not None and feedback_temp is not None and transformed_error is not None
             with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
-                committed.zero_()
-                committed_blocks = committed.view(
-                    input_blocks,
+                # One anti-diagonal touches a contiguous span of input/output
+                # blocks and is zero everywhere outside that span. Preserve
+                # the original two-GEMM association while removing those
+                # guaranteed-zero rows and columns from both contractions.
+                first_input_block = min(coordinate[0] for coordinate in coordinates)
+                first_output_block = min(coordinate[1] for coordinate in coordinates)
+                diagonal_blocks = len(coordinates)
+                input_span = diagonal_blocks * tile_rows
+                output_span = diagonal_blocks * tile_cols
+                committed_panel = committed[:input_span, :output_span]
+                committed_panel.zero_()
+                committed_panel_blocks = committed_panel.view(
+                    diagonal_blocks,
                     tile_rows,
-                    output_blocks,
+                    diagonal_blocks,
                     tile_cols,
                 ).permute(0, 2, 1, 3)
-                committed_blocks[input_indices, output_indices] = reconstructed
-                torch.mm(input_L.transpose(0, 1), committed, out=feedback_temp)
+                committed_panel_blocks[
+                    input_indices - first_input_block,
+                    output_indices - first_output_block,
+                ] = reconstructed
+                feedback_panel = feedback_temp[:, :output_span]
+                torch.mm(
+                    input_L[
+                        first_input_block * tile_rows : first_input_block * tile_rows + input_span
+                    ].transpose(0, 1),
+                    committed_panel,
+                    out=feedback_panel,
+                )
                 torch.addmm(
                     transformed_error,
-                    feedback_temp,
-                    output_L,
+                    feedback_panel,
+                    output_L[
+                        first_output_block * tile_cols : first_output_block * tile_cols + output_span
+                    ],
                     beta=1,
                     alpha=-1,
                     out=transformed_error,
