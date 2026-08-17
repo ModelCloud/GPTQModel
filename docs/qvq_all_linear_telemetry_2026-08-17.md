@@ -144,3 +144,65 @@ Top-1/5/10 continues to use the native tie-stable evaluator.
 
 The warm CUDA reduction is millisecond-scale, so the expected improvement for the 215-second W2.5 metric phase is
 substantially larger than 10x without changing an acceptance decision within the required numerical contract.
+
+## Completed full-model YAQA sweep
+
+This matched sweep quantized all 112 Q/K/V/O/gate/up/down projections in all 16 Llama 3.2 1B layers. V2 and
+B2-P32 used the same 512 calibration rows, 512 disjoint evaluation rows, and 512 further-disjoint Sketch-B rows.
+Rows were processed at batch 1 without concatenation or truncation; Sketch-B used batch 8.
+
+| Rate | Arm | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | V2 + YAQA | 0.546288 | 0.694820 | 1.059582 | 1.615112 | 0.942185 | 64.97% | 58.97% | 58.11% |
+| W1 | B2-P32 + YAQA | 0.529927 | 0.644295 | 0.943450 | 1.391596 | 0.800008 | 67.64% | 61.10% | 60.14% |
+| W1.5 | V2 + YAQA | 0.406340 | 0.155091 | 0.319266 | 0.407024 | 0.248925 | 82.65% | 74.27% | 73.64% |
+| W1.5 | B2-P32 + YAQA | 0.389116 | 0.134656 | 0.270713 | 0.370088 | 0.214388 | 83.33% | 75.69% | 75.15% |
+| W2 | V2 + YAQA | 0.293481 | 0.048756 | 0.118903 | 0.127933 | 0.091508 | 88.80% | 82.59% | 82.21% |
+| W2 | B2-P32 + YAQA | 0.286913 | 0.044344 | 0.111459 | 0.126684 | 0.088402 | 89.66% | 82.90% | 82.53% |
+| W2.5 | V2 + YAQA | 0.201517 | 0.019941 | 0.047538 | 0.047341 | 0.033498 | 92.85% | 88.35% | 88.19% |
+| W2.5 | B2-P32 + YAQA | 0.196658 | 0.018809 | 0.045044 | 0.041130 | 0.031463 | 93.20% | 88.83% | 88.55% |
+| W3 | V2 + YAQA | 0.142375 | 0.009995 | 0.022475 | 0.019315 | 0.014759 | 95.08% | 91.92% | 91.78% |
+| W3 | B2-P32 + YAQA | 0.141947 | 0.009436 | 0.022751 | 0.020499 | 0.015194 | 95.35% | 91.77% | 91.58% |
+| W3.5 | V2 + YAQA | 0.107992 | 0.004975 | 0.012768 | 0.012918 | 0.008952 | 96.32% | 93.60% | 93.42% |
+| W3.5 | B2-P32 + YAQA | 0.099910 | 0.004619 | 0.010688 | 0.009418 | 0.006952 | 97.01% | 94.26% | 94.07% |
+
+### B2-P32 delta from V2
+
+KL/Rel-L2 columns report relative reduction (positive is better); Top-N columns report percentage-point change.
+
+| Rate | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | +2.99% | +7.27% | +10.96% | +13.84% | +15.09% | +2.67 | +2.13 | +2.03 |
+| W1.5 | +4.24% | +13.18% | +15.21% | +9.07% | +13.87% | +0.68 | +1.42 | +1.51 |
+| W2 | +2.24% | +9.05% | +6.26% | +0.98% | +3.39% | +0.86 | +0.31 | +0.33 |
+| W2.5 | +2.41% | +5.68% | +5.25% | +13.12% | +6.07% | +0.36 | +0.48 | +0.35 |
+| W3 | +0.30% | +5.60% | -1.23% | -6.13% | -2.95% | +0.27 | -0.16 | -0.21 |
+| W3.5 | +7.48% | +7.15% | +16.30% | +27.10% | +22.34% | +0.70 | +0.66 | +0.65 |
+
+B2-P32+YAQA wins the final KL at five of six rates. W3 is the exception: local KL improves 5.60%, but live,
+layer, and final KL regress, demonstrating again that the local objective is not a sufficient promotion gate.
+
+## Full-run hotspot closure
+
+W2.5 is representative of the common-rate timing profile.
+
+| Area | Before | After | Speedup / finding | Accuracy |
+|---|---:|---:|---:|---|
+| MLP acceptance metric phase | 215.466 s | 33.092 s | 6.51x | CUDA KL within 3.47e-7 of CPU; deterministic Top-N |
+| Complete MLP acceptance | 222.159 s | 40.800 s | 5.45x | same acceptance policy |
+| Final local replay | 20.273 s | 4.215 s | 4.81x | local Rel-L2 drift 3.99e-9; final metrics exact |
+| Sketch-B, 2-layer gate/up micro A/B | 7.604 s | 4.127 s | 1.84x | factor drift 4.06e-7 |
+| Canonical square YAQA feedback, 2048 | 3.678 s | 1.460 s | 2.52x | weights/states bit-exact |
+
+The remaining W2.5 B2 quantization work is dominated by Sketch-B capture (about 521 seconds across O, gate/up,
+and down) and exact YAQA encoding. Within the selected encodes, feedback plus incremental update consumes about
+170 GPU-seconds and canonical plus segmented Viterbi consumes about 165 GPU-seconds. B2 intentionally performs
+an independent canonical encode and a segmented-family encode so rejection can restore exact V2 bytes.
+
+The final 512-row evaluator now takes 41.47 seconds. Its largest GPU phases are dense forward (10.83 seconds) and
+quantized forward (9.73 seconds), followed by layer metrics (6.28 seconds). Concurrent model streams and explicit
+FA2 were both measured regressions and remain disabled.
+
+A wide YAQA TF32 feedback experiment was also rejected. It preserved states/weights in the tested 1024 x 4096
+identity and SPD probes but improved wall time by only 1.07--1.11x; process-global TF32 state and unproven near-tie
+behavior do not justify weakening the exact quantization contract.
