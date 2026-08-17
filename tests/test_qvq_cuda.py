@@ -643,6 +643,59 @@ def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(bits, bank_c
     assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
+@pytest.mark.parametrize("codebook_dtype", (torch.float16, torch.float32))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("constrained", (False, True))
+@pytest.mark.parametrize("batch", (1, 7, 8, 9, 17))
+def test_qvq_cuda_w25_segmented_cooperative_dispatch_is_exact(
+    codebook_dtype,
+    weighted,
+    constrained,
+    batch,
+):
+    """Cover both cooperative launch geometries and the larger-batch grid fallback."""
+
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260826 + batch * 100 + int(weighted) * 10 + int(constrained)
+    )
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=2.5, dtype=torch.float32) for bank in range(2))
+    ).to(device="cuda", dtype=codebook_dtype)
+    overlap = (
+        torch.randint(0, 1 << 11, (batch,), generator=generator, device="cuda", dtype=torch.int64)
+        if constrained
+        else None
+    )
+    step_weights = (
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous()
+        if weighted
+        else None
+    )
+
+    expected = qvq_cuda_viterbi_v2_segment_banked(
+        sequences,
+        codebooks,
+        2.5,
+        16,
+        overlap,
+        step_weights,
+    )
+    for _ in range(3):
+        actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+            sequences,
+            codebooks,
+            5,
+            16,
+            overlap,
+            step_weights,
+        )
+        assert all(
+            torch.equal(expected_tensor, actual_tensor)
+            for expected_tensor, actual_tensor in zip(expected, actual)
+        )
+
+
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
 @pytest.mark.parametrize("weighted", (False, True))

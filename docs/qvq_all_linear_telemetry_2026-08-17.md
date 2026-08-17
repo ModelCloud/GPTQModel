@@ -373,3 +373,41 @@ segment launches two 1024-thread CTAs across 108 SMs, reports 0.01 waves/SM, and
 and rejected: despite halving each lane's serial prefix chain, shuffle/reduction overhead regressed exact grid time
 by 20--21% at batches 1--16 and 18% at batch 64. The next material gain requires work aggregation across independent
 modules/families or a cooperative multi-CTA recurrence, not another local unroll.
+
+## Cooperative W2.5 segmented recurrence
+
+The W2.5 B2-P32 recurrence now partitions its 2,048 suffix states across cooperative CTAs instead of assigning one
+1,024-thread CTA to each bank. Batches up to seven use eight 256-thread CTAs per bank; batch eight uses four
+512-thread CTAs per bank. Every suffix remains owned by one thread, all 32 prefixes are evaluated in ascending order,
+and cooperative grid barriers separate dependent recurrence steps. The previous shared-memory grid remains the
+fallback for batch nine and above, other rates, B4-P64, midpoint traceback, unsupported devices, or a grid that
+cannot be simultaneously resident.
+
+Matched CUDA-event medians on one PG506-230, `sm_80`, CUDA 13.0, FP16 codebooks, weighted and constrained W2.5:
+
+| Batch | Previous grid (ms) | Cooperative/gated (ms) | Speedup | Dispatch |
+|---:|---:|---:|---:|---|
+| 1 | 1.2216 | 0.5642 | **2.17x** | 256-thread cooperative |
+| 4 | 1.2288 | 0.5929 | **2.07x** | 256-thread cooperative |
+| 7 | 1.2319 | 0.6308 | **1.95x** | 256-thread cooperative |
+| 8 | 1.2319 | 1.1315 | **1.09x** | 512-thread cooperative |
+| 9 | 1.2411 | previous grid | 1.00x | exact fallback |
+| 17 | previous grid | previous grid | 1.00x | exact fallback |
+
+The 512-thread experiment regressed from batch ten onward despite remaining resident, so production dispatch is
+intentionally capped at batch eight. The focused CUDA gate covers FP16/FP32 codebooks, batches 1/7/8/9/17,
+weighted/unweighted and constrained/unconstrained objectives, three deterministic repeats, fused tail biting, and
+family-batched routing: 96/96 cases passed with exact states, selector bytes, and FP32 losses.
+
+Matched real Llama 3.2 1B layer-0 q_proj, W2.5 B2-P32+YAQA, sampled-96 family selection, seven measured runs after
+warm-up on separate idle PG506-230 GPUs:
+
+| Path | Previous grid | Cooperative/gated | Delta | Accuracy/VRAM |
+|---|---:|---:|---:|---|
+| Segmented-Viterbi GPU | 982.81 ms | 955.37 ms | **1.029x** | exact artifact |
+| Family-candidate GPU | 1194.18 ms | 1163.80 ms | **1.026x** | exact artifact |
+| Full module median | 2.3124 s | 2.2796 s | **1.014x** | SHA-256 identical |
+| Peak allocated VRAM | 561.79 MiB | 561.79 MiB | unchanged | zero delta |
+
+The kernel target exceeds 2x for the severely underfilled batch-one through batch-four calls. The module gain is
+smaller because canonical V2 recurrence, YAQA feedback, and larger anti-diagonals are unchanged.

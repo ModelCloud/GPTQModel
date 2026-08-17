@@ -24,6 +24,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cooperative_groups.h>
 #include <math_constants.h>
 #include <torch/library.h>
 #include <torch/types.h>
@@ -39,6 +40,7 @@ namespace {
 constexpr int kStateCount = 1 << 16;
 constexpr int kThreads = 1024;
 constexpr size_t kMaxNormCacheEntries = 32;
+namespace cg = cooperative_groups;
 
 __device__ __forceinline__ bool lower_pair(float candidate, int candidate_index, float current, int current_index);
 
@@ -1510,6 +1512,147 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   }
 }
 
+// W2.5 B2-P32 is badly underfilled by the one-CTA-per-bank recurrence: a
+// singleton tile launches only two 1024-thread CTAs on a 124-SM local sm_80
+// device.  This exact cooperative variant partitions the 2048 suffixes into
+// eight 256-thread CTAs per bank.  All predecessor candidates for one suffix
+// remain in one thread and are visited in ascending prefix order, preserving
+// the reference arithmetic and lowest-prefix tie precedence.  Grid barriers
+// make the global ping-pong frontiers safe between dependent recurrence steps.
+template <int BlockThreads, typename CodebookScalar, typename BackpointerScalar>
+__global__ __launch_bounds__(BlockThreads) void qvq_v2_segment_w25_cooperative_kernel(
+    const float* __restrict__ sequences,
+    const CodebookScalar* __restrict__ codebooks,
+    const float* __restrict__ codebook_norms,
+    const int64_t* __restrict__ overlap,
+    const float* __restrict__ step_weights,
+    float* __restrict__ costs_a,
+    float* __restrict__ costs_b,
+    BackpointerScalar* __restrict__ backpointers,
+    uint8_t* __restrict__ boundary_banks,
+    int batch,
+    int family_batch,
+    int segment_index,
+    bool constrained,
+    bool weighted) {
+  constexpr int shift = 5;
+  constexpr int bank_count = 2;
+  constexpr int suffix_count = 1 << (16 - shift);
+  constexpr int prefix_count = 1 << shift;
+  constexpr int segment_steps = 16;
+  constexpr int segment_count = 128 / segment_steps;
+  constexpr int partitions = suffix_count / BlockThreads;
+  constexpr int bank_suffix_count = bank_count * suffix_count;
+  const int flat_block = static_cast<int>(blockIdx.x);
+  const int partition = flat_block % partitions;
+  const int bank_sequence = flat_block / partitions;
+  const int bank = bank_sequence % bank_count;
+  const int sequence = bank_sequence / bank_count;
+  const int x = partition * BlockThreads + static_cast<int>(threadIdx.x);
+  if (sequence >= batch) {
+    return;
+  }
+
+  cg::grid_group grid = cg::this_grid();
+  const int first_step = segment_index * segment_steps;
+  const int end_step = min(first_step + segment_steps, 127);
+  const int required_overlap = constrained ? static_cast<int>(overlap[sequence]) : 0;
+  const int family = family_batch == 0 ? 0 : sequence / family_batch;
+  const int physical_bank = family * bank_count + bank;
+  const CodebookScalar* bank_codebook =
+      codebooks + static_cast<int64_t>(physical_bank) * kStateCount * 2;
+  const float* bank_norm = codebook_norms + static_cast<int64_t>(physical_bank) * kStateCount *
+      (std::is_same_v<CodebookScalar, half> ? 2 : 1);
+  const int64_t sequence_base = static_cast<int64_t>(sequence) * 128 * 2;
+  const int64_t g_base = static_cast<int64_t>(sequence) * bank_suffix_count + bank * suffix_count;
+  const int64_t pointer_base = static_cast<int64_t>(sequence) * 127 * bank_suffix_count;
+  const int64_t boundary_base = static_cast<int64_t>(sequence) * (segment_count - 1) * suffix_count;
+
+  if (segment_index == 0) {
+    const float* target = sequences + sequence_base;
+    const float weight = weighted ? step_weights[static_cast<int64_t>(sequence) * 128] : 1.0f;
+    const float target_norm = __fadd_rn(
+        __fmul_rn(target[0], target[0]),
+        __fmul_rn(target[1], target[1]));
+    float best = CUDART_INF_F;
+    int best_h = 0;
+    #pragma unroll
+    for (int h = 0; h < prefix_count; ++h) {
+      const int state = h * suffix_count + x;
+      float candidate = emission<2, CodebookScalar>(
+          target, bank_codebook, bank_norm, state, weight, target_norm);
+      if (constrained && (state >> shift) != required_overlap) {
+        candidate = CUDART_INF_F;
+      }
+      if (lower_pair(candidate, h, best, best_h)) {
+        best = candidate;
+        best_h = h;
+      }
+    }
+    costs_a[g_base + x] = best;
+    backpointers[pointer_base + bank * suffix_count + x] =
+        static_cast<BackpointerScalar>(best_h);
+    grid.sync();
+  } else {
+    const float* previous = ((first_step - 1) & 1) == 0 ? costs_a : costs_b;
+    if (bank == 0) {
+      const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
+      float best = previous[input_base + x];
+      int best_bank = 0;
+      const float candidate = previous[input_base + suffix_count + x];
+      if (candidate < best) {
+        best_bank = 1;
+      }
+      boundary_banks[
+          boundary_base + static_cast<int64_t>(segment_index - 1) * suffix_count + x] =
+          static_cast<uint8_t>(best_bank);
+    }
+    grid.sync();
+  }
+
+  const int recurrence_start = segment_index == 0 ? 1 : first_step;
+  for (int step = recurrence_start; step < end_step; ++step) {
+    const float* previous = ((step - 1) & 1) == 0 ? costs_a : costs_b;
+    float* current = (step & 1) == 0 ? costs_a : costs_b;
+    const bool boundary = step == first_step && segment_index != 0;
+    const float* target = sequences + sequence_base + static_cast<int64_t>(step) * 2;
+    const float weight = weighted
+        ? step_weights[static_cast<int64_t>(sequence) * 128 + step]
+        : 1.0f;
+    const float target_norm = __fadd_rn(
+        __fmul_rn(target[0], target[0]),
+        __fmul_rn(target[1], target[1]));
+    float best = CUDART_INF_F;
+    int best_h = 0;
+    #pragma unroll
+    for (int h = 0; h < prefix_count; ++h) {
+      const int state = h * suffix_count + x;
+      const int predecessor_suffix = state >> shift;
+      const int previous_bank = boundary
+          ? static_cast<int>(boundary_banks[
+                boundary_base + static_cast<int64_t>(segment_index - 1) * suffix_count +
+                predecessor_suffix])
+          : bank;
+      const float predecessor_cost = previous[
+          static_cast<int64_t>(sequence) * bank_suffix_count +
+          previous_bank * suffix_count + predecessor_suffix];
+      const float candidate = __fadd_rn(
+          predecessor_cost,
+          emission<2, CodebookScalar>(
+              target, bank_codebook, bank_norm, state, weight, target_norm));
+      if (lower_pair(candidate, h, best, best_h)) {
+        best = candidate;
+        best_h = h;
+      }
+    }
+    current[g_base + x] = best;
+    backpointers[
+        pointer_base + static_cast<int64_t>(step) * bank_suffix_count +
+        bank * suffix_count + x] = static_cast<BackpointerScalar>(best_h);
+    grid.sync();
+  }
+}
+
 template <
     int Shift,
     int BankCount,
@@ -1907,6 +2050,76 @@ std::tuple<at::Tensor, at::Tensor> qvq_viterbi_banked_cuda(
   return qvq_viterbi_banked_cuda_impl<4>(sequences, codebooks, transition_bits, overlap, step_weights);
 }
 
+template <int BlockThreads, typename CodebookScalar, typename BackpointerScalar>
+bool can_launch_qvq_v2_segment_w25_cooperative(int batch, const cudaDeviceProp& properties) {
+  constexpr int partitions = (1 << (16 - 5)) / BlockThreads;
+  constexpr int bank_count = 2;
+  int blocks_per_sm = 0;
+  C10_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks_per_sm,
+      qvq_v2_segment_w25_cooperative_kernel<BlockThreads, CodebookScalar, BackpointerScalar>,
+      BlockThreads,
+      0));
+  return properties.cooperativeLaunch &&
+      batch * bank_count * partitions <= blocks_per_sm * properties.multiProcessorCount;
+}
+
+template <int BlockThreads, typename CodebookScalar, typename BackpointerScalar>
+void launch_qvq_v2_segment_w25_cooperative(
+    const float* sequences,
+    const CodebookScalar* codebooks,
+    const float* codebook_norms,
+    const int64_t* overlap,
+    const float* step_weights,
+    float* costs_a,
+    float* costs_b,
+    BackpointerScalar* backpointers,
+    uint8_t* boundary_banks,
+    int batch,
+    int family_batch,
+    bool constrained,
+    bool weighted,
+    const cudaDeviceProp& properties,
+    cudaStream_t stream) {
+  constexpr int partitions = (1 << (16 - 5)) / BlockThreads;
+  constexpr int bank_count = 2;
+  constexpr int segment_count = 8;
+  const int blocks = batch * bank_count * partitions;
+  const bool can_launch =
+      can_launch_qvq_v2_segment_w25_cooperative<BlockThreads, CodebookScalar, BackpointerScalar>(
+          batch, properties);
+  TORCH_CHECK(
+      can_launch,
+      "cooperative W2.5 segmented V2 grid exceeds resident-device capacity");
+
+  for (int segment_index = 0; segment_index < segment_count; ++segment_index) {
+    void* arguments[] = {
+        &sequences,
+        &codebooks,
+        &codebook_norms,
+        &overlap,
+        &step_weights,
+        &costs_a,
+        &costs_b,
+        &backpointers,
+        &boundary_banks,
+        &batch,
+        &family_batch,
+        &segment_index,
+        &constrained,
+        &weighted,
+    };
+    C10_CUDA_CHECK(cudaLaunchCooperativeKernel(
+        reinterpret_cast<void*>(
+            qvq_v2_segment_w25_cooperative_kernel<BlockThreads, CodebookScalar, BackpointerScalar>),
+        dim3(blocks),
+        dim3(BlockThreads),
+        arguments,
+        0,
+        stream));
+  }
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cuda_impl(
     const at::Tensor& sequences,
     const at::Tensor& codebooks,
@@ -1920,6 +2133,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     int bank_count_override = 0,
     bool midpoint_only = false) {
   const bool g_only = kernel_mode != 0;
+  bool cooperative = false;
+  int cooperative_threads = 0;
   bool grid_parallel = kernel_mode == 2;
   TORCH_CHECK(sequences.is_cuda() && codebooks.is_cuda(),
               "segmented-bank V2 sequences and codebooks must be CUDA tensors");
@@ -2012,8 +2227,26 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   // Ada exposes less opt-in shared memory per CTA than Ampere/Hopper. Preserve
   // the exact persistent G-only path when a rate's two frontiers do not fit.
   grid_parallel = grid_parallel && grid_shared_bytes <= properties.sharedMemPerBlockOptin;
+  if (kernel_mode == 2 && !midpoint_only && transition_bits == 5 &&
+      bank_count == 2 && segment_steps == 16) {
+    const bool can_launch_256 = batch <= 7 && (codebooks.scalar_type() == at::kHalf
+        ? can_launch_qvq_v2_segment_w25_cooperative<256, half, uint8_t>(batch, properties)
+        : can_launch_qvq_v2_segment_w25_cooperative<256, float, uint8_t>(batch, properties));
+    // The 512-thread variant remains faster through batch eight on the local
+    // 124-SM sm_80 devices.  Beyond that point global-frontier barriers cost
+    // more than the shared-memory grid kernel, even while the launch remains
+    // cooperatively resident.
+    const bool can_launch_512 = batch == 8 && (codebooks.scalar_type() == at::kHalf
+        ? can_launch_qvq_v2_segment_w25_cooperative<512, half, uint8_t>(batch, properties)
+        : can_launch_qvq_v2_segment_w25_cooperative<512, float, uint8_t>(batch, properties));
+    cooperative_threads = can_launch_256 ? 256 : (can_launch_512 ? 512 : 0);
+    cooperative = cooperative_threads != 0;
+    grid_parallel = !cooperative && grid_parallel;
+  }
   TORCH_CHECK(!midpoint_only || (grid_parallel && properties.major == 8 && properties.minor == 0),
               "midpoint-only segmented V2 currently requires an sm_80 grid recurrence");
+  TORCH_CHECK(!cooperative || (!midpoint_only && transition_bits == 5 && bank_count == 2 && segment_steps == 16),
+              "cooperative segmented V2 currently supports only full W2.5 B2-P32 recurrence");
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
   const int segments = steps / static_cast<int>(segment_steps);
   const auto float_options = sequences.options().dtype(at::kFloat);
@@ -2044,6 +2277,43 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       : cached_banked_codebook_norm<2, float>(codebooks, stream);
   const int64_t* overlap_ptr = constrained ? overlap_tensor.const_data_ptr<int64_t>() : nullptr;
   const float* weight_ptr = weighted ? step_weights_tensor.const_data_ptr<float>() : nullptr;
+
+  if (cooperative) {
+#define QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH(THREADS, CODEBOOK_TYPE, CODEBOOK_POINTER)                   \
+    do {                                                                                              \
+      launch_qvq_v2_segment_w25_cooperative<THREADS, CODEBOOK_TYPE, uint8_t>(                         \
+          sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(), \
+          overlap_ptr, weight_ptr, costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(), \
+          backpointers.mutable_data_ptr<uint8_t>(), boundary_banks.mutable_data_ptr<uint8_t>(),      \
+          batch, family_batch, constrained, weighted, properties, stream);                            \
+      qvq_v2_segment_grid_finalize_kernel<5, 2, 16, false, CODEBOOK_TYPE, uint8_t>                    \
+          <<<batch, kThreads, 0, stream>>>(                                                           \
+              sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(), \
+              overlap_ptr, weight_ptr, costs_a.const_data_ptr<float>(),                              \
+              backpointers.const_data_ptr<uint8_t>(), boundary_banks.const_data_ptr<uint8_t>(),      \
+              states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),      \
+              squared_error.mutable_data_ptr<float>(), batch, family_batch, constrained, weighted);  \
+    } while (0)
+    if (codebooks.scalar_type() == at::kHalf) {
+      if (cooperative_threads == 256) {
+        QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH(
+            256, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()));
+      } else {
+        QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH(
+            512, half, reinterpret_cast<const half*>(codebooks.const_data_ptr()));
+      }
+    } else {
+      if (cooperative_threads == 256) {
+        QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH(256, float, codebooks.const_data_ptr<float>());
+      } else {
+        QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH(512, float, codebooks.const_data_ptr<float>());
+      }
+    }
+#undef QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    record_norm_cache_use(codebooks, codebook_norm, stream);
+    return {states, squared_error, segment_bank_ids};
+  }
 
 #define QVQ_V2_SEGMENT_LAUNCH(BITS, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)                    \
   qvq_v2_segment_banked_kernel<BITS, CODEBOOK_TYPE, POINTER_TYPE><<<batch, kThreads, 0, stream>>>(    \
