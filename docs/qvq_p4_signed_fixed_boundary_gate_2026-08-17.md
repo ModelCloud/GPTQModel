@@ -443,6 +443,45 @@ should combine multiple Monte Carlo samples per sequence (or average factor accu
 repeat the same packed two-fold/confirmation gate. The locked family-selection threshold and canonical rollback must
 remain unchanged.
 
+## Two-seed YAQA factor ensemble (P20)
+
+P20 averaged the seed-0 and seed-1 input/output Gram-factor estimators before factorization. Because both caches use
+the same 512 sequences and normalization, this is exactly the two-Monte-Carlo-sample estimator for each factor:
+
+\[
+\bar H_I=\frac{H_I^{(0)}+H_I^{(1)}}{2},\qquad
+\bar H_O=\frac{H_O^{(0)}+H_O^{(1)}}{2}.
+\]
+
+The discrete winner did not interpolate between the single-seed winners. Families 1/2 regressed, while family 3
+improved both packed search folds with a worst-fold ratio of `0.982316`. This is expected: YAQA factorization,
+feedback, and trellis argmins are nonlinear in factor geometry. The family ID is not the stable object; exhaustive
+family search under the current estimator is.
+
+Family 3 passed confirmation and untouched evaluation:
+
+| Metric | 30-row confirmation | 64-row untouched evaluation |
+|---|---:|---:|
+| Final KL | **-4.1327%** | **-1.1657%** |
+| JSD | **-4.3264%** | **-1.2478%** |
+| Top-1 | +0.0096 pp | -0.0503 pp |
+| Top-5 overlap | +0.0579 pp | -0.0050 pp |
+| Top-10 overlap | -0.0058 pp | +0.0079 pp |
+
+The untouched Top-1/5 movements are noise-scale, while the primary KL/JSD gains are material and repeat across both
+disjoint gates. Under the repository's uncertainty-aware policy, P20 is a validated positive. The recommended
+optional stage is therefore:
+
+1. collect or combine at least two YAQA Monte Carlo samples per sequence;
+2. independently encode canonical V2+YAQA and every fixed B2 family;
+3. replay the actual packed modules across at least two search folds;
+4. confirm the best material all-fold improvement on disjoint prompts;
+5. atomically retain canonical V2+YAQA on any tie, regression, non-finite value, or callback failure.
+
+This stage remains default-off until broader layer/module evidence exists because its cost is roughly four complete
+YAQA encodes plus full-model replay. The mathematical and lifecycle direction is now validated; fixed family IDs and
+single-seed factors are rejected.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -467,3 +506,7 @@ remain unchanged.
 - `artifacts/qvq_p19_fisher_seed0_gate/yaqa512_seed0_factors.pt`
 - `artifacts/qvq_p19_fisher_seed0_gate/report_packed.json`
 - `artifacts/qvq_p19_fisher_seed0_gate/selected_packed.safetensors`
+- `artifacts/qvq_p20_fisher_ensemble_gate/yaqa_seed0_1_ensemble.json`
+- `artifacts/qvq_p20_fisher_ensemble_gate/yaqa512_seed0_1_ensemble.pt`
+- `artifacts/qvq_p20_fisher_ensemble_gate/report_packed.json`
+- `artifacts/qvq_p20_fisher_ensemble_gate/selected_packed.safetensors`
