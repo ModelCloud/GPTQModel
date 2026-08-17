@@ -96,4 +96,5 @@ def test_fixed_v2b2_family_zero_emits_exact_canonical_shape(monkeypatch):
     assert selectors.shape == (40,)
     assert selectors.dtype == torch.uint8
     assert torch.count_nonzero(selectors) == 0
+    assert inactive_family.shape == (1,)
     assert inactive_family.item() == 1

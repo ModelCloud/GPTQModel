@@ -173,7 +173,7 @@ def _fixed_v2b2_yaqa_family(
             dtype=torch.uint8,
             device=canonical_states.device,
         )
-        inactive_family = torch.ones((), dtype=torch.uint8, device=canonical_states.device)
+        inactive_family = torch.ones((1,), dtype=torch.uint8, device=canonical_states.device)
         return canonical_weight, canonical_states, selectors, inactive_family
 
     return fixed_family
