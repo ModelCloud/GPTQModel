@@ -953,6 +953,7 @@ def test_qvq_two_stream_diagnostics_match_serial_pipeline():
                 diagnostic_device="cuda",
                 diagnostic_detail="primary",
                 diagnostic_streams=diagnostic_streams,
+                collect_telemetry=True,
             )
         )
 
@@ -964,6 +965,22 @@ def test_qvq_two_stream_diagnostics_match_serial_pipeline():
     assert reports[1]["logits"]["top1_agreement"] == pytest.approx(
         reports[0]["logits"]["top1_agreement"], abs=1e-12
     )
+    for report in reports:
+        telemetry = report["evaluation_telemetry"]
+        assert telemetry["rows"] == len(rows)
+        assert telemetry["valid_tokens"] == sum(row["hidden_values"].shape[1] for row in rows)
+        assert telemetry["wall_seconds"] > 0
+        assert telemetry["materialization_seconds"] >= 0
+        assert set(telemetry["gpu_phase_ms"]) == {
+            "dense_forward",
+            "quantized_forward",
+            "local_replay",
+            "local_metrics",
+            "live_metrics",
+            "layer_metrics",
+            "logit_metrics",
+        }
+        assert all(milliseconds >= 0 for milliseconds in telemetry["gpu_phase_ms"].values())
 
 
 def _acceptance_metrics(kl: float, topn: float = 0.9, *, finite: bool = True) -> dict:

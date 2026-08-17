@@ -2743,6 +2743,7 @@ def _streaming_compare_models_cuda(
     module_scope: str,
     diagnostic_detail: str,
     diagnostic_streams: int,
+    collect_telemetry: bool = False,
 ) -> dict[str, object]:
     """Run batch-1 diagnostics with persistent hooks, GPU replay, and device-resident reductions."""
 
@@ -2775,6 +2776,24 @@ def _streaming_compare_models_cuda(
     forward_stream = torch.cuda.current_stream(device)
     metric_stream = torch.cuda.Stream(device=device) if diagnostic_streams == 2 else forward_stream
     pipeline_events = [torch.cuda.Event() for _ in range(2)] if diagnostic_streams == 2 else []
+    evaluation_started = time.perf_counter()
+    gpu_phase_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = defaultdict(list)
+    progress_sync_seconds = 0.0
+    evaluated_tokens = 0
+
+    def phase_start(name: str, stream: torch.cuda.Stream) -> torch.cuda.Event | None:
+        if not collect_telemetry:
+            return None
+        event = torch.cuda.Event(enable_timing=True)
+        event.record(stream)
+        return event
+
+    def phase_end(name: str, stream: torch.cuda.Stream, start: torch.cuda.Event | None) -> None:
+        if start is None:
+            return
+        end = torch.cuda.Event(enable_timing=True)
+        end.record(stream)
+        gpu_phase_events[name].append((start, end))
 
     def preserve_on_metric_stream(*collections: Mapping[str, torch.Tensor] | torch.Tensor) -> None:
         if diagnostic_streams == 1:
@@ -2791,9 +2810,14 @@ def _streaming_compare_models_cuda(
                 # Bound retained captures to two rows. This is a device-side
                 # dependency, not a host synchronization.
                 forward_stream.wait_event(pipeline_events[slot])
+            dense_start = phase_start("dense_forward", forward_stream)
             dense_logits, dense_inputs, dense_outputs = dense_capture.run(row)
+            phase_end("dense_forward", forward_stream, dense_start)
+            quantized_start = phase_start("quantized_forward", forward_stream)
             quantized_logits, _, live_outputs = quantized_capture.run(row)
+            phase_end("quantized_forward", forward_stream, quantized_start)
             token_count = dense_logits.shape[0]
+            evaluated_tokens += token_count
             with torch.cuda.stream(metric_stream):
                 if diagnostic_streams == 2:
                     metric_stream.wait_stream(forward_stream)
@@ -2804,8 +2828,11 @@ def _streaming_compare_models_cuda(
                         dense_outputs,
                         live_outputs,
                     )
+                replay_start = phase_start("local_replay", metric_stream)
                 local_outputs = _replay_local_groups(dense_inputs, replay_groups)
+                phase_end("local_replay", metric_stream, replay_start)
                 dense_joined = _joined(dense_outputs, module_names)
+                local_metric_start = phase_start("local_metrics", metric_stream)
                 local_accumulator.add(
                     metric_function(
                         dense_joined,
@@ -2814,6 +2841,8 @@ def _streaming_compare_models_cuda(
                     ),
                     rows=token_count,
                 )
+                phase_end("local_metrics", metric_stream, local_metric_start)
+                live_metric_start = phase_start("live_metrics", metric_stream)
                 live_accumulator.add(
                     metric_function(
                         dense_joined,
@@ -2822,6 +2851,8 @@ def _streaming_compare_models_cuda(
                     ),
                     rows=token_count,
                 )
+                phase_end("live_metrics", metric_stream, live_metric_start)
+                layer_metric_start = phase_start("layer_metrics", metric_stream)
                 for layer_index, accumulator in layer_accumulators.items():
                     accumulator.add(
                         metric_function(
@@ -2831,6 +2862,8 @@ def _streaming_compare_models_cuda(
                         ),
                         rows=token_count,
                     )
+                phase_end("layer_metrics", metric_stream, layer_metric_start)
+                logit_metric_start = phase_start("logit_metrics", metric_stream)
                 logit_accumulator.add(
                     metric_function(
                         dense_logits,
@@ -2841,6 +2874,7 @@ def _streaming_compare_models_cuda(
                     ),
                     rows=token_count,
                 )
+                phase_end("logit_metrics", metric_stream, logit_metric_start)
                 if diagnostic_streams == 2:
                     pipeline_events[slot].record(metric_stream)
             if row_index % 16 == 0 or row_index == len(rows):
@@ -2848,7 +2882,9 @@ def _streaming_compare_models_cuda(
                     # Progress is an explicit host-visible checkpoint. Wait
                     # here so streamed scalar telemetry cannot report stale
                     # values; ordinary rows remain fully asynchronous.
+                    progress_sync_started = time.perf_counter()
                     metric_stream.synchronize()
+                    progress_sync_seconds += time.perf_counter() - progress_sync_started
                 print(
                     f"{progress_label}: eval {row_index}/{len(rows)} rows, "
                     f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
@@ -2864,6 +2900,7 @@ def _streaming_compare_models_cuda(
         dense_capture.close()
         quantized_capture.close()
 
+    materialization_started = time.perf_counter()
     local_metrics = local_accumulator.result()
     live_metrics = live_accumulator.result()
     result = {
@@ -2875,6 +2912,18 @@ def _streaming_compare_models_cuda(
         "diagnostic_detail": diagnostic_detail,
         "diagnostic_streams": diagnostic_streams,
     }
+    if collect_telemetry:
+        result["evaluation_telemetry"] = {
+            "wall_seconds": time.perf_counter() - evaluation_started,
+            "progress_sync_seconds": progress_sync_seconds,
+            "materialization_seconds": time.perf_counter() - materialization_started,
+            "gpu_phase_ms": {
+                name: sum(start.elapsed_time(end) for start, end in events)
+                for name, events in gpu_phase_events.items()
+            },
+            "rows": len(rows),
+            "valid_tokens": evaluated_tokens,
+        }
     if module_scope == "qkvo":
         result["local_qkvo"] = local_metrics
         result["live_qkvo"] = live_metrics
@@ -2896,6 +2945,7 @@ def _streaming_compare_models(
     diagnostic_device: str = "auto",
     diagnostic_detail: str = "primary",
     diagnostic_streams: int = 2,
+    collect_telemetry: bool = False,
 ) -> dict[str, object]:
     """Dispatch to accelerated CUDA diagnostics while retaining the exact historical CPU reference."""
 
@@ -2920,6 +2970,7 @@ def _streaming_compare_models(
             module_scope=module_scope,
             diagnostic_detail=diagnostic_detail,
             diagnostic_streams=diagnostic_streams,
+            collect_telemetry=collect_telemetry,
         )
     result = _streaming_compare_models_cpu(
         dense_model,
@@ -3645,6 +3696,7 @@ def main() -> None:
                 diagnostic_device=args.diagnostic_device,
                 diagnostic_detail=args.diagnostic_detail,
                 diagnostic_streams=args.diagnostic_streams,
+                collect_telemetry=args.qvq_telemetry,
             )
             codec_bpw = rate + selector_bpw
             selected_mlp_rates = (
