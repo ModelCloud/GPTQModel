@@ -373,6 +373,27 @@ The optimized negative path skipped duplicate selected-artifact endpoint passes 
 P16 together reinforce that occupancy and local capacity are not promotion evidence; only the live propagated gate
 can decide whether a family is useful for a specific module.
 
+## Sequential O-projection replication (P17)
+
+P17 completed the layer-2 attention quartet by installing the selected Q and canonical K/V artifacts before
+quantizing `o_proj`. Family 3 had a strong two-fold search result (`0.955928`, at least `4.41%` better in each fold),
+while family 1 was a sub-threshold near-tie and families 2/3 otherwise showed the same high selector occupancy as
+earlier modules. The independent confirmation split reversed the selected family:
+
+| Metric | Family 3 versus packed canonical V2+YAQA |
+|---|---:|
+| Confirmation final KL | **+2.0130%** |
+| Confirmation JSD | **+2.0394%** |
+| Confirmation Top-1 | +0.0096 pp |
+| Confirmation Top-5 overlap | +0.0328 pp |
+| Confirmation Top-10 overlap | -0.0347 pp |
+
+The material KL/JSD regression blocked the candidate and the packed canonical artifact was serialized. The complete
+quartet result is therefore: Q validated positive; K/V rejected during search; O rejected during confirmation.
+Complete-family replay is a useful candidate mechanism, but its search estimator can still overfit and every module
+requires independent confirmation. The next decisive test is Q under another YAQA/RHT seed; no production lifecycle
+promotion should precede that seed-stability gate.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -389,3 +410,5 @@ can decide whether a family is useful for a specific module.
 - `artifacts/qvq_p15_complete_family_k_gate/selected_packed.safetensors`
 - `artifacts/qvq_p16_complete_family_v_gate/report_packed.json`
 - `artifacts/qvq_p16_complete_family_v_gate/selected_packed.safetensors`
+- `artifacts/qvq_p17_complete_family_o_gate/report_packed.json`
+- `artifacts/qvq_p17_complete_family_o_gate/selected_packed.safetensors`
