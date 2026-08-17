@@ -2613,29 +2613,38 @@ def _prepare_local_replay_groups(
 def _replay_local_groups(
     inputs: Mapping[str, torch.Tensor],
     groups: tuple[_LocalReplayGroup, ...],
+    *,
+    allow_tf32: bool = False,
 ) -> dict[str, torch.Tensor]:
-    """Replay grouped reconstructed projections in FP32 without device-to-host copies."""
+    """Replay grouped reconstructed projections without device-to-host copies."""
 
-    outputs = {}
-    for group in groups:
-        group_input = inputs[group.names[0]]
-        for name in group.names[1:]:
-            candidate = inputs[name]
-            if (
-                candidate.shape != group_input.shape
-                or candidate.device != group_input.device
-                or candidate.dtype != group_input.dtype
+    previous_tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    try:
+        outputs = {}
+        for group in groups:
+            group_input = inputs[group.names[0]]
+            for name in group.names[1:]:
+                candidate = inputs[name]
+                if (
+                    candidate.shape != group_input.shape
+                    or candidate.device != group_input.device
+                    or candidate.dtype != group_input.dtype
+                ):
+                    raise ValueError(
+                        f"module-tree shared-input group has incompatible runtime geometry: {group.names}"
+                    )
+            joined = F.linear(group_input.float(), group.weight)
+            for name, output, bias in zip(
+                group.names,
+                joined.split(group.output_widths, dim=-1),
+                group.biases,
+                strict=True,
             ):
-                raise ValueError(f"module-tree shared-input group has incompatible runtime geometry: {group.names}")
-        joined = F.linear(group_input.float(), group.weight)
-        for name, output, bias in zip(
-            group.names,
-            joined.split(group.output_widths, dim=-1),
-            group.biases,
-            strict=True,
-        ):
-            outputs[name] = output if bias is None else output + bias
-    return outputs
+                outputs[name] = output if bias is None else output + bias
+        return outputs
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous_tf32
 
 
 @torch.inference_mode()
@@ -2838,7 +2847,7 @@ def _streaming_compare_models_cuda(
                         live_outputs,
                     )
                 replay_start = phase_start("local_replay", metric_stream)
-                local_outputs = _replay_local_groups(dense_inputs, replay_groups)
+                local_outputs = _replay_local_groups(dense_inputs, replay_groups, allow_tf32=True)
                 phase_end("local_replay", metric_stream, replay_start)
                 dense_joined = _joined(dense_outputs, module_names)
                 local_metric_start = phase_start("local_metrics", metric_stream)

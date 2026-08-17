@@ -52,3 +52,21 @@ dominant sampled stalls were math-pipe throttle, dispatch, long scoreboard, and 
   496-sequence benchmark (W3: 19.991 ms to 22.546 ms; W3.5: 18.187 ms to 19.454 ms) and was rejected.
 
 Profile artifact: `/private/monster/data/model/qvq_all_linear_telemetry_20260817/reports/viterbi-w2-sm80.ncu-rep`.
+
+## Final-evaluation local replay A/B
+
+The local reconstruction diagnostic previously disabled TF32 for 112 large FP32 projection replays per row. TF32
+is now scoped only to those diagnostic GEMMs; dense and quantized model forwards retain their original numerical
+policy. A matched 512-row, all-linear, 16-layer real-model replay produced:
+
+| Metric | FP32 baseline | Scoped TF32 | Speedup / absolute drift |
+|---|---:|---:|---:|
+| Evaluation wall time | 58.256 s | 42.104 s | 1.38x |
+| Local replay GPU work | 20.273 s | 4.255 s | 4.77x |
+| Local relative L2 | 2.091496e-4 | 2.091536e-4 | 3.99e-9 |
+| Local KL | 5.122090e-6 | 5.121487e-6 | 6.03e-10 |
+| Final-logit KL | 0 | 0 | 0 |
+| Top-1/5/10 | identical | identical | 0 |
+
+A separate 16-layer, 320-token raw-output stress microbenchmark measured 4.83x replay speedup, 2.78e-4 maximum
+absolute output drift, and 7.69e-6 relative L2, all inside the `2e-3` inference-analysis tolerance.

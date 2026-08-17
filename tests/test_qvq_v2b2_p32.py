@@ -821,6 +821,28 @@ def test_qvq_grouped_device_replay_matches_independent_fp32_linears():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_qvq_grouped_tf32_replay_stays_within_inference_tolerance_and_restores_policy():
+    generator = torch.Generator().manual_seed(20260817)
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(2048, 2048, bias=False, device="cuda", dtype=torch.float32)
+    with torch.no_grad():
+        model.proj.weight.copy_(0.02 * torch.randn((2048, 2048), generator=generator, dtype=torch.float32).cuda())
+    modules = {"proj": model.proj}
+    reconstructions = {"proj": model.proj.weight.detach()}
+    inputs = {"proj": torch.randn((32, 2048), generator=generator, dtype=torch.float16).cuda()}
+    groups = _prepare_local_replay_groups(model, modules, reconstructions, device=torch.device("cuda"))
+    previous_tf32 = torch.backends.cuda.matmul.allow_tf32
+
+    reference = _replay_local_groups(inputs, groups, allow_tf32=False)["proj"]
+    actual = _replay_local_groups(inputs, groups, allow_tf32=True)["proj"]
+
+    assert torch.backends.cuda.matmul.allow_tf32 is previous_tf32
+    delta = (actual - reference).abs()
+    assert delta.max().item() <= 2e-3
+    assert torch.linalg.vector_norm(delta).item() / torch.linalg.vector_norm(reference).item() <= 2e-3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_qvq_cuda_diagnostic_reduction_matches_cpu_reference():
     generator = torch.Generator().manual_seed(20260817)
     dense_cpu = torch.randn((13, 61), generator=generator)
