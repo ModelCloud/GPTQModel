@@ -3668,6 +3668,11 @@ def yaqa_inner(
                 output_stop = output_start + tile_cols
                 left_feedback = input_feedback[input_start:, input_start:input_stop].transpose(0, 1)
                 right_feedback = output_feedback[output_start:, output_start:output_stop]
+                # The left-projected full suffix is already required by the
+                # two-sided term. Reuse its leading tile columns for the
+                # one-sided input term instead of issuing an identical
+                # reduction through a second, skinny GEMM.
+                left_projected_error = left_feedback @ error[input_start:, output_start:]
                 corrected_tiles.append(
                     source[input_start:input_stop, output_start:output_stop]
                     + (
@@ -3675,8 +3680,8 @@ def yaqa_inner(
                         if rounding_bias is None
                         else rounding_bias[input_start:input_stop, output_start:output_stop]
                     )
-                    + left_feedback @ error[input_start:, output_start:] @ right_feedback
-                    + left_feedback @ error[input_start:, output_start:output_stop]
+                    + left_projected_error @ right_feedback
+                    + left_projected_error[:, :tile_cols]
                     + error[input_start:input_stop, output_start:] @ right_feedback
                 )
 

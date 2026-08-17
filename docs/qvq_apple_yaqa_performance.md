@@ -224,3 +224,24 @@ The profile is now concentrated: the three B2 family candidates consume 55.824 s
 of segmented Metal recurrence, while all canonical V2 work consumes 11.020 seconds and CPU feedback across all
 four passes consumes 12.592 seconds. A 2x module target requires the family region to fall from 55.824 seconds to
 roughly 22 seconds or less; canonical and feedback-only tuning cannot provide that bound by themselves.
+
+## Reused left-side YAQA feedback projection
+
+Each corrected tile contains both `L E R` and `L E_tile`. The former already materializes `L E` across the full
+live output suffix, so its leading tile columns are bit-identical to a second skinny `L E_tile` GEMM. YAQA now
+reuses that slice. This removes one Accelerate GEMM per tile without changing the addition order, factors, error
+history, corrected target, trellis search, or checkpoint format.
+
+Direct FP32 checks over suffix widths through 2048 found bit-exact corrected targets (`max_abs = 0`). The focused
+real-artifact Apple parity test also retained exact states and selectors, satisfying the `1e-6` quantization gate.
+The matched real-Llama W2 B2-P32+YAQA contract measured:
+
+| Region | Before reuse | After | Speedup |
+|---|---:|---:|---:|
+| YAQA feedback | 12.592 s | 10.273 s | 1.226x |
+| Four Q/K/V/O module quantization | 66.936 s | 64.668 s | 1.035x |
+| Complete quantize-and-evaluate arm | 112.748 s | 110.458 s | 1.021x |
+
+Final-logit KL remained `0.003401`; Top-1/5/10 remained `99.71%`, `92.06%`, and `91.90%`. The result is a free
+exact win, but it also reinforces the profile conclusion: segmented Metal recurrence remains 45.418 seconds and
+requires cross-family batching or a deeper exact-kernel change to reach the requested 2--4x module speedup.
