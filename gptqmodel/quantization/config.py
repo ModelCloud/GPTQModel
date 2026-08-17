@@ -5952,6 +5952,13 @@ class QVQConfig(BaseQuantizeConfig):
         requested_pack_dtype = _normalize_pack_dtype(self.pack_dtype)
         super().__post_init__()
 
+        # Apple exposes one process-wide MPS command stream. Data-parallel
+        # calibration forwards can overlap encoders on that stream and trigger
+        # Metal's "command encoder is already encoding" assertion. Keep the
+        # numerical path unchanged but force the serial executor on MPS.
+        if self.device is not None and torch.device(self.device).type == "mps":
+            self.auto_forward_data_parallel = False
+
         if self.bits not in QVQ_BITS:
             raise ValueError(
                 "QVQConfig: `bits` must be an integer or half-integer in `[1, 8]` for the PGC16 bitshift trellis."
