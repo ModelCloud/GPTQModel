@@ -418,6 +418,31 @@ winner. This clears implementation of an **optional per-module complete-family p
 V2+YAQA rollback. It does not yet clear default enablement; a new Fisher sampling seed and broader module/depth sweep
 remain required.
 
+## Independent Fisher-seed replication (P19)
+
+P19 recollected the same 512 full YAQA rows with Monte Carlo seed 0: 163,324 valid tokens across 512 independent
+sequences. Collection completed in `138.60 s` and produced a separate 392 MiB-class factor cache. The Q-family gate
+then used codec/RHT seed 1, matching P14, so only the Fisher sampling seed changed.
+
+No alternate improved both packed search folds:
+
+| Family | Fold 0 final KL | Fold 1 final KL | Worst-fold ratio | Decision |
+|---:|---:|---:|---:|---|
+| canonical V2 | 0.00193776 | 0.00281087 | 1.000000 | selected rollback |
+| 1 | 0.00184288 | 0.00291467 | 1.036928 | reject |
+| 2 | 0.00182964 | 0.00287259 | 1.021957 | reject |
+| 3 | 0.00185431 | 0.00302310 | 1.075504 | reject |
+
+Every family improved fold 0 but regressed fold 1. Thus P14/P18 establish codec-seed stability under one factor
+estimate, but the winning direction is **not Fisher-seed stable**. Default enablement is rejected. The complete-family
+stage remains safe and potentially useful only as an optional guarded search because the packed all-fold gate returns
+exactly to canonical V2+YAQA when the estimator proposes a harmful family.
+
+Before lifecycle integration, stabilize the YAQA estimator rather than hard-code family 1. The next efficient test
+should combine multiple Monte Carlo samples per sequence (or average factor accumulators before factorization), then
+repeat the same packed two-fold/confirmation gate. The locked family-selection threshold and canonical rollback must
+remain unchanged.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -438,3 +463,7 @@ remain required.
 - `artifacts/qvq_p17_complete_family_o_gate/selected_packed.safetensors`
 - `artifacts/qvq_p18_complete_family_q_seed0_gate/report_packed.json`
 - `artifacts/qvq_p18_complete_family_q_seed0_gate/selected_packed.safetensors`
+- `artifacts/qvq_p19_fisher_seed0_gate/yaqa_seed0_prepare.json`
+- `artifacts/qvq_p19_fisher_seed0_gate/yaqa512_seed0_factors.pt`
+- `artifacts/qvq_p19_fisher_seed0_gate/report_packed.json`
+- `artifacts/qvq_p19_fisher_seed0_gate/selected_packed.safetensors`
