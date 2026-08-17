@@ -30,6 +30,7 @@ def _qvq_cpu_sources() -> list[str]:
     return [
         str(_qvq_cpu_root() / "qvq_gemv_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_viterbi_cpu.cpp"),
+        str(_qvq_cpu_root() / "qvq_viterbi_banked_cpu.cpp"),
     ]
 
 
@@ -47,7 +48,7 @@ def _qvq_cpu_extra_ldflags() -> list[str]:
 _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_CPU_OPS_NAME,
     namespace=_QVQ_CPU_NAMESPACE,
-    required_ops=("gemv_cpu", "viterbi_cpu"),
+    required_ops=("gemv_cpu", "viterbi_cpu", "viterbi_banked_cpu"),
     sources=_qvq_cpu_sources,
     build_root_env="GPTQMODEL_QVQ_CPU_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_cpu"),
@@ -195,4 +196,82 @@ def qvq_cpu_viterbi(
         transition_bits,
         overlap,
         step_weights,
+    )
+
+
+_QVQ_CPU_VITERBI_BANKED_OP: Callable | None = None
+
+
+def _qvq_cpu_viterbi_banked_op() -> Callable:
+    global _QVQ_CPU_VITERBI_BANKED_OP
+    if _QVQ_CPU_VITERBI_BANKED_OP is None:
+        with _QVQ_CPU_OP_LOCK:
+            if _QVQ_CPU_VITERBI_BANKED_OP is None:
+                _QVQ_CPU_VITERBI_BANKED_OP = _extension_api().op("qvq_cpu", "viterbi_banked_cpu")
+    return _QVQ_CPU_VITERBI_BANKED_OP
+
+
+def qvq_cpu_viterbi_banked(
+    sequences: torch.Tensor,
+    codebooks: torch.Tensor,
+    transition_bits: int,
+    segment_steps: int,
+    overlap: torch.Tensor | None = None,
+    step_weights: torch.Tensor | None = None,
+    entry_states: torch.Tensor | None = None,
+    exit_states: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Native CPU banked batched Viterbi trellis quantization.
+
+    Args:
+        sequences: [batch, steps, V] float tensor on CPU.
+        codebooks: [bank_count, state_count, V] float tensor on CPU.
+        transition_bits: QVQ transition width in bits.
+        segment_steps: number of steps between bank switches.
+        overlap: optional int64 [batch] tail-biting overlap.
+        step_weights: optional float [batch, steps] per-step weights.
+        entry_states: optional int64 [batch] fixed-boundary entry state.
+        exit_states: optional int64 [batch] fixed-boundary exit state.
+
+    Returns:
+        (states [batch, steps], squared_error [batch], segment_bank_ids [batch, segments]).
+    """
+
+    if not qvq_cpu_supported():
+        raise RuntimeError("QVQ CPU kernel requires x86-64 (AMD64).")
+    if sequences.device.type != "cpu" or codebooks.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_banked requires CPU tensors")
+    if sequences.dim() != 3 or codebooks.dim() != 3 or sequences.size(2) != codebooks.size(2):
+        raise ValueError("qvq_cpu_viterbi_banked: sequence/codebooks shape mismatch")
+    if overlap is not None and overlap.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_banked: overlap must be on CPU")
+    if step_weights is not None and step_weights.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_banked: step_weights must be on CPU")
+    if entry_states is not None and entry_states.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_banked: entry_states must be on CPU")
+    if exit_states is not None and exit_states.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_banked: exit_states must be on CPU")
+    if (entry_states is None) != (exit_states is None):
+        raise ValueError("qvq_cpu_viterbi_banked: entry_states and exit_states must be both provided or both omitted")
+
+    sequences = sequences.contiguous()
+    codebooks = codebooks.contiguous()
+    if overlap is not None:
+        overlap = overlap.to(torch.int64).contiguous()
+    if step_weights is not None:
+        step_weights = step_weights.to(torch.float32).contiguous()
+    if entry_states is not None:
+        entry_states = entry_states.to(torch.int64).contiguous()
+    if exit_states is not None:
+        exit_states = exit_states.to(torch.int64).contiguous()
+
+    return _qvq_cpu_viterbi_banked_op()(
+        sequences,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        overlap,
+        step_weights,
+        entry_states,
+        exit_states,
     )

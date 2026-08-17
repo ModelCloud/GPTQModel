@@ -1513,6 +1513,36 @@ def _batched_v2_banked_viterbi_quantize(
                 squared_error=squared_error,
                 segment_bank_ids=segment_bank_ids,
             )
+    if (
+        sequences.device.type == "cpu"
+        and sequences.dtype == torch.float32
+        and codebooks.dtype == torch.float32
+        and sequences.is_contiguous()
+        and codebooks.is_contiguous()
+        and codebooks.shape[1] == (1 << 16)
+        and codebooks.shape[2] == 2
+        and (step_weights is None or step_weights.dtype == torch.float32)
+    ):
+        from ..utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi_banked
+
+        if qvq_cpu_supported():
+            native_weights = None if step_weights is None else step_weights.contiguous()
+            native_overlap = None if overlap is None else overlap.to(torch.int64).contiguous()
+            states, squared_error, segment_bank_ids = qvq_cpu_viterbi_banked(
+                sequences,
+                codebooks,
+                shift,
+                segment_steps,
+                overlap=native_overlap,
+                step_weights=native_weights,
+            )
+            path_banks = segment_bank_ids.repeat_interleave(segment_steps, dim=1).to(torch.long)
+            return BankedTrellisQuantizationResult(
+                states=states,
+                values=codebooks[path_banks, states],
+                squared_error=squared_error,
+                segment_bank_ids=segment_bank_ids,
+            )
     use_float64 = sequences.device.type != "mps" and any(
         tensor.dtype == torch.float64 for tensor in (sequences, codebooks, step_weights) if tensor is not None
     )
@@ -1737,6 +1767,31 @@ def fixed_boundary_v2b2_p32_segment_quantize(
     shift = _validate_trellis_shape(bits=bits, vector_size=2, trellis_window=16)
     if shift > 7:
         raise ValueError("QVQ fixed-boundary P32 supports only rates W1 through W3.5.")
+    if (
+        sequences.device.type == "cpu"
+        and sequences.dtype == torch.float32
+        and codebooks.dtype == torch.float32
+        and sequences.is_contiguous()
+        and codebooks.is_contiguous()
+    ):
+        from ..utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi_banked
+
+        if qvq_cpu_supported():
+            states, squared_error, segment_bank_ids = qvq_cpu_viterbi_banked(
+                sequences,
+                codebooks,
+                shift,
+                sequences.shape[1],
+                entry_states=entry_states,
+                exit_states=exit_states,
+            )
+            path_banks = segment_bank_ids.repeat_interleave(sequences.shape[1], dim=1).to(torch.long)
+            return BankedTrellisQuantizationResult(
+                states=states,
+                values=codebooks[path_banks, states],
+                squared_error=squared_error,
+                segment_bank_ids=segment_bank_ids,
+            )
     work_dtype = torch.float64 if sequences.device.type != "mps" and (
         sequences.dtype == torch.float64 or codebooks.dtype == torch.float64
     ) else torch.float32
