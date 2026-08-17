@@ -129,3 +129,18 @@ The end-to-end collection speedup is **1.84x** with 1.07 GiB extra peak VRAM. Th
 declared `1e-6` quantization tolerance. Tiny-model CUDA/CPU accumulation, activation-checkpointing, repeated-seed,
 and factor-output tests remain bit-exact; telemetry now records residency, allocated factor bytes, capture wall/CUDA
 time, and final transfer time.
+
+## Near-threshold acceptance CUDA KL recheck
+
+The full W2.5 V2+YAQA run exposed the next evaluation bottleneck after the lean metric change: 61 near-threshold
+proposals caused 496 historical CPU KL rechecks. Metrics consumed 215.466 seconds while candidate forwards used
+only 9.843 seconds. The exact recheck now uses ordinary CUDA FP32 log-softmax and reduction; deterministic
+Top-1/5/10 continues to use the native tie-stable evaluator.
+
+| Case | Device / dtype | CPU reference | CUDA recheck | Absolute KL delta | Contract |
+|---|---|---:|---:|---:|---:|
+| Representative 384 x 128256 logits | A100 / FP16 | 0.711 s | 0.063 s cold | 1.49e-7 | <=1e-6 |
+| Ten scale/noise cases | A100 / FP16+BF16 | — | — | 3.47e-7 max | <=1e-6 |
+
+The warm CUDA reduction is millisecond-scale, so the expected improvement for the 215-second W2.5 metric phase is
+substantially larger than 10x without changing an acceptance decision within the required numerical contract.

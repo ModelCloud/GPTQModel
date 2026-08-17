@@ -47,6 +47,7 @@ from scripts.compare_qvq_codecs_llama_qkvo import (
     ARM_CONFIG,
     DEFAULT_ARMS,
     _acceptance_kl_only_cpu,
+    _acceptance_kl_reference,
     _acceptance_logit_metrics,
     _aggregate_qvq_telemetry,
     _all_linear_dependency_stages,
@@ -1056,6 +1057,21 @@ def test_qvq_mlp_acceptance_kl_only_cpu_matches_full_reference():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_qvq_mlp_acceptance_cuda_kl_reference_matches_cpu(dtype):
+    generator = torch.Generator(device="cuda").manual_seed(20260817)
+    dense = torch.randn((2, 19, 4097), generator=generator, device="cuda", dtype=dtype)
+    candidate = dense + 0.1 * torch.randn(dense.shape, generator=generator, device="cuda", dtype=dtype)
+
+    expected = _acceptance_kl_only_cpu(dense, candidate)
+    actual = _acceptance_kl_reference(dense, candidate)
+
+    assert actual["shape"] == expected["shape"]
+    assert actual["finite"] is True
+    assert actual["kl_forward"]["mean"] == pytest.approx(expected["kl_forward"]["mean"], abs=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemetry():
     from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -1110,8 +1126,9 @@ def test_qvq_mlp_suffix_acceptance_matches_full_forward_and_reports_cuda_telemet
     suffix("near_threshold")
     near_telemetry = suffix.telemetry()
     assert near_telemetry["acceptance_near_threshold_evaluations"] == 1
-    assert near_telemetry["exact_cpu_metric_calls"] >= 4
-    assert near_telemetry["cpu_topk_fallback_rows"] >= 4
+    assert near_telemetry["exact_cpu_metric_calls"] == 0
+    assert near_telemetry["exact_cuda_metric_calls"] >= 4
+    assert near_telemetry["cpu_topk_fallback_rows"] == 0
     assert near_telemetry["candidate_host_cache_bytes"] == 0
     for telemetry in (full_telemetry, suffix_telemetry):
         assert telemetry["peak_allocated_bytes"] >= telemetry["start_allocated_bytes"]

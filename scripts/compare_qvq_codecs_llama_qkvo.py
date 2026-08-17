@@ -1032,6 +1032,28 @@ def _acceptance_kl_only_cpu(dense_logits: torch.Tensor, candidate_logits: torch.
 
 
 @torch.inference_mode()
+def _acceptance_kl_reference(dense_logits: torch.Tensor, candidate_logits: torch.Tensor) -> dict[str, object]:
+    """Recheck acceptance KL on CUDA without the fused reducer's small approximation drift."""
+
+    if candidate_logits.device.type != "cuda":
+        return _acceptance_kl_only_cpu(dense_logits, candidate_logits)
+    dense = dense_logits.detach().to(candidate_logits.device, non_blocking=True).float().reshape(
+        -1, dense_logits.shape[-1]
+    )
+    candidate = candidate_logits.detach().float().reshape(-1, candidate_logits.shape[-1])
+    if dense.shape != candidate.shape or dense.shape[0] < 1:
+        raise ValueError(f"acceptance logit shape mismatch: {tuple(dense.shape)} != {tuple(candidate.shape)}")
+    dense_log_prob = F.log_softmax(dense, dim=-1)
+    candidate_log_prob = F.log_softmax(candidate, dim=-1)
+    kl_forward = (dense_log_prob.exp() * (dense_log_prob - candidate_log_prob)).sum(dim=-1)
+    return {
+        "shape": list(dense.shape),
+        "finite": bool(torch.isfinite(candidate).all()),
+        "kl_forward": {"mean": kl_forward.mean().item()},
+    }
+
+
+@torch.inference_mode()
 def _streaming_logit_metrics(
     dense_model: torch.nn.Module,
     candidate_model: torch.nn.Module,
@@ -1185,6 +1207,7 @@ class _MlpAcceptanceEvaluatorBase:
         self.cpu_topk_fallback_rows = 0
         self.fast_cuda_metric_calls = 0
         self.exact_cpu_metric_calls = 0
+        self.exact_cuda_metric_calls = 0
         self.acceptance_near_threshold_evaluations = 0
         self.candidate_host_cache_bytes = 0
         self.acceptance_baseline = None
@@ -1237,6 +1260,7 @@ class _MlpAcceptanceEvaluatorBase:
             "cpu_topk_fallback_rows": self.cpu_topk_fallback_rows,
             "fast_cuda_metric_calls": self.fast_cuda_metric_calls,
             "exact_cpu_metric_calls": self.exact_cpu_metric_calls,
+            "exact_cuda_metric_calls": self.exact_cuda_metric_calls,
             "acceptance_near_threshold_evaluations": self.acceptance_near_threshold_evaluations,
             "candidate_host_cache_bytes": self.candidate_host_cache_bytes,
             "historical_full_forward_calls": historical_full_calls,
@@ -1304,7 +1328,7 @@ class _MlpAcceptanceEvaluatorBase:
                 self.acceptance_near_threshold_evaluations += 1
             exact = _WeightedMetricAccumulator()
             for dense_logits, candidate in zip(self.dense_logits_by_row, candidate_logits_factory(), strict=True):
-                metrics = _acceptance_kl_only_cpu(dense_logits, candidate)
+                metrics = _acceptance_kl_reference(dense_logits, candidate)
                 deterministic = _fast_cuda_acceptance_metrics(dense_logits, candidate)
                 if deterministic is None:
                     raise RuntimeError("CUDA acceptance metrics unexpectedly unavailable for a CUDA candidate")
@@ -1313,8 +1337,7 @@ class _MlpAcceptanceEvaluatorBase:
                     # same native deterministic value-descending/index-ascending
                     # ordering as the fast path, including percentile summaries.
                     metrics[key] = deterministic[key]
-                self.exact_cpu_metric_calls += 1
-                self.cpu_topk_fallback_rows += 1
+                self.exact_cuda_metric_calls += 1
                 exact.add(metrics, rows=candidate.numel() // candidate.shape[-1])
             return exact.result()
         exact = _WeightedMetricAccumulator()
