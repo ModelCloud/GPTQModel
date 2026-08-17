@@ -48,6 +48,7 @@ from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
     _qvq_cuda_viterbi_v2_segment_g_op,
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_supported,
@@ -586,6 +587,44 @@ def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(bank_count, segme
     assert torch.count_nonzero(states) == 0
     assert torch.count_nonzero(loss) == 0
     assert torch.count_nonzero(bank_ids) == 0
+
+
+@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(bits, bank_count, segment_steps):
+    generator = torch.Generator(device="cuda").manual_seed(20260818 + int(bits * 2) * 10 + bank_count)
+    sequences = torch.randn((3, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    overlap = torch.randint(
+        0,
+        1 << (16 - transition_bits),
+        (3,),
+        generator=generator,
+        device="cuda",
+        dtype=torch.int64,
+    )
+    step_weights = (0.1 + torch.rand((3, 128), generator=generator, device="cuda")).contiguous()
+
+    expected = qvq_cuda_viterbi_v2_segment_banked(
+        sequences,
+        codebooks,
+        bits,
+        segment_steps,
+        overlap,
+        step_weights,
+    )
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences,
+        codebooks,
+        transition_bits,
+        segment_steps,
+        overlap,
+        step_weights,
+    )
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))

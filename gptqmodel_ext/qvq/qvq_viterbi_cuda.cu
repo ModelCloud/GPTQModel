@@ -1672,7 +1672,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     int64_t segment_steps,
     const c10::optional<at::Tensor>& overlap,
     const c10::optional<at::Tensor>& step_weights,
-    int kernel_mode) {
+    int kernel_mode,
+    bool validate_values = true) {
   const bool g_only = kernel_mode != 0;
   bool grid_parallel = kernel_mode == 2;
   TORCH_CHECK(sequences.is_cuda() && codebooks.is_cuda(),
@@ -1701,9 +1702,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   TORCH_CHECK(reinterpret_cast<uintptr_t>(sequences.data_ptr()) % 4 == 0 &&
                   reinterpret_cast<uintptr_t>(codebooks.data_ptr()) % 4 == 0,
               "segmented-bank V2 tensors do not satisfy the native vector-load alignment contract");
-  TORCH_CHECK(at::isfinite(sequences).all().item<bool>() &&
-                  at::isfinite(codebooks).all().item<bool>(),
-              "segmented-bank V2 sequences and codebooks must be finite");
+  if (validate_values) {
+    TORCH_CHECK(at::isfinite(sequences).all().item<bool>() &&
+                    at::isfinite(codebooks).all().item<bool>(),
+                "segmented-bank V2 sequences and codebooks must be finite");
+  }
 
   const bool constrained = overlap.has_value();
   const at::Tensor overlap_tensor = constrained ? *overlap : at::Tensor();
@@ -1714,9 +1717,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     TORCH_CHECK(overlap_tensor.dim() == 1 && overlap_tensor.size(0) == batch,
                 "segmented-bank V2 overlap must have shape [batch]");
     const int64_t overlap_limit = int64_t{1} << (16 - transition_bits);
-    TORCH_CHECK(overlap_tensor.ge(0).all().item<bool>() &&
-                    overlap_tensor.lt(overlap_limit).all().item<bool>(),
-                "segmented-bank V2 overlap values are outside the retained-state range");
+    if (validate_values) {
+      TORCH_CHECK(overlap_tensor.ge(0).all().item<bool>() &&
+                      overlap_tensor.lt(overlap_limit).all().item<bool>(),
+                  "segmented-bank V2 overlap values are outside the retained-state range");
+    }
   }
 
   const bool weighted = step_weights.has_value();
@@ -1727,19 +1732,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
                 "segmented-bank V2 step weights must be contiguous float32 on the sequence device");
     TORCH_CHECK(step_weights_tensor.sizes() == at::IntArrayRef({batch, steps}),
                 "segmented-bank V2 step weights must have shape [batch, 128]");
-    TORCH_CHECK(at::isfinite(step_weights_tensor).all().item<bool>() &&
-                    step_weights_tensor.ge(0).all().item<bool>(),
-                "segmented-bank V2 step weights must be finite and nonnegative");
+    if (validate_values) {
+      TORCH_CHECK(at::isfinite(step_weights_tensor).all().item<bool>() &&
+                      step_weights_tensor.ge(0).all().item<bool>(),
+                  "segmented-bank V2 step weights must be finite and nonnegative");
+    }
   }
 
-  const double maximum_weight = weighted ? step_weights_tensor.abs().amax().item<double>() : 1.0;
-  const double accumulation_terms = std::max(1.0, static_cast<double>(steps) * maximum_weight);
-  const double safe_magnitude = std::sqrt(static_cast<double>(std::numeric_limits<float>::max()) /
-                                           accumulation_terms) /
-      (2.0 * std::sqrt(2.0));
-  TORCH_CHECK(sequences.abs().amax().item<double>() <= safe_magnitude &&
-                  codebooks.abs().amax().item<double>() <= safe_magnitude,
-              "segmented-bank V2 magnitudes are too large for finite FP32 distance accumulation");
+  if (validate_values) {
+    const double maximum_weight = weighted ? step_weights_tensor.abs().amax().item<double>() : 1.0;
+    const double accumulation_terms = std::max(1.0, static_cast<double>(steps) * maximum_weight);
+    const double safe_magnitude = std::sqrt(static_cast<double>(std::numeric_limits<float>::max()) /
+                                             accumulation_terms) /
+        (2.0 * std::sqrt(2.0));
+    TORCH_CHECK(sequences.abs().amax().item<double>() <= safe_magnitude &&
+                    codebooks.abs().amax().item<double>() <= safe_magnitude,
+                "segmented-bank V2 magnitudes are too large for finite FP32 distance accumulation");
+  }
 
   const c10::cuda::CUDAGuard device_guard(sequences.device());
   cudaDeviceProp properties{};
@@ -1942,6 +1951,22 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_cuda(
       sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2);
 }
 
+// Internal hot-path entry point. YAQA validates one complete anti-diagonal
+// before chunking and derives overlap from a native traceback, so repeating
+// value reductions in both tail-biting passes only serializes the launch
+// stream. Keep all structural checks above active; only synchronized value
+// scans are skipped here.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& overlap,
+    const c10::optional<at::Tensor>& step_weights) {
+  return qvq_viterbi_v2_segment_banked_cuda_impl(
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
@@ -1957,6 +1982,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_grid(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
         "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+  m.def("viterbi_v2_segment_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
+        "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
@@ -1966,4 +1993,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi_v2_segment_banked", &qvq_viterbi_v2_segment_banked_cuda);
   m.impl("viterbi_v2_segment_g", &qvq_viterbi_v2_segment_g_cuda);
   m.impl("viterbi_v2_segment_grid", &qvq_viterbi_v2_segment_grid_cuda);
+  m.impl("viterbi_v2_segment_grid_trusted", &qvq_viterbi_v2_segment_grid_trusted_cuda);
 }
