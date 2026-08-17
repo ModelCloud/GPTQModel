@@ -110,6 +110,31 @@ rates plus the multi-tile partial-batch test (`7 passed`). A pure policy test
 covers the CUDA default, W1 memory cap, partial anti-diagonal, explicit caller,
 non-CUDA, and Apple branches.
 
+The canonical V2+YAQA oracle had the same underfill independently of the
+segmented family paths. Its CUDA default now coalesces up to 32 tiles at W1 and
+W1.5 (large shared-memory frontier) and up to 128 tiles at W2 and above.
+Explicit non-default batches again remain authoritative.
+
+```text
++----------------------+-------+-----------+-----------+---------+---------------------+
+| Benchmark            | Rate  | Batch 16  | Tuned     | Speedup | Accuracy            |
++----------------------+-------+-----------+-----------+---------+---------------------+
+| Canonical V2+YAQA    | W1    | 778.90 ms | 525.05 ms |   1.48x | bit-exact           |
+| Canonical V2+YAQA    | W1.5  | 673.06 ms | 482.04 ms |   1.40x | bit-exact           |
+| Canonical V2+YAQA    | W2    | 657.46 ms | 472.80 ms |   1.39x | bit-exact           |
+| Canonical V2+YAQA    | W2.5  | 807.64 ms | 581.84 ms |   1.39x | bit-exact           |
+| Canonical V2+YAQA    | W3    | 701.70 ms | 502.37 ms |   1.40x | bit-exact           |
+| Full B2 reselect     | W2.5  |4002.35 ms |1697.84 ms |   2.36x | bit-exact repeated  |
++----------------------+-------+-----------+-----------+---------+---------------------+
+```
+
+The full 512x512 W2.5 comparison is a same-GPU, six-sample median against
+commit `b666f398`, which already contains the segmented-family auto-batching.
+Peak allocated memory remained `80.08 MiB`. The larger whole-stage gain comes
+from removing dozens of small canonical allocations/launches before the three
+side streams; repeated module-like calls no longer accumulate allocator and
+stream-ordering pressure.
+
 ## Nsight result and remaining target
 
 For W2.5 batch 16, Nsight Compute reports only 32 CTAs on a 124-SM GPU

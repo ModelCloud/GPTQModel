@@ -138,6 +138,21 @@ def _yaqa_segmented_batch_size(
     return requested_batch_size
 
 
+def _yaqa_viterbi_batch_size(
+    logical_batch_size: int,
+    requested_batch_size: int,
+    bits: float,
+    *,
+    cuda_feedback: bool,
+) -> int:
+    """Fill canonical CUDA Viterbi launches while retaining explicit caller policy."""
+
+    if cuda_feedback and requested_batch_size == 16:
+        cuda_auto_batch = 32 if bits <= 1.5 else 128
+        return min(logical_batch_size, cuda_auto_batch)
+    return requested_batch_size
+
+
 def _canonical_qvq_codebook(
     *,
     device: torch.device,
@@ -3800,7 +3815,13 @@ def yaqa_inner(
                             values.append(host_canonical_codebook_stack[0][states])
                             states_for_bank.append(states)
                     else:
-                        for chunk in sequences.split(trellis_batch_size):
+                        canonical_batch_size = _yaqa_viterbi_batch_size(
+                            sequences.shape[0],
+                            trellis_batch_size,
+                            bits,
+                            cuda_feedback=sequences.device.type == "cuda",
+                        )
+                        for chunk in sequences.split(canonical_batch_size):
                             search_chunk = chunk.to(quantization_device) if apple_host_feedback else chunk
                             result = tail_biting_viterbi_quantize(
                                 search_chunk,

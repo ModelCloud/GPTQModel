@@ -1352,6 +1352,14 @@ def test_yaqa_segmented_batch_policy_fills_cuda_without_overriding_explicit_batc
     assert policy(128, 16, 2.5, apple_host_feedback=False, cuda_feedback=False) == 16
     assert policy(128, 16, 2.5, apple_host_feedback=True, cuda_feedback=False) == 128
 
+    canonical_policy = qvq_module._yaqa_viterbi_batch_size
+    assert canonical_policy(128, 16, 1, cuda_feedback=True) == 32
+    assert canonical_policy(128, 16, 1.5, cuda_feedback=True) == 32
+    assert canonical_policy(128, 16, 2, cuda_feedback=True) == 128
+    assert canonical_policy(23, 16, 2.5, cuda_feedback=True) == 23
+    assert canonical_policy(128, 8, 2.5, cuda_feedback=True) == 8
+    assert canonical_policy(128, 16, 2.5, cuda_feedback=False) == 16
+
 
 def test_qvq_l18_implicit_batch_policy_reaches_quantizer_without_changing_math(monkeypatch):
     observed = []
