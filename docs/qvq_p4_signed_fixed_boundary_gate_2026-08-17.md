@@ -284,6 +284,60 @@ modules through the live quantized prefix, and choose by cross-fitted final-logi
 confirmation. This avoids the fragile one-segment spectral projection while testing whether B2's coarse family
 diversity supplies a stable downstream error direction.
 
+## Complete serialized family selection (P14)
+
+P14 tested that different degree of freedom. It independently encoded four complete module artifacts for
+`model.layers.2.self_attn.q_proj` at W2:
+
+1. canonical V2+YAQA represented by all-zero B2 selectors;
+2. V2B2-P32+YAQA with fixed alternate family 1;
+3. V2B2-P32+YAQA with fixed alternate family 2;
+4. V2B2-P32+YAQA with fixed alternate family 3.
+
+Every candidate was packed and reconstructed exactly before use (`max_abs_error = 0`). More importantly, the final
+gate installed each candidate as a native packed `QVQLinear` during search and confirmation. This exposed the small
+FP16 transform/backend drift that a dense reconstructed-weight replay does not see. The packed path changed family
+2 from a near-tie (`0.999960` through a dense reconstructed weight) to a regression (`1.003042`), validating the
+production-path requirement.
+
+The expanded P13 data contract was retained: two 16-row search folds, a disjoint 30-row confirmation split, and a
+disjoint 64-row untouched evaluation split. The complete packed search was:
+
+| Family | Worst-fold final-KL ratio | Selector nonzero fraction | Decision |
+|---:|---:|---:|---|
+| canonical V2 | 1.000000 | 0.00% | rollback oracle |
+| 1 | **0.962960** | 49.97% | confirm |
+| 2 | 1.003042 | 49.80% | reject |
+| 3 | 1.024526 | 50.13% | reject |
+
+Family 1 improved both search folds by at least `3.70%`. It then passed the independent packed confirmation gate:
+
+| Metric | 30-row confirmation delta versus packed V2+YAQA |
+|---|---:|
+| Final KL | -0.5892% |
+| JSD | -0.6643% |
+| Top-1 | -0.0772 pp |
+| Top-5 overlap | +0.0540 pp |
+| Top-10 overlap | +0.0772 pp |
+
+The small confirmation Top-1 loss is noise-scale relative to the token count and is outweighed by consistent primary
+distribution and Top-5/10 improvements. It reversed on the larger untouched evaluation split, where every measured
+endpoint improved:
+
+| Metric | 64-row untouched evaluation delta versus packed V2+YAQA |
+|---|---:|
+| Final KL | **-2.0749%** |
+| JSD | **-2.0359%** |
+| Top-1 | **+0.0395 pp** |
+| Top-5 overlap | **+0.0582 pp** |
+| Top-10 overlap | **+0.0309 pp** |
+
+P14 is therefore a **validated positive direction**, unlike P10-P13. It is not yet an unconditional default: this
+is one module, rate, and seed, and the winning family must be selected rather than hard-coded. The next gate is a
+replication across additional Q/K/V/O modules and at least one independent YAQA/RHT seed. If that confirms the
+effect, integrate complete packed family replay as an optional propagation-aware quantization stage, retaining
+canonical V2+YAQA as the atomic fallback.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -294,3 +348,5 @@ diversity supplies a stable downstream error direction.
 - `artifacts/qvq_p11_realized_gradient_gate/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p12_crossfit_gradient_gate/layer2_q_w2_rows1954_2048.json`
 - `artifacts/qvq_p13_crossfit_expanded_gate/layer2_q_w2_expanded.json`
+- `artifacts/qvq_p14_complete_family_gate/report_packed.json`
+- `artifacts/qvq_p14_complete_family_gate/selected_packed.safetensors`
