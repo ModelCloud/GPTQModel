@@ -184,6 +184,21 @@ def _collect_worker_results(futures, prior_error: Optional[BaseException] = None
     return results
 
 
+def _submit_quantization_task(device, fn, /, *args, **kwargs):
+    """Submit one module quantizer with device-safe accelerator ownership.
+
+    Apple exposes one process-wide MPS command stream.  Concurrent sibling
+    quantizers can otherwise open overlapping Torch/MLX command encoders even
+    when their calibration forwards were serialized.  Keep one FIFO owner for
+    MPS module quantization; other device families retain their normal worker
+    policy.
+    """
+
+    normalized_device = normalize_device_like(device)
+    submitter = DEVICE_THREAD_POOL.submit_serial if normalized_device.type == "mps" else DEVICE_THREAD_POOL.submit
+    return submitter(device, fn, *args, **kwargs)
+
+
 def _supports_async_input_only_weight_prefetch(
     looper: "ModuleLooper",
     processor: LoopProcessor,
@@ -1290,7 +1305,7 @@ def _run_single_subset_pass(
             # parallel as allowed by the device thread pool.
             tgt_dev = quant_target_devices.get(name, cur_layer_device)
             futures.append(
-                DEVICE_THREAD_POOL.submit(
+                _submit_quantization_task(
                     tgt_dev,
                     _process_on_worker,
                     processor,

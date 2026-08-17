@@ -1445,6 +1445,14 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
     if sequences.dtype != torch.float32 or codebooks.dtype != torch.float32:
         raise TypeError("QVQ MLX quantization bridge requires float32 Torch tensors")
 
+    # PyTorch MPS and MLX own separate command queues on the same Metal
+    # device.  A real YAQA module reaches this bridge with factorization and
+    # feedback work still queued by PyTorch; starting MLX while that encoder is
+    # open triggers AGX's "command encoder is already encoding" assertion.
+    # The bridge is already a synchronous host-copy boundary, so make that
+    # ownership transfer explicit before MLX submits its recurrence.
+    torch.mps.synchronize()
+
     def copy_to_mlx(tensor):
         copied = tensor.detach().to("cpu").contiguous()
         return mx.array(copied.numpy())
@@ -1480,6 +1488,7 @@ def qvq_mlx_v2_banked_viterbi_from_torch_mps(
         step_weights=None if step_weights is None else copy_to_mlx(step_weights),
     )
     mx.eval(*outputs)
+    mx.synchronize()
     states = torch.from_numpy(np.asarray(outputs[0])).to(torch.long).to(device=sequences.device)
     selectors = torch.from_numpy(np.asarray(outputs[1])).to(torch.uint8).to(device=sequences.device)
     squared_error = torch.from_numpy(np.asarray(outputs[2])).to(torch.float32).to(device=sequences.device)
