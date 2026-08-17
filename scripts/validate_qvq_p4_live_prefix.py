@@ -1010,6 +1010,7 @@ def main() -> None:
         else nullcontext()
     )
     complete_family_report: list[dict[str, object]] = []
+    selected_family: int | None = None
     if args.complete_family_selection:
         assert search_teacher is not None and confirmation_teacher is not None
         original_family_quantizer = qvq_module.yaqa_inner_v2b2_p32
@@ -1062,7 +1063,11 @@ def main() -> None:
             for index in range(1, 4)
             if complete_family_report[index]["replay_score"] < 1 - args.minimum_relative_kl_improvement
         ]
-        selected_family = min(eligible, key=lambda index: complete_family_report[index]["replay_score"]) if eligible else 0
+        selected_family = (
+            min(eligible, key=lambda index: complete_family_report[index]["replay_score"])
+            if eligible
+            else 0
+        )
         if selected_family and serialized_confirmation_callback(
             family_results[selected_family],
             family_results[0],
@@ -1102,7 +1107,11 @@ def main() -> None:
     rollback_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
     with torch.no_grad():
         target.weight.copy_(result.weight.to(device=device, dtype=target.weight.dtype))
-    selected_dense_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
+    selected_dense_evaluation = (
+        rollback_evaluation
+        if args.complete_family_selection and selected_family == 0
+        else _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
+    )
     with torch.no_grad():
         target.weight.copy_(rollback_weight.to(dtype=target.weight.dtype))
     rollback_packed_evaluation = None
@@ -1111,7 +1120,11 @@ def main() -> None:
         rollback_packed_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
         install_target(target)
     _replace_target_with_result(student_model, target_name=args.target, result=result, bits=args.bits)
-    selected_packed_evaluation = _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
+    selected_packed_evaluation = (
+        rollback_packed_evaluation
+        if args.complete_family_selection and selected_family == 0
+        else _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
+    )
 
     provenance = {
         "model": str(args.model.resolve()),

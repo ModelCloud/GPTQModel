@@ -338,6 +338,24 @@ replication across additional Q/K/V/O modules and at least one independent YAQA/
 effect, integrate complete packed family replay as an optional propagation-aware quantization stage, retaining
 canonical V2+YAQA as the atomic fallback.
 
+## Sequential K-projection replication (P15)
+
+P15 installed P14's accepted layer-2 Q artifact into the live prefix and repeated the complete packed family gate
+for `model.layers.2.self_attn.k_proj`. No alternate improved both search folds:
+
+| Family | Worst-fold final-KL ratio | Selector nonzero fraction | Decision |
+|---:|---:|---:|---|
+| canonical V2 | 1.000000 | 0.00% | selected rollback |
+| 1 | 1.022334 | 49.67% | reject |
+| 2 | 1.005045 | 50.21% | reject |
+| 3 | 1.021583 | 50.00% | reject |
+
+The exact packed V2+YAQA oracle was therefore retained without confirmation. This is not a failure of the P14
+strategy: it is evidence that useful bank-family direction is module- and prefix-dependent. Family 1 was strongly
+positive for Q and strongly negative for K under the same rate, YAQA factors, prompts, and seed. A global family ID
+or local-proxy choice is therefore unsupported. The production design must remain optional per module, score the
+actual packed runtime, and preserve atomic canonical rollback.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -350,3 +368,5 @@ canonical V2+YAQA as the atomic fallback.
 - `artifacts/qvq_p13_crossfit_expanded_gate/layer2_q_w2_expanded.json`
 - `artifacts/qvq_p14_complete_family_gate/report_packed.json`
 - `artifacts/qvq_p14_complete_family_gate/selected_packed.safetensors`
+- `artifacts/qvq_p15_complete_family_k_gate/report_packed.json`
+- `artifacts/qvq_p15_complete_family_k_gate/selected_packed.safetensors`
