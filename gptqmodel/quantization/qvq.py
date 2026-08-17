@@ -50,6 +50,27 @@ QVQ_V2B4_P64_STEPS_PER_SEGMENT = QVQ_V2B4_P64_SEGMENT_WEIGHTS // 2
 QVQ_V2B2_P32_SEGMENT_WEIGHTS = 32
 QVQ_V2B2_P32_SEGMENTS_PER_TILE = 8
 QVQ_V2B2_P32_STEPS_PER_SEGMENT = QVQ_V2B2_P32_SEGMENT_WEIGHTS // 2
+QVQ_YAQA_SAMPLE_TILE_COUNTS = {
+    "full": None,
+    "32_16x16": 32,
+    "64_16x16": 64,
+    "128_16x16": 128,
+    "256_16x16": 256,
+}
+
+
+def _yaqa_sample_tile_indices(tile_count: int, sample_strategy: str) -> torch.Tensor:
+    """Return deterministic, evenly spaced 16x16 tile indices for a sampled YAQA family screen."""
+
+    if isinstance(tile_count, bool) or not isinstance(tile_count, int) or tile_count < 1:
+        raise ValueError("YAQA sampled family selection requires a positive tile count.")
+    requested_count = QVQ_YAQA_SAMPLE_TILE_COUNTS.get(sample_strategy)
+    if requested_count is None:
+        if sample_strategy == "full":
+            raise ValueError("YAQA `full` selection evaluates complete module candidates and does not sample tiles.")
+        raise ValueError("Unknown YAQA sample strategy.")
+    sample_count = min(requested_count, tile_count)
+    return torch.linspace(0, tile_count - 1, sample_count, dtype=torch.float64).round().to(torch.long)
 _QVQ_LOW_RATE_OUTPUT_SCALE_STRENGTH = 0.5
 _QVQ_PROPAGATION_DELTA_CACHE_BYTES = 256 * 1024 * 1024
 _QVQ_CODEBOOK_CACHE_LOCK = threading.Lock()
@@ -4137,6 +4158,7 @@ def yaqa_inner_v2b2_p32(
     codebook_library: tuple[torch.Tensor, ...],
     bank_codebook_pair_stacks: tuple[torch.Tensor, ...] | None = None,
     family_mode: str = "reselect",
+    sample_strategy: str = "full",
     block_input_hessian: torch.Tensor | None = None,
     block_family_id: int | None = None,
     diagnostics: dict[str, object] | None = None,
@@ -4161,24 +4183,23 @@ def yaqa_inner_v2b2_p32(
         or any(tuple(stack.shape) != (2, 1 << 16, 2) for stack in bank_codebook_pair_stacks)
     ):
         raise ValueError("YAQA V2B2-P32 pair stacks must contain three [2, 65536, 2] tensors.")
-    if family_mode not in {"fixed_block_ldlq", "sampled_proxy", "reselect"}:
+    if family_mode not in {"fixed_block_ldlq", "reselect"}:
+        raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if sample_strategy not in QVQ_YAQA_SAMPLE_TILE_COUNTS:
         raise ValueError(
-            "YAQA V2B2-P32 family mode must be `fixed_block_ldlq`, `sampled_proxy`, or `reselect`."
+            "YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `128_16x16`, or `256_16x16`."
         )
+    if family_mode != "reselect" and sample_strategy != "full":
+        raise ValueError("YAQA sampled family selection requires `family_mode=reselect`.")
     if telemetry is not None:
         telemetry.count("yaqa_v2b2_modules")
         telemetry.count("yaqa_v2b2_reselect_modules", int(family_mode == "reselect"))
-    if family_mode == "sampled_proxy":
+    if sample_strategy != "full":
         input_blocks = inner_weight.shape[0] // 16
         output_blocks = inner_weight.shape[1] // 16
         tile_count = input_blocks * output_blocks
-        sample_count = min(64, tile_count)
-        sample_indices_cpu = torch.linspace(
-            0,
-            tile_count - 1,
-            sample_count,
-            dtype=torch.float64,
-        ).round().to(torch.long)
+        sample_indices_cpu = _yaqa_sample_tile_indices(tile_count, sample_strategy)
+        sample_count = sample_indices_cpu.numel()
         sample_indices = sample_indices_cpu.to(inner_weight.device)
         sample_input_blocks = torch.div(sample_indices, output_blocks, rounding_mode="floor")
         sample_output_blocks = sample_indices.remainder(output_blocks)
@@ -4223,6 +4244,7 @@ def yaqa_inner_v2b2_p32(
         block_selectors = None
         if telemetry is not None:
             telemetry.count("yaqa_v2b2_sampled_family_tiles", sample_count)
+            telemetry.count(f"yaqa_v2b2_sample_strategy_{sample_strategy}")
             telemetry.count(f"yaqa_v2b2_sampled_family_{block_alt_id}")
     elif block_family_id is None:
         with _qvq_phase(telemetry, "yaqa_v2b2_block_family_selection", inner_weight.device):
@@ -4243,7 +4265,7 @@ def yaqa_inner_v2b2_p32(
             raise ValueError("YAQA V2B2-P32 cached Block-LDLQ family ID must be 1, 2, or 3.")
         block_alt_id = block_family_id
         block_selectors = None
-    alternative_ids = (block_alt_id,) if family_mode != "reselect" else (1, 2, 3)
+    alternative_ids = (block_alt_id,) if family_mode != "reselect" or sample_strategy != "full" else (1, 2, 3)
     parallel_families = inner_weight.device.type == "cuda" and len(alternative_ids) > 1
     current_stream = None
     canonical_completion = None
@@ -5741,6 +5763,7 @@ def quantize_qvq_linear(
     tail_biting_candidates: int = 1,
     rounding: str = "block_ldlq",
     yaqa_v2b2_family_mode: str = "reselect",
+    yaqa_sample_strategy: str = "full",
     yaqa_spectral_refinement: bool = False,
     yaqa_spectral_ranks: tuple[int, ...] = (8, 16, 32),
     yaqa_spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0),
@@ -5854,10 +5877,17 @@ def quantize_qvq_linear(
     if not isinstance(yaqa_v2b2_family_mode, str):
         raise TypeError("QVQ YAQA V2B2 family mode must be a string.")
     yaqa_v2b2_family_mode = yaqa_v2b2_family_mode.strip().lower()
-    if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "sampled_proxy", "reselect"}:
+    if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
+        raise ValueError("QVQ YAQA V2B2 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if not isinstance(yaqa_sample_strategy, str):
+        raise TypeError("QVQ YAQA sample strategy must be a string.")
+    yaqa_sample_strategy = yaqa_sample_strategy.strip().lower()
+    if yaqa_sample_strategy not in QVQ_YAQA_SAMPLE_TILE_COUNTS:
         raise ValueError(
-            "QVQ YAQA V2B2 family mode must be `fixed_block_ldlq`, `sampled_proxy`, or `reselect`."
+            "QVQ YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `128_16x16`, or `256_16x16`."
         )
+    if yaqa_v2b2_family_mode != "reselect" and yaqa_sample_strategy != "full":
+        raise ValueError("QVQ YAQA sampled family selection requires `yaqa_v2b2_family_mode=reselect`.")
     if not isinstance(yaqa_spectral_refinement, bool):
         raise TypeError("QVQ YAQA spectral refinement must be boolean.")
     if not isinstance(yaqa_spectral_push, bool):
@@ -6233,6 +6263,7 @@ def quantize_qvq_linear(
                     trellis_batch_size=trellis_batch_size,
                     tail_biting_candidates=tail_biting_candidates,
                     family_mode=yaqa_v2b2_family_mode,
+                    sample_strategy=yaqa_sample_strategy,
                     diagnostics=yaqa_bank_diagnostics,
                     factorization=prepared_yaqa_factorization,
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,

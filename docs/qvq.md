@@ -787,14 +787,20 @@ module
   change only the V2 path and binary P32 schedule. The family control uses Block-LDLQ's ordinary `0.01` input-Hessian
   damping rather than YAQA's `1e-4` damping, so it reproduces the matched baseline selection geometry. This isolates
   YAQA on an unchanged codec candidate space.
-- `yaqa.v2b2_family_mode="reselect"` (default) evaluates all three family IDs as complete YAQA module artifacts and
-  retains the strict best full-Kronecker result. This measures the combined ceiling because an input-Hessian winner
-  need not be the winner under the two-sided YAQA objective.
-- `yaqa.v2b2_family_mode="sampled_proxy"` is an experimental fast mode. It scores every family on 64 evenly spaced
-  real module tiles with the corresponding diagonal input/output Hessian blocks, then runs a complete YAQA pass only
-  for the selected family. The final candidate is still compared with an independently encoded canonical V2+YAQA
-  oracle under the complete Kronecker proxy. The sampling step changes candidate generation, not YAQA arithmetic or
-  the serialized format, so it needs propagated held-out confirmation rather than an algebraic equivalence claim.
+- `yaqa.v2b2_family_mode="reselect"` (default) chooses the alternative family under YAQA. Its independent
+  `yaqa.sample_strategy` controls the amount of evidence used for that choice:
+  - `full` (default) evaluates all three family IDs as complete YAQA module artifacts and retains the strict best
+    full-Kronecker result. This is the quality-ceiling reference.
+  - `32_16x16`, `64_16x16`, `128_16x16`, and `256_16x16` score all three families on exactly that many deterministic,
+    evenly spaced real 16x16 weight tiles, clipped only when the module contains fewer tiles. The screen uses the
+    matching diagonal input/output Hessian blocks, then runs one complete YAQA pass for the selected family.
+
+Every sampled strategy still runs an independently encoded canonical V2+YAQA oracle and compares the selected
+complete module candidate under the original full-module Kronecker proxy. Sampling therefore changes only the
+module-level family proposal. It does not sample the selected YAQA feedback pass, alter V2/P32 selectors, add
+checkpoint data, or change inference. It is not algebraically equivalent to `full`: off-diagonal cross-tile YAQA
+couplings and feedback can make a family favored by the sampled diagonal-block proxy differ from the full winner.
+Use propagated held-out confirmation rather than local error to promote a sampled strategy.
 
 Both modes independently encode canonical V2+YAQA. A non-finite, tied, or worse banked candidate restores that exact
 artifact and all-zero selectors. The result reports fallback, selector churn, Block-LDLQ family ID, and family change;

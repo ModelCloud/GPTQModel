@@ -284,14 +284,14 @@ because dataset capture and model evaluation are intentionally unchanged.
   matched real-Llama module time from 56.762 seconds to approximately 57.86 seconds. Metal's default optimizer is
   better balanced for this kernel, so the explicit unroll directives were removed.
 
-## Sampled family proxy: another 2.20x module gain
+## Sampled family strategies: another 2.20x module gain
 
 The exact three-family YAQA ceiling spends three complete feedback/recurrence histories to select one module-level
-alternative family. The experimental `sampled_proxy` mode instead evaluates all three families on 64 evenly spaced
-real weight tiles using the matching diagonal 16x16 input/output Hessian blocks:
+alternative family. `YaqaConfig.sample_strategy` optionally evaluates all three families on 32, 64, 128, or 256 evenly
+spaced real 16x16 weight tiles using the matching diagonal input/output Hessian blocks. The default remains `full`:
 
 ```text
-64 real module tiles
+N real module tiles, N in {32, 64, 128, 256}
   -> score family 1, 2, 3 with tr(E H_I,block E^T H_O,block)
   -> choose one family for the module
   -> run canonical V2+YAQA independently
@@ -319,6 +319,26 @@ Matched contract: real Llama 3.2 1B Instruct, layer-0 Q/K/V/O, W2 B2-P32+YAQA, `
 | Top-5 overlap | 92.058% | 92.011% | -0.047 pp |
 | Top-10 overlap | 91.904% | 91.821% | -0.083 pp |
 | Layer KL | 0.040268 | 0.039665 | -1.50% |
+
+The follow-up matched sweep compared every explicit strategy using the same model, row splits, factors, seed, and
+runtime contract:
+
+| Strategy | Module quantization | Complete arm | Final KL | Layer KL | Top-1 | Top-5 | Top-10 | Family histogram |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `full` | 56.714 s | 102.704 s | 0.003401 | 0.040268 | 99.706% | 92.058% | 91.904% | all 3 complete candidates |
+| `32_16x16` | 26.285 s | 72.287 s | 0.003336 | **0.038784** | 99.696% | 91.913% | 91.894% | 0 / 1 / 2 / 1 |
+| `64_16x16` | 25.669 s | 70.948 s | 0.003251 | 0.039665 | **99.715%** | 92.011% | 91.821% | 0 / 1 / 2 / 1 |
+| `128_16x16` | 27.647 s | 73.163 s | **0.003194** | 0.040867 | 99.701% | **92.016%** | **91.843%** | 0 / 2 / 0 / 2 |
+| `256_16x16` | 28.393 s | 74.160 s | 0.003258 | 0.041306 | 99.696% | 91.953% | 91.807% | 0 / 1 / 2 / 1 |
+
+The strategy is not monotonic in sample count. At this seed, 128 tiles gives the best final KL, 32 gives the best
+layer KL, 64 gives the best Top-1, and 256 loses to both 64 and 128 despite selecting the same family-count histogram
+as 32 and 64. Histograms do not
+identify which projection received each family, and equal family IDs would still not prove equal paths if the
+selected modules differ. This is expected from a proposal screen: its diagonal-block proxy omits cross-tile terms,
+while the accepted artifact is produced by complete sequential YAQA feedback. No sampled strategy is the default;
+`full` remains the conservative ceiling reference until multi-layer, multi-rate, and multi-seed propagated evidence
+supports a different policy.
 
 The small Top-5/10 movements are noise-scale guardrails, while final KL and layer KL improve. Local reconstruction
 does not uniformly improve: mean relative weight L2 is 0.690088 versus 0.689651 for full reselection. That is

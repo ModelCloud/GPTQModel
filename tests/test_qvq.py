@@ -2625,6 +2625,12 @@ def test_yaqa_prepared_factorization_is_exact_and_immutable():
         {},
         {"bank_count": 2, "v2b2_p32": True, "yaqa_v2b2_family_mode": "fixed_block_ldlq"},
         {"bank_count": 2, "v2b2_p32": True, "yaqa_v2b2_family_mode": "reselect"},
+        {
+            "bank_count": 2,
+            "v2b2_p32": True,
+            "yaqa_v2b2_family_mode": "reselect",
+            "yaqa_sample_strategy": "64_16x16",
+        },
         {"bank_count": 4, "v2b4_p64": True},
     ),
 )

@@ -18,6 +18,7 @@ from gptqmodel.quantization.config import FORMAT, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
     QVQQuantizationTelemetry,
+    _yaqa_sample_tile_indices,
     block_ldlq_inner,
     fixed_boundary_v2b2_p32_segment_quantize,
     pack_qvq_binary_bank_ids,
@@ -436,7 +437,10 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
         "bank_count": 2,
     }
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
-    assert ARM_CONFIG["v2b2-p32-yaqa-sampled"]["yaqa_v2b2_family_mode"] == "sampled_proxy"
+    assert ARM_CONFIG["v2b2-p32-yaqa-sampled-32"]["yaqa_sample_strategy"] == "32_16x16"
+    assert ARM_CONFIG["v2b2-p32-yaqa-sampled-64"]["yaqa_sample_strategy"] == "64_16x16"
+    assert ARM_CONFIG["v2b2-p32-yaqa-sampled-128"]["yaqa_sample_strategy"] == "128_16x16"
+    assert ARM_CONFIG["v2b2-p32-yaqa-sampled-256"]["yaqa_sample_strategy"] == "256_16x16"
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-fixed"]["yaqa_v2b2_family_mode"] == "fixed_block_ldlq"
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-push-fixed"]["yaqa_spectral_push"] is True
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral-push"]["yaqa_v2b2_family_mode"] == "reselect"
@@ -1867,7 +1871,7 @@ def test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq():
         )
 
 
-@pytest.mark.parametrize("family_mode", ("fixed_block_ldlq", "sampled_proxy", "reselect"))
+@pytest.mark.parametrize("family_mode", ("fixed_block_ldlq", "reselect"))
 def test_qvq_v2b2_p32_yaqa_family_mode_config_round_trip(family_mode):
     config = QVQConfig(
         bits=2,
@@ -1878,6 +1882,19 @@ def test_qvq_v2b2_p32_yaqa_family_mode_config_round_trip(family_mode):
     )
     reloaded = QVQConfig.from_quant_config(config.to_dict())
     assert reloaded.yaqa.v2b2_family_mode == family_mode
+
+
+@pytest.mark.parametrize("sample_strategy", ("full", "32_16x16", "64_16x16", "128_16x16", "256_16x16"))
+def test_qvq_v2b2_p32_yaqa_sample_strategy_config_round_trip(sample_strategy):
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(sample_strategy=sample_strategy),
+        offload_to_disk=False,
+    )
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+    assert reloaded.yaqa.sample_strategy == sample_strategy
 
 
 def test_qvq_v2b2_p32_yaqa_spectral_config_round_trip():
@@ -2001,6 +2018,43 @@ def test_qvq_v2b2_p32_rejects_invalid_yaqa_family_mode(family_mode):
     error = TypeError if family_mode is None else ValueError
     with pytest.raises(error, match="v2b2_family_mode"):
         YaqaConfig(v2b2_family_mode=family_mode)
+
+
+@pytest.mark.parametrize("sample_strategy", (None, "sampled_proxy", "16_16x16"))
+def test_qvq_v2b2_p32_rejects_invalid_yaqa_sample_strategy(sample_strategy):
+    error = TypeError if sample_strategy is None else ValueError
+    with pytest.raises(error, match="sample_strategy"):
+        YaqaConfig(sample_strategy=sample_strategy)
+
+
+def test_qvq_v2b2_p32_sample_strategy_requires_reselected_yaqa_family():
+    with pytest.raises(ValueError, match="sampled family selection requires"):
+        YaqaConfig(v2b2_family_mode="fixed_block_ldlq", sample_strategy="64_16x16")
+    with pytest.raises(ValueError, match="requires `format=qvq_v2b2_p32`"):
+        QVQConfig(
+            bits=2,
+            rounding="yaqa",
+            yaqa=YaqaConfig(sample_strategy="64_16x16"),
+            offload_to_disk=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("sample_strategy", "expected_count"),
+    (("32_16x16", 32), ("64_16x16", 64), ("128_16x16", 128), ("256_16x16", 256)),
+)
+def test_qvq_v2b2_p32_sample_strategy_selects_exact_evenly_spaced_tile_count(
+    sample_strategy,
+    expected_count,
+):
+    indices = _yaqa_sample_tile_indices(1024, sample_strategy)
+    assert indices.numel() == expected_count
+    assert indices.unique().numel() == expected_count
+    assert indices[0].item() == 0
+    assert indices[-1].item() == 1023
+    assert torch.all(indices[1:] > indices[:-1])
+    clipped = _yaqa_sample_tile_indices(17, sample_strategy)
+    assert torch.equal(clipped, torch.arange(17))
 
 
 def test_qvq_v2b2_p32_binary_selector_round_trip_and_validation():
@@ -3429,7 +3483,8 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
         }
 
 
-def test_qvq_v2b2_p32_sampled_proxy_scores_all_families_then_runs_one_complete_candidate():
+@pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "128_16x16", "256_16x16"))
+def test_qvq_v2b2_p32_sampled_strategy_scores_all_families_then_runs_one_complete_candidate(sample_strategy):
     weight = torch.zeros((16, 16))
     hessian = torch.eye(16)
     states = torch.zeros((1, 128), dtype=torch.long)
@@ -3456,7 +3511,8 @@ def test_qvq_v2b2_p32_sampled_proxy_scores_all_families_then_runs_one_complete_c
             hessian,
             codebooks,
             bits=2,
-            family_mode="sampled_proxy",
+            family_mode="reselect",
+            sample_strategy=sample_strategy,
             telemetry=telemetry,
         )
 
@@ -3466,11 +3522,13 @@ def test_qvq_v2b2_p32_sampled_proxy_scores_all_families_then_runs_one_complete_c
     assert torch.equal(selectors, torch.ones_like(selectors))
     counters = telemetry.finalize()["counters"]
     assert counters["yaqa_v2b2_sampled_family_tiles"] == 1
+    assert counters[f"yaqa_v2b2_sample_strategy_{sample_strategy}"] == 1
     assert counters["yaqa_v2b2_sampled_family_2"] == 1
     assert counters["yaqa_v2b2_family_candidates"] == 1
 
 
-def test_qvq_v2b2_p32_sampled_proxy_matches_an_independent_selected_family_run_exactly():
+@pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "128_16x16", "256_16x16"))
+def test_qvq_v2b2_p32_sampled_strategy_matches_an_independent_selected_family_run_exactly(sample_strategy):
     generator = torch.Generator().manual_seed(20260817)
     weight = torch.randn((16, 16), generator=generator) * 0.1
     input_source = torch.randn((32, 16), generator=generator)
@@ -3485,7 +3543,8 @@ def test_qvq_v2b2_p32_sampled_proxy_matches_an_independent_selected_family_run_e
         output_hessian,
         library,
         bits=2,
-        family_mode="sampled_proxy",
+        family_mode="reselect",
+        sample_strategy=sample_strategy,
         trellis_batch_size=1,
     )
     selected_family = int(sampled[3].item())

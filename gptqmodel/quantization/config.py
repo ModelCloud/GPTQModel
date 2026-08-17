@@ -44,6 +44,7 @@ class YaqaConfig:
     regularization: float = YAQA_PAPER_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
     v2b2_family_mode: str = "reselect"
+    sample_strategy: str = "full"
     spectral_refinement: bool = False
     spectral_ranks: tuple[int, ...] = (8, 16, 32)
     spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0)
@@ -73,10 +74,20 @@ class YaqaConfig:
         if not isinstance(self.v2b2_family_mode, str):
             raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
         self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()
-        if self.v2b2_family_mode not in {"fixed_block_ldlq", "sampled_proxy", "reselect"}:
+        if self.v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
             raise ValueError(
-                "YaqaConfig: `v2b2_family_mode` must be `fixed_block_ldlq`, `sampled_proxy`, or `reselect`."
+                "YaqaConfig: `v2b2_family_mode` must be `fixed_block_ldlq` or `reselect`."
             )
+        if not isinstance(self.sample_strategy, str):
+            raise TypeError("YaqaConfig: `sample_strategy` must be a string.")
+        self.sample_strategy = self.sample_strategy.strip().lower()
+        if self.sample_strategy not in {"full", "32_16x16", "64_16x16", "128_16x16", "256_16x16"}:
+            raise ValueError(
+                "YaqaConfig: `sample_strategy` must be `full`, `32_16x16`, `64_16x16`, `128_16x16`, "
+                "or `256_16x16`."
+            )
+        if self.v2b2_family_mode != "reselect" and self.sample_strategy != "full":
+            raise ValueError("YaqaConfig: sampled family selection requires `v2b2_family_mode=reselect`.")
         if not isinstance(self.spectral_refinement, bool):
             raise TypeError("YaqaConfig: `spectral_refinement` must be boolean.")
         if not isinstance(self.spectral_push, bool):
@@ -6025,6 +6036,12 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError(
                 "QVQConfig: YAQA spectral experiment requires `format=qvq_v2b2_p32` "
                 "with YAQA rounding."
+            )
+        if self.yaqa.sample_strategy != "full" and (
+            self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
+        ):
+            raise ValueError(
+                "QVQConfig: sampled YAQA family selection requires `format=qvq_v2b2_p32` with YAQA rounding."
             )
         self.incoherence = str(self.incoherence).strip().lower()
         if not isinstance(self.module_scale_search, bool):

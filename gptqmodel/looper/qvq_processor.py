@@ -827,6 +827,7 @@ class QVQProcessor(LoopProcessor):
                 tail_biting_candidates=module_qcfg.tail_biting_candidates,
                 rounding=module_qcfg.rounding,
                 yaqa_v2b2_family_mode=module_qcfg.yaqa.v2b2_family_mode,
+                yaqa_sample_strategy=module_qcfg.yaqa.sample_strategy,
                 yaqa_spectral_refinement=module_qcfg.yaqa.spectral_refinement,
                 yaqa_spectral_ranks=module_qcfg.yaqa.spectral_ranks,
                 yaqa_spectral_lambdas=module_qcfg.yaqa.spectral_lambdas,
@@ -920,6 +921,11 @@ class QVQProcessor(LoopProcessor):
                 "yaqa_checkpointed_modules": self._yaqa_stats.get("checkpointed_modules"),
                 "yaqa_v2b2_family_mode": (
                     module_qcfg.yaqa.v2b2_family_mode
+                    if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
+                    else None
+                ),
+                "yaqa_sample_strategy": (
+                    module_qcfg.yaqa.sample_strategy
                     if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
                     else None
                 ),
