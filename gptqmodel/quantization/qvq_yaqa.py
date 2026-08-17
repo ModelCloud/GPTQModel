@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -246,12 +247,21 @@ def capture_yaqa_sketch_b(
         output_update = torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0)
         if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
             raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
+        # Keep the quadratic Sketch-B accumulators on host memory.  Leaving one
+        # input and one output Gram matrix per target on MPS makes the unified
+        # memory allocator retain several gigabytes for a two-layer 1B model;
+        # the factors are consumed by the quantizer on CPU later anyway.  The
+        # matrix products above still run on the requested device, so this is a
+        # residency/allocator fix, not a change to the Fisher objective.
+        input_update_cpu = input_update.detach().to(device="cpu")
+        output_update_cpu = output_update.detach().to(device="cpu")
         if module_name in input_accumulators:
-            input_accumulators[module_name].add_(input_update)
-            output_accumulators[module_name].add_(output_update)
+            input_accumulators[module_name].add_(input_update_cpu)
+            output_accumulators[module_name].add_(output_update_cpu)
         else:
-            input_accumulators[module_name] = input_update
-            output_accumulators[module_name] = output_update
+            input_accumulators[module_name] = input_update_cpu.contiguous()
+            output_accumulators[module_name] = output_update_cpu.contiguous()
+        del input_update, output_update, input_update_cpu, output_update_cpu
         if not torch.isfinite(input_accumulators[module_name]).all() or not torch.isfinite(
             output_accumulators[module_name]
         ).all():
@@ -336,6 +346,14 @@ def capture_yaqa_sketch_b(
                     handle.remove()
                 tensor_hook_handles.clear()
                 active_mask = None
+                # Explicitly drop the autograd graph before the next sequence.
+                # MPS command buffers are asynchronous and otherwise keep the
+                # logits/loss graph live until allocator pressure forces a flush.
+                del outputs, logits, loss
+                gc.collect()
+                if device.type == "mps":
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
     finally:
         active_mask = None
         decoder_seed_handle.remove()
@@ -359,8 +377,8 @@ def capture_yaqa_sketch_b(
         if sequence_counts[name] != total_sequences or name not in input_accumulators:
             raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
         out_features, in_features = module.weight.shape
-        input_hessians[name] = input_accumulators[name].div(total_sequences * out_features).cpu().contiguous()
-        output_hessians[name] = output_accumulators[name].div(total_sequences * in_features).cpu().contiguous()
+        input_hessians[name] = input_accumulators[name].div(total_sequences * out_features).contiguous()
+        output_hessians[name] = output_accumulators[name].div(total_sequences * in_features).contiguous()
 
     input_factor_elements = sum(factor.numel() for factor in input_hessians.values())
     output_factor_elements = sum(factor.numel() for factor in output_hessians.values())

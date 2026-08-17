@@ -896,6 +896,10 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
 
     torch.testing.assert_close(input_hessians["proj"], expected_input.float(), rtol=1e-6, atol=2e-7)
     torch.testing.assert_close(output_hessians["proj"], expected_output.float(), rtol=1e-6, atol=2e-7)
+    # Sketch-B factors are deliberately spilled to host memory while each
+    # sequence is processed so MPS does not retain quadratic Gram matrices.
+    assert input_hessians["proj"].device == torch.device("cpu")
+    assert output_hessians["proj"].device == torch.device("cpu")
     assert stats == {
         "method": "YAQA-v3 Sketch B real Fisher",
         "full_model_backward": True,
