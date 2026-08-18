@@ -21,7 +21,6 @@ from gptqmodel.quantization.awq.quantize.scale import apply_scale
 
 
 MODEL_ID = "/monster/data/model/North-Micro-Vision-Instruct"
-LOCAL_MODEL_PATH = os.environ.get("GPTQMODEL_COHERE_COMPASS_MODEL")
 
 
 def test_cohere_compass_model_type_selects_definition(monkeypatch):
@@ -318,18 +317,17 @@ def test_cohere_compass_layer_norm_supports_awq_scale_equivalence():
     assert torch.isfinite(module.self_attn.q_proj.weight).all()
 
 
-@pytest.mark.skipif(LOCAL_MODEL_PATH is None, reason="Set GPTQMODEL_COHERE_COMPASS_MODEL to run this integration test")
 def test_cohere_compass_native_shell_and_processor_match_definition():
     from accelerate import init_empty_weights
 
-    config = AutoConfig.from_pretrained(LOCAL_MODEL_PATH, trust_remote_code=False)
+    config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=False)
     with init_empty_weights(include_buffers=True):
         shell = AutoModelForImageTextToText.from_config(config, trust_remote_code=False)
 
     layer = shell.model.language_model.layers[0]
 
     assert config.model_type == "cohere_compass"
-    assert auto.check_and_get_model_definition(LOCAL_MODEL_PATH) is CohereCompassQModel
+    assert auto.check_and_get_model_definition(MODEL_ID) is CohereCompassQModel
     assert hasattr(shell.model, "visual")
     assert hasattr(shell.model, "language_model")
     assert hasattr(layer, "input_layernorm")
@@ -341,7 +339,7 @@ def test_cohere_compass_native_shell_and_processor_match_definition():
     assert hasattr(layer.mlp, "up_proj")
     assert hasattr(layer.mlp, "down_proj")
 
-    processor = AutoProcessor.from_pretrained(LOCAL_MODEL_PATH, trust_remote_code=False)
+    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=False)
     image = Image.open(Path(__file__).parent / "ovis" / "10016.jpg").convert("RGB")
     conversations = [
         {
@@ -367,7 +365,7 @@ def test_cohere_compass_native_shell_and_processor_match_definition():
 
 
 class TestCohereCompass(ModelTest):
-    NATIVE_MODEL_ID = LOCAL_MODEL_PATH or MODEL_ID
+    NATIVE_MODEL_ID = MODEL_ID
     TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     OFFLOAD_TO_DISK = False
