@@ -559,6 +559,24 @@ disjoint splits, the confirmation Top-N losses are noise-scale, and every Top-N 
 split. P20/P23 now support the optional guarded stage at W2 and W2.5 for this Q-module context. P22 still forbids
 assuming the same result at W1.5, and the winning family remains rate-dependent (`3` at W2, `1` at W2.5).
 
+## K-projection role replication at W2 (P24)
+
+P24 returned to W2 but changed the layer-2 target from `q_proj` to `k_proj`, retaining the P20 two-seed factors,
+packed prefix, seed, row splits, two-fold search, and full-horizon runtime. Every alternate regressed at least one
+search fold:
+
+| Family | Fold 0 final KL | Fold 1 final KL | Worst-fold ratio | Nonzero selectors |
+|---:|---:|---:|---:|---:|
+| canonical V2 | 0.00188420 | 0.00276094 | 1.000000 | 0.00% |
+| 1 | 0.00190226 | 0.00279032 | 1.010641 | 49.37% |
+| 2 | 0.00190319 | 0.00273569 | 1.010081 | 49.89% |
+| 3 | 0.00191289 | 0.00280961 | 1.017627 | 49.92% |
+
+The gate therefore skipped unnecessary candidate confirmation and serialized canonical V2+YAQA. The final packed
+rollback evaluation was finite (`KL=0.00307153`, Top-1 `97.97%`, Top-5 `96.75%`, Top-10 `96.63%`). This is a
+confirmed rejection for K/W2 under this evidence contract. It also proves that the Q/W2 positive is role-specific:
+neither its winning family nor the decision to use an alternate may be transferred to K.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -591,3 +609,5 @@ assuming the same result at W1.5, and the winning family remains rate-dependent 
 - `artifacts/qvq_p22_w1p5_ensemble_gate/selected_packed.safetensors`
 - `artifacts/qvq_p23_w2p5_ensemble_gate/report_packed.json`
 - `artifacts/qvq_p23_w2p5_ensemble_gate/selected_packed.safetensors`
+- `artifacts/qvq_p24_k_w2_ensemble_gate/report_packed.json`
+- `artifacts/qvq_p24_k_w2_ensemble_gate/selected_packed.safetensors`
