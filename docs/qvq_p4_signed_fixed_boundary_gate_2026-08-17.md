@@ -632,6 +632,29 @@ This is direct evidence against a role-wide fixed bank policy. The optional algo
 make a per-module propagated decision; a static Q/K/V/O rule is not justified from one layer and cannot replace the
 search/confirmation gates.
 
+## Conditional Q-then-V composition at W2 (P27)
+
+P20 and P25 accepted Q and V independently against the same canonical prefix. P27 installed the exact packed P20 Q
+artifact first, then repeated complete-family selection for V. This measures V's conditional marginal gain rather
+than adding two standalone percentages.
+
+Family 1 remained the V winner, and its worst-fold search ratio improved from `0.980618` standalone to `0.971632`
+after Q was installed. Family 3 also remained eligible at `0.980554`; family 2 regressed at `1.026907`.
+
+| Conditional V metric after accepted Q | 30-row confirmation | 64-row untouched evaluation |
+|---|---:|---:|
+| Final KL | **-4.016%** | **-4.606%** |
+| JSD | **-4.340%** | **-4.878%** |
+| Top-1 agreement | +0.019 pp | -0.093 pp |
+| Top-5 overlap | +0.044 pp | +0.078 pp |
+| Top-10 overlap | -0.001 pp | +0.029 pp |
+
+The evaluation Top-1 loss is noise-scale, while the primary KL/JSD gains are larger than the standalone V gain and
+Top-5 improves on both splits. P27 is a validated positive and demonstrates complementary Q/V error directions under
+live packed execution. It also validates the intended greedy conditional algorithm: after each accepted module,
+subsequent candidates must be replayed against the updated live artifact; standalone gains must not be summed or
+transplanted without remeasurement.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -670,3 +693,5 @@ search/confirmation gates.
 - `artifacts/qvq_p25_v_w2_ensemble_gate/selected_packed.safetensors`
 - `artifacts/qvq_p26_o_w2_ensemble_gate/report_packed.json`
 - `artifacts/qvq_p26_o_w2_ensemble_gate/selected_packed.safetensors`
+- `artifacts/qvq_p27_q_then_v_w2_gate/report_packed.json`
+- `artifacts/qvq_p27_q_then_v_w2_gate/selected_packed.safetensors`
