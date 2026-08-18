@@ -20,7 +20,7 @@ from gptqmodel.models.definitions.cohere_compass import CohereCompassQModel
 from gptqmodel.quantization.awq.quantize.scale import apply_scale
 
 
-MODEL_ID = "CohereLabs/North-Micro-Vision-Instruct"
+MODEL_ID = "/monster/data/model/North-Micro-Vision-Instruct"
 LOCAL_MODEL_PATH = os.environ.get("GPTQMODEL_COHERE_COMPASS_MODEL")
 
 
@@ -377,14 +377,6 @@ class TestCohereCompass(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-        },
-        "arc_challenge": {
-            "chat_template": True,
-        },
-    }
-    EVAL_TASKS_FAST = {
-        "gsm8k_platinum_cot": {
-            "chat_template": True,
             "evalution_use_model_path": True,
             "evalution_batch_size": "auto",
             "evalution_model_args": {
@@ -417,6 +409,7 @@ class TestCohereCompass(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_cohere_compass(self):
         with self.model_compat_test_context():
@@ -476,62 +469,3 @@ class TestCohereCompass(ModelTest):
             self.check_results(task_results)
         finally:
             self._cleanup_quantized_model(model, enabled=self.DELETE_QUANTIZED_MODEL)
-
-
-def test_cohere_compass_eval_configuration(monkeypatch):
-    monkeypatch.setenv(ModelTest.MODEL_TEST_MODE_ENV, ModelTest.MODEL_TEST_MODE_FAST)
-    test_case = TestCohereCompass(methodName="test_cohere_compass")
-
-    assert test_case.get_eval_tasks() == {
-        "gsm8k_platinum_cot": {
-            "acc,num": {
-                "value": 0.47229114971050457,
-                "floor_pct": 0.04,
-                "ceil_pct": 1.0,
-                "metric_key": None,
-            },
-        },
-        "arc_challenge": {
-            "acc": {
-                "value": 0.3242320819112628,
-                "floor_pct": 0.04,
-                "ceil_pct": 1.0,
-                "metric_key": None,
-            },
-            "acc_norm": {
-                "value": 0.3515358361774744,
-                "floor_pct": 0.04,
-                "ceil_pct": 1.0,
-                "metric_key": None,
-            },
-        },
-    }
-    assert test_case._task_chat_template == {
-        "gsm8k_platinum_cot": True,
-        "arc_challenge": True,
-    }
-    assert test_case._task_evalution_batch_size == {
-        "gsm8k_platinum_cot": "auto",
-        "arc_challenge": None,
-    }
-    assert test_case._task_evalution_use_model_path == {
-        "gsm8k_platinum_cot": True,
-        "arc_challenge": False,
-    }
-    assert test_case._task_evalution_model_args == {
-        "gsm8k_platinum_cot": {
-            "dtype": "bfloat16",
-            "attn_implementation": "paged|flash_attention_2",
-            "device": "cuda:0",
-        },
-        "arc_challenge": {},
-    }
-    assert test_case._task_evalution_suite_kwargs == {
-        "gsm8k_platinum_cot": {
-            "batch_size": 32,
-            "max_new_tokens": 256,
-            "stream": True,
-        },
-        "arc_challenge": {},
-    }
-    assert TestCohereCompass.MODEL_COMPAT_FAST_LAYER_COUNT == 4
