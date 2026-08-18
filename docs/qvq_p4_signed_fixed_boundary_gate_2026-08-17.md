@@ -655,6 +655,23 @@ live packed execution. It also validates the intended greedy conditional algorit
 subsequent candidates must be replayed against the updated live artifact; standalone gains must not be summed or
 transplanted without remeasurement.
 
+## Conditional Q/V-then-K reevaluation at W2 (P28)
+
+P28 installed the accepted packed Q and V artifacts, then reran the complete K family search. No K alternate
+improved both folds:
+
+| Family | Fold 0 final KL | Fold 1 final KL | Worst-fold ratio |
+|---:|---:|---:|---:|
+| canonical V2 | 0.00259885 | 0.00380873 | 1.000000 |
+| 1 | 0.00265924 | 0.00380031 | 1.023239 |
+| 2 | 0.00260823 | 0.00375113 | 1.003611 |
+| 3 | 0.00261484 | 0.00393544 | 1.033269 |
+
+Canonical K was retained before confirmation, and the packed Q/V plus canonical-K evaluation remained finite
+(`KL=0.00422634`, Top-1 `97.65%`, Top-5 `96.14%`, Top-10 `96.02%`). K's rejection therefore survives the changed
+live error state. In the current greedy solution, K is conditionally exhausted after Q and V and need not be retried
+again unless a later accepted module or factor estimator materially changes the prefix.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -695,3 +712,5 @@ transplanted without remeasurement.
 - `artifacts/qvq_p26_o_w2_ensemble_gate/selected_packed.safetensors`
 - `artifacts/qvq_p27_q_then_v_w2_gate/report_packed.json`
 - `artifacts/qvq_p27_q_then_v_w2_gate/selected_packed.safetensors`
+- `artifacts/qvq_p28_qv_then_k_w2_gate/report_packed.json`
+- `artifacts/qvq_p28_qv_then_k_w2_gate/selected_packed.safetensors`
