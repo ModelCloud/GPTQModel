@@ -283,13 +283,6 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview             | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open / Open 2                    | ✅ | North Micro Vision | ✅ |
 
-[CohereLabs/North-Micro-Vision-Instruct](https://huggingface.co/CohereLabs/North-Micro-Vision-Instruct) currently
-requires unreleased Transformers 5.16 APIs. Install the runtime dependencies and Transformers from Git:
-
-```bash
-uv pip install accelerate pillow
-uv pip install "git+https://github.com/huggingface/transformers.git"
-```
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
