@@ -10,6 +10,7 @@ import platform
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import asdict
 from itertools import pairwise
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import gptqmodel.quantization.qvq as qvq_module
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+from gptqmodel.quantization.config import (
+    MODULE_GRANULAR_REPLAY_SUBSETS,
+    ModuleGranularReplayConfig,
+)
 from gptqmodel.quantization.qvq import (
     QVQLinearQuantizationResult,
     quantize_qvq_linear,
@@ -111,6 +116,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Skip full replay when the actual serialized candidate delta has a non-favorable gradient product.",
     )
     parser.add_argument("--replay-folds", type=int, default=1)
+    parser.add_argument(
+        "--module-replay-search-folds",
+        type=int,
+        default=2,
+        help="Independent search folds required by module-granular replay.",
+    )
     parser.add_argument("--topn-regression-limit", type=float, default=0.0025)
     parser.add_argument("--minimum-relative-kl-improvement", type=float, default=0.001)
     parser.add_argument(
@@ -119,12 +130,21 @@ def _parser() -> argparse.ArgumentParser:
         help="Serialize ordinary V2B2-P32+YAQA without localized P4 candidate generation.",
     )
     parser.add_argument(
+        "--module-granular-replay",
         "--complete-family-selection",
+        dest="module_granular_replay",
         action="store_true",
         help=(
-            "Independently quantize canonical V2+YAQA and all three fixed B2-P32 families, then select only by "
-            "cross-fitted full-horizon replay plus disjoint confirmation."
+            "Independently quantize canonical V2+YAQA and complete B2-P32 alternative-bank candidates, then "
+            "select one module at a time by cross-fitted full-horizon replay plus disjoint confirmation."
         ),
+    )
+    parser.add_argument(
+        "--replay-subsets",
+        nargs="+",
+        choices=tuple(MODULE_GRANULAR_REPLAY_SUBSETS),
+        default=("attention_qkvo",),
+        help="Coupled semantic subsets eligible for module-granular replay.",
     )
     return parser
 
@@ -490,10 +510,24 @@ def _localized_summary(
 
 def main() -> None:
     args = _parser().parse_args()
-    if args.complete_family_selection and args.baseline_only:
-        raise ValueError("complete-family selection and baseline-only mode are mutually exclusive")
-    if args.complete_family_selection and (args.gradient_ranked_direct or args.gradient_shaped_spectral):
-        raise ValueError("complete-family selection cannot be combined with localized gradient searches")
+    replay_config = (
+        ModuleGranularReplayConfig(
+            subsets=tuple(args.replay_subsets),
+            search_folds=args.module_replay_search_folds,
+            minimum_relative_kl_improvement=args.minimum_relative_kl_improvement,
+            topn_regression_limit=args.topn_regression_limit,
+        )
+        if args.module_granular_replay
+        else None
+    )
+    if replay_config is not None and not replay_config.includes_module(args.target):
+        raise ValueError(
+            f"module-granular replay target `{args.target}` is outside configured subsets {replay_config.subsets}"
+        )
+    if replay_config is not None and args.baseline_only:
+        raise ValueError("module-granular replay and baseline-only mode are mutually exclusive")
+    if replay_config is not None and (args.gradient_ranked_direct or args.gradient_shaped_spectral):
+        raise ValueError("module-granular replay cannot be combined with localized gradient searches")
     if args.gradient_ranked_direct and args.gradient_shaped_spectral:
         raise ValueError("gradient-ranked and gradient-shaped spectral searches are mutually exclusive")
     gradient_enabled = args.gradient_ranked_direct or args.gradient_shaped_spectral
@@ -530,12 +564,14 @@ def main() -> None:
         raise ValueError("realized-gradient gating requires a propagated-gradient strategy")
     if args.replay_folds < 1 or args.replay_folds > args.search_rows:
         raise ValueError("replay fold count must be between one and the search row count")
+    if replay_config is not None and replay_config.search_folds > args.search_rows:
+        raise ValueError("module replay search-fold count cannot exceed the search row count")
     if not 0 <= args.minimum_relative_kl_improvement < 1:
         raise ValueError("minimum relative KL improvement must be in [0, 1)")
     if args.baseline_only and args.replay_candidates:
         raise ValueError("baseline-only mode cannot enable full-horizon candidate replay")
-    if args.complete_family_selection and args.replay_candidates:
-        raise ValueError("complete-family selection enumerates its four arms and does not use --replay-candidates")
+    if replay_config is not None and args.replay_candidates:
+        raise ValueError("module-granular replay enumerates complete bank arms and does not use --replay-candidates")
     torch.manual_seed(args.seed)
 
     config = AutoConfig.from_pretrained(args.model, local_files_only=True)
@@ -604,7 +640,7 @@ def main() -> None:
         print("Capturing live-prefix search inputs with target-boundary early stop", flush=True)
         propagated_inputs = _capture_target_inputs(student_model, target, row_sets["search"])
         propagated_target = F.linear(propagated_inputs, source_weight, source_bias)
-        if args.replay_candidates or args.complete_family_selection:
+        if args.replay_candidates or replay_config is not None:
             print("Caching dense teacher logits for full-horizon search reranking", flush=True)
             search_teacher = _teacher_logits(dense_model, row_sets["search"])
             if gradient_enabled:
@@ -633,9 +669,10 @@ def main() -> None:
     gradient_baseline_weight: torch.Tensor | None = None
     full_horizon_gradient_folds: tuple[torch.Tensor, ...] = ()
     replay_baseline_fold_kl: list[float] | None = None
+    replay_fold_count = replay_config.search_folds if replay_config is not None else args.replay_folds
     replay_row_folds = tuple(
-        tuple(row_sets["search"][fold_index :: args.replay_folds])
-        for fold_index in range(args.replay_folds)
+        tuple(row_sets["search"][fold_index::replay_fold_count])
+        for fold_index in range(replay_fold_count)
     )
 
     def full_horizon_candidate_score(candidate: torch.Tensor) -> float:
@@ -664,7 +701,7 @@ def main() -> None:
                 target.weight.copy_(candidate.to(device=device, dtype=target.weight.dtype))
             fold_metrics = []
             for fold_index, fold_rows in enumerate(replay_row_folds):
-                fold_teacher = tuple(search_teacher[fold_index :: args.replay_folds])
+                fold_teacher = tuple(search_teacher[fold_index::replay_fold_count])
                 fold_metrics.append(_compare_logits(student_model, fold_rows, fold_teacher))
             fold_kl = [float(metrics["kl_forward"]["mean"]) for metrics in fold_metrics]
             if replay_baseline_fold_kl is None:
@@ -714,7 +751,7 @@ def main() -> None:
         try:
             fold_metrics = []
             for fold_index, fold_rows in enumerate(replay_row_folds):
-                fold_teacher = tuple(search_teacher[fold_index :: args.replay_folds])
+                fold_teacher = tuple(search_teacher[fold_index::replay_fold_count])
                 fold_metrics.append(_compare_logits(student_model, fold_rows, fold_teacher))
             fold_kl = [float(metrics["kl_forward"]["mean"]) for metrics in fold_metrics]
             if replay_baseline_fold_kl is None:
@@ -855,8 +892,8 @@ def main() -> None:
     mode = (
         "ordinary YAQA baseline"
         if args.baseline_only
-        else "complete serialized YAQA family selection"
-        if args.complete_family_selection
+        else "module-granular serialized YAQA bank selection"
+        if replay_config is not None
         else "localized P4"
     )
     print(f"Starting {mode} quantization for {args.target}", flush=True)
@@ -870,7 +907,7 @@ def main() -> None:
         "v2b2_p32": True,
         "yaqa_v2b2_family_mode": "reselect",
     }
-    if not args.baseline_only and not args.complete_family_selection:
+    if not args.baseline_only and replay_config is None:
         quantization_kwargs.update(
             yaqa_spectral_localized=True,
             yaqa_spectral_ranks=tuple(args.ranks),
@@ -959,78 +996,80 @@ def main() -> None:
         if args.gradient_shaped_spectral
         else nullcontext()
     )
-    complete_family_report: list[dict[str, object]] = []
-    selected_family: int | None = None
-    if args.complete_family_selection:
+    module_replay_report: list[dict[str, object]] = []
+    selected_alternative_bank_id: int | None = None
+    bank_results: dict[int, QVQLinearQuantizationResult] = {}
+    if replay_config is not None:
         assert search_teacher is not None and confirmation_teacher is not None
-        family_results: list[QVQLinearQuantizationResult] = []
-        for family_id in range(4):
-            family_started = time.perf_counter()
-            family_quantization_kwargs = dict(quantization_kwargs)
-            family_quantization_kwargs.update(
+        for alternative_bank_id in (0, *replay_config.alternative_bank_ids):
+            candidate_started = time.perf_counter()
+            candidate_quantization_kwargs = dict(quantization_kwargs)
+            candidate_quantization_kwargs.update(
                 yaqa_v2b2_family_mode="fixed_block_ldlq",
-                yaqa_v2b2_fixed_family_id=family_id,
+                yaqa_v2b2_fixed_family_id=alternative_bank_id,
             )
-            family_result = quantize_qvq_linear(
+            candidate_result = quantize_qvq_linear(
                 source_weight,
                 input_hessians[args.target].to(device),
                 bits=args.bits,
-                **family_quantization_kwargs,
+                **candidate_quantization_kwargs,
             )
-            serialized_weight = _serialized_v2b2_weight(family_result, bits=args.bits).to(device)
+            serialized_weight = _serialized_v2b2_weight(candidate_result, bits=args.bits).to(device)
             replay_index = len(replay_scores)
-            replay_score = full_horizon_serialized_score(family_result)
-            family_results.append(family_result)
-            selectors = family_result.bank_ids
+            replay_score = full_horizon_serialized_score(candidate_result)
+            bank_results[alternative_bank_id] = candidate_result
+            selectors = candidate_result.bank_ids
             nonzero = 0.0 if selectors is None else float((selectors != 0).float().mean().item())
-            complete_family_report.append(
+            module_replay_report.append(
                 {
-                    "family_id": family_id,
-                    "seconds": time.perf_counter() - family_started,
-                    "serialized_max_abs_error": float((serialized_weight - family_result.weight).abs().max().item()),
-                    "proxy_loss": float(family_result.proxy_loss.item()),
+                    "alternative_bank_id": alternative_bank_id,
+                    "seconds": time.perf_counter() - candidate_started,
+                    "serialized_max_abs_error": float(
+                        (serialized_weight - candidate_result.weight).abs().max().item()
+                    ),
+                    "proxy_loss": float(candidate_result.proxy_loss.item()),
                     "kronecker_proxy_loss": (
                         None
-                        if family_result.kronecker_proxy_loss is None
-                        else float(family_result.kronecker_proxy_loss.item())
+                        if candidate_result.kronecker_proxy_loss is None
+                        else float(candidate_result.kronecker_proxy_loss.item())
                     ),
                     "selector_nonzero_fraction": nonzero,
-                    "fallback_to_v2": family_result.yaqa_bank_fallback_to_v2,
+                    "fallback_to_v2": candidate_result.yaqa_bank_fallback_to_v2,
                     "replay": replay_scores[replay_index],
                     "replay_score": replay_score,
                 }
             )
             print(
-                f"Family {family_id}: score={replay_score:.8f} selectors={nonzero:.4f} "
-                f"time={complete_family_report[-1]['seconds']:.2f}s",
+                f"Alternative bank {alternative_bank_id}: score={replay_score:.8f} selectors={nonzero:.4f} "
+                f"time={module_replay_report[-1]['seconds']:.2f}s",
                 flush=True,
             )
 
-        result = family_results[0]
+        result = bank_results[0]
         eligible = [
-            index
-            for index in range(1, 4)
-            if complete_family_report[index]["replay_score"] < 1 - args.minimum_relative_kl_improvement
+            record
+            for record in module_replay_report
+            if record["alternative_bank_id"] != 0
+            and record["replay_score"] < 1 - replay_config.minimum_relative_kl_improvement
         ]
-        selected_family = (
-            min(eligible, key=lambda index: complete_family_report[index]["replay_score"])
-            if eligible
-            else 0
+        selected_alternative_bank_id = (
+            int(min(eligible, key=lambda record: record["replay_score"])["alternative_bank_id"])
+            if eligible else 0
         )
-        if selected_family and serialized_confirmation_callback(
-            family_results[selected_family],
-            family_results[0],
+        if selected_alternative_bank_id and serialized_confirmation_callback(
+            bank_results[selected_alternative_bank_id],
+            bank_results[0],
         ):
-            result = family_results[selected_family]
+            result = bank_results[selected_alternative_bank_id]
         else:
-            selected_family = 0
+            selected_alternative_bank_id = 0
             if not callback_report:
                 callback_report = {
                     "accepted": False,
-                    "reason": "no complete family improved every search fold by the required margin",
+                    "reason": "no complete alternative bank improved every search fold by the required margin",
                 }
-        for record in complete_family_report:
-            record["selected"] = record["family_id"] == selected_family
+        for record in module_replay_report:
+            record["selected"] = record["alternative_bank_id"] == selected_alternative_bank_id
     else:
         with localized_context:
             result = quantize_qvq_linear(
@@ -1045,7 +1084,7 @@ def main() -> None:
     elif not callback_report:
         callback_report = {"accepted": False, "reason": "localized proposal unchanged; callback not invoked"}
 
-    rollback_result = family_results[0] if args.complete_family_selection else None
+    rollback_result = bank_results.get(0)
     rollback_weight = (
         rollback_result.weight
         if rollback_result is not None
@@ -1058,7 +1097,7 @@ def main() -> None:
         target.weight.copy_(result.weight.to(device=device, dtype=target.weight.dtype))
     selected_dense_evaluation = (
         rollback_evaluation
-        if args.complete_family_selection and selected_family == 0
+        if replay_config is not None and selected_alternative_bank_id == 0
         else _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
     )
     with torch.no_grad():
@@ -1071,7 +1110,7 @@ def main() -> None:
     _replace_target_with_result(student_model, target_name=args.target, result=result, bits=args.bits)
     selected_packed_evaluation = (
         rollback_packed_evaluation
-        if args.complete_family_selection and selected_family == 0
+        if replay_config is not None and selected_alternative_bank_id == 0
         else _compare_logits(student_model, row_sets["evaluation"], evaluation_teacher)
     )
 
@@ -1114,19 +1153,23 @@ def main() -> None:
             "gradient_folds": args.gradient_folds,
             "require_favorable_realized_gradient": args.require_favorable_realized_gradient,
             "replay_folds": args.replay_folds,
+            "module_replay_search_folds": args.module_replay_search_folds,
             "topn_regression_limit": args.topn_regression_limit,
             "minimum_relative_kl_improvement": args.minimum_relative_kl_improvement,
             "baseline_only": args.baseline_only,
-            "complete_family_selection": args.complete_family_selection,
+            "module_granular_replay": None if replay_config is None else asdict(replay_config),
         },
         "quantization_seconds": quantization_seconds,
         "search_valid_tokens": 0 if propagated_inputs is None else int(propagated_inputs.shape[0]),
         "localized": _localized_summary(result, callback_report),
         "full_horizon_search": {
-            "enabled": bool(args.replay_candidates or args.complete_family_selection),
+            "enabled": bool(args.replay_candidates or replay_config is not None),
             "evaluations": replay_scores,
         },
-        "complete_family_selection": complete_family_report,
+        "module_granular_replay": {
+            "selected_alternative_bank_id": selected_alternative_bank_id,
+            "candidates": module_replay_report,
+        },
         "full_horizon_gradient": gradient_report,
         "confirmation": callback_report,
         "evaluation": {

@@ -173,6 +173,137 @@ class YaqaConfig:
             )
 
 
+MODULE_GRANULAR_REPLAY_SUBSETS = {
+    "attention_qk": ("q_proj", "k_proj"),
+    "attention_vo": ("v_proj", "o_proj"),
+    "attention_qkvo": ("q_proj", "k_proj", "v_proj", "o_proj"),
+    "mlp_gate_up": ("gate_proj", "up_proj"),
+    "mlp_down": ("down_proj",),
+    "mlp_gate_up_down": ("gate_proj", "up_proj", "down_proj"),
+}
+
+
+@dataclass
+class ModuleGranularReplayConfig:
+    """Offline propagated selection of complete packed candidates within coupled subsets.
+
+    This is the public name for the P27 policy. It does not alter the QVQ checkpoint
+    layout or inference kernel: every accepted candidate remains an ordinary
+    V2B2-P32 module. Canonical V2+YAQA is always candidate zero and the atomic
+    rollback artifact.
+    """
+
+    subsets: tuple[str, ...] = ("attention_qkvo",)
+    strategy: str = "greedy"
+    module_order: tuple[str, ...] = (
+        "q_proj",
+        "v_proj",
+        "k_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
+    alternative_bank_ids: tuple[int, ...] = (1, 2, 3)
+    replay_horizon: str = "final_logits"
+    search_folds: int = 2
+    minimum_relative_kl_improvement: float = 0.001
+    topn_regression_limit: float = 0.0025
+    require_disjoint_confirmation: bool = True
+    fallback: str = "canonical_v2_yaqa"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subsets, (tuple, list)) or not self.subsets:
+            raise ValueError("ModuleGranularReplayConfig: `subsets` must be a nonempty sequence.")
+        self.subsets = tuple(str(value).strip().lower() for value in self.subsets)
+        if len(set(self.subsets)) != len(self.subsets):
+            raise ValueError("ModuleGranularReplayConfig: `subsets` must not contain duplicates.")
+        unknown_subsets = set(self.subsets) - set(MODULE_GRANULAR_REPLAY_SUBSETS)
+        if unknown_subsets:
+            raise ValueError(
+                "ModuleGranularReplayConfig: unsupported subsets: "
+                f"{sorted(unknown_subsets)}; expected {sorted(MODULE_GRANULAR_REPLAY_SUBSETS)}."
+            )
+
+        if not isinstance(self.strategy, str):
+            raise TypeError("ModuleGranularReplayConfig: `strategy` must be a string.")
+        self.strategy = self.strategy.strip().lower()
+        if self.strategy != "greedy":
+            raise ValueError("ModuleGranularReplayConfig: only the validated `greedy` strategy is supported.")
+
+        if not isinstance(self.module_order, (tuple, list)) or not self.module_order:
+            raise ValueError("ModuleGranularReplayConfig: `module_order` must be a nonempty sequence.")
+        self.module_order = tuple(str(value).strip().lower() for value in self.module_order)
+        if len(set(self.module_order)) != len(self.module_order):
+            raise ValueError("ModuleGranularReplayConfig: `module_order` must not contain duplicates.")
+        supported_roles = {role for roles in MODULE_GRANULAR_REPLAY_SUBSETS.values() for role in roles}
+        unknown_roles = set(self.module_order) - supported_roles
+        if unknown_roles:
+            raise ValueError(
+                f"ModuleGranularReplayConfig: unsupported module roles: {sorted(unknown_roles)}."
+            )
+        selected_roles = {role for subset in self.subsets for role in MODULE_GRANULAR_REPLAY_SUBSETS[subset]}
+        missing_roles = selected_roles - set(self.module_order)
+        if missing_roles:
+            raise ValueError(
+                "ModuleGranularReplayConfig: `module_order` must include every selected subset role; "
+                f"missing {sorted(missing_roles)}."
+            )
+
+        if not isinstance(self.alternative_bank_ids, (tuple, list)) or not self.alternative_bank_ids:
+            raise ValueError("ModuleGranularReplayConfig: `alternative_bank_ids` must be a nonempty sequence.")
+        if any(
+            isinstance(bank_id, bool) or not isinstance(bank_id, int) or bank_id not in (1, 2, 3)
+            for bank_id in self.alternative_bank_ids
+        ):
+            raise ValueError("ModuleGranularReplayConfig: alternative bank IDs must be integers in {1, 2, 3}.")
+        self.alternative_bank_ids = tuple(self.alternative_bank_ids)
+        if len(set(self.alternative_bank_ids)) != len(self.alternative_bank_ids):
+            raise ValueError("ModuleGranularReplayConfig: `alternative_bank_ids` must not contain duplicates.")
+
+        if not isinstance(self.replay_horizon, str):
+            raise TypeError("ModuleGranularReplayConfig: `replay_horizon` must be a string.")
+        self.replay_horizon = self.replay_horizon.strip().lower()
+        if self.replay_horizon != "final_logits":
+            raise ValueError(
+                "ModuleGranularReplayConfig: only the validated `final_logits` replay horizon is supported."
+            )
+        if isinstance(self.search_folds, bool) or not isinstance(self.search_folds, int) or self.search_folds < 2:
+            raise ValueError("ModuleGranularReplayConfig: `search_folds` must be an integer of at least two.")
+
+        for field_name in ("minimum_relative_kl_improvement", "topn_regression_limit"):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"ModuleGranularReplayConfig: `{field_name}` must be a real scalar.")
+            value = float(value)
+            if not math.isfinite(value) or value < 0 or value >= 1:
+                raise ValueError(f"ModuleGranularReplayConfig: `{field_name}` must be finite and in [0, 1).")
+            setattr(self, field_name, value)
+
+        if self.require_disjoint_confirmation is not True:
+            raise ValueError(
+                "ModuleGranularReplayConfig: disjoint confirmation is required for propagated promotion."
+            )
+        if not isinstance(self.fallback, str):
+            raise TypeError("ModuleGranularReplayConfig: `fallback` must be a string.")
+        self.fallback = self.fallback.strip().lower()
+        if self.fallback != "canonical_v2_yaqa":
+            raise ValueError(
+                "ModuleGranularReplayConfig: only the exact `canonical_v2_yaqa` fallback is supported."
+            )
+
+    def roles(self) -> tuple[str, ...]:
+        """Return selected roles in the configured greedy order."""
+
+        selected = {role for subset in self.subsets for role in MODULE_GRANULAR_REPLAY_SUBSETS[subset]}
+        return tuple(role for role in self.module_order if role in selected)
+
+    def includes_module(self, module_name: str) -> bool:
+        """Return whether a fully qualified module name belongs to the selected subsets."""
+
+        return module_name.rsplit(".", 1)[-1] in self.roles()
+
+
 class _SharedTemporaryDirectory:
     """Share one TemporaryDirectory handle across copied config objects."""
 
@@ -5857,6 +5988,23 @@ def _normalize_qvq_output_alignment_config(
     raise TypeError("QVQConfig: `output_alignment` must be an OutputAlignConfig, dictionary, or None.")
 
 
+def _normalize_module_granular_replay_config(
+    value: Optional[Union[ModuleGranularReplayConfig, Dict[str, Any], bool]],
+) -> Optional[ModuleGranularReplayConfig]:
+    if value is None or value is False:
+        return None
+    if value is True:
+        return ModuleGranularReplayConfig()
+    if isinstance(value, ModuleGranularReplayConfig):
+        value.__post_init__()
+        return value
+    if isinstance(value, dict):
+        return ModuleGranularReplayConfig(**value)
+    raise TypeError(
+        "QVQConfig: `module_granular_replay` must be a ModuleGranularReplayConfig, dictionary, boolean, or None."
+    )
+
+
 @dataclass
 class QVQConfig(BaseQuantizeConfig):
     """QVQ trellis-code configuration.
@@ -5900,6 +6048,7 @@ class QVQConfig(BaseQuantizeConfig):
     tail_biting_candidates: int = field(default=1)
     viterbi_minimum_proxy_improvement: float = field(default=0.0)
     output_alignment: Optional[OutputAlignConfig] = field(default_factory=OutputAlignConfig)
+    module_granular_replay: Optional[ModuleGranularReplayConfig] = field(default=None)
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -6073,6 +6222,18 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError(
                 "QVQ output alignment currently supports decoder layers, not language-model head (`lm_head`) quantization."
             )
+        self.module_granular_replay = _normalize_module_granular_replay_config(self.module_granular_replay)
+        if self.module_granular_replay is not None:
+            if self.format != FORMAT.QVQ_V2B2_P32 or self.rounding != "yaqa":
+                raise ValueError(
+                    "QVQConfig: module-granular replay requires `format=qvq_v2b2_p32` with YAQA rounding."
+                )
+            if self.yaqa.sample_strategy != "full":
+                raise ValueError("QVQConfig: module-granular replay requires exact `yaqa.sample_strategy='full'`.")
+            if self.propagated_bank_selection is True:
+                raise ValueError(
+                    "QVQConfig: module-granular replay and localized propagated bank selection are mutually exclusive."
+                )
         if self.rounding == "yaqa" and self.output_channel_scale_optimization:
             raise ValueError("QVQConfig: YAQA does not support independent output-channel scale optimization.")
         if self.rounding == "yaqa" and self.module_scale_search:
@@ -6193,6 +6354,9 @@ class QVQConfig(BaseQuantizeConfig):
         out["tail_biting_candidates"] = self.tail_biting_candidates
         out["viterbi_minimum_proxy_improvement"] = self.viterbi_minimum_proxy_improvement
         out["output_alignment"] = None if self.output_alignment is None else asdict(self.output_alignment)
+        out["module_granular_replay"] = (
+            None if self.module_granular_replay is None else asdict(self.module_granular_replay)
+        )
         out["tensor_storage"] = self.tensor_storage
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:

@@ -632,7 +632,7 @@ This is direct evidence against a role-wide fixed bank policy. The optional algo
 make a per-module propagated decision; a static Q/K/V/O rule is not justified from one layer and cannot replace the
 search/confirmation gates.
 
-## Conditional Q-then-V composition at W2 (P27)
+## Module-granular replay: conditional Q-then-V composition at W2 (P27)
 
 P20 and P25 accepted Q and V independently against the same canonical prefix. P27 installed the exact packed P20 Q
 artifact first, then repeated complete-family selection for V. This measures V's conditional marginal gain rather
@@ -654,6 +654,26 @@ Top-5 improves on both splits. P27 is a validated positive and demonstrates comp
 live packed execution. It also validates the intended greedy conditional algorithm: after each accepted module,
 subsequent candidates must be replayed against the updated live artifact; standalone gains must not be summed or
 transplanted without remeasurement.
+
+The public name for this policy is `ModuleGranularReplayConfig`. “Family” was research shorthand for the alternative
+decoder placed in B2-P32 bank 1; the public config instead calls these `alternative_bank_ids`. Canonical V2+YAQA is
+implicit candidate zero. The stage changes only quantization-time selection and serializes the ordinary B2-P32
+layout, so it adds no bits or inference operations beyond B2-P32 itself. The validated P27 contract is represented by:
+
+```python
+ModuleGranularReplayConfig(
+    subsets=("attention_qkvo",),
+    strategy="greedy",
+    module_order=("q_proj", "v_proj", "k_proj", "o_proj"),
+    alternative_bank_ids=(1, 2, 3),
+    replay_horizon="final_logits",
+    search_folds=2,
+    minimum_relative_kl_improvement=0.001,
+    topn_regression_limit=0.0025,
+    require_disjoint_confirmation=True,
+    fallback="canonical_v2_yaqa",
+)
+```
 
 ## Conditional Q/V-then-K reevaluation at W2 (P28)
 
