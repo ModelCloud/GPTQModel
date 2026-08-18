@@ -733,6 +733,48 @@ It is evidence for transactional live-prefix selection, not a static role policy
 two-fold search win is insufficient: the alternate changed the propagated error direction enough to fail an
 independent confirmation split even though its mean search KL was 5.33% lower.
 
+## ModuleGranularReplayConfig real-model lifecycle validation
+
+The public `ModuleGranularReplayConfig` refactor was validated by rerunning the accepted P27 Q-then-V decision through
+the new `--module-granular-replay` path at commit `2908005844777998a887898e6ee56c72dd267a15`. This was a real-model,
+full-logit test, not a synthetic module proxy:
+
+- Llama 3.2 1B Instruct with a 16-layer execution horizon;
+- W2 V2B2-P32+YAQA on `model.layers.2.self_attn.v_proj` behind the accepted live Q prefix;
+- 512 independent Fisher rows (`[1024, 1536)`, 163,324 valid tokens) and YAQA seeds 0/1;
+- 32 search rows (`[1986, 2018)`, 9,676 valid tokens) split into two replay folds;
+- 30 disjoint confirmation rows (`[2018, 2048)`, 10,398 valid tokens);
+- 64 disjoint untouched evaluation rows (`[1536, 1600)`, 27,899 valid tokens);
+- batch 1, full row lengths, MPS, FP32 YAQA factors, and an independently serialized canonical V2+YAQA fallback.
+
+The refactored lifecycle reproduced the historical decision exactly. Alternative bank 1 won with replay score
+`0.9716315491` and selector occupancy `0.4983825684`; banks 2 and 3 scored `1.0269067789` and `0.9805535209`.
+Disjoint confirmation accepted bank 1:
+
+| Confirmation metric | Bank 1 versus canonical |
+|---|---:|
+| Final KL | -4.016% |
+| JSD | -4.340% |
+| Top-1 agreement | +0.019 pp |
+| Top-5 overlap | +0.044 pp |
+| Top-10 overlap | -0.001 pp |
+
+Untouched evaluation also retained the propagated benefit:
+
+| Evaluation metric | Canonical rollback | Selected bank 1 | Delta |
+|---|---:|---:|---:|
+| Final KL | 0.00398606 | 0.00380244 | -4.606% |
+| JSD | 0.00098251 | 0.00093459 | -4.878% |
+| Top-1 agreement | 97.765% | 97.672% | -0.093 pp |
+| Top-5 overlap | 96.228% | 96.305% | +0.078 pp |
+| Top-10 overlap | 96.176% | 96.206% | +0.029 pp |
+
+The new selected checkpoint is byte-identical to the historical P27 artifact (SHA-256
+`c0b3479783b44cc97603005da86cceb653f8239956f61955248147069e40f63e`), and every reported rollback and selected
+evaluation metric is numerically identical. This validates the renamed configuration and driver lifecycle for the
+accepted 16-layer attention-QKVO case. It does not yet prove automatic processor orchestration across an entire model
+or establish a universal bank policy across layers, rates, model families, or replay subsets.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -777,3 +819,5 @@ independent confirmation split even though its mean search KL was 5.33% lower.
 - `artifacts/qvq_p28_qv_then_k_w2_gate/selected_packed.safetensors`
 - `artifacts/qvq_p29_qv_then_o_w2_gate/report_packed.json`
 - `artifacts/qvq_p29_qv_then_o_w2_gate/selected_packed.safetensors`
+- `artifacts/qvq_module_granular_replay_validation/report_packed.json`
+- `artifacts/qvq_module_granular_replay_validation/selected_packed.safetensors`
