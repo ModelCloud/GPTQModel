@@ -88,5 +88,22 @@ Done (native CPU Hadamard kernel):
   - This removes the Python Hadamard overhead from the QVQ CPU inference path, where it previously sat next to the ~1 ms GEMV kernel.
 - `ruff check` and `git diff --check` pass.
 
+Done (AVX-512 vectorized QVQ GEMV decode):
+- Added `decode_tile_avx512` in `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp` that computes the 16-bit PGC state vector for 16 consecutive trellis steps at once using AVX-512 integer shifts/ORs, then gathers the two float values per state from `g_state_values` with two `_mm512_i32gather_ps` calls and stores them interleaved into `tile_weights`.
+- This breaks the serial state-update dependency chain in the old scalar `decode_tile` and reduces per-tile table lookups from 128 serial loads to 8 vector gathers (2 per 16-step block).
+- `accumulate_tile_m1_avx512` and `accumulate_tile_mn_avx512` now call `decode_tile_avx512`; the scalar `decode_tile` remains for the non-AVX-512 fallback path.
+- Accuracy:
+  - `tests/test_qvq_v2b2_p32.py`: 119 passed, 12 skipped.
+  - `tests/test_qvq.py -k "viterbi or tail_biting"`: 89 passed, 112 skipped, 1 failed (same pre-existing `squared_error` 1.19e-6 tolerance edge case).
+  - CPU GEMV max abs diff vs dense reference for `bits = [2, 3, 3.5, 4]` is `<= 2.44e-4`, inside the 2e-3 inference tolerance.
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - Raw `qvq_cpu_gemv` for `x=[1,2048] weight=[2048,2048]`:
+    - bits=3.5 (E=7): 1.04 ms -> 0.90 ms (~1.15x)
+    - bits=2.0 (E=4): ~0.53 ms
+    - bits=3.0 (E=6): ~0.71 ms
+    - bits=4.0 (E=8): ~0.52 ms
+  - Python fallback remains ~100 ms; speedup vs fallback is now 114-190x depending on E.
+- `ruff check` and `git diff --check` pass.
+
 Next:
-- Continue reducing the gap to dense matmul by fusing decode + FMA over output-channel tiles and vectorizing `unpack_tile_codes`, or explore dense-weight precompute fallback for larger batch regimes.
+- Continue reducing the gap to dense matmul by vectorizing `unpack_tile_codes` for non-power-of-two E (the remaining scalar bottleneck for E=3.5/6/7), fusing decode + FMA over output-channel tiles, or exploring a dense-weight precompute fallback for larger batch regimes.

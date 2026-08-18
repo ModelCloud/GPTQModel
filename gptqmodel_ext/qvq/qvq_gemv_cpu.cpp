@@ -167,6 +167,64 @@ void tile_segment_masks(
   }
 }
 
+// Decode one tile into 256 row-major float weights using AVX-512 vector
+// gathers.  The 128 E-bit codes form a circular bitstream; state_s is the
+// 16-bit window ending at code s and is computed directly from the previous
+// ceil(16/E) codes to break the serial table-lookup dependency chain.
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
+void decode_tile_avx512(
+    int E,
+    const uint16_t* codes,
+    int segments_per_tile,
+    int states_per_segment,
+    const uint16_t* seg_masks,
+    float* tile_weights) {
+  const __m512i perm0 = _mm512_setr_epi32(
+      0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+  const __m512i perm1 = _mm512_setr_epi32(
+      8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+
+  const float* table0 = &g_state_values[0][0];
+  const float* table1 = &g_state_values[0][1];
+
+  int L = (E >= 16) ? 1 : ((16 + E - 1) / E);
+
+  // Extended code buffer so every 16-step vector load can read the circular
+  // tail without explicit wrap-around handling.  Max L is 8 (E == 2).
+  uint16_t ext[128 + 8];
+  for (int i = 0; i < 128 + L - 1; ++i) {
+    int j = i - (L - 1);
+    if (j < 0) j += 128;
+    ext[i] = codes[j];
+  }
+
+  const __m512i and_mask = _mm512_set1_epi32(0xFFFF);
+  for (int base = 0; base < 128; base += 16) {
+    const uint16_t mask = seg_masks[base / states_per_segment];
+    __m512i state = _mm512_setzero_si512();
+    for (int i = 0; i < L; ++i) {
+      const int start = base + L - 1 - i;
+      const __m256i v16 =
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ext + start));
+      __m512i v32 = _mm512_cvtepu16_epi32(v16);
+      const int shift = i * E;
+      if (shift) {
+        v32 = _mm512_sll_epi32(v32, _mm_cvtsi32_si128(shift));
+      }
+      state = _mm512_or_si512(state, v32);
+    }
+    state = _mm512_and_si512(state, and_mask);
+    state = _mm512_xor_si512(state, _mm512_set1_epi32(mask));
+
+    const __m512 v0 = _mm512_i32gather_ps(state, table0, 8);
+    const __m512 v1 = _mm512_i32gather_ps(state, table1, 8);
+    const __m512 out0 = _mm512_permutex2var_ps(v0, perm0, v1);
+    const __m512 out1 = _mm512_permutex2var_ps(v0, perm1, v1);
+    _mm512_storeu_ps(tile_weights + 2 * base, out0);
+    _mm512_storeu_ps(tile_weights + 2 * base + 16, out1);
+  }
+}
+
 // One output tile accumulation (M == 1, AVX-512).
 __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
 void accumulate_tile_m1_avx512(
@@ -194,7 +252,7 @@ void accumulate_tile_m1_avx512(
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
     }
-    decode_tile(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+    decode_tile_avx512(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
     const float* x_row = x + tr * 16;
     for (int i = 0; i < 16; ++i) {
       __m512 w = _mm512_loadu_ps(tile_weights + i * 16);
@@ -236,7 +294,7 @@ void accumulate_tile_mn_avx512(
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
     }
-    decode_tile(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+    decode_tile_avx512(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
 
     for (int i = 0; i < 16; ++i) {
       __m512 w = _mm512_loadu_ps(tile_weights + i * 16);
