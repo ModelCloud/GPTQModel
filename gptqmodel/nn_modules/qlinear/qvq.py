@@ -588,6 +588,21 @@ class QVQLinear(BaseQuantLinear):
 
     def post_init(self) -> None:
         super().post_init()
+        # Quantization and checkpoint materialization may construct this
+        # module under ``torch.inference_mode()``. Such tensors deliberately
+        # have no mutation counter, but the selector/dtype caches below rely
+        # on one to reject stale state. Take ownership once at the module
+        # boundary as ordinary versioned buffers instead of weakening every
+        # cache to identity-only validation.
+        for buffer_name in _QVQ_BUFFER_NAMES:
+            tensor = getattr(self, buffer_name)
+            if tensor is None or tensor.device.type == "meta":
+                continue
+            try:
+                _ = tensor._version
+            except RuntimeError:
+                with torch.inference_mode(False):
+                    setattr(self, buffer_name, tensor.detach().clone())
         self._validate_tensors()
         self._qvq_mps_compander = None
         self._qvq_mps_bank_ids = None
@@ -610,7 +625,13 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_mps_bank_ids_cache = None
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
-        return super()._apply(fn)
+        # ModuleLooper performs device handoffs from inference-mode workers.
+        # Letting Module._apply inherit that mode would recreate all cache-keyed
+        # buffers without mutation counters immediately after post_init made
+        # them versioned. Device conversion is ownership transfer, not model
+        # inference, so keep the resulting buffers ordinary and guardable.
+        with torch.inference_mode(False):
+            return super()._apply(fn)
 
     def _prepare_mps_bank_ids(self, device: torch.device) -> torch.Tensor | None:
         """Return packed selectors from a stable snapshot of mutable bank state.

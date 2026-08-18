@@ -973,6 +973,12 @@ class BaseQModel(nn.Module):
         yaqa_calibration: Optional[
             Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
         ] = None,
+        module_replay_search_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
+        module_replay_confirmation_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
         freeze_others: bool = True,
     ) -> Dict[str, List[Dict[str, str]]]:
@@ -986,6 +992,10 @@ class BaseQModel(nn.Module):
         dataset for the full-model Fisher/Sketch-B pass. If omitted, YAQA reuses
         `calibration`; the ordinary activation-Hessian and replay stream is never
         replaced by this YAQA-only dataset.
+
+        QVQ module-granular replay requires explicit, disjoint
+        `module_replay_search_calibration` and `module_replay_confirmation_calibration`
+        streams. They are never inferred from ordinary or YAQA calibration.
         """
 
         # Layer-scope dynamic overrides are temporary. Snapshot the original map so
@@ -1013,6 +1023,8 @@ class BaseQModel(nn.Module):
                 embed_quant_mode=embed_quant_mode,
                 validation_calibration=validation_calibration,
                 yaqa_calibration=yaqa_calibration,
+                module_replay_search_calibration=module_replay_search_calibration,
+                module_replay_confirmation_calibration=module_replay_confirmation_calibration,
                 layer_scope=layer_scope,
                 freeze_others=freeze_others,
             )
@@ -1060,6 +1072,12 @@ class BaseQModel(nn.Module):
             Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
         ] = None,
         yaqa_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
+        module_replay_search_calibration: Optional[
+            Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
+        ] = None,
+        module_replay_confirmation_calibration: Optional[
             Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]
         ] = None,
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
@@ -1296,6 +1314,8 @@ class BaseQModel(nn.Module):
                 calibration=calibration,
                 validation_calibration=validation_calibration,
                 yaqa_calibration=yaqa_calibration,
+                module_replay_search_calibration=module_replay_search_calibration,
+                module_replay_confirmation_calibration=module_replay_confirmation_calibration,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
                 batch_size=batch_size,
@@ -1713,6 +1733,8 @@ class BaseQModel(nn.Module):
         calibration,
         validation_calibration,
         yaqa_calibration,
+        module_replay_search_calibration,
+        module_replay_confirmation_calibration,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
@@ -1748,6 +1770,17 @@ class BaseQModel(nn.Module):
             if self.quantize_config.rounding != "yaqa":
                 raise ValueError("`yaqa_calibration` requires QVQ `rounding='yaqa'`.")
 
+        replay_config = getattr(self.quantize_config, "module_granular_replay", None)
+        replay_streams = (module_replay_search_calibration, module_replay_confirmation_calibration)
+        if replay_config is None and any(stream is not None for stream in replay_streams):
+            raise ValueError(
+                "Module replay calibration streams require QVQ `module_granular_replay` to be enabled."
+            )
+        if replay_config is not None and any(stream is None for stream in replay_streams):
+            raise ValueError(
+                "QVQ module-granular replay requires explicit search and confirmation calibration streams."
+            )
+
         configured_preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
         analysis_enabled = any(isinstance(item, AnalysisConfig) for item in configured_preprocessors)
         planning_preprocessors = [item for item in configured_preprocessors if not isinstance(item, AnalysisConfig)]
@@ -1782,7 +1815,25 @@ class BaseQModel(nn.Module):
                     calibration_data_min_length=10,
                     calibration_concat_separator=calibration_concat_separator,
                 )
+            if replay_config is not None:
+                qvq_args["module_replay_search_calibration"] = self.prepare_dataset(
+                    calibration_dataset=module_replay_search_calibration,
+                    calibration_dataset_concat_size=None,
+                    calibration_dataset_sort=None,
+                    batch_size=1,
+                    calibration_data_min_length=10,
+                    calibration_concat_separator=None,
+                )
+                qvq_args["module_replay_confirmation_calibration"] = self.prepare_dataset(
+                    calibration_dataset=module_replay_confirmation_calibration,
+                    calibration_dataset_concat_size=None,
+                    calibration_dataset_sort=None,
+                    batch_size=1,
+                    calibration_data_min_length=10,
+                    calibration_concat_separator=None,
+                )
             qvq_processor = QVQProcessor(**qvq_args)
+            qvq_processor.prepare_module_granular_replay(self)
             qvq_processor.prepare_yaqa(self)
             quantize_processor = preprocessors + [qvq_processor]
         elif self.quantize_config.method == METHOD.EXL3:

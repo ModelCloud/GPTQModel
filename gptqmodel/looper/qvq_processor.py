@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -15,11 +17,17 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 import transformers
 from torch.nn import Module
 
 from .. import DEVICE_THREAD_POOL
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
+from ..looper.loop_processor import (
+    DTYPE_SIZE_COLUMN,
+    MODULE_FEATURE_COLUMN,
+    ExecutionConfig,
+    LoopProcessor,
+)
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.base import (
@@ -56,7 +64,6 @@ from ..utils.model import find_modules, get_layers_with_prefixes, recurse_setatt
 from ..utils.module_locks import parent_module_lock
 from .qvq_output_alignment import QVQOutputAlignmentAttachment
 
-
 log = setup_logger()
 
 
@@ -90,6 +97,8 @@ class QVQProcessor(LoopProcessor):
         calibration_sort: Optional[str],
         batch_size: int,
         yaqa_calibration=None,
+        module_replay_search_calibration=None,
+        module_replay_confirmation_calibration=None,
         require_fwd: bool = True,
         calibration_concat_separator: Optional[str] = None,
         execution_config: Optional[ExecutionConfig] = None,
@@ -117,6 +126,13 @@ class QVQProcessor(LoopProcessor):
         # The ordinary calibration dataset remains the source for activation
         # Hessians and module replay.
         self.yaqa_calibration = self.calibration_dataset if yaqa_calibration is None else yaqa_calibration
+        self._module_replay_search_calibration = module_replay_search_calibration
+        self._module_replay_confirmation_calibration = module_replay_confirmation_calibration
+        self._module_replay_model: Optional[BaseQModel] = None
+        self._module_replay_rows: Dict[str, list[Dict[str, torch.Tensor]]] = {}
+        self._module_replay_teacher_logits: Dict[str, list[torch.Tensor]] = {}
+        self._module_replay_stats: Dict[str, Dict[str, Any]] = {}
+        self._module_replay_lock = threading.RLock()
         # Keep [B, S] membership until the hook can remove padding. Flattening
         # before the hook loses the only authoritative keep mask.
         self.preserve_batch_keep_mask = True
@@ -140,6 +156,113 @@ class QVQProcessor(LoopProcessor):
         self._automatic_propagation_gate_samples: Dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         self._additional_calibration_sample_counts: Dict[str, set[int]] = {}
         self._propagation_gates_lock = threading.RLock()
+
+    @staticmethod
+    def _module_replay_row_fingerprint(row: Dict[str, torch.Tensor]) -> str:
+        input_ids = row.get("input_ids")
+        if not torch.is_tensor(input_ids):
+            raise ValueError("QVQ module replay rows must contain tensor `input_ids`.")
+        payload = input_ids.detach().to(device="cpu", dtype=torch.int64).contiguous().numpy().tobytes()
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _module_replay_model_inputs(row: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
+        return {
+            name: value.to(device=device)
+            for name, value in row.items()
+            if torch.is_tensor(value) and name not in {"labels", "label"}
+        }
+
+    def _ensure_module_replay_residency(self, model: torch.nn.Module) -> torch.device:
+        """Keep every tensor needed by final-logit replay on one device."""
+
+        named_tensors = tuple(model.named_parameters()) + tuple(model.named_buffers())
+        meta_names = [name for name, tensor in named_tensors if tensor.device.type == "meta"]
+        if meta_names:
+            raise RuntimeError(
+                "QVQ module-granular replay requires a fully materialized model; "
+                f"found meta tensors including {meta_names[:3]}."
+            )
+        source_devices = {tensor.device for _, tensor in named_tensors}
+        if not source_devices:
+            raise RuntimeError("QVQ module-granular replay found no model tensors to place.")
+        target_device = normalize_device_like(self.qcfg.device) or next(iter(source_devices))
+        if source_devices != {target_device}:
+            # Stage finalization deliberately returns completed leaves to CPU.
+            # Rehome once before the next module search so all candidates reuse
+            # a fully resident model; never transfer layers inside each replay.
+            model.to(target_device)
+        return target_device
+
+    def prepare_module_granular_replay(self, gptq_model: BaseQModel) -> None:
+        """Cache exact dense FP32 logits for later propagated replay."""
+
+        replay_config = self.qcfg.module_granular_replay
+        if replay_config is None:
+            return
+        if self._module_replay_search_calibration is None or self._module_replay_confirmation_calibration is None:
+            raise ValueError("QVQ module-granular replay requires explicit search and confirmation streams.")
+        if self._module_replay_model is not None:
+            raise RuntimeError("QVQ module-granular replay teacher targets were already prepared.")
+        model = gptq_model.model
+        if any(isinstance(module, BaseQuantLinear) for module in model.modules()):
+            raise RuntimeError("QVQ module-granular replay teacher capture requires an entirely dense source model.")
+        self._ensure_module_replay_residency(model)
+        input_embeddings = model.get_input_embeddings()
+        if input_embeddings is None:
+            raise RuntimeError("QVQ module-granular replay requires model input embeddings.")
+        input_device = input_embeddings.weight.device
+        streams = {
+            "search": list(self._module_replay_search_calibration),
+            "confirmation": list(self._module_replay_confirmation_calibration),
+        }
+        if len(streams["search"]) < replay_config.search_folds:
+            raise ValueError("QVQ module replay search rows must cover every configured search fold.")
+        fingerprints = {
+            name: {self._module_replay_row_fingerprint(row) for row in rows}
+            for name, rows in streams.items()
+        }
+        overlap = fingerprints["search"].intersection(fingerprints["confirmation"])
+        if overlap:
+            raise ValueError("QVQ module replay search and confirmation rows must be prompt-disjoint.")
+        calibration_fingerprints = {
+            self._module_replay_row_fingerprint(row) for row in self.calibration_dataset
+        }
+        yaqa_fingerprints = {
+            self._module_replay_row_fingerprint(row) for row in self.yaqa_calibration
+        }
+        for split_name, split_fingerprints in fingerprints.items():
+            if split_fingerprints.intersection(calibration_fingerprints):
+                raise ValueError(
+                    f"QVQ module replay {split_name} rows must be prompt-disjoint from ordinary calibration."
+                )
+            if split_fingerprints.intersection(yaqa_fingerprints):
+                raise ValueError(f"QVQ module replay {split_name} rows must be prompt-disjoint from YAQA calibration.")
+
+        was_training = model.training
+        model.eval()
+        teacher_logits: Dict[str, list[torch.Tensor]] = {"search": [], "confirmation": []}
+        try:
+            with torch.no_grad():
+                for split_name, rows in streams.items():
+                    for row in rows:
+                        logits = model(
+                            **self._module_replay_model_inputs(row, input_device),
+                            use_cache=False,
+                            return_dict=True,
+                        ).logits[:, :-1]
+                        teacher_logits[split_name].append(logits.detach().to(device="cpu", dtype=torch.float32))
+        finally:
+            model.train(was_training)
+        self._module_replay_model = gptq_model
+        self._module_replay_rows = {
+            name: [
+                {key: value.detach().cpu() if torch.is_tensor(value) else value for key, value in row.items()}
+                for row in rows
+            ]
+            for name, rows in streams.items()
+        }
+        self._module_replay_teacher_logits = teacher_logits
 
     def _record_automatic_propagation_gate(
         self, module_full_name: str, inputs: torch.Tensor, targets: torch.Tensor
@@ -242,15 +365,276 @@ class QVQProcessor(LoopProcessor):
             if owner is None or self._propagation_gates.get(module_full_name) is owner:
                 self._propagation_gates.pop(module_full_name, None)
 
+    def _module_replay_metrics(self, split_name: str, *, fold_index: int = 0, folds: int = 1) -> Dict[str, float]:
+        """Replay one split and compare exact final logits against cached dense hidden states."""
+
+        if self._module_replay_model is None:
+            raise RuntimeError("QVQ module replay model is unavailable.")
+        model = self._module_replay_model.model
+        input_embeddings = model.get_input_embeddings()
+        if input_embeddings is None:
+            raise RuntimeError("QVQ module replay requires input embeddings.")
+        input_device = input_embeddings.weight.device
+        rows = self._module_replay_rows[split_name][fold_index::folds]
+        teacher_logits_rows = self._module_replay_teacher_logits[split_name][fold_index::folds]
+        if not rows:
+            raise ValueError("QVQ module replay produced an empty search fold.")
+        totals = {"kl": 0.0, "top1": 0.0, "top5": 0.0, "top10": 0.0, "tokens": 0}
+        with torch.no_grad():
+            for row, teacher_logits_cpu in zip(rows, teacher_logits_rows, strict=True):
+                student_logits = model(**self._module_replay_model_inputs(row, input_device), use_cache=False).logits[
+                    :, :-1
+                ].to(torch.float32)
+                teacher_logits = teacher_logits_cpu.to(device=student_logits.device)
+                attention_mask = row.get("attention_mask")
+                if attention_mask is None:
+                    valid = torch.ones(teacher_logits.shape[:-1], dtype=torch.bool, device=student_logits.device)
+                else:
+                    attention_mask = attention_mask.to(device=student_logits.device, dtype=torch.bool)
+                    # A next-token comparison is valid only when both the query
+                    # position and its target position are real tokens. Requiring
+                    # both sides excludes left/right padding boundaries.
+                    valid = attention_mask[:, :-1] & attention_mask[:, 1:]
+                teacher_logits = teacher_logits[valid]
+                student_logits = student_logits[valid]
+                if teacher_logits.numel() == 0:
+                    continue
+                teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+                student_log_probs = F.log_softmax(student_logits, dim=-1)
+                token_count = int(teacher_logits.shape[0])
+                totals["kl"] += float(
+                    F.kl_div(student_log_probs, teacher_log_probs, reduction="sum", log_target=True).item()
+                )
+                teacher_top10 = teacher_logits.topk(10, dim=-1).indices
+                student_top10 = student_logits.topk(10, dim=-1).indices
+                totals["top1"] += float((teacher_top10[..., 0] == student_top10[..., 0]).sum().item())
+                for topn in (5, 10):
+                    overlap = (
+                        teacher_top10[..., :topn].unsqueeze(-1)
+                        == student_top10[..., :topn].unsqueeze(-2)
+                    ).any(dim=-1)
+                    totals[f"top{topn}"] += float(overlap.sum().item()) / topn
+                totals["tokens"] += token_count
+        tokens = int(totals["tokens"])
+        if tokens == 0:
+            raise ValueError("QVQ module replay split contains no valid next-token positions.")
+        return {
+            "kl_forward": totals["kl"] / tokens,
+            "top1_agreement": totals["top1"] / tokens,
+            "top5_overlap": totals["top5"] / tokens,
+            "top10_overlap": totals["top10"] / tokens,
+            "tokens": tokens,
+        }
+
+    @staticmethod
+    def _module_replay_score(candidate: list[Dict[str, float]], baseline: list[Dict[str, float]]) -> float:
+        ratios = []
+        for candidate_fold, baseline_fold in zip(candidate, baseline, strict=True):
+            candidate_kl = candidate_fold["kl_forward"]
+            baseline_kl = baseline_fold["kl_forward"]
+            if not math.isfinite(candidate_kl) or not math.isfinite(baseline_kl) or baseline_kl <= 0:
+                return math.inf
+            ratios.append(candidate_kl / baseline_kl)
+        return max(ratios)
+
+    @staticmethod
+    def _module_replay_confirmation_passes(
+        candidate: Dict[str, float], baseline: Dict[str, float], config
+    ) -> bool:
+        required = baseline["kl_forward"] * config.minimum_relative_kl_improvement
+        if not math.isfinite(candidate["kl_forward"]) or baseline["kl_forward"] - candidate["kl_forward"] < required:
+            return False
+        return all(
+            candidate[metric] >= baseline[metric] - config.topn_regression_limit
+            for metric in ("top1_agreement", "top5_overlap", "top10_overlap")
+        )
+
+    @staticmethod
+    def _module_replay_qlinear(
+        original: torch.nn.Linear,
+        module_full_name: str,
+        module_qcfg: QVQConfig,
+        result,
+    ) -> QVQLinear:
+        tensors = {
+            name: value.detach().to(device=original.weight.device)
+            for name, value in result.serialized_tensors().items()
+        }
+        candidate = QVQLinear(
+            bits=module_qcfg.bits,
+            in_features=original.in_features,
+            out_features=original.out_features,
+            bias=original.bias is not None,
+            backend=BACKEND.QVQ,
+            name=module_full_name,
+            dtype=original.weight.dtype,
+            tensors=tensors,
+            codebook_version=module_qcfg.codebook,
+            vector_size=2,
+            trellis_window=16,
+            bank_count=2,
+            v2b2_p32=True,
+        ).eval()
+        candidate.post_init()
+        return candidate
+
+    def _select_module_granular_replay_candidate(
+        self,
+        module: NamedModule,
+        module_qcfg: QVQConfig,
+        canonical_weight: torch.Tensor,
+        quantization_hessian: torch.Tensor,
+        quantization_kwargs: Dict[str, Any],
+    ):
+        """Choose one complete serialized bank arm by live final-logit replay."""
+
+        replay_config = module_qcfg.module_granular_replay
+        if replay_config is None or not replay_config.includes_module(module.full_name):
+            return quantize_qvq_linear(
+                canonical_weight,
+                quantization_hessian,
+                bits=module_qcfg.bits,
+                **quantization_kwargs,
+            )
+        if self._module_replay_model is None:
+            raise RuntimeError("QVQ module-granular replay was enabled without prepared teacher targets.")
+        quantization_kwargs = dict(quantization_kwargs)
+        quantization_kwargs.pop("yaqa_v2b2_family_mode", None)
+        quantization_kwargs.pop("yaqa_v2b2_fixed_family_id", None)
+        model = self._module_replay_model.model
+        self._ensure_module_replay_residency(model)
+        original = model.get_submodule(module.full_name)
+        if original is not module.module or not isinstance(original, torch.nn.Linear):
+            raise RuntimeError(
+                f"QVQ module replay target `{module.full_name}` is not the authoritative live dense linear."
+            )
+        candidate_results = {}
+        candidate_records = []
+        baseline_folds = None
+        parent_name, _, child_name = module.full_name.rpartition(".")
+        parent = model.get_submodule(parent_name)
+        with self._module_replay_lock:
+            try:
+                for alternative_bank_id in (0, *replay_config.alternative_bank_ids):
+                    result = quantize_qvq_linear(
+                        canonical_weight,
+                        quantization_hessian,
+                        bits=module_qcfg.bits,
+                        yaqa_v2b2_family_mode="fixed_block_ldlq",
+                        yaqa_v2b2_fixed_family_id=alternative_bank_id,
+                        **quantization_kwargs,
+                    )
+                    candidate = self._module_replay_qlinear(
+                        original,
+                        module.full_name,
+                        module_qcfg,
+                        result,
+                    )
+                    setattr(parent, child_name, candidate)
+                    folds = [
+                        self._module_replay_metrics(
+                            "search",
+                            fold_index=fold_index,
+                            folds=replay_config.search_folds,
+                        )
+                        for fold_index in range(replay_config.search_folds)
+                    ]
+                    if alternative_bank_id == 0:
+                        baseline_folds = folds
+                        score = 1.0
+                    else:
+                        assert baseline_folds is not None
+                        score = self._module_replay_score(folds, baseline_folds)
+                    candidate_results[alternative_bank_id] = result
+                    candidate_records.append(
+                        {
+                            "alternative_bank_id": alternative_bank_id,
+                            "score": score,
+                            "fold_kl_forward": [fold["kl_forward"] for fold in folds],
+                            "fold_metrics": folds,
+                            "selected": False,
+                        }
+                    )
+                    log.info(
+                        "QVQ module replay: module=%s alternative_bank_id=%d score=%.8f fold_kl=%s",
+                        module.full_name,
+                        alternative_bank_id,
+                        score,
+                        [fold["kl_forward"] for fold in folds],
+                    )
+                    setattr(parent, child_name, original)
+
+                eligible = [
+                    record
+                    for record in candidate_records
+                    if record["alternative_bank_id"] != 0
+                    and record["score"] < 1 - replay_config.minimum_relative_kl_improvement
+                ]
+                selected_id = (
+                    int(min(eligible, key=lambda record: record["score"])["alternative_bank_id"])
+                    if eligible
+                    else 0
+                )
+                baseline_candidate = self._module_replay_qlinear(
+                    original,
+                    module.full_name,
+                    module_qcfg,
+                    candidate_results[0],
+                )
+                setattr(parent, child_name, baseline_candidate)
+                baseline_confirmation = self._module_replay_metrics("confirmation")
+                candidate_confirmation = baseline_confirmation
+                if selected_id:
+                    selected_candidate = self._module_replay_qlinear(
+                        original,
+                        module.full_name,
+                        module_qcfg,
+                        candidate_results[selected_id],
+                    )
+                    setattr(parent, child_name, selected_candidate)
+                    candidate_confirmation = self._module_replay_metrics("confirmation")
+                    if not self._module_replay_confirmation_passes(
+                        candidate_confirmation,
+                        baseline_confirmation,
+                        replay_config,
+                    ):
+                        selected_id = 0
+                selected_result = candidate_results[selected_id]
+                for record in candidate_records:
+                    record["selected"] = record["alternative_bank_id"] == selected_id
+                self._module_replay_stats[module.full_name] = {
+                    "selected_alternative_bank_id": selected_id,
+                    "candidates": candidate_records,
+                    "confirmation_baseline": baseline_confirmation,
+                    "confirmation_candidate": candidate_confirmation,
+                }
+                log.info(
+                    "QVQ module replay: module=%s selected_alternative_bank_id=%d "
+                    "confirmation_baseline_kl=%.8g confirmation_candidate_kl=%.8g",
+                    module.full_name,
+                    selected_id,
+                    baseline_confirmation["kl_forward"],
+                    candidate_confirmation["kl_forward"],
+                )
+                return selected_result
+            finally:
+                setattr(parent, child_name, original)
+
     def refine_subset_module_groups(self, groups: list[list[str]]) -> list[list[str]]:
         """Match QTIP's projection-at-a-time installation when alignment is enabled."""
 
-        if self._output_alignment is None:
+        replay_config = self.qcfg.module_granular_replay
+        if self._output_alignment is None and replay_config is None:
             return groups
-        gptq_model = self._output_alignment.gptq_model
-        if gptq_model is None:
-            ordered_groups = groups
-        else:
+        if replay_config is not None:
+            role_order = {role: index for index, role in enumerate(replay_config.module_order)}
+            groups = [
+                sorted(group, key=lambda name: role_order.get(name.rsplit(".", 1)[-1], len(role_order)))
+                for group in groups
+            ]
+        ordered_groups = groups
+        gptq_model = None if self._output_alignment is None else self._output_alignment.gptq_model
+        if gptq_model is not None:
             # QTIP's authoritative Llama recipe installs V, Q, K and then UP,
             # GATE. Preserve the model-tree group boundaries (so attention
             # output and MLP down remain in their declared positions), and use
@@ -268,7 +652,7 @@ class QVQProcessor(LoopProcessor):
                 priorities = [role_priority[flag] for flag in flags if flag in role_priority]
                 return min(priorities, default=len(role_priority))
 
-            ordered_groups = [sorted(group, key=priority) for group in groups]
+            ordered_groups = [sorted(group, key=priority) for group in ordered_groups]
         return [[module_name] for group in ordered_groups for module_name in group]
 
     def _yaqa_target_modules(
@@ -807,10 +1191,7 @@ class QVQProcessor(LoopProcessor):
                     propagation_gate = self._require_propagation_gate(module.full_name, target_device)
             else:
                 propagation_gate = None
-            result = quantize_qvq_linear(
-                canonical_weight,
-                quantization_hessian,
-                bits=module_qcfg.bits,
+            quantization_kwargs = dict(
                 output_hessian=output_hessian,
                 bias=None if module.bias is None else module.bias.detach().to(target_device),
                 seed=seed,
@@ -852,6 +1233,13 @@ class QVQProcessor(LoopProcessor):
                     if propagation_gate is None or not module_qcfg.propagated_bank_selection
                     else propagation_gate[3]
                 ),
+            )
+            result = self._select_module_granular_replay_candidate(
+                module,
+                module_qcfg,
+                canonical_weight,
+                quantization_hessian,
+                quantization_kwargs,
             )
             duration = time.perf_counter() - started
 
@@ -953,6 +1341,7 @@ class QVQProcessor(LoopProcessor):
                 "yaqa_kronecker_proxy_loss": (
                     None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss.item())
                 ),
+                "module_granular_replay": self._module_replay_stats.get(module.full_name),
             }
             if result.telemetry is not None:
                 stat["qvq_telemetry"] = result.telemetry
@@ -1117,6 +1506,9 @@ class QVQProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model and checkpoint metadata as QVQ after replacement completes."""
 
+        self._module_replay_rows.clear()
+        self._module_replay_teacher_logits.clear()
+        self._module_replay_model = None
         with self._yaqa_factor_lock:
             self._yaqa_input_hessians.clear()
             self._yaqa_output_hessians.clear()

@@ -134,17 +134,39 @@ class _QVQMLXPreparedBankedCodebooks:
     """One validated bank stack and its immutable FP32 state norms."""
 
     source: Any
-    source_version: int
+    source_version: int | None
     lease: _TorchMLXReadOnlyLease | None
     norms: Any | None
     implicit_levels: Any | None = None
     implicit_masks: Any | None = None
 
     def verify_source(self, source) -> None:
-        if source is not self.source or source._version != self.source_version:
+        if source is not self.source:
             raise RuntimeError("QVQ prepared MLX bank codebooks no longer match the Torch source tensor")
+        if self.source_version is not None:
+            try:
+                current_version = source._version
+            except RuntimeError as exc:
+                raise RuntimeError("QVQ prepared MLX bank codebooks lost their Torch mutation guard") from exc
+            if current_version != self.source_version:
+                raise RuntimeError("QVQ prepared MLX bank codebooks no longer match the Torch source tensor")
         if self.lease is not None:
             self.lease.verify_unchanged()
+
+
+def _torch_tensor_version_or_none(tensor) -> int | None:
+    """Return a mutation counter when Torch exposes one.
+
+    Inference-mode tensors intentionally have no version counter. The MLX
+    bridge snapshots those tensors into independently owned storage, so source
+    identity remains sufficient to bind a prepared snapshot to its call site;
+    tensors with counters retain the stronger mutation check.
+    """
+
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
 
 
 class _TorchMLXStagingPool:
@@ -2253,6 +2275,7 @@ def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks, *, allow_implicit:
         raise ValueError("QVQ MLX bank codebooks require contiguous float32 Torch CPU or MPS tensors")
     if not torch.isfinite(codebooks).all():
         raise ValueError("QVQ MLX bank codebooks must contain only finite values")
+    source_version = _torch_tensor_version_or_none(codebooks)
     with _TORCH_MLX_BRIDGE_LOCK:
         if allow_implicit and codebooks.device.type == "cpu":
             bank_masks = []
@@ -2274,7 +2297,7 @@ def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks, *, allow_implicit:
                 mx.eval(implicit_levels, implicit_masks)
                 return _QVQMLXPreparedBankedCodebooks(
                     source=codebooks,
-                    source_version=codebooks._version,
+                    source_version=source_version,
                     lease=None,
                     norms=None,
                     implicit_levels=implicit_levels,
@@ -2293,7 +2316,7 @@ def qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks, *, allow_implicit:
         mx.eval(norms)
         return _QVQMLXPreparedBankedCodebooks(
             source=codebooks,
-            source_version=codebooks._version,
+            source_version=source_version,
             lease=lease,
             norms=norms,
         )

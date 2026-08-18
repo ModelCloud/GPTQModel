@@ -596,6 +596,27 @@ def test_qvq_mlx_prepared_banked_codebooks_reject_mutated_source():
         )
 
 
+def test_qvq_mlx_prepared_banked_codebooks_accept_inference_mode_source():
+    with torch.inference_mode():
+        codebooks = torch.stack(
+            tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in (0, 1))
+        ).contiguous()
+        with pytest.raises(RuntimeError, match="Inference tensors do not track version counter"):
+            _ = codebooks._version
+        prepared = qvq_mlx_prepare_v2_banked_codebooks_from_torch(codebooks)
+        states, selectors, squared_error = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
+            torch.zeros((1, 128, 2), dtype=torch.float32),
+            codebooks,
+            2,
+            segment_steps=16,
+            mlx_codebooks=prepared,
+        )
+
+    assert states.shape == (1, 128)
+    assert selectors.shape == (1, 8)
+    assert torch.isfinite(squared_error).all()
+
+
 def test_qvq_mlx_prepared_banked_codebooks_use_exact_fp16_or_fp32_fallback():
     pgc_codebooks = torch.stack(
         tuple(pgc16_codebook_v2_bank(bank, bits=2) for bank in (0, 3))

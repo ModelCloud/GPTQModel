@@ -6230,6 +6230,11 @@ class QVQConfig(BaseQuantizeConfig):
                 )
             if self.yaqa.sample_strategy != "full":
                 raise ValueError("QVQConfig: module-granular replay requires exact `yaqa.sample_strategy='full'`.")
+            if self.yaqa.spectral_refinement or self.yaqa.spectral_push or self.yaqa.spectral_localized:
+                raise ValueError(
+                    "QVQConfig: module-granular replay enumerates fixed complete bank arms and cannot combine "
+                    "with YAQA spectral candidate refinement."
+                )
             if self.propagated_bank_selection is True:
                 raise ValueError(
                     "QVQConfig: module-granular replay and localized propagated bank selection are mutually exclusive."

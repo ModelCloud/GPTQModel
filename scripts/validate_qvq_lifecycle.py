@@ -26,7 +26,13 @@ from gptqmodel.models.base import (
     MODULE_TREE_FLAG_V,
 )
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization import FORMAT, OutputAlignConfig, QVQConfig, YaqaConfig
+from gptqmodel.quantization import (
+    FORMAT,
+    ModuleGranularReplayConfig,
+    OutputAlignConfig,
+    QVQConfig,
+    YaqaConfig,
+)
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
 from gptqmodel.quantization.qvq_yaqa import YAQA_PAPER_MINIMUM_SEQUENCES, YAQA_PAPER_REGULARIZATION
 from gptqmodel.utils.model import get_layers_with_prefixes
@@ -120,6 +126,24 @@ def parse_args() -> argparse.Namespace:
         "--yaqa-dataset-config",
         default=None,
         help="Independent YAQA dataset config; omitted uses --dataset-config.",
+    )
+    parser.add_argument("--module-granular-replay", action="store_true")
+    parser.add_argument("--module-replay-search-row-start", type=int, default=0)
+    parser.add_argument("--module-replay-search-rows", type=int, default=0)
+    parser.add_argument("--module-replay-confirmation-row-start", type=int, default=0)
+    parser.add_argument("--module-replay-confirmation-rows", type=int, default=0)
+    parser.add_argument(
+        "--module-replay-subsets",
+        nargs="+",
+        default=("attention_qkvo",),
+        choices=(
+            "attention_qk",
+            "attention_vo",
+            "attention_qkvo",
+            "mlp_gate_up",
+            "mlp_down",
+            "mlp_gate_up_down",
+        ),
     )
     parser.add_argument("--output-alignment", action="store_true")
     parser.add_argument("--output-alignment-no-pristine-hessian", action="store_true")
@@ -251,6 +275,23 @@ def _masked_logits(model, prompts: tuple[str, ...], tokenizer=None) -> tuple[tor
 def main() -> None:
     args = parse_args()
     _validate_args(args)
+    if args.module_granular_replay:
+        if args.format != "qvq_v2b2_p32" or args.rounding != "yaqa":
+            raise ValueError("Module-granular replay requires V2B2-P32 with YAQA rounding.")
+        if args.module_replay_search_rows < 2 or args.module_replay_confirmation_rows < 1:
+            raise ValueError("Module-granular replay requires at least two search rows and one confirmation row.")
+        search_range = range(
+            args.module_replay_search_row_start,
+            args.module_replay_search_row_start + args.module_replay_search_rows,
+        )
+        confirmation_range = range(
+            args.module_replay_confirmation_row_start,
+            args.module_replay_confirmation_row_start + args.module_replay_confirmation_rows,
+        )
+        if set(search_range).intersection(confirmation_range):
+            raise ValueError("Module replay search and confirmation row ranges must be disjoint.")
+    elif args.module_replay_search_rows or args.module_replay_confirmation_rows:
+        raise ValueError("Module replay row controls require --module-granular-replay.")
     calibration_concat_size, calibration_sort, dynamic = _calibration_controls(args)
     yaqa_controls = _yaqa_calibration_controls(args)
 
@@ -285,6 +326,11 @@ def main() -> None:
                 pristine_hessian=not args.output_alignment_no_pristine_hessian,
             )
             if args.output_alignment
+            else None
+        ),
+        module_granular_replay=(
+            ModuleGranularReplayConfig(subsets=tuple(args.module_replay_subsets))
+            if args.module_granular_replay
             else None
         ),
         # Live inference, save, and exact reload parity all require one fully
@@ -350,6 +396,19 @@ def main() -> None:
                 f"but dataset contains only {len(yaqa_dataset)} rows."
             )
         yaqa_calibration = yaqa_dataset.select(range(yaqa_row_start, yaqa_row_stop))
+    module_replay_search_calibration = None
+    module_replay_confirmation_calibration = None
+    if args.module_granular_replay:
+        search_stop = args.module_replay_search_row_start + args.module_replay_search_rows
+        confirmation_stop = args.module_replay_confirmation_row_start + args.module_replay_confirmation_rows
+        if max(search_stop, confirmation_stop) > len(dataset):
+            raise ValueError("Module replay row range exceeds the selected dataset.")
+        module_replay_search_calibration = dataset.select(
+            range(args.module_replay_search_row_start, search_stop)
+        )
+        module_replay_confirmation_calibration = dataset.select(
+            range(args.module_replay_confirmation_row_start, confirmation_stop)
+        )
     quant_started = time.perf_counter()
     quant_log = model.quantize(
         calibration,
@@ -358,6 +417,8 @@ def main() -> None:
         batch_size=args.batch_size,
         backend=BACKEND.QVQ,
         yaqa_calibration=yaqa_calibration,
+        module_replay_search_calibration=module_replay_search_calibration,
+        module_replay_confirmation_calibration=module_replay_confirmation_calibration,
         layer_scope=slice(0, args.layers),
     )
     quant_seconds = time.perf_counter() - quant_started
@@ -382,6 +443,12 @@ def main() -> None:
     output_alignment_layers = {
         layer_index: [passes[key] for key in sorted(passes, key=int)]
         for layer_index, passes in output_alignment_passes.items()
+    }
+    module_granular_replay_results = {
+        row["full_name"]: row["module_granular_replay"]
+        for rows in quant_log.values()
+        for row in rows
+        if row.get("module_granular_replay") is not None
     }
 
     qvq_modules = [name for name, module in model.model.named_modules() if isinstance(module, QVQLinear)]
@@ -577,6 +644,18 @@ def main() -> None:
         "accuracy_reloaded_vs_live": live_reload_accuracy,
         "quant_log_rows": sum(len(rows) for rows in quant_log.values()),
         "output_alignment_layers": output_alignment_layers,
+        "module_granular_replay": (
+            {
+                "subsets": args.module_replay_subsets,
+                "search_row_start": args.module_replay_search_row_start,
+                "search_rows": args.module_replay_search_rows,
+                "confirmation_row_start": args.module_replay_confirmation_row_start,
+                "confirmation_rows": args.module_replay_confirmation_rows,
+                "results": module_granular_replay_results,
+            }
+            if args.module_granular_replay
+            else None
+        ),
     }
     results_path.parent.mkdir(parents=True, exist_ok=True)
     results_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

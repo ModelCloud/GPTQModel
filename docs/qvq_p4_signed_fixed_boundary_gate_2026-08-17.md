@@ -775,6 +775,73 @@ evaluation metric is numerically identical. This validates the renamed configura
 accepted 16-layer attention-QKVO case. It does not yet prove automatic processor orchestration across an entire model
 or establish a universal bank policy across layers, rates, model families, or replay subsets.
 
+### Automatic four-layer processor lifecycle smoke
+
+The automatic processor path was subsequently exercised end to end on four real decoder layers. This deliberately
+small smoke test validates orchestration and persistence; its two-row replay splits are not large enough to promote a
+bank policy or estimate benchmark recovery.
+
+```text
+Dense Llama 3.2 1B teacher
+  └─ cache exact FP32 logits for disjoint search and confirmation rows
+
+Four-layer W2 V2B2-P32+YAQA quantization
+  └─ layer 0 q_proj: replay complete bank arms 0/1/2/3
+  └─ layer 1 q_proj: replay complete bank arms 0/1/2/3
+  └─ layer 2 q_proj: replay complete bank arms 0/1/2/3
+  └─ layer 3 q_proj: replay complete bank arms 0/1/2/3
+       └─ two-fold search under the current live quantized prefix
+            └─ disjoint confirmation
+                 ├─ pass: install complete serialized candidate
+                 └─ fail: restore complete canonical artifact
+
+Save → reload → first MPS forward
+  └─ require exact live/reloaded logits
+```
+
+The exact contract was:
+
+- real Llama 3.2 1B Instruct weights and full 16-layer forward execution;
+- the first four decoder layers, with only each layer's real `q_proj` quantized and all other projections left dense;
+- W2 V2B2-P32, YAQA, batch 1, un-concatenated full rows, FP16 inference, and MPS execution;
+- ordinary calibration rows `[0, 4)`, YAQA rows `[4, 8)`, search rows `[8, 10)`, and confirmation rows `[10, 12)`;
+- exact sequence-overlap rejection between ordinary calibration, YAQA, replay search, and replay confirmation;
+- four complete fixed-bank candidates per module, with canonical bank 0 retained as an independent rollback artifact.
+
+The replay decisions were:
+
+| Module | Search winner | Confirmation KL: canonical | Confirmation KL: winner | Decision |
+|---|---:|---:|---:|---|
+| layer 0 `q_proj` | bank 0 | 0.00057605 | 0.00057605 | canonical |
+| layer 1 `q_proj` | bank 0 | 0.00167388 | 0.00167388 | canonical |
+| layer 2 `q_proj` | bank 3 | 0.00504373 | 0.00442597 | accept (-12.25%) |
+| layer 3 `q_proj` | bank 2 | 0.00782915 | 0.00668017 | accept (-14.68%) |
+
+For the two accepted candidates, confirmation Top-1 changed from `97.363%` to `98.022%` and from `96.264%` to
+`96.703%`, respectively. Top-5 changed by `-0.044 pp` and `-0.132 pp`, while Top-10 improved by `+0.462 pp` and
+`+0.505 pp`. These mixed Top-K movements reinforce why confirmation is a metric-aware transactional gate rather than
+a local-MSE-only rule. With only 455 confirmation tokens, the values are lifecycle evidence rather than statistical
+quality claims.
+
+The final saved artifact contained four QVQ modules at effective `2.062502` bpw including auxiliary tensors. Its
+live final-logit KL versus dense was `0.00569971`, Top-1 agreement was `91.892%`, and Top-5/10 overlap were both
+`95.676%` on the driver's 37-token inference prompt. Save/reload parity was exact: zero MAE, zero KL, and identical
+Top-1/5/10 outputs.
+
+This run also exposed and fixed lifecycle ownership defects that isolated kernel tests did not cover:
+
+- MLX bank-codebook preparation now accepts immutable inference tensors while retaining mutation detection for normal
+  tensors;
+- `QVQLinear.post_init()` takes normal, versioned ownership of inference-created buffers;
+- `QVQLinear._apply()` preserves version counters through CPU/MPS lifecycle moves;
+- module replay explicitly restores the complete model to the quantization device after finalized leaves are moved to
+  CPU, so teacher/student replay never observes a mixed-device model.
+
+No serialized tensor, bank layout, selector overhead, or inference operation was added by module replay. Its cost is
+quantization-only: this small four-module run spent `493.86 s` in quantization, versus `0.40 s` live inference and
+`0.41 s` reloaded inference. Larger replay datasets remain necessary before default promotion, and efficient cached
+or staged replay remains the next performance target.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
