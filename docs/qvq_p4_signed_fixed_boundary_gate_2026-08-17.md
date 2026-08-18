@@ -501,6 +501,38 @@ This is an integration and correctness improvement, not a promotion decision. It
 candidates reproducible without process-global mutation. Propagated complete-family search remains explicit and
 default-off under the P20 two-seed, cross-fold, disjoint-confirmation policy.
 
+## W1.5 rate replication with the two-seed ensemble (P22)
+
+P22 changed only the target Q projection from W2 to W1.5. It retained the P20 real Llama 3.2 1B model, packed W2
+live prefix, layer-2 Q target, codec seed 1, two-seed 512-row YAQA factor ensemble, two search folds, 30-row
+confirmation split, 64-row untouched evaluation split, full row lengths, and native packed MPS runtime.
+
+| Family | Worst-fold search ratio | Nonzero selectors | Search decision |
+|---:|---:|---:|---|
+| canonical V2 | 1.000000 | 0.00% | rollback baseline |
+| 1 | 1.006063 | 49.98% | reject |
+| 2 | **0.966471** | 50.14% | provisional winner |
+| 3 | 1.007704 | 50.35% | reject |
+
+Family 2's approximately 3.35% worst-fold search improvement did not generalize to the disjoint confirmation rows:
+
+| Confirmation metric | Family 2 versus canonical V2+YAQA |
+|---|---:|
+| Final KL | **+1.178% regression** |
+| JSD | **+1.104% regression** |
+| Top-1 agreement | +0.116 pp |
+| Top-5 overlap | effectively unchanged |
+| Top-10 overlap | -0.038 pp |
+
+The KL/JSD regressions are material and directionally consistent; the mixed Top-N changes are small. The atomic gate
+therefore serialized canonical family 0. The untouched evaluation measured the rollback artifact, not the rejected
+family, and must not be presented as evidence for family 2.
+
+This is a confirmed W1.5 rejection for this module and evidence contract, not a global B2-P32 rejection. It shows
+that the P20 W2 gain is rate-specific and that neither high selector entropy nor cross-fold search improvement is
+sufficient without disjoint confirmation. Complete-family selection remains optional and guarded; no family or rate
+should be promoted from another rate's result.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -529,3 +561,5 @@ default-off under the P20 two-seed, cross-fold, disjoint-confirmation policy.
 - `artifacts/qvq_p20_fisher_ensemble_gate/yaqa512_seed0_1_ensemble.pt`
 - `artifacts/qvq_p20_fisher_ensemble_gate/report_packed.json`
 - `artifacts/qvq_p20_fisher_ensemble_gate/selected_packed.safetensors`
+- `artifacts/qvq_p22_w1p5_ensemble_gate/report_packed.json`
+- `artifacts/qvq_p22_w1p5_ensemble_gate/selected_packed.safetensors`
