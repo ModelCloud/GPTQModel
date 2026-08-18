@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Measure the latest QVQ quantization and inference changes at full Llama 3.2 1B scale, including every decoder
-layer and every Q/K/V/O, gate/up, and down linear. The comparison covers canonical V2, V2B2-P32, and
-V2B2-P32 with 512-row YAQA.
+Measure the latest QVQ quantization and inference changes at full Llama 3.2 1B scale. The sweep targeted every
+decoder layer and every Q/K/V/O, gate/up, and down linear, but its then-default MLP acceptance gate selectively
+restored dense MLP projections. The comparison covers canonical V2, V2B2-P32, and V2B2-P32 with 512-row YAQA.
 
 The tested source revision was `26679f27b243d1ee48e50583ebac1278a2e19512` (`accelerate underfilled QVQ
 segmented recurrence`).
@@ -20,7 +20,8 @@ segmented recurrence`).
 | Calibration | 512 full rows, offset 0, batch 1, no concatenation or length limit |
 | Evaluation | 512 disjoint full rows, offset 512, batch 1 |
 | YAQA Sketch-B | 512 further-disjoint rows, offset 1024, batch 8, seed 0 |
-| MLP acceptance | 8 rows, offset 1536; KL and Top-N regression limits 5% |
+| MLP acceptance | **Enabled**: 8 rows, offset 1536; KL and Top-N regression limits 5%; selective dense rollback allowed |
+| Bit-rate ladder | Disabled; the independent MLP acceptance gate was still active |
 | Main seed | 18240 |
 | Dataset SHA-256 | `26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef` |
 | Dataset | `/private/monster/data/model/dataset/nm-calibration/llm.parquet` |
@@ -35,26 +36,32 @@ artifacts completed successfully.
 
 ## Full results
 
-| Rate | Arm | Seconds | Effective BPW | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| W1 | V2 | 397.8 | 1.0000 | 0.438016 | 0.087400 | 0.656277 | 0.629403 | 1.203016 | 58.83% | 53.79% | 53.13% |
-| W1 | V2B2-P32 | 1516.8 | 1.0312 | 0.428284 | 0.080903 | 0.755357 | 0.629559 | 1.088000 | 60.98% | 55.15% | 54.33% |
-| W1 | V2B2-P32 + YAQA | 2793.8 | 1.0312 | 0.529797 | 0.633308 | 0.935487 | 0.402686 | 0.756969 | 68.90% | 61.73% | 60.65% |
-| W1.5 | V2 | 389.6 | 1.5000 | 0.317952 | 0.025754 | 0.347390 | 0.266919 | 0.386202 | 77.37% | 69.16% | 68.49% |
-| W1.5 | V2B2-P32 | 1215.4 | 1.5312 | 0.310337 | 0.024768 | 0.313523 | 0.246109 | 0.355999 | 78.45% | 69.85% | 69.10% |
-| W1.5 | V2B2-P32 + YAQA | 2226.0 | 1.5312 | 0.397504 | 0.135523 | 0.294137 | 0.141491 | 0.236714 | 82.98% | 74.78% | 74.00% |
-| W2 | V2 | 376.0 | 2.0000 | 0.228039 | 0.010518 | 0.156065 | 0.108333 | 0.160293 | 85.10% | 78.29% | 77.76% |
-| W2 | V2B2-P32 | 1156.8 | 2.0312 | 0.222241 | 0.009691 | 0.141203 | 0.099418 | 0.153436 | 86.38% | 79.00% | 78.50% |
-| W2 | V2B2-P32 + YAQA | 2095.0 | 2.0312 | 0.283073 | 0.043864 | 0.109502 | 0.050926 | 0.085294 | 89.49% | 83.11% | 82.68% |
-| W2.5 | V2 | 381.2 | 2.5000 | 0.163174 | 0.004561 | 0.072903 | 0.048801 | 0.078198 | 89.65% | 83.97% | 83.88% |
-| W2.5 | V2B2-P32 | 1159.0 | 2.5312 | 0.156940 | 0.004113 | 0.066427 | 0.043957 | 0.070613 | 90.22% | 84.80% | 84.44% |
-| W2.5 | V2B2-P32 + YAQA | 2045.0 | 2.5312 | 0.208448 | 0.018757 | 0.053403 | 0.025040 | 0.039548 | 93.01% | 87.74% | 87.48% |
-| W3 | V2 | 352.9 | 3.0000 | 0.114047 | 0.002178 | 0.036317 | 0.022919 | 0.038752 | 92.75% | 88.26% | 88.10% |
-| W3 | V2B2-P32 | 1177.8 | 3.0312 | 0.111197 | 0.002063 | 0.034181 | 0.020781 | 0.035386 | 93.00% | 88.77% | 88.74% |
-| W3 | V2B2-P32 + YAQA | 2106.9 | 3.0312 | 0.135101 | 0.009484 | 0.020622 | 0.008021 | 0.012495 | 95.76% | 92.53% | 92.38% |
-| W3.5 | V2 | 371.4 | 3.5000 | 0.080305 | 0.001101 | 0.017111 | 0.010537 | 0.018704 | 94.54% | 91.51% | 91.40% |
-| W3.5 | V2B2-P32 | 1241.6 | 3.5312 | 0.079877 | 0.001015 | 0.016817 | 0.009989 | 0.017333 | 94.77% | 91.75% | 91.61% |
-| W3.5 | V2B2-P32 + YAQA | 2187.2 | 3.5312 | 0.098740 | 0.004789 | 0.010901 | 0.004278 | 0.006578 | 96.76% | 94.42% | 94.26% |
+| Rate | Arm | Seconds | Selected BPW | Quantized params | Rel L2 | Local KL | Live KL | Layer KL | Final KL | Top-1 | Top-5 | Top-10 |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| W1 | V2 | 397.8 | 9.5345 | 43.10% | 0.438016 | 0.087400 | 0.656277 | 0.629403 | 1.203016 | 58.83% | 53.79% | 53.13% |
+| W1 | V2B2-P32 | 1516.8 | 9.5480 | 43.10% | 0.428284 | 0.080903 | 0.755357 | 0.629559 | 1.088000 | 60.98% | 55.15% | 54.33% |
+| W1 | V2B2-P32 + YAQA | 2793.8 | 9.5480 | 43.10% | 0.529797 | 0.633308 | 0.935487 | 0.402686 | 0.756969 | 68.90% | 61.73% | 60.65% |
+| W1.5 | V2 | 389.6 | 9.5000 | 44.83% | 0.317952 | 0.025754 | 0.347390 | 0.266919 | 0.386202 | 77.37% | 69.16% | 68.49% |
+| W1.5 | V2B2-P32 | 1215.4 | 9.5140 | 44.83% | 0.310337 | 0.024768 | 0.313523 | 0.246109 | 0.355999 | 78.45% | 69.85% | 69.10% |
+| W1.5 | V2B2-P32 + YAQA | 2226.0 | 9.7635 | 43.10% | 0.397504 | 0.135523 | 0.294137 | 0.141491 | 0.236714 | 82.98% | 74.78% | 74.00% |
+| W2 | V2 | 376.0 | 9.7241 | 44.83% | 0.228039 | 0.010518 | 0.156065 | 0.108333 | 0.160293 | 85.10% | 78.29% | 77.76% |
+| W2 | V2B2-P32 | 1156.8 | 9.7381 | 44.83% | 0.222241 | 0.009691 | 0.141203 | 0.099418 | 0.153436 | 86.38% | 79.00% | 78.50% |
+| W2 | V2B2-P32 + YAQA | 2095.0 | 10.7015 | 37.93% | 0.283073 | 0.043864 | 0.109502 | 0.050926 | 0.085294 | 89.49% | 83.11% | 82.68% |
+| W2.5 | V2 | 381.2 | 9.9483 | 44.83% | 0.163174 | 0.004561 | 0.072903 | 0.048801 | 0.078198 | 89.65% | 83.97% | 83.88% |
+| W2.5 | V2B2-P32 | 1159.0 | 10.1945 | 43.10% | 0.156940 | 0.004113 | 0.066427 | 0.043957 | 0.070613 | 90.22% | 84.80% | 84.44% |
+| W2.5 | V2B2-P32 + YAQA | 2045.0 | 10.6589 | 39.66% | 0.208448 | 0.018757 | 0.053403 | 0.025040 | 0.039548 | 93.01% | 87.74% | 87.48% |
+| W3 | V2 | 352.9 | 10.6207 | 41.38% | 0.114047 | 0.002178 | 0.036317 | 0.022919 | 0.038752 | 92.75% | 88.26% | 88.10% |
+| W3 | V2B2-P32 | 1177.8 | 10.6336 | 41.38% | 0.111197 | 0.002063 | 0.034181 | 0.020781 | 0.035386 | 93.00% | 88.77% | 88.74% |
+| W3 | V2B2-P32 + YAQA | 2106.9 | 12.8696 | 24.14% | 0.135101 | 0.009484 | 0.020622 | 0.008021 | 0.012495 | 95.76% | 92.53% | 92.38% |
+| W3.5 | V2 | 371.4 | 11.2586 | 37.93% | 0.080305 | 0.001101 | 0.017111 | 0.010537 | 0.018704 | 94.54% | 91.51% | 91.40% |
+| W3.5 | V2B2-P32 | 1241.6 | 10.8405 | 41.38% | 0.079877 | 0.001015 | 0.016817 | 0.009989 | 0.017333 | 94.77% | 91.75% | 91.61% |
+| W3.5 | V2B2-P32 + YAQA | 2187.2 | 12.7753 | 25.86% | 0.098740 | 0.004789 | 0.010901 | 0.004278 | 0.006578 | 96.76% | 94.42% | 94.26% |
+
+These are selective-compression results, not fixed-rate all-linear results. The original report displayed nominal
+codec BPW in the effective-BPW column even though the JSON separately recorded dense rollback. The corrected
+`Selected BPW` column includes dense FP16 fallback, and `Quantized params` reports the retained compressed share.
+The comparison harness now disables this MLP gate by default; future selective runs must explicitly set a positive
+`--mlp-acceptance-rows` value.
 
 ## Historical timing A/B
 
@@ -114,4 +121,3 @@ Dominant phases are `block_ldl_viterbi` for V2, `block_ldl_v2_banked` for B2, an
 All 18 JSON files, logs, and status files are under:
 
 `/private/monster/data/model/qvq_kernel_speed_full16_26679f27_20260817`
-

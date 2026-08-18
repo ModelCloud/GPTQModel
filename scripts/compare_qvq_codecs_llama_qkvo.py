@@ -297,10 +297,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mlp-acceptance-rows",
         type=int,
-        default=8,
+        default=0,
         help=(
-            "Disjoint full-row final-logit gate used to accept MLP projection subsets atomically; "
-            "set to zero to disable the fail-closed MLP selection."
+            "Opt-in disjoint full-row final-logit gate used to accept MLP projection subsets atomically. "
+            "The default is zero so a fixed-rate all-linear sweep quantizes every selected MLP projection; "
+            "set this to a positive row count to permit selective dense rollback."
         ),
     )
     parser.add_argument(
@@ -3874,7 +3875,8 @@ def main() -> None:
                 "rounding": rounding,
                 "hessian_mode": args.all_linear_hessian_mode if args.module_scope == "all-linear" else "dense-frozen",
                 "quantization_stages": stage_reports,
-                "effective_bpw": codec_bpw,
+                "nominal_codec_bpw": codec_bpw,
+                "effective_bpw": storage_metrics["selected_effective_bpw"],
                 "mlp_effective_bpw": (
                     [mlp_candidate_bpw[candidate_rate] for candidate_rate in mlp_rate_ladder]
                     if mlp_rate_ladder

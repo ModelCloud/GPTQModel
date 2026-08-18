@@ -423,6 +423,7 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert args.calibration_rows == 64
     assert args.evaluation_rows == 64
     assert args.evaluation_row_offset == 64
+    assert args.mlp_acceptance_rows == 0
     assert args.mlp_acceptance_kl_regression_limit == 0.05
     assert args.mlp_acceptance_topn_regression_limit == 0.05
     assert args.mlp_acceptance_execution == "auto"
@@ -432,6 +433,18 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert _parser().parse_args(
         ("--model", "model", "--dataset", "dataset", "--output", "report.json", "--output-alignment")
     ).output_alignment is True
+    assert _parser().parse_args(
+        (
+            "--model",
+            "model",
+            "--dataset",
+            "dataset",
+            "--output",
+            "report.json",
+            "--mlp-acceptance-rows",
+            "8",
+        )
+    ).mlp_acceptance_rows == 8
     assert ARM_CONFIG["v2b2-p32"] == {
         "vector_size": 2,
         "trellis_window": 16,
