@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import threading
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 
@@ -49,7 +51,7 @@ def _qvq_cpu_extra_ldflags() -> list[str]:
 _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_CPU_OPS_NAME,
     namespace=_QVQ_CPU_NAMESPACE,
-    required_ops=("gemv_cpu", "viterbi_cpu", "viterbi_banked_cpu", "hadamard"),
+    required_ops=("gemv_cpu", "inner_weight_cpu", "viterbi_cpu", "viterbi_banked_cpu", "hadamard"),
     sources=_qvq_cpu_sources,
     build_root_env="GPTQMODEL_QVQ_CPU_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_cpu"),
@@ -86,6 +88,50 @@ def _qvq_cpu_op() -> Callable:
             if _QVQ_CPU_OP is None:
                 _QVQ_CPU_OP = _extension_api().op("qvq_cpu", "gemv_cpu")
     return _QVQ_CPU_OP
+
+
+_QVQ_CPU_INNER_WEIGHT_OP: Callable | None = None
+
+
+def _qvq_cpu_inner_weight_op() -> Callable:
+    global _QVQ_CPU_INNER_WEIGHT_OP
+    if _QVQ_CPU_INNER_WEIGHT_OP is None:
+        with _QVQ_CPU_OP_LOCK:
+            if _QVQ_CPU_INNER_WEIGHT_OP is None:
+                _QVQ_CPU_INNER_WEIGHT_OP = _extension_api().op("qvq_cpu", "inner_weight_cpu")
+    return _QVQ_CPU_INNER_WEIGHT_OP
+
+
+# Dense dequantized weight cache for repeated CPU GEMV calls.  The cache is
+# keyed by the trellis object's id and cleaned up when the trellis tensor is
+# garbage collected, so the dense copy is released with the source weight.
+_QVQ_CPU_INNER_CACHE: dict[int, dict] = {}
+_QVQ_CPU_INNER_REFS: dict[int, weakref.ref] = {}
+_QVQ_CPU_INNER_CACHE_LOCK = threading.Lock()
+
+
+def _qvq_cpu_cache_key(
+    bits: float,
+    out_features: int,
+    bank_ids: torch.Tensor | None,
+    bank_alt_id: int,
+    v2b4_p64: bool,
+    v2b2_p32: bool,
+) -> tuple:
+    # Bank_ids is a separate tensor; key its pointer + shape so swapping the
+    # selector tensor invalidates the cached inner weight.
+    if bank_ids is None:
+        bank_key = None
+    else:
+        bank_key = (bank_ids.data_ptr(), tuple(bank_ids.shape), str(bank_ids.dtype))
+    return (
+        float(bits),
+        int(out_features),
+        bank_key,
+        int(bank_alt_id),
+        bool(v2b4_p64),
+        bool(v2b2_p32),
+    )
 
 
 _QVQ_CPU_VITERBI_OP: Callable | None = None
@@ -140,6 +186,37 @@ def qvq_cpu_gemv(
     trellis = trellis.contiguous()
     if bank_ids is not None:
         bank_ids = bank_ids.to(torch.uint8).contiguous()
+
+    dense_cache = os.environ.get("QVQ_CPU_GEMV_DENSE_CACHE", "1").lower() not in ("0", "false", "off", "")
+    if dense_cache:
+        option_key = _qvq_cpu_cache_key(
+            bits, out_features, bank_ids, bank_alt_id, v2b4_p64, v2b2_p32
+        )
+        trellis_id = id(trellis)
+        with _QVQ_CPU_INNER_CACHE_LOCK:
+            per_trellis = _QVQ_CPU_INNER_CACHE.get(trellis_id)
+            if per_trellis is None:
+                per_trellis = {}
+                _QVQ_CPU_INNER_CACHE[trellis_id] = per_trellis
+
+                def _cleanup_trellis_cache(ref, tid=trellis_id):
+                    _QVQ_CPU_INNER_CACHE.pop(tid, None)
+                    _QVQ_CPU_INNER_REFS.pop(tid, None)
+
+                _QVQ_CPU_INNER_REFS[trellis_id] = weakref.ref(trellis, _cleanup_trellis_cache)
+            inner = per_trellis.get(option_key)
+            if inner is None:
+                inner = _qvq_cpu_inner_weight_op()(
+                    trellis,
+                    transition_bits,
+                    out_features,
+                    bank_ids,
+                    bank_alt_id,
+                    v2b4_p64,
+                    v2b2_p32,
+                )
+                per_trellis[option_key] = inner
+        return torch.matmul(x, inner)
 
     return _qvq_cpu_op()(
         x,

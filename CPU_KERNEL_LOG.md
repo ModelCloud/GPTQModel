@@ -123,5 +123,25 @@ Done (AVX-512 vectorized QVQ GEMV planar unpack):
   - Dense `torch.matmul` for the same shape is ~0.04 ms; the remaining ~10x gap is now in the per-tile decode+FMA loop itself.
 - `git diff --check` passes. No Python files were changed in this pass; the pre-existing `ruff check` findings are unrelated.
 
+Done (dense-weight dequantize cache for CPU GEMV):
+- Added `qvq_inner_weight_cpu` native op in `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp` that decodes the packed QVQ trellis into a dense `[in_features, out_features]` float32 weight matrix using the existing `unpack_tile_codes_avx512` / `decode_tile_avx512` AVX-512 helpers and `at::parallel_for`.
+- Registered the op in `gptqmodel_qvq` and exposed it through `gptqmodel/utils/qvq_cpu.py` as `_qvq_cpu_inner_weight_op`.
+- `qvq_cpu_gemv` now optionally builds/reuses a dense dequantized weight copy and calls `torch.matmul(x, inner)` for the GEMV, removing the per-token planar decode cost from the critical inference path.
+- Cache is keyed by `id(trellis)` plus decode options; a `weakref` finalizer removes the dense copy when the source trellis tensor is garbage collected.  Set `QVQ_CPU_GEMV_DENSE_CACHE=0` (or `false`/`off`) to keep the previous on-the-fly AVX-512 GEMV path.
+- Accuracy:
+  - `tests/test_qvq_v2b2_p32.py`: 119 passed, 12 skipped.
+  - `tests/test_qvq.py -k "viterbi or tail_biting"`: 89 passed, 112 skipped, 1 failed (same pre-existing `squared_error` 1.19e-6 tolerance edge case; CPU result matches Python fallback exactly).
+  - With the cache enabled, CPU GEMV output is bit-exact against the Python `reconstruct_qvq_inner_weight` dense reference for `x=[1,2048] weight=[2048,2048] bits=3.5` (`max abs diff = 0.0`).
+  - With the cache disabled, the on-the-fly AVX-512 GEMV stays within `2.29e-4` max abs diff vs the dense reference, inside the 2e-3 inference tolerance.
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - For `x=[1,2048] weight=[2048,2048] bits=3.5`:
+    - Python fallback: ~295 ms
+    - On-the-fly `qvq_cpu_gemv` (cache disabled): ~0.49 ms (~600x vs fallback)
+    - Dense `torch.matmul` reference: ~0.04 ms
+    - Cached `qvq_cpu_gemv` (cache enabled): ~0.06 ms (~9x faster than on-the-fly, ~0.7x of dense BLAS, ~4800x vs fallback)
+  - The cached path effectively closes the remaining gap to dense BLAS by moving the planar decode cost out of the per-token inference loop.
+- `ruff check` on `gptqmodel/utils/qvq_cpu.py` passes; `git diff --check` passes.
+
 Next:
-- Continue reducing the gap to dense matmul by fusing decode with the FMA over output-channel tiles to hide gather latency, tiling over multiple output columns per input tile, or precomputing a dense-weight cache for M=1 token generation when memory allows.
+- Investigate whether transposing/storing the cached dense weight in a BLAS-friendlier layout can shrink the remaining ~0.02 ms overhead over native dense `torch.matmul` for M=1, or whether this is within `torch.matmul` dispatch overhead.
+- Continue CPU optimization for quantization kernels (Viterbi/YAQA) or other inference paths if targets remain.

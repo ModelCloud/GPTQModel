@@ -22,7 +22,7 @@ namespace {
 constexpr uint32_t PGC16_MULTIPLIER = 40503;
 constexpr uint32_t PGC16_INCREMENT = 17011;
 
-alignas(64) float g_state_values[65536][2];
+alignas(64) float g_levels_float[256];
 std::once_flag g_tables_once;
 
 inline uint16_t pgc16_mix_state(uint16_t state) {
@@ -32,14 +32,9 @@ inline uint16_t pgc16_mix_state(uint16_t state) {
 }
 
 void pgc16_build_tables() {
-  for (uint32_t state = 0; state < 65536; ++state) {
-    uint16_t mixed = pgc16_mix_state(static_cast<uint16_t>(state));
-    uint16_t hi = mixed >> 8;
-    uint16_t lo = mixed & 0xFF;
-    c10::Half h0 = c10::Half(kPgc16LevelBits[hi], c10::Half::from_bits());
-    c10::Half h1 = c10::Half(kPgc16LevelBits[lo], c10::Half::from_bits());
-    g_state_values[state][0] = static_cast<float>(h0);
-    g_state_values[state][1] = static_cast<float>(h1);
+  for (int i = 0; i < 256; ++i) {
+    c10::Half h = c10::Half(kPgc16LevelBits[i], c10::Half::from_bits());
+    g_levels_float[i] = static_cast<float>(h);
   }
 }
 
@@ -114,8 +109,8 @@ void unpack_tile_codes(const int32_t* tile_words, int E, uint16_t* codes) {
   }
 }
 
-__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
-void unpack_tile_codes_avx512(const int32_t* tile_words, int E, uint16_t* codes) {
+__attribute__((always_inline)) __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
+static inline void unpack_tile_codes_avx512(const int32_t* tile_words, int E, uint16_t* codes) {
   Plane planes[5];
   int nplanes = planes_for_width(E, planes);
   const __m512i lane_id = _mm512_load_si512(reinterpret_cast<const __m512i*>(kLaneId));
@@ -193,9 +188,9 @@ inline void decode_tile(
   for (int s = 0; s < 128; ++s) {
     state = static_cast<uint16_t>((static_cast<uint32_t>(state) << E) | static_cast<uint32_t>(codes[s]));
     uint16_t mask = seg_masks[s / states_per_segment];
-    const float* vals = g_state_values[state ^ mask];
-    tile_weights[2 * s] = vals[0];
-    tile_weights[2 * s + 1] = vals[1];
+    uint16_t mixed = pgc16_mix_state(state ^ mask);
+    tile_weights[2 * s] = g_levels_float[mixed >> 8];
+    tile_weights[2 * s + 1] = g_levels_float[mixed & 0xFF];
   }
 }
 
@@ -228,8 +223,8 @@ void tile_segment_masks(
 // gathers.  The 128 E-bit codes form a circular bitstream; state_s is the
 // 16-bit window ending at code s and is computed directly from the previous
 // ceil(16/E) codes to break the serial table-lookup dependency chain.
-__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
-void decode_tile_avx512(
+__attribute__((always_inline)) __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
+static inline void decode_tile_avx512(
     int E,
     const uint16_t* codes,
     int segments_per_tile,
@@ -241,8 +236,8 @@ void decode_tile_avx512(
   const __m512i perm1 = _mm512_setr_epi32(
       8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
 
-  const float* table0 = &g_state_values[0][0];
-  const float* table1 = &g_state_values[0][1];
+  const __m512i mult = _mm512_set1_epi32(PGC16_MULTIPLIER);
+  const __m512i inc = _mm512_set1_epi32(PGC16_INCREMENT);
 
   int L = (E >= 16) ? 1 : ((16 + E - 1) / E);
 
@@ -273,8 +268,17 @@ void decode_tile_avx512(
     state = _mm512_and_si512(state, and_mask);
     state = _mm512_xor_si512(state, _mm512_set1_epi32(mask));
 
-    const __m512 v0 = _mm512_i32gather_ps(state, table0, 8);
-    const __m512 v1 = _mm512_i32gather_ps(state, table1, 8);
+    // Inline the PGC16 bijection and gather from the 1 KiB half-precision
+    // level table instead of a 512 KiB pre-mixed state table.
+    __m512i mixed = _mm512_xor_epi32(state, _mm512_srli_epi32(state, 8));
+    mixed = _mm512_add_epi32(_mm512_mullo_epi32(mixed, mult), inc);
+    mixed = _mm512_and_si512(mixed, and_mask);
+    mixed = _mm512_xor_epi32(mixed, _mm512_srli_epi32(mixed, 7));
+
+    __m512i hi = _mm512_srli_epi32(mixed, 8);
+    __m512i lo = _mm512_and_epi32(mixed, _mm512_set1_epi32(0xFF));
+    const __m512 v0 = _mm512_i32gather_ps(hi, g_levels_float, 4);
+    const __m512 v1 = _mm512_i32gather_ps(lo, g_levels_float, 4);
     const __m512 out0 = _mm512_permutex2var_ps(v0, perm0, v1);
     const __m512 out1 = _mm512_permutex2var_ps(v0, perm1, v1);
     _mm512_storeu_ps(tile_weights + 2 * base, out0);
@@ -318,6 +322,73 @@ void accumulate_tile_m1_avx512(
     }
   }
   _mm512_storeu_ps(out + tc * 16, acc);
+}
+
+// Block of output tiles accumulation (M == 1, AVX-512).
+// Processes a contiguous range of B output tiles with the input-tile loop on the
+// outside.  This makes trellis/bank_id reads contiguous and exposes multiple
+// independent tile decodes/FMAs for better instruction-level parallelism.
+template <int B>
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
+void accumulate_block_m1_avx512(
+    int tc_start,
+    int I,
+    int O,
+    const float* x,
+    int K,
+    const int32_t* trellis,
+    int E,
+    const uint8_t* bank_ids,
+    int segments_per_tile,
+    int states_per_segment,
+    bool v2b2_p32,
+    int bank_alt_id,
+    float* out) {
+  static_assert(B >= 1 && B <= 8, "B must be 1..8");
+  alignas(64) float tile_weights[B * 256];
+  __m512 accv[B];
+#pragma GCC unroll 8
+  for (int t = 0; t < B; ++t) {
+    accv[t] = _mm512_setzero_ps();
+  }
+
+  for (int tr = 0; tr < I; ++tr) {
+    for (int t = 0; t < B; ++t) {
+      int tc = tc_start + t;
+      int tile_idx = tr * O + tc;
+      const int32_t* tile_words = trellis + tile_idx * (4 * E);
+      alignas(64) uint16_t codes[128];
+      unpack_tile_codes_avx512(tile_words, E, codes);
+      uint16_t seg_masks[8] = {0};
+      if (bank_ids) {
+        tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
+      }
+      decode_tile_avx512(
+          E,
+          codes,
+          segments_per_tile,
+          states_per_segment,
+          seg_masks,
+          tile_weights + t * 256);
+    }
+
+    const float* x_row = x + tr * 16;
+#pragma GCC unroll 8
+    for (int t = 0; t < B; ++t) {
+      __m512 a = accv[t];
+      for (int i = 0; i < 16; ++i) {
+        __m512 w = _mm512_loadu_ps(tile_weights + t * 256 + i * 16);
+        __m512 xv = _mm512_set1_ps(x_row[i]);
+        a = _mm512_fmadd_ps(w, xv, a);
+      }
+      accv[t] = a;
+    }
+  }
+
+#pragma GCC unroll 8
+  for (int t = 0; t < B; ++t) {
+    _mm512_storeu_ps(out + (tc_start + t) * 16, accv[t]);
+  }
 }
 
 // One output tile accumulation (M > 1, AVX-512).
@@ -562,30 +633,224 @@ torch::Tensor qvq_gemv_cpu(
   }
 
   int64_t num_threads = at::get_num_threads();
-  int64_t grain = std::max<int64_t>(1, O / num_threads);
+  constexpr int kTileBlock = 4;
 
-  at::parallel_for(0, O, grain, [&](int64_t begin, int64_t end) {
-    for (int64_t tc = begin; tc < end; ++tc) {
-      tile_dispatch(
-          M,
-          I,
+  if (M == 1 && cpu_has_avx512()) {
+    int64_t grain = std::max<int64_t>(kTileBlock, O / num_threads);
+    at::parallel_for(0, O, grain, [&](int64_t begin, int64_t end) {
+      int tc = static_cast<int>(begin);
+      while (tc + kTileBlock <= static_cast<int>(end)) {
+        accumulate_block_m1_avx512<kTileBlock>(
+            tc,
+            I,
+            O,
+            x_ptr,
+            static_cast<int>(K),
+            trellis_ptr,
+            E,
+            bank_ptr,
+            segments_per_tile,
+            states_per_segment,
+            v2b2_p32,
+            static_cast<int>(bank_alt_id),
+            out_ptr);
+        tc += kTileBlock;
+      }
+      while (tc < static_cast<int>(end)) {
+        accumulate_tile_m1_avx512(
+            I,
+            O,
+            tc,
+            x_ptr,
+            static_cast<int>(K),
+            trellis_ptr,
+            E,
+            bank_ptr,
+            segments_per_tile,
+            states_per_segment,
+            v2b2_p32,
+            static_cast<int>(bank_alt_id),
+            out_ptr);
+        ++tc;
+      }
+    });
+  } else {
+    int64_t grain = std::max<int64_t>(1, O / num_threads);
+    at::parallel_for(0, O, grain, [&](int64_t begin, int64_t end) {
+      for (int64_t tc = begin; tc < end; ++tc) {
+        tile_dispatch(
+            M,
+            I,
+            O,
+            static_cast<int>(tc),
+            x_ptr,
+            static_cast<int>(K),
+            static_cast<int>(N),
+            trellis_ptr,
+            E,
+            bank_ptr,
+            segments_per_tile,
+            states_per_segment,
+            v2b2_p32,
+            static_cast<int>(bank_alt_id),
+            out_ptr);
+      }
+    });
+  }
+
+  return out;
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
+static inline void dequantize_tiles_avx512(
+    int64_t begin,
+    int64_t end,
+    int O,
+    int64_t N,
+    int E,
+    int words_per_tile,
+    int segments_per_tile,
+    int states_per_segment,
+    const int32_t* trellis_ptr,
+    const uint8_t* bank_ptr,
+    bool v2b2_p32,
+    int bank_alt_id,
+    float* inner_ptr) {
+  for (int64_t tile_idx = begin; tile_idx < end; ++tile_idx) {
+    int tr = static_cast<int>(tile_idx / O);
+    int tc = static_cast<int>(tile_idx % O);
+    const int32_t* tile_words = trellis_ptr + tile_idx * words_per_tile;
+
+    alignas(64) uint16_t codes[128];
+    unpack_tile_codes_avx512(tile_words, E, codes);
+    uint16_t seg_masks[8] = {0};
+    if (bank_ptr) {
+      tile_segment_masks(
+          bank_ptr[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
+    }
+
+    alignas(64) float tile_weights[256];
+    decode_tile_avx512(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+
+    float* out_base = inner_ptr + static_cast<int64_t>(tr) * 16 * N + tc * 16;
+    for (int i = 0; i < 16; ++i) {
+      _mm512_storeu_ps(out_base + static_cast<int64_t>(i) * N, _mm512_loadu_ps(tile_weights + i * 16));
+    }
+  }
+}
+
+torch::Tensor qvq_inner_weight_cpu(
+    torch::Tensor trellis,
+    int64_t transition_bits,
+    int64_t out_features,
+    c10::optional<torch::Tensor> bank_ids,
+    int64_t bank_alt_id,
+    bool v2b4_p64,
+    bool v2b2_p32) {
+  TORCH_CHECK(trellis.device().is_cpu(), "qvq_inner_weight_cpu: trellis must be a CPU tensor");
+  TORCH_CHECK(trellis.dim() == 2, "qvq_inner_weight_cpu: trellis must be 2D [tile_count, words]");
+  TORCH_CHECK(trellis.scalar_type() == at::kInt, "qvq_inner_weight_cpu: trellis must be int32");
+  TORCH_CHECK(
+      transition_bits >= 2 && transition_bits <= 16,
+      "qvq_inner_weight_cpu: transition_bits must be 2..16");
+  TORCH_CHECK(!(v2b4_p64 && v2b2_p32), "qvq_inner_weight_cpu: v2b4_p64 and v2b2_p32 are mutually exclusive");
+
+  int64_t N = out_features;
+  TORCH_CHECK(N % 16 == 0, "qvq_inner_weight_cpu: out_features must be a multiple of 16");
+  int O = static_cast<int>(N / 16);
+  int E = static_cast<int>(transition_bits);
+  int words_per_tile = 4 * E;
+
+  int64_t tile_count = trellis.size(0);
+  TORCH_CHECK(trellis.size(1) == words_per_tile, "qvq_inner_weight_cpu: trellis words_per_tile mismatch");
+  TORCH_CHECK(tile_count % O == 0, "qvq_inner_weight_cpu: tile_count must be divisible by out_features/16");
+  int I = static_cast<int>(tile_count / O);
+  int64_t K = static_cast<int64_t>(I) * 16;
+
+  if (v2b4_p64 || v2b2_p32) {
+    TORCH_CHECK(bank_ids.has_value(), "qvq_inner_weight_cpu: banked formats require bank_ids");
+    TORCH_CHECK(
+        bank_ids->dim() == 1 && bank_ids->size(0) == tile_count,
+        "qvq_inner_weight_cpu: bank_ids must be [tile_count]");
+    TORCH_CHECK(
+        bank_ids->scalar_type() == at::kByte, "qvq_inner_weight_cpu: bank_ids must be uint8");
+    TORCH_CHECK(bank_ids->device() == trellis.device(), "qvq_inner_weight_cpu: bank_ids must be on CPU");
+    if (v2b2_p32) {
+      TORCH_CHECK(bank_alt_id >= 1 && bank_alt_id <= 3, "qvq_inner_weight_cpu: v2b2_p32 bank_alt_id must be 1..3");
+    }
+  }
+
+  int segments_per_tile = 1;
+  int states_per_segment = 128;
+  if (v2b2_p32) {
+    segments_per_tile = 8;
+    states_per_segment = 16;
+  } else if (v2b4_p64) {
+    segments_per_tile = 4;
+    states_per_segment = 32;
+  }
+
+  pgc16_ensure_tables();
+
+  auto inner = at::empty({K, N}, at::TensorOptions().dtype(at::kFloat).device(trellis.device()));
+
+  const int32_t* trellis_ptr = trellis.data_ptr<int32_t>();
+  float* inner_ptr = inner.data_ptr<float>();
+  const uint8_t* bank_ptr = nullptr;
+  if (bank_ids.has_value() && bank_ids->numel() > 0) {
+    bank_ptr = bank_ids->data_ptr<uint8_t>();
+  }
+
+  const bool has_avx512 = cpu_has_avx512();
+  int64_t num_threads = at::get_num_threads();
+  int64_t grain = std::max<int64_t>(1, tile_count / num_threads);
+
+  at::parallel_for(0, tile_count, grain, [&](int64_t begin, int64_t end) {
+    if (has_avx512) {
+      dequantize_tiles_avx512(
+          begin,
+          end,
           O,
-          static_cast<int>(tc),
-          x_ptr,
-          static_cast<int>(K),
-          static_cast<int>(N),
-          trellis_ptr,
+          N,
           E,
-          bank_ptr,
+          words_per_tile,
           segments_per_tile,
           states_per_segment,
+          trellis_ptr,
+          bank_ptr,
           v2b2_p32,
           static_cast<int>(bank_alt_id),
-          out_ptr);
+          inner_ptr);
+    } else {
+      alignas(64) float tile_weights[256];
+      for (int64_t tile_idx = begin; tile_idx < end; ++tile_idx) {
+        int tr = static_cast<int>(tile_idx / O);
+        int tc = static_cast<int>(tile_idx % O);
+        const int32_t* tile_words = trellis_ptr + tile_idx * words_per_tile;
+
+        uint16_t seg_masks[8] = {0};
+        if (bank_ptr) {
+          tile_segment_masks(
+              bank_ptr[tile_idx], E, segments_per_tile, v2b2_p32, static_cast<int>(bank_alt_id), seg_masks);
+        }
+
+        uint16_t codes[128];
+        unpack_tile_codes(tile_words, E, codes);
+        decode_tile(E, codes, segments_per_tile, states_per_segment, seg_masks, tile_weights);
+
+        float* out_base = inner_ptr + static_cast<int64_t>(tr) * 16 * N + tc * 16;
+        for (int i = 0; i < 16; ++i) {
+          float* row = out_base + static_cast<int64_t>(i) * N;
+          const float* w = tile_weights + i * 16;
+          for (int j = 0; j < 16; ++j) {
+            row[j] = w[j];
+          }
+        }
+      }
     }
   });
 
-  return out;
+  return inner;
 }
 
 }  // namespace qvq_cpu
@@ -594,8 +859,12 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def(
       "gemv_cpu(Tensor x, Tensor trellis, int transition_bits, int out_features, Tensor? bank_ids=None, "
       "int bank_alt_id=0, bool v2b4_p64=False, bool v2b2_p32=False) -> Tensor");
+  m.def(
+      "inner_weight_cpu(Tensor trellis, int transition_bits, int out_features, Tensor? bank_ids=None, "
+      "int bank_alt_id=0, bool v2b4_p64=False, bool v2b2_p32=False) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CPU, m) {
   m.impl("gemv_cpu", qvq_cpu::qvq_gemv_cpu);
+  m.impl("inner_weight_cpu", qvq_cpu::qvq_inner_weight_cpu);
 }
