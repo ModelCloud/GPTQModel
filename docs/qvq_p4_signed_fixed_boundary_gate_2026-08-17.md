@@ -898,6 +898,51 @@ specific. It does **not** justify enabling all MLP roles by default. The next ex
 for gate and down. On this M4 host the exact three-module run took 4,723.33 seconds; a four-layer all-MLP sweep should
 use CUDA or a faster candidate-generation path rather than multiplying this Apple runtime directly.
 
+### Fully disjoint MLP replication
+
+The one-layer MLP screen was repeated with no sequence reuse from the first experiment and no overlap among the four
+estimation stages:
+
+| Stream | Rows | Valid scoring/input tokens |
+|---|---:|---:|
+| ordinary calibration | `[12, 20)` | 2,608 |
+| YAQA Fisher | `[20, 28)` | 2,487 |
+| replay search | `[28, 32)` | 1,466 next-token positions |
+| replay confirmation | `[32, 36)` | 2,160 next-token positions |
+
+The driver gained an explicit `--row-start` control so ordinary calibration could also move to a fresh slice. This
+is important: changing only replay rows would test confirmation stability, but would not replicate the Hessian and
+YAQA estimates that generated the bank candidates.
+
+The independent result was:
+
+| Role | Search winner | Search evidence | Confirmation KL: canonical → candidate | Confirmation Top-1/5/10 delta | Runtime decision |
+|---|---:|---|---:|---:|---|
+| `gate_proj` | bank 3 | both folds improve; score 0.8218 | 0.02582106 → 0.02593061 (+0.42%) | +0.37 / +0.50 / +0.49 pp | canonical rollback |
+| `up_proj` | bank 2 | both folds improve; score 0.8733 | 0.07025153 → 0.07361508 (+4.79%) | +0.19 / -0.15 / +0.25 pp | canonical rollback |
+| `down_proj` | bank 0 | no alternate improves both folds | 0.14871716 → 0.14871716 | 0 / 0 / 0 pp | canonical |
+
+This replication changes the interpretation of the first run:
+
+- The original fixed `up_proj` bank-1 win is **not a stable default policy**. On fresh calibration/YAQA/search data,
+  bank 1 failed one search fold, bank 2 won search, and bank 2 then materially regressed confirmation KL.
+- Gate demonstrates the value of independent confirmation most clearly. Bank 3 improved search KL by roughly 18%,
+  yet did not improve confirmation KL. Reusing search rows for acceptance would have promoted it incorrectly.
+- The gate result is **mixed/inconclusive**, not a proven quality failure: its 0.42% KL regression is small while all
+  three Top-K metrics improve. The strict runtime KL gate correctly preserves the baseline, but a larger paired
+  confirmation set or confidence interval is required before scientifically rejecting that candidate.
+- Down is the most stable negative result: neither experiment found an alternate with robust two-fold evidence.
+
+The current recommendation is therefore to keep MLP module-granular replay optional and transactional, never use a
+fixed role-to-bank mapping, and require search and confirmation sequences to be disjoint. Candidate generation may
+use the search set, but promotion must use a held-out confirmation set from the same target distribution. Near-noise
+metric conflicts, such as the gate result, should be escalated to a larger confirmation run rather than converted to
+an unconditional pass or failure.
+
+The replicated artifact again contained 50,331,648 quantized weights at `2.03125` payload bpw and `2.050782`
+effective bpw. Quantization took 4,789.80 seconds on MPS. Live/reloaded output was bit-exact with zero KL and 100%
+Top-1/5/10 agreement, confirming that every rollback survived serialization exactly.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -945,3 +990,4 @@ use CUDA or a faster candidate-generation path rather than multiplying this Appl
 - `artifacts/qvq_module_granular_replay_validation/report_packed.json`
 - `artifacts/qvq_module_granular_replay_validation/selected_packed.safetensors`
 - `artifacts/qvq_module_granular_replay_validation/full_lifecycle_1layer_mlp.json`
+- `artifacts/qvq_module_granular_replay_validation/full_lifecycle_1layer_mlp_replication.json`

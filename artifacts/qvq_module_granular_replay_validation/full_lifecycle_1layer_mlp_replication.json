@@ -1,0 +1,502 @@
+{
+  "model": "/Users/diego/.cache/huggingface/hub/models--ModelCloud--Llama3.2-1B-Instruct/snapshots/bb3d2111f8e40d15ed5c1f821d36f40e2072f03c",
+  "output": "/private/tmp/qvq_module_replay_1layer_mlp_replication_model",
+  "python_gil_enabled": true,
+  "torch": "2.14.0.dev20260806",
+  "inference_dtype": "torch.float16",
+  "device": "mps",
+  "bits": 2.0,
+  "attention_bits": null,
+  "attention_rate_modules": [],
+  "qvq_rate_counts": {
+    "2": 3
+  },
+  "qvq_storage": {
+    "weight_numel": 50331648,
+    "trellis_bytes": 12582912,
+    "selector_bytes": 196608,
+    "bank_metadata_bytes": 3,
+    "payload_bytes": 12779520,
+    "auxiliary_bytes": 122883,
+    "payload_bits_per_weight": 2.03125,
+    "effective_bits_per_weight": 2.050781726837158
+  },
+  "rounding": "yaqa",
+  "yaqa_seed": 0,
+  "yaqa_regularization": 0.0001,
+  "yaqa_minimum_sequences": 8,
+  "yaqa_calibration": {
+    "dataset": "neuralmagic/calibration",
+    "dataset_config": "LLM",
+    "row_start": 20,
+    "rows": 8
+  },
+  "output_alignment": null,
+  "layers": 1,
+  "calibration_row_start": 12,
+  "calibration_rows": 8,
+  "calibration_concat_size": null,
+  "calibration_sort": null,
+  "excluded_modules": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.self_attn.k_proj",
+    "model.layers.0.self_attn.v_proj",
+    "model.layers.0.self_attn.o_proj"
+  ],
+  "batch_size": 1,
+  "non_padding_eval_tokens": 37,
+  "qvq_module_count": 3,
+  "qvq_modules": [
+    "model.layers.0.mlp.gate_proj",
+    "model.layers.0.mlp.up_proj",
+    "model.layers.0.mlp.down_proj"
+  ],
+  "seconds": {
+    "load_dense": 3.1443210839061067,
+    "quantize": 4789.796081374981,
+    "save": 4.250433458015323,
+    "reload": 19.571101250010543,
+    "live_inference": 0.7011416250606999,
+    "reloaded_inference": 0.29989920801017433
+  },
+  "acceptance": {
+    "max_forward_kld": 100.0,
+    "min_top1_agreement": 0.0,
+    "reload_rtol": 0.0,
+    "reload_atol": 0.0
+  },
+  "accuracy_live_vs_dense": {
+    "finite": true,
+    "mae": 0.5140796899795532,
+    "mse": 0.7150974273681641,
+    "rmse": 0.8456343412399292,
+    "relative_l2": 0.32208204405658064,
+    "sqnr_db": 9.84066972493574,
+    "cosine": 0.9478664458912723,
+    "forward_kld": 0.20455188480584577,
+    "reverse_kld": 0.42179656638715934,
+    "jensen_shannon": 0.043077136393273874,
+    "top1_agreement": 0.7297297120094299,
+    "top5_overlap": 0.8324323892593384,
+    "top10_overlap": 0.8108108043670654,
+    "max_abs": 10.953125
+  },
+  "accuracy_reloaded_vs_dense": {
+    "finite": true,
+    "mae": 0.5140796899795532,
+    "mse": 0.7150974273681641,
+    "rmse": 0.8456343412399292,
+    "relative_l2": 0.32208204405658064,
+    "sqnr_db": 9.84066972493574,
+    "cosine": 0.9478664458912723,
+    "forward_kld": 0.20455188480584577,
+    "reverse_kld": 0.42179656638715934,
+    "jensen_shannon": 0.043077136393273874,
+    "top1_agreement": 0.7297297120094299,
+    "top5_overlap": 0.8324323892593384,
+    "top10_overlap": 0.8108108043670654,
+    "max_abs": 10.953125
+  },
+  "accuracy_live_after_save_vs_before_save": {
+    "finite": true,
+    "mae": 0.0,
+    "mse": 0.0,
+    "rmse": 0.0,
+    "relative_l2": 0.0,
+    "sqnr_db": 231.63602087731252,
+    "cosine": 1.0,
+    "forward_kld": 0.0,
+    "reverse_kld": 0.0,
+    "jensen_shannon": 0.0,
+    "top1_agreement": 1.0,
+    "top5_overlap": 1.0,
+    "top10_overlap": 1.0,
+    "max_abs": 0.0
+  },
+  "accuracy_reloaded_vs_live": {
+    "finite": true,
+    "mae": 0.0,
+    "mse": 0.0,
+    "rmse": 0.0,
+    "relative_l2": 0.0,
+    "sqnr_db": 231.63602087731252,
+    "cosine": 1.0,
+    "forward_kld": 0.0,
+    "reverse_kld": 0.0,
+    "jensen_shannon": 0.0,
+    "top1_agreement": 1.0,
+    "top5_overlap": 1.0,
+    "top10_overlap": 1.0,
+    "max_abs": 0.0
+  },
+  "quant_log_rows": 3,
+  "output_alignment_layers": {},
+  "module_granular_replay": {
+    "subsets": [
+      "mlp_gate_up_down"
+    ],
+    "search_row_start": 28,
+    "search_rows": 4,
+    "confirmation_row_start": 32,
+    "confirmation_rows": 4,
+    "results": {
+      "model.layers.0.mlp.gate_proj": {
+        "selected_alternative_bank_id": 0,
+        "candidates": [
+          {
+            "alternative_bank_id": 0,
+            "score": 1.0,
+            "fold_kl_forward": [
+              0.03178904640319964,
+              0.025434093700872885
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.03178904640319964,
+                "top1_agreement": 0.9210526315789473,
+                "top5_overlap": 0.9135011441647597,
+                "top10_overlap": 0.912700228832952,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.025434093700872885,
+                "top1_agreement": 0.9341216216216216,
+                "top5_overlap": 0.9043918918918918,
+                "top10_overlap": 0.9067567567567567,
+                "tokens": 592
+              }
+            ],
+            "selected": true
+          },
+          {
+            "alternative_bank_id": 1,
+            "score": 1.118603407159189,
+            "fold_kl_forward": [
+              0.03555933561696068,
+              0.0195065321954521
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.03555933561696068,
+                "top1_agreement": 0.9210526315789473,
+                "top5_overlap": 0.9086956521739131,
+                "top10_overlap": 0.911441647597254,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.0195065321954521,
+                "top1_agreement": 0.9459459459459459,
+                "top5_overlap": 0.9121621621621622,
+                "top10_overlap": 0.9121621621621622,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 2,
+            "score": 0.8437001385770839,
+            "fold_kl_forward": [
+              0.02682042285561289,
+              0.018641150480992085
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.02682042285561289,
+                "top1_agreement": 0.9267734553775744,
+                "top5_overlap": 0.9105263157894736,
+                "top10_overlap": 0.9171624713958809,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.018641150480992085,
+                "top1_agreement": 0.9341216216216216,
+                "top5_overlap": 0.918918918918919,
+                "top10_overlap": 0.9097972972972973,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 3,
+            "score": 0.8217806777714145,
+            "fold_kl_forward": [
+              0.02612362409892835,
+              0.01972922682762146
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.02612362409892835,
+                "top1_agreement": 0.9176201372997712,
+                "top5_overlap": 0.9116704805491991,
+                "top10_overlap": 0.9168192219679633,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.01972922682762146,
+                "top1_agreement": 0.956081081081081,
+                "top5_overlap": 0.9179054054054053,
+                "top10_overlap": 0.9138513513513513,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          }
+        ],
+        "confirmation_baseline": {
+          "kl_forward": 0.025821064357404357,
+          "top1_agreement": 0.9412037037037037,
+          "top5_overlap": 0.9062037037037037,
+          "top10_overlap": 0.9037962962962963,
+          "tokens": 2160
+        },
+        "confirmation_candidate": {
+          "kl_forward": 0.02593061195479499,
+          "top1_agreement": 0.9449074074074074,
+          "top5_overlap": 0.9112037037037036,
+          "top10_overlap": 0.9086574074074073,
+          "tokens": 2160
+        }
+      },
+      "model.layers.0.mlp.up_proj": {
+        "selected_alternative_bank_id": 0,
+        "candidates": [
+          {
+            "alternative_bank_id": 0,
+            "score": 1.0,
+            "fold_kl_forward": [
+              0.08599763603996084,
+              0.0762478918642611
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.08599763603996084,
+                "top1_agreement": 0.8821510297482837,
+                "top5_overlap": 0.8540045766590388,
+                "top10_overlap": 0.8537757437070939,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.0762478918642611,
+                "top1_agreement": 0.893581081081081,
+                "top5_overlap": 0.8527027027027028,
+                "top10_overlap": 0.8481418918918919,
+                "tokens": 592
+              }
+            ],
+            "selected": true
+          },
+          {
+            "alternative_bank_id": 1,
+            "score": 1.0480226324116426,
+            "fold_kl_forward": [
+              0.07646630721452308,
+              0.07990951634742119
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.07646630721452308,
+                "top1_agreement": 0.8718535469107551,
+                "top5_overlap": 0.8670480549199084,
+                "top10_overlap": 0.8672768878718535,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.07990951634742119,
+                "top1_agreement": 0.8834459459459459,
+                "top5_overlap": 0.8608108108108109,
+                "top10_overlap": 0.8574324324324325,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 2,
+            "score": 0.8732560618172128,
+            "fold_kl_forward": [
+              0.07509795697384622,
+              0.062397679767093144
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.07509795697384622,
+                "top1_agreement": 0.8901601830663616,
+                "top5_overlap": 0.865675057208238,
+                "top10_overlap": 0.869107551487414,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.062397679767093144,
+                "top1_agreement": 0.9054054054054054,
+                "top5_overlap": 0.8648648648648649,
+                "top10_overlap": 0.8633445945945947,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 3,
+            "score": 1.0519102432339842,
+            "fold_kl_forward": [
+              0.09046179424434286,
+              0.05708527081721538
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.09046179424434286,
+                "top1_agreement": 0.868421052631579,
+                "top5_overlap": 0.8592677345537757,
+                "top10_overlap": 0.8623569794050344,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.05708527081721538,
+                "top1_agreement": 0.8986486486486487,
+                "top5_overlap": 0.8641891891891892,
+                "top10_overlap": 0.864527027027027,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          }
+        ],
+        "confirmation_baseline": {
+          "kl_forward": 0.07025153327871252,
+          "top1_agreement": 0.9152777777777777,
+          "top5_overlap": 0.8589814814814816,
+          "top10_overlap": 0.8546759259259259,
+          "tokens": 2160
+        },
+        "confirmation_candidate": {
+          "kl_forward": 0.07361507857287372,
+          "top1_agreement": 0.9171296296296296,
+          "top5_overlap": 0.8575,
+          "top10_overlap": 0.857175925925926,
+          "tokens": 2160
+        }
+      },
+      "model.layers.0.mlp.down_proj": {
+        "selected_alternative_bank_id": 0,
+        "candidates": [
+          {
+            "alternative_bank_id": 0,
+            "score": 1.0,
+            "fold_kl_forward": [
+              0.16930349249588816,
+              0.17159515458184318
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.16930349249588816,
+                "top1_agreement": 0.8363844393592678,
+                "top5_overlap": 0.8093821510297483,
+                "top10_overlap": 0.8064073226544622,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.17159515458184318,
+                "top1_agreement": 0.8445945945945946,
+                "top5_overlap": 0.8054054054054053,
+                "top10_overlap": 0.789864864864865,
+                "tokens": 592
+              }
+            ],
+            "selected": true
+          },
+          {
+            "alternative_bank_id": 1,
+            "score": 1.0962255621171928,
+            "fold_kl_forward": [
+              0.18559481622970894,
+              0.16763167123536807
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.18559481622970894,
+                "top1_agreement": 0.8260869565217391,
+                "top5_overlap": 0.7940503432494279,
+                "top10_overlap": 0.7998855835240275,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.16763167123536807,
+                "top1_agreement": 0.8530405405405406,
+                "top5_overlap": 0.8047297297297297,
+                "top10_overlap": 0.7913851351351351,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 2,
+            "score": 1.0426922290038487,
+            "fold_kl_forward": [
+              0.17653143596867402,
+              0.15211064751083786
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.17653143596867402,
+                "top1_agreement": 0.8363844393592678,
+                "top5_overlap": 0.8066361556064073,
+                "top10_overlap": 0.8040045766590389,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.15211064751083786,
+                "top1_agreement": 0.8547297297297297,
+                "top5_overlap": 0.8027027027027028,
+                "top10_overlap": 0.7988175675675675,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 3,
+            "score": 1.011707543761016,
+            "fold_kl_forward": [
+              0.1712856205431766,
+              0.17033773177378886
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.1712856205431766,
+                "top1_agreement": 0.8329519450800915,
+                "top5_overlap": 0.7979405034324942,
+                "top10_overlap": 0.8062929061784898,
+                "tokens": 874
+              },
+              {
+                "kl_forward": 0.17033773177378886,
+                "top1_agreement": 0.831081081081081,
+                "top5_overlap": 0.8016891891891892,
+                "top10_overlap": 0.791722972972973,
+                "tokens": 592
+              }
+            ],
+            "selected": false
+          }
+        ],
+        "confirmation_baseline": {
+          "kl_forward": 0.1487171596950955,
+          "top1_agreement": 0.8861111111111111,
+          "top5_overlap": 0.8037037037037037,
+          "top10_overlap": 0.799212962962963,
+          "tokens": 2160
+        },
+        "confirmation_candidate": {
+          "kl_forward": 0.1487171596950955,
+          "top1_agreement": 0.8861111111111111,
+          "top5_overlap": 0.8037037037037037,
+          "top10_overlap": 0.799212962962963,
+          "tokens": 2160
+        }
+      }
+    }
+  }
+}
