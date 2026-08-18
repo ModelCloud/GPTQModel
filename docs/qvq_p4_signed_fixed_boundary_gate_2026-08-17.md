@@ -672,6 +672,47 @@ Canonical K was retained before confirmation, and the packed Q/V plus canonical-
 live error state. In the current greedy solution, K is conditionally exhausted after Q and V and need not be retried
 again unless a later accepted module or factor estimator materially changes the prefix.
 
+## Conditional Q/V-then-O reevaluation at W2 (P29)
+
+P29 installed the accepted packed Q and V artifacts and then repeated the complete O family search. Unlike the
+standalone P26 result, families 1 and 3 improved both search folds. Family 3 won the minimax comparison:
+
+| Family | Fold 0 final KL | Fold 1 final KL | Worst-fold ratio | Search decision |
+|---:|---:|---:|---:|---|
+| canonical V2 | 0.00347280 | 0.00462049 | 1.000000 | rollback baseline |
+| 1 | 0.00326649 | 0.00460805 | 0.997308 | eligible |
+| 2 | 0.00313131 | 0.00491947 | 1.064708 | reject |
+| 3 | **0.00309218** | **0.00459152** | **0.993731** | provisional winner |
+
+The disjoint confirmation split rejected family 3:
+
+| Metric | 30-row confirmation delta |
+|---|---:|
+| Final KL | **+1.293%** |
+| JSD | **+0.866%** |
+| Top-1 agreement | **-0.203 pp** |
+| Top-5 overlap | +0.029 pp |
+| Top-10 overlap | +0.081 pp |
+
+The KL/JSD and Top-1 regressions are aligned and materially larger than the small Top-5/10 gains, so this is not a
+noise-only rejection. The gate restored canonical O before untouched evaluation. The packed Q/V plus canonical K/O
+artifact remained finite (`KL=0.00514676`, Top-1 `97.37%`, Top-5 `95.67%`, Top-10 `95.59%`); the packed-versus-dense
+rollback difference was numerical only.
+
+P29 therefore closes the first greedy conditional sweep at a fixed point under this evidence contract:
+
+| Role | Conditional decision after accepted predecessors | Family |
+|---|---|---:|
+| Q | accept | 3 |
+| V after Q | accept | 1 |
+| K after Q+V | rollback | canonical |
+| O after Q+V | rollback after failed confirmation | canonical |
+
+This fixed point is conditional on the tested layer, W2 rate, two-seed Fisher estimator, row splits, and greedy order.
+It is evidence for transactional live-prefix selection, not a static role policy. In particular, P29 shows why a
+two-fold search win is insufficient: the alternate changed the propagated error direction enough to fail an
+independent confirmation split even though its mean search KL was 5.33% lower.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -714,3 +755,5 @@ again unless a later accepted module or factor estimator materially changes the 
 - `artifacts/qvq_p27_q_then_v_w2_gate/selected_packed.safetensors`
 - `artifacts/qvq_p28_qv_then_k_w2_gate/report_packed.json`
 - `artifacts/qvq_p28_qv_then_k_w2_gate/selected_packed.safetensors`
+- `artifacts/qvq_p29_qv_then_o_w2_gate/report_packed.json`
+- `artifacts/qvq_p29_qv_then_o_w2_gate/selected_packed.safetensors`
