@@ -374,8 +374,6 @@ class TestCohereCompass(ModelTest):
     EVAL_BATCH_SIZE = 8
     MODEL_COMPAT_FAST_LAYER_COUNT = 4
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
-    # Exercise both benchmarks without inventing score thresholds; the test below
-    # still requires each task and its expected metrics to be returned.
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
@@ -387,16 +385,36 @@ class TestCohereCompass(ModelTest):
     EVAL_TASKS_FAST = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "evalution_batch_size": 8,
+            "evalution_use_model_path": True,
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "paged|flash_attention_2",
+                "device": "cuda:0",
+            },
             "evalution_suite_kwargs": {
-                "batch_size": 8,
+                "batch_size": 32,
                 "max_new_tokens": 256,
                 "stream": True,
+            },
+            "acc,num": {
+                "value": 0.47229114971050457,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
             },
         },
         "arc_challenge": {
             "chat_template": True,
-            "evalution_batch_size": 8,
+            "acc": {
+                "value": 0.3242320819112628,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.3515358361774744,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
         },
     }
 
@@ -465,15 +483,55 @@ def test_cohere_compass_eval_configuration(monkeypatch):
     test_case = TestCohereCompass(methodName="test_cohere_compass")
 
     assert test_case.get_eval_tasks() == {
-        "gsm8k_platinum_cot": {},
-        "arc_challenge": {},
+        "gsm8k_platinum_cot": {
+            "acc,num": {
+                "value": 0.47229114971050457,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+                "metric_key": None,
+            },
+        },
+        "arc_challenge": {
+            "acc": {
+                "value": 0.3242320819112628,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+                "metric_key": None,
+            },
+            "acc_norm": {
+                "value": 0.3515358361774744,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+                "metric_key": None,
+            },
+        },
     }
     assert test_case._task_chat_template == {
         "gsm8k_platinum_cot": True,
         "arc_challenge": True,
     }
     assert test_case._task_evalution_batch_size == {
-        "gsm8k_platinum_cot": 8,
-        "arc_challenge": 8,
+        "gsm8k_platinum_cot": "auto",
+        "arc_challenge": None,
+    }
+    assert test_case._task_evalution_use_model_path == {
+        "gsm8k_platinum_cot": True,
+        "arc_challenge": False,
+    }
+    assert test_case._task_evalution_model_args == {
+        "gsm8k_platinum_cot": {
+            "dtype": "bfloat16",
+            "attn_implementation": "paged|flash_attention_2",
+            "device": "cuda:0",
+        },
+        "arc_challenge": {},
+    }
+    assert test_case._task_evalution_suite_kwargs == {
+        "gsm8k_platinum_cot": {
+            "batch_size": 32,
+            "max_new_tokens": 256,
+            "stream": True,
+        },
+        "arc_challenge": {},
     }
     assert TestCohereCompass.MODEL_COMPAT_FAST_LAYER_COUNT == 4
