@@ -5931,6 +5931,7 @@ def quantize_qvq_linear(
     tail_biting_candidates: int = 1,
     rounding: str = "block_ldlq",
     yaqa_v2b2_family_mode: str = "reselect",
+    yaqa_v2b2_fixed_family_id: int | None = None,
     yaqa_sample_strategy: str = "full",
     yaqa_spectral_refinement: bool = False,
     yaqa_spectral_ranks: tuple[int, ...] = (8, 16, 32),
@@ -6047,6 +6048,12 @@ def quantize_qvq_linear(
     yaqa_v2b2_family_mode = yaqa_v2b2_family_mode.strip().lower()
     if yaqa_v2b2_family_mode not in {"fixed_block_ldlq", "reselect"}:
         raise ValueError("QVQ YAQA V2B2 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if yaqa_v2b2_fixed_family_id is not None and (
+        isinstance(yaqa_v2b2_fixed_family_id, bool)
+        or not isinstance(yaqa_v2b2_fixed_family_id, int)
+        or yaqa_v2b2_fixed_family_id not in range(4)
+    ):
+        raise ValueError("QVQ YAQA V2B2 fixed family ID must be 0, 1, 2, or 3.")
     if not isinstance(yaqa_sample_strategy, str):
         raise TypeError("QVQ YAQA sample strategy must be a string.")
     yaqa_sample_strategy = yaqa_sample_strategy.strip().lower()
@@ -6167,6 +6174,20 @@ def quantize_qvq_linear(
             raise ValueError("YAQA requires the Euclidean PGC16 tile objective.")
         if input_hessian_preparation is not None:
             raise ValueError("YAQA input/output factors are module-specific and cannot use shared input preparation.")
+    if yaqa_v2b2_fixed_family_id is not None and (
+        rounding != "yaqa"
+        or not v2b2_p32
+        or yaqa_v2b2_family_mode != "fixed_block_ldlq"
+        or yaqa_sample_strategy != "full"
+        or yaqa_spectral_refinement
+        or yaqa_spectral_push
+        or yaqa_spectral_localized
+        or propagated_inputs is not None
+    ):
+        raise ValueError(
+            "QVQ YAQA V2B2 fixed-family encoding requires V2B2-P32 YAQA, "
+            "`fixed_block_ldlq` mode, full family scoring, and no subsequent candidate refinement."
+        )
     if (yaqa_spectral_refinement or yaqa_spectral_push or yaqa_spectral_localized) and (
         rounding != "yaqa" or not v2b2_p32
     ):
@@ -6429,6 +6450,32 @@ def quantize_qvq_linear(
                 )
             if v2b2_p32:
                 assert bank_codebooks is not None
+                if yaqa_v2b2_fixed_family_id == 0:
+                    canonical_weight, canonical_states = yaqa_inner(
+                        normalized_weight,
+                        transformed_H,
+                        transformed_output_hessian,
+                        codebook,
+                        bits=bits,
+                        trellis_batch_size=trellis_batch_size,
+                        tail_biting_candidates=tail_biting_candidates,
+                        factorization=prepared_yaqa_factorization,
+                        telemetry=telemetry,
+                        _incremental_cuda_feedback=incremental_cuda_feedback,
+                        _trusted_inputs=True,
+                    )
+                    yaqa_bank_diagnostics["fallback_to_v2"] = True
+                    yaqa_bank_diagnostics["block_family_id"] = 0
+                    return (
+                        canonical_weight,
+                        canonical_states,
+                        torch.zeros(
+                            canonical_states.shape[0] * 8,
+                            dtype=torch.uint8,
+                            device=canonical_states.device,
+                        ),
+                        torch.ones((1,), dtype=torch.uint8, device=canonical_states.device),
+                    )
                 return yaqa_inner_v2b2_p32(
                     normalized_weight,
                     transformed_H,
@@ -6440,6 +6487,7 @@ def quantize_qvq_linear(
                     tail_biting_candidates=tail_biting_candidates,
                     family_mode=yaqa_v2b2_family_mode,
                     sample_strategy=yaqa_sample_strategy,
+                    block_family_id=yaqa_v2b2_fixed_family_id,
                     diagnostics=yaqa_bank_diagnostics,
                     factorization=prepared_yaqa_factorization,
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,

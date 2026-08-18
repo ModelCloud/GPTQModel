@@ -129,56 +129,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _fixed_v2b2_yaqa_family(
-    original,
-    family_id: int,
-):
-    """Force one independently encoded YAQA family; family zero is exact canonical V2."""
-
-    if isinstance(family_id, bool) or not isinstance(family_id, int) or family_id not in range(4):
-        raise ValueError("complete-family YAQA family ID must be 0, 1, 2, or 3")
-
-    def fixed_family(*args, **kwargs):
-        if family_id:
-            kwargs["family_mode"] = "fixed_block_ldlq"
-            kwargs["sample_strategy"] = "full"
-            kwargs["block_family_id"] = family_id
-            return original(*args, **kwargs)
-
-        inner_weight, input_hessian, output_hessian, codebook_library = args[:4]
-        allowed = {
-            name: kwargs[name]
-            for name in (
-                "bits",
-                "tile_rows",
-                "tile_cols",
-                "trellis_batch_size",
-                "tail_biting_candidates",
-                "factorization",
-                "telemetry",
-                "_incremental_cuda_feedback",
-                "_trusted_inputs",
-            )
-            if name in kwargs
-        }
-        canonical_weight, canonical_states = qvq_module.yaqa_inner(
-            inner_weight,
-            input_hessian,
-            output_hessian,
-            codebook_library[0],
-            **allowed,
-        )
-        selectors = torch.zeros(
-            canonical_states.shape[0] * 8,
-            dtype=torch.uint8,
-            device=canonical_states.device,
-        )
-        inactive_family = torch.ones((1,), dtype=torch.uint8, device=canonical_states.device)
-        return canonical_weight, canonical_states, selectors, inactive_family
-
-    return fixed_family
-
-
 def _serialized_v2b2_weight(result: QVQLinearQuantizationResult, *, bits: float) -> torch.Tensor:
     """Reconstruct the exact B2-P32 checkpoint payload instead of trusting its staging tensor."""
 
@@ -1013,21 +963,20 @@ def main() -> None:
     selected_family: int | None = None
     if args.complete_family_selection:
         assert search_teacher is not None and confirmation_teacher is not None
-        original_family_quantizer = qvq_module.yaqa_inner_v2b2_p32
         family_results: list[QVQLinearQuantizationResult] = []
         for family_id in range(4):
             family_started = time.perf_counter()
-            with patch.object(
-                qvq_module,
-                "yaqa_inner_v2b2_p32",
-                _fixed_v2b2_yaqa_family(original_family_quantizer, family_id),
-            ):
-                family_result = quantize_qvq_linear(
-                    source_weight,
-                    input_hessians[args.target].to(device),
-                    bits=args.bits,
-                    **quantization_kwargs,
-                )
+            family_quantization_kwargs = dict(quantization_kwargs)
+            family_quantization_kwargs.update(
+                yaqa_v2b2_family_mode="fixed_block_ldlq",
+                yaqa_v2b2_fixed_family_id=family_id,
+            )
+            family_result = quantize_qvq_linear(
+                source_weight,
+                input_hessians[args.target].to(device),
+                bits=args.bits,
+                **family_quantization_kwargs,
+            )
             serialized_weight = _serialized_v2b2_weight(family_result, bits=args.bits).to(device)
             replay_index = len(replay_scores)
             replay_score = full_horizon_serialized_score(family_result)

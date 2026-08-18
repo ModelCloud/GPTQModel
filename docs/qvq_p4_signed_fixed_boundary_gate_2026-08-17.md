@@ -482,6 +482,25 @@ This stage remains default-off until broader layer/module evidence exists becaus
 YAQA encodes plus full-model replay. The mathematical and lifecycle direction is now validated; fixed family IDs and
 single-seed factors are rejected.
 
+## Supported fixed-family encoding contract (P21)
+
+The complete-family harness originally forced each candidate by monkeypatching `yaqa_inner_v2b2_p32`. P21 replaces
+that research shortcut with the explicit `quantize_qvq_linear(..., yaqa_v2b2_fixed_family_id=...)` contract:
+
+- family `0` independently runs canonical V2+YAQA, emits all-zero P32 selectors, and uses a legal inactive family byte;
+- families `1` through `3` independently run the requested fixed B2-P32 family under full YAQA scoring;
+- the control is legal only for V2B2-P32 YAQA with `fixed_block_ldlq` family mode and full scoring;
+- every candidate still passes the production planar pack/reconstruct equality check before replay or serialization.
+
+The family-0 micro-gate was bit-exact with standalone V2+YAQA for the trellis, transformed weight, and reconstructed
+weight. Families 1/2/3 preserved their requested serialized family byte and active selector payload. The focused gate
+passed 22 tests: 10 new fixed-family/replay API checks and 12 existing YAQA family, fallback, serialization, and
+spectral-interaction checks.
+
+This is an integration and correctness improvement, not a promotion decision. It makes the four independent
+candidates reproducible without process-global mutation. Propagated complete-family search remains explicit and
+default-off under the P20 two-seed, cross-fold, disjoint-confirmation policy.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
