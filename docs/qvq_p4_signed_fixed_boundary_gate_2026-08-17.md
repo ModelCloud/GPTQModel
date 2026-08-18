@@ -604,6 +604,34 @@ Top-10 reverses positive on the larger split. P25 is therefore a validated posit
 complete-family selection is beneficial for the tested Q and V modules but rejected for K. The production policy
 must remain module-conditional and replay-gated rather than role- or rate-hard-coded.
 
+## O-projection role replication at W2 (P26)
+
+P26 completed the layer-2 attention-role sweep with `o_proj`. Every alternate improved fold 0 but regressed fold 1:
+
+| Family | Fold 0 final KL | Fold 1 final KL | Worst-fold ratio | Nonzero selectors |
+|---:|---:|---:|---:|---:|
+| canonical V2 | 0.00276171 | 0.00370304 | 1.000000 | 0.00% |
+| 1 | 0.00265508 | 0.00373741 | 1.009282 | 49.75% |
+| 2 | 0.00244199 | 0.00388863 | 1.050119 | 49.87% |
+| 3 | 0.00240872 | 0.00381050 | 1.029020 | 50.02% |
+
+The minimax gate correctly rejected cancellation across folds and skipped candidate confirmation. Canonical
+V2+YAQA was serialized; its packed evaluation remained finite (`KL=0.00408568`, Top-1 `97.65%`, Top-5 `96.15%`,
+Top-10 `96.06%`). P26 is a confirmed O/W2 rejection under this contract.
+
+The complete layer-2 W2 role result is therefore:
+
+| Role | Decision | Winning alternate |
+|---|---|---:|
+| Q | accept | family 3 |
+| K | rollback | none |
+| V | accept | family 1 |
+| O | rollback | none |
+
+This is direct evidence against a role-wide fixed bank policy. The optional algorithm must encode all candidates and
+make a per-module propagated decision; a static Q/K/V/O rule is not justified from one layer and cannot replace the
+search/confirmation gates.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -640,3 +668,5 @@ must remain module-conditional and replay-gated rather than role- or rate-hard-c
 - `artifacts/qvq_p24_k_w2_ensemble_gate/selected_packed.safetensors`
 - `artifacts/qvq_p25_v_w2_ensemble_gate/report_packed.json`
 - `artifacts/qvq_p25_v_w2_ensemble_gate/selected_packed.safetensors`
+- `artifacts/qvq_p26_o_w2_ensemble_gate/report_packed.json`
+- `artifacts/qvq_p26_o_w2_ensemble_gate/selected_packed.safetensors`
