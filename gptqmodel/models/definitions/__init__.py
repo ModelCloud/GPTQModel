@@ -14,6 +14,7 @@ from .brumby import BrumbyQModel
 from .chatglm import ChatGLMQModel
 from .codegen import CodeGenQModel
 from .cohere2_moe import Cohere2MoeQModel
+from .cohere_compass import CohereCompassQModel
 from .dbrx import DbrxQModel
 from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel

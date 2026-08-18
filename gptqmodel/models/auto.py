@@ -74,6 +74,7 @@ from .definitions.brumby import BrumbyQModel  # noqa: E402
 from .definitions.chatglm import ChatGLMQModel  # noqa: E402
 from .definitions.codegen import CodeGenQModel  # noqa: E402
 from .definitions.cohere2_moe import Cohere2MoeQModel  # noqa: E402
+from .definitions.cohere_compass import CohereCompassQModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
 from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
@@ -236,6 +237,7 @@ MODEL_MAP = {
     "cohere": LlamaQModel, # 100% llama clone
     "cohere2": LlamaQModel, # 100% llama clone
     "cohere2_moe": Cohere2MoeQModel,
+    "cohere_compass": CohereCompassQModel,
     "refinedWebModel": RwgQModel,
     "refinedWeb": RwgQModel,
     "falcon": RwgQModel,
