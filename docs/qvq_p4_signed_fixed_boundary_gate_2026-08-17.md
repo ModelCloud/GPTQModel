@@ -577,6 +577,33 @@ rollback evaluation was finite (`KL=0.00307153`, Top-1 `97.97%`, Top-5 `96.75%`,
 confirmed rejection for K/W2 under this evidence contract. It also proves that the Q/W2 positive is role-specific:
 neither its winning family nor the decision to use an alternate may be transferred to K.
 
+## V-projection role replication at W2 (P25)
+
+P25 changed the layer-2 target to `v_proj` under the otherwise identical P24 contract. Families 1 and 3 improved
+both search folds; family 1 won the minimax comparison:
+
+| Family | Worst-fold ratio | Nonzero selectors | Search decision |
+|---:|---:|---:|---|
+| canonical V2 | 1.000000 | 0.00% | rollback baseline |
+| 1 | **0.980618** | 49.84% | provisional winner |
+| 2 | 1.033598 | 49.39% | reject |
+| 3 | 0.982620 | 49.96% | eligible, not best |
+
+Family 1 passed confirmation and improved the primary distribution metrics materially on untouched evaluation:
+
+| Metric | 30-row confirmation | 64-row untouched evaluation |
+|---|---:|---:|
+| Final KL | **-4.755%** | **-3.227%** |
+| JSD | **-5.116%** | **-3.500%** |
+| Top-1 agreement | +0.183 pp | -0.072 pp |
+| Top-5 overlap | +0.056 pp | +0.047 pp |
+| Top-10 overlap | -0.020 pp | +0.051 pp |
+
+The lone evaluation Top-1 loss is noise-scale; KL/JSD are large and consistent, Top-5 improves on both splits, and
+Top-10 reverses positive on the larger split. P25 is therefore a validated positive. Combined with P20/P24, W2
+complete-family selection is beneficial for the tested Q and V modules but rejected for K. The production policy
+must remain module-conditional and replay-gated rather than role- or rate-hard-coded.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -611,3 +638,5 @@ neither its winning family nor the decision to use an alternate may be transferr
 - `artifacts/qvq_p23_w2p5_ensemble_gate/selected_packed.safetensors`
 - `artifacts/qvq_p24_k_w2_ensemble_gate/report_packed.json`
 - `artifacts/qvq_p24_k_w2_ensemble_gate/selected_packed.safetensors`
+- `artifacts/qvq_p25_v_w2_ensemble_gate/report_packed.json`
+- `artifacts/qvq_p25_v_w2_ensemble_gate/selected_packed.safetensors`
