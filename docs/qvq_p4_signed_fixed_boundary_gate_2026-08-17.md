@@ -842,6 +842,62 @@ quantization-only: this small four-module run spent `493.86 s` in quantization, 
 `0.41 s` reloaded inference. Larger replay datasets remain necessary before default promotion, and efficient cached
 or staged replay remains the next performance target.
 
+### Real MLP module-granular replay validation
+
+The automatic lifecycle was also exercised on the complete MLP projection triplet in decoder layer 0. This is a
+real-model role screen, not a synthetic matrix test: the run used real Llama 3.2 1B Instruct weights, executed the
+complete 16-layer model for replay and confirmation, and quantized `gate_proj`, `up_proj`, and `down_proj` while
+leaving layer-0 Q/K/V/O dense.
+
+```text
+Dense full-model teacher logits
+  └─ layer-0 MLP W2 V2B2-P32+YAQA baseline
+       ├─ gate_proj: compare complete bank arms 0/1/2/3
+       ├─ up_proj: compare arms under the accepted gate state
+       └─ down_proj: compare arms under the accepted gate/up state
+            └─ two-fold search through all remaining decoder layers
+                 └─ disjoint confirmation
+                      ├─ pass: retain the complete serialized candidate
+                      └─ fail: restore the exact canonical artifact
+```
+
+The data contract was intentionally small but strictly disjoint:
+
+- ordinary calibration rows `[0, 4)` with 1,603 valid tokens;
+- YAQA rows `[4, 8)` with 2,442 valid tokens;
+- replay-search rows `[8, 10)` with 345 next-token positions split into 229/116-token folds;
+- replay-confirmation rows `[10, 12)` with 455 next-token positions;
+- batch 1, full natural row lengths, no concatenation or padding-based scoring;
+- MPS execution and full downstream propagation through the real 16-layer model.
+
+The conditional decisions were:
+
+| Role | Search result | Confirmation KL: canonical | Confirmation KL: selected | Top-1 delta | Top-5 delta | Top-10 delta |
+|---|---:|---:|---:|---:|---:|---:|
+| `gate_proj` | bank 0 | 0.01738665 | 0.01738665 | 0.00 pp | 0.00 pp | 0.00 pp |
+| `up_proj` | bank 1 | 0.04079536 | 0.03998858 | +1.10 pp | +0.97 pp | -0.20 pp |
+| `down_proj` | bank 0 | 0.08163950 | 0.08163950 | 0.00 pp | 0.00 pp | 0.00 pp |
+
+For `up_proj`, bank 1 improved both search folds from `0.02577617/0.12919406` KL to
+`0.02057580/0.09859654`. Bank 3 also improved both folds, but had a worse minimax-normalized score than bank 1.
+The selected bank-1 artifact then reduced independent confirmation KL by 1.98%. Its small Top-10 regression was
+outweighed by larger Top-1/5 gains, but all Top-K deltas are noisy at only 455 confirmation positions.
+
+`gate_proj` illustrates why the two-fold requirement matters: banks 1 and 2 substantially improved the second fold,
+but each regressed the first fold, so neither was eligible. `down_proj` banks 1 and 2 regressed both folds; bank 3
+reproduced the canonical metrics exactly. Both roles therefore rolled back without changing the checkpoint.
+
+The saved artifact contained 50,331,648 quantized weights at `2.03125` payload bpw and `2.050782` effective bpw.
+Live-versus-dense final-logit KL on the driver's separate 37-token inference prompt was `0.15233121`, with Top-1/5/10
+agreement of `75.676%/81.081%/81.351%`. Live-after-save and reloaded-versus-live outputs were bit-exact: zero MAE,
+zero KL, and 100% Top-1/5/10 agreement.
+
+This result establishes that module-granular replay is applicable to MLPs and that its value is projection-role
+specific. It does **not** justify enabling all MLP roles by default. The next expanded validation should prioritize
+`up_proj` across at least four layers with larger disjoint search/confirmation sets, while retaining exact rollback
+for gate and down. On this M4 host the exact three-module run took 4,723.33 seconds; a four-layer all-MLP sweep should
+use CUDA or a faster candidate-generation path rather than multiplying this Apple runtime directly.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -888,3 +944,4 @@ or staged replay remains the next performance target.
 - `artifacts/qvq_p29_qv_then_o_w2_gate/selected_packed.safetensors`
 - `artifacts/qvq_module_granular_replay_validation/report_packed.json`
 - `artifacts/qvq_module_granular_replay_validation/selected_packed.safetensors`
+- `artifacts/qvq_module_granular_replay_validation/full_lifecycle_1layer_mlp.json`
