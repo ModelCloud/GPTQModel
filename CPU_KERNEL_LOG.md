@@ -105,5 +105,23 @@ Done (AVX-512 vectorized QVQ GEMV decode):
   - Python fallback remains ~100 ms; speedup vs fallback is now 114-190x depending on E.
 - `ruff check` and `git diff --check` pass.
 
+Done (AVX-512 vectorized QVQ GEMV planar unpack):
+- Reverted the inline PGC16-mix experiment in `decode_tile_avx512` because it added integer operations to the per-state critical path and regressed `qvq_cpu_gemv` from ~0.90 ms back to ~0.97-1.15 ms. The pre-mixed `g_state_values` gather path is restored.
+- Added `unpack_tile_codes_avx512` in `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp` that extracts 32 16-bit transition codes per 32-state block with AVX-512 `permutexvar_epi32`, `srlv_epi32`, `cvtepi32_epi16`, and `slli_epi16`/`or` across binary planes. This removes the scalar per-code bit extraction loops that were the remaining large bottleneck for non-power-of-two E (3.5/6/7).
+- `accumulate_tile_m1_avx512` and `accumulate_tile_mn_avx512` now call `unpack_tile_codes_avx512`; the scalar `unpack_tile_codes` remains for the non-AVX-512 fallback path.
+- Accuracy:
+  - `tests/test_qvq_v2b2_p32.py`: 119 passed, 12 skipped.
+  - `tests/test_qvq.py -k "viterbi or tail_biting"`: 89 passed, 112 skipped, 1 failed (same pre-existing `squared_error` 1.19e-6 tolerance edge case).
+  - CPU GEMV max abs diff vs dense reference for `bits = [2, 3, 3.5, 4]` is `<= 2.44e-4`, inside the 2e-3 inference tolerance.
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - Raw `qvq_cpu_gemv` for `x=[1,2048] weight=[2048,2048]`:
+    - bits=2.0 (E=4): 0.53 ms -> 0.39 ms (~1.37x)
+    - bits=3.0 (E=6): 0.71 ms -> 0.40 ms (~1.78x)
+    - bits=3.5 (E=7): 0.90 ms -> 0.43 ms (~2.09x)
+    - bits=4.0 (E=8): 0.52 ms -> 0.37 ms (~1.41x)
+  - Python fallback remains ~100 ms; speedup vs fallback is now 223-263x depending on E.
+  - Dense `torch.matmul` for the same shape is ~0.04 ms; the remaining ~10x gap is now in the per-tile decode+FMA loop itself.
+- `git diff --check` passes. No Python files were changed in this pass; the pre-existing `ruff check` findings are unrelated.
+
 Next:
-- Continue reducing the gap to dense matmul by vectorizing `unpack_tile_codes` for non-power-of-two E (the remaining scalar bottleneck for E=3.5/6/7), fusing decode + FMA over output-channel tiles, or exploring a dense-weight precompute fallback for larger batch regimes.
+- Continue reducing the gap to dense matmul by fusing decode with the FMA over output-channel tiles to hide gather latency, tiling over multiple output columns per input tile, or precomputing a dense-weight cache for M=1 token generation when memory allows.

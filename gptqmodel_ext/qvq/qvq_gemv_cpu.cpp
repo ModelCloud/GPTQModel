@@ -86,6 +86,9 @@ inline int planes_for_width(int bits, Plane* planes) {
   return count;
 }
 
+alignas(64) static const int32_t kLaneId[16] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+
 // Unpack one tile's 128 transition-bit code words from the planar int32 payload.
 void unpack_tile_codes(const int32_t* tile_words, int E, uint16_t* codes) {
   Plane planes[5];
@@ -108,6 +111,60 @@ void unpack_tile_codes(const int32_t* tile_words, int E, uint16_t* codes) {
       }
       word_offset += w;
     }
+  }
+}
+
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
+void unpack_tile_codes_avx512(const int32_t* tile_words, int E, uint16_t* codes) {
+  Plane planes[5];
+  int nplanes = planes_for_width(E, planes);
+  const __m512i lane_id = _mm512_load_si512(reinterpret_cast<const __m512i*>(kLaneId));
+  for (int block = 0; block < 4; ++block) {
+    __m512i block_codes = _mm512_setzero_si512();
+    int block_base = block * E;
+    int word_offset = 0;
+    for (int p = 0; p < nplanes; ++p) {
+      const int w = planes[p].width;
+      const int o = planes[p].offset;
+      const int log2_pf = 5 - __builtin_ctz(w);
+      const int pf_mask = (1 << log2_pf) - 1;
+      const int half_w = w / 2;
+      const __mmask16 load_mask = static_cast<__mmask16>((1u << w) - 1u);
+      const __m512i src = _mm512_maskz_loadu_epi32(
+          load_mask, tile_words + block_base + word_offset);
+
+      __m512i plane_codes = _mm512_setzero_si512();
+      for (int h = 0; h < 2; ++h) {
+        __m512i idx = _mm512_srli_epi32(lane_id, log2_pf);
+        if (h == 1) {
+          const __m512i half_offset = _mm512_set1_epi32(half_w);
+          idx = _mm512_add_epi32(idx, half_offset);
+        }
+
+        int extra_shift = (h == 1 && w == 1) ? 16 : 0;
+        __m512i shift = _mm512_and_epi32(lane_id, _mm512_set1_epi32(pf_mask));
+        shift = _mm512_mullo_epi32(shift, _mm512_set1_epi32(w));
+        if (extra_shift) {
+          shift = _mm512_add_epi32(shift, _mm512_set1_epi32(extra_shift));
+        }
+
+        __m512i vals = _mm512_permutexvar_epi32(idx, src);
+        vals = _mm512_srlv_epi32(vals, shift);
+        vals = _mm512_and_epi32(vals, _mm512_set1_epi32((1u << w) - 1u));
+
+        const __m256i vals16 = _mm512_cvtepi32_epi16(vals);
+        if (h == 0) {
+          plane_codes = _mm512_castsi256_si512(vals16);
+        } else {
+          plane_codes = _mm512_inserti64x4(plane_codes, vals16, 1);
+        }
+      }
+      plane_codes = _mm512_slli_epi16(plane_codes, o);
+      block_codes = _mm512_or_si512(block_codes, plane_codes);
+      word_offset += w;
+    }
+    _mm512_storeu_si512(
+        reinterpret_cast<__m512i*>(codes + block * 32), block_codes);
   }
 }
 
@@ -246,8 +303,8 @@ void accumulate_tile_m1_avx512(
   for (int tr = 0; tr < I; ++tr) {
     int tile_idx = tr * O + tc;
     const int32_t* tile_words = trellis + tile_idx * (4 * E);
-    uint16_t codes[128];
-    unpack_tile_codes(tile_words, E, codes);
+    alignas(64) uint16_t codes[128];
+    unpack_tile_codes_avx512(tile_words, E, codes);
     uint16_t seg_masks[8] = {0};
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
@@ -288,8 +345,8 @@ void accumulate_tile_mn_avx512(
   for (int tr = 0; tr < I; ++tr) {
     int tile_idx = tr * O + tc;
     const int32_t* tile_words = trellis + tile_idx * (4 * E);
-    uint16_t codes[128];
-    unpack_tile_codes(tile_words, E, codes);
+    alignas(64) uint16_t codes[128];
+    unpack_tile_codes_avx512(tile_words, E, codes);
     uint16_t seg_masks[8] = {0};
     if (bank_ids) {
       tile_segment_masks(bank_ids[tile_idx], E, segments_per_tile, v2b2_p32, bank_alt_id, seg_masks);
