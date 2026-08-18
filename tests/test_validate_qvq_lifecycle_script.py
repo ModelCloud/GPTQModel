@@ -7,7 +7,10 @@ import pytest
 
 from gptqmodel import BACKEND
 from scripts.eval_qvq_checkpoint import _parse_backend
-from scripts.validate_qvq_lifecycle import _yaqa_calibration_controls
+from scripts.validate_qvq_lifecycle import (
+    _calibration_row_range,
+    _yaqa_calibration_controls,
+)
 
 
 def _args(**overrides) -> Namespace:
@@ -26,6 +29,19 @@ def _args(**overrides) -> Namespace:
 
 def test_yaqa_calibration_controls_reuse_base_stream_when_unspecified():
     assert _yaqa_calibration_controls(_args()) is None
+
+
+def test_ordinary_calibration_controls_resolve_exact_nonzero_slice():
+    assert _calibration_row_range(Namespace(row_start=12, rows=8), dataset_length=100) == range(12, 20)
+
+
+@pytest.mark.parametrize(
+    ("row_start", "rows", "dataset_length", "message"),
+    ((-1, 8, 100, "must be nonnegative"), (96, 8, 100, "requires rows \\[96, 104\\)")),
+)
+def test_ordinary_calibration_controls_reject_invalid_slice(row_start, rows, dataset_length, message):
+    with pytest.raises(ValueError, match=message):
+        _calibration_row_range(Namespace(row_start=row_start, rows=rows), dataset_length=dataset_length)
 
 
 def test_yaqa_calibration_controls_resolve_independent_exact_slice():

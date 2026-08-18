@@ -34,15 +34,19 @@ from gptqmodel.quantization import (
     YaqaConfig,
 )
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
-from gptqmodel.quantization.qvq_yaqa import YAQA_PAPER_MINIMUM_SEQUENCES, YAQA_PAPER_REGULARIZATION
+from gptqmodel.quantization.qvq_yaqa import (
+    YAQA_PAPER_MINIMUM_SEQUENCES,
+    YAQA_PAPER_REGULARIZATION,
+)
 from gptqmodel.utils.model import get_layers_with_prefixes
 from gptqmodel.utils.qvq_validation import (
     assert_qvq_dense_accuracy as _assert_dense_accuracy,
-    assert_qvq_reload_parity as _assert_reload_parity,
-    qvq_accuracy_metrics as _accuracy_metrics,
-    validate_qvq_lifecycle_args as _validate_args,
 )
-
+from gptqmodel.utils.qvq_validation import (
+    assert_qvq_reload_parity as _assert_reload_parity,
+)
+from gptqmodel.utils.qvq_validation import qvq_accuracy_metrics as _accuracy_metrics
+from gptqmodel.utils.qvq_validation import validate_qvq_lifecycle_args as _validate_args
 
 DEFAULT_PROMPTS = (
     "The capital of France is",
@@ -60,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results", required=True)
     parser.add_argument("--dataset", default="/monster/data/model/dataset/nm-calibration")
     parser.add_argument("--dataset-config", default="LLM")
+    parser.add_argument("--row-start", type=int, default=0, help="Starting row for ordinary calibration.")
     parser.add_argument("--rows", type=int, default=128)
     parser.add_argument(
         "--concat-size",
@@ -183,6 +188,20 @@ def _calibration_controls(args: argparse.Namespace) -> tuple[int | None, str | N
     calibration_sort = None if args.calibration_sort == "none" else args.calibration_sort
     dynamic = {f"-:^{re.escape(name)}$": {} for name in args.exclude_module} or None
     return calibration_concat_size, calibration_sort, dynamic
+
+
+def _calibration_row_range(args: argparse.Namespace, *, dataset_length: int) -> range:
+    """Resolve an exact ordinary-calibration slice for disjoint replication runs."""
+
+    if args.row_start < 0:
+        raise ValueError("--row-start must be nonnegative.")
+    row_stop = args.row_start + args.rows
+    if row_stop > dataset_length:
+        raise ValueError(
+            f"Ordinary calibration requires rows [{args.row_start}, {row_stop}), "
+            f"but dataset contains only {dataset_length} rows."
+        )
+    return range(args.row_start, row_stop)
 
 
 def _yaqa_calibration_controls(args: argparse.Namespace) -> tuple[str, str, int, int] | None:
@@ -381,7 +400,7 @@ def main() -> None:
     attention_rate_modules = _install_semantic_attention_bits(model, args.attention_bits, layers=args.layers)
 
     dataset = load_dataset(args.dataset, name=args.dataset_config, split="train")
-    calibration = dataset.select(range(min(args.rows, len(dataset))))
+    calibration = dataset.select(_calibration_row_range(args, dataset_length=len(dataset)))
     yaqa_calibration = None
     if yaqa_controls is not None:
         yaqa_dataset_name, yaqa_dataset_config, yaqa_row_start, yaqa_rows = yaqa_controls
@@ -616,6 +635,7 @@ def main() -> None:
             else None
         ),
         "layers": args.layers,
+        "calibration_row_start": args.row_start,
         "calibration_rows": len(calibration),
         "calibration_concat_size": calibration_concat_size,
         "calibration_sort": calibration_sort,
