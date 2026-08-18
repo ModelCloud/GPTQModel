@@ -44,6 +44,7 @@ class CohereCompassQModel(BaseQModel):
 
     # Cohere Compass uses GQA, so o_proj does not match v_proj's output shape.
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
+    awq_preserve_explicit_position_embeddings = True
 
     # Decoder forward order is:
     #   normalized = input_layernorm(hidden_states)

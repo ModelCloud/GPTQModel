@@ -50,6 +50,7 @@ def test_cohere_compass_module_tree_matches_parallel_residual_decoder():
     assert CohereCompassQModel.require_pkgs == ["transformers>=5.16.0.dev0"]
     assert CohereCompassQModel.pre_lm_head_norm_module == "model.language_model.norm"
     assert CohereCompassQModel.rotary_embedding == "model.language_model.rotary_emb"
+    assert CohereCompassQModel.awq_preserve_explicit_position_embeddings is True
     assert CohereCompassQModel.extract_layers_node() == ["model.language_model.layers"]
 
 
@@ -370,8 +371,34 @@ class TestCohereCompass(ModelTest):
     TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     OFFLOAD_TO_DISK = False
-    EVAL_BATCH_SIZE = 1
+    EVAL_BATCH_SIZE = 8
+    MODEL_COMPAT_FAST_LAYER_COUNT = 4
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+    # Exercise both benchmarks without inventing score thresholds; the test below
+    # still requires each task and its expected metrics to be returned.
+    EVAL_TASKS_SLOW = {
+        "gsm8k_platinum_cot": {
+            "chat_template": True,
+        },
+        "arc_challenge": {
+            "chat_template": True,
+        },
+    }
+    EVAL_TASKS_FAST = {
+        "gsm8k_platinum_cot": {
+            "chat_template": True,
+            "evalution_batch_size": 8,
+            "evalution_suite_kwargs": {
+                "batch_size": 8,
+                "max_new_tokens": 256,
+                "stream": True,
+            },
+        },
+        "arc_challenge": {
+            "chat_template": True,
+            "evalution_batch_size": 8,
+        },
+    }
 
     def test_cohere_compass(self):
         with self.model_compat_test_context():
@@ -380,38 +407,73 @@ class TestCohereCompass(ModelTest):
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 dtype=self.TORCH_DTYPE,
                 batch_size=1,
-                call_perform_post_quant_validation=False,
             )
 
-        image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovis/10016.jpg")
-        image = Image.open(image_path).convert("RGB")
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": "What do you see?"},
-                ],
+        try:
+            image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovis/10016.jpg")
+            image = Image.open(image_path).convert("RGB")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": "What do you see?"},
+                    ],
+                }
+            ]
+
+            inputs = processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True,
+            ).to(model.device)
+            outputs = model.generate(**inputs, max_new_tokens=64, do_sample=False)
+            generated_ids = [
+                output_ids[len(input_ids) :]
+                for input_ids, output_ids in zip(inputs.input_ids, outputs)
+            ]
+            response = processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
+            self.assertTrue(response.strip())
+            self.check_kernel(model, self.KERNEL_INFERENCE)
+            task_results = self._post_quant_eval_records.get(self._current_load_backend())
+            self.assertIsNotNone(task_results)
+            expected_metrics = {
+                "gsm8k_platinum_cot": ("acc,num",),
+                "arc_challenge": ("acc", "acc_norm"),
             }
-        ]
+            for task_name, metric_names in expected_metrics.items():
+                self.assertIn(task_name, task_results)
+                for metric_name in metric_names:
+                    self.assertIsNotNone(
+                        self._resolve_metric_key(metric_name, task_results[task_name]),
+                        f"Metric `{metric_name}` missing from task `{task_name}`",
+                    )
+            self.check_results(task_results)
+        finally:
+            self._cleanup_quantized_model(model, enabled=self.DELETE_QUANTIZED_MODEL)
 
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            return_dict=True,
-        ).to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=64, do_sample=False)
-        generated_ids = [
-            output_ids[len(input_ids) :]
-            for input_ids, output_ids in zip(inputs.input_ids, outputs)
-        ]
-        response = processor.batch_decode(
-            generated_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
 
-        self.assertTrue(response.strip())
-        self.check_kernel(model, self.KERNEL_INFERENCE)
+def test_cohere_compass_eval_configuration(monkeypatch):
+    monkeypatch.setenv(ModelTest.MODEL_TEST_MODE_ENV, ModelTest.MODEL_TEST_MODE_FAST)
+    test_case = TestCohereCompass(methodName="test_cohere_compass")
+
+    assert test_case.get_eval_tasks() == {
+        "gsm8k_platinum_cot": {},
+        "arc_challenge": {},
+    }
+    assert test_case._task_chat_template == {
+        "gsm8k_platinum_cot": True,
+        "arc_challenge": True,
+    }
+    assert test_case._task_evalution_batch_size == {
+        "gsm8k_platinum_cot": 8,
+        "arc_challenge": 8,
+    }
+    assert TestCohereCompass.MODEL_COMPAT_FAST_LAYER_COUNT == 4
