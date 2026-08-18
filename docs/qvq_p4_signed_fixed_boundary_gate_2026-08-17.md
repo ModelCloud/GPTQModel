@@ -533,6 +533,32 @@ that the P20 W2 gain is rate-specific and that neither high selector entropy nor
 sufficient without disjoint confirmation. Complete-family selection remains optional and guarded; no family or rate
 should be promoted from another rate's result.
 
+## W2.5 rate replication with the two-seed ensemble (P23)
+
+P23 repeated the P22 contract at W2.5. Family 1 was the only alternate to improve both packed search folds:
+
+| Family | Worst-fold search ratio | Nonzero selectors | Search decision |
+|---:|---:|---:|---|
+| canonical V2 | 1.000000 | 0.00% | rollback baseline |
+| 1 | **0.988515** | 49.89% | provisional winner |
+| 2 | 1.014544 | 49.89% | reject |
+| 3 | 1.005774 | 49.93% | reject |
+
+Family 1 passed disjoint confirmation, and its small confirmation Top-N losses reversed on the larger untouched split:
+
+| Metric | 30-row confirmation | 64-row untouched evaluation |
+|---|---:|---:|
+| Final KL | **-2.608%** | **-0.811%** |
+| JSD | **-2.469%** | **-0.777%** |
+| Top-1 agreement | -0.048 pp | +0.022 pp |
+| Top-5 overlap | -0.015 pp | +0.014 pp |
+| Top-10 overlap | -0.009 pp | +0.013 pp |
+
+Under the uncertainty-aware policy this is a validated positive: the primary distribution metrics improve on both
+disjoint splits, the confirmation Top-N losses are noise-scale, and every Top-N metric improves on the larger untouched
+split. P20/P23 now support the optional guarded stage at W2 and W2.5 for this Q-module context. P22 still forbids
+assuming the same result at W1.5, and the winning family remains rate-dependent (`3` at W2, `1` at W2.5).
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -563,3 +589,5 @@ should be promoted from another rate's result.
 - `artifacts/qvq_p20_fisher_ensemble_gate/selected_packed.safetensors`
 - `artifacts/qvq_p22_w1p5_ensemble_gate/report_packed.json`
 - `artifacts/qvq_p22_w1p5_ensemble_gate/selected_packed.safetensors`
+- `artifacts/qvq_p23_w2p5_ensemble_gate/report_packed.json`
+- `artifacts/qvq_p23_w2p5_ensemble_gate/selected_packed.safetensors`
