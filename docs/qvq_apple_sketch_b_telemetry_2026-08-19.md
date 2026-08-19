@@ -112,8 +112,32 @@ run; the projection is not substituted for that measurement.
 
 ## Remaining bottleneck and next work
 
-The telemetry shows that backward plus per-sequence gradient/Gram construction dominates. The next credible large
-gain requires a workspace-bounded native MLX/Metal Sketch operator that consumes each sequence's activation and
-output gradient, accumulates both symmetric factors directly, and preserves the `1e-6` factor contract. A mere
-reassociation in eager MPS is insufficient. The materialized PyTorch implementation remains the oracle until exact
-factors, quantized states/selectors, and held-out final metrics validate such a kernel.
+The first restarted 512-row run exposed a full-population memory cliff that the 16-row gate could not: the first
+6,014-token batch completed, but all 112 modules kept 14.28 GiB of persistent FP32 accumulators while MPS also held
+large transient weight-gradient and Gram workspaces. Free memory fell to roughly 68 MiB and the next batch made no
+progress for more than three minutes. That run was stopped rather than allowed to swap for hours.
+
+The accepted exact remedy streams collection in whole-layer groups on MPS. The default 4 GiB factor budget produces
+four passes of four Llama layers each:
+
+```text
+same dense model + same rows + same seed
+    +-- full backward, target layers 0--3   -> retain factors on CPU
+    +-- full backward, target layers 4--7   -> retain factors on CPU
+    +-- full backward, target layers 8--11  -> retain factors on CPU
+    `-- full backward, target layers 12--15 -> retain factors on CPU
+```
+
+This is not a layer-local Fisher approximation. Every pass still traverses the complete dense model from final loss
+to the first decoder layer. Resetting the same sampling seed regenerates the same sampled token targets, and only
+gradient hooks outside the current target group are omitted. A two-layer exact oracle verified bit-identical input
+and output factors between one pass and two one-layer passes (`rtol=0`, `atol=0`).
+
+Peak target-factor workspace falls from 14.28 GiB to approximately 3.57 GiB. The cost is four full-model backward
+traversals, but model traversal is cheaper than repeatedly paging tens of GiB. `max_factor_bytes_per_pass` can set an
+explicit positive byte budget; `None` selects 4 GiB on MPS and an unchunked pass elsewhere.
+
+The remaining native-kernel opportunity is a workspace-bounded MLX/Metal Sketch operator that consumes each
+sequence's activation and output gradient, accumulates both symmetric factors directly, and preserves the `1e-6`
+factor contract. The materialized PyTorch implementation remains the oracle until exact factors, quantized
+states/selectors, and held-out final metrics validate such a kernel.

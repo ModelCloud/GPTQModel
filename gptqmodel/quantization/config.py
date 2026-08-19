@@ -47,6 +47,7 @@ class YaqaConfig:
     activation_checkpointing: bool = True
     mps_cleanup_interval: int = 8
     sequence_sort: str = "desc"
+    max_factor_bytes_per_pass: int | None = None
     v2b2_family_mode: str = "reselect"
     sample_strategy: str = "full"
     spectral_refinement: bool = False
@@ -90,6 +91,12 @@ class YaqaConfig:
         self.sequence_sort = self.sequence_sort.strip().lower()
         if self.sequence_sort not in {"none", "asc", "desc"}:
             raise ValueError("YaqaConfig: `sequence_sort` must be one of `none`, `asc`, or `desc`.")
+        if self.max_factor_bytes_per_pass is not None and (
+            isinstance(self.max_factor_bytes_per_pass, bool)
+            or not isinstance(self.max_factor_bytes_per_pass, int)
+            or self.max_factor_bytes_per_pass < 1
+        ):
+            raise ValueError("YaqaConfig: `max_factor_bytes_per_pass` must be a positive integer or None.")
         if not isinstance(self.v2b2_family_mode, str):
             raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
         self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()

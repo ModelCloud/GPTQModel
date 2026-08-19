@@ -43,6 +43,38 @@ def _processor(*, bits=2, dynamic=None, qcfg=None):
     )
 
 
+def test_qvq_yaqa_factor_chunking_preserves_decoder_layer_boundaries():
+    layers = torch.nn.ModuleList(
+        [
+            torch.nn.ModuleDict(
+                {
+                    "q_proj": torch.nn.Linear(4, 4, bias=False),
+                    "o_proj": torch.nn.Linear(4, 4, bias=False),
+                }
+            )
+            for _ in range(3)
+        ]
+    )
+    targets = {
+        f"model.layers.{layer_index}.{name}": module
+        for layer_index, layer in enumerate(layers)
+        for name, module in layer.items()
+    }
+    bytes_per_layer = sum(QVQProcessor._yaqa_factor_bytes(module) for module in layers[0].values())
+
+    chunks = QVQProcessor._yaqa_target_chunks(
+        targets,
+        list(layers),
+        max_factor_bytes=bytes_per_layer * 2,
+    )
+
+    assert [tuple(chunk) for chunk in chunks] == [
+        ("model.layers.0.q_proj", "model.layers.0.o_proj", "model.layers.1.q_proj", "model.layers.1.o_proj"),
+        ("model.layers.2.q_proj", "model.layers.2.o_proj"),
+    ]
+    assert set().union(*(set(chunk) for chunk in chunks)) == set(targets)
+
+
 def test_qvq_dynamic_clone_preserves_fractional_rate_and_skip_contract():
     cfg = QVQConfig(
         bits=2,
@@ -775,6 +807,58 @@ def test_qvq_yaqa_lifecycle_rejects_lazy_source_and_duplicate_prepass():
     processor.prepare_yaqa(qmodel)
     with pytest.raises(RuntimeError, match="already prepared"):
         processor.prepare_yaqa(qmodel)
+
+
+def test_qvq_yaqa_chunked_factor_passes_match_single_pass_exactly():
+    yaqa_rows = [
+        {
+            "input_ids": torch.tensor([[1, 2], [3, 4], [5, 6]]),
+            "attention_mask": torch.ones((3, 2), dtype=torch.long),
+        }
+    ]
+
+    def collect(max_factor_bytes_per_pass):
+        qcfg = QVQConfig(
+            bits=2,
+            rounding="yaqa",
+            yaqa={
+                "seed": 787,
+                "minimum_sequences": 3,
+                "max_factor_bytes_per_pass": max_factor_bytes_per_pass,
+            },
+            device="cpu",
+            offload_to_disk=False,
+        )
+        qmodel = _YaqaQModel(qcfg)
+        qmodel.model.load_state_dict(reference_state)
+        processor = QVQProcessor(
+            tokenizer=None,
+            qcfg=qcfg,
+            calibration=yaqa_rows,
+            prepare_dataset_func=_prepared_calibration,
+            calibration_concat_size=None,
+            calibration_sort=None,
+            batch_size=1,
+            yaqa_calibration=yaqa_rows,
+        )
+        processor.prepare_yaqa(qmodel)
+        return processor
+
+    reference_model = _YaqaCausalModel().eval()
+    reference_state = reference_model.state_dict()
+    bytes_per_layer = 2 * 16 * 16 * 4
+    single = collect(None)
+    chunked = collect(bytes_per_layer)
+
+    assert single._yaqa_stats["factor_passes"] == 1
+    assert chunked._yaqa_stats["factor_passes"] == 2
+    assert chunked._yaqa_stats["pass_target_counts"] == [1, 1]
+    assert single._yaqa_input_hessians.keys() == chunked._yaqa_input_hessians.keys()
+    for name in single._yaqa_input_hessians:
+        torch.testing.assert_close(single._yaqa_input_hessians[name], chunked._yaqa_input_hessians[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            single._yaqa_output_hessians[name], chunked._yaqa_output_hessians[name], rtol=0, atol=0
+        )
 
 
 @pytest.mark.cuda

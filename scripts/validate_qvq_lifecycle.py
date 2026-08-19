@@ -165,6 +165,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yaqa-no-activation-checkpointing", action="store_true")
     parser.add_argument("--yaqa-mps-cleanup-interval", type=int, default=8)
     parser.add_argument("--yaqa-sequence-sort", choices=("none", "asc", "desc"), default="desc")
+    parser.add_argument("--yaqa-max-factor-bytes-per-pass", type=int)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-forward-kld", type=float, required=True)
     parser.add_argument("--min-top1-agreement", type=float, required=True)
@@ -339,6 +340,7 @@ def main() -> None:
             activation_checkpointing=not args.yaqa_no_activation_checkpointing,
             mps_cleanup_interval=args.yaqa_mps_cleanup_interval,
             sequence_sort=args.yaqa_sequence_sort,
+            max_factor_bytes_per_pass=args.yaqa_max_factor_bytes_per_pass,
         ),
         output_alignment=(
             OutputAlignConfig(

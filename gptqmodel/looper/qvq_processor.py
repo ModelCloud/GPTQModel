@@ -710,6 +710,51 @@ class QVQProcessor(LoopProcessor):
             raise ValueError("QVQ YAQA module-tree selection produced no quantization targets.")
         return targets, layers
 
+    @staticmethod
+    def _yaqa_factor_bytes(module: torch.nn.Linear) -> int:
+        return (module.in_features * module.in_features + module.out_features * module.out_features) * 4
+
+    @classmethod
+    def _yaqa_target_chunks(
+        cls,
+        targets: dict[str, torch.nn.Linear],
+        decoder_layers: list[Module],
+        max_factor_bytes: int,
+    ) -> list[dict[str, torch.nn.Linear]]:
+        """Pack whole decoder layers into bounded Sketch-B passes.
+
+        Keeping layer boundaries intact avoids changing the semantic target set
+        within a layer while bounding persistent Gram tensors and their transient
+        device-to-host updates. Every pass still traverses the complete model.
+        """
+
+        owner_by_module_id = {}
+        for layer_index, layer in enumerate(decoder_layers):
+            for child in layer.modules():
+                owner_by_module_id[id(child)] = layer_index
+        by_layer: dict[int, dict[str, torch.nn.Linear]] = {}
+        for name, module in targets.items():
+            layer_index = owner_by_module_id.get(id(module))
+            if layer_index is None:
+                raise ValueError(f"QVQ YAQA target `{name}` is not owned by a decoder layer.")
+            by_layer.setdefault(layer_index, {})[name] = module
+
+        chunks: list[dict[str, torch.nn.Linear]] = []
+        current: dict[str, torch.nn.Linear] = {}
+        current_bytes = 0
+        for layer_index in sorted(by_layer):
+            layer_targets = by_layer[layer_index]
+            layer_bytes = sum(cls._yaqa_factor_bytes(module) for module in layer_targets.values())
+            if current and current_bytes + layer_bytes > max_factor_bytes:
+                chunks.append(current)
+                current = {}
+                current_bytes = 0
+            current.update(layer_targets)
+            current_bytes += layer_bytes
+        if current:
+            chunks.append(current)
+        return chunks
+
     def prepare_yaqa(self, gptq_model: BaseQModel) -> None:
         """Collect immutable full-model Sketch-B factors before any layer is quantized."""
 
@@ -753,10 +798,16 @@ class QVQProcessor(LoopProcessor):
         source_device = next(iter(source_devices))
         target_device = normalize_device_like(self.qcfg.device) or source_device
         targets, decoder_layers = self._yaqa_target_modules(gptq_model)
+        max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
+        if max_factor_bytes is None:
+            max_factor_bytes = 4 * 1024**3 if target_device.type == "mps" else sum(
+                self._yaqa_factor_bytes(module) for module in targets.values()
+            )
+        target_chunks = self._yaqa_target_chunks(targets, decoder_layers, max_factor_bytes)
         log.info(
             "QVQ YAQA: collecting full-model Sketch-B factors targets=%d batches=%d device=%s seed=%d "
             "minimum_sequences=%d regularization=%.6g batch_size=%d activation_checkpointing=%s "
-            "checkpointed_modules=%d",
+            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d",
             len(targets),
             len(self.yaqa_calibration),
             target_device,
@@ -766,42 +817,81 @@ class QVQProcessor(LoopProcessor):
             self.qcfg.yaqa.batch_size,
             self.qcfg.yaqa.activation_checkpointing,
             len(decoder_layers) if self.qcfg.yaqa.activation_checkpointing else 0,
+            len(target_chunks),
+            max_factor_bytes,
         )
         progress_stride = max(1, len(self.yaqa_calibration) // 16)
-
-        def log_progress(stats):
-            completed = stats["completed_batches"]
-            total = stats["total_batches"]
-            if completed == 1 or completed == total or completed % progress_stride == 0:
-                log.info(
-                    "QVQ YAQA Sketch-B: batches=%d/%d sequences=%d valid_tokens=%d",
-                    completed,
-                    total,
-                    stats["completed_sequences"],
-                    stats["valid_tokens"],
-                )
         moved = source_device != target_device
         try:
             if moved:
                 model.to(target_device)
+            input_hessians = {}
+            output_hessians = {}
+            pass_stats = []
             with torch.inference_mode(False), torch.enable_grad():
-                input_hessians, output_hessians, stats = capture_yaqa_sketch_b(
-                    model,
-                    self.yaqa_calibration,
-                    targets,
-                    device=target_device,
-                    seed=self.qcfg.yaqa.seed,
-                    minimum_sequences=self.qcfg.yaqa.minimum_sequences,
-                    first_decoder_layer=decoder_layers[0],
-                    checkpoint_modules=decoder_layers if self.qcfg.yaqa.activation_checkpointing else (),
-                    progress_callback=log_progress,
-                    mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
-                )
+                for pass_index, pass_targets in enumerate(target_chunks, start=1):
+
+                    def log_progress(progress, *, current_pass=pass_index):
+                        completed = progress["completed_batches"]
+                        total = progress["total_batches"]
+                        if completed == 1 or completed == total or completed % progress_stride == 0:
+                            log.info(
+                                "QVQ YAQA Sketch-B: pass=%d/%d targets=%d batches=%d/%d "
+                                "sequences=%d valid_tokens=%d",
+                                current_pass,
+                                len(target_chunks),
+                                len(pass_targets),
+                                completed,
+                                total,
+                                progress["completed_sequences"],
+                                progress["valid_tokens"],
+                            )
+
+                    pass_inputs, pass_outputs, current_stats = capture_yaqa_sketch_b(
+                        model,
+                        self.yaqa_calibration,
+                        pass_targets,
+                        device=target_device,
+                        seed=self.qcfg.yaqa.seed,
+                        minimum_sequences=self.qcfg.yaqa.minimum_sequences,
+                        first_decoder_layer=decoder_layers[0],
+                        checkpoint_modules=decoder_layers if self.qcfg.yaqa.activation_checkpointing else (),
+                        progress_callback=log_progress,
+                        mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
+                    )
+                    input_hessians.update(pass_inputs)
+                    output_hessians.update(pass_outputs)
+                    pass_stats.append(current_stats)
+                    if target_device.type == "mps":
+                        torch.mps.synchronize()
+                        torch.mps.empty_cache()
         finally:
             if moved:
                 model.to(source_device)
                 if target_device.type == "cuda":
                     torch.cuda.empty_cache()
+        if not pass_stats:
+            raise RuntimeError("QVQ YAQA produced no factor passes.")
+        stats = dict(pass_stats[0])
+        sum_fields = (
+            "accumulator_bytes",
+            "capture_wall_seconds",
+            "final_host_transfer_seconds",
+            "input_factor_elements",
+            "output_factor_elements",
+            "factor_storage_bytes",
+            "mps_cleanup_count",
+        )
+        for field in sum_fields:
+            stats[field] = sum(item[field] for item in pass_stats)
+        stats["phase_wall_seconds"] = {
+            phase: sum(item["phase_wall_seconds"][phase] for item in pass_stats)
+            for phase in pass_stats[0]["phase_wall_seconds"]
+        }
+        stats["factor_passes"] = len(pass_stats)
+        stats["max_factor_bytes_per_pass"] = max_factor_bytes
+        stats["pass_target_counts"] = [len(chunk) for chunk in target_chunks]
+        stats["pass_factor_bytes"] = [item["factor_storage_bytes"] for item in pass_stats]
         self._yaqa_input_hessians = input_hessians
         self._yaqa_output_hessians = output_hessians
         self._yaqa_stats = stats
