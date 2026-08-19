@@ -5,6 +5,24 @@ tests showed local/proxy error reductions without dependable held-out final-KLD 
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
 
+### Harness consolidation TODO
+
+- [ ] Merge `scripts/compare_qvq_codecs_llama_qkvo.py` and
+  `scripts/validate_qvq_lifecycle.py` into one QVQ experiment harness.
+  The unified entry point must preserve both contracts: full-row disjoint
+  calibration/evaluation/YAQA splits, all-layer/all-linear scope, cached or
+  live Sketch-B provenance, QVQ arm selection (including `96_16x16`),
+  save/reload parity, and the complete KL/Top-1/Top-5/Top-10 metric schema.
+- [ ] Keep one shared argument/config model so codec policy, YAQA sampling,
+  damping, output alignment, replay, device routing, and diagnostic backend
+  cannot silently diverge between lifecycle validation and comparison runs.
+- [ ] Add a regression test that runs the same configuration through the
+  unified path and verifies identical prepared dataset fingerprints, row
+  ranges, YAQA metadata, quantization settings, and metric naming.
+- [ ] Retain explicit lifecycle mode and comparison mode as subcommands or
+  stages only for orchestration; neither mode may maintain a separate math or
+  dataset-preparation implementation.
+
 ### Unpromoted P-stage revalidation on real Llama 3.2 1B (2026-08-16)
 
 This revalidation uses the local `ModelCloud/Llama3.2-1B-Instruct` snapshot, `neuralmagic/calibration`, full
@@ -2875,3 +2893,91 @@ the wide MLP factors; even computing only one triangle offers at most approximat
 credible paths are: (1) a native packed-triangular Metal Gram kernel plus the one-pass policy for an exact but smaller
 gain, or (2) a deliberately approximate estimator such as projected Sketch-B/FastKron, which must earn promotion via
 disjoint full-model final-KL and Top-N validation rather than local factor similarity.
+
+## Chat-template Fisher weighting experiment
+
+### Motivation
+
+The Llama 3.2 Instruct calibration parquet contains both raw text and message-shaped examples. The comparison
+harness historically tokenized the raw `text` field, while the lifecycle formatter applied the chat template to every
+`messages` example. On the same rows this changed YAQA Sketch-B valid tokens from 163,324 to 178,427. The difference is
+an input-format change, not an accuracy improvement, and must be recorded explicitly in every artifact.
+
+For models deployed exclusively through chat templates, calibration and Sketch-B should use chat-formatted inputs so
+the hidden-state distribution matches production. Repeated system/role/separator tokens must not dominate low-bit error
+correction, however. The experiment below keeps those tokens in the forward context but caps their direct Fisher/Hessian
+weight.
+
+### Proposed default
+
+For 100%-chat deployment:
+
+```text
+chat-formatted rows: 100%
+content-token Fisher weight: 95%
+template-structure Fisher weight: 5%
+```
+
+The cap is an objective weight, not a row-count limit:
+
+```text
+H_chat = 0.95 * H_content + 0.05 * H_template
+F_chat = 0.95 * F_content + 0.05 * F_template
+```
+
+For mixed raw/chat deployment, use an explicit row-stream mixture and normalize each stream independently before
+combining it. Never infer the mixture from whether a dataset happens to expose `text` or `messages`.
+
+### Token provenance and weighting
+
+The formatter must return provenance for every token:
+
+```text
+content_mask[t]  = 1 for user/assistant content tokens
+template_mask[t] = 1 for system/role/separator/EOT tokens
+```
+
+For a row with `C` content tokens and `T` template tokens, use content weight `1` and template weight:
+
+```text
+gamma = (0.05 * C) / (0.95 * T)
+```
+
+This makes the normalized direct template-token mass exactly 5% regardless of sequence length. The forward pass still
+sees all tokens. Do not identify template tokens by hard-coded token IDs; use tokenizer/template provenance, offsets, or
+an equivalent model-family-owned formatter contract.
+
+### Calibration implementation experiments
+
+1. Add a formatter that emits token IDs, attention masks, and content/template provenance for supported chat templates.
+2. For input Hessian capture, apply `sqrt(weight)` to activation rows before the Gram product and divide by total
+   weight, yielding `sum_t w_t x_t x_t^T / sum_t w_t`.
+3. Keep raw and templated row streams disjoint and log row fingerprints, token counts, and effective weight mass.
+4. Compare three arms at W1, W1.5, W2, W2.5, W3, and W3.5: raw-text, unweighted full-chat, and 95/5 weighted-chat.
+5. Use identical calibration, YAQA, and evaluation row ranges; evaluate on full chat-formatted validation rows when
+   chat deployment is the target.
+
+### Sketch-B implementation experiments
+
+1. First implement weighted per-token sampled loss and collect content/template contribution telemetry.
+2. Measure the resulting factor contribution:
+
+   ```text
+   template_factor_fraction = trace(F_template) / trace(F_total)
+   ```
+
+3. Treat the weighted-loss path as approximate until its final-KL and Top-1/5/10 results pass the full gate.
+4. For a hard 5% guarantee, accumulate content and template gradient contributions separately before forming Gram
+   factors; this is more expensive but avoids assuming that loss weight equals outer-product weight.
+5. Reject any arm where the effective template factor contribution exceeds the configured cap or where raw/chat
+   provenance is missing.
+
+### Acceptance gates
+
+- Same raw rows and tokenizer produce identical per-row masks across lifecycle and comparison harness.
+- Save/reload and dense-reference parity remain exact within the existing quantization contract.
+- Quantization factor drift is at most `1e-6` for the exact path; the `2e-3` threshold is screening-only for research
+  performance experiments.
+- Full disjoint chat validation reports final KL, Top-1, Top-5, and Top-10.
+- The weighted-chat arm must not regress the raw-text arm on a disjoint raw validation set by more than the configured
+  production tolerance.

@@ -19,6 +19,16 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 YAQA_PAPER_REGULARIZATION = 1e-4
+YAQA_DEFAULT_REGULARIZATION = 0.05
+YAQA_DEFAULT_RATE_REGULARIZATION = (
+    (1.0, 0.1),
+    (1.5, 0.1),
+    (2.0, 0.1),
+    (2.5, 0.1),
+    (3.0, 0.1),
+    (3.5, 0.1),
+    (4.0, 0.1),
+)
 YAQA_PAPER_MINIMUM_SEQUENCES = 2_000
 YAQA_PAPER_RECOMMENDED_SEQUENCES = 65_536
 
@@ -664,6 +674,8 @@ def capture_yaqa_sketch_b(
 
 
 __all__ = [
+    "YAQA_DEFAULT_RATE_REGULARIZATION",
+    "YAQA_DEFAULT_REGULARIZATION",
     "YAQA_PAPER_MINIMUM_SEQUENCES",
     "YAQA_PAPER_RECOMMENDED_SEQUENCES",
     "YAQA_PAPER_REGULARIZATION",

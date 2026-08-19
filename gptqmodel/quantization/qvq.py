@@ -40,7 +40,7 @@ from .qvq_rates import (
     qvq_transition_bits,
     qvq_words_per_tile,
 )
-from .qvq_yaqa import YAQA_PAPER_REGULARIZATION
+from .qvq_yaqa import YAQA_DEFAULT_REGULARIZATION, YAQA_PAPER_REGULARIZATION
 from .rotation.hadamard_utils import matmul_hadU
 
 QVQ_BITS = _QVQ_BITS
@@ -6140,7 +6140,7 @@ def quantize_qvq_linear(
             "QVQ YAQA localized direct replay candidate count must be between zero and the replay shortlist."
         )
     if damp_percent is None:
-        damp_percent = YAQA_PAPER_REGULARIZATION if rounding == "yaqa" else 0.01
+        damp_percent = YAQA_DEFAULT_REGULARIZATION if rounding == "yaqa" else 0.01
     if isinstance(damp_percent, bool) or not isinstance(damp_percent, (int, float)):
         raise TypeError("QVQ damping percent must be a real scalar.")
     damp_percent = float(damp_percent)

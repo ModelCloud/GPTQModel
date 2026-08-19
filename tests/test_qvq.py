@@ -637,6 +637,7 @@ def test_qvq_config_does_not_expose_gptq_activation_ordering():
         QVQConfig(desc_act=True, offload_to_disk=False)
 
     config = QVQConfig(offload_to_disk=False)
+    assert config.rounding == "yaqa"
     assert "desc_act" not in {config_field.name for config_field in fields(config)}
     assert "desc_act" not in vars(config)
     payload = config.to_dict()
@@ -845,16 +846,20 @@ def test_yaqa_rounding_round_trips_through_config_and_protocol():
     assert reloaded.tail_biting_candidates == 4
 
 
-def test_yaqa_config_defaults_to_current_paper_regularization_and_sample_floor():
+def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
     config = QVQConfig(rounding="yaqa", yaqa=YaqaConfig(), offload_to_disk=False)
 
-    assert config.yaqa.regularization == YAQA_PAPER_REGULARIZATION == 1e-4
+    assert config.yaqa.regularization == pytest.approx(0.05)
     assert config.yaqa.minimum_sequences == YAQA_PAPER_MINIMUM_SEQUENCES == 2_000
     assert config.yaqa.batch_size == 8
     assert config.yaqa.activation_checkpointing is True
     assert config.yaqa.mps_cleanup_interval == 8
     assert config.yaqa.sequence_sort == "desc"
     assert config.yaqa.max_factor_bytes_per_pass is None
+    for rate in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
+        assert config.yaqa.regularization_for_rate(rate) == pytest.approx(0.1)
+    for rate in (4.5, 5.0, 6.0, 7.0, 8.0):
+        assert config.yaqa.regularization_for_rate(rate) == pytest.approx(0.05)
 
 
 @pytest.mark.parametrize(
@@ -874,6 +879,39 @@ def test_yaqa_config_defaults_to_current_paper_regularization_and_sample_floor()
 def test_yaqa_config_rejects_invalid_collection_controls(kwargs, exception, message):
     with pytest.raises(exception, match=message):
         YaqaConfig(**kwargs)
+
+
+def test_yaqa_config_supports_exact_rate_regularization_overrides():
+    config = YaqaConfig(regularization_by_rate=((2.5, 5e-4), (1.0, 1e-2)))
+    assert config.regularization_by_rate == ((1.0, 0.01), (2.5, 0.0005))
+    assert config.regularization_for_rate(1.0) == pytest.approx(0.01)
+    assert config.regularization_for_rate(2.5) == pytest.approx(0.0005)
+    assert config.regularization_for_rate(2.0) == pytest.approx(YAQA_PAPER_REGULARIZATION)
+
+
+def test_yaqa_rate_regularization_overrides_round_trip_through_qvq_config():
+    config = QVQConfig(
+        rounding="yaqa",
+        yaqa=YaqaConfig(regularization_by_rate=((2.5, 5e-4), (1.0, 1e-2))),
+        offload_to_disk=False,
+    )
+    reloaded = QuantizeConfig.from_quant_config(config.to_dict())
+    assert reloaded.yaqa.regularization_by_rate == ((1.0, 0.01), (2.5, 0.0005))
+    assert reloaded.yaqa.regularization_for_rate(1.0) == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ((1.0, 1e-3), (1.0, 2e-3)),
+        ((0.0, 1e-3),),
+        ((1.0, -1e-3),),
+        ((1.0,),),
+    ],
+)
+def test_yaqa_config_rejects_invalid_rate_regularization_overrides(overrides):
+    with pytest.raises((TypeError, ValueError)):
+        YaqaConfig(regularization_by_rate=overrides)
 
 
 @pytest.mark.parametrize(
@@ -3878,7 +3916,7 @@ def test_qvq_yaqa_identity_output_hessian_matches_block_ldlq_after_rht():
 
 
 @pytest.mark.parametrize("regularization", (None, 0.01))
-def test_qvq_yaqa_uses_paper_default_or_explicit_author_code_regularization(monkeypatch, regularization):
+def test_qvq_yaqa_uses_default_or_explicit_damping(monkeypatch, regularization):
     weight = torch.arange(256, dtype=torch.float32).reshape(16, 16).div(100)
     input_hessian = torch.diag(torch.linspace(1.0, 2.0, 16))
     output_hessian = torch.diag(torch.linspace(2.0, 4.0, 16))
@@ -3902,7 +3940,7 @@ def test_qvq_yaqa_uses_paper_default_or_explicit_author_code_regularization(monk
         **kwargs,
     )
 
-    expected_regularization = YAQA_PAPER_REGULARIZATION if regularization is None else regularization
+    expected_regularization = 0.05 if regularization is None else regularization
     expected_input = rht_preprocess_hessian(input_hessian, result.SU)
     expected_input = (expected_input + expected_input.T) * 0.5
     output_sign = result.SV.sign()

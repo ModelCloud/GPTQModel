@@ -30,7 +30,11 @@ from .diagnostics import (
 from .fused_forward_config import FusedForwardConfig
 from .qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from .qvq_rates import QVQ_BITS, normalize_qvq_rate
-from .qvq_yaqa import YAQA_PAPER_MINIMUM_SEQUENCES, YAQA_PAPER_REGULARIZATION
+from .qvq_yaqa import (
+    YAQA_DEFAULT_RATE_REGULARIZATION,
+    YAQA_DEFAULT_REGULARIZATION,
+    YAQA_PAPER_MINIMUM_SEQUENCES,
+)
 
 
 log = setup_logger()
@@ -41,7 +45,10 @@ class YaqaConfig:
     """YAQA-v3 full-model Fisher collection controls."""
 
     seed: int = 0
-    regularization: float = YAQA_PAPER_REGULARIZATION
+    regularization: float = YAQA_DEFAULT_REGULARIZATION
+    # The full-depth Llama sweep selected stronger damping for W1--W4. Rates
+    # above W4 use the global 0.05 fallback. Explicit overrides still win.
+    regularization_by_rate: tuple[tuple[float, float], ...] = YAQA_DEFAULT_RATE_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
     batch_size: int = 8
     activation_checkpointing: bool = True
@@ -70,6 +77,34 @@ class YaqaConfig:
         self.regularization = float(self.regularization)
         if not math.isfinite(self.regularization) or self.regularization < 0:
             raise ValueError("YaqaConfig: `regularization` must be finite and nonnegative.")
+        if not isinstance(self.regularization_by_rate, (tuple, list)):
+            raise TypeError("YaqaConfig: `regularization_by_rate` must be a sequence of `(bits, value)` pairs.")
+        normalized_rate_overrides = []
+        seen_rates = set()
+        for override in self.regularization_by_rate:
+            if not isinstance(override, (tuple, list)) or len(override) != 2:
+                raise ValueError("YaqaConfig: every regularization rate override must be a `(bits, value)` pair.")
+            rate, value = override
+            if (
+                isinstance(rate, bool)
+                or not isinstance(rate, (int, float))
+                or not math.isfinite(float(rate))
+                or float(rate) <= 0
+            ):
+                raise ValueError("YaqaConfig: override rates must be finite and positive.")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+            ):
+                raise ValueError("YaqaConfig: override regularization must be finite and nonnegative.")
+            normalized_rate = float(rate)
+            if normalized_rate in seen_rates:
+                raise ValueError(f"YaqaConfig: duplicate regularization override for rate {normalized_rate}.")
+            seen_rates.add(normalized_rate)
+            normalized_rate_overrides.append((normalized_rate, float(value)))
+        self.regularization_by_rate = tuple(sorted(normalized_rate_overrides))
         if (
             isinstance(self.minimum_sequences, bool)
             or not isinstance(self.minimum_sequences, int)
@@ -197,6 +232,16 @@ class YaqaConfig:
                 "YaqaConfig: `spectral_localized_direct_replay_candidates` must be between zero and "
                 "`spectral_localized_replay_candidates`."
             )
+
+    def regularization_for_rate(self, bits: float) -> float:
+        """Return an exact-rate override, or the configured global value."""
+
+        if isinstance(bits, bool) or not isinstance(bits, (int, float)) or not math.isfinite(float(bits)):
+            raise ValueError("YaqaConfig: `bits` must be a finite numeric rate.")
+        for rate, value in self.regularization_by_rate:
+            if math.isclose(float(bits), rate, rel_tol=0.0, abs_tol=1e-6):
+                return value
+        return self.regularization
 
 
 MODULE_GRANULAR_REPLAY_SUBSETS = {
@@ -6065,7 +6110,9 @@ class QVQConfig(BaseQuantizeConfig):
     propagated_bank_selection: Optional[bool] = field(default=None)
     tile_rows: int = field(default=16)
     tile_cols: int = field(default=16)
-    rounding: str = field(default="block_ldlq")
+    # YAQA is the production QVQ lifecycle default; callers that need the
+    # local-only baseline must request rounding="block_ldlq" explicitly.
+    rounding: str = field(default="yaqa")
     yaqa: YaqaConfig = field(default_factory=YaqaConfig)
     incoherence: str = field(default="rht")
     module_scale_search: bool = field(default=False)
