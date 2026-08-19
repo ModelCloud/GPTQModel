@@ -358,6 +358,20 @@ export GPTQMODEL_FP32_ACCUM=1
 export GPTQMODEL_FP32_ACCUM=0
 ```
 
+### JIT kernel cache and multi-process quantization
+
+JIT-compiled kernels are cached at `~/.cache/gptqmodel/torch_extensions` by default. Multiple processes on one host may safely share the cache: builds are serialized with a cross-process file lock that the OS releases automatically if a process dies.
+
+```shell
+# optional: relocate the kernel cache (e.g. one cache per process)
+export GPTQMODEL_TORCH_EXTENSIONS_DIR=/path/to/cache
+
+# optional: max seconds to wait for another process's in-flight build before
+# falling back to non-JIT paths. Default: 600 or 5x the kernel's compile
+# baseline, whichever is larger.
+export GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT=600
+```
+
 Notes:
 * This is a runtime toggle. It does not change model weights or saved checkpoints.
 * It mainly affects some fused AWQ and ParoQuant CUDA/Triton kernels. Dense/dequantize fallback paths are mostly unaffected.
