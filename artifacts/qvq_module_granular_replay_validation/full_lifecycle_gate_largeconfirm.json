@@ -1,0 +1,264 @@
+{
+  "model": "/Users/diego/.cache/huggingface/hub/models--ModelCloud--Llama3.2-1B-Instruct/snapshots/bb3d2111f8e40d15ed5c1f821d36f40e2072f03c",
+  "output": "/private/tmp/qvq_module_replay_gate_largeconfirm_model",
+  "python_gil_enabled": true,
+  "torch": "2.14.0.dev20260806",
+  "inference_dtype": "torch.float16",
+  "device": "mps",
+  "bits": 2.0,
+  "attention_bits": null,
+  "attention_rate_modules": [],
+  "qvq_rate_counts": {
+    "2": 1
+  },
+  "qvq_storage": {
+    "weight_numel": 16777216,
+    "trellis_bytes": 4194304,
+    "selector_bytes": 65536,
+    "bank_metadata_bytes": 1,
+    "payload_bytes": 4259840,
+    "auxiliary_bytes": 40961,
+    "payload_bits_per_weight": 2.03125,
+    "effective_bits_per_weight": 2.050781726837158
+  },
+  "rounding": "yaqa",
+  "yaqa_seed": 0,
+  "yaqa_regularization": 0.0001,
+  "yaqa_minimum_sequences": 8,
+  "yaqa_calibration": {
+    "dataset": "neuralmagic/calibration",
+    "dataset_config": "LLM",
+    "row_start": 44,
+    "rows": 8
+  },
+  "output_alignment": null,
+  "layers": 1,
+  "calibration_row_start": 36,
+  "calibration_rows": 8,
+  "calibration_concat_size": null,
+  "calibration_sort": null,
+  "excluded_modules": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.self_attn.k_proj",
+    "model.layers.0.self_attn.v_proj",
+    "model.layers.0.self_attn.o_proj",
+    "model.layers.0.mlp.up_proj",
+    "model.layers.0.mlp.down_proj"
+  ],
+  "batch_size": 1,
+  "non_padding_eval_tokens": 37,
+  "qvq_module_count": 1,
+  "qvq_modules": [
+    "model.layers.0.mlp.gate_proj"
+  ],
+  "seconds": {
+    "load_dense": 3.4060569170396775,
+    "quantize": 1434.4721478329739,
+    "save": 4.6876418750034645,
+    "reload": 24.38827820797451,
+    "live_inference": 0.482653749990277,
+    "reloaded_inference": 0.5070781670510769
+  },
+  "acceptance": {
+    "max_forward_kld": 100.0,
+    "min_top1_agreement": 0.0,
+    "reload_rtol": 0.0,
+    "reload_atol": 0.0
+  },
+  "accuracy_live_vs_dense": {
+    "finite": true,
+    "mae": 0.2168571501970291,
+    "mse": 0.11175984889268875,
+    "rmse": 0.3343050181865692,
+    "relative_l2": 0.1273288477484825,
+    "sqnr_db": 17.901463820304933,
+    "cosine": 0.9919139732933928,
+    "forward_kld": 0.01701316955457319,
+    "reverse_kld": 0.01713253898004293,
+    "jensen_shannon": 0.004100403612601485,
+    "top1_agreement": 0.8648648858070374,
+    "top5_overlap": 0.9081080555915833,
+    "top10_overlap": 0.9270269870758057,
+    "max_abs": 4.169921875
+  },
+  "accuracy_reloaded_vs_dense": {
+    "finite": true,
+    "mae": 0.2168571501970291,
+    "mse": 0.11175984889268875,
+    "rmse": 0.3343050181865692,
+    "relative_l2": 0.1273288477484825,
+    "sqnr_db": 17.901463820304933,
+    "cosine": 0.9919139732933928,
+    "forward_kld": 0.01701316955457319,
+    "reverse_kld": 0.01713253898004293,
+    "jensen_shannon": 0.004100403612601485,
+    "top1_agreement": 0.8648648858070374,
+    "top5_overlap": 0.9081080555915833,
+    "top10_overlap": 0.9270269870758057,
+    "max_abs": 4.169921875
+  },
+  "accuracy_live_after_save_vs_before_save": {
+    "finite": true,
+    "mae": 0.0,
+    "mse": 0.0,
+    "rmse": 0.0,
+    "relative_l2": 0.0,
+    "sqnr_db": 231.7018707863498,
+    "cosine": 1.0,
+    "forward_kld": 0.0,
+    "reverse_kld": 0.0,
+    "jensen_shannon": 0.0,
+    "top1_agreement": 1.0,
+    "top5_overlap": 1.0,
+    "top10_overlap": 1.0,
+    "max_abs": 0.0
+  },
+  "accuracy_reloaded_vs_live": {
+    "finite": true,
+    "mae": 0.0,
+    "mse": 0.0,
+    "rmse": 0.0,
+    "relative_l2": 0.0,
+    "sqnr_db": 231.7018707863498,
+    "cosine": 1.0,
+    "forward_kld": 0.0,
+    "reverse_kld": 0.0,
+    "jensen_shannon": 0.0,
+    "top1_agreement": 1.0,
+    "top5_overlap": 1.0,
+    "top10_overlap": 1.0,
+    "max_abs": 0.0
+  },
+  "quant_log_rows": 1,
+  "output_alignment_layers": {},
+  "module_granular_replay": {
+    "subsets": [
+      "mlp_gate_up_down"
+    ],
+    "search_row_start": 56,
+    "search_rows": 4,
+    "confirmation_row_start": 60,
+    "confirmation_rows": 16,
+    "results": {
+      "model.layers.0.mlp.gate_proj": {
+        "selected_alternative_bank_id": 1,
+        "candidates": [
+          {
+            "alternative_bank_id": 0,
+            "score": 1.0,
+            "fold_kl_forward": [
+              0.0224800650070955,
+              0.021651882486245066
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.0224800650070955,
+                "top1_agreement": 0.9324618736383442,
+                "top5_overlap": 0.9093681917211328,
+                "top10_overlap": 0.920479302832244,
+                "tokens": 459
+              },
+              {
+                "kl_forward": 0.021651882486245066,
+                "top1_agreement": 0.9450171821305842,
+                "top5_overlap": 0.9192439862542955,
+                "top10_overlap": 0.9164948453608247,
+                "tokens": 582
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 1,
+            "score": 0.9351663475844798,
+            "fold_kl_forward": [
+              0.021022600286147174,
+              0.018986101412691202
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.021022600286147174,
+                "top1_agreement": 0.934640522875817,
+                "top5_overlap": 0.9198257080610022,
+                "top10_overlap": 0.9163398692810458,
+                "tokens": 459
+              },
+              {
+                "kl_forward": 0.018986101412691202,
+                "top1_agreement": 0.9450171821305842,
+                "top5_overlap": 0.9254295532646049,
+                "top10_overlap": 0.922852233676976,
+                "tokens": 582
+              }
+            ],
+            "selected": true
+          },
+          {
+            "alternative_bank_id": 2,
+            "score": 0.9730988053827592,
+            "fold_kl_forward": [
+              0.01844234975594581,
+              0.02106942098165296
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.01844234975594581,
+                "top1_agreement": 0.9477124183006536,
+                "top5_overlap": 0.9172113289760349,
+                "top10_overlap": 0.9235294117647059,
+                "tokens": 459
+              },
+              {
+                "kl_forward": 0.02106942098165296,
+                "top1_agreement": 0.9553264604810997,
+                "top5_overlap": 0.9213058419243987,
+                "top10_overlap": 0.9197594501718213,
+                "tokens": 582
+              }
+            ],
+            "selected": false
+          },
+          {
+            "alternative_bank_id": 3,
+            "score": 1.0549161915283596,
+            "fold_kl_forward": [
+              0.019514581476681114,
+              0.022840921411809233
+            ],
+            "fold_metrics": [
+              {
+                "kl_forward": 0.019514581476681114,
+                "top1_agreement": 0.9411764705882353,
+                "top5_overlap": 0.9215686274509803,
+                "top10_overlap": 0.9165577342047931,
+                "tokens": 459
+              },
+              {
+                "kl_forward": 0.022840921411809233,
+                "top1_agreement": 0.9432989690721649,
+                "top5_overlap": 0.9257731958762886,
+                "top10_overlap": 0.924914089347079,
+                "tokens": 582
+              }
+            ],
+            "selected": false
+          }
+        ],
+        "confirmation_baseline": {
+          "kl_forward": 0.037882384321070155,
+          "top1_agreement": 0.9358142710822807,
+          "top5_overlap": 0.909354728576306,
+          "top10_overlap": 0.9061795834755889,
+          "tokens": 5858
+        },
+        "confirmation_candidate": {
+          "kl_forward": 0.0352449733859323,
+          "top1_agreement": 0.9400819392284055,
+          "top5_overlap": 0.9098668487538407,
+          "top10_overlap": 0.9079207920792078,
+          "tokens": 5858
+        }
+      }
+    }
+  }
+}

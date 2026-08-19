@@ -943,6 +943,52 @@ The replicated artifact again contained 50,331,648 quantized weights at `2.03125
 effective bpw. Quantization took 4,789.80 seconds on MPS. Live/reloaded output was bit-exact with zero KL and 100%
 Top-1/5/10 agreement, confirming that every rollback survived serialization exactly.
 
+### Larger held-out gate confirmation
+
+The mixed gate result was escalated rather than rejected. A third real-model run isolated layer-0 `gate_proj`, used
+fresh calibration and YAQA rows, generated candidates on four natural search rows, and expanded confirmation to 16
+natural rows:
+
+| Stream | Rows | Prepared/scored tokens |
+|---|---:|---:|
+| ordinary calibration | `[36, 44)` | 3,050 |
+| YAQA Fisher | `[44, 52)` | 3,535 |
+| replay search | `[56, 60)` | 1,041 next-token positions |
+| replay confirmation | `[60, 76)` | 5,858 next-token positions |
+
+Bank 1 improved both search folds and won the minimax-normalized search score:
+
+| Bank | Fold KL | Score | Search status |
+|---:|---:|---:|---|
+| 0 | 0.02248007 / 0.02165188 | 1.0000 | canonical |
+| 1 | 0.02102260 / 0.01898610 | 0.9352 | winner |
+| 2 | 0.01844235 / 0.02106942 | 0.9731 | eligible |
+| 3 | 0.01951458 / 0.02284092 | 1.0549 | ineligible |
+
+The larger independent confirmation accepted bank 1:
+
+| Metric | Canonical | Bank 1 | Delta |
+|---|---:|---:|---:|
+| final-logit KL | 0.03788238 | 0.03524497 | **-6.96%** |
+| Top-1 agreement | 93.581% | 94.008% | **+0.427 pp** |
+| Top-5 overlap | 90.935% | 90.987% | **+0.051 pp** |
+| Top-10 overlap | 90.618% | 90.792% | **+0.174 pp** |
+
+This resolves the earlier gate result in favor of continued development: gate replay can produce a propagated,
+held-out improvement, but the winning bank is data-dependent and must be selected dynamically. It does not support a
+fixed global `gate_proj -> bank N` rule. The next quality gate is the same transactional search across several decoder
+layers, with each accepted gate candidate conditioned on the already accepted live prefix.
+
+The first attempt cached 11,473 full-vocabulary search/confirmation positions and terminated externally after the
+canonical arm without a Python traceback. The successful run retained all 16 confirmation rows but reduced search
+from eight rows to four, cutting cached search logits from 5,599 to 1,045 prepared positions. This preserves the
+statistically valuable confirmation horizon while bounding transient unified-memory pressure. Future replay drivers
+should size cache budgets in vocabulary-logit bytes, not row count alone.
+
+The successful gate-only quantization took 1,434.47 seconds on MPS. Its checkpoint contained 16,777,216 quantized
+weights at `2.03125` payload bpw and `2.050782` effective bpw. Live/reloaded output remained bit-exact with zero KL
+and 100% Top-1/5/10 agreement.
+
 ## Artifacts
 
 - `artifacts/qvq_p4_signed_fixed_boundary_gate/layer2_q_w2_rows1826_1954_with_yaqa_diagnostics.json`
@@ -991,3 +1037,4 @@ Top-1/5/10 agreement, confirming that every rollback survived serialization exac
 - `artifacts/qvq_module_granular_replay_validation/selected_packed.safetensors`
 - `artifacts/qvq_module_granular_replay_validation/full_lifecycle_1layer_mlp.json`
 - `artifacts/qvq_module_granular_replay_validation/full_lifecycle_1layer_mlp_replication.json`
+- `artifacts/qvq_module_granular_replay_validation/full_lifecycle_gate_largeconfirm.json`
