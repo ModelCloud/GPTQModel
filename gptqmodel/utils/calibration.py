@@ -259,7 +259,7 @@ def prepare_calibration_dataset(
             if len(templated) > 0 and isinstance(templated[0], int):
                 return _pack_ids(list(templated), None, idx)
             raise ValueError(
-                "tokenizer.apply_template returned an unsupported sequence type for calibration item {idx}."
+                f"tokenizer.apply_template returned an unsupported sequence type for calibration item {idx}."
             )
 
         if torch.is_tensor(templated):
