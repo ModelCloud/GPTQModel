@@ -154,6 +154,7 @@ from .definitions.mllama import MLlamaQModel, MLlamaTextQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
+from .definitions.muse_glimmer import MuseGlimmerQModel  # noqa: E402
 from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
@@ -289,6 +290,7 @@ MODEL_MAP = {
     "minimax": MiniMaxM2GPTQ,
     "minimax_m2": MiniMaxM2GPTQ,
     "minimax_m3_vl": MiniMaxM3VLGPTQ,
+    "muse_glimmer": MuseGlimmerQModel,
     "ministral3": Ministral3GPTQ,
     "qwen2_moe": Qwen2MoeQModel,
     "qwen3_moe": Qwen3MoeQModel,

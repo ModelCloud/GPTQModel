@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/19/2026 7.4.0 `main`: ✨ Added `muse_glimmer` / Muse Glimmer multimodal model support.
 * 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl` / Mage-VL model support
 * 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
 * 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
@@ -284,6 +285,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview             | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open / Open 2                    | ✅ | North Micro Vision | ✅ |
 | Mage-VL                       | ✅ |                                 |    |                            |    |                                 |    |                        |    |
+| Muse Glimmer                  | ✅ |                                 |    |                            |    |                                 |    |                        |    |
 
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.

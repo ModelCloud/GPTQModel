@@ -17,6 +17,7 @@ from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
+from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
@@ -171,6 +172,7 @@ def get_calib_dataset(model):
         or isinstance(model, InklingMMQModel)
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
+        or isinstance(model, MuseGlimmerQModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 

@@ -75,6 +75,7 @@ from .mllama import MLlamaQModel, MLlamaTextQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
+from .muse_glimmer import MuseGlimmerQModel
 from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
 from .opt import OptQModel
