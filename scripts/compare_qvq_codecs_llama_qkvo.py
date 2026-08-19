@@ -334,6 +334,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaqa-rows", type=int, default=512)
     parser.add_argument("--yaqa-row-offset", type=int)
     parser.add_argument("--yaqa-batch-size", type=int, default=8)
+    parser.add_argument("--yaqa-mps-cleanup-interval", type=int, default=8)
+    parser.add_argument(
+        "--yaqa-no-activation-checkpointing",
+        action="store_true",
+        help="Disable decoder-layer recomputation for bounded memory-feasibility and speed profiling.",
+    )
     parser.add_argument("--yaqa-seed", type=int, default=0)
     parser.add_argument("--yaqa-spectral-ranks", nargs="+", type=int, default=(8, 16, 32))
     parser.add_argument("--yaqa-spectral-lambdas", nargs="+", type=float, default=(0.1, 0.25, 0.5, 1.0))
@@ -3295,8 +3301,9 @@ def main() -> None:
                 device=device,
                 seed=args.yaqa_seed,
                 minimum_sequences=args.yaqa_rows,
-                checkpoint_modules=tuple(model.model.layers),
+                checkpoint_modules=() if args.yaqa_no_activation_checkpointing else tuple(model.model.layers),
                 progress_callback=sketch_progress,
+                mps_cleanup_interval=args.yaqa_mps_cleanup_interval,
             )
             yaqa_stats["collection_seconds"] = time.perf_counter() - yaqa_started
             yaqa_stats["data"] = yaqa_data_stats

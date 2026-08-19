@@ -161,6 +161,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-alignment-validation-fraction", type=float, default=0.2)
     parser.add_argument("--output-alignment-minimum-improvement", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--yaqa-batch-size", type=int, default=8)
+    parser.add_argument("--yaqa-no-activation-checkpointing", action="store_true")
+    parser.add_argument("--yaqa-mps-cleanup-interval", type=int, default=8)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-forward-kld", type=float, required=True)
     parser.add_argument("--min-top1-agreement", type=float, required=True)
@@ -331,6 +334,9 @@ def main() -> None:
             seed=args.yaqa_seed,
             regularization=args.yaqa_regularization,
             minimum_sequences=args.yaqa_minimum_sequences,
+            batch_size=args.yaqa_batch_size,
+            activation_checkpointing=not args.yaqa_no_activation_checkpointing,
+            mps_cleanup_interval=args.yaqa_mps_cleanup_interval,
         ),
         output_alignment=(
             OutputAlignConfig(

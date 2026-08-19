@@ -43,6 +43,9 @@ class YaqaConfig:
     seed: int = 0
     regularization: float = YAQA_PAPER_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
+    batch_size: int = 8
+    activation_checkpointing: bool = True
+    mps_cleanup_interval: int = 8
     v2b2_family_mode: str = "reselect"
     sample_strategy: str = "full"
     spectral_refinement: bool = False
@@ -71,6 +74,16 @@ class YaqaConfig:
             or self.minimum_sequences < 1
         ):
             raise ValueError("YaqaConfig: `minimum_sequences` must be a positive integer.")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1:
+            raise ValueError("YaqaConfig: `batch_size` must be a positive integer.")
+        if not isinstance(self.activation_checkpointing, bool):
+            raise TypeError("YaqaConfig: `activation_checkpointing` must be boolean.")
+        if (
+            isinstance(self.mps_cleanup_interval, bool)
+            or not isinstance(self.mps_cleanup_interval, int)
+            or self.mps_cleanup_interval < 1
+        ):
+            raise ValueError("YaqaConfig: `mps_cleanup_interval` must be a positive integer.")
         if not isinstance(self.v2b2_family_mode, str):
             raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
         self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()

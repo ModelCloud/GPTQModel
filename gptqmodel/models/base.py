@@ -1811,7 +1811,10 @@ class BaseQModel(nn.Module):
                     calibration_dataset=yaqa_calibration,
                     calibration_dataset_concat_size=calibration_concat_size,
                     calibration_dataset_sort=calibration_sort,
-                    batch_size=batch_size,
+                    # Sketch-B remains per-sequence: collating independent rows
+                    # only amortizes model launches, Gram transfers, and MPS
+                    # synchronization. Ordinary calibration keeps its own batch.
+                    batch_size=self.quantize_config.yaqa.batch_size,
                     calibration_data_min_length=10,
                     calibration_concat_separator=calibration_concat_separator,
                 )

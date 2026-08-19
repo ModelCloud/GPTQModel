@@ -905,6 +905,16 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
     assert stats.pop("capture_wall_seconds") >= 0
     assert stats.pop("capture_cuda_ms") is None
     assert stats.pop("final_host_transfer_seconds") >= 0
+    phase_wall_seconds = stats.pop("phase_wall_seconds")
+    assert set(phase_wall_seconds) == {
+        "forward",
+        "loss",
+        "backward_and_sketch",
+        "python_gc",
+        "mps_synchronize",
+        "mps_empty_cache",
+    }
+    assert all(seconds >= 0 for seconds in phase_wall_seconds.values())
     assert stats == {
         "method": "YAQA-v3 Sketch B real Fisher",
         "full_model_backward": True,
@@ -914,6 +924,8 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
         "sequence_loss_reduction": "per_sequence_token_sum",
         "activation_checkpointing": False,
         "checkpointed_modules": 0,
+        "mps_cleanup_interval": 8,
+        "mps_cleanup_count": 0,
         "minimum_sequences": 1,
         "factor_dtype": "float32",
         "input_factor_elements": 4,

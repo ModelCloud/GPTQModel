@@ -158,6 +158,7 @@ def capture_yaqa_sketch_b(
     checkpoint_modules: Sequence[nn.Module] = (),
     progress_callback: Callable[[dict[str, int]], None] | None = None,
     accumulator_device: torch.device | None = None,
+    mps_cleanup_interval: int = 8,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -175,6 +176,12 @@ def capture_yaqa_sketch_b(
         raise ValueError("YAQA Sketch B target modules must be unique")
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("YAQA Sketch B progress callback must be callable")
+    if (
+        isinstance(mps_cleanup_interval, bool)
+        or not isinstance(mps_cleanup_interval, int)
+        or mps_cleanup_interval < 1
+    ):
+        raise ValueError("YAQA MPS cleanup interval must be a positive integer")
     if accumulator_device is not None:
         accumulator_device = torch.device(accumulator_device)
         if accumulator_device.type not in {"cpu", "cuda"}:
@@ -233,10 +240,24 @@ def capture_yaqa_sketch_b(
     parameters = tuple(model.parameters())
     parameter_requires_grad = tuple(parameter.requires_grad for parameter in parameters)
     generator = torch.Generator(device=device).manual_seed(seed)
+    # A Python bool() on a CUDA/MPS reduction synchronizes the accelerator.
+    # Accumulate the identical predicate on-device and inspect it once after
+    # collection instead of forcing three command-buffer drains per module.
     nonfinite_update = (
-        torch.zeros((), dtype=torch.bool, device=device) if accumulator_device.type == "cuda" else None
+        torch.zeros((), dtype=torch.bool, device=device)
+        if device.type in {"cuda", "mps"}
+        else None
     )
     capture_started = time.perf_counter()
+    phase_seconds = {
+        "forward": 0.0,
+        "loss": 0.0,
+        "backward_and_sketch": 0.0,
+        "python_gc": 0.0,
+        "mps_synchronize": 0.0,
+        "mps_empty_cache": 0.0,
+    }
+    mps_cleanup_count = 0
     capture_start_event = capture_end_event = None
     if device.type == "cuda":
         capture_start_event = torch.cuda.Event(enable_timing=True)
@@ -269,10 +290,14 @@ def capture_yaqa_sketch_b(
         gradient = torch.where(keep, gradient.detach().float(), 0)
         activation = torch.where(keep, activation.float(), 0)
         per_sequence_gradient = torch.bmm(gradient.transpose(1, 2), activation)
-        if not torch.isfinite(per_sequence_gradient).all():
-            raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
+        if nonfinite_update is None:
+            if not torch.isfinite(per_sequence_gradient).all():
+                raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
+        else:
+            nonfinite_update.logical_or_(~torch.isfinite(per_sequence_gradient).all())
         input_update = torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0)
         output_update = torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0)
+        batch_sequences = per_sequence_gradient.shape[0]
         if nonfinite_update is None:
             if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
                 raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
@@ -287,7 +312,7 @@ def capture_yaqa_sketch_b(
         else:
             input_accumulators[module_name] = input_update.contiguous()
             output_accumulators[module_name] = output_update.contiguous()
-        sequence_counts[module_name] += per_sequence_gradient.shape[0]
+        sequence_counts[module_name] += batch_sequences
 
     for name, module in modules.items():
 
@@ -342,12 +367,18 @@ def capture_yaqa_sketch_b(
                 if not bool(valid_by_sequence.gt(0).all()):
                     raise ValueError("every YAQA calibration sequence must contain at least one valid token")
                 active_calls.clear()
+                phase_started = time.perf_counter()
                 outputs = model(**encoded, use_cache=False)
+                phase_seconds["forward"] += time.perf_counter() - phase_started
                 logits = getattr(outputs, "logits", None)
                 if not isinstance(logits, torch.Tensor):
                     raise TypeError("YAQA full-model forward must return tensor logits")
+                phase_started = time.perf_counter()
                 loss, valid_tokens = yaqa_real_fisher_loss(logits, active_mask, generator=generator)
+                phase_seconds["loss"] += time.perf_counter() - phase_started
+                phase_started = time.perf_counter()
                 loss.backward()
+                phase_seconds["backward_and_sketch"] += time.perf_counter() - phase_started
                 missing = set(modules) - active_calls
                 if missing:
                     raise ValueError(f"YAQA full-model forward did not execute target modules {sorted(missing)}")
@@ -371,10 +402,19 @@ def capture_yaqa_sketch_b(
                 # MPS command buffers are asynchronous and otherwise keep the
                 # logits/loss graph live until allocator pressure forces a flush.
                 del outputs, logits, loss
-                gc.collect()
-                if device.type == "mps":
+                cleanup_due = batch_index == len(batches) or batch_index % mps_cleanup_interval == 0
+                if cleanup_due:
+                    phase_started = time.perf_counter()
+                    gc.collect()
+                    phase_seconds["python_gc"] += time.perf_counter() - phase_started
+                if device.type == "mps" and cleanup_due:
+                    phase_started = time.perf_counter()
                     torch.mps.synchronize()
+                    phase_seconds["mps_synchronize"] += time.perf_counter() - phase_started
+                    phase_started = time.perf_counter()
                     torch.mps.empty_cache()
+                    phase_seconds["mps_empty_cache"] += time.perf_counter() - phase_started
+                    mps_cleanup_count += 1
     finally:
         active_mask = None
         decoder_seed_handle.remove()
@@ -436,6 +476,9 @@ def capture_yaqa_sketch_b(
             "activation_checkpointing": bool(checkpoint_modules),
             "checkpointed_modules": len(checkpoint_modules),
             "accumulator_device": accumulator_device.type,
+            "phase_wall_seconds": phase_seconds,
+            "mps_cleanup_interval": mps_cleanup_interval,
+            "mps_cleanup_count": mps_cleanup_count,
             "accumulator_bytes": factor_bytes,
             "capture_wall_seconds": time.perf_counter() - capture_started,
             "capture_cuda_ms": capture_cuda_ms,

@@ -755,15 +755,31 @@ class QVQProcessor(LoopProcessor):
         targets, decoder_layers = self._yaqa_target_modules(gptq_model)
         log.info(
             "QVQ YAQA: collecting full-model Sketch-B factors targets=%d batches=%d device=%s seed=%d "
-            "minimum_sequences=%d regularization=%.6g activation_checkpointing=true checkpointed_modules=%d",
+            "minimum_sequences=%d regularization=%.6g batch_size=%d activation_checkpointing=%s "
+            "checkpointed_modules=%d",
             len(targets),
             len(self.yaqa_calibration),
             target_device,
             self.qcfg.yaqa.seed,
             self.qcfg.yaqa.minimum_sequences,
             self.qcfg.yaqa.regularization,
-            len(decoder_layers),
+            self.qcfg.yaqa.batch_size,
+            self.qcfg.yaqa.activation_checkpointing,
+            len(decoder_layers) if self.qcfg.yaqa.activation_checkpointing else 0,
         )
+        progress_stride = max(1, len(self.yaqa_calibration) // 16)
+
+        def log_progress(stats):
+            completed = stats["completed_batches"]
+            total = stats["total_batches"]
+            if completed == 1 or completed == total or completed % progress_stride == 0:
+                log.info(
+                    "QVQ YAQA Sketch-B: batches=%d/%d sequences=%d valid_tokens=%d",
+                    completed,
+                    total,
+                    stats["completed_sequences"],
+                    stats["valid_tokens"],
+                )
         moved = source_device != target_device
         try:
             if moved:
@@ -777,7 +793,9 @@ class QVQProcessor(LoopProcessor):
                     seed=self.qcfg.yaqa.seed,
                     minimum_sequences=self.qcfg.yaqa.minimum_sequences,
                     first_decoder_layer=decoder_layers[0],
-                    checkpoint_modules=decoder_layers,
+                    checkpoint_modules=decoder_layers if self.qcfg.yaqa.activation_checkpointing else (),
+                    progress_callback=log_progress,
+                    mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
                 )
         finally:
             if moved:

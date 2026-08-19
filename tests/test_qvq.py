@@ -850,6 +850,24 @@ def test_yaqa_config_defaults_to_current_paper_regularization_and_sample_floor()
 
     assert config.yaqa.regularization == YAQA_PAPER_REGULARIZATION == 1e-4
     assert config.yaqa.minimum_sequences == YAQA_PAPER_MINIMUM_SEQUENCES == 2_000
+    assert config.yaqa.batch_size == 8
+    assert config.yaqa.activation_checkpointing is True
+    assert config.yaqa.mps_cleanup_interval == 8
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "exception", "message"),
+    (
+        ({"batch_size": 0}, ValueError, "batch_size"),
+        ({"batch_size": True}, ValueError, "batch_size"),
+        ({"activation_checkpointing": 1}, TypeError, "activation_checkpointing"),
+        ({"mps_cleanup_interval": 0}, ValueError, "mps_cleanup_interval"),
+        ({"mps_cleanup_interval": True}, ValueError, "mps_cleanup_interval"),
+    ),
+)
+def test_yaqa_config_rejects_invalid_collection_controls(kwargs, exception, message):
+    with pytest.raises(exception, match=message):
+        YaqaConfig(**kwargs)
 
 
 @pytest.mark.parametrize(
