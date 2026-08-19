@@ -5916,9 +5916,9 @@ class EXL3Config(BaseQuantizeConfig):
 class OutputAlignConfig:
     """Offline decoder-layer output alignment for fixed QVQ trellises.
 
-    QVQ enables this stage by default. Passing ``output_alignment=None`` to
-    :class:`QVQConfig` is the explicit opt-out control for a baseline or
-    rollback comparison.
+    This stage is opt-in. Pass ``OutputAlignConfig(...)`` through
+    :class:`QVQConfig` to enable it; the default ``output_alignment=None``
+    retains the unaligned QVQ baseline.
     """
 
     learning_rate: float = 1e-5
@@ -6047,7 +6047,7 @@ class QVQConfig(BaseQuantizeConfig):
     viterbi_objective: str = field(default="euclidean")
     tail_biting_candidates: int = field(default=1)
     viterbi_minimum_proxy_improvement: float = field(default=0.0)
-    output_alignment: Optional[OutputAlignConfig] = field(default_factory=OutputAlignConfig)
+    output_alignment: Optional[OutputAlignConfig] = field(default=None)
     module_granular_replay: Optional[ModuleGranularReplayConfig] = field(default=None)
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
 

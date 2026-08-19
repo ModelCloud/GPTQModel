@@ -13,7 +13,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.qvq_processor import QVQProcessor, clone_qvq_config_for_module
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization import QVQConfig, OutputAlignConfig
+from gptqmodel.quantization import OutputAlignConfig, QVQConfig
 from gptqmodel.quantization.qvq import quantize_qvq_linear
 
 
@@ -221,17 +221,20 @@ def test_qvq_lifecycle_forwards_module_scale_search_and_reports_the_guarded_deci
     assert isinstance(stat["module_scale_reencoded"], bool)
 
 
-def test_qvq_output_alignment_is_enabled_by_default_and_explicitly_disablable():
+def test_qvq_output_alignment_is_disabled_by_default_and_explicitly_enablable():
     processor = _processor()
     inputs = [[torch.ones(1, 1, 16)]]
 
-    assert processor._output_alignment is not None
-    disabled = _processor(qcfg=QVQConfig(bits=2, output_alignment=None, device="cpu", offload_to_disk=False))
-    assert disabled._output_alignment is None
-    assert disabled.uses_grouped_optimization() is False
-    assert disabled.needs_pristine_layer_clone() is False
-    assert disabled.clean_group_layer_inputs(layer_index=0, layer_inputs=inputs) is inputs
-    assert disabled.receive_clean_layer_inputs(layer_index=0, layer_inputs=inputs) is None
+    assert processor._output_alignment is None
+    assert processor.uses_grouped_optimization() is False
+    assert processor.needs_pristine_layer_clone() is False
+    assert processor.clean_group_layer_inputs(layer_index=0, layer_inputs=inputs) is inputs
+    assert processor.receive_clean_layer_inputs(layer_index=0, layer_inputs=inputs) is None
+
+    enabled = _processor(
+        qcfg=QVQConfig(bits=2, output_alignment=OutputAlignConfig(), device="cpu", offload_to_disk=False)
+    )
+    assert enabled._output_alignment is not None
 
 
 def test_qvq_output_alignment_delegates_pristine_stream_ownership_to_attachment():

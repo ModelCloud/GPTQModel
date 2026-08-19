@@ -52,10 +52,10 @@ inference is unchanged. A real one-layer Llama smoke run stayed near 14 GB RSS f
 unbounded growth, before being stopped for quantization-time cost. The recurrence and serialized payload are unchanged;
 the focused B2/YAQA suite passed 25 tests. CUDA retains its native banked quantization path.
 
-### Fixed-trellis SU/SV alignment promoted by noise-aware real-model gates (2026-08-16)
+### Fixed-trellis SU/SV alignment validated by noise-aware real-model gates (2026-08-16)
 
-The previous default-off decision below is historical and is superseded by the larger real-model confirmation. The
-default is now `OutputAlignConfig()`; pass `output_alignment=None` to reproduce the exact unaligned baseline.
+The larger real-model confirmation validates fixed-trellis alignment as a useful opt-in, but the public default remains
+`output_alignment=None`. Pass `output_alignment=OutputAlignConfig()` to enable it explicitly.
 
 The promotion contract used real Llama 3.2 1B Instruct weights, the first four decoder layers, all Q/K/V/O
 projections, W2 V2B2-P32 packed weights, 64 full calibration rows, 64 disjoint alignment rows, and batch-1 unrestricted

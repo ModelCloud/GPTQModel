@@ -315,7 +315,7 @@ regressing top-1 significantly. Higher W3--W8 rates remain a separate research h
 results have transferred local improvements more reliably, but no such rate may be enabled without its own held-out
 model-output gate.
 
-Fixed-trellis output alignment is enabled by default for QVQ and is explicitly disabled with
+Fixed-trellis output alignment is opt-in with `output_alignment=OutputAlignConfig(...)`; the QVQ default is
 `output_alignment=None`. Its optimizer is configurable as `adam` or `adamw`, with `optimizer="adam"` and
 `weight_decay=0.0` as the defaults. These defaults match the public QTIP/YAQA recovery implementations, which
 construct Adam without decoupled weight decay; AdamW and nonzero decay are opt-in tuning controls for calibration
