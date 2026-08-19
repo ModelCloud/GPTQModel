@@ -1610,7 +1610,16 @@ class AWQProcessor(LoopProcessor):
             seq_len = x.shape[0]
 
         rotary = self._get_root_rotary()
-        if seq_len is not None and rotary is not None and supports_position_embeddings:
+        preserve_position_embeddings = (
+            getattr(self.gptq_model, "awq_preserve_explicit_position_embeddings", False)
+            and "position_embeddings" in module_kwargs
+        )
+        if (
+            seq_len is not None
+            and rotary is not None
+            and supports_position_embeddings
+            and not preserve_position_embeddings
+        ):
             rotary = self._get_rotary_for_device(target_device or x.device)
             rotary_device = self._get_rotary_device(rotary, target_device or x.device)
             pos_ids = module_kwargs.get("position_ids") if supports_position_ids else None

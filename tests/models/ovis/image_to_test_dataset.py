@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
+from gptqmodel.models.definitions.cohere_compass import CohereCompassQModel
 from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
@@ -179,7 +180,7 @@ def get_calib_dataset(model):
     if isinstance(model, DeepSeekVLV2QModel):
         return prepare_deepseek_vl_v2_dataset(n_sample=20)
 
-    if isinstance(model, DeepSeekVLQModel):
+    if isinstance(model, (CohereCompassQModel, DeepSeekVLQModel)):
         return prepare_deepseek_vl_dataset(n_sample=20)
 
     if isinstance(model, DeepSeekOCR2QModel):

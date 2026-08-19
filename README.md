@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
 * 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
 * 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2` model support
@@ -280,7 +281,8 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | XVERSE                        | ✅ | Brumby                          | ✅ | Hymba                      | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE                | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview             | ✅ |
-| HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open / Open 2                    | ✅ |                |   |
+| HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open / Open 2                    | ✅ | North Micro Vision | ✅ |
+
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
