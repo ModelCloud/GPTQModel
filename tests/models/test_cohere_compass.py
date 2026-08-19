@@ -7,7 +7,6 @@ import os.path
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 import torch
 from model_test import ModelTest
 from PIL import Image
