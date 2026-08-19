@@ -75,6 +75,38 @@ def test_qvq_yaqa_factor_chunking_preserves_decoder_layer_boundaries():
     assert set().union(*(set(chunk) for chunk in chunks)) == set(targets)
 
 
+def test_qvq_yaqa_packed_symmetric_chunking_uses_actual_accumulator_bytes():
+    layers = torch.nn.ModuleList(
+        [
+            torch.nn.ModuleDict({"proj": torch.nn.Linear(8, 8, bias=False)})
+            for _ in range(4)
+        ]
+    )
+    targets = {
+        f"model.layers.{layer_index}.proj": layer["proj"]
+        for layer_index, layer in enumerate(layers)
+    }
+    full_bytes = QVQProcessor._yaqa_factor_bytes(layers[0]["proj"])
+    packed_bytes = QVQProcessor._yaqa_packed_factor_bytes(layers[0]["proj"])
+    assert packed_bytes == 8 * 9 * 4
+    assert packed_bytes < full_bytes
+
+    full_chunks = QVQProcessor._yaqa_target_chunks(
+        targets,
+        list(layers),
+        max_factor_bytes=full_bytes * 2,
+    )
+    packed_chunks = QVQProcessor._yaqa_target_chunks(
+        targets,
+        list(layers),
+        max_factor_bytes=full_bytes * 2,
+        packed_symmetric=True,
+    )
+
+    assert [len(chunk) for chunk in full_chunks] == [2, 2]
+    assert [len(chunk) for chunk in packed_chunks] == [3, 1]
+
+
 def test_qvq_dynamic_clone_preserves_fractional_rate_and_skip_contract():
     cfg = QVQConfig(
         bits=2,

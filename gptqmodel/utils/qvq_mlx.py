@@ -78,8 +78,42 @@ _TORCH_MLX_BRIDGE_LOCK = threading.RLock()
 _TORCH_MLX_STAGING_MAX_BYTES = 128 * 1024 * 1024
 _FP32_KERNELS: dict[str, Any] = {}
 _FP32_KERNEL_ERRORS: dict[str, str] = {}
+_SYMMETRIC_GRAM_KERNELS: dict[str, Any] = {}
+_SYMMETRIC_GRAM_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
+
+_SYMMETRIC_GRAM_PACK_SOURCE = r"""
+uint index = thread_position_in_grid.x;
+uint count = dims[1];
+if (index >= count) return;
+float root = metal::sqrt(float(8ul * ulong(index) + 1ul));
+uint row = uint((root - 1.0f) * 0.5f);
+ulong row_start = (ulong(row) * ulong(row + 1u)) >> 1u;
+while (row_start > index) {
+    --row;
+    row_start = (ulong(row) * ulong(row + 1u)) >> 1u;
+}
+while (((ulong(row + 1u) * ulong(row + 2u)) >> 1u) <= index) {
+    ++row;
+    row_start = (ulong(row) * ulong(row + 1u)) >> 1u;
+}
+uint col = uint(ulong(index) - row_start);
+out[index] = matrix[ulong(row) * ulong(dims[0]) + col];
+"""
+
+_SYMMETRIC_GRAM_UNPACK_SOURCE = r"""
+uint index = thread_position_in_grid.x;
+uint width = dims[0];
+uint count = width * width;
+if (index >= count) return;
+uint row = index / width;
+uint col = index - row * width;
+uint high = metal::max(row, col);
+uint low = metal::min(row, col);
+ulong packed_index = (ulong(high) * ulong(high + 1u)) / 2ul + ulong(low);
+out[index] = packed[packed_index];
+"""
 
 
 @dataclass(frozen=True)
@@ -273,6 +307,99 @@ def _torch_to_mlx_read_only(tensor, *, name: str) -> _TorchMLXReadOnlyLease:
 
     copied = tensor.detach().to("cpu").contiguous() if tensor.device.type == "mps" else tensor.detach()
     return _TorchMLXReadOnlyLease(tensor, mx.array(copied.numpy()), None, False, name)
+
+
+def _symmetric_gram_kernel(kind: str):
+    if kind not in ("pack", "unpack"):
+        raise ValueError(f"Unknown QVQ symmetric-Gram MLX kernel kind: {kind}")
+    kernel = _SYMMETRIC_GRAM_KERNELS.get(kind)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _SYMMETRIC_GRAM_KERNELS.get(kind)
+        if kernel is not None:
+            return kernel
+        error = _SYMMETRIC_GRAM_KERNEL_ERRORS.get(kind)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_symmetric_gram_{kind}",
+                input_names=["matrix" if kind == "pack" else "packed", "dims"],
+                output_names=["out"],
+                source=_SYMMETRIC_GRAM_PACK_SOURCE if kind == "pack" else _SYMMETRIC_GRAM_UNPACK_SOURCE,
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            message = f"QVQ symmetric-Gram MLX {kind} kernel creation failed: {exc}"
+            _SYMMETRIC_GRAM_KERNEL_ERRORS[kind] = message
+            raise RuntimeError(message) from exc
+        _SYMMETRIC_GRAM_KERNELS[kind] = kernel
+        return kernel
+
+
+def qvq_mlx_pack_symmetric_gram_from_torch_mps(matrix):
+    """Pack one exactly symmetric FP32 MPS Gram matrix without changing its arithmetic."""
+
+    import mlx.core as mx
+    import torch
+
+    if matrix.device.type != "mps" or matrix.dtype != torch.float32:
+        raise TypeError("QVQ symmetric-Gram packing requires an FP32 Torch MPS tensor")
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("QVQ symmetric-Gram packing requires a square matrix")
+    if not matrix.is_contiguous():
+        raise ValueError("QVQ symmetric-Gram packing requires a contiguous matrix")
+    width = matrix.shape[0]
+    packed_count = width * (width + 1) // 2
+    with _TORCH_MLX_BRIDGE_LOCK:
+        torch.mps.synchronize()
+        lease = _torch_to_mlx_read_only(matrix, name="symmetric Gram matrix")
+        dims = mx.array([width, packed_count], dtype=mx.uint32)
+        output = _symmetric_gram_kernel("pack")(
+            inputs=[lease.array, dims],
+            template=[],
+            grid=(packed_count, 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(packed_count,)],
+            output_dtypes=[mx.float32],
+        )[0]
+        mx.eval(output)
+        mx.synchronize()
+        lease.verify_unchanged()
+        return torch.from_dlpack(output)
+
+
+def qvq_mlx_unpack_symmetric_gram_to_torch_cpu(packed, *, width: int):
+    """Expand one packed FP32 lower triangle into a symmetric CPU factor."""
+
+    import mlx.core as mx
+    import torch
+
+    if isinstance(width, bool) or not isinstance(width, int) or width < 1:
+        raise ValueError("QVQ symmetric-Gram width must be a positive integer")
+    expected = width * (width + 1) // 2
+    if packed.device.type != "cpu" or packed.dtype != torch.float32:
+        raise TypeError("QVQ symmetric-Gram unpacking requires an FP32 Torch CPU tensor")
+    if packed.ndim != 1 or packed.numel() != expected or not packed.is_contiguous():
+        raise ValueError(f"QVQ packed symmetric Gram must be contiguous with {expected} elements")
+    with _TORCH_MLX_BRIDGE_LOCK:
+        lease = _torch_to_mlx_read_only(packed, name="packed symmetric Gram")
+        dims = mx.array([width], dtype=mx.uint32)
+        output = _symmetric_gram_kernel("unpack")(
+            inputs=[lease.array, dims],
+            template=[],
+            grid=(width * width, 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(width, width)],
+            output_dtypes=[mx.float32],
+        )[0]
+        mx.eval(output)
+        mx.synchronize()
+        lease.verify_unchanged()
+        return torch.from_dlpack(output).to(device="cpu").contiguous()
 
 
 def _integer_argument(value: int, name: str) -> int:
@@ -2915,8 +3042,10 @@ __all__ = [
     "QVQMLXLinear",
     "qvq_hyb_reference_mlx_gemv",
     "qvq_mlx_gemv",
+    "qvq_mlx_pack_symmetric_gram_from_torch_mps",
     "qvq_mlx_tail_biting_v2b2_p32",
     "qvq_mlx_tail_biting_v2b4_p64",
+    "qvq_mlx_unpack_symmetric_gram_to_torch_cpu",
     "qvq_mlx_v2_banked_viterbi",
     "qvq_mlx_viterbi",
 ]

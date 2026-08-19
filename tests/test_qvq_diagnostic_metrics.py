@@ -924,6 +924,7 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
         "sequence_loss_reduction": "per_sequence_token_sum",
         "activation_checkpointing": False,
         "checkpointed_modules": 0,
+        "packed_symmetric_accumulators": False,
         "mps_cleanup_interval": 8,
         "mps_cleanup_count": 0,
         "minimum_sequences": 1,

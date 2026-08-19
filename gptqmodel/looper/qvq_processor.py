@@ -714,12 +714,21 @@ class QVQProcessor(LoopProcessor):
     def _yaqa_factor_bytes(module: torch.nn.Linear) -> int:
         return (module.in_features * module.in_features + module.out_features * module.out_features) * 4
 
+    @staticmethod
+    def _yaqa_packed_factor_bytes(module: torch.nn.Linear) -> int:
+        return (
+            module.in_features * (module.in_features + 1)
+            + module.out_features * (module.out_features + 1)
+        ) * 2
+
     @classmethod
     def _yaqa_target_chunks(
         cls,
         targets: dict[str, torch.nn.Linear],
         decoder_layers: list[Module],
         max_factor_bytes: int,
+        *,
+        packed_symmetric: bool = False,
     ) -> list[dict[str, torch.nn.Linear]]:
         """Pack whole decoder layers into bounded Sketch-B passes.
 
@@ -744,7 +753,8 @@ class QVQProcessor(LoopProcessor):
         current_bytes = 0
         for layer_index in sorted(by_layer):
             layer_targets = by_layer[layer_index]
-            layer_bytes = sum(cls._yaqa_factor_bytes(module) for module in layer_targets.values())
+            byte_counter = cls._yaqa_packed_factor_bytes if packed_symmetric else cls._yaqa_factor_bytes
+            layer_bytes = sum(byte_counter(module) for module in layer_targets.values())
             if current and current_bytes + layer_bytes > max_factor_bytes:
                 chunks.append(current)
                 current = {}
@@ -803,11 +813,17 @@ class QVQProcessor(LoopProcessor):
             max_factor_bytes = 4 * 1024**3 if target_device.type == "mps" else sum(
                 self._yaqa_factor_bytes(module) for module in targets.values()
             )
-        target_chunks = self._yaqa_target_chunks(targets, decoder_layers, max_factor_bytes)
+        packed_symmetric_accumulators = target_device.type == "mps"
+        target_chunks = self._yaqa_target_chunks(
+            targets,
+            decoder_layers,
+            max_factor_bytes,
+            packed_symmetric=packed_symmetric_accumulators,
+        )
         log.info(
             "QVQ YAQA: collecting full-model Sketch-B factors targets=%d batches=%d device=%s seed=%d "
             "minimum_sequences=%d regularization=%.6g batch_size=%d activation_checkpointing=%s "
-            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d",
+            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d packed_symmetric=%s",
             len(targets),
             len(self.yaqa_calibration),
             target_device,
@@ -819,6 +835,7 @@ class QVQProcessor(LoopProcessor):
             len(decoder_layers) if self.qcfg.yaqa.activation_checkpointing else 0,
             len(target_chunks),
             max_factor_bytes,
+            packed_symmetric_accumulators,
         )
         progress_stride = max(1, len(self.yaqa_calibration) // 16)
         moved = source_device != target_device

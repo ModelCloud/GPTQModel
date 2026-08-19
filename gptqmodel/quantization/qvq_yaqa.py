@@ -159,6 +159,7 @@ def capture_yaqa_sketch_b(
     progress_callback: Callable[[dict[str, int]], None] | None = None,
     accumulator_device: torch.device | None = None,
     mps_cleanup_interval: int = 8,
+    mps_pack_symmetric_grams: bool = True,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -182,6 +183,8 @@ def capture_yaqa_sketch_b(
         or mps_cleanup_interval < 1
     ):
         raise ValueError("YAQA MPS cleanup interval must be a positive integer")
+    if not isinstance(mps_pack_symmetric_grams, bool):
+        raise TypeError("YAQA MPS symmetric-Gram packing flag must be boolean")
     if accumulator_device is not None:
         accumulator_device = torch.device(accumulator_device)
         if accumulator_device.type not in {"cpu", "cuda"}:
@@ -230,6 +233,9 @@ def capture_yaqa_sketch_b(
                 accumulator_device = device
     input_accumulators: dict[str, torch.Tensor] = {}
     output_accumulators: dict[str, torch.Tensor] = {}
+    packed_symmetric_accumulators = (
+        mps_pack_symmetric_grams and device.type == "mps" and accumulator_device.type == "cpu"
+    )
     sequence_counts = dict.fromkeys(modules, 0)
     total_sequences = 0
     total_valid_tokens = 0
@@ -304,8 +310,18 @@ def capture_yaqa_sketch_b(
         else:
             nonfinite_update.logical_or_(~torch.isfinite(input_update).all())
             nonfinite_update.logical_or_(~torch.isfinite(output_update).all())
-        input_update = input_update.detach().to(device=accumulator_device)
-        output_update = output_update.detach().to(device=accumulator_device)
+        if packed_symmetric_accumulators:
+            from ..utils.qvq_mlx import qvq_mlx_pack_symmetric_gram_from_torch_mps
+
+            input_update = qvq_mlx_pack_symmetric_gram_from_torch_mps(input_update.detach().contiguous()).to(
+                device="cpu"
+            )
+            output_update = qvq_mlx_pack_symmetric_gram_from_torch_mps(output_update.detach().contiguous()).to(
+                device="cpu"
+            )
+        else:
+            input_update = input_update.detach().to(device=accumulator_device)
+            output_update = output_update.detach().to(device=accumulator_device)
         if module_name in input_accumulators:
             input_accumulators[module_name].add_(input_update)
             output_accumulators[module_name].add_(output_update)
@@ -440,9 +456,21 @@ def capture_yaqa_sketch_b(
     transfer_started = time.perf_counter()
     if nonfinite_update is not None and bool(nonfinite_update):
         raise ValueError("YAQA produced a non-finite Sketch-B Gram update")
-    for name in modules:
-        input_accumulators[name] = input_accumulators[name].to(device="cpu")
-        output_accumulators[name] = output_accumulators[name].to(device="cpu")
+    for name, module in modules.items():
+        if packed_symmetric_accumulators:
+            from ..utils.qvq_mlx import qvq_mlx_unpack_symmetric_gram_to_torch_cpu
+
+            input_accumulators[name] = qvq_mlx_unpack_symmetric_gram_to_torch_cpu(
+                input_accumulators[name],
+                width=module.in_features,
+            )
+            output_accumulators[name] = qvq_mlx_unpack_symmetric_gram_to_torch_cpu(
+                output_accumulators[name],
+                width=module.out_features,
+            )
+        else:
+            input_accumulators[name] = input_accumulators[name].to(device="cpu")
+            output_accumulators[name] = output_accumulators[name].to(device="cpu")
         if not torch.isfinite(input_accumulators[name]).all() or not torch.isfinite(
             output_accumulators[name]
         ).all():
@@ -479,7 +507,17 @@ def capture_yaqa_sketch_b(
             "phase_wall_seconds": phase_seconds,
             "mps_cleanup_interval": mps_cleanup_interval,
             "mps_cleanup_count": mps_cleanup_count,
-            "accumulator_bytes": factor_bytes,
+            "accumulator_bytes": sum(
+                (
+                    module.in_features * (module.in_features + 1)
+                    + module.out_features * (module.out_features + 1)
+                )
+                * 2
+                for module in modules.values()
+            )
+            if packed_symmetric_accumulators
+            else factor_bytes,
+            "packed_symmetric_accumulators": packed_symmetric_accumulators,
             "capture_wall_seconds": time.perf_counter() - capture_started,
             "capture_cuda_ms": capture_cuda_ms,
             "final_host_transfer_seconds": transfer_seconds,

@@ -141,3 +141,40 @@ The remaining native-kernel opportunity is a workspace-bounded MLX/Metal Sketch 
 sequence's activation and output gradient, accumulates both symmetric factors directly, and preserves the `1e-6`
 factor contract. The materialized PyTorch implementation remains the oracle until exact factors, quantized
 states/selectors, and held-out final metrics validate such a kernel.
+
+## Accepted symmetric-Gram packing
+
+The safe first symmetric optimization keeps the established MPS `bmm` reductions unchanged. Both Sketch-B updates
+are Gram matrices and MPS produced them bit-symmetric across the tested 512, 2,048, 4,096, and 8,192 feature
+geometries. A native MLX/Metal kernel now packs the lower triangle before the host handoff; CPU accumulation uses
+that packed representation, and a second native kernel expands it once when the final factor is materialized.
+
+This changes storage and transfer, not the estimator:
+
+\[
+N^2\ \text{FP32 elements}
+\quad\longrightarrow\quad
+\frac{N(N+1)}{2}\ \text{FP32 elements}.
+\]
+
+The real Llama 3.2 1B all-linear factor population falls from 14.28 GiB to 7.14 GiB while accumulating. Under the
+same 4 GiB lifecycle budget, whole-layer streaming falls from four 28-module passes to two 56-module passes. The
+standalone comparison harness can safely collect all 112 modules in one packed pass.
+
+Validation on real model weights and natural calibration rows:
+
+| Scope | Rows / valid tokens | Full accumulator | Packed accumulator | Result |
+|---|---:|---:|---:|---|
+| 2 layers, all 14 linear projections | 16 / 5,831 | 5.985 s | 6.025 s | Every input/output factor bit-exact |
+| 16 layers, all 112 linear projections | 16 / 5,831 | 38.519 s historical | 40.132 s | One packed pass completed without memory pressure |
+
+The isolated one-pass cost is approximately 0.7% on two layers and 4.2% against the historical full-accumulator
+16-layer run. That small cost is accepted because the full accumulator cannot survive the 512-row production run.
+Relative to the safe four-pass plan, the one-pass 16-layer gate is about 3.84x faster at the Sketch collection
+level; the normal 4 GiB lifecycle conservatively uses two passes and should approach a 2x reduction in repeated
+full-model backward work. Larger factors and packed round trips were exact at `rtol=0, atol=0`, which is stronger
+than the required `1e-6` quantization tolerance.
+
+Rejected alternatives remain rejected: flattening or reassociating the Gram contraction changed FP32 reduction
+order by up to approximately `3.45e-6` and provided little speedup. Symmetric packing is accepted specifically
+because it preserves every arithmetic operation and only removes redundant storage of the mirrored triangle.
