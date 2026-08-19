@@ -16,6 +16,13 @@ import sys
 import threading
 import time
 import traceback
+
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
+    fcntl = None
+
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -63,6 +70,12 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
+# Cross-process JIT build lock tuning. The lock itself is a kernel-released
+# flock, so a killed holder can never leave the cache permanently locked; the
+# timeout only bounds how long a process waits for another's in-flight build.
+_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV = "GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT"
+_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS = 600.0
+_TORCH_OPS_FILE_LOCK_POLL_SECONDS = 0.1
 
 
 def _log_cache_clear_callsite(*, reason: str, target_path: str | Path) -> None:
@@ -306,6 +319,63 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     if override_root:
         return Path(override_root).expanduser() / subdir
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
+
+
+def _torch_ops_file_lock_timeout_seconds() -> float:
+    """Resolve how long one process waits on another's in-flight JIT build."""
+
+    raw_timeout = os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV)
+    if raw_timeout is None:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+    try:
+        return max(0.0, float(raw_timeout))
+    except ValueError:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+
+
+@contextmanager
+def _cross_process_build_lock(lock_path: Path, *, timeout_seconds: float):
+    """Serialize on-disk JIT cache mutation across OS processes.
+
+    The process-local `_TORCH_OPS_JIT_LOCK` cannot see other interpreters, so
+    two independent processes sharing one cache directory can race the same
+    build. This holds an exclusive `flock` on `lock_path` instead. The lock
+    belongs to this process's open file descriptor, so the kernel releases it
+    automatically when the holder exits or is killed — a dead process can
+    never leave the cache permanently locked.
+
+    Yields True when the lock was acquired within `timeout_seconds`, else
+    False so the caller can degrade loudly instead of blocking forever. Hosts
+    without `fcntl` keep the existing process-local-only behavior and yield
+    True.
+    """
+
+    if fcntl is None:
+        yield True
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    acquired = False
+    try:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_TORCH_OPS_FILE_LOCK_POLL_SECONDS)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:  # pragma: no cover - closing the fd still releases the lock
+                pass
+        os.close(lock_fd)
 
 
 def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
@@ -701,6 +771,49 @@ class TorchOpsJitExtension:
             return Path(override).expanduser()
         return self._resolve_path(self.default_build_root)
 
+    def _build_lock_timeout_seconds(self) -> float:
+        """Resolve the cross-process build lock wait, honoring the env override.
+
+        Without an explicit override the wait scales with this extension's
+        recorded compile baseline so a waiter never gives up on a slower host
+        while the builder is still legitimately compiling.
+        """
+
+        if os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV) is not None:
+            return _torch_ops_file_lock_timeout_seconds()
+        baseline_seconds = self.compile_baseline_seconds or 0.0
+        return max(_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS, 5.0 * baseline_seconds)
+
+    def _cross_process_lock_path(self) -> Path:
+        """Return the flock path, kept outside the directory cache clears delete."""
+
+        base_build_root = self.base_build_root()
+        return base_build_root.parent / f"{base_build_root.name}.lock"
+
+    def _remove_stale_torch_build_lock(self, build_root: Path) -> None:
+        """Drop a leftover torch FileBaton lock file so a dead build cannot hang new ones.
+
+        torch's `_jit_compile` waits on `<build_root>/lock` with no timeout and
+        no owner check, so a lock file left behind by a killed process would
+        otherwise block every later build in this directory forever. Only safe
+        while holding the exclusive cross-process build lock, which proves no
+        live process is compiling here.
+        """
+
+        baton_path = build_root / "lock"
+        if not baton_path.exists():
+            return
+        log.warning(
+            "%s: removing stale torch JIT build lock left by a dead process: pid=%s path=%s",
+            self.display_name,
+            os.getpid(),
+            baton_path,
+        )
+        try:
+            baton_path.unlink()
+        except FileNotFoundError:  # pragma: no cover - already gone
+            pass
+
     def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
         """Hash one source file plus recursively discovered quoted local includes."""
 
@@ -868,11 +981,23 @@ class TorchOpsJitExtension:
             self._op_cache = {}
             build_root = self.base_build_root()
             if build_root.exists():
-                _log_cache_clear_callsite(
-                    reason=f"{self.display_name}.clear_cache",
-                    target_path=build_root,
-                )
-                shutil.rmtree(build_root, ignore_errors=True)
+                lock_timeout_seconds = self._build_lock_timeout_seconds()
+                with _cross_process_build_lock(
+                    self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+                ) as build_lock_acquired:
+                    if not build_lock_acquired:
+                        log.warning(
+                            "%s: skipping on-disk cache clear; timed out after %.0fs waiting for the "
+                            "cross-process JIT build lock (another process may be building here).",
+                            self.display_name,
+                            lock_timeout_seconds,
+                        )
+                        return
+                    _log_cache_clear_callsite(
+                        reason=f"{self.display_name}.clear_cache",
+                        target_path=build_root,
+                    )
+                    shutil.rmtree(build_root, ignore_errors=True)
 
     def last_error_message(self) -> str:
         """Return the most recent human-readable load failure."""
@@ -924,111 +1049,129 @@ class TorchOpsJitExtension:
             build_root = self.build_root()
             base_build_root = self.base_build_root()
 
-            if force_rebuild and base_build_root.exists():
-                setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")
-                _log_cache_clear_callsite(
-                    reason=f"{self.display_name}.force_rebuild",
-                    target_path=base_build_root,
-                )
-                shutil.rmtree(base_build_root, ignore_errors=True)
-
-            build_root.mkdir(parents=True, exist_ok=True)
-
-            if not force_rebuild and self._try_load_prebuilt_library(build_root):
-                self._load_attempted = True
-                self._load_result = True
-                self._last_error = ""
-                return True
-
-            logger = setup_logger()
-            logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")
-            progress_display = _CompileProgressDisplay(
-                logger=logger,
-                title=f"Compiling extension: {self.display_name}...",
-                baseline_seconds=self.compile_baseline_seconds,
-            )
-            started = time.perf_counter()
-            build_invocation_succeeded = False
-            try:
-                resolved_sources = self._resolve_sequence(self.sources)
-                extra_include_paths = self._resolved_extra_include_paths()
-                kwargs = {
-                    "name": self.name,
-                    "sources": resolved_sources,
-                    "build_directory": str(build_root),
-                    "is_python_module": False,
-                    "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
-                }
-                extra_cflags = self._resolve_sequence(self.extra_cflags)
-                if extra_cflags:
-                    kwargs["extra_cflags"] = extra_cflags
-                extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
-                if extra_cuda_cflags:
-                    kwargs["extra_cuda_cflags"] = extra_cuda_cflags
-                if extra_include_paths:
-                    kwargs["extra_include_paths"] = extra_include_paths
-                extra_ldflags = self._resolve_sequence(self.extra_ldflags)
-                if extra_ldflags:
-                    kwargs["extra_ldflags"] = extra_ldflags
-                with _temporary_merged_cuda_arch_override(
-                    enabled=self.merge_visible_cuda_arch_override
-                ):
-                    load(**kwargs)
-                build_invocation_succeeded = True
-            except Exception as exc:  # pragma: no cover - build depends on host toolchain
-                elapsed = time.perf_counter() - started
-                self._load_attempted = True
-                self._load_result = False
-                diagnostic_lines = [
-                    f"{self.display_name}: failed to build torch.ops JIT extension: {exc}",
-                    f"build_root={build_root}",
-                    f"base_build_root={base_build_root}",
-                    f"python={platform.python_version()}",
-                    f"pid={os.getpid()}",
-                    f"TORCH_EXTENSIONS_DIR={os.getenv('TORCH_EXTENSIONS_DIR', '')}",
-                    f"GPTQMODEL_TORCH_EXTENSIONS_DIR={os.getenv('GPTQMODEL_TORCH_EXTENSIONS_DIR', '')}",
-                ]
-                candidate_paths = self._candidate_binary_paths(build_root)
-                if candidate_paths:
-                    diagnostic_lines.append(
-                        "candidate_binaries="
-                        + ", ".join(f"{path}:{'exists' if path.exists() else 'missing'}" for path in candidate_paths)
+            lock_timeout_seconds = self._build_lock_timeout_seconds()
+            with _cross_process_build_lock(
+                self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+            ) as build_lock_acquired:
+                if not build_lock_acquired:
+                    self._load_attempted = True
+                    self._load_result = False
+                    self._last_error = (
+                        f"{self.display_name}: timed out after {lock_timeout_seconds:.0f}s waiting for the "
+                        f"cross-process JIT build lock `{self._cross_process_lock_path()}`; another process "
+                        f"may be stuck building this extension. Adjust via `{_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV}`."
                     )
+                    log.warning("%s", self._last_error)
+                    setup_logger().info(f"{self.display_name}: JIT build lock wait timed out; using fallback path.")
+                    return False
+
+                if force_rebuild and base_build_root.exists():
+                    setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")
+                    _log_cache_clear_callsite(
+                        reason=f"{self.display_name}.force_rebuild",
+                        target_path=base_build_root,
+                    )
+                    shutil.rmtree(base_build_root, ignore_errors=True)
+
+                build_root.mkdir(parents=True, exist_ok=True)
+
+                if not force_rebuild and self._try_load_prebuilt_library(build_root):
+                    self._load_attempted = True
+                    self._load_result = True
+                    self._last_error = ""
+                    return True
+
+                self._remove_stale_torch_build_lock(build_root)
+
+                logger = setup_logger()
+                logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")
+                progress_display = _CompileProgressDisplay(
+                    logger=logger,
+                    title=f"Compiling extension: {self.display_name}...",
+                    baseline_seconds=self.compile_baseline_seconds,
+                )
+                started = time.perf_counter()
+                build_invocation_succeeded = False
                 try:
-                    entries = sorted(build_root.iterdir())
-                    preview = ", ".join(entry.name for entry in entries[:24])
-                    if len(entries) > 24:
-                        preview += f", ... (+{len(entries) - 24} more)"
-                    diagnostic_lines.append(f"build_root_entries=[{preview}]")
-                except OSError as snapshot_exc:
-                    diagnostic_lines.append(f"build_root_entries=<unavailable: {snapshot_exc}>")
-                self._last_error = " | ".join(diagnostic_lines)
-                log.debug("%s", self._last_error, exc_info=True)
-                logger.info(
-                    f"{self.display_name}: torch.ops JIT compilation failed "
-                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}; using fallback path."
-                )
-                return False
-            finally:
+                    resolved_sources = self._resolve_sequence(self.sources)
+                    extra_include_paths = self._resolved_extra_include_paths()
+                    kwargs = {
+                        "name": self.name,
+                        "sources": resolved_sources,
+                        "build_directory": str(build_root),
+                        "is_python_module": False,
+                        "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
+                    }
+                    extra_cflags = self._resolve_sequence(self.extra_cflags)
+                    if extra_cflags:
+                        kwargs["extra_cflags"] = extra_cflags
+                    extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
+                    if extra_cuda_cflags:
+                        kwargs["extra_cuda_cflags"] = extra_cuda_cflags
+                    if extra_include_paths:
+                        kwargs["extra_include_paths"] = extra_include_paths
+                    extra_ldflags = self._resolve_sequence(self.extra_ldflags)
+                    if extra_ldflags:
+                        kwargs["extra_ldflags"] = extra_ldflags
+                    with _temporary_merged_cuda_arch_override(
+                        enabled=self.merge_visible_cuda_arch_override
+                    ):
+                        load(**kwargs)
+                    build_invocation_succeeded = True
+                except Exception as exc:  # pragma: no cover - build depends on host toolchain
+                    elapsed = time.perf_counter() - started
+                    self._load_attempted = True
+                    self._load_result = False
+                    diagnostic_lines = [
+                        f"{self.display_name}: failed to build torch.ops JIT extension: {exc}",
+                        f"build_root={build_root}",
+                        f"base_build_root={base_build_root}",
+                        f"python={platform.python_version()}",
+                        f"pid={os.getpid()}",
+                        f"TORCH_EXTENSIONS_DIR={os.getenv('TORCH_EXTENSIONS_DIR', '')}",
+                        f"GPTQMODEL_TORCH_EXTENSIONS_DIR={os.getenv('GPTQMODEL_TORCH_EXTENSIONS_DIR', '')}",
+                    ]
+                    candidate_paths = self._candidate_binary_paths(build_root)
+                    if candidate_paths:
+                        diagnostic_lines.append(
+                            "candidate_binaries="
+                            + ", ".join(f"{path}:{'exists' if path.exists() else 'missing'}" for path in candidate_paths)
+                        )
+                    try:
+                        entries = sorted(build_root.iterdir())
+                        preview = ", ".join(entry.name for entry in entries[:24])
+                        if len(entries) > 24:
+                            preview += f", ... (+{len(entries) - 24} more)"
+                        diagnostic_lines.append(f"build_root_entries=[{preview}]")
+                    except OSError as snapshot_exc:
+                        diagnostic_lines.append(f"build_root_entries=<unavailable: {snapshot_exc}>")
+                    self._last_error = " | ".join(diagnostic_lines)
+                    log.debug("%s", self._last_error, exc_info=True)
+                    logger.info(
+                        f"{self.display_name}: torch.ops JIT compilation failed "
+                        f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}; using fallback path."
+                    )
+                    return False
+                finally:
+                    elapsed = time.perf_counter() - started
+                    progress_display.close(succeeded=build_invocation_succeeded, elapsed_seconds=elapsed)
+
                 elapsed = time.perf_counter() - started
-                progress_display.close(succeeded=build_invocation_succeeded, elapsed_seconds=elapsed)
+                ready = self._refresh_runtime_cache() or self._try_load_prebuilt_library(build_root)
+                self._load_attempted = True
+                self._load_result = ready
+                if ready:
+                    self._refresh_runtime_cache()
+                    self._last_error = ""
+                    logger.info(
+                        f"{self.display_name}: torch.ops JIT extension ready "
+                        f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}."
+                    )
+                    return True
 
-            elapsed = time.perf_counter() - started
-            ready = self._refresh_runtime_cache() or self._try_load_prebuilt_library(build_root)
-            self._load_attempted = True
-            self._load_result = ready
-            if ready:
-                self._refresh_runtime_cache()
-                self._last_error = ""
-                logger.info(
-                    f"{self.display_name}: torch.ops JIT extension ready "
-                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}."
-                )
-                return True
-
-            self._last_error = f"{self.display_name}: build completed but required torch.ops were not registered."
-            logger.info(f"{self.display_name}: torch.ops JIT build finished without registering required ops.")
-            return False
+                self._last_error = f"{self.display_name}: build completed but required torch.ops were not registered."
+                logger.info(f"{self.display_name}: torch.ops JIT build finished without registering required ops.")
+                return False
 
     def namespace_object(self) -> object:
         """Return the cached torch.ops namespace after loading this extension."""

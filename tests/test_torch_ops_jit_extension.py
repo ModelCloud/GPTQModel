@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from gptqmodel.utils import cpp as cpp_module
 
@@ -768,3 +771,120 @@ def test_torch_ops_jit_extension_fingerprint_tracks_transitive_local_includes(tm
     second_build_root = loader.build_root()
 
     assert first_build_root != second_build_root
+
+
+def _spawn_flock_holder(lock_path: Path) -> subprocess.Popen:
+    """Start a child process that holds an exclusive flock on `lock_path` until killed."""
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, time\n"
+                f"fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('held', flush=True)\n"
+                "time.sleep(60)\n"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout.readline().strip() == "held"
+    return holder
+
+
+def test_torch_ops_jit_extension_removes_stale_torch_build_lock_before_compile(monkeypatch, tmp_path):
+    """Guard stale torch baton cleanup so a lock file left by a dead process cannot hang new builds."""
+
+    loader = _make_loader(tmp_path)
+    build_root = loader.build_root()
+    build_root.mkdir(parents=True)
+    stale_baton = build_root / "lock"
+    stale_baton.write_bytes(b"")
+
+    state = {"ready": False}
+    baton_present_during_compile = []
+    logger = _FakeLogger()
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+
+    def fake_compile(**kwargs):
+        baton_present_during_compile.append(stale_baton.exists())
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert baton_present_during_compile == [False]
+    assert stale_baton.exists() is False
+
+
+def test_torch_ops_jit_extension_build_lock_is_released_when_holder_is_killed(monkeypatch, tmp_path):
+    """Guard the killed-holder case so a dead process can never leave the JIT cache locked."""
+
+    if cpp_module.fcntl is None:
+        pytest.skip("requires fcntl-based cross-process locking")
+
+    loader = _make_loader(tmp_path)
+    lock_path = loader._cross_process_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    holder = _spawn_flock_holder(lock_path)
+    holder.kill()
+    holder.wait()
+
+    state = {"ready": False}
+    compile_calls = []
+    logger = _FakeLogger()
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setenv("GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT", "5")
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    started = time.perf_counter()
+    assert loader.load() is True
+    assert time.perf_counter() - started < 5.0
+    assert len(compile_calls) == 1
+    assert lock_path.exists() is True
+
+
+def test_torch_ops_jit_extension_build_lock_wait_is_bounded(monkeypatch, tmp_path):
+    """Guard the bounded wait so a stuck live holder degrades the load instead of hanging it."""
+
+    if cpp_module.fcntl is None:
+        pytest.skip("requires fcntl-based cross-process locking")
+
+    loader = _make_loader(tmp_path)
+    lock_path = loader._cross_process_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    holder = _spawn_flock_holder(lock_path)
+    try:
+        compile_calls = []
+        logger = _FakeLogger()
+
+        monkeypatch.setenv("GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT", "0.5")
+        monkeypatch.setattr(loader, "_ops_available", lambda: False)
+        monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+        monkeypatch.setattr(cpp_module, "load", lambda **kwargs: compile_calls.append(kwargs))
+
+        assert loader.load() is False
+        assert compile_calls == []
+        assert "timed out" in loader.last_error_message()
+        assert any("fallback" in message for message in logger.info_messages)
+    finally:
+        holder.kill()
+        holder.wait()
