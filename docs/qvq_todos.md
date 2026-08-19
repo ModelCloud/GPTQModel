@@ -2850,10 +2850,25 @@ Findings and decisions:
   batch dimension. Replay batching remains independently fixed at 1.
 - Preserve descending length sorting. It is a measured 1.63x win on the 64-row screen and does not change the
   per-sequence estimator.
-- Promote adaptive MPS factor-pass sizing: retain the conservative 4-GiB floor, but allow up to 8 GiB (at most one
-  quarter of `torch.mps.recommended_max_memory()`). On this M4, Llama 3.2 1B's approximately 7.67-GB packed factor
-  set fits in one pass instead of two, removing one complete 512-sequence full-model traversal without changing any
-  factor arithmetic.
+- Reject the adaptive 8-GiB one-pass MPS policy after a complete matched lifecycle benchmark. Both arms used all
+  16 Llama 3.2 1B layers, all 112 Q/K/V/O/gate/up/down projections, the same 512 rows (163,324 valid tokens), batch
+  8, descending full-row lengths, FP16 model execution, FP32 factors, activation checkpointing, seed 20260819, and
+  all 12 M4 Max performance cores:
+
+```text
++----------------------+---------------+---------+-----------------+--------------------------+
+| Factor budget        | Factor passes | Minutes | Relative speed  | Exact factor SHA-256     |
++----------------------+---------------+---------+-----------------+--------------------------+
+| 4 GiB (legacy)       | 2 x 56 target | 24.002  | 1.000x          | reference                |
+| 8 GiB (one pass)     | 1 x 112 target| 41.546  | 0.578x          | identical, all 224       |
++----------------------+---------------+---------+-----------------+--------------------------+
+```
+
+  The one-pass policy is 1.731x slower. It removes one model traversal, but doubling the resident target set makes
+  the MPS packed-Gram working set much less efficient. The 4-GiB default is restored; an explicit
+  `max_factor_bytes_per_pass` override remains available for future hardware-specific sweeps. The benchmark is
+  reproducible with `scripts/benchmark_qvq_sketch_b_pass_planning.py`, and the JSON/log artifacts are under
+  `artifacts/qvq_sketch_b_optimization/full512_{legacy_4gib,optimized_8gib}.*`.
 
 The 10x goal cannot be met by an exact contraction reorder alone. Exact Sketch-B's arithmetic lower bound dominates
 the wide MLP factors; even computing only one triangle offers at most approximately 2x for that phase. The remaining
