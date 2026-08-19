@@ -1810,7 +1810,14 @@ class BaseQModel(nn.Module):
                 qvq_args["yaqa_calibration"] = self.prepare_dataset(
                     calibration_dataset=yaqa_calibration,
                     calibration_dataset_concat_size=calibration_concat_size,
-                    calibration_dataset_sort=calibration_sort,
+                    # YAQA batching is independent of ordinary calibration.
+                    # Length bucketing removes padded model/Gram work without
+                    # changing which independent Fisher rows are consumed.
+                    calibration_dataset_sort=(
+                        None
+                        if self.quantize_config.yaqa.sequence_sort == "none"
+                        else self.quantize_config.yaqa.sequence_sort
+                    ),
                     # Sketch-B remains per-sequence: collating independent rows
                     # only amortizes model launches, Gram transfers, and MPS
                     # synchronization. Ordinary calibration keeps its own batch.

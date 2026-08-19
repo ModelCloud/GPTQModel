@@ -46,6 +46,7 @@ class YaqaConfig:
     batch_size: int = 8
     activation_checkpointing: bool = True
     mps_cleanup_interval: int = 8
+    sequence_sort: str = "desc"
     v2b2_family_mode: str = "reselect"
     sample_strategy: str = "full"
     spectral_refinement: bool = False
@@ -84,6 +85,11 @@ class YaqaConfig:
             or self.mps_cleanup_interval < 1
         ):
             raise ValueError("YaqaConfig: `mps_cleanup_interval` must be a positive integer.")
+        if not isinstance(self.sequence_sort, str):
+            raise TypeError("YaqaConfig: `sequence_sort` must be a string.")
+        self.sequence_sort = self.sequence_sort.strip().lower()
+        if self.sequence_sort not in {"none", "asc", "desc"}:
+            raise ValueError("YaqaConfig: `sequence_sort` must be one of `none`, `asc`, or `desc`.")
         if not isinstance(self.v2b2_family_mode, str):
             raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
         self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()

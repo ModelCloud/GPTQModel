@@ -853,6 +853,7 @@ def test_yaqa_config_defaults_to_current_paper_regularization_and_sample_floor()
     assert config.yaqa.batch_size == 8
     assert config.yaqa.activation_checkpointing is True
     assert config.yaqa.mps_cleanup_interval == 8
+    assert config.yaqa.sequence_sort == "desc"
 
 
 @pytest.mark.parametrize(
@@ -863,6 +864,8 @@ def test_yaqa_config_defaults_to_current_paper_regularization_and_sample_floor()
         ({"activation_checkpointing": 1}, TypeError, "activation_checkpointing"),
         ({"mps_cleanup_interval": 0}, ValueError, "mps_cleanup_interval"),
         ({"mps_cleanup_interval": True}, ValueError, "mps_cleanup_interval"),
+        ({"sequence_sort": 1}, TypeError, "sequence_sort"),
+        ({"sequence_sort": "shuffle"}, ValueError, "sequence_sort"),
     ),
 )
 def test_yaqa_config_rejects_invalid_collection_controls(kwargs, exception, message):

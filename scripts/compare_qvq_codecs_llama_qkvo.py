@@ -335,6 +335,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaqa-row-offset", type=int)
     parser.add_argument("--yaqa-batch-size", type=int, default=8)
     parser.add_argument("--yaqa-mps-cleanup-interval", type=int, default=8)
+    parser.add_argument("--yaqa-sequence-sort", choices=("none", "asc", "desc"), default="desc")
     parser.add_argument(
         "--yaqa-no-activation-checkpointing",
         action="store_true",
@@ -469,6 +470,7 @@ def _padded_batch_chunks(
     encoded: dict[str, torch.Tensor],
     *,
     batch_size: int,
+    sequence_sort: str = "none",
 ) -> list[dict[str, torch.Tensor]]:
     """Split padded rows into batches while trimming padding-only edge columns."""
 
@@ -477,6 +479,18 @@ def _padded_batch_chunks(
         raise ValueError("YAQA encoding must contain a rank-2 attention mask")
     if batch_size < 1:
         raise ValueError("YAQA batch size must be positive")
+    if sequence_sort not in {"none", "asc", "desc"}:
+        raise ValueError("YAQA sequence sort must be `none`, `asc`, or `desc`")
+    if sequence_sort != "none":
+        lengths = attention_mask.ne(0).sum(dim=1)
+        order = torch.argsort(lengths, descending=sequence_sort == "desc", stable=True)
+        encoded = {
+            name: value.index_select(0, order)
+            if value.ndim > 0 and value.shape[0] == attention_mask.shape[0]
+            else value
+            for name, value in encoded.items()
+        }
+        attention_mask = encoded["attention_mask"]
     batches = []
     for start in range(0, attention_mask.shape[0], batch_size):
         stop = min(start + batch_size, attention_mask.shape[0])
@@ -506,6 +520,7 @@ def _yaqa_cache_metadata(args: argparse.Namespace, module_shapes: dict[str, list
         "rows": args.yaqa_rows,
         "row_offset": row_offset,
         "batch_size": args.yaqa_batch_size,
+        "sequence_sort": args.yaqa_sequence_sort,
         "seed": args.yaqa_seed,
         "max_length": args.max_length,
     }
@@ -3268,7 +3283,11 @@ def main() -> None:
                 rows=args.yaqa_rows,
                 max_length=args.max_length,
             )
-            yaqa_batches = _padded_batch_chunks(yaqa_encoded, batch_size=args.yaqa_batch_size)
+            yaqa_batches = _padded_batch_chunks(
+                yaqa_encoded,
+                batch_size=args.yaqa_batch_size,
+                sequence_sort=args.yaqa_sequence_sort,
+            )
         if args.yaqa_factor_cache is not None and args.yaqa_factor_cache.is_file():
             yaqa_input_hessians, yaqa_output_hessians, yaqa_stats = _load_yaqa_factor_cache(
                 args.yaqa_factor_cache,

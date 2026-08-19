@@ -1591,6 +1591,35 @@ def test_qvq_banked_yaqa_sweep_arms_and_disjoint_batch_contract():
     assert sum(int(batch["attention_mask"].sum()) for batch in batches) == 9
 
 
+def test_yaqa_padded_batches_length_bucket_without_changing_rows():
+    encoded = {
+        "input_ids": torch.tensor(
+            [
+                [11, 12, 13, 14],
+                [0, 0, 0, 21],
+                [0, 31, 32, 33],
+                [0, 0, 41, 42],
+            ]
+        ),
+        "attention_mask": torch.tensor(
+            [
+                [1, 1, 1, 1],
+                [0, 0, 0, 1],
+                [0, 1, 1, 1],
+                [0, 0, 1, 1],
+            ]
+        ),
+    }
+
+    native = _padded_batch_chunks(encoded, batch_size=2, sequence_sort="none")
+    bucketed = _padded_batch_chunks(encoded, batch_size=2, sequence_sort="desc")
+
+    assert sum(batch["attention_mask"].numel() for batch in native) == 14
+    assert sum(batch["attention_mask"].numel() for batch in bucketed) == 12
+    assert [int(row[-1]) for batch in bucketed for row in batch["input_ids"]] == [14, 33, 42, 21]
+    assert sum(int(batch["attention_mask"].sum()) for batch in bucketed) == 10
+
+
 def test_qvq_banked_yaqa_factor_cache_is_atomic_and_validated(tmp_path):
     path = tmp_path / "sketch_b.pt"
     metadata = {"version": 1, "module_shapes": {"proj": [3, 2]}}
