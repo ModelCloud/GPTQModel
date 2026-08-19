@@ -721,6 +721,23 @@ class QVQProcessor(LoopProcessor):
             + module.out_features * (module.out_features + 1)
         ) * 2
 
+    @staticmethod
+    def _yaqa_default_max_factor_bytes(target_device: torch.device, total_factor_bytes: int) -> int:
+        """Choose a conservative pass budget while exploiting large unified-memory Macs."""
+
+        if target_device.type != "mps":
+            return total_factor_bytes
+        minimum = 4 * 1024**3
+        maximum = 8 * 1024**3
+        recommended_max_memory = getattr(torch.mps, "recommended_max_memory", None)
+        if not callable(recommended_max_memory):
+            return minimum
+        try:
+            device_budget = int(recommended_max_memory()) // 4
+        except RuntimeError:
+            return minimum
+        return max(minimum, min(maximum, device_budget))
+
     @classmethod
     def _yaqa_target_chunks(
         cls,
@@ -810,8 +827,10 @@ class QVQProcessor(LoopProcessor):
         targets, decoder_layers = self._yaqa_target_modules(gptq_model)
         max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
         if max_factor_bytes is None:
-            max_factor_bytes = 4 * 1024**3 if target_device.type == "mps" else sum(
-                self._yaqa_factor_bytes(module) for module in targets.values()
+            total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
+            max_factor_bytes = self._yaqa_default_max_factor_bytes(
+                target_device,
+                total_factor_bytes,
             )
         packed_symmetric_accumulators = target_device.type == "mps"
         target_chunks = self._yaqa_target_chunks(

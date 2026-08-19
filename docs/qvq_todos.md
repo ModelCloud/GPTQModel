@@ -41,6 +41,39 @@ local error when disjoint live execution materially lowers final-logit KL and im
 and any guardrail changes are noise-consistent. YAQA can deliberately spend local error in directions that are less
 harmful after propagation. Reject clear downstream negatives or numerical instability, not a local-proxy miss alone.
 
+### Promotion, rejection, and compute-status ledger
+
+This ledger is the historical decision boundary for the low-rate recovery experiments. “Rejected” means a complete
+disjoint propagated gate produced evidence against the tested formulation. “Needs more compute” means that no quality
+decision is valid because the test did not finish. A local-proxy improvement alone is never sufficient for promotion.
+
+| Item | Decision | Evidence / measured result | Next action |
+|---|---|---|---|
+| Canonical V2 / PGC16-v1 | **Production baseline** | Exact serialized V2 oracle; remains the rollback reference for every banked arm | Keep as independent oracle |
+| V2 + YAQA | **Validated positive** | Real Llama 3.2 1B W2 control: final KL `0.134190`; YAQA `0.094945`; Top-1 `62.93% -> 68.58%`, Top-5 `67.41% -> 72.33%`, Top-10 `68.47% -> 73.26%` | Retain as the propagated low-rate baseline; repeat on CUDA for larger factorials |
+| Fixed-trellis SU/SV alignment | **Validated opt-in** | Four-layer W2 B2-P32 real-Llama gates: evaluation slice 1 KL/JSD `-12.92%/-12.55%`, Top-5/10 `+0.456/+0.498 pp`; slice 2 KL/JSD `-14.87%/-14.40%`, Top-5/10 `+0.499/+0.543 pp`; Top-1 `-0.043/-0.030 pp`, classified as noise-consistent | Enable with `output_alignment=OutputAlignConfig()` when desired; the default remains the unaligned baseline, with fixed trellises and exact rollback |
+| Sequential SU/SV lifecycle alignment | **Not promoted** | Local validation MSE improved, but external propagated KL/JSD changed `+0.80%/+0.07%` while Top-1/5 improved slightly; tiny prompt gate had opposite mixed signs | Keep diagnostic-only; do not conflate with fixed-trellis promotion |
+| P3 global spectral push | **Rejected/retired** | 192 real-Llama candidates changed paths, but zero improved the original YAQA proxy; proxy regressions ranged from `+6.42%` to `+838.26%` depending on rank/alpha | Retire as promotion path; retain only as a diagnostic |
+| P4 localized propagation | **Default-off / inconclusive** | Seed-sensitive, near-noise effects; four-layer and full-horizon signs changed; no replicated material gain | Do not spend task-scale evaluation until a seed-stable gate exists |
+| P5 multi-change refinement | **Rejected for current formulation** | Short-horizon gains reversed at full horizon; Q proposal KL `0.0014115776 -> 0.0014153905`, K `0.0038981916 -> 0.0039030055` | Keep implementation guarded; require complete-horizon selection |
+| P6 bounded replay reranking | **Rejected for current portfolio** | Two search folds improved, but independent confirmation KL regressed `+0.0234%`; repeated rerun reproduced the result | Do not widen replay budget; change candidate generation first |
+| P7 direct residual-ranked candidates | **Rejected** | Direct candidate regressed one search fold; spectral winner later regressed confirmation KL `+0.0234%` | Retire residual-ranked direct generator |
+| P8 four direct candidates | **Rejected** | Best candidate improved search by only `0.0099%` and confirmation KL regressed `+0.0090%` | Retire this candidate family |
+| P9 teacher-KL gradient ranking | **Promising but underpowered** | Original disjoint confirmation moved KL `-0.0094%`, Top-1 `+0.0105 pp`, Top-5 `+0.0021 pp`, Top-10 `+0.0169 pp`; direction was consistent but below the `0.1%` minimum effect | Re-run with disjoint gradient rows on CUDA |
+| B2-P32 + YAQA on Apple | **Needs more compute** | Real Llama setup was valid, but first q-projection exceeded practical MPS runtime; no quality metric was produced | Run identical contract on CUDA |
+| P9 disjoint-gradient Apple rerun | **Resource-inconclusive** | Gradient/search/confirmation/evaluation splits loaded and teacher caches completed, but 50-minute run stopped inside `_batched_v2_banked_viterbi_quantize` before candidate metrics | Do not classify as failure; rerun on CUDA using the new split flags |
+| CUDA/MLX packed V2B2/V2B4 inference | **Implementation validated** | Dense-reference, packing, reload, and backend parity tests pass through supported rates | Continue performance and full lifecycle coverage; this is not a quality promotion by itself |
+
+#### Required follow-up order
+
+1. Run the identical P9 disjoint-gradient contract on CUDA and report gradient norm, candidate fold scores,
+   independent confirmation KL, Top-1/5/10, and paired flips.
+2. Run the V2 versus B2-P32 YAQA factorial on CUDA with independent ordinary calibration, YAQA Fisher, search,
+   confirmation, and evaluation splits.
+3. Keep P4--P8 default-off unless a materially larger, seed-stable propagated gain survives confirmation.
+4. Do not undo fixed-trellis SU/SV alignment based on the older sequential lifecycle result; they are different
+   algorithms and have different evidence.
+
 ### MPS YAQA banked quantization memory bound (2026-08-16)
 
 The first real Llama 3.2 1B B2-P32+YAQA attempt on the M4 Max showed runaway Metal allocator pressure: the native
@@ -2777,3 +2810,53 @@ average of ARC normalized, GSM8K, STEM, and History recovery; raw ARC accuracy i
 All rows are complete. The strict-disjoint W3 and W3.5 History evaluations finished at 0.5129 and 0.5290.
 The legacy W3 checkpoints use `format=qvq, vector_size=2`; they do not exercise the experimental V4 CUDA GEMV path
 added by `ef7cce80`.
+
+## Apple Sketch-B collection optimization (2026-08-19)
+
+Goal: reduce the approximately 20--25 minute, once-per-model YAQA Sketch-B startup on a 48-GB M4 Max. Replay
+batching remains 1 because replay was not the dominant stage. Critical factor arithmetic uses a `1e-6` relative-L2
+gate; forwarding-only comparisons may use `1e-3`.
+
+The collector implements the paper/reference Sketch-B contraction. For each independent sequence,
+`G_b = D_b^T A_b`, then it accumulates `sum_b G_b^T G_b` and `sum_b G_b G_b^T`. This is intrinsically cubic in
+module width. The reference implementation uses the equivalent four-index `einsum`; on MPS that contraction planner
+attempted a 124,928-GiB intermediate and is unusable.
+
+Real-model screens used Llama 3.2 1B Instruct, full-model backward through all 16 decoder layers, natural full-length
+`neuralmagic/calibration` rows, FP16 model execution, FP32 factors, and all 12 performance cores.
+
+```text
++--------------------------------------+----------+----------+---------------------+------------------------------+
+| Arm                                 | Rows/B   | Seconds  | Speedup             | Max factor rel-L2 vs full    |
++--------------------------------------+----------+----------+---------------------+------------------------------+
+| QKVO full Sketch-B, unsorted         | 64/8     | 32.113   | 1.00x               | 0                            |
+| QKVO full Sketch-B, sorted           | 64/8     | 19.724   | 1.63x vs unsorted   | 0                            |
+| QKVO full Sketch-B, sorted           | 64/16    | 44.079   | 0.45x vs sorted B8  | grouping test only           |
+| QKVO device-resident exact Gram      | 64/8     | 32.235   | 1.00x               | 0                            |
+| QKVO flattened Gram                  | 8/8      |  2.674   | 1.08x               | 2.264e-6: reject             |
+| QKVO token-space Gram                | 64/8     | 31.054   | 0.98x               | 1.232e-6: reject             |
+| Full layer projected Sketch-B r=128  | 8/8      |  2.803   | 1.38x               | 0.304: experimental only     |
+| Full layer projected Sketch-B r=256  | 8/8      |  2.876   | 1.34x               | 0.229: experimental only     |
++--------------------------------------+----------+----------+---------------------+------------------------------+
+```
+
+Findings and decisions:
+
+- Keep `gram_strategy="batched"` as the exact oracle/default. Flattened and token-space reassociation are rejected:
+  neither is faster on the realistic 64-row screen and each exceeds the critical `1e-6` factor gate.
+- Keep projected Sketch-B research-only. The Rademacher estimator is PSD and unbiased, but ranks 32--256 changed
+  real QKVO factors by roughly 14--35%; it needs a complete quantization/final-KL gate before lifecycle exposure.
+- Keep YAQA batch size 8. Batch 16 is slower even after length sorting because full Gram temporaries scale with the
+  batch dimension. Replay batching remains independently fixed at 1.
+- Preserve descending length sorting. It is a measured 1.63x win on the 64-row screen and does not change the
+  per-sequence estimator.
+- Promote adaptive MPS factor-pass sizing: retain the conservative 4-GiB floor, but allow up to 8 GiB (at most one
+  quarter of `torch.mps.recommended_max_memory()`). On this M4, Llama 3.2 1B's approximately 7.67-GB packed factor
+  set fits in one pass instead of two, removing one complete 512-sequence full-model traversal without changing any
+  factor arithmetic.
+
+The 10x goal cannot be met by an exact contraction reorder alone. Exact Sketch-B's arithmetic lower bound dominates
+the wide MLP factors; even computing only one triangle offers at most approximately 2x for that phase. The remaining
+credible paths are: (1) a native packed-triangular Metal Gram kernel plus the one-pass policy for an exact but smaller
+gain, or (2) a deliberately approximate estimator such as projected Sketch-B/FastKron, which must earn promotion via
+disjoint full-model final-KL and Top-N validation rather than local factor similarity.

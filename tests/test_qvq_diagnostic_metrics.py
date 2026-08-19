@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from gptqmodel.quantization.qvq import yaqa_sketch_b
+from gptqmodel.quantization.qvq_yaqa import _sketch_b_gram_updates
 from scripts.analyze_gptq_low_bit_grid import (
     _load_nm_calibration,
     _summary,
@@ -837,6 +838,53 @@ def test_qvq_diagnostic_calibration_hessian_fails_closed_on_invalid_sample_state
     assert not modules["proj"]._forward_hooks
 
 
+@pytest.mark.parametrize("shape", ((3, 7, 8, 6), (4, 32, 64, 48), (2, 128, 128, 96)))
+@pytest.mark.parametrize("strategy", ("flattened", "token_space"))
+def test_yaqa_sketch_b_gram_strategies_preserve_fp32_factor_geometry(shape, strategy):
+    batch, tokens, in_features, out_features = shape
+    generator = torch.Generator().manual_seed(20260819)
+    activation = torch.randn((batch, tokens, in_features), generator=generator, dtype=torch.float32)
+    gradient = torch.randn((batch, tokens, out_features), generator=generator, dtype=torch.float32)
+
+    expected = _sketch_b_gram_updates(activation, gradient, strategy="batched")
+    actual = _sketch_b_gram_updates(activation, gradient, strategy=strategy)
+
+    for actual_factor, expected_factor in zip(actual, expected, strict=True):
+        relative_l2 = torch.linalg.vector_norm(actual_factor - expected_factor) / torch.linalg.vector_norm(
+            expected_factor
+        )
+        assert float(relative_l2) <= 1e-6
+        assert torch.equal(actual_factor, actual_factor.T)
+
+
+def test_yaqa_projected_sketch_b_gram_matches_explicit_projected_weight_scores():
+    generator = torch.Generator().manual_seed(20260819)
+    activation = torch.randn((3, 11, 13), generator=generator, dtype=torch.float32)
+    gradient = torch.randn((3, 11, 17), generator=generator, dtype=torch.float32)
+    output_projection = torch.randn((17, 5), generator=generator, dtype=torch.float32)
+    input_projection = torch.randn((13, 5), generator=generator, dtype=torch.float32)
+    weight_scores = torch.bmm(gradient.transpose(1, 2), activation)
+    expected_input = torch.bmm(
+        (weight_scores.transpose(1, 2) @ output_projection),
+        (weight_scores.transpose(1, 2) @ output_projection).transpose(1, 2),
+    ).sum(dim=0)
+    expected_output = torch.bmm(
+        weight_scores @ input_projection,
+        (weight_scores @ input_projection).transpose(1, 2),
+    ).sum(dim=0)
+
+    actual_input, actual_output = _sketch_b_gram_updates(
+        activation,
+        gradient,
+        strategy="projected",
+        projections=(output_projection, input_projection),
+    )
+
+    for actual, expected in ((actual_input, expected_input), (actual_output, expected_output)):
+        relative_l2 = torch.linalg.vector_norm(actual - expected) / torch.linalg.vector_norm(expected)
+        assert float(relative_l2) <= 1e-6
+
+
 def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_oracle():
     model = _TinyCausalModel().eval()
     reference = copy.deepcopy(model)
@@ -924,8 +972,10 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
         "sequence_loss_reduction": "per_sequence_token_sum",
         "activation_checkpointing": False,
         "checkpointed_modules": 0,
-        "packed_symmetric_accumulators": False,
-        "mps_cleanup_interval": 8,
+            "packed_symmetric_accumulators": False,
+            "gram_strategy": "batched",
+            "gram_projection_rank": None,
+            "mps_cleanup_interval": 8,
         "mps_cleanup_count": 0,
         "minimum_sequences": 1,
         "factor_dtype": "float32",
@@ -1218,7 +1268,7 @@ def test_yaqa_diagnostic_sketch_b_rejects_invalid_accumulator_devices():
     }
     modules = {"proj": model.model.layers[0].proj}
 
-    with pytest.raises(ValueError, match="CPU or CUDA"):
+    with pytest.raises(ValueError, match="CPU, CUDA, or MPS"):
         capture_yaqa_sketch_b(
             model,
             [batch],

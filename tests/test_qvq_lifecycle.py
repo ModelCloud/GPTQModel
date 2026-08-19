@@ -107,6 +107,14 @@ def test_qvq_yaqa_packed_symmetric_chunking_uses_actual_accumulator_bytes():
     assert [len(chunk) for chunk in packed_chunks] == [3, 1]
 
 
+def test_qvq_yaqa_default_mps_factor_budget_uses_large_unified_memory_without_exceeding_cap():
+    with patch("torch.mps.recommended_max_memory", return_value=40 * 1024**3):
+        assert QVQProcessor._yaqa_default_max_factor_bytes(torch.device("mps"), 20 * 1024**3) == 8 * 1024**3
+    with patch("torch.mps.recommended_max_memory", return_value=16 * 1024**3):
+        assert QVQProcessor._yaqa_default_max_factor_bytes(torch.device("mps"), 20 * 1024**3) == 4 * 1024**3
+    assert QVQProcessor._yaqa_default_max_factor_bytes(torch.device("cpu"), 12345) == 12345
+
+
 def test_qvq_dynamic_clone_preserves_fractional_rate_and_skip_contract():
     cfg = QVQConfig(
         bits=2,

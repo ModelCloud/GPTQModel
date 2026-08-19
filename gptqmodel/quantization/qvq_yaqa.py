@@ -146,6 +146,96 @@ def _default_first_decoder_layer(model: nn.Module) -> nn.Module:
     return layers[0]
 
 
+def _sketch_b_gram_updates(
+    activation: torch.Tensor,
+    gradient: torch.Tensor,
+    *,
+    strategy: str,
+    projections: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the two exact Sketch-B Gram sums without changing their objective.
+
+    For each sequence ``b``, Sketch-B forms the full-model weight score
+    ``G_b = D_b.T @ A_b``.  All strategies below compute
+    ``sum_b G_b.T @ G_b`` and ``sum_b G_b @ G_b.T``; they differ only in
+    contraction grouping and temporary storage.
+    """
+
+    if strategy not in {"batched", "flattened", "projected", "token_space"}:
+        raise ValueError("YAQA Gram strategy must be `batched`, `flattened`, `projected`, or `token_space`")
+    if activation.ndim != 3 or gradient.ndim != 3:
+        raise ValueError("YAQA Gram inputs must have [batch, sequence, channels] geometry")
+    if tuple(activation.shape[:2]) != tuple(gradient.shape[:2]):
+        raise ValueError("YAQA Gram activation and gradient token geometry must match")
+    if activation.dtype != torch.float32 or gradient.dtype != torch.float32:
+        raise TypeError("YAQA Gram inputs must be FP32")
+
+    batch_sequences, _, out_features = gradient.shape
+    in_features = activation.shape[-1]
+    if strategy == "projected":
+        if projections is None or len(projections) != 2:
+            raise ValueError("Projected YAQA Gram collection requires output and input projections")
+        output_projection, input_projection = projections
+        if tuple(output_projection.shape[:1]) != (out_features,) or tuple(input_projection.shape[:1]) != (
+            in_features,
+        ):
+            raise ValueError("Projected YAQA Gram geometry does not match the module channels")
+        if output_projection.shape[1] != input_projection.shape[1]:
+            raise ValueError("Projected YAQA input and output ranks must match")
+        if output_projection.device != gradient.device or input_projection.device != gradient.device:
+            raise ValueError("Projected YAQA Gram projections must share the activation device")
+        # For R with iid +/-1/sqrt(k), E[R R.T] = I. Therefore
+        # E[(G.T R)(G.T R).T] = G.T G and likewise for G R. This
+        # preserves a PSD Kronecker factor while replacing the opposite
+        # channel dimension by the tunable projection rank k.
+        projected_gradient = torch.bmm(
+            activation.transpose(1, 2),
+            gradient @ output_projection,
+        )
+        projected_activation = torch.bmm(
+            gradient.transpose(1, 2),
+            activation @ input_projection,
+        )
+        input_source = projected_gradient.permute(1, 0, 2).reshape(in_features, -1)
+        output_source = projected_activation.permute(1, 0, 2).reshape(out_features, -1)
+        input_update = input_source @ input_source.T
+        output_update = output_source @ output_source.T
+        return input_update, output_update
+    if strategy == "token_space":
+        # Associativity gives A.T @ (D @ D.T) @ A and
+        # D.T @ (A @ A.T) @ D.  This avoids materializing G when the token
+        # dimension is smaller than the module channel dimensions.
+        gradient_token_gram = torch.bmm(gradient, gradient.transpose(1, 2))
+        activation_token_gram = torch.bmm(activation, activation.transpose(1, 2))
+        input_update = torch.bmm(
+            activation.transpose(1, 2),
+            torch.bmm(gradient_token_gram, activation),
+        ).sum(dim=0)
+        output_update = torch.bmm(
+            gradient.transpose(1, 2),
+            torch.bmm(activation_token_gram, gradient),
+        ).sum(dim=0)
+        # The reassociated products can differ across mirrored entries by a
+        # few FP32 ulps. Restore the exact symmetric contract required by the
+        # packed accumulator and LDL factorization.
+        return (input_update + input_update.T) * 0.5, (output_update + output_update.T) * 0.5
+
+    per_sequence_gradient = torch.bmm(gradient.transpose(1, 2), activation)
+    if strategy == "flattened":
+        # Concatenating G_b vertically/horizontally turns each sum of Grams
+        # into one GEMM and avoids B full Gram outputs.
+        input_source = per_sequence_gradient.reshape(batch_sequences * out_features, in_features)
+        output_source = per_sequence_gradient.permute(1, 0, 2).reshape(
+            out_features, batch_sequences * in_features
+        )
+        return input_source.T @ input_source, output_source @ output_source.T
+
+    return (
+        torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0),
+        torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0),
+    )
+
+
 def capture_yaqa_sketch_b(
     model: nn.Module,
     batches: list[dict[str, torch.Tensor]],
@@ -160,6 +250,8 @@ def capture_yaqa_sketch_b(
     accumulator_device: torch.device | None = None,
     mps_cleanup_interval: int = 8,
     mps_pack_symmetric_grams: bool = True,
+    gram_strategy: str = "batched",
+    gram_projection_rank: int | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -185,12 +277,25 @@ def capture_yaqa_sketch_b(
         raise ValueError("YAQA MPS cleanup interval must be a positive integer")
     if not isinstance(mps_pack_symmetric_grams, bool):
         raise TypeError("YAQA MPS symmetric-Gram packing flag must be boolean")
+    if gram_strategy not in {"batched", "flattened", "projected", "token_space"}:
+        raise ValueError("YAQA Gram strategy must be `batched`, `flattened`, `projected`, or `token_space`")
+    if gram_strategy == "projected":
+        if (
+            isinstance(gram_projection_rank, bool)
+            or not isinstance(gram_projection_rank, int)
+            or gram_projection_rank < 1
+        ):
+            raise ValueError("Projected YAQA Gram collection requires a positive projection rank")
+    elif gram_projection_rank is not None:
+        raise ValueError("YAQA Gram projection rank is valid only with the projected strategy")
     if accumulator_device is not None:
         accumulator_device = torch.device(accumulator_device)
-        if accumulator_device.type not in {"cpu", "cuda"}:
-            raise ValueError("YAQA Sketch-B accumulators support CPU or CUDA storage")
+        if accumulator_device.type not in {"cpu", "cuda", "mps"}:
+            raise ValueError("YAQA Sketch-B accumulators support CPU, CUDA, or MPS storage")
         if accumulator_device.type == "cuda" and device.type != "cuda":
             raise ValueError("YAQA CUDA accumulators require CUDA collection")
+        if accumulator_device.type == "mps" and device.type != "mps":
+            raise ValueError("YAQA MPS accumulators require MPS collection")
     if first_decoder_layer is None:
         first_decoder_layer = _default_first_decoder_layer(model)
     if not isinstance(first_decoder_layer, nn.Module):
@@ -236,6 +341,27 @@ def capture_yaqa_sketch_b(
     packed_symmetric_accumulators = (
         mps_pack_symmetric_grams and device.type == "mps" and accumulator_device.type == "cpu"
     )
+    gram_projections: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    if gram_strategy == "projected":
+        assert gram_projection_rank is not None
+        projection_generator = torch.Generator(device="cpu").manual_seed(seed ^ 0x59415141)
+        projection_scale = gram_projection_rank**-0.5
+        for name, module in modules.items():
+            output_projection = torch.randint(
+                0,
+                2,
+                (module.out_features, gram_projection_rank),
+                generator=projection_generator,
+                dtype=torch.int8,
+            ).to(dtype=torch.float32).mul_(2).sub_(1).mul_(projection_scale).to(device)
+            input_projection = torch.randint(
+                0,
+                2,
+                (module.in_features, gram_projection_rank),
+                generator=projection_generator,
+                dtype=torch.int8,
+            ).to(dtype=torch.float32).mul_(2).sub_(1).mul_(projection_scale).to(device)
+            gram_projections[name] = (output_projection, input_projection)
     sequence_counts = dict.fromkeys(modules, 0)
     total_sequences = 0
     total_valid_tokens = 0
@@ -295,15 +421,18 @@ def capture_yaqa_sketch_b(
         keep = active_mask.to(device=gradient.device, dtype=torch.bool).unsqueeze(-1)
         gradient = torch.where(keep, gradient.detach().float(), 0)
         activation = torch.where(keep, activation.float(), 0)
-        per_sequence_gradient = torch.bmm(gradient.transpose(1, 2), activation)
+        batch_sequences = gradient.shape[0]
         if nonfinite_update is None:
-            if not torch.isfinite(per_sequence_gradient).all():
+            if not torch.isfinite(gradient).all():
                 raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
         else:
-            nonfinite_update.logical_or_(~torch.isfinite(per_sequence_gradient).all())
-        input_update = torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0)
-        output_update = torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0)
-        batch_sequences = per_sequence_gradient.shape[0]
+            nonfinite_update.logical_or_(~torch.isfinite(gradient).all())
+        input_update, output_update = _sketch_b_gram_updates(
+            activation,
+            gradient,
+            strategy=gram_strategy,
+            projections=gram_projections.get(module_name),
+        )
         if nonfinite_update is None:
             if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
                 raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
@@ -518,6 +647,8 @@ def capture_yaqa_sketch_b(
             if packed_symmetric_accumulators
             else factor_bytes,
             "packed_symmetric_accumulators": packed_symmetric_accumulators,
+            "gram_strategy": gram_strategy,
+            "gram_projection_rank": gram_projection_rank,
             "capture_wall_seconds": time.perf_counter() - capture_started,
             "capture_cuda_ms": capture_cuda_ms,
             "final_host_transfer_seconds": transfer_seconds,
