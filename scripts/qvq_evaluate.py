@@ -142,11 +142,16 @@ def _row_text(row: dict[str, Any], tokenizer, text_column: str | None) -> str:
 
 
 def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
-    target = getattr(model, "model", model)
-    output = target(**encoded, use_cache=False)
+    # Call the public causal-LM wrapper. Unwrapping ``.model`` bypasses the LM
+    # head on common Transformers architectures and returns hidden states.
+    output = model(**encoded, use_cache=False)
     logits = getattr(output, "logits", None)
+    if logits is None and isinstance(output, dict):
+        logits = output.get("logits")
+    if logits is None and isinstance(output, (tuple, list)) and output:
+        logits = output[0]
     if not isinstance(logits, torch.Tensor):
-        raise TypeError("Model forward did not return tensor logits")
+        raise TypeError(f"Model forward did not return tensor logits (output type: {type(output).__name__})")
     return logits
 
 
