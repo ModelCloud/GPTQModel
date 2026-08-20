@@ -41,6 +41,26 @@ log = setup_logger()
 
 
 @dataclass
+class ChatTemplateConfig:
+    """Controls optional YAQA down-weighting of formatter/control tokens."""
+
+    enabled: bool = False
+    content_weight: float = 0.95
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("ChatTemplateConfig: `enabled` must be boolean.")
+        if (
+            isinstance(self.content_weight, bool)
+            or not isinstance(self.content_weight, (int, float))
+            or not math.isfinite(float(self.content_weight))
+            or not 0.0 < float(self.content_weight) < 1.0
+        ):
+            raise ValueError("ChatTemplateConfig: `content_weight` must be finite and in (0, 1).")
+        self.content_weight = float(self.content_weight)
+
+
+@dataclass
 class YaqaConfig:
     """YAQA-v3 full-model Fisher collection controls."""
 
@@ -51,6 +71,7 @@ class YaqaConfig:
     regularization_by_rate: tuple[tuple[float, float], ...] = YAQA_DEFAULT_RATE_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
     batch_size: int = 8
+    chat_template: ChatTemplateConfig = field(default_factory=ChatTemplateConfig)
     activation_checkpointing: bool = True
     mps_cleanup_interval: int = 8
     sequence_sort: str = "desc"
@@ -113,6 +134,10 @@ class YaqaConfig:
             raise ValueError("YaqaConfig: `minimum_sequences` must be a positive integer.")
         if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1:
             raise ValueError("YaqaConfig: `batch_size` must be a positive integer.")
+        if isinstance(self.chat_template, dict):
+            self.chat_template = ChatTemplateConfig(**self.chat_template)
+        elif not isinstance(self.chat_template, ChatTemplateConfig):
+            raise TypeError("YaqaConfig: `chat_template` must be a ChatTemplateConfig.")
         if not isinstance(self.activation_checkpointing, bool):
             raise TypeError("YaqaConfig: `activation_checkpointing` must be boolean.")
         if (
