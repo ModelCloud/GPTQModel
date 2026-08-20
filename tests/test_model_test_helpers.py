@@ -269,6 +269,45 @@ def test_quantize_and_evaluate_runs_evalution_for_prequantized_model_without_cac
     }
 
 
+def test_quant_model_for_prequantized_vl_forwards_trust_remote_code_to_processor(monkeypatch):
+    tokenizer = SimpleNamespace(pad_token_id=1, eos_token_id=2)
+    prequantized_model = SimpleNamespace(
+        config=SimpleNamespace(model_type="mage_vl", pad_token_id=1, eos_token_id=2),
+        modality=[model_test_module.MODALITY.IMAGE_TO_TEXT],
+        quantized=True,
+        tokenizer=tokenizer,
+    )
+    processor = object()
+    processor_calls = []
+
+    class _Harness(ModelTest):
+        USE_FLASH_ATTN = False
+
+    helper = _Harness(methodName="runTest")
+    quantize_config = SimpleNamespace(requires_calibration_dataset=lambda: False)
+
+    monkeypatch.setattr(helper, "_build_quantize_config", lambda: quantize_config)
+    monkeypatch.setattr(helper, "_apply_model_compat_quant_overrides", lambda _model: None)
+    monkeypatch.setattr(model_test_module.GPTQModel, "load", lambda *args, **kwargs: prequantized_model)
+
+    def _load_processor(*args, **kwargs):
+        processor_calls.append((args, kwargs))
+        return processor
+
+    monkeypatch.setattr(model_test_module.AutoProcessor, "from_pretrained", _load_processor)
+
+    loaded_model, loaded_tokenizer, loaded_processor = helper.quantModel(
+        "/tmp/prequantized-vl",
+        trust_remote_code=True,
+        need_eval=False,
+    )
+
+    assert loaded_model is prequantized_model
+    assert loaded_tokenizer is tokenizer
+    assert loaded_processor is processor
+    assert processor_calls == [(("/tmp/prequantized-vl",), {"trust_remote_code": True})]
+
+
 def test_perform_post_quant_validation_retries_without_forced_cuda_map_after_oom(monkeypatch):
     class _LoadedModel:
         def __init__(self):

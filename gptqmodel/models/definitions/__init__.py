@@ -59,6 +59,7 @@ from .intern_s2_preview import InternS2PreviewQModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
 from .lfm2_vl import LFM2VLQModel
+from .mage_vl import MageVLQModel
 from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel

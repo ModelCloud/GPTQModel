@@ -1707,7 +1707,10 @@ class ModelTest(unittest.TestCase):
 
         else:
             if need_create_processor:
-                processor = AutoProcessor.from_pretrained(model_id_or_path)
+                processor = AutoProcessor.from_pretrained(
+                    model_id_or_path,
+                    trust_remote_code=trust_remote_code,
+                )
         if not is_quantized:
             del model
             torch_empty_cache()

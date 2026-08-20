@@ -21,7 +21,7 @@ from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
-from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
+from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 def format_ovis_dataset(image, assistant):
@@ -161,7 +161,7 @@ def get_calib_dataset(model):
 
     if (
         isinstance(model, BaseQwen2VLGPTQ)
-        or isinstance(model, Qwen3_VLQModel)
+        or isinstance(model, BaseQwen3VLGPTQ)
         or isinstance(model, MiniCPMOQModel)
         or isinstance(model, MiniCPMVQModel)
         or isinstance(model, MiniCPMV4_6QModel)

@@ -137,6 +137,7 @@ from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
+from .definitions.mage_vl import MageVLQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.mimo_v2 import MimoV2QModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
@@ -314,6 +315,7 @@ MODEL_MAP = {
     "mllama": MLlamaQModel,
     "mllama_text_model": MLlamaTextQModel,
     "marin": Qwen3QModel,
+    "mage_vl": MageVLQModel,
     "granite": LlamaQModel, # 100% llama clone
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
