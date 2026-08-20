@@ -51,7 +51,7 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
-from gptqmodel.utils.diagnostic_metrics import native_primary_metrics_cuda
+from gptqmodel.utils.diagnostic_metrics import native_divergence_metrics_cuda, native_primary_metrics_cuda
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 
 QKVO_SUFFIXES = (
@@ -1083,6 +1083,16 @@ def _divergence_metrics(
     candidate = candidate_logits.detach().float().reshape(-1, candidate_logits.shape[-1])
     if dense.shape[0] < token_count:
         return None
+    native = native_divergence_metrics_cuda(dense, candidate, token_count=token_count)
+    if native is not None:
+        matches, exact, first, compared = native.unbind()
+        return {
+            "token_top1_agreement": matches.float() / compared.float(),
+            "exact_sequence_agreement": exact.float(),
+            "first_divergence_token": first.float(),
+            "divergent_sequence_fraction": 1.0 - exact.float(),
+            "tokens_compared": compared.float(),
+        }
     matches = dense[:token_count].argmax(dim=-1).eq(candidate[:token_count].argmax(dim=-1))
     mismatch = (~matches).nonzero(as_tuple=False).flatten()
     first = (

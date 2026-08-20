@@ -15,6 +15,7 @@ from torch import nn
 
 from gptqmodel.quantization.qvq import yaqa_sketch_b
 from gptqmodel.quantization.qvq_yaqa import _sketch_b_gram_updates
+from gptqmodel.utils.diagnostic_metrics import native_divergence_metrics_cuda
 from scripts.analyze_gptq_low_bit_grid import (
     _load_nm_calibration,
     _summary,
@@ -1899,6 +1900,27 @@ def test_divergence_metrics_excludes_short_rows_and_uses_horizon_sentinel():
     assert metrics["exact_sequence_agreement"] == 1.0
     assert metrics["first_divergence_token"] == 33.0
     assert metrics["divergent_sequence_fraction"] == 0.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused divergence operator")
+def test_fused_cuda_divergence_matches_reference_and_tie_order():
+    dense = torch.tensor(
+        [[1.0, 3.0, 3.0, 0.0], [4.0, 1.0, 0.0, 0.0], [2.0, 2.0, 1.0, 0.0]],
+        device="cuda",
+    )
+    candidate = dense.clone()
+    candidate[1, 2] = 5.0
+    candidate[2, 0] = 1.0
+
+    result = native_divergence_metrics_cuda(dense, candidate, token_count=3)
+
+    assert result is not None
+    assert result.cpu().tolist() == [1, 0, 2, 3]
+    reference = _divergence_metrics(dense.cpu(), candidate.cpu(), token_count=3)
+    assert reference is not None
+    assert result[0].item() == int(reference["token_top1_agreement"].item() * 3)
+    assert result[1].item() == int(reference["exact_sequence_agreement"].item())
+    assert result[2].item() == int(reference["first_divergence_token"].item())
 
 
 def test_qvq_diagnostic_identical_standardized_channels_are_exact():

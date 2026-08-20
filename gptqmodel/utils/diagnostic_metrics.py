@@ -66,6 +66,10 @@ def _cuda_source_path() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "diagnostic_metrics_cuda.cu"
 
 
+def _divergence_cuda_source_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "divergence_metrics_cuda.cu"
+
+
 def _extra_cflags() -> list[str]:
     flags = ["-O3", "-fno-math-errno"]
     if platform.system() == "Linux":
@@ -112,8 +116,8 @@ def _cuda_flags() -> list[str]:
 _DIAGNOSTIC_METRICS_CUDA_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_diagnostic_metrics_cuda",
     namespace="gptqmodel_diagnostic_metrics",
-    required_ops=("primary_metrics_cuda",),
-    sources=lambda: [str(_cuda_source_path())],
+    required_ops=("primary_metrics_cuda", "divergence_metrics_cuda"),
+    sources=lambda: [str(_cuda_source_path()), str(_divergence_cuda_source_path())],
     build_root_env="GPTQMODEL_DIAGNOSTIC_METRICS_CUDA_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("diagnostic_metrics_cuda"),
     display_name="diagnostic_metrics_cuda",
@@ -226,4 +230,32 @@ def native_primary_metrics_cuda(
     return operation(dense, quantized, normalize_distribution, include_top10)
 
 
-__all__ = ["native_primary_metrics_cuda", "native_tensor_metrics"]
+def native_divergence_metrics_cuda(
+    dense: torch.Tensor,
+    quantized: torch.Tensor,
+    *,
+    token_count: int,
+) -> torch.Tensor | None:
+    """Return exact CUDA greedy-divergence counters for one sequence.
+
+    The returned int64 vector is ``[matching_tokens, exact_sequence, first_mismatch,
+    tokens_compared]``. ``first_mismatch`` is one-based and uses ``token_count + 1``
+    when no mismatch occurs. ``None`` means that the native CUDA extension is not
+    available; callers should use the reference implementation.
+    """
+
+    if dense.device.type != "cuda" or quantized.device.type != "cuda":
+        return None
+    if not isinstance(token_count, int) or isinstance(token_count, bool) or token_count < 1:
+        raise ValueError(f"token_count must be a positive integer, got {token_count!r}")
+    if dense.dim() != 2 or quantized.dim() != 2 or dense.shape != quantized.shape:
+        raise ValueError("CUDA divergence tensors must be matching rank-2 tensors")
+    if dense.size(0) < token_count:
+        return None
+    if not _DIAGNOSTIC_METRICS_CUDA_EXTENSION.load():
+        return None
+    operation = _DIAGNOSTIC_METRICS_CUDA_EXTENSION.op("divergence_metrics_cuda")
+    return operation(dense.detach().float().contiguous(), quantized.detach().float().contiguous(), token_count)
+
+
+__all__ = ["native_divergence_metrics_cuda", "native_primary_metrics_cuda", "native_tensor_metrics"]
