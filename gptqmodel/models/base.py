@@ -942,6 +942,7 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
     ):
+        yaqa_config = getattr(getattr(self, "quantize_config", None), "yaqa", None)
         return prepare_calibration_dataset(
             self,
             calibration_dataset=calibration_dataset,
@@ -950,6 +951,7 @@ class BaseQModel(nn.Module):
             batch_size=batch_size,
             calibration_data_min_length=calibration_data_min_length,
             calibration_concat_separator=calibration_concat_separator,
+            chat_template_config=getattr(yaqa_config, "chat_template", None),
             logger=log,
         )
 

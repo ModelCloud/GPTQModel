@@ -126,6 +126,7 @@ def yaqa_real_fisher_loss(
     attention_mask: torch.Tensor,
     *,
     generator: torch.Generator,
+    token_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, int]:
     """Sample the model distribution and return the sum of sequence score losses.
 
@@ -143,7 +144,18 @@ def yaqa_real_fisher_loss(
         raise ValueError("YAQA full-model logits must contain only finite values")
     probabilities = F.softmax(valid_logits.detach().float(), dim=-1)
     sampled_tokens = torch.multinomial(probabilities, num_samples=1, generator=generator).squeeze(-1)
-    loss = F.cross_entropy(valid_logits.float(), sampled_tokens, reduction="sum")
+    token_loss = F.cross_entropy(valid_logits.float(), sampled_tokens, reduction="none")
+    if token_weights is not None:
+        if token_weights.shape != attention_mask.shape:
+            raise ValueError("YAQA token weights must have the same shape as attention_mask")
+        valid_weights = token_weights[attention_mask.to(device=token_weights.device, dtype=torch.bool)].to(
+            device=token_loss.device, dtype=token_loss.dtype
+        )
+        if not torch.isfinite(valid_weights).all() or bool(valid_weights.le(0).any()):
+            raise ValueError("YAQA token weights must be finite and positive on valid tokens")
+        loss = (token_loss * valid_weights).sum()
+    else:
+        loss = token_loss.sum()
     if not torch.isfinite(loss):
         raise ValueError("YAQA full-model score loss overflowed")
     return loss, sampled_tokens.numel()
@@ -262,6 +274,7 @@ def capture_yaqa_sketch_b(
     mps_pack_symmetric_grams: bool = True,
     gram_strategy: str = "batched",
     gram_projection_rank: int | None = None,
+    chat_template_config=None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -514,7 +527,12 @@ def capture_yaqa_sketch_b(
 
         with _checkpoint_module_forwards(checkpoint_modules):
             for batch_index, batch in enumerate(batches, start=1):
-                encoded = {name: value.to(device) for name, value in batch.items() if name != "labels"}
+                template_mask = batch.get("chat_template_mask")
+                encoded = {
+                    name: value.to(device)
+                    for name, value in batch.items()
+                    if name in {"input_ids", "attention_mask", "position_ids", "token_type_ids"}
+                }
                 active_mask = encoded["attention_mask"]
                 if active_mask.ndim != 2:
                     raise ValueError("YAQA attention masks must be rank-2")
@@ -529,7 +547,29 @@ def capture_yaqa_sketch_b(
                 if not isinstance(logits, torch.Tensor):
                     raise TypeError("YAQA full-model forward must return tensor logits")
                 phase_started = time.perf_counter()
-                loss, valid_tokens = yaqa_real_fisher_loss(logits, active_mask, generator=generator)
+                token_weights = None
+                if template_mask is not None:
+                    template_mask = template_mask.to(device=device, dtype=torch.bool)
+                    valid_template = template_mask & active_mask.bool()
+                    valid_content = active_mask.bool() & ~template_mask
+                    content_count = valid_content.sum(dim=1).to(dtype=logits.dtype)
+                    template_count = valid_template.sum(dim=1).to(dtype=logits.dtype)
+                    content_mass = float(getattr(chat_template_config, "content_weight", 0.95))
+                    template_mass = 1.0 - content_mass
+                    gamma = (template_mass * content_count) / (content_mass * template_count.clamp_min(1.0))
+                    token_weights = torch.where(valid_template, gamma.unsqueeze(1), torch.ones_like(gamma).unsqueeze(1))
+                    token_weights = torch.where(active_mask.bool(), token_weights, torch.ones_like(token_weights))
+                    # Normalize each sequence so weighting changes token composition,
+                    # not the relative scale of independent sequence gradients.
+                    valid_count = active_mask.sum(dim=1).to(dtype=logits.dtype)
+                    weight_sum = (token_weights * active_mask).sum(dim=1).clamp_min(1.0)
+                    token_weights = token_weights * (valid_count / weight_sum).unsqueeze(1)
+                loss, valid_tokens = yaqa_real_fisher_loss(
+                    logits,
+                    active_mask,
+                    generator=generator,
+                    token_weights=token_weights,
+                )
                 phase_seconds["loss"] += time.perf_counter() - phase_started
                 phase_started = time.perf_counter()
                 loss.backward()

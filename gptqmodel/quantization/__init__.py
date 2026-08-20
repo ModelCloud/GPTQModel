@@ -27,6 +27,7 @@ from .config import (
                      BaseComplexBits,
                      BasePreProcessorConfig,
                      BaseQuantizeConfig,
+                     ChatTemplateConfig,
                      BitsAndBytesConfig,
                      EXL3Config,
                      Fallback,

@@ -160,6 +160,8 @@ def collate_data(
     # Flatten rows across all items in the outer batch
     rows_ids = []
     rows_mask = []
+    rows_template_mask = []
+    has_template_mask = any("chat_template_mask" in item for item in batch)
 
     for item in batch:
         ids_list = item["input_ids"]
@@ -178,6 +180,14 @@ def collate_data(
 
             rows_ids.append(ids)
             rows_mask.append(msk)
+            if has_template_mask:
+                template = item.get("chat_template_mask")
+                if template is None:
+                    raise ValueError("every calibration item must provide chat_template_mask when weighting is enabled")
+                template_row = torch.as_tensor(template[r], dtype=torch.bool)
+                if template_row.numel() != ids.numel():
+                    raise ValueError("chat_template_mask must align with input_ids")
+                rows_template_mask.append(template_row)
 
     # Compute global max length
     max_len = max(t.numel() for t in rows_ids) if rows_ids else 0
@@ -217,15 +227,19 @@ def collate_data(
     padded_ids = [pad_fn(t, pad_token_id, dtype=torch.long) for t in rows_ids]
     # pad masks with False, not 0
     padded_msk = [pad_fn(t, False, dtype=torch.bool) for t in rows_mask]
+    padded_template_mask = [pad_fn(t, False, dtype=torch.bool) for t in rows_template_mask]
 
     # Stack into [total_rows_in_batch, max_len]
     input_ids = torch.stack(padded_ids, dim=0) if padded_ids else torch.empty((0, 0), dtype=torch.long)
     attention_mask = torch.stack(padded_msk, dim=0) if padded_msk else torch.empty((0, 0), dtype=torch.bool)
 
-    return {
+    result = {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
     }
+    if has_template_mask:
+        result["chat_template_mask"] = torch.stack(padded_template_mask, dim=0)
+    return result
 
 
 def get_dataloader(

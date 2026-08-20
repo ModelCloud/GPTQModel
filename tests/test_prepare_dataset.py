@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.quantization.config import ChatTemplateConfig
 from gptqmodel.utils.data import collate_data
 
 
@@ -50,6 +52,30 @@ class _ChatStubTokenizer(_StubTokenizer):
         if add_generation_prompt:
             rendered += "<assistant>"
         return rendered
+
+
+class _OffsetChatStubTokenizer(_ChatStubTokenizer):
+    """Character tokenizer with an explicit BOS and exact offset provenance."""
+
+    def __call__(
+        self,
+        text,
+        return_tensors="pt",
+        add_special_tokens=True,
+        return_offsets_mapping=False,
+    ):
+        token_ids = [self._encode_char(ch) for ch in str(text)]
+        offsets = [(index, index + 1) for index in range(len(token_ids))]
+        if add_special_tokens:
+            token_ids.insert(0, 1)
+            offsets.insert(0, (0, 0))
+        result = {
+            "input_ids": torch.tensor([token_ids], dtype=torch.long),
+            "attention_mask": torch.ones((1, len(token_ids)), dtype=torch.long),
+        }
+        if return_offsets_mapping:
+            result["offset_mapping"] = torch.tensor([offsets], dtype=torch.long)
+        return result
 
 
 class _MissingChatTemplateTokenizer(_StubTokenizer):
@@ -225,6 +251,40 @@ def test_prepare_dataset_prefers_apply_chat_template_for_messages():
 
     assert batches[0]["input_ids"].tolist() == expected_ids
     assert batches[0]["input_ids"].tolist() != raw_text_ids
+
+
+def test_chat_template_weighting_preserves_exact_calibration_tokens():
+    dataset = [
+        {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ],
+            "text": "raw-fallback",
+        }
+    ]
+
+    def prepare(enabled):
+        qmodel = _make_qmodel_with_tokenizer(_OffsetChatStubTokenizer())
+        qmodel.quantize_config = SimpleNamespace(
+            yaqa=SimpleNamespace(chat_template=ChatTemplateConfig(enabled=enabled, content_weight=0.95))
+        )
+        return qmodel.prepare_dataset(
+            calibration_dataset=dataset,
+            calibration_dataset_sort=None,
+            batch_size=1,
+            calibration_data_min_length=0,
+        )[0]
+
+    control = prepare(False)
+    weighted = prepare(True)
+
+    assert torch.equal(weighted["input_ids"], control["input_ids"])
+    assert torch.equal(weighted["attention_mask"], control["attention_mask"])
+    assert "chat_template_mask" not in control
+    assert weighted["chat_template_mask"].shape == weighted["input_ids"].shape
+    assert bool(weighted["chat_template_mask"].any())
+    assert bool((~weighted["chat_template_mask"] & weighted["attention_mask"]).any())
 
 
 def test_prepare_dataset_falls_back_to_text_when_chat_template_is_missing():

@@ -890,6 +890,7 @@ class QVQProcessor(LoopProcessor):
                         checkpoint_modules=decoder_layers if self.qcfg.yaqa.activation_checkpointing else (),
                         progress_callback=log_progress,
                         mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
+                        chat_template_config=self.qcfg.yaqa.chat_template,
                     )
                     input_hessians.update(pass_inputs)
                     output_hessians.update(pass_outputs)

@@ -28,6 +28,7 @@ from gptqmodel.models.base import (
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization import (
     FORMAT,
+    ChatTemplateConfig,
     ModuleGranularReplayConfig,
     OutputAlignConfig,
     QVQConfig,
@@ -166,6 +167,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yaqa-mps-cleanup-interval", type=int, default=8)
     parser.add_argument("--yaqa-sequence-sort", choices=("none", "asc", "desc"), default="desc")
     parser.add_argument("--yaqa-max-factor-bytes-per-pass", type=int)
+    parser.add_argument(
+        "--yaqa-chat-template-weighting",
+        action="store_true",
+        help="Down-weight tokenizer-provided chat control tokens in the YAQA Fisher objective.",
+    )
+    parser.add_argument("--yaqa-chat-template-content-weight", type=float, default=0.95)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-forward-kld", type=float, required=True)
     parser.add_argument("--min-top1-agreement", type=float, required=True)
@@ -341,6 +348,10 @@ def main() -> None:
             mps_cleanup_interval=args.yaqa_mps_cleanup_interval,
             sequence_sort=args.yaqa_sequence_sort,
             max_factor_bytes_per_pass=args.yaqa_max_factor_bytes_per_pass,
+            chat_template=ChatTemplateConfig(
+                enabled=args.yaqa_chat_template_weighting,
+                content_weight=args.yaqa_chat_template_content_weight,
+            ),
         ),
         output_alignment=(
             OutputAlignConfig(

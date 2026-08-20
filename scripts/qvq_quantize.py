@@ -198,6 +198,9 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         yaqa=yaqa,
         output_alignment=alignment,
         module_granular_replay=replay,
+        # YAQA preparation performs an exact full-model backward for Sketch-B.
+        # A checkpoint-backed LazyTurtle shell cannot participate in autograd.
+        offload_to_disk=args.rounding != "yaqa",
     )
 
 

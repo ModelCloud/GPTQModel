@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import random
 import re
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Sequence, Union
 from urllib.parse import urlsplit, urlunsplit
 
@@ -219,6 +220,7 @@ def prepare_calibration_dataset(
     batch_size: int = 1,
     calibration_data_min_length: int = 10,
     calibration_concat_separator: Optional[str] = None,
+    chat_template_config=None,
     logger=None,
 ):
     """Normalize, validate, and batch calibration samples for quantization.
@@ -228,6 +230,7 @@ def prepare_calibration_dataset(
     """
 
     log = logger or setup_logger()
+    chat_template_weighting = bool(getattr(chat_template_config, "enabled", False))
 
     tokenizer = getattr(qmodel, "tokenizer", None)
     support_batch_quantize = getattr(qmodel, "support_batch_quantize", True)
@@ -361,7 +364,12 @@ def prepare_calibration_dataset(
                 )
         return mask_tensor
 
-    def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+    def _pack_ids(
+        ids_value: Any,
+        mask_value: Any,
+        idx: int,
+        chat_template_mask_value: Any = None,
+    ) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
 
         if mask_value is None:
@@ -369,10 +377,14 @@ def prepare_calibration_dataset(
         else:
             mask_tensor = _normalize_attention_mask(mask_value, ids_tensor, idx)
 
-        return {
+        packed = {
             "input_ids": ids_tensor.detach(),
             "attention_mask": mask_tensor.detach(),
         }
+        if chat_template_mask_value is not None:
+            template_mask = _normalize_attention_mask(chat_template_mask_value, ids_tensor, idx).bool()
+            packed["chat_template_mask"] = template_mask.detach()
+        return packed
 
     def _tokenize_text_value(text_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         _require_tokenizer("calibration data contains raw text")
@@ -427,7 +439,51 @@ def prepare_calibration_dataset(
             return _pack_ids(templated, None, idx)
 
         if isinstance(templated, str):
-            return _tokenize_text_value(templated, idx)
+            if not chat_template_weighting:
+                return _tokenize_text_value(templated, idx)
+            content_spans = []
+            search_start = 0
+            for message in messages_value:
+                content = str(message.get("content", ""))
+                if not content:
+                    continue
+                start = templated.find(content, search_start)
+                if start < 0:
+                    matcher = SequenceMatcher(None, content, templated[search_start:], autojunk=False)
+                    blocks = [block for block in matcher.get_matching_blocks() if block.size >= 3]
+                    if not blocks:
+                        raise ValueError(
+                            "chat-template weighting could not align message content to the rendered template"
+                        )
+                    for block in blocks:
+                        content_spans.append((search_start + block.b, search_start + block.b + block.size))
+                    stop = max(end for _, end in content_spans)
+                else:
+                    content_spans.append((start, start + len(content)))
+                    stop = start + len(content)
+                search_start = stop
+            if not content_spans:
+                raise ValueError("chat-template weighting requires at least one non-empty message content span")
+            encoded = tokenizer(
+                templated,
+                # Match the unweighted chat-template path exactly. Weighting
+                # may add provenance metadata, but must never alter the token
+                # sequence being calibrated.
+                add_special_tokens=True,
+                return_tensors="pt",
+                return_offsets_mapping=True,
+            )
+            offsets = encoded.get("offset_mapping")
+            if offsets is None:
+                raise ValueError("chat-template weighting requires tokenizer offset provenance")
+            offset_rows = offsets.tolist() if isinstance(offsets, torch.Tensor) else offsets
+            offset_row = offset_rows[0] if offset_rows and isinstance(offset_rows[0], list) else offset_rows
+            content_mask = [
+                any(start < int(end) and int(begin) < stop for start, stop in content_spans)
+                for begin, end in offset_row
+            ]
+            template_mask = [[not value for value in content_mask]]
+            return _pack_ids(encoded["input_ids"], encoded.get("attention_mask"), idx, template_mask)
 
         raise ValueError(
             f"tokenizer.apply_template returned unsupported type {type(templated)} for calibration item {idx}."
@@ -575,12 +631,24 @@ def prepare_calibration_dataset(
                 too_short_calibration_data_count += 1
                 continue
 
-            new_calibration_dataset.append(
-                {
-                    "input_ids": [row_ids],
-                    "attention_mask": [row_mask],
-                }
-            )
+            normalized = {
+                "input_ids": [row_ids],
+                "attention_mask": [row_mask],
+            }
+            if "chat_template_mask" in example:
+                template_row = example["chat_template_mask"]
+                if isinstance(template_row, torch.Tensor):
+                    template_row = template_row.tolist()
+                template_row = template_row[0] if template_row and isinstance(template_row[0], list) else template_row
+                if max_positions is not None and len(template_row) > max_positions:
+                    if padding_side == "left":
+                        template_row = template_row[-max_positions:]
+                    else:
+                        template_row = template_row[:max_positions]
+                if len(template_row) != len(row_ids):
+                    raise ValueError("chat_template_mask must remain aligned with input_ids during preparation")
+                normalized["chat_template_mask"] = [template_row]
+            new_calibration_dataset.append(normalized)
 
     if too_short_calibration_data_count > 0:
         log.warn(
@@ -615,6 +683,8 @@ def prepare_calibration_dataset(
         )
 
     if calibration_dataset_concat_size:
+        if chat_template_weighting:
+            raise ValueError("chat-template weighting currently requires concat_size=0 to preserve provenance")
         _require_tokenizer("`calibration_dataset_concat_size` is specified")
         concatenated_data = []
         input_ids_buff = []

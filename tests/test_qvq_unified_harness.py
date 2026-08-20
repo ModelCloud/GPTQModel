@@ -39,6 +39,7 @@ def test_qvq_quantize_parser_builds_nested_yaqa_configuration():
     assert config.rounding == "yaqa"
     assert config.yaqa.batch_size == 8
     assert config.yaqa.chat_template.enabled is True
+    assert config.offload_to_disk is False
 
 
 @pytest.mark.parametrize(
