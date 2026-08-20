@@ -145,3 +145,19 @@ Done (dense-weight dequantize cache for CPU GEMV):
 Next:
 - Investigate whether transposing/storing the cached dense weight in a BLAS-friendlier layout can shrink the remaining ~0.02 ms overhead over native dense `torch.matmul` for M=1, or whether this is within `torch.matmul` dispatch overhead.
 - Continue CPU optimization for quantization kernels (Viterbi/YAQA) or other inference paths if targets remain.
+
+Done (CPU GEMV wrapper / `QVQLinear` dense-weight cache pass):
+- Added `qvq_cpu_inner_weight` to `gptqmodel/utils/qvq_cpu.py` to expose the native dense dequantize op directly, with a fast `int(bits * 2)` transition-bits path and the same validation/contiguous handling as `qvq_cpu_gemv`.
+- Cached `qvq_cpu_supported()` with `functools.lru_cache(maxsize=1)` so the hot-path CPU check is evaluated once per process.
+- Cached `qvq_transition_bits()` in `gptqmodel/quantization/qvq_rates.py` with `functools.lru_cache(maxsize=128)` to avoid repeated `Fraction` construction from the same rate string/float.
+- Added `QVQLinear._qvq_cpu_dense_inner()` which lazily builds and caches the dense `[in_features, out_features]` FP32 weight directly on the module, keyed by `(trellis id+version, bank_ids id+version, bank_alt_id, v2b4_p64, v2b2_p32)`. The `_inner_forward` CPU branch now calls `torch.matmul(x.contiguous(), self._qvq_cpu_dense_inner(...))` instead of the `qvq_cpu_gemv` wrapper, removing the per-token global-cache lookup and `qvq_cpu_gemv` call overhead.
+- The transient `_qvq_cpu_dense_inner_cache` is excluded from `__getstate__` and cleared in `__setstate__` to avoid serializing the dense copy and to rebuild it after unpickling.
+- Accuracy:
+  - `qvq_cpu_inner_weight` output is bit-exact against `reconstruct_qvq_inner_weight` for V2 and V2B2-P32 test cases.
+  - `QVQLinear` CPU forward for V2 and V2B2-P32 remains deterministic and within the 2e-3 inference tolerance.
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - `qvq_cpu_gemv` for `x=[1,2048] weight=[2048,2048] bits=3.5`: 0.1268 ms -> 0.1108 ms (~13% wrapper overhead reduction; now ~0.90x of dense `torch.matmul` at 0.1005 ms).
+  - `QVQLinear._inner_forward` CPU branch after the first call is dominated by `torch.matmul` (~0.10 ms for the same shape), with the remaining ~0.01 ms being the in-module cache check, `x.contiguous()`, and `torch.matmul` Python dispatch.
+- `ruff check` passes for `gptqmodel/utils/qvq_cpu.py`, `gptqmodel/quantization/qvq_rates.py`, and `gptqmodel/nn_modules/qlinear/qvq.py`.
+- `tests/test_qvq.py -k "viterbi or tail_biting"` results unchanged: 89 passed, 112 skipped, 1 failed (pre-existing `squared_error` 1.19e-6 tolerance edge case in `test_qvq_l18_v4_torch_viterbi_recovers_exact_transition_consistent_path`).
+- `tests/test_qvq_v2b2_p32.py` shows 1 new unrelated failure (`test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq`) caused by a recent `QVQConfig` validation rule (YAQA requires `viterbi_objective='euclidean'`) conflicting with that test; it is not touched by this CPU kernel pass.

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from fractions import Fraction
 
@@ -49,6 +50,7 @@ def normalize_qvq_rate(rate: float | str | Fraction) -> int | float:
     return normalized.numerator / normalized.denominator
 
 
+@functools.lru_cache(maxsize=128)
 def qvq_transition_bits(rate: float | str | Fraction, *, vector_size: int = QVQ_VECTOR_SIZE) -> int:
     """Return the integer bits appended by one trellis transition."""
 

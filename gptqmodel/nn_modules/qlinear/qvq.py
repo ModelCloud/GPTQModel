@@ -399,9 +399,10 @@ class QVQLinear(BaseQuantLinear):
             self._validate_tensors()
 
     def __getstate__(self):
-        """Exclude transient CUDA selector state from deepcopy/pickle."""
+        """Exclude transient selector/dense state from deepcopy/pickle."""
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
+        state.pop("_qvq_cpu_dense_inner_cache", None)
         state["_qvq_cuda_bank_cache"] = None
         return state
 
@@ -409,6 +410,7 @@ class QVQLinear(BaseQuantLinear):
         super().__setstate__(state)
         self._qvq_cuda_bank_cache_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
+        self._qvq_cpu_dense_inner_cache = None
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -704,6 +706,37 @@ class QVQLinear(BaseQuantLinear):
         inner = self.get_inner_weight_tensor(dtype=x.dtype)
         return x @ inner
 
+    def _qvq_cpu_dense_inner(self, bank_alt_id: int = 0) -> torch.Tensor:
+        """Build and cache the dense FP32 weight for the CPU inference path."""
+
+        from ...utils.qvq_cpu import qvq_cpu_inner_weight
+
+        cache = getattr(self, "_qvq_cpu_dense_inner_cache", None)
+        bank_ids = self.bank_ids
+        cache_key = (
+            id(self.trellis),
+            self.trellis._version,
+            id(bank_ids),
+            bank_ids._version if bank_ids is not None else None,
+            bank_alt_id,
+            self.v2b4_p64,
+            self.v2b2_p32,
+        )
+        if cache is not None and cache[0] == cache_key:
+            return cache[1]
+        inner = qvq_cpu_inner_weight(
+            self.trellis,
+            self.bits,
+            out_features=self.out_features,
+            vector_size=self.vector_size,
+            bank_ids=bank_ids,
+            bank_alt_id=bank_alt_id,
+            v2b4_p64=self.v2b4_p64,
+            v2b2_p32=self.v2b2_p32,
+        )
+        self._qvq_cpu_dense_inner_cache = (cache_key, inner)
+        return inner
+
     def _inner_forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.bank_count in (2, 4) and (
             not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta"
@@ -881,7 +914,7 @@ class QVQLinear(BaseQuantLinear):
                 bank_alt_id=cuda_bank_alt_id,
             )
         if x.device.type == "cpu":
-            from ...utils.qvq_cpu import qvq_cpu_gemv, qvq_cpu_supported
+            from ...utils.qvq_cpu import qvq_cpu_supported
 
             if (
                 self.trellis_window != 16
@@ -891,24 +924,11 @@ class QVQLinear(BaseQuantLinear):
             ):
                 return self._reference_inner_forward(x)
             bank_alt_id = 0
-            cpu_bank_ids = None
-            if self.bank_ids is not None:
-                if self.v2b2_p32:
-                    bank_alt_id = int(self.bank_alt_id.detach().item())
-                    if not 1 <= bank_alt_id <= 3:
-                        return self._reference_inner_forward(x)
-                cpu_bank_ids = self.bank_ids.to(torch.uint8).contiguous()
-            return qvq_cpu_gemv(
-                x.contiguous(),
-                self.trellis.contiguous(),
-                self.bits,
-                out_features=self.out_features,
-                vector_size=self.vector_size,
-                bank_ids=cpu_bank_ids,
-                v2b4_p64=self.v2b4_p64,
-                v2b2_p32=self.v2b2_p32,
-                bank_alt_id=bank_alt_id,
-            )
+            if self.bank_ids is not None and self.v2b2_p32:
+                bank_alt_id = int(self.bank_alt_id.detach().item())
+                if not 1 <= bank_alt_id <= 3:
+                    return self._reference_inner_forward(x)
+            return torch.matmul(x.contiguous(), self._qvq_cpu_dense_inner(bank_alt_id=bank_alt_id))
         return self._reference_inner_forward(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

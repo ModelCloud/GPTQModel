@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import functools
+import numbers
 import os
 import platform
 import threading
@@ -65,6 +67,7 @@ _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
 )
 
 
+@functools.lru_cache(maxsize=1)
 def qvq_cpu_supported() -> bool:
     return platform.machine().lower() in ("x86_64", "amd64")
 
@@ -181,7 +184,10 @@ def qvq_cpu_gemv(
     if v2b4_p64 and v2b2_p32:
         raise ValueError("v2b4_p64 and v2b2_p32 are mutually exclusive")
 
-    transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
+    if isinstance(bits, numbers.Real) and not isinstance(bits, bool) and vector_size == 2:
+        transition_bits = int(bits * 2)
+    else:
+        transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     x = x.contiguous()
     trellis = trellis.contiguous()
     if bank_ids is not None:
@@ -220,6 +226,47 @@ def qvq_cpu_gemv(
 
     return _qvq_cpu_op()(
         x,
+        trellis,
+        transition_bits,
+        out_features,
+        bank_ids,
+        bank_alt_id,
+        v2b4_p64,
+        v2b2_p32,
+    )
+
+
+def qvq_cpu_inner_weight(
+    trellis: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    vector_size: int = 2,
+    bank_ids: torch.Tensor | None = None,
+    v2b4_p64: bool = False,
+    v2b2_p32: bool = False,
+    bank_alt_id: int = 0,
+) -> torch.Tensor:
+    """Build a dense [in_features, out_features] weight for QVQ on CPU."""
+
+    if not qvq_cpu_supported():
+        raise RuntimeError("QVQ CPU kernel requires x86-64 (AMD64).")
+    if trellis.device.type != "cpu":
+        raise ValueError("qvq_cpu_inner_weight requires CPU tensors")
+    if vector_size != 2:
+        raise ValueError("QVQ CPU kernel currently supports vector_size=2")
+    if v2b4_p64 and v2b2_p32:
+        raise ValueError("v2b4_p64 and v2b2_p32 are mutually exclusive")
+
+    if isinstance(bits, numbers.Real) and not isinstance(bits, bool) and vector_size == 2:
+        transition_bits = int(bits * 2)
+    else:
+        transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
+    trellis = trellis.contiguous()
+    if bank_ids is not None:
+        bank_ids = bank_ids.to(torch.uint8).contiguous()
+
+    return _qvq_cpu_inner_weight_op()(
         trellis,
         transition_bits,
         out_features,
