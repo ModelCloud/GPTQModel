@@ -396,6 +396,23 @@ def _parser() -> argparse.ArgumentParser:
             "using a bounded two-row pipeline; one provides a serial A/B reference."
         ),
     )
+    parser.add_argument(
+        "--include-topn",
+        action="store_true",
+        help="Include legacy Top-5/Top-10 overlap metrics; disabled by default.",
+    )
+    parser.add_argument(
+        "--divergence-rows",
+        type=int,
+        default=300,
+        help="Maximum evaluation sequences used by the Divergent-300-style metric (default: 300).",
+    )
+    parser.add_argument(
+        "--divergence-tokens",
+        type=int,
+        default=32,
+        help="Teacher-forced token positions compared per divergence sequence (default: 32).",
+    )
     return parser
 
 
@@ -1033,6 +1050,53 @@ def _acceptance_logit_metrics(dense_logits: torch.Tensor, candidate_logits: torc
         )
         result[f"top{width}_overlap"] = {"mean": overlap.mean().item()}
     return result
+
+
+@torch.inference_mode()
+def _divergence_metrics(
+    dense_logits: torch.Tensor,
+    candidate_logits: torch.Tensor,
+    *,
+    token_count: int = 32,
+) -> dict[str, object] | None:
+    """Compare teacher-forced greedy predictions over a fixed token horizon.
+
+    This is the local, deterministic form of the Divergent-300 measurement:
+    each evaluation row is one sequence, and at most ``token_count`` next-token
+    predictions are compared.  The returned values are intentionally separate:
+
+    * ``token_top1_agreement`` is the fraction of matching predictions;
+    * ``exact_sequence_agreement`` requires every compared position to match;
+    * ``first_divergence_token`` is one-based, with ``token_count + 1`` meaning
+      no divergence in the measured horizon.
+
+    Rows shorter than the requested horizon are excluded rather than padded.
+    """
+
+    if token_count < 1:
+        raise ValueError("divergence token horizon must be positive")
+    if dense_logits.shape != candidate_logits.shape:
+        raise ValueError(
+            f"divergence logit shape mismatch: {tuple(dense_logits.shape)} != {tuple(candidate_logits.shape)}"
+        )
+    dense = dense_logits.detach().float().reshape(-1, dense_logits.shape[-1])
+    candidate = candidate_logits.detach().float().reshape(-1, candidate_logits.shape[-1])
+    if dense.shape[0] < token_count:
+        return None
+    matches = dense[:token_count].argmax(dim=-1).eq(candidate[:token_count].argmax(dim=-1))
+    mismatch = (~matches).nonzero(as_tuple=False).flatten()
+    first = (
+        (mismatch[0] + 1).to(dtype=torch.float32)
+        if mismatch.numel()
+        else torch.tensor(float(token_count + 1), device=dense.device)
+    )
+    return {
+        "token_top1_agreement": matches.float().mean(),
+        "exact_sequence_agreement": matches.all().float(),
+        "first_divergence_token": first,
+        "divergent_sequence_fraction": (~matches.all()).float(),
+        "tokens_compared": torch.tensor(float(token_count), device=dense.device),
+    }
 
 
 @torch.inference_mode()
@@ -2806,12 +2870,16 @@ def _streaming_compare_models_cpu(
     layer_count: int,
     progress_label: str,
     module_scope: str = "qkvo",
+    include_topn: bool = False,
+    divergence_rows: int = 300,
+    divergence_tokens: int = 32,
 ) -> dict:
     module_names = tuple(dense_modules)
     local_accumulator = _WeightedMetricAccumulator()
     live_accumulator = _WeightedMetricAccumulator()
     layer_accumulators = {index: _WeightedMetricAccumulator() for index in range(layer_count)}
     logit_accumulator = _WeightedMetricAccumulator()
+    divergence_accumulator = _WeightedMetricAccumulator()
     for row_index, row in enumerate(rows, start=1):
         dense_logits, dense_inputs, dense_outputs = capture_forward(
             dense_model,
@@ -2867,26 +2935,41 @@ def _streaming_compare_models_cpu(
                 dense_logits,
                 quantized_logits,
                 normalize_distribution=False,
-                include_top10=True,
+                include_top10=include_topn,
             ),
             rows=token_count,
         )
+        if row_index <= divergence_rows:
+            divergence = _divergence_metrics(
+                dense_logits,
+                quantized_logits,
+                token_count=divergence_tokens,
+            )
+            if divergence is not None:
+                divergence_accumulator.add(_pythonize_metric_scalars(divergence), rows=1)
         if row_index % 16 == 0 or row_index == len(rows):
             print(
                 f"{progress_label}: eval {row_index}/{len(rows)} rows, "
                 f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
-                f"top1={logit_accumulator.mean('top1_agreement'):.4f} "
-                f"top5={logit_accumulator.mean('top5_overlap', 'mean'):.4f} "
-                f"top10={logit_accumulator.mean('top10_overlap', 'mean'):.4f}",
+                f"divTop1={divergence_accumulator.mean('token_top1_agreement') or float('nan'):.4f}",
                 flush=True,
             )
     local_metrics = local_accumulator.result()
     live_metrics = live_accumulator.result()
+    divergence_report = (
+        divergence_accumulator.result()
+        if divergence_accumulator.weight
+        else {"valid_sequences": 0}
+    )
+    divergence_report["requested_sequences"] = min(divergence_rows, len(rows))
+    divergence_report["valid_sequences"] = divergence_accumulator.weight
+    divergence_report["token_horizon"] = divergence_tokens
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
         "layers": {str(index): accumulator.result() for index, accumulator in layer_accumulators.items()},
         "logits": logit_accumulator.result(),
+        "divergence_300": divergence_report,
     }
     if module_scope == "qkvo":
         result["local_qkvo"] = local_metrics
@@ -2909,6 +2992,9 @@ def _streaming_compare_models_cuda(
     diagnostic_detail: str,
     diagnostic_streams: int,
     collect_telemetry: bool = False,
+    include_topn: bool = False,
+    divergence_rows: int = 300,
+    divergence_tokens: int = 32,
 ) -> dict[str, object]:
     """Run batch-1 diagnostics with persistent hooks, GPU replay, and device-resident reductions."""
 
@@ -2935,6 +3021,7 @@ def _streaming_compare_models_cuda(
     live_accumulator = _DeviceMetricAccumulator()
     layer_accumulators = {index: _DeviceMetricAccumulator() for index in range(layer_count)}
     logit_accumulator = _DeviceMetricAccumulator()
+    divergence_accumulator = _DeviceMetricAccumulator()
     previous_tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     metric_function = _device_primary_metrics if diagnostic_detail == "primary" else _device_tensor_metrics
@@ -3034,12 +3121,20 @@ def _streaming_compare_models_cuda(
                         dense_logits,
                         quantized_logits,
                         normalize_distribution=False,
-                        include_top10=True,
+                        include_top10=include_topn,
                         **({"cpu_compatible_topk": True} if diagnostic_detail == "full" else {}),
                     ),
                     rows=token_count,
                 )
                 phase_end("logit_metrics", metric_stream, logit_metric_start)
+                if row_index <= divergence_rows:
+                    divergence = _divergence_metrics(
+                        dense_logits,
+                        quantized_logits,
+                        token_count=divergence_tokens,
+                    )
+                    if divergence is not None:
+                        divergence_accumulator.add(divergence, rows=1)
                 if diagnostic_streams == 2:
                     pipeline_events[slot].record(metric_stream)
             if row_index % 16 == 0 or row_index == len(rows):
@@ -3053,9 +3148,7 @@ def _streaming_compare_models_cuda(
                 print(
                     f"{progress_label}: eval {row_index}/{len(rows)} rows, "
                     f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
-                    f"top1={logit_accumulator.mean('top1_agreement'):.4f} "
-                    f"top5={logit_accumulator.mean('top5_overlap', 'mean'):.4f} "
-                    f"top10={logit_accumulator.mean('top10_overlap', 'mean'):.4f}",
+                    f"divTop1={divergence_accumulator.mean('token_top1_agreement') or float('nan'):.4f}",
                     flush=True,
                 )
         if diagnostic_streams == 2:
@@ -3068,11 +3161,20 @@ def _streaming_compare_models_cuda(
     materialization_started = time.perf_counter()
     local_metrics = local_accumulator.result()
     live_metrics = live_accumulator.result()
+    divergence_report = (
+        divergence_accumulator.result()
+        if divergence_accumulator.weight
+        else {"valid_sequences": 0}
+    )
+    divergence_report["requested_sequences"] = min(divergence_rows, len(rows))
+    divergence_report["valid_sequences"] = divergence_accumulator.weight
+    divergence_report["token_horizon"] = divergence_tokens
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
         "layers": {str(index): accumulator.result() for index, accumulator in layer_accumulators.items()},
         "logits": logit_accumulator.result(),
+        "divergence_300": divergence_report,
         "diagnostic_device": "cuda",
         "diagnostic_detail": diagnostic_detail,
         "diagnostic_streams": diagnostic_streams,
@@ -3111,6 +3213,9 @@ def _streaming_compare_models(
     diagnostic_detail: str = "primary",
     diagnostic_streams: int = 2,
     collect_telemetry: bool = False,
+    include_topn: bool = False,
+    divergence_rows: int = 300,
+    divergence_tokens: int = 32,
 ) -> dict[str, object]:
     """Dispatch to accelerated CUDA diagnostics while retaining the exact historical CPU reference."""
 
@@ -3136,6 +3241,9 @@ def _streaming_compare_models(
             diagnostic_detail=diagnostic_detail,
             diagnostic_streams=diagnostic_streams,
             collect_telemetry=collect_telemetry,
+            include_topn=include_topn,
+            divergence_rows=divergence_rows,
+            divergence_tokens=divergence_tokens,
         )
     result = _streaming_compare_models_cpu(
         dense_model,
@@ -3147,6 +3255,9 @@ def _streaming_compare_models(
         layer_count=layer_count,
         progress_label=progress_label,
         module_scope=module_scope,
+        include_topn=include_topn,
+        divergence_rows=divergence_rows,
+        divergence_tokens=divergence_tokens,
     )
     result["diagnostic_device"] = "cpu"
     result["diagnostic_detail"] = "full"
@@ -3163,6 +3274,8 @@ def main() -> None:
         )
     if args.layers < 1:
         raise ValueError("layer count must be positive")
+    if args.divergence_rows < 1 or args.divergence_tokens < 1:
+        raise ValueError("divergence rows and token horizon must be positive")
     if args.prepare_yaqa_only and args.yaqa_factor_cache is None:
         raise ValueError("--prepare-yaqa-only requires --yaqa-factor-cache")
     if args.evaluation_row_offset < args.calibration_rows:
@@ -3867,6 +3980,9 @@ def main() -> None:
                 diagnostic_detail=args.diagnostic_detail,
                 diagnostic_streams=args.diagnostic_streams,
                 collect_telemetry=args.qvq_telemetry,
+                include_topn=args.include_topn,
+                divergence_rows=args.divergence_rows,
+                divergence_tokens=args.divergence_tokens,
             )
             codec_bpw = rate + selector_bpw
             selected_mlp_rates = (
@@ -3948,20 +4064,25 @@ def main() -> None:
             }
             report["results"][str(rate)][arm] = arm_report
             logits = arm_report["logits"]
+            divergence = arm_report["divergence_300"]
             layer_kl = _mean(
                 [metrics["kl_forward"]["mean"] for metrics in arm_report["layers"].values()]
             )
-            print(
+            summary = (
                 f"W{rate:g} {arm}: relL2={arm_report['weight']['mean_relative_l2']:.6f} "
                 f"localKL={arm_report['local_modules']['kl_forward']['mean']:.6f} "
                 f"liveKL={arm_report['live_modules']['kl_forward']['mean']:.6f} "
-                f"layerKL={layer_kl:.6f} "
-                f"logitKL={logits['kl_forward']['mean']:.6f} "
-                f"top1={logits['top1_agreement']:.4f} "
-                f"top5={logits['top5_overlap']['mean']:.4f} "
-                f"top10={logits['top10_overlap']['mean']:.4f}",
-                flush=True,
+                f"layerKL={layer_kl:.6f} logitKL={logits['kl_forward']['mean']:.6f} "
+                f"divTop1={divergence.get('token_top1_agreement', float('nan')):.4f} "
+                f"divExact={divergence.get('exact_sequence_agreement', float('nan')):.4f} "
+                f"firstDiv={divergence.get('first_divergence_token', float('nan')):.2f}"
             )
+            if args.include_topn:
+                summary += (
+                    f" top5={logits['top5_overlap']['mean']:.4f}"
+                    f" top10={logits['top10_overlap']['mean']:.4f}"
+                )
+            print(summary, flush=True)
             with torch.no_grad():
                 for name, module in modules.items():
                     module.weight.copy_(original_weights[name].to(device=device, dtype=module.weight.dtype))

@@ -36,6 +36,7 @@ from scripts.analyze_gptq_low_bit_grid import (
     tensor_metrics,
 )
 from scripts.analyze_gptq_low_bit_grid import main as diagnostic_main
+from scripts.compare_qvq_codecs_llama_qkvo import _divergence_metrics
 
 
 class _TinyLayer(nn.Module):
@@ -1866,6 +1867,38 @@ def test_qvq_diagnostic_reports_requested_final_logit_top10_metrics():
     assert metrics["top10_exact_agreement"] == 0.0
     assert metrics["dense_top1_in_quantized_top10"] == 1.0
     assert metrics["quantized_top1_in_dense_top10"] == 1.0
+
+
+def test_divergence_metrics_report_token_top1_exact_sequence_and_first_mismatch():
+    dense = torch.zeros((32, 4), dtype=torch.float32)
+    candidate = dense.clone()
+    dense[:, 0] = 2.0
+    candidate[:, 0] = 2.0
+    candidate[5, 1] = 3.0
+    candidate[20, 2] = 4.0
+
+    metrics = _divergence_metrics(dense, candidate, token_count=32)
+
+    assert metrics is not None
+    assert metrics["token_top1_agreement"] == pytest.approx(30 / 32)
+    assert metrics["exact_sequence_agreement"] == 0.0
+    assert metrics["first_divergence_token"] == 6.0
+    assert metrics["divergent_sequence_fraction"] == 1.0
+
+
+def test_divergence_metrics_excludes_short_rows_and_uses_horizon_sentinel():
+    dense = torch.zeros((31, 3), dtype=torch.float32)
+    candidate = dense.clone()
+    assert _divergence_metrics(dense, candidate, token_count=32) is None
+
+    dense = torch.zeros((32, 3), dtype=torch.float32)
+    candidate = dense.clone()
+    metrics = _divergence_metrics(dense, candidate, token_count=32)
+    assert metrics is not None
+    assert metrics["token_top1_agreement"] == 1.0
+    assert metrics["exact_sequence_agreement"] == 1.0
+    assert metrics["first_divergence_token"] == 33.0
+    assert metrics["divergent_sequence_fraction"] == 0.0
 
 
 def test_qvq_diagnostic_identical_standardized_channels_are_exact():

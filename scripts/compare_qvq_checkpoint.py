@@ -10,7 +10,6 @@ or vocabulary-sized logits between sweep arms.
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import platform
 import sys
@@ -24,8 +23,10 @@ from gptqmodel import BACKEND, GPTQModel
 
 if __package__:
     from scripts.analyze_gptq_low_bit_grid import capture_forward, load_nm_evaluation_batch, tensor_metrics
+    from scripts.compare_qvq_codecs_llama_qkvo import _divergence_metrics
 else:
     from analyze_gptq_low_bit_grid import capture_forward, load_nm_evaluation_batch, tensor_metrics
+    from compare_qvq_codecs_llama_qkvo import _divergence_metrics
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,7 +37,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--row-offset", type=int, default=128)
     parser.add_argument("--rows", type=int, default=128)
     parser.add_argument("--max-length", type=int, default=48)
+    parser.add_argument(
+        "--full-rows",
+        action="store_true",
+        help="Preserve each selected evaluation row at its full tokenized length.",
+    )
     parser.add_argument("--layers", type=int, default=2)
+    parser.add_argument("--eval-batch-size", type=int, default=1)
+    parser.add_argument("--include-topn", action="store_true")
+    parser.add_argument("--divergence-rows", type=int, default=300)
+    parser.add_argument("--divergence-tokens", type=int, default=32)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", type=Path, required=True)
     return parser
@@ -56,8 +66,12 @@ def main() -> None:
     args = _parser().parse_args()
     if args.layers < 1:
         raise ValueError("layer count must be positive")
-    if args.row_offset < 0 or args.rows < 1 or args.max_length < 1:
+    if args.row_offset < 0 or args.rows < 1 or args.max_length < 1 or args.eval_batch_size < 1:
         raise ValueError("evaluation row offset must be nonnegative and sizes must be positive")
+    if args.divergence_rows < 1 or args.divergence_tokens < 1:
+        raise ValueError("divergence rows and token horizon must be positive")
+    if args.eval_batch_size != 1:
+        raise ValueError("snapshot divergence validation requires --eval-batch-size 1")
     if args.output.exists():
         raise FileExistsError(f"Refusing to overwrite existing result: {args.output}")
 
@@ -69,27 +83,11 @@ def main() -> None:
         dataset_path=args.dataset,
         row_offset=args.row_offset,
         rows=args.rows,
-        max_length=args.max_length,
+        max_length=None if args.full_rows else args.max_length,
     )
-    encoded = {name: value.to(args.device) for name, value in encoded.items()}
-
     dense_load_started = time.perf_counter()
     dense = _load_dense(args.dense_model, args.device)
     dense_load_seconds = time.perf_counter() - dense_load_started
-    dense_forward_started = time.perf_counter()
-    dense_logits, _, dense_outputs = capture_forward(
-        dense,
-        encoded,
-        {},
-        capture_inputs=False,
-        layer_count=args.layers,
-    )
-    torch.cuda.synchronize(args.device)
-    dense_forward_seconds = time.perf_counter() - dense_forward_started
-    del dense
-    gc.collect()
-    torch.cuda.empty_cache()
-
     quantized_load_started = time.perf_counter()
     quantized = GPTQModel.load(
         str(args.checkpoint),
@@ -99,16 +97,90 @@ def main() -> None:
         attn_implementation="eager",
     )
     quantized_load_seconds = time.perf_counter() - quantized_load_started
-    quantized_forward_started = time.perf_counter()
-    quantized_logits, _, quantized_outputs = capture_forward(
-        quantized.model,
-        encoded,
-        {},
-        capture_inputs=False,
-        layer_count=args.layers,
+
+    from scripts.compare_qvq_codecs_llama_qkvo import _WeightedMetricAccumulator
+
+    logit_accumulator = _WeightedMetricAccumulator()
+    layer_accumulators = {
+        f"layer.{index}": _WeightedMetricAccumulator() for index in range(args.layers)
+    }
+    divergence_values = []
+    dense_forward_seconds = 0.0
+    quantized_forward_seconds = 0.0
+    row_count = int(encoded["input_ids"].shape[0])
+    for row_index in range(row_count):
+        row = {
+            name: value[row_index : row_index + 1].to(args.device, non_blocking=True)
+            for name, value in encoded.items()
+        }
+        started = time.perf_counter()
+        dense_row_logits, _, dense_row_outputs = capture_forward(
+            dense, row, {}, capture_inputs=False, layer_count=args.layers
+        )
+        torch.cuda.synchronize(args.device)
+        dense_forward_seconds += time.perf_counter() - started
+        started = time.perf_counter()
+        quantized_row_logits, _, quantized_row_outputs = capture_forward(
+            quantized.model, row, {}, capture_inputs=False, layer_count=args.layers
+        )
+        torch.cuda.synchronize(args.device)
+        quantized_forward_seconds += time.perf_counter() - started
+        token_count = dense_row_logits.shape[0]
+        logit_accumulator.add(
+            tensor_metrics(dense_row_logits, quantized_row_logits, normalize_distribution=False),
+            rows=token_count,
+        )
+        for name, accumulator in layer_accumulators.items():
+            accumulator.add(
+                tensor_metrics(
+                    dense_row_outputs[f"{name}.hidden"],
+                    quantized_row_outputs[f"{name}.hidden"],
+                    normalize_distribution=True,
+                ),
+                rows=token_count,
+            )
+        if row_index < args.divergence_rows:
+            metric = _divergence_metrics(
+                dense_row_logits, quantized_row_logits, token_count=args.divergence_tokens
+            )
+            if metric is not None:
+                divergence_values.append({name: float(value.item()) for name, value in metric.items()})
+        del row, dense_row_logits, quantized_row_logits, dense_row_outputs, quantized_row_outputs
+        if row_index == 0 or (row_index + 1) % 16 == 0 or row_index + 1 == row_count:
+            print(
+                f"snapshot eval {row_index + 1}/{row_count} rows "
+                f"tokens={logit_accumulator.weight} divergence={len(divergence_values)}",
+                flush=True,
+            )
+
+    divergence = (
+        {
+            name: sum(value[name] for value in divergence_values) / len(divergence_values)
+            for name in divergence_values[0]
+        }
+        if divergence_values
+        else {}
     )
-    torch.cuda.synchronize(args.device)
-    quantized_forward_seconds = time.perf_counter() - quantized_forward_started
+    divergence.update(
+        {
+            "requested_sequences": min(args.divergence_rows, row_count),
+            "valid_sequences": len(divergence_values),
+            "token_horizon": args.divergence_tokens,
+        }
+    )
+    logits_metrics = logit_accumulator.result()
+    if not args.include_topn:
+        for key in (
+            "top5_overlap",
+            "top5_exact_agreement",
+            "dense_top1_in_quantized_top5",
+            "quantized_top1_in_dense_top5",
+            "top10_overlap",
+            "top10_exact_agreement",
+            "dense_top1_in_quantized_top10",
+            "quantized_top1_in_dense_top10",
+        ):
+            logits_metrics.pop(key, None)
 
     report = {
         "dense_model": str(args.dense_model),
@@ -129,15 +201,9 @@ def main() -> None:
             "quantized_load": quantized_load_seconds,
             "quantized_forward": quantized_forward_seconds,
         },
-        "logits": tensor_metrics(dense_logits, quantized_logits, normalize_distribution=False),
-        "layers": {
-            f"layer.{index}": tensor_metrics(
-                dense_outputs[f"layer.{index}.hidden"],
-                quantized_outputs[f"layer.{index}.hidden"],
-                normalize_distribution=True,
-            )
-            for index in range(args.layers)
-        },
+        "logits": logits_metrics,
+        "divergence_300": divergence,
+        "layers": {name: accumulator.result() for name, accumulator in layer_accumulators.items()},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
