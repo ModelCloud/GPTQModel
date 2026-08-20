@@ -5,23 +5,23 @@ tests showed local/proxy error reductions without dependable held-out final-KLD 
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
 not selectable through configuration, lifecycle, loading, or inference. Continue from the latest draft PR #244 tip.
 
-### Harness consolidation TODO
+### Harness consolidation
 
-- [ ] Merge `scripts/compare_qvq_codecs_llama_qkvo.py` and
-  `scripts/validate_qvq_lifecycle.py` into one QVQ experiment harness.
-  The unified entry point must preserve both contracts: full-row disjoint
-  calibration/evaluation/YAQA splits, all-layer/all-linear scope, cached or
-  live Sketch-B provenance, QVQ arm selection (including `96_16x16`),
-  save/reload parity, and the complete KL/Top-1/Top-5/Top-10 metric schema.
-- [ ] Keep one shared argument/config model so codec policy, YAQA sampling,
-  damping, output alignment, replay, device routing, and diagnostic backend
-  cannot silently diverge between lifecycle validation and comparison runs.
-- [ ] Add a regression test that runs the same configuration through the
-  unified path and verifies identical prepared dataset fingerprints, row
-  ranges, YAQA metadata, quantization settings, and metric naming.
-- [ ] Retain explicit lifecycle mode and comparison mode as subcommands or
-  stages only for orchestration; neither mode may maintain a separate math or
-  dataset-preparation implementation.
+- [x] Establish `scripts/qvq_quantize.py` as the single model-agnostic
+  prepare + quantize + save entry point. Sketch-B, activation Hessians,
+  alignment, replay, model adaptation, and device delegation are owned by the
+  normal GPTQModel lifecycle rather than copied into a comparison script.
+- [x] Separate post-quantization work into `scripts/qvq_evaluate.py`, with
+  final-logit diagnostics and Evalution task subcommands. Evaluation fails
+  closed when its recorded dataset range overlaps preparation data.
+- [x] Record exact dataset identities/ranges, resolved QVQ configuration,
+  layer scope, revision, and stage timings in the checkpoint manifest.
+- [x] Add focused parser, nested-config, bank-policy, disjoint-range, and
+  post-quant overlap regression tests.
+- [ ] Migrate historical experiment launchers to thin wrappers around the two
+  canonical commands, then move their model-specific analysis code under a
+  research-only namespace. They must not remain alternative production
+  quantization lifecycles.
 
 ### Unpromoted P-stage revalidation on real Llama 3.2 1B (2026-08-16)
 
