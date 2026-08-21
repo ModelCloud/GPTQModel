@@ -2252,6 +2252,47 @@ class LazyTurtle:
 
         return tuple(layer_prefixes), tuple(specs)
 
+    @classmethod
+    def routed_module_template_aliases(
+        cls,
+        module_tree: Optional[Any],
+        runtime_templates: Iterable[str],
+    ) -> tuple[str, ...]:
+        """Expand routed runtime templates to every alias declared by ``module_tree``.
+
+        The model-tree metadata cache intentionally uses runtime shell paths. A
+        checkpoint planner also needs the corresponding checkpoint-side paths
+        (for example Mixtral's ``block_sparse_moe.experts.#.w1``), so derive
+        both from the same alias specs used by LazyTurtle materialization.
+        """
+
+        templates = list(dict.fromkeys(runtime_templates))
+        _, specs = cls._build_moe_alias_specs(module_tree)
+        for template in tuple(templates):
+            parts = tuple(part for part in template.split(".") if part)
+            for spec in specs:
+                expert_path_len = len(spec.runtime_experts_path)
+                if len(parts) != expert_path_len + 2:
+                    continue
+                if parts[:expert_path_len] != spec.runtime_experts_path:
+                    continue
+                if parts[expert_path_len] not in ("#", "{expert_index}"):
+                    continue
+
+                runtime_leaf = parts[-1]
+                for group_index, runtime_group in enumerate(spec.runtime_leaf_groups):
+                    if runtime_leaf not in runtime_group:
+                        continue
+                    leaf_index = runtime_group.index(runtime_leaf)
+                    for expert_alias_path in spec.expert_alias_paths:
+                        for leaf_alias in spec.leaf_alias_groups[group_index][leaf_index]:
+                            alias = ".".join((*expert_alias_path, "{expert_index}", leaf_alias))
+                            if alias not in templates:
+                                templates.append(alias)
+                    break
+
+        return tuple(templates)
+
     def _split_layer_relative_path(self, name: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Return `(layer_prefix_with_index, relative_parts)` for a runtime or checkpoint tensor path."""
 
