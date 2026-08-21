@@ -53,6 +53,7 @@ from gptqmodel.quantization.rotation.hadamard_utils import (
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
+    _qvq_cuda_yaqa_feedback_op,
     _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
     _qvq_cuda_viterbi_v2_segment_g_op,
@@ -1468,6 +1469,64 @@ def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2
         **kwargs,
     )
     assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
+    factored_incremental = yaqa_inner(
+        weight,
+        input_hessian,
+        output_hessian,
+        pair_stack[0],
+        _incremental_cuda_factored_feedback=True,
+        **kwargs,
+    )
+    assert all(
+        torch.equal(candidate, expected)
+        for candidate, expected in zip(factored_incremental, reference, strict=True)
+    )
+
+
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_stream(with_bias):
+    """The grouped anti-diagonal contraction stays within the quantization FP32 gate."""
+
+    generator = torch.Generator(device="cuda").manual_seed(20260824 + with_bias)
+    source = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.05
+    left = torch.randn_like(source, generator=generator) * 0.01
+    right = torch.randn_like(source, generator=generator) * 0.01
+    output_feedback = torch.tril(
+        torch.randn((64, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01,
+        diagonal=-1,
+    )
+    bias = torch.randn_like(source, generator=generator) * 0.001 if with_bias else None
+    expected = []
+    for input_block, output_block in ((0, 3), (1, 2)):
+        input_start = input_block * 16
+        output_start = output_block * 16
+        tile = source[input_start : input_start + 16, output_start : output_start + 16]
+        if bias is not None:
+            tile = tile + bias[input_start : input_start + 16, output_start : output_start + 16]
+        expected.append(
+            tile
+            + left[input_start : input_start + 16, output_start:]
+            @ output_feedback[output_start:, output_start : output_start + 16]
+            + left[input_start : input_start + 16, output_start : output_start + 16]
+            + right[input_start : input_start + 16, output_start : output_start + 16]
+        )
+    expected = torch.stack(expected)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        actual = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, bias)
+        repeated = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, bias)
+    torch.cuda.current_stream().wait_stream(stream)
+    assert torch.equal(actual, repeated)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-6)
+
+
+def test_qvq_cuda_factored_yaqa_feedback_rejects_invalid_geometry():
+    source = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
+    output_feedback = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="anti-diagonal geometry"):
+        _qvq_cuda_yaqa_feedback_op()(source, source, source, output_feedback, 0, 0, 2, None)
 
 
 def test_qvq_cuda_fixed_b2_yaqa_parallel_candidate_is_bit_exact():

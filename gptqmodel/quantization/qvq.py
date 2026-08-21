@@ -3553,6 +3553,7 @@ def yaqa_inner(
     _diagnostics: dict[str, object] | None = None,
     _defer_segmented_cuda_checks: bool = False,
     _incremental_cuda_feedback: bool = False,
+    _incremental_cuda_factored_feedback: bool = False,
     _trusted_inputs: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
@@ -3746,6 +3747,7 @@ def yaqa_inner(
                 factorization=factorization,
                 _rounding_bias=_rounding_bias,
                 _incremental_cuda_feedback=_incremental_cuda_feedback,
+                _incremental_cuda_factored_feedback=_incremental_cuda_factored_feedback,
             )
         elif _bank0_oracle is not None:
             bank0_reference, bank0_reference_states = _bank0_oracle
@@ -3780,8 +3782,8 @@ def yaqa_inner(
     quantization_device = inner_weight.device
     apple_host_feedback = quantization_device.type == "mps"
     feedback_device = torch.device("cpu") if apple_host_feedback else quantization_device
-    input_feedback = input_L.to(device=feedback_device, copy=True)
-    output_feedback = output_L.to(device=feedback_device, copy=True)
+    input_feedback = input_L.to(device=feedback_device, copy=True).contiguous()
+    output_feedback = output_L.to(device=feedback_device, copy=True).contiguous()
     input_feedback.diagonal().sub_(1)
     output_feedback.diagonal().sub_(1)
     source = inner_weight.to(device=feedback_device, dtype=torch.float32)
@@ -3825,13 +3827,27 @@ def yaqa_inner(
     error = source.clone()
     error_blocks = error.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
     incremental_cuda_feedback = _incremental_cuda_feedback and feedback_device.type == "cuda"
+    incremental_cuda_factored_feedback = (
+        _incremental_cuda_factored_feedback
+        and feedback_device.type == "cuda"
+        and not incremental_cuda_feedback
+    )
     transformed_error = None
     feedback_temp = None
+    left_transformed_error = None
+    right_transformed_error = None
     if incremental_cuda_feedback:
         feedback_temp = torch.empty_like(source)
         transformed_error = torch.empty_like(source)
         torch.mm(input_L.transpose(0, 1), error, out=feedback_temp)
         torch.mm(feedback_temp, output_L, out=transformed_error)
+    elif incremental_cuda_factored_feedback:
+        if telemetry is not None:
+            telemetry.count("yaqa_factored_feedback_calls")
+        left_transformed_error = torch.empty_like(source)
+        right_transformed_error = torch.empty_like(source)
+        torch.mm(input_feedback.transpose(0, 1), error, out=left_transformed_error)
+        torch.mm(error, output_feedback, out=right_transformed_error)
     active_banks = bank_codebooks if bank_codebooks is not None else (codebook,)
     if segmented_v2 and segmented_bank_stack is None:
         segmented_bank_stack = torch.stack(active_banks).contiguous()
@@ -3917,6 +3933,20 @@ def yaqa_inner(
                         tile_cols,
                     ).permute(0, 2, 1, 3)
                     corrected_tile_stack = corrected_tile_stack + bias_blocks[input_indices, output_indices]
+            elif incremental_cuda_factored_feedback:
+                assert left_transformed_error is not None and right_transformed_error is not None
+                from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_op
+
+                corrected_tile_stack = _qvq_cuda_yaqa_feedback_op()(
+                    source,
+                    left_transformed_error,
+                    right_transformed_error,
+                    output_feedback,
+                    coordinates[0][0],
+                    coordinates[0][1],
+                    len(coordinates),
+                    rounding_bias,
+                )
             else:
                 corrected_tiles = []
                 for input_block, output_block in coordinates:
@@ -4168,6 +4198,33 @@ def yaqa_inner(
                     alpha=-1,
                     out=transformed_error,
                 )
+        elif incremental_cuda_factored_feedback:
+            assert left_transformed_error is not None and right_transformed_error is not None
+            with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
+                # Maintain P = L_I'.T @ E and R = E @ L_O'. Every tile on an
+                # anti-diagonal has distinct input/output blocks, so both
+                # updates are independent batched 16-wide GEMMs and need no
+                # atomics.
+                left_factors = input_feedback.view(input_blocks, tile_rows, in_features)[
+                    input_indices
+                ].transpose(1, 2)
+                updates = torch.bmm(left_factors, reconstructed)
+                left_transformed_columns = left_transformed_error.view(
+                    in_features,
+                    output_blocks,
+                    tile_cols,
+                ).permute(1, 0, 2)
+                left_transformed_columns[output_indices] -= updates
+                right_factors = output_feedback.view(output_blocks, tile_cols, out_features)[
+                    output_indices
+                ]
+                right_updates = torch.bmm(reconstructed, right_factors)
+                right_transformed_rows = right_transformed_error.view(
+                    input_blocks,
+                    tile_rows,
+                    out_features,
+                )
+                right_transformed_rows[input_indices] -= right_updates
 
     if (
         yaqa_cuda_invalid is not None
@@ -6428,9 +6485,13 @@ def quantize_qvq_linear(
             assert transformed_output_hessian is not None
             # The exact incremental recurrence avoids hundreds of shrinking
             # suffix products on attention-sized CUDA projections.  MLP
-            # matrices outside the measured 2048-dimension envelope retain
-            # the lower-workspace suffix path.
+            # Small matrices use the exact dense transformed-error recurrence.
+            # Large MLP matrices use two factored transformed-error caches and
+            # one grouped FP32 GEMM per anti-diagonal. This avoids thousands
+            # of overlapping suffix materializations while bounding corrected-
+            # tile drift against the direct FP32 expression to 1e-6.
             incremental_cuda_feedback = device.type == "cuda" and max(normalized_weight.shape) <= 2048
+            incremental_cuda_factored_feedback = device.type == "cuda" and max(normalized_weight.shape) > 2048
             if v2b4_p64:
                 assert bank_codebooks is not None
                 return yaqa_inner_v2b4_p64(
@@ -6447,6 +6508,7 @@ def quantize_qvq_linear(
                     segmented_bank_stack=segmented_bank_stack,
                     telemetry=telemetry,
                     _incremental_cuda_feedback=incremental_cuda_feedback,
+                    _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
                     _trusted_inputs=True,
                 )
             if v2b2_p32:
@@ -6463,6 +6525,7 @@ def quantize_qvq_linear(
                         factorization=prepared_yaqa_factorization,
                         telemetry=telemetry,
                         _incremental_cuda_feedback=incremental_cuda_feedback,
+                        _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
                         _trusted_inputs=True,
                     )
                     yaqa_bank_diagnostics["fallback_to_v2"] = True
@@ -6493,6 +6556,7 @@ def quantize_qvq_linear(
                     factorization=prepared_yaqa_factorization,
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,
                     telemetry=telemetry,
+                    _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
                     _trusted_inputs=True,
                 )
             return yaqa_inner(
@@ -6509,6 +6573,7 @@ def quantize_qvq_linear(
                 factorization=prepared_yaqa_factorization,
                 telemetry=telemetry,
                 _incremental_cuda_feedback=incremental_cuda_feedback,
+                _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
                 _trusted_inputs=True,
             )
         if v2b4_p64:

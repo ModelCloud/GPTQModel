@@ -934,3 +934,36 @@ kernel 4.58x. Nsight measured zero shared-load bank conflicts, so shared-memory
 swizzling was rejected. A 512-thread CTA variant and two-way candidate-loop
 unrolling were also rejected after exact A/B sweeps: they regressed common
 small/medium batches by up to 55% and 23%, respectively.
+
+## Factored large-MLP YAQA feedback (August 2026)
+
+Large CUDA YAQA matrices previously rebuilt three overlapping suffix products
+for every 16x16 tile. The factored path maintains `P = L_I'^T E` and
+`R = E L_O'`, updates both caches once per anti-diagonal, and constructs all
+cross terms with one CUDA 13 grouped FP32 cuBLAS call. A fused epilogue adds
+the source, optional bias, and one-sided terms. Matrices whose largest
+dimension is at most 2048 retain the existing exact dense recurrence.
+
+Matched W1.5 V2B2-P32+YAQA-512 measurements used Llama 3.2 1B layer 0, all
+Q/K/V/O/gate/up/down modules, 512 calibration rows, disjoint YAQA rows
+512--1023, batch 8, CUDA 13.0, and one SM80 PG506-230 GPU:
+
+| Region | Direct suffix | Factored grouped | Speedup |
+|:--|--:|--:|--:|
+| Gate YAQA feedback GPU time | 27.224 s | 3.421 s | 7.96x |
+| Up YAQA feedback GPU time | 27.788 s | 3.413 s | 8.14x |
+| Down YAQA feedback GPU time | 42.466 s | 1.030 s | 41.23x |
+| All YAQA feedback GPU time | 97.518 s | 7.904 s | 12.34x |
+| Complete `process_quant` | 217.925 s | 131.677 s | 1.66x |
+
+The grouped corrected-tile result differs from the direct FP32 suffix
+expression by at most 1e-6 in the CUDA unit gate (a 2048x8192 synthetic probe
+measured max absolute error 1.49e-8 and relative L2 3.90e-8). At ultra-low
+rates, near-tied Viterbi paths can amplify that numerically tiny difference
+into a different but valid packed artifact. Therefore the promotion gate also
+uses disjoint model output, not only intermediate tensor error. On 512 held-
+out rows (163,324 valid tokens), final-logit KL improved from 0.0389304 to
+0.0387482 and Top-1 agreement changed from 92.6220% to 92.6110% (-0.0110
+percentage points), inside the 2e-3 inference tolerance. Non-default-stream,
+determinism, optional-bias, rectangular, malformed-geometry, and W1/W2.5/W3.5
+tests accompany the operator.
