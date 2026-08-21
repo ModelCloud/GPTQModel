@@ -54,7 +54,15 @@ def _qvq_cpu_extra_ldflags() -> list[str]:
 _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_CPU_OPS_NAME,
     namespace=_QVQ_CPU_NAMESPACE,
-    required_ops=("gemv_cpu", "inner_weight_cpu", "viterbi_cpu", "viterbi_banked_cpu", "hadamard", "yaqa_feedback"),
+    required_ops=(
+        "gemv_cpu",
+        "inner_weight_cpu",
+        "viterbi_cpu",
+        "viterbi_banked_cpu",
+        "hadamard",
+        "yaqa_feedback",
+        "yaqa_feedback_update_",
+    ),
     sources=_qvq_cpu_sources,
     build_root_env="GPTQMODEL_QVQ_CPU_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_cpu"),
@@ -339,6 +347,7 @@ def _qvq_cpu_viterbi_banked_op() -> Callable:
 
 _QVQ_CPU_HADAMARD_OP: Callable | None = None
 _QVQ_CPU_YAQA_FEEDBACK_OP: Callable | None = None
+_QVQ_CPU_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
 
 
 def _qvq_cpu_hadamard_op() -> Callable:
@@ -357,6 +366,75 @@ def _qvq_cpu_yaqa_feedback_op() -> Callable:
             if _QVQ_CPU_YAQA_FEEDBACK_OP is None:
                 _QVQ_CPU_YAQA_FEEDBACK_OP = _extension_api().op("qvq_cpu", "yaqa_feedback")
     return _QVQ_CPU_YAQA_FEEDBACK_OP
+
+
+def _qvq_cpu_yaqa_feedback_update_op() -> Callable:
+    """Resolve the fused in-place factored-YAQA cache update operator once."""
+
+    global _QVQ_CPU_YAQA_FEEDBACK_UPDATE_OP
+    if _QVQ_CPU_YAQA_FEEDBACK_UPDATE_OP is None:
+        with _QVQ_CPU_OP_LOCK:
+            if _QVQ_CPU_YAQA_FEEDBACK_UPDATE_OP is None:
+                _QVQ_CPU_YAQA_FEEDBACK_UPDATE_OP = _extension_api().op(
+                    "qvq_cpu", "yaqa_feedback_update_"
+                )
+    return _QVQ_CPU_YAQA_FEEDBACK_UPDATE_OP
+
+
+def qvq_cpu_yaqa_feedback_update(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    input_feedback: torch.Tensor,
+    output_feedback: torch.Tensor,
+    reconstructed: torch.Tensor,
+    first_input_block: int,
+    first_output_block: int,
+    count: int,
+) -> None:
+    """Apply the fused in-place factored YAQA cache update for one anti-diagonal.
+
+    Subtracts ``input_feedback[i0:i0+16, :].T @ Q`` from the matching 16 columns
+    of ``left`` and ``Q @ output_feedback[o0:o0+16, :]`` from the matching 16
+    rows of ``right`` for every tile of the anti-diagonal.
+
+    Args:
+        left: [in_features, out_features] float32 CPU ``input_feedback.T @ error`` cache.
+        right: [in_features, out_features] float32 CPU ``error @ output_feedback`` cache.
+        input_feedback: [in_features, in_features] float32 CPU input feedback matrix.
+        output_feedback: [out_features, out_features] float32 CPU output feedback matrix.
+        reconstructed: [count, 16, 16] float32 CPU committed tile stack.
+        first_input_block: input block coordinate of the anti-diagonal's first tile.
+        first_output_block: output block coordinate of the anti-diagonal's first tile.
+        count: number of tiles along this anti-diagonal.
+    """
+
+    if not qvq_cpu_supported():
+        raise RuntimeError("QVQ CPU kernel requires x86-64 (AMD64).")
+    tensors = (
+        ("left", left),
+        ("right", right),
+        ("input_feedback", input_feedback),
+        ("output_feedback", output_feedback),
+        ("reconstructed", reconstructed),
+    )
+    for name, tensor in tensors:
+        if tensor.device.type != "cpu":
+            raise ValueError(f"qvq_cpu_yaqa_feedback_update: {name} must be a CPU tensor")
+        if tensor.dtype != torch.float32:
+            raise TypeError(f"qvq_cpu_yaqa_feedback_update: {name} must be float32")
+        if not tensor.is_contiguous():
+            raise ValueError(f"qvq_cpu_yaqa_feedback_update: {name} must be contiguous")
+
+    _qvq_cpu_yaqa_feedback_update_op()(
+        left,
+        right,
+        input_feedback,
+        output_feedback,
+        reconstructed,
+        int(first_input_block),
+        int(first_output_block),
+        int(count),
+    )
 
 
 def qvq_cpu_yaqa_feedback(

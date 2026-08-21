@@ -186,3 +186,39 @@ Done (mimic CUDA VAQA/YAQA factored feedback on CPU):
   - 4096x4096: Python 1038.54 ms -> native 327.71 ms (~3.17x)
 - `ruff check` passes for `gptqmodel/quantization/qvq.py`, `gptqmodel/utils/qvq_cpu.py`, and `scripts/benchmark_qvq_yaqa_feedback_cpu.py`.
 - `git diff --check` passes.
+
+Done (mirror CUDA commit 053be9c1 "fuse YAQA cache updates" on CPU):
+- Added a native fused in-place factored-feedback cache update `gptqmodel_qvq.yaqa_feedback_update_` in
+  `gptqmodel_ext/qvq/qvq_yaqa_cpu.cpp`, mirroring the batched cuBLAS update in `qvq_yaqa_cuda.cu`. For each 16x16
+  reconstructed tile of one anti-diagonal it applies
+  `left[:, o0:o0+16] -= input_feedback[i0:i0+16, :].T @ Q` and `right[i0:i0+16, :] -= Q @ output_feedback[o0:o0+16, :]`
+  directly into the strided cache tiles, removing the two batched `bmm` temporaries plus indexed scatters the Python
+  path used.
+  - Destinations are disjoint across an anti-diagonal, so no atomics are needed; work is split with `at::parallel_for`
+    over left-cache rows and right-cache column chunks.
+  - Runtime dispatch: AVX-512F/VL/DQ, then AVX2+FMA, then a scalar fallback (also used on non-x86).
+  - Each rank-16 update is accumulated in registers starting from zero and folded into the cache once, so rounding
+    stays at the scale of the (small) update rather than the (large) running cache value. This made the kernel
+    bit-exact against the BLAS reference instead of ~1e-6 off.
+- `gptqmodel/utils/qvq_cpu.py`: added `qvq_cpu_yaqa_feedback_update` plus `_qvq_cpu_yaqa_feedback_update_op`, and
+  listed `yaqa_feedback_update_` in the extension's `required_ops`.
+- `gptqmodel/quantization/qvq.py`: the cache-update branch now resolves the CPU op for
+  `_incremental_cpu_factored_feedback` instead of unconditionally calling the CUDA op.
+- Added `tests/test_qvq_cpu_yaqa.py` (dense FP32 reference for 32x64 / 64x32 / 48x48, plus geometry rejection) and
+  `scripts/benchmark_qvq_yaqa_feedback_update_cpu.py`.
+- Accuracy (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu):
+  - Native vs Python/BLAS reference: `max abs diff = 0.0` (bit-exact) for 256/512/1024/2048 square cases.
+  - Native and Python have identical FP64-reference relative error (2.0e-7 .. 5.4e-7), well inside the 1e-6 gate.
+  - End-to-end `yaqa_inner(..., _incremental_cpu_factored_feedback=True)` is bit-exact vs the non-incremental
+    reference for (32, 48) and (48, 32).
+- Performance from `scripts/benchmark_qvq_yaqa_feedback_update_cpu.py` (full anti-diagonal sweep, median of 10):
+  - 256x256: Python 1.66 ms -> native 0.38 ms (~4.35x)
+  - 512x512: Python 4.73 ms -> native 0.75 ms (~6.35x)
+  - 1024x1024: Python 20.43 ms -> native 3.25 ms (~6.28x)
+  - 2048x2048: Python 114.80 ms -> native 21.28 ms (~5.40x)
+- Tests: `tests/test_qvq_cpu_yaqa.py` 4 passed; `tests/test_qvq.py -k "yaqa or feedback"` 91 passed, 1 skipped,
+  1 failed; `tests/test_qvq_v2b2_p32.py -k "yaqa or feedback"` 35 passed, 1 failed. Both failures
+  (`test_yaqa_config_supports_exact_rate_regularization_overrides`,
+  `test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq`) reproduce on a clean tree and are pre-existing
+  config regressions.
+- `ruff check` passes for the changed Python files; `git diff --check` passes.

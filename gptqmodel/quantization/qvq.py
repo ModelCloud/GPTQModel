@@ -4228,9 +4228,14 @@ def yaqa_inner(
                 # anti-diagonal. One native call therefore submits both
                 # batched rank-16 updates directly into their strided cache
                 # tiles, avoiding temporary bmm outputs and indexed scatters.
-                from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_update_op
+                if incremental_cpu_factored_feedback:
+                    from ..utils.qvq_cpu import qvq_cpu_yaqa_feedback_update as _yaqa_feedback_update
+                else:
+                    from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_update_op
 
-                _qvq_cuda_yaqa_feedback_update_op()(
+                    _yaqa_feedback_update = _qvq_cuda_yaqa_feedback_update_op()
+
+                _yaqa_feedback_update(
                     left_transformed_error,
                     right_transformed_error,
                     input_feedback,
