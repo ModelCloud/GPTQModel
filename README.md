@@ -21,7 +21,7 @@
 
 ## Latest News
 
-* 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl` and `muse_glimmer` model support
+* 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl`, `muse_glimmer`, `olmo3` and `smollm3` model support
 * 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
 * 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
 * 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
@@ -371,7 +371,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | Cohere 1-2 / 2 MoE            | ✅ | GPT-Neo / NeoX                  | ✅ | Llama 1-3.3 | ✅ | Nemotron H / H Puzzle / Omni    | ✅ | StarCoder2             | ✅ |
 | DBRX Converted                | ✅ | GPT-2                           | ✅ | Llama 3.2 VL | ✅ | Nemotron Ultra / Labs-Diffusion | ✅ | TeleChat2              | ✅ |
 | Deci                          | ✅ | GPT-J                           | ✅ | Llama 4    | ✅ | OPT                             | ✅ | Trinity                | ✅ |
-| DeepSeek-V2/V3/V4/R1          | ✅ | GPT-OSS                         | ✅ | LongCat Flash | ✅ | OLMo2 / LLaDA2                  | ✅ | Yi                     | ✅ |
+| DeepSeek-V2/V3/V4/R1          | ✅ | GPT-OSS                         | ✅ | LongCat Flash | ✅ | OLMo2/3 / LLaDA2                | ✅ | Yi                     | ✅ |
 | DeepSeek-V2 Lite / VL / VL2 / OCR2 | ✅ | Granite / Granite MoE           | ✅ | LongLLaMA  | ✅ | Ovis 1.6/2/2.5/2.6 MoE/2.6 Next | ✅ | Seed-OSS               | ✅ |
 | Dream                         | ✅ | GRIN-MoE                        | ✅ | Instella   | ✅ | Phi 1-4                         | ✅ | Voxtral                | ✅ |
 | ERNIE 4.5 / MoE / VL MoE      | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6             | ✅ | PanGu-α                | ✅ |
@@ -379,7 +379,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Nanbeige   | ✅ | North Micro Vision              | ✅ |  Mage-VL                      | ✅ |
-| Muse Glimmer        | ✅ |                            |  |    |  |               |  |                        |  |
+| Muse Glimmer        | ✅ |   SmolLM3                         | ✅ |    |  |               |  |                        |  |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. For ternary checkpoints, canonical 128-value-block `Q2_0` and its identical `PQ2_0` payload are supported; the incompatible `Q2_0_g64` layout is rejected. Prism model quantization is not included.
 

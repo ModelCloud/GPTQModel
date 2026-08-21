@@ -160,6 +160,7 @@ from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # 
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
+from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.olmoe import OlmoeQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
@@ -220,6 +221,7 @@ MODEL_MAP = {
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
+    "smollm3": LlamaQModel,  # llama-compatible quantization module tree
     "llama4": Llama4QModel,
     "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
@@ -325,6 +327,7 @@ MODEL_MAP = {
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
+    "olmo3": Olmo3QModel,
     "olmoe": OlmoeQModel,
     "ovis": OvisQModel,
     "ovis2": Ovis2QModel,
