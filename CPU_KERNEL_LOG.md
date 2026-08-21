@@ -328,3 +328,10 @@ Branch tip `9388a66f` matches `origin/agent/qvq-dual-v4`; working tree clean. Ne
 `05f5152d` (B2 Block-LDLQ family batching) and `6b66f16f` (YAQA family-candidate batching), both already reviewed
 and recorded as not CPU-portable, and no MLX/MPS kernel or `gptqmodel/quantization/qvq.py` /
 `gptqmodel/nn_modules/qlinear/qvq.py` change has landed since. Nothing to port this run.
+
+## 2026-08-21 (07:52 UTC) sync check: no new CUDA/MLX/MPS CPU-portable changes
+
+Branch tip `c35340e4` matches `origin/agent/qvq-dual-v4`; working tree clean. Newest GPU-side commits remain
+`05f5152d` (B2 Block-LDLQ family batching) and `6b66f16f` (YAQA family-candidate batching), both already reviewed
+and recorded as not CPU-portable; no MLX/MPS kernel or `gptqmodel/quantization/qvq.py` /
+`gptqmodel/nn_modules/qlinear/qvq.py` change has landed since. Nothing to port this run.
