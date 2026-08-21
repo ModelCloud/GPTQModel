@@ -59,3 +59,24 @@ Run the smallest applicable checks first:
 6. Serving-engine checks for GPTQ or AWQ only when that integration is in scope.
 
 Report the exact method, format, bits, group size, symmetry, activation ordering, dtype, device, and backend with every numerical result. Never use a successful save as the sole correctness signal.
+
+## Reference: Hadamard rotation for outlier suppression
+
+Low-bit quantization (especially int4) is highly sensitive to outliers because the scale is often set by the largest absolute value. A single extreme value widens the spacing between every representable level, which increases relative error for the many small values.
+
+Hadamard rotation is a pre-quantization orthogonal transform that mixes values so that extreme values are distributed across many less-extreme dimensions rather than isolated in a few channels:
+
+- It is an orthogonal rotation, so `Q @ Q.T = I`. Applying the rotation before quantization and its inverse after quantization cancels out in exact arithmetic; the benefit appears only when values are rounded in between.
+- Example effect from Jessie Dong's experiment (8 artificial ±25 outliers in a 4096-length vector, symmetric int4):
+  - largest absolute value: 25.0 → 5.5
+  - int4 step size: 3.571 → 0.781
+  - relative error: 0.598 → 0.152 (≈3.9× reduction)
+  - RMS stayed at 1.493; the rotation did not remove information, it moved the same information across more channels.
+- The Hadamard matrix uses only `+1`/`-1` entries, so the transform can be done with additions and subtractions. The fast Walsh-Hadamard transform runs in `O(n log n)` instead of `O(n²)` and does not require building the full matrix.
+- In GPT-QModel, `BaseQuantizeConfig.rotation` accepts `"hadamard"` or `"random"` and the rotation logic lives in `gptqmodel/quantization/rotation/`. The Hadamard path is adapted from QuaRot and can use the vendored fast-hadamard-transform CUDA kernel.
+- Activations may need online rotation when the transform cannot be folded into the weights. That overhead can erode the speedup of quantization; fused kernels (e.g. HadaCore, the native `qvq_hadamard_*` kernels) reduce this cost.
+- Caveats:
+  - Outlier suppression is fundamentally limited by the geometry of the input vector. If several outlier channels land in the same small block, the rotation only spreads them inside that block. Recent work such as PeRQ rearranges channels first so large values are split across different blocks.
+  - Rotations are not a substitute for calibration-aware scale/zero search; they are a pre-conditioning step that changes the quantization problem geometry.
+
+Source: Jessie Dong, *one strange way to make 4-bit inference more accurate is to mix the model’s values together before rounding them*, 2026-08-20, https://x.com/jessiedong_/status/2090308407123402875?s=20.
