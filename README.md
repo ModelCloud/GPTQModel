@@ -21,7 +21,7 @@
 
 ## Latest News
 
-* 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl` / Mage-VL model support
+* 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl` and `muse_glimmer` model support
 * 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
 * 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
 * 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
@@ -378,7 +378,8 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | XVERSE                        | ✅ | Brumby                          | ✅ | Hymba      | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview | ✅ |
-| HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Nanbeige   | ✅ | North Micro Vision              | ✅ |  Mage-VL                      |   |
+| HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Nanbeige   | ✅ | North Micro Vision              | ✅ |  Mage-VL                      | ✅ |
+| Muse Glimmer        | ✅ |                            |  |    |  |               |  |                        |  |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. For ternary checkpoints, canonical 128-value-block `Q2_0` and its identical `PQ2_0` payload are supported; the incompatible `Q2_0_g64` layout is rejected. Prism model quantization is not included.
 
