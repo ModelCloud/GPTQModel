@@ -4201,30 +4201,23 @@ def yaqa_inner(
         elif incremental_cuda_factored_feedback:
             assert left_transformed_error is not None and right_transformed_error is not None
             with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
-                # Maintain P = L_I'.T @ E and R = E @ L_O'. Every tile on an
-                # anti-diagonal has distinct input/output blocks, so both
-                # updates are independent batched 16-wide GEMMs and need no
-                # atomics.
-                left_factors = input_feedback.view(input_blocks, tile_rows, in_features)[
-                    input_indices
-                ].transpose(1, 2)
-                updates = torch.bmm(left_factors, reconstructed)
-                left_transformed_columns = left_transformed_error.view(
-                    in_features,
-                    output_blocks,
-                    tile_cols,
-                ).permute(1, 0, 2)
-                left_transformed_columns[output_indices] -= updates
-                right_factors = output_feedback.view(output_blocks, tile_cols, out_features)[
-                    output_indices
-                ]
-                right_updates = torch.bmm(reconstructed, right_factors)
-                right_transformed_rows = right_transformed_error.view(
-                    input_blocks,
-                    tile_rows,
-                    out_features,
+                # Maintain P = L_I'.T @ E and R = E @ L_O'. Distinct input
+                # and output blocks make every destination disjoint within an
+                # anti-diagonal. One native call therefore submits both
+                # batched rank-16 updates directly into their strided cache
+                # tiles, avoiding temporary bmm outputs and indexed scatters.
+                from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_update_op
+
+                _qvq_cuda_yaqa_feedback_update_op()(
+                    left_transformed_error,
+                    right_transformed_error,
+                    input_feedback,
+                    output_feedback,
+                    reconstructed.contiguous(),
+                    coordinates[0][0],
+                    coordinates[0][1],
+                    len(coordinates),
                 )
-                right_transformed_rows[input_indices] -= right_updates
 
     if (
         yaqa_cuda_invalid is not None

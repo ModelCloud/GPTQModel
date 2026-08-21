@@ -967,3 +967,21 @@ out rows (163,324 valid tokens), final-logit KL improved from 0.0389304 to
 percentage points), inside the 2e-3 inference tolerance. Non-default-stream,
 determinism, optional-bias, rectangular, malformed-geometry, and W1/W2.5/W3.5
 tests accompany the operator.
+
+The follow-up cache-update fusion replaces two Torch `bmm` temporaries and two
+indexed scatter/subtract kernels per anti-diagonal with one native operator.
+It submits two FP32 batched cuBLAS products directly into the disjoint strided
+tiles of `P` and `R` using `alpha=-1, beta=1`. The same matched layer run gave:
+
+| Region | Torch bmm/scatter | Native direct update | Speedup |
+|:--|--:|--:|--:|
+| Gate cache update GPU time | 1.569 s | 0.899 s | 1.74x |
+| Up cache update GPU time | 1.572 s | 0.938 s | 1.68x |
+| Down cache update GPU time | 1.833 s | 1.029 s | 1.78x |
+| All cache updates GPU time | 6.196 s | 4.091 s | 1.51x |
+| Complete `process_quant` | 131.677 s | 129.049 s | 1.02x |
+
+All trellis words, segment selectors, and B2 family IDs were bit-for-bit
+identical across the seven real modules. Direct cache tests additionally cover
+both rectangular orientations, non-default streams, deterministic repetition,
+malformed geometry, and an absolute FP32 error gate of 1e-6.

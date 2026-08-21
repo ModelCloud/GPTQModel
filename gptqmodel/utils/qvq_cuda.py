@@ -69,6 +69,7 @@ def _validate_viterbi_distance_range(
         )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
+_QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
 _PGC16_LEVELS: dict[tuple[torch.device, str], torch.Tensor] = {}
 _PGC16_LEVELS_LOCK = threading.Lock()
@@ -107,6 +108,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
         "yaqa_feedback",
+        "yaqa_feedback_update_",
     ),
     sources=_qvq_cuda_sources,
     build_root_env="GPTQMODEL_QVQ_CUDA_BUILD_ROOT",
@@ -203,6 +205,19 @@ def _qvq_cuda_yaqa_feedback_op() -> Callable:
             if _QVQ_CUDA_YAQA_FEEDBACK_OP is None:
                 _QVQ_CUDA_YAQA_FEEDBACK_OP = _extension_api().op("qvq_cuda", "yaqa_feedback")
     return _QVQ_CUDA_YAQA_FEEDBACK_OP
+
+
+def _qvq_cuda_yaqa_feedback_update_op() -> Callable:
+    """Resolve the fused in-place factored-YAQA cache update operator once."""
+
+    global _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP
+    if _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP is None:
+                _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP = _extension_api().op(
+                    "qvq_cuda", "yaqa_feedback_update_"
+                )
+    return _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP
 
 
 def _qvq_cuda_viterbi_v4_op() -> Callable:

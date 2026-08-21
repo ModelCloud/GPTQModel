@@ -54,6 +54,7 @@ from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
     _qvq_cuda_yaqa_feedback_op,
+    _qvq_cuda_yaqa_feedback_update_op,
     _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
     _qvq_cuda_viterbi_v2_segment_g_op,
@@ -1527,6 +1528,55 @@ def test_qvq_cuda_factored_yaqa_feedback_rejects_invalid_geometry():
     output_feedback = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
     with pytest.raises(RuntimeError, match="anti-diagonal geometry"):
         _qvq_cuda_yaqa_feedback_op()(source, source, source, output_feedback, 0, 0, 2, None)
+
+
+def test_qvq_cuda_factored_yaqa_cache_update_matches_fp32_reference_on_nondefault_stream():
+    generator = torch.Generator(device="cuda").manual_seed(20260825)
+    left = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01
+    right = torch.randn_like(left, generator=generator) * 0.01
+    input_feedback = torch.randn((32, 32), generator=generator, device="cuda") * 0.01
+    output_feedback = torch.randn((64, 64), generator=generator, device="cuda") * 0.01
+    reconstructed = torch.randn((2, 16, 16), generator=generator, device="cuda") * 0.05
+    expected_left = left.clone()
+    expected_right = right.clone()
+    for tile, (input_block, output_block) in enumerate(((0, 3), (1, 2))):
+        input_start = input_block * 16
+        output_start = output_block * 16
+        expected_left[:, output_start : output_start + 16] -= (
+            input_feedback[input_start : input_start + 16].T @ reconstructed[tile]
+        )
+        expected_right[input_start : input_start + 16] -= (
+            reconstructed[tile] @ output_feedback[output_start : output_start + 16]
+        )
+
+    actual_left = left.clone()
+    actual_right = right.clone()
+    repeated_left = left.clone()
+    repeated_right = right.clone()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        _qvq_cuda_yaqa_feedback_update_op()(
+            actual_left, actual_right, input_feedback, output_feedback, reconstructed, 0, 3, 2
+        )
+        _qvq_cuda_yaqa_feedback_update_op()(
+            repeated_left, repeated_right, input_feedback, output_feedback, reconstructed, 0, 3, 2
+        )
+    torch.cuda.current_stream().wait_stream(stream)
+    assert torch.equal(actual_left, repeated_left)
+    assert torch.equal(actual_right, repeated_right)
+    torch.testing.assert_close(actual_left, expected_left, rtol=0.0, atol=1e-6)
+    torch.testing.assert_close(actual_right, expected_right, rtol=0.0, atol=1e-6)
+
+
+def test_qvq_cuda_factored_yaqa_cache_update_rejects_invalid_geometry():
+    left = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
+    feedback = torch.zeros_like(left)
+    reconstructed = torch.zeros((2, 16, 16), device="cuda", dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="update anti-diagonal geometry"):
+        _qvq_cuda_yaqa_feedback_update_op()(
+            left, left.clone(), feedback, feedback, reconstructed, 0, 0, 2
+        )
 
 
 def test_qvq_cuda_fixed_b2_yaqa_parallel_candidate_is_bit_exact():
