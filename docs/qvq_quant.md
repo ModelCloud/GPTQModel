@@ -985,3 +985,38 @@ All trellis words, segment selectors, and B2 family IDs were bit-for-bit
 identical across the seven real modules. Direct cache tests additionally cover
 both rectangular orientations, non-default streams, deterministic repetition,
 malformed geometry, and an absolute FP32 error gate of 1e-6.
+
+The next pass lifts the complete B2 family dimension through the factored
+feedback, segmented Viterbi, commit, and cache-update schedule. Each family
+retains an independent error history; only launch scheduling and grouped GEMM
+submission are shared. A synthetic W1.5, 128-tile SM80 recurrence sweep gave:
+
+| Candidate width | Serial ms | Family-grid ms | Serial speedup | Side-stream ms | Grid vs streams |
+|:--|--:|--:|--:|--:|--:|
+| 2 | 15.158 | 12.763 | 1.188x | 11.093 | 0.830x |
+| 4 | 31.059 | 23.159 | 1.341x | 22.250 | 0.908x |
+| 8 | 62.692 | 44.366 | 1.413x | 44.951 | 0.955x |
+
+Recurrence batching alone does not beat independent streams at this occupancy.
+It is retained only as part of full-path batching, where it also removes
+duplicate feedback and cache-update submissions. Production B2 reselect has
+three alternative candidates; width eight is a scalability experiment, not a
+claim that one module has eight useful families.
+
+The matched real-layer A/B used the same Llama 3.2 1B layer 0, W1.5,
+V2B2-P32+YAQA-512, seed 18240, calibration rows 0--511, YAQA rows 512--1023,
+batch 8, and all seven linear modules as the two preceding measurements:
+
+| Region | Independent paths | Candidate batch | Speedup |
+|:--|--:|--:|--:|
+| Three-family candidate GPU time | 52.554 s | 43.827 s | 1.20x |
+| Segmented Viterbi GPU time | 42.219 s | 35.789 s | 1.18x |
+| Factored feedback GPU time | 7.907 s | 6.383 s | 1.24x |
+| Cache update GPU time | 4.091 s | 4.013 s | 1.02x |
+| Complete `process_quant` | 129.049 s | 122.005 s | 1.06x |
+
+All 37 saved tensors belonging to layer 0 were bit-for-bit identical between
+the two checkpoints. Focused CUDA coverage also compares four batched factor
+histories with four independent calls and checks corrected tiles plus both
+factor caches exactly; the complete three-family YAQA candidate test requires
+identical dense weight, trellis states, selector bytes, and winning family.

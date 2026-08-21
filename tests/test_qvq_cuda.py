@@ -1569,6 +1569,52 @@ def test_qvq_cuda_factored_yaqa_cache_update_matches_fp32_reference_on_nondefaul
     torch.testing.assert_close(actual_right, expected_right, rtol=0.0, atol=1e-6)
 
 
+def test_qvq_cuda_factored_yaqa_family_batch_matches_independent_candidates():
+    """A leading candidate dimension must not couple independent YAQA histories."""
+
+    generator = torch.Generator(device="cuda").manual_seed(20260826)
+    families = 4
+    source = torch.randn((32, 64), generator=generator, device="cuda") * 0.05
+    left = torch.randn((families, 32, 64), generator=generator, device="cuda") * 0.01
+    right = torch.randn_like(left, generator=generator) * 0.01
+    input_feedback = torch.randn((32, 32), generator=generator, device="cuda") * 0.01
+    output_feedback = torch.randn((64, 64), generator=generator, device="cuda") * 0.01
+    reconstructed = torch.randn((families, 2, 16, 16), generator=generator, device="cuda") * 0.05
+
+    expected_tiles = torch.stack(
+        tuple(
+            _qvq_cuda_yaqa_feedback_op()(
+                source, left[family], right[family], output_feedback, 0, 3, 2, None
+            )
+            for family in range(families)
+        )
+    )
+    expected_left = left.clone()
+    expected_right = right.clone()
+    for family in range(families):
+        _qvq_cuda_yaqa_feedback_update_op()(
+            expected_left[family],
+            expected_right[family],
+            input_feedback,
+            output_feedback,
+            reconstructed[family],
+            0,
+            3,
+            2,
+        )
+
+    actual_left = left.clone()
+    actual_right = right.clone()
+    actual_tiles = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, None)
+    _qvq_cuda_yaqa_feedback_update_op()(
+        actual_left, actual_right, input_feedback, output_feedback, reconstructed, 0, 3, 2
+    )
+
+    assert torch.equal(actual_tiles, expected_tiles)
+    assert torch.equal(actual_left, expected_left)
+    assert torch.equal(actual_right, expected_right)
+
+
 def test_qvq_cuda_factored_yaqa_cache_update_rejects_invalid_geometry():
     left = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
     feedback = torch.zeros_like(left)
@@ -1579,7 +1625,7 @@ def test_qvq_cuda_factored_yaqa_cache_update_rejects_invalid_geometry():
         )
 
 
-def test_qvq_cuda_fixed_b2_yaqa_parallel_candidate_is_bit_exact():
+def test_qvq_cuda_b2_yaqa_candidate_batch_is_bit_exact():
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260823)
     bits = 2.5
     banks = _canonical_qvq_v2b4_banks(
@@ -1597,9 +1643,10 @@ def test_qvq_cuda_fixed_b2_yaqa_parallel_candidate_is_bit_exact():
     kwargs = {
         "bits": bits,
         "block_family_id": 2,
-        "family_mode": "fixed_block_ldlq",
+        "family_mode": "reselect",
         "bank_codebook_pair_stacks": pairs,
         "trellis_batch_size": 1,
+        "_incremental_cuda_factored_feedback": True,
     }
     reference = yaqa_inner_v2b2_p32(
         weight,

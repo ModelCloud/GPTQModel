@@ -27,19 +27,27 @@ __global__ void qvq_yaqa_grouped_pointers_kernel(
     float** c_array,
     int first_input_block,
     int first_output_block,
+    int in_features,
     int out_features,
-    int count) {
-  const int tile = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (tile >= count) {
+    int count,
+    int families) {
+  const int item = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int total = count * families;
+  if (item >= total) {
     return;
   }
+  const int family = item / count;
+  const int tile = item - family * count;
   const int input_start = (first_input_block + tile) * kTile;
   const int output_start = (first_output_block - tile) * kTile;
+  const int64_t matrix_stride = static_cast<int64_t>(in_features) * out_features;
+  const int64_t family_offset = static_cast<int64_t>(family) * matrix_stride;
   // Row-major C=P@L is column-major C.T=L.T@P.T.
-  a_array[tile] = const_cast<float*>(
+  b_array[item] = const_cast<float*>(
+      left + family_offset + static_cast<int64_t>(input_start) * out_features + output_start);
+  a_array[item] = const_cast<float*>(
       output_feedback + static_cast<int64_t>(output_start) * out_features + output_start);
-  b_array[tile] = const_cast<float*>(left + static_cast<int64_t>(input_start) * out_features + output_start);
-  c_array[tile] = cross + static_cast<int64_t>(tile) * kThreads;
+  c_array[item] = cross + static_cast<int64_t>(item) * kThreads;
 }
 
 __global__ void qvq_yaqa_update_grouped_pointers_kernel(
@@ -55,29 +63,35 @@ __global__ void qvq_yaqa_update_grouped_pointers_kernel(
     int first_output_block,
     int in_features,
     int out_features,
-    int count) {
-  const int tile = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (tile >= count) {
+    int count,
+    int families) {
+  const int item = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int total = count * families;
+  if (item >= total) {
     return;
   }
+  const int family = item / count;
+  const int tile = item - family * count;
   const int input_start = (first_input_block + tile) * kTile;
   const int output_start = (first_output_block - tile) * kTile;
-  const float* tile_reconstruction = reconstructed + static_cast<int64_t>(tile) * kThreads;
+  const int64_t matrix_stride = static_cast<int64_t>(in_features) * out_features;
+  const int64_t family_offset = static_cast<int64_t>(family) * matrix_stride;
+  const float* tile_reconstruction = reconstructed + static_cast<int64_t>(item) * kThreads;
 
   // Row-major P[:, j] -= L_I[i, :].T @ Q is column-major
   // P[:, j].T -= Q.T @ L_I[i, :].
-  a_array[tile] = const_cast<float*>(tile_reconstruction);
-  b_array[tile] = const_cast<float*>(
+  a_array[item] = const_cast<float*>(tile_reconstruction);
+  b_array[item] = const_cast<float*>(
       input_feedback + static_cast<int64_t>(input_start) * in_features);
-  c_array[tile] = left + output_start;
+  c_array[item] = left + family_offset + output_start;
 
   // Row-major R[i, :] -= Q @ L_O[j, :] is column-major
   // R[i, :].T -= L_O[j, :].T @ Q.T.
-  const int right_index = count + tile;
+  const int right_index = total + item;
   a_array[right_index] = const_cast<float*>(
       output_feedback + static_cast<int64_t>(output_start) * out_features);
   b_array[right_index] = const_cast<float*>(tile_reconstruction);
-  c_array[right_index] = right + static_cast<int64_t>(input_start) * out_features;
+  c_array[right_index] = right + family_offset + static_cast<int64_t>(input_start) * out_features;
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_yaqa_feedback_epilogue_kernel(
@@ -89,23 +103,29 @@ __global__ __launch_bounds__(kThreads) void qvq_yaqa_feedback_epilogue_kernel(
     float* __restrict__ corrected,
     int first_input_block,
     int first_output_block,
-    int out_features) {
-  const int tile = static_cast<int>(blockIdx.x);
+    int in_features,
+    int out_features,
+    int count) {
+  const int item = static_cast<int>(blockIdx.x);
+  const int family = item / count;
+  const int tile = item - family * count;
   const int lane = static_cast<int>(threadIdx.x);
   const int row = lane / kTile;
   const int col = lane % kTile;
   const int input_start = (first_input_block + tile) * kTile;
   const int output_start = (first_output_block - tile) * kTile;
+  const int64_t matrix_stride = static_cast<int64_t>(in_features) * out_features;
+  const int64_t family_offset = static_cast<int64_t>(family) * matrix_stride;
 
   const int64_t matrix_index = static_cast<int64_t>(input_start + row) * out_features + output_start + col;
   float value = source[matrix_index];
   if (bias != nullptr) {
     value += bias[matrix_index];
   }
-  value += cross[static_cast<int64_t>(tile) * kThreads + lane];
-  value += left[matrix_index];
-  value += right[matrix_index];
-  corrected[static_cast<int64_t>(tile) * kThreads + lane] = value;
+  value += cross[static_cast<int64_t>(item) * kThreads + lane];
+  value += left[family_offset + matrix_index];
+  value += right[family_offset + matrix_index];
+  corrected[static_cast<int64_t>(item) * kThreads + lane] = value;
 }
 
 at::Tensor qvq_yaqa_feedback_cuda(
@@ -120,11 +140,13 @@ at::Tensor qvq_yaqa_feedback_cuda(
   TORCH_CHECK(source.is_cuda(), "YAQA source must be CUDA");
   TORCH_CHECK(source.scalar_type() == at::kFloat && source.dim() == 2 && source.is_contiguous(),
               "YAQA source must be contiguous FP32 [input, output]");
-  for (const auto* tensor : {&left, &right}) {
-    TORCH_CHECK(tensor->device() == source.device() && tensor->scalar_type() == at::kFloat &&
-                    tensor->sizes() == source.sizes() && tensor->is_contiguous(),
-                "YAQA transformed errors must match the contiguous FP32 source");
-  }
+  TORCH_CHECK(left.device() == source.device() && left.scalar_type() == at::kFloat && left.is_contiguous() &&
+                  (left.sizes() == source.sizes() ||
+                   (left.dim() == 3 && left.size(1) == source.size(0) && left.size(2) == source.size(1))),
+              "YAQA left transformed error must be contiguous FP32 [input, output] or [family, input, output]");
+  TORCH_CHECK(right.device() == source.device() && right.scalar_type() == at::kFloat &&
+                  right.sizes() == left.sizes() && right.is_contiguous(),
+              "YAQA right transformed error must match the left transformed error");
   TORCH_CHECK(output_feedback.device() == source.device() && output_feedback.scalar_type() == at::kFloat &&
                   output_feedback.dim() == 2 && output_feedback.size(0) == source.size(1) &&
                   output_feedback.size(1) == source.size(1) && output_feedback.is_contiguous(),
@@ -142,15 +164,19 @@ at::Tensor qvq_yaqa_feedback_cuda(
   }
 
   const c10::cuda::CUDAGuard device_guard(source.device());
-  at::Tensor corrected = at::empty({count, kTile, kTile}, source.options());
+  const int64_t families = left.dim() == 3 ? left.size(0) : 1;
+  const int64_t total = families * count;
+  at::Tensor corrected = left.dim() == 3
+      ? at::empty({families, count, kTile, kTile}, source.options())
+      : at::empty({count, kTile, kTile}, source.options());
   at::Tensor cross = at::empty_like(corrected);
-  at::Tensor pointer_storage = at::empty({3, count}, source.options().dtype(at::kLong));
+  at::Tensor pointer_storage = at::empty({3, total}, source.options().dtype(at::kLong));
   auto pointers = reinterpret_cast<float**>(pointer_storage.mutable_data_ptr<int64_t>());
   auto a_array = pointers;
-  auto b_array = pointers + count;
-  auto c_array = pointers + 2 * count;
+  auto b_array = pointers + total;
+  auto c_array = pointers + 2 * total;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(source.get_device());
-  qvq_yaqa_grouped_pointers_kernel<<<static_cast<unsigned int>((count + 127) / 128), 128, 0, stream>>>(
+  qvq_yaqa_grouped_pointers_kernel<<<static_cast<unsigned int>((total + 127) / 128), 128, 0, stream>>>(
       left.const_data_ptr<float>(),
       output_feedback.const_data_ptr<float>(),
       cross.mutable_data_ptr<float>(),
@@ -159,11 +185,13 @@ at::Tensor qvq_yaqa_feedback_cuda(
       c_array,
       static_cast<int>(first_input_block),
       static_cast<int>(first_output_block),
+      static_cast<int>(source.size(0)),
       static_cast<int>(source.size(1)),
-      static_cast<int>(count));
+      static_cast<int>(count),
+      static_cast<int>(families));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  const int group_count = static_cast<int>(count);
+  const int group_count = static_cast<int>(total);
   std::vector<cublasOperation_t> operations(group_count, CUBLAS_OP_N);
   std::vector<int> m(group_count, kTile);
   std::vector<int> n(group_count, kTile);
@@ -174,8 +202,9 @@ at::Tensor qvq_yaqa_feedback_cuda(
   std::vector<int> group_sizes(group_count, 1);
   std::vector<float> alpha(group_count, 1.0f);
   std::vector<float> beta(group_count, 0.0f);
-  for (int tile = 0; tile < group_count; ++tile) {
-    k[tile] = static_cast<int>(source.size(1)) -
+  for (int item = 0; item < group_count; ++item) {
+    const int tile = item % static_cast<int>(count);
+    k[item] = static_cast<int>(source.size(1)) -
         (static_cast<int>(first_output_block) - tile) * kTile;
   }
   cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
@@ -206,7 +235,7 @@ at::Tensor qvq_yaqa_feedback_cuda(
               "failed to restore YAQA cuBLAS pointer mode");
   TORCH_CHECK(grouped_status == CUBLAS_STATUS_SUCCESS, "YAQA grouped FP32 GEMM failed");
 
-  qvq_yaqa_feedback_epilogue_kernel<<<static_cast<unsigned int>(count), kThreads, 0, stream>>>(
+  qvq_yaqa_feedback_epilogue_kernel<<<static_cast<unsigned int>(total), kThreads, 0, stream>>>(
       source.const_data_ptr<float>(),
       left.const_data_ptr<float>(),
       right.const_data_ptr<float>(),
@@ -215,7 +244,9 @@ at::Tensor qvq_yaqa_feedback_cuda(
       corrected.mutable_data_ptr<float>(),
       static_cast<int>(first_input_block),
       static_cast<int>(first_output_block),
-      static_cast<int>(source.size(1)));
+      static_cast<int>(source.size(0)),
+      static_cast<int>(source.size(1)),
+      static_cast<int>(count));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return corrected;
 }
@@ -229,13 +260,15 @@ void qvq_yaqa_feedback_update_cuda(
     int64_t first_input_block,
     int64_t first_output_block,
     int64_t count) {
-  TORCH_CHECK(left.is_cuda() && left.scalar_type() == at::kFloat && left.dim() == 2 && left.is_contiguous(),
-              "YAQA left cache must be contiguous CUDA FP32 [input, output]");
+  TORCH_CHECK(left.is_cuda() && left.scalar_type() == at::kFloat &&
+                  (left.dim() == 2 || left.dim() == 3) && left.is_contiguous(),
+              "YAQA left cache must be contiguous CUDA FP32 [input, output] or [family, input, output]");
   TORCH_CHECK(right.device() == left.device() && right.scalar_type() == at::kFloat &&
                   right.sizes() == left.sizes() && right.is_contiguous(),
               "YAQA right cache must match the contiguous FP32 left cache");
-  const int64_t in_features = left.size(0);
-  const int64_t out_features = left.size(1);
+  const int64_t families = left.dim() == 3 ? left.size(0) : 1;
+  const int64_t in_features = left.size(left.dim() - 2);
+  const int64_t out_features = left.size(left.dim() - 1);
   TORCH_CHECK(input_feedback.device() == left.device() && input_feedback.scalar_type() == at::kFloat &&
                   input_feedback.sizes() == at::IntArrayRef({in_features, in_features}) &&
                   input_feedback.is_contiguous(),
@@ -245,10 +278,13 @@ void qvq_yaqa_feedback_update_cuda(
                   output_feedback.is_contiguous(),
               "YAQA output feedback must be contiguous FP32 [output, output]");
   TORCH_CHECK(reconstructed.device() == left.device() && reconstructed.scalar_type() == at::kFloat &&
-                  reconstructed.dim() == 3 && reconstructed.size(0) == count &&
-                  reconstructed.size(1) == kTile && reconstructed.size(2) == kTile &&
+                  ((left.dim() == 2 && reconstructed.dim() == 3 && reconstructed.size(0) == count) ||
+                   (left.dim() == 3 && reconstructed.dim() == 4 && reconstructed.size(0) == families &&
+                    reconstructed.size(1) == count)) &&
+                  reconstructed.size(reconstructed.dim() - 2) == kTile &&
+                  reconstructed.size(reconstructed.dim() - 1) == kTile &&
                   reconstructed.is_contiguous(),
-              "YAQA reconstruction must be contiguous FP32 [count, 16, 16]");
+              "YAQA reconstruction must be contiguous FP32 [count, 16, 16] or [family, count, 16, 16]");
   TORCH_CHECK(in_features % kTile == 0 && out_features % kTile == 0,
               "YAQA fused update requires dimensions divisible by 16");
   TORCH_CHECK(count >= 1 && first_input_block >= 0 && first_output_block >= count - 1 &&
@@ -257,13 +293,14 @@ void qvq_yaqa_feedback_update_cuda(
               "YAQA update anti-diagonal geometry is invalid");
 
   const c10::cuda::CUDAGuard device_guard(left.device());
-  at::Tensor pointer_storage = at::empty({6, count}, left.options().dtype(at::kLong));
+  const int64_t total = families * count;
+  at::Tensor pointer_storage = at::empty({6, total}, left.options().dtype(at::kLong));
   auto pointers = reinterpret_cast<float**>(pointer_storage.mutable_data_ptr<int64_t>());
   auto a_array = pointers;
-  auto b_array = pointers + 2 * count;
-  auto c_array = pointers + 4 * count;
+  auto b_array = pointers + 2 * total;
+  auto c_array = pointers + 4 * total;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(left.get_device());
-  qvq_yaqa_update_grouped_pointers_kernel<<<static_cast<unsigned int>((count + 127) / 128), 128, 0, stream>>>(
+  qvq_yaqa_update_grouped_pointers_kernel<<<static_cast<unsigned int>((total + 127) / 128), 128, 0, stream>>>(
       left.mutable_data_ptr<float>(),
       right.mutable_data_ptr<float>(),
       input_feedback.const_data_ptr<float>(),
@@ -276,10 +313,11 @@ void qvq_yaqa_feedback_update_cuda(
       static_cast<int>(first_output_block),
       static_cast<int>(in_features),
       static_cast<int>(out_features),
-      static_cast<int>(count));
+      static_cast<int>(count),
+      static_cast<int>(families));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  const int matrix_count = static_cast<int>(count);
+  const int matrix_count = static_cast<int>(total);
   const float alpha = -1.0f;
   const float beta = 1.0f;
   cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
@@ -314,12 +352,12 @@ void qvq_yaqa_feedback_update_cuda(
       kTile,
       kTile,
       &alpha,
-      a_array + count,
+      a_array + total,
       static_cast<int>(out_features),
-      b_array + count,
+      b_array + total,
       kTile,
       &beta,
-      c_array + count,
+      c_array + total,
       static_cast<int>(out_features),
       matrix_count);
   TORCH_CHECK(cublasSetPointerMode(handle, previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
