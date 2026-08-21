@@ -363,3 +363,9 @@ commits are still `05f5152d` and `6b66f16f`, both already recorded as not CPU-po
 Tip `c416a58e` matches `origin/agent/qvq-dual-v4` (pull --rebase: already up to date); tree clean. Newest GPU-side
 commits are still `05f5152d` and `6b66f16f`, both already recorded as not CPU-portable; no MLX/MPS kernel exists
 under `gptqmodel_ext/qvq/` and no `qvq.py` quant/qlinear change since. Nothing to port.
+
+## 2026-08-21 (08:12 UTC) sync check: no new CUDA/MLX/MPS CPU-portable changes
+
+Tip `b4e61800` matches `origin/agent/qvq-dual-v4` (pull --rebase: already up to date); tree clean. Newest GPU-side
+commits are still `05f5152d` and `6b66f16f`, both already recorded as not CPU-portable; no MLX/MPS kernel exists
+under `gptqmodel_ext/qvq/` and no `qvq.py` quant/qlinear change since. Nothing to port.
