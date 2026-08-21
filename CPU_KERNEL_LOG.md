@@ -313,3 +313,11 @@ dimension, keep each row's recurrence independent but cache-resident.
   ran (CPU-only host).
 - Family batching on CPU is still not worth revisiting: the regression measured for 6b66f16f came from tripling an
   out-of-cache row footprint, and this change lowers the footprint per row rather than making wide rows cheaper.
+
+## 2026-08-21 sync check: no new CUDA/MLX/MPS CPU-portable changes
+
+Branch tip `b471bdbf` (CPU banked-Viterbi cache blocking) is in sync with `origin/agent/qvq-dual-v4`; working tree
+clean. The newest GPU-side commits (`05f5152d` B2 Block-LDLQ family batching, `6b66f16f` YAQA family-candidate
+batching) are already reviewed above and recorded as not CPU-portable, and no MLX/MPS kernel or
+`gptqmodel/quantization/qvq.py` / `gptqmodel/nn_modules/qlinear/qvq.py` change has landed since. Nothing to port
+this run.
