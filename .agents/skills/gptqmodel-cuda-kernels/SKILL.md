@@ -123,3 +123,27 @@ A compilation-only result must be labeled compilation-only. A passing kernel uni
 ## Benchmark after correctness
 
 Put reproducible benchmarks in `scripts/`. Warm up compilation and steady-state launches, synchronize correctly or use CUDA events, report distribution statistics rather than one timing, and compare against both the reference and the nearest production kernel. Include shapes, tokens/batch regime, dtype, quantization config, GPU properties, software stack, latency, throughput, and memory. Present the complete result table in ASCII.
+
+## Reference: modern CUDA SIMT and warp specialization
+
+Modern CUDA still issues one common instruction to active threads in a warp, but the classic “all 32 threads execute exactly the same instruction at the same time” mental model is incomplete.
+
+Key points from NVIDIA's recent Blackwell GEMM/CUTLASS work (Jessie Dong, *modern CUDA is not SIMT in the way you were probably first taught!*, 2026-08-20, https://x.com/jessiedong_/status/2090518824131121504?s=20):
+
+- **Independent thread scheduling (Volta+).** Before Volta a warp shared one program counter. Starting with Volta, each thread keeps its own PC and execution state. Threads can diverge and reconverge at a finer granularity, but the GPU still groups active threads into SIMT units when it issues instructions, so SIMT is not removed—scheduling is simply less strict.
+- **Legacy warp assumptions can break.** Code that assumes every thread in a warp reaches a memory write before any thread reads it on the next line may fail on Volta+. Use explicit warp-level synchronization (`__syncwarp()`) wherever cross-lane ordering matters.
+- **Warp specialization.** Different warps in the same kernel can stay on different jobs. One warp may schedule tiles, another loads `A` and `B`, another initiates the matrix multiply, and others finish/store the output. Loading and math can overlap instead of every warp doing load→math→store serially.
+- **Asynchronous initiators.** On Hopper/Blackwell, one thread/warp can start a TMA transfer or tensor-core operation and then continue with other work while the hardware unit completes it. The rest of the warp does not have to participate in copying every byte.
+- **Blackwell GEMM example split of 8 warps:**
+  - warp 0: matrix multiply
+  - warp 1: choose the next tile
+  - warp 2: load `A` and `B`
+  - warp 3: load data needed for the output step
+  - warps 4–7: finish and store the output
+
+Implications for GPT-QModel kernels:
+
+- Prefer explicit warp/CTA role assignment over implicit “everyone does the same thing” kernels when fusing phases.
+- Treat `__syncwarp()` and block/cluster fences as part of the handoff contract when one warp produces data another consumes.
+- Architect kernels so one warp can initiate an asynchronous copy or MMA while others continue independent work; do not block the whole warp waiting for the asynchronous unit.
+- Keep fallback paths that do not assume per-thread scheduling details (pre-Volta behavior differs from Volta+).
