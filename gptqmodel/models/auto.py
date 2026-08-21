@@ -220,6 +220,7 @@ MODEL_MAP = {
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
+    "smollm3": LlamaQModel,  # llama-compatible quantization module tree
     "llama4": Llama4QModel,
     "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
