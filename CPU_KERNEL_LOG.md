@@ -229,3 +229,25 @@ Not ported yet (CUDA commit 6b66f16f "batch YAQA family candidates on CUDA"):
   dimension. The CPU side has no equivalent of the family-batched segmented Viterbi op
   (`viterbi_v2_segment_family_grid_trusted`), so adding the family dimension to the CPU feedback kernels alone would
   leave dead code. Revisit once (or if) a CPU family-grid Viterbi kernel exists.
+
+Rejected (CUDA commit 6b66f16f "batch YAQA family candidates on CUDA", family-grid Viterbi on CPU):
+- Built the missing prerequisite as an experiment: a family-aware refactor of `gptqmodel_ext/qvq/qvq_viterbi_banked_cpu.cpp`
+  exporting `viterbi_banked_family_cpu` with `[families, batch, steps, V]` sequences and `[families, banks, 65536, V]`
+  codebooks, flattening families into the row dimension exactly like
+  `qvq_viterbi_v2_segment_family_grid_trusted_cuda` does, plus a CPU family-batched branch for the
+  `yaqa_v2b2_sampled_family_selection` two-pass schedule.
+- Exactness held: states, squared errors, segment bank ids, quantized values, selected `block_alt_id`, and the final
+  quadratic loss were all bit-identical (`torch.equal`) to looping `qvq_cpu_viterbi_banked` once per family.
+- Performance was a regression, so the experiment was not retained (Intel Xeon Platinum 8559C, AVX-512, 8 logical
+  cores, torch 2.13.0+cpu; 3 families, 2 banks/family, 128 steps, V=2, 65536 states, transition_bits=5, segment 16):
+  - 32 tiles: looped native 172.6 ms -> family-batched 225.4 ms (0.77x)
+  - 64 tiles: looped native 408.5 ms -> family-batched 493.0 ms (0.83x)
+  - 128 tiles: looped native 830.9 ms -> family-batched 1216.0 ms (0.68x)
+- Why the CUDA lesson does not transfer: the CUDA win comes from filling an under-occupied grid and removing launch
+  latency. The CPU kernel has neither problem, and its per-row cost/emission working set is
+  `batch * banks * 65536 * 4 B` (~67 MB at 128 tiles), so tripling the row count triples an already
+  out-of-cache footprint and makes the recurrence more memory-bound. Batching cannot amortize anything on CPU here:
+  three native calls cost three Python dispatches, which are noise next to a ~150 ms kernel.
+- Follow-up worth trying instead (not attempted here, and independent of this CUDA commit): block the existing CPU
+  banked Viterbi over the batch dimension so the cost/emission buffers stay cache-resident. That would help the
+  looped path too, and would be the precondition for family batching ever being neutral on CPU.
