@@ -237,7 +237,7 @@ at::Tensor qvq_hadamard_cpu(
 
   at::parallel_for(0, rows, 1, [&](int64_t begin, int64_t end) {
     // Per-thread scratch buffer for one row.
-    static thread_local alignas(64) float row_buf[16384];
+    alignas(64) static thread_local float row_buf[16384];
     for (int64_t r = begin; r < end; ++r) {
       const float* src = in_ptr + r * n;
       float* dst = out_ptr + r * n;

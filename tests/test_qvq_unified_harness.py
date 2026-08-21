@@ -15,6 +15,7 @@ from scripts.qvq_evaluate import validate_evaluation_is_held_out
 from scripts.qvq_quantize import (
     DatasetSlice,
     _automatic_bank_count,
+    aggregate_qvq_process_telemetry,
     build_parser as build_quantize_parser,
     build_quantize_config,
     validate_disjoint_slices,
@@ -45,6 +46,72 @@ def test_qvq_quantize_parser_builds_nested_yaqa_configuration():
     assert config.yaqa.chat_template.enabled is True
     assert config.yaqa.chat_template.content_weight == 0.97
     assert config.offload_to_disk is False
+    assert args.qvq_telemetry is True
+
+
+def test_qvq_quantize_parser_can_disable_nested_telemetry():
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--no-qvq-telemetry",
+        ]
+    )
+
+    assert args.qvq_telemetry is False
+
+
+def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
+    quant_log = {
+        "qvq": [
+            {
+                "full_name": "model.layers.0.self_attn.q_proj",
+                "time": "2.5",
+                "qvq_telemetry": {
+                    "phases": {
+                        "yaqa_segmented_viterbi": {
+                            "calls": 2,
+                            "host_dispatch_ms": 2000.0,
+                            "gpu_ms": 1900.0,
+                        }
+                    },
+                    "counters": {"input_features": 16, "output_features": 32, "yaqa_tiles": 2},
+                },
+            },
+            {
+                "full_name": "model.layers.1.self_attn.q_proj",
+                "time": "3.5",
+                "qvq_telemetry": {
+                    "phases": {
+                        "yaqa_segmented_viterbi": {
+                            "calls": 3,
+                            "host_dispatch_ms": 3000.0,
+                            "gpu_ms": 2800.0,
+                        }
+                    },
+                    "counters": {"input_features": 16, "output_features": 32, "yaqa_tiles": 4},
+                },
+            },
+        ]
+    }
+
+    telemetry = aggregate_qvq_process_telemetry(quant_log)
+
+    assert telemetry is not None
+    assert telemetry["process_quant_seconds"] == 6.0
+    assert telemetry["phases"]["yaqa_segmented_viterbi"] == {
+        "calls": 5,
+        "host_dispatch_ms": 5000.0,
+        "gpu_ms": 4700.0,
+    }
+    assert telemetry["counters"]["yaqa_tiles"] == 6
+    assert telemetry["shapes"]["32x16"]["modules"] == 2
+    assert telemetry["shapes"]["32x16"]["process_quant_seconds"] == 6.0
+    assert len(telemetry["modules"]) == 2
 
 
 @pytest.mark.parametrize(

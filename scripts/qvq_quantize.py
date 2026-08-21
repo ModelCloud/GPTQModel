@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -98,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibration-sort", choices=("none", "asc", "desc"), default="desc")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--propagated-bank-selection", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--qvq-telemetry",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Record nested process-quant CUDA/host phases and shape counters in the run manifest.",
+    )
 
     _add_dataset_args(parser, "calibration", required=True)
     _add_dataset_args(parser, "yaqa")
@@ -141,6 +149,77 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("attention_qk", "attention_vo", "attention_qkvo", "mlp_gate_up", "mlp_down", "mlp_gate_up_down"),
     )
     return parser
+
+
+def _quant_log_rows(quant_log: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [row for rows in quant_log.values() for row in rows if isinstance(row, dict)]
+
+
+def aggregate_qvq_process_telemetry(
+    quant_log: dict[str, list[dict[str, Any]]],
+) -> dict[str, object] | None:
+    """Aggregate finalized per-module QVQ timers without another CUDA synchronization."""
+
+    phases: dict[str, dict[str, float | int | None]] = {}
+    counters: Counter[str] = Counter()
+    modules: list[dict[str, object]] = []
+    shapes: dict[str, dict[str, object]] = {}
+    for row in _quant_log_rows(quant_log):
+        telemetry = row.get("qvq_telemetry")
+        if not isinstance(telemetry, dict):
+            continue
+        module_counters = telemetry.get("counters", {})
+        counters.update(module_counters)
+        input_features = int(module_counters.get("input_features", 0))
+        output_features = int(module_counters.get("output_features", 0))
+        shape_key = f"{output_features}x{input_features}"
+        shape = shapes.setdefault(
+            shape_key,
+            {"modules": 0, "process_quant_seconds": 0.0, "phases": {}, "counters": Counter()},
+        )
+        shape["modules"] += 1
+        shape["process_quant_seconds"] += float(row.get("time", 0.0))
+        shape["counters"].update(module_counters)
+        module_phases: dict[str, object] = {}
+        for name, values in telemetry.get("phases", {}).items():
+            module_values = {
+                "calls": int(values["calls"]),
+                "host_dispatch_ms": float(values["host_dispatch_ms"]),
+                "gpu_ms": None if values["gpu_ms"] is None else float(values["gpu_ms"]),
+            }
+            module_phases[name] = module_values
+            for target in (phases, shape["phases"]):
+                aggregate = target.setdefault(
+                    name,
+                    {"calls": 0, "host_dispatch_ms": 0.0, "gpu_ms": 0.0},
+                )
+                aggregate["calls"] += module_values["calls"]
+                aggregate["host_dispatch_ms"] += module_values["host_dispatch_ms"]
+                if module_values["gpu_ms"] is None:
+                    aggregate["gpu_ms"] = None
+                elif aggregate["gpu_ms"] is not None:
+                    aggregate["gpu_ms"] += module_values["gpu_ms"]
+        modules.append(
+            {
+                "full_name": row.get("full_name"),
+                "shape": shape_key,
+                "process_quant_seconds": float(row.get("time", 0.0)),
+                "phases": module_phases,
+                "counters": dict(module_counters),
+            }
+        )
+    if not modules:
+        return None
+    for shape in shapes.values():
+        shape["counters"] = dict(shape["counters"])
+    return {
+        "timing_semantics": "inclusive; nested phase totals must not be added together",
+        "process_quant_seconds": sum(float(module["process_quant_seconds"]) for module in modules),
+        "phases": phases,
+        "counters": dict(counters),
+        "shapes": shapes,
+        "modules": modules,
+    }
 
 
 def _automatic_bank_count(format_value: str) -> int:
@@ -318,18 +397,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     load_seconds = time.perf_counter() - load_started
     quant_started = time.perf_counter()
-    quant_log = model.quantize(
-        streams["calibration"],
-        calibration_concat_size=args.concat_size or None,
-        calibration_sort=None if args.calibration_sort == "none" else args.calibration_sort,
-        batch_size=args.batch_size,
-        backend=BACKEND.QVQ,
-        validation_calibration=streams["validation"],
-        yaqa_calibration=streams["yaqa"],
-        module_replay_search_calibration=streams["replay_search"],
-        module_replay_confirmation_calibration=streams["replay_confirmation"],
-        layer_scope=None if args.layers is None else slice(0, args.layers),
-    )
+    telemetry_environment = "GPTQMODEL_QVQ_TELEMETRY"
+    previous_telemetry = os.environ.get(telemetry_environment)
+    if args.qvq_telemetry:
+        os.environ[telemetry_environment] = "1"
+    else:
+        os.environ.pop(telemetry_environment, None)
+    try:
+        quant_log = model.quantize(
+            streams["calibration"],
+            calibration_concat_size=args.concat_size or None,
+            calibration_sort=None if args.calibration_sort == "none" else args.calibration_sort,
+            batch_size=args.batch_size,
+            backend=BACKEND.QVQ,
+            validation_calibration=streams["validation"],
+            yaqa_calibration=streams["yaqa"],
+            module_replay_search_calibration=streams["replay_search"],
+            module_replay_confirmation_calibration=streams["replay_confirmation"],
+            layer_scope=None if args.layers is None else slice(0, args.layers),
+        )
+    finally:
+        if previous_telemetry is None:
+            os.environ.pop(telemetry_environment, None)
+        else:
+            os.environ[telemetry_environment] = previous_telemetry
     quant_seconds = time.perf_counter() - quant_started
     save_started = time.perf_counter()
     model.save(str(output))
@@ -358,7 +449,22 @@ def main(argv: list[str] | None = None) -> int:
         },
         "layer_scope": "all" if args.layers is None else {"first_layers": args.layers},
         "seconds": {"load": load_seconds, "prepare_and_quantize": quant_seconds, "save": save_seconds},
-        "quant_log_rows": sum(len(rows) for rows in quant_log.values()),
+        "quant_log_rows": len(_quant_log_rows(quant_log)),
+        "telemetry": {
+            "qvq_process_quant": aggregate_qvq_process_telemetry(quant_log),
+            "lifecycle": {
+                "aggregate": model.quant_region_timer.snapshot(),
+                "layers": model.quant_region_timer.period_snapshots(),
+            },
+            "yaqa_sketch_b": next(
+                (
+                    row["yaqa_sketch_b_telemetry"]
+                    for row in _quant_log_rows(quant_log)
+                    if isinstance(row.get("yaqa_sketch_b_telemetry"), dict)
+                ),
+                None,
+            ),
+        },
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

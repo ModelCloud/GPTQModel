@@ -6407,11 +6407,12 @@ def quantize_qvq_linear(
     scale = (source_rms / PGC16_NORMALIZATION_RMS * pgc16_scale_factor(bits)).clamp_min(torch.finfo(torch.float32).eps)
     prepared_block_factors = None
     if rounding == "block_ldlq":
-        prepared_block_factors = (
-            input_hessian_preparation.factorization
-            if input_hessian_preparation is not None
-            else block_ldl_factor(transformed_H.to(torch.float32), block_size=16)
-        )
+        with _qvq_phase(telemetry, "block_ldl_factor", device):
+            prepared_block_factors = (
+                input_hessian_preparation.factorization
+                if input_hessian_preparation is not None
+                else block_ldl_factor(transformed_H.to(torch.float32), block_size=16)
+            )
     needs_bank0_oracle = (
         bank_codebooks is not None and rounding == "block_ldlq" and not v2b4_p64 and not v2b2_p32
     )

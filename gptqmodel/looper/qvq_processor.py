@@ -1448,6 +1448,7 @@ class QVQProcessor(LoopProcessor):
                 "yaqa_sequence_loss_reduction": self._yaqa_stats.get("sequence_loss_reduction"),
                 "yaqa_activation_checkpointing": self._yaqa_stats.get("activation_checkpointing"),
                 "yaqa_checkpointed_modules": self._yaqa_stats.get("checkpointed_modules"),
+                "yaqa_sketch_b_telemetry": self._yaqa_stats if module_qcfg.rounding == "yaqa" else None,
                 "yaqa_v2b2_family_mode": (
                     module_qcfg.yaqa.v2b2_family_mode
                     if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
