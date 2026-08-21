@@ -1020,3 +1020,34 @@ the two checkpoints. Focused CUDA coverage also compares four batched factor
 histories with four independent calls and checks corrected tiles plus both
 factor caches exactly; the complete three-family YAQA candidate test requires
 identical dense weight, trellis states, selector bytes, and winning family.
+
+The preceding local B2 family-selection pass was still executing the three
+alternative Block-LDLQ histories serially. The CUDA family-grid path now keeps
+three independent error histories in one tensor, batches their feedback with
+`bmm`, and submits all six family/bank trellises together. Input blocks remain
+strictly sequential, and every family still receives its own full-Hessian
+bank-zero rollback. A 128-output-tile window won across all supported rates on
+the 124-SM test device:
+
+| Rate | 32-tile ms | 128-tile ms | Speedup |
+|:--|--:|--:|--:|
+| W1 | 472.423 | 400.857 | 1.179x |
+| W1.5 | 312.980 | 294.472 | 1.063x |
+| W2 | 316.194 | 291.961 | 1.083x |
+| W2.5 | 324.198 | 299.491 | 1.082x |
+| W3 | 320.017 | 293.911 | 1.089x |
+| W3.5 | 370.783 | 324.864 | 1.141x |
+
+The same historical-seed real-layer gate then measured:
+
+| Region | Serial families | Batched families (128 tiles) | Speedup |
+|:--|--:|--:|--:|
+| B2 Block-LDLQ family selection GPU time | 61.638 s | 45.866 s | 1.344x |
+| Complete `process_quant` | 122.005 s | 106.281 s | 1.148x |
+
+Compared with the 129.049-second pre-cache-fusion baseline, the combined exact
+optimizations reduce `process_quant` to 106.281 seconds (1.214x). All 37 saved
+layer-0 tensors remained bit-for-bit identical. CUDA tests cover W1--W3.5,
+Euclidean and Hessian-diagonal objectives, nontrivial SPD feedback, multiple
+input/output chunks, and exact dense weight/state/selector/family parity with
+the serial implementation.

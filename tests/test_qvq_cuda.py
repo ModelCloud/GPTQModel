@@ -25,6 +25,7 @@ from gptqmodel.quantization.qvq import (
     block_ldlq_inner,
     block_ldlq_inner_banked,
     block_ldlq_inner_banked_candidates,
+    block_ldlq_inner_v2b2_p32,
     optimize_qvq_output_channel_scales,
     pack_qvq_bank_ids,
     pack_qvq_binary_bank_ids,
@@ -1665,6 +1666,37 @@ def test_qvq_cuda_b2_yaqa_candidate_batch_is_bit_exact():
         **kwargs,
     )
     assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
+
+
+@pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
+@pytest.mark.parametrize("objective", ("euclidean", "hessian_diagonal"))
+def test_qvq_cuda_b2_block_ldl_family_batch_matches_serial(bits, objective):
+    generator = torch.Generator(device="cuda").manual_seed(20260827 + int(bits * 2))
+    weight = (torch.randn((32, 64), generator=generator, device="cuda") * 0.05).to(torch.float16)
+    samples = torch.randn((47, 32), generator=generator, device="cuda")
+    hessian = samples.T @ samples / samples.shape[0]
+    hessian.diagonal().add_(0.1)
+    banks = _canonical_qvq_v2b4_banks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float16,
+    )
+    pair_stacks = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float16,
+    )
+    common = {
+        "bits": bits,
+        "trellis_batch_size": 3,
+        "viterbi_objective": objective,
+        "bank_codebook_pair_stacks": pair_stacks,
+    }
+    expected = block_ldlq_inner_v2b2_p32(weight, hessian, banks, _family_batch=False, **common)
+    actual = block_ldlq_inner_v2b2_p32(weight, hessian, banks, _family_batch=True, **common)
+    assert all(torch.equal(candidate, reference) for candidate, reference in zip(actual, expected, strict=True))
 
 
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])

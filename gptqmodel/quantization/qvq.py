@@ -2936,6 +2936,125 @@ def block_ldlq_inner_v2b4_p64(
     )
 
 
+def _block_ldlq_v2b2_family_batch_cuda(
+    inner_weight: torch.Tensor,
+    H: torch.Tensor,
+    family_stacks: torch.Tensor,
+    bank0_oracle: tuple[torch.Tensor, torch.Tensor],
+    factorization: BlockLDLFactorization,
+    *,
+    bits: float,
+    trellis_batch_size: int,
+    family_batch_size: int | None,
+    viterbi_objective: str,
+    telemetry: QVQQuantizationTelemetry | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run three independent B2 Block-LDLQ histories in one CUDA work grid."""
+
+    from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+
+    families = family_stacks.shape[0]
+    in_features, out_features = inner_weight.shape
+    input_tiles, output_tiles = in_features // 16, out_features // 16
+    source = inner_weight.to(torch.float32)
+    hessian = H.to(torch.float32)
+    L, D = factorization
+    feedback = L.clone()
+    feedback.diagonal().sub_(1)
+    errors = source.unsqueeze(0).expand(families, -1, -1).clone()
+    quantized = torch.zeros_like(errors)
+    states = torch.empty((families, input_tiles, output_tiles, 128), device=source.device, dtype=torch.long)
+    selectors = torch.empty((families, input_tiles, output_tiles, 8), device=source.device, dtype=torch.uint8)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    midpoint = 64
+    overlap_mask = (1 << (16 - transition_bits)) - 1
+    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    family_indices = torch.arange(families, device=source.device).view(families, 1, 1)
+    # Six CTAs are generated per logical tile (three families x two banks).
+    # A 128-tile window amortizes segment barriers and won at every W1--W3.5
+    # rate on the local 124-SM device. Explicit larger caller batches survive.
+    batch_size = (
+        max(trellis_batch_size, min(output_tiles, 128))
+        if family_batch_size is None
+        else min(output_tiles, family_batch_size)
+    )
+    if batch_size <= 0:
+        raise ValueError("QVQ B2 family batch size must be positive.")
+
+    for block in range(input_tiles - 1, -1, -1):
+        start, stop = block * 16, (block + 1) * 16
+        left = feedback[start:, start:stop].transpose(0, 1)
+        corrected = source[start:stop].unsqueeze(0) + torch.bmm(
+            left.unsqueeze(0).expand(families, -1, -1), errors[:, start:]
+        )
+        sequences = corrected.reshape(families, 16, output_tiles, 16).permute(0, 2, 1, 3)
+        sequences = sequences.reshape(families, output_tiles, 128, 2)
+        step_weights = None
+        if viterbi_objective == "hessian_diagonal":
+            diagonal = D[start:stop, start:stop].diagonal().clamp_min(0)
+            diagonal_mean = diagonal.mean()
+            if not torch.isfinite(diagonal_mean) or diagonal_mean <= torch.finfo(diagonal.dtype).eps:
+                raise RuntimeError("QVQ banked V2 conditioned Hessian diagonal must be positive and finite.")
+            step_weights = (diagonal / diagonal_mean).repeat_interleave(8)
+
+        block_values, block_states, block_selectors = [], [], []
+        with _qvq_phase(telemetry, "block_ldl_v2_banked", source.device):
+            for chunk_start in range(0, output_tiles, batch_size):
+                chunk = sequences[:, chunk_start : chunk_start + batch_size].contiguous()
+                chunk_count = chunk.shape[1]
+                chunk_weights = None
+                if step_weights is not None:
+                    chunk_weights = step_weights.view(1, 1, 128).expand(families, chunk_count, -1).contiguous()
+                provisional, _, _ = family_viterbi(
+                    torch.roll(chunk, shifts=midpoint, dims=2).contiguous(),
+                    family_stacks,
+                    transition_bits,
+                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                    None,
+                    None
+                    if chunk_weights is None
+                    else torch.roll(chunk_weights, shifts=midpoint, dims=2).contiguous(),
+                )
+                overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+                chunk_states, _, chunk_selectors = family_viterbi(
+                    chunk,
+                    family_stacks,
+                    transition_bits,
+                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                    overlaps,
+                    chunk_weights,
+                )
+                path_banks = chunk_selectors.to(torch.long).repeat_interleave(
+                    QVQ_V2B2_P32_STEPS_PER_SEGMENT, dim=2
+                )
+                block_values.append(family_stacks[family_indices, path_banks, chunk_states])
+                block_states.append(chunk_states)
+                block_selectors.append(chunk_selectors)
+                if telemetry is not None:
+                    telemetry.count("v2_banked_family_chunks")
+                    telemetry.count("viterbi_recurrence_passes", 2)
+        reconstructed_states = torch.cat(block_states, dim=1)
+        reconstructed_selectors = torch.cat(block_selectors, dim=1)
+        reconstructed = torch.cat(block_values, dim=1).reshape(families, output_tiles, 16, 16)
+        reconstructed = reconstructed.permute(0, 2, 1, 3).reshape(families, 16, out_features).to(torch.float32)
+        quantized[:, start:stop] = reconstructed
+        errors[:, start:stop] = source[start:stop].unsqueeze(0) - reconstructed
+        states[:, block] = reconstructed_states
+        selectors[:, block] = reconstructed_selectors
+
+    bank0_weight, bank0_states = bank0_oracle
+    bank0_error = bank0_weight.to(torch.float32) - source
+    bank0_loss = torch.sum((hessian @ bank0_error) * bank0_error)
+    for family in range(families):
+        mixed_error = quantized[family] - source
+        mixed_loss = torch.sum((hessian @ mixed_error) * mixed_error)
+        if not torch.isfinite(mixed_loss) or mixed_loss >= bank0_loss:
+            quantized[family] = bank0_weight.to(torch.float32)
+            states[family] = bank0_states.reshape(input_tiles, output_tiles, 128)
+            selectors[family].zero_()
+    return quantized.to(inner_weight.dtype), states.reshape(families, -1, 128), selectors.reshape(families, -1)
+
+
 def block_ldlq_inner_v2b2_p32(
     inner_weight: torch.Tensor,
     H: torch.Tensor,
@@ -2953,6 +3072,9 @@ def block_ldlq_inner_v2b2_p32(
     if len(codebook_library) != 4:
         raise ValueError("QVQ V2B2-P32 requires canonical V2 plus three complementary candidates.")
     factorization = kwargs.pop("factorization", None)
+    pair_stacks = kwargs.pop("bank_codebook_pair_stacks", None)
+    family_batch = kwargs.pop("_family_batch", True)
+    family_batch_size = kwargs.pop("_family_batch_size", None)
     if factorization is None:
         factorization = block_ldl_factor(H.to(torch.float32), block_size=16)
     bank0_weight, bank0_states = block_ldlq_inner(
@@ -2984,16 +3106,44 @@ def block_ldlq_inner_v2b2_p32(
     )
     best_alt_id = 1
     best_loss = full_loss(bank0_weight)
-    for alt_id in range(1, 4):
-        candidate_weight, candidate_states, candidate_selectors = _block_ldlq_inner_v2_banked(
-            inner_weight,
-            H,
-            (codebook_library[0], codebook_library[alt_id]),
-            segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-            factorization=factorization,
-            bank0_oracle=(bank0_weight, bank0_states),
-            **kwargs,
+    if family_batch and inner_weight.device.type == "cuda" and kwargs.get("tail_biting_candidates", 1) == 1:
+        family_stacks = torch.stack(
+            tuple(
+                torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
+                if pair_stacks is None
+                else pair_stacks[alt_id - 1]
+                for alt_id in range(1, 4)
+            )
+        ).contiguous()
+        candidate_weights, candidate_states_batch, candidate_selectors_batch = (
+            _block_ldlq_v2b2_family_batch_cuda(
+                inner_weight,
+                H,
+                family_stacks,
+                (bank0_weight, bank0_states),
+                factorization,
+                bits=kwargs["bits"],
+                trellis_batch_size=kwargs.get("trellis_batch_size", 1),
+                family_batch_size=family_batch_size,
+                viterbi_objective=kwargs.get("viterbi_objective", "euclidean"),
+                telemetry=kwargs.get("telemetry"),
+            )
         )
+        candidates = zip(candidate_weights, candidate_states_batch, candidate_selectors_batch, strict=True)
+    else:
+        candidates = (
+            _block_ldlq_inner_v2_banked(
+                inner_weight,
+                H,
+                (codebook_library[0], codebook_library[alt_id]),
+                segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                factorization=factorization,
+                bank0_oracle=(bank0_weight, bank0_states),
+                **kwargs,
+            )
+            for alt_id in range(1, 4)
+        )
+    for alt_id, (candidate_weight, candidate_states, candidate_selectors) in enumerate(candidates, start=1):
         candidate_loss = full_loss(candidate_weight)
         if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
             best_weight = candidate_weight
@@ -4615,6 +4765,7 @@ def yaqa_inner_v2b2_p32(
                 trellis_batch_size=kwargs.get("trellis_batch_size", 16),
                 viterbi_objective="euclidean",
                 tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
+                bank_codebook_pair_stacks=bank_codebook_pair_stacks,
             )
         block_alt_id = int(block_alt_id_tensor.item())
     else:
@@ -6751,6 +6902,7 @@ def quantize_qvq_linear(
                 tail_biting_candidates=tail_biting_candidates,
                 telemetry=telemetry,
                 factorization=prepared_block_factors,
+                bank_codebook_pair_stacks=bank_codebook_pair_stacks,
             )
         if bank_codebooks is not None:
             if propagated_inputs is not None and rounding == "block_ldlq":
