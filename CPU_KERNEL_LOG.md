@@ -222,3 +222,10 @@ Done (mirror CUDA commit 053be9c1 "fuse YAQA cache updates" on CPU):
   `test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq`) reproduce on a clean tree and are pre-existing
   config regressions.
 - `ruff check` passes for the changed Python files; `git diff --check` passes.
+
+Not ported yet (CUDA commit 6b66f16f "batch YAQA family candidates on CUDA"):
+- The new `_yaqa_inner_v2b2_family_batch_cuda` schedule runs all B2 family candidates through one candidate-batched
+  pass, which required giving the CUDA `yaqa_feedback`/`yaqa_feedback_update_` ops an optional leading `families`
+  dimension. The CPU side has no equivalent of the family-batched segmented Viterbi op
+  (`viterbi_v2_segment_family_grid_trusted`), so adding the family dimension to the CPU feedback kernels alone would
+  leave dead code. Revisit once (or if) a CPU family-grid Viterbi kernel exists.
