@@ -13,6 +13,8 @@ def _bare_model(*, quantized: bool):
     model = BaseQModel.__new__(BaseQModel)
     nn.Module.__init__(model)
     model.quantized = quantized
+    model.get_input_embeddings_name = lambda: "model.embed_tokens"
+    model.get_output_embeddings_name = lambda: "lm_head"
     return model
 
 

@@ -350,10 +350,6 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
         f"Input should be on CPU, got {result.layer_inputs[0][0].device}"
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
-    reason="Requires at least 2 CUDA devices"
-)
 def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
     """
     Test StageInputsCapture: in balanced mode, compute_device_filter is applied
@@ -378,9 +374,8 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         # Filter out cuda:0 (e.g., reserved for model layers)
         return [d for d in devices if d != torch.device("cuda:0")]
 
-    # Patch at source module since import happens inside the function
     monkeypatch.setattr(
-        "gptqmodel.utils.looper_helpers.select_forward_devices",
+        "gptqmodel.looper.stage_inputs_capture.select_forward_devices",
         fake_select_forward_devices,
     )
 
@@ -403,7 +398,6 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
         capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
         finalize_input_capture_example = BaseQModel.finalize_input_capture_example
-        move_input_capture_example = BaseQModel.move_input_capture_example
         prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
         _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
@@ -438,6 +432,10 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         def get_input_embeddings_name(self):
             return None
 
+        def move_input_capture_example(self, example, data_device):
+            del data_device
+            return self.finalize_input_capture_example(example)
+
         def pre_quantize_generate_hook_start(self):
             pass
 
@@ -449,7 +447,6 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
 
     # Track which devices are actually used
     used_devices = []
-    __import__('gptqmodel.utils.model', fromlist=['move_to']).move_to
 
     def tracking_move_to(obj, device, **kwargs):
         if isinstance(obj, torch.Tensor):
@@ -495,7 +492,7 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         mock_device_ctx,
     )
     monkeypatch.setattr(
-        "gptqmodel.looper.stage_inputs_capture.move_to",
+        "gptqmodel.models.base.move_to",
         tracking_move_to,
     )
     monkeypatch.setattr(
@@ -517,9 +514,7 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         use_cache=False,
     )
 
-    # Verify cuda:0 is NOT used (it was filtered out by compute_device_filter)
-    assert torch.device("cuda:0") not in used_devices, \
-        f"cuda:0 should be filtered out, got devices: {used_devices}"
+    assert used_devices == mock_devices[1:]
 
     # Verify we captured the expected number of batches
     assert len(result.layer_inputs) == 3, f"Should have captured 3 batches, got {len(result.layer_inputs)}"
@@ -545,9 +540,8 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
     def compute_device_filter_returns_empty(devices):
         return []  # Invalid filter returning empty
 
-    # Patch at source module since import happens inside the function
     monkeypatch.setattr(
-        "gptqmodel.utils.looper_helpers.select_forward_devices",
+        "gptqmodel.looper.stage_inputs_capture.select_forward_devices",
         fake_select_forward_devices,
     )
 
@@ -569,7 +563,6 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
         capture_first_layer_positional_inputs = BaseQModel.capture_first_layer_positional_inputs
         capture_first_layer_input_kwargs = BaseQModel.capture_first_layer_input_kwargs
         finalize_input_capture_example = BaseQModel.finalize_input_capture_example
-        move_input_capture_example = BaseQModel.move_input_capture_example
         prepare_layer_replay_kwargs = BaseQModel.prepare_layer_replay_kwargs
         run_input_capture = BaseQModel.run_input_capture
         _sanitize_input_ids_for_embeddings = BaseQModel._sanitize_input_ids_for_embeddings
@@ -603,6 +596,10 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
 
         def get_input_embeddings_name(self):
             return None
+
+        def move_input_capture_example(self, example, data_device):
+            del data_device
+            return self.finalize_input_capture_example(example)
 
         def pre_quantize_generate_hook_start(self):
             pass
@@ -658,7 +655,7 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
         mock_device_ctx,
     )
     monkeypatch.setattr(
-        "gptqmodel.looper.stage_inputs_capture.move_to",
+        "gptqmodel.models.base.move_to",
         tracking_move_to,
     )
     monkeypatch.setattr(
@@ -670,6 +667,7 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
 
     calibration_data = [
         {"input_ids": torch.randint(0, 100, (1, 4)), "attention_mask": torch.ones(1, 4, dtype=torch.long)}
+        for _ in range(2)
     ]
 
     result = capture.cache_inputs(
@@ -679,7 +677,8 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
     )
 
     # Should still work despite empty filter (fallback to all_devices)
-    assert len(result.layer_inputs) == 1, "Should have captured one batch"
+    assert len(result.layer_inputs) == 2, "Should have captured two batches"
+    assert used_devices == mock_devices
 
 
 # ============================================================================
@@ -996,12 +995,13 @@ def test_balanced_mode_fallback_when_input_device_not_in_forward_devices(monkeyp
     module = torch.nn.Linear(1, 1)
     processor = DummyProcessor()
 
-    # All inputs on cuda:0 which is NOT in forward_devices
+    # Device-only fakes keep this routing test CPU-only while preserving the
+    # production `.device` lookup used to choose the fallback device.
     layer_inputs = [
-        [torch.zeros(1, 1, device=torch.device("cuda:0"))],
-        [torch.zeros(1, 1, device=torch.device("cuda:0"))],
-        [torch.zeros(1, 1, device=torch.device("cuda:0"))],
-        [torch.zeros(1, 1, device=torch.device("cuda:0"))],
+        [types.SimpleNamespace(device=torch.device("cuda:0"))],
+        [types.SimpleNamespace(device=torch.device("cuda:0"))],
+        [types.SimpleNamespace(device=torch.device("cuda:0"))],
+        [types.SimpleNamespace(device=torch.device("cuda:0"))],
     ]
 
     looper._run_forward_batches_parallel(
@@ -1339,6 +1339,9 @@ class TestCalibrationDataDeviceIntegration:
             "bits": 4,
             "group_size": 128,
             "calibration_data_device": calibration_data_device,
+            # These four short rows exercise placement, not length-aware
+            # bucket estimation, whose default requires a larger/diverse set.
+            "hessian": {"length_aware": False},
             "offload_to_disk": False,
             # Memory-efficient settings for multi-test runs
             "auto_forward_data_parallel": False,
@@ -1390,6 +1393,33 @@ class TestCalibrationDataDeviceIntegration:
         assert loaded is not None
         self._cleanup_model(loaded)
 
+    @pytest.mark.skipif(
+        torch.cuda.device_count() < 2,
+        reason="Requires at least 2 CUDA devices",
+    )
+    def test_calibration_data_device_cuda1_with_compute_filter_integration(self, tmp_path):
+        """Quantize with data on cuda:1 while excluding cuda:1 from compute."""
+        from gptqmodel import GPTQModel
+
+        def compute_device_filter(devices):
+            return [device for device in devices if device != torch.device("cuda:1")]
+
+        quantize_config = self._create_quantize_config(
+            calibration_data_device="cuda:1",
+            compute_device_filter=compute_device_filter,
+        )
+
+        model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
+        model.quantize(self.calibration_data, batch_size=1)
+
+        save_path = str(tmp_path / "quantized_cuda1")
+        model.save(save_path)
+        self._cleanup_model(model)
+
+        loaded = GPTQModel.load(save_path)
+        assert loaded is not None
+        self._cleanup_model(loaded)
+
 
 def test_run_input_capture_replaces_out_of_range_input_ids():
     class MinimalModel(nn.Module):
@@ -1425,31 +1455,3 @@ def test_run_input_capture_replaces_out_of_range_input_ids():
 
     assert instance.model.captured_input_ids is not None
     assert instance.model.captured_input_ids.tolist() == [[1, 2, 0, 0]]
-
-    @pytest.mark.skipif(
-        torch.cuda.device_count() < 2,
-        reason="Requires at least 2 CUDA devices"
-    )
-    def test_calibration_data_device_cuda1_with_compute_filter_integration(self, tmp_path):
-        """Integration test: quantization with calibration_data_device='cuda:1' and compute_device_filter."""
-        from gptqmodel import GPTQModel
-
-        # Filter that excludes cuda:1 from compute devices
-        def compute_device_filter(devices):
-            return [d for d in devices if d != torch.device("cuda:1")]
-
-        quantize_config = self._create_quantize_config(
-            calibration_data_device="cuda:1",
-            compute_device_filter=compute_device_filter,
-        )
-
-        model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_data, batch_size=1)
-
-        save_path = str(tmp_path / "quantized_cuda1")
-        model.save(save_path)
-        self._cleanup_model(model)
-
-        loaded = GPTQModel.load(save_path)
-        assert loaded is not None
-        self._cleanup_model(loaded)
