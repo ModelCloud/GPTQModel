@@ -351,3 +351,9 @@ working tree clean. Newest GPU-side commits are unchanged: `05f5152d` (B2 Block-
 `6b66f16f` (YAQA family-candidate batching on CUDA), both already reviewed above and recorded as not CPU-portable.
 No MLX/MPS kernel exists under `gptqmodel_ext/qvq/`, and no `gptqmodel/quantization/qvq.py` /
 `gptqmodel/nn_modules/qlinear/qvq.py` change has landed since. Nothing to port this run.
+
+## 2026-08-21 (07:59 UTC) sync check: no new CUDA/MLX/MPS CPU-portable changes
+
+Tip `f3877fe5` matches `origin/agent/qvq-dual-v4` (pull --rebase: already up to date); tree clean. Newest GPU-side
+commits are still `05f5152d` and `6b66f16f`, both already recorded as not CPU-portable; no MLX/MPS kernel or
+`qvq.py` quant/qlinear change since. Nothing to port.
