@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 from unittest.mock import patch
 
 import pcre
 import pytest
+import torch
 
 import gptqmodel.quantization.config as config_module
 from gptqmodel.quantization.config import QuantizeConfig
@@ -92,6 +94,42 @@ def test_dynamic_prefix_pattern_is_not_exact():
     assert cfg.dynamic_get("model.layers.1.mlp.down_proj", "bits", cfg.bits) == 2
     assert cfg.dynamic_get("model.layers.10.mlp.down_proj", "bits", cfg.bits) == 2
     assert cfg.dynamic_get("model.layers.2.mlp.down_proj", "bits", cfg.bits) == cfg.bits
+
+
+def test_to_dict_does_not_mutate_dynamic_or_meta_payloads():
+    """Serialization must not invalidate runtime overrides or rewrite nested metadata in place."""
+    module_name = "model.layers.0.mlp.down_proj"
+    pattern = _exact_pattern(module_name)
+    cfg = QuantizeConfig(
+        dynamic={
+            pattern: {
+                "bits": 2,
+                "adapter": {"rank": 8},
+                "scale_dtype": torch.float16,
+            }
+        },
+        meta={"nested": {"scale_dtype": torch.float32}},
+        bits=4,
+        group_size=128,
+        sym=False,
+    )
+    dynamic_before = copy.deepcopy(cfg.dynamic)
+    meta_before = copy.deepcopy(cfg.meta)
+
+    # Populate the identity-based dynamic cache before serializing. Mutating
+    # the source dict would otherwise make results depend on cache eviction.
+    assert cfg.dynamic_get(module_name, "adapter", None) == {"rank": 8}
+
+    payload = cfg.to_dict()
+
+    assert "adapter" not in payload["dynamic"][pattern]
+    assert payload["dynamic"][pattern]["scale_dtype"] == "float16"
+    assert payload["meta"]["nested"]["scale_dtype"] == "float32"
+    assert cfg.dynamic == dynamic_before
+    assert cfg.meta == meta_before
+
+    _clear_dynamic_caches()
+    assert cfg.dynamic_get(module_name, "adapter", None) == {"rank": 8}
 
 
 def test_dynamic_mixed_ordering_respected():

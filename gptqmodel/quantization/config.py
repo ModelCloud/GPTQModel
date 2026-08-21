@@ -1383,12 +1383,20 @@ class LengthAwareConfig:
             raise ValueError("LengthAwareConfig: `min_length` must be a positive integer or None.")
         if not isinstance(self.min_bucket_size, int) or self.min_bucket_size <= 0:
             raise ValueError("LengthAwareConfig: `min_bucket_size` must be a positive integer.")
-        if not isinstance(self.max_bucket_ratio, (int, float)) or self.max_bucket_ratio <= 1.0:
-            raise ValueError("LengthAwareConfig: `max_bucket_ratio` must be > 1.0.")
+        if (
+            not isinstance(self.max_bucket_ratio, (int, float))
+            or not math.isfinite(self.max_bucket_ratio)
+            or self.max_bucket_ratio <= 1.0
+        ):
+            raise ValueError("LengthAwareConfig: `max_bucket_ratio` must be a finite number > 1.0.")
         if self.target_bucket_count is not None and (not isinstance(self.target_bucket_count, int) or self.target_bucket_count <= 0):
             raise ValueError("LengthAwareConfig: `target_bucket_count` must be a positive integer or None.")
-        if not isinstance(self.bucket_weight_exponent, (int, float)) or self.bucket_weight_exponent < 0:
-            raise ValueError("LengthAwareConfig: `bucket_weight_exponent` must be a non-negative number.")
+        if (
+            not isinstance(self.bucket_weight_exponent, (int, float))
+            or not math.isfinite(self.bucket_weight_exponent)
+            or self.bucket_weight_exponent < 0
+        ):
+            raise ValueError("LengthAwareConfig: `bucket_weight_exponent` must be a finite non-negative number.")
         if self.bucket_boundaries is not None:
             normalized_boundaries: List[Optional[Union[int, float]]] = []
             for boundary in self.bucket_boundaries:
@@ -1414,10 +1422,14 @@ class LengthAwareConfig:
             raise ValueError(
                 "LengthAwareConfig: `bucket_boundaries` are required when bucket scales or weights are provided."
             )
-        if self.bucket_scales is not None and not all(isinstance(s, (int, float)) and s > 0 for s in self.bucket_scales):
-            raise ValueError("LengthAwareConfig: `bucket_scales` must be positive numbers.")
-        if self.bucket_weights is not None and not all(isinstance(w, (int, float)) and w > 0 for w in self.bucket_weights):
-            raise ValueError("LengthAwareConfig: `bucket_weights` must be positive numbers.")
+        if self.bucket_scales is not None and not all(
+            isinstance(s, (int, float)) and math.isfinite(s) and s > 0 for s in self.bucket_scales
+        ):
+            raise ValueError("LengthAwareConfig: `bucket_scales` must be finite positive numbers.")
+        if self.bucket_weights is not None and not all(
+            isinstance(w, (int, float)) and math.isfinite(w) and w > 0 for w in self.bucket_weights
+        ):
+            raise ValueError("LengthAwareConfig: `bucket_weights` must be finite positive numbers.")
 
     def __bool__(self) -> bool:
         return self.mode is not LengthAwareMode.DISABLED
@@ -4237,7 +4249,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     def to_dict(self):
         smooth = _serialize_smooth_method(self.fallback.smooth if self.fallback is not None else None)
 
-        meta_payload = dict(self.meta) if self.meta else {}
+        # Serialization normalizes nested values (for example scale_dtype) in
+        # place below, so it must operate on an independent payload.  Keeping
+        # aliases here would silently rewrite the live config and invalidate
+        # identity-based dynamic-resolution cache entries.
+        meta_payload = copy.deepcopy(self.meta) if self.meta else {}
         if self.moe:
             meta_payload["moe"] = self.moe.to_dict()
 
@@ -4277,9 +4293,24 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self._update_meta_payload(meta_payload)
         meta_payload["native_kernel_replay"] = self.native_kernel_replay
 
+        dynamic_payload = None
+        if self.dynamic is not None:
+            dynamic_payload = {}
+            for pattern, layer_config in self.dynamic.items():
+                if isinstance(layer_config, dict):
+                    # Per-layer adapter overrides are runtime-only. Exclude
+                    # them before cloning so serialization does not copy a
+                    # potentially heavyweight adapter payload merely to drop it.
+                    serializable_layer_config = {
+                        key: value for key, value in layer_config.items() if key != "adapter"
+                    }
+                    dynamic_payload[pattern] = copy.deepcopy(serializable_layer_config)
+                else:
+                    dynamic_payload[pattern] = copy.deepcopy(layer_config)
+
         out = {
             "bits": serialize_quant_bits(self.bits),
-            "dynamic": self.dynamic,
+            "dynamic": dynamic_payload,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
@@ -4298,7 +4329,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             for _, v in dynamic.items():
                 if not isinstance(v, dict):
                     continue
-                v.pop("adapter", None)
                 if "bits" in v:
                     v["bits"] = serialize_quant_bits(v["bits"])
 
@@ -4503,8 +4533,13 @@ class GPTQConfig(PreProcessorConfig):
             self.damp_auto_increment = _default_damp_auto_increment(self.method)
         if not (0 < self.damp_percent < 1):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
-        if self.damp_auto_increment < 0:
-            raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
+        if (
+            isinstance(self.damp_auto_increment, bool)
+            or not isinstance(self.damp_auto_increment, (int, float))
+            or not math.isfinite(self.damp_auto_increment)
+            or not (0 <= self.damp_auto_increment < 1)
+        ):
+            raise ValueError("QuantizeConfig: `damp_auto_increment` must be a finite number in [0, 1).")
 
         # Store the original fixed damping values before they are overwritten by the
         # adaptive damp config. These are the empirical floor used when adaptive
