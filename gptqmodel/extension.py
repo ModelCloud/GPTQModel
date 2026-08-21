@@ -375,6 +375,7 @@ def load(name: str = "all", *, use_cache: bool = True) -> dict[str, bool]:
             results[extension_name] = True
         except RuntimeError as exc:
             results[extension_name] = False
+            # Prefer the concrete extension's detailed error when available.
             extension = _EXTENSION_SPECS_BY_NAME[extension_name].resolve()
             errors[extension_name] = extension.last_error_message() or str(exc)
 

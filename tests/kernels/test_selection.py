@@ -316,6 +316,93 @@ def test_explicit_select_tolerates_kernel_without_legacy_shard_capability(monkey
     assert selected is MinimalKernel
 
 
+def test_auto_and_explicit_selection_both_forward_adapter_to_validation(monkeypatch):
+    adapter = object()
+    seen_adapters = []
+    unsupported = NotImplementedError("test adapter is unsupported")
+
+    class AdapterAwareKernel:
+        SUPPORTS_DEVICES = [DEVICE.CPU]
+
+        @classmethod
+        def validate(cls, **kwargs):
+            seen_adapters.append(kwargs.get("adapter"))
+            if kwargs.get("adapter") is adapter:
+                return False, unsupported
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict(((BACKEND.QQQ_TORCH, AdapterAwareKernel),)),
+    )
+    selection_kwargs = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "device": DEVICE.CPU,
+        "format": FORMAT.QQQ,
+        "quant_method": METHOD.QQQ,
+        "pack_dtype": torch.int32,
+        "adapter": adapter,
+    }
+
+    with pytest.raises(NotImplementedError, match="test adapter is unsupported"):
+        select_quant_linear(**selection_kwargs, backend=BACKEND.AUTO)
+
+    monkeypatch.setattr(importer, "get_kernel_for_backend", lambda *_args: AdapterAwareKernel)
+    with pytest.raises(ValueError, match="test adapter is unsupported"):
+        select_quant_linear(**selection_kwargs, backend=BACKEND.QQQ_TORCH)
+
+    assert seen_adapters == [adapter, adapter]
+
+
+def test_auto_falls_back_on_dependency_probe_exception_but_explicit_preserves_it(monkeypatch):
+    missing_dependency = ModuleNotFoundError("optional kernel runtime is missing")
+
+    class MissingDependencyKernel:
+        SUPPORTS_DEVICES = [DEVICE.CPU]
+
+        @classmethod
+        def validate(cls, **_kwargs):
+            raise missing_dependency
+
+    class FallbackKernel:
+        SUPPORTS_DEVICES = [DEVICE.CPU]
+
+        @classmethod
+        def validate(cls, **_kwargs):
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict(
+            (
+                (BACKEND.QQQ, MissingDependencyKernel),
+                (BACKEND.QQQ_TORCH, FallbackKernel),
+            )
+        ),
+    )
+    selection_kwargs = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "device": DEVICE.CPU,
+        "format": FORMAT.QQQ,
+        "quant_method": METHOD.QQQ,
+        "pack_dtype": torch.int32,
+    }
+
+    assert select_quant_linear(**selection_kwargs, backend=BACKEND.AUTO) is FallbackKernel
+
+    monkeypatch.setattr(importer, "get_kernel_for_backend", lambda *_args: MissingDependencyKernel)
+    with pytest.raises(ModuleNotFoundError, match="optional kernel runtime is missing"):
+        select_quant_linear(**selection_kwargs, backend=BACKEND.QQQ_TORCH)
+
+
 @pytest.mark.parametrize("fmt", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
 def test_auto_select_excludes_embedding_only_kernel(fmt):
     candidates = AUTO_BACKEND_KERNEL_MAPPING[METHOD.GPTQ][fmt].values()

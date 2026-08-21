@@ -105,20 +105,11 @@ class TestAwqCpuPacking(unittest.TestCase):
         linear = self._build_linear(in_features, out_features, dtype)
         scales, zeros = self._build_scales_zeros(out_features, group_size, in_features, dtype, bits=4)
 
-        q_cpu = AwqGEMMLinear(
-            bits=4,
-            group_size=group_size,
-            sym=False,
-            desc_act=False,
-            in_features=in_features,
-            out_features=out_features,
-            bias=False,
-            register_buffers=False,
-        )
-        q_cpu.pack(linear, scales, zeros)
-
-        with patch("gptqmodel.nn_modules.qlinear.gemm_awq.pack_awq_cpu", side_effect=RuntimeError("unavailable")):
-            q_fallback = AwqGEMMLinear(
+        # This test exercises the host-only packing method, not the CUDA/ROCm
+        # inference backend. Keep the production capability gate intact while
+        # allowing both packing implementations to be compared on CPU hosts.
+        with patch.object(AwqGEMMLinear, "cached_validate_once", return_value=(True, None)):
+            q_cpu = AwqGEMMLinear(
                 bits=4,
                 group_size=group_size,
                 sym=False,
@@ -128,7 +119,20 @@ class TestAwqCpuPacking(unittest.TestCase):
                 bias=False,
                 register_buffers=False,
             )
-            q_fallback.pack(linear, scales, zeros)
+            q_cpu.pack(linear, scales, zeros)
+
+            with patch("gptqmodel.nn_modules.qlinear.gemm_awq.pack_awq_cpu", side_effect=RuntimeError("unavailable")):
+                q_fallback = AwqGEMMLinear(
+                    bits=4,
+                    group_size=group_size,
+                    sym=False,
+                    desc_act=False,
+                    in_features=in_features,
+                    out_features=out_features,
+                    bias=False,
+                    register_buffers=False,
+                )
+                q_fallback.pack(linear, scales, zeros)
 
         self.assertTrue(torch.equal(q_cpu.qweight, q_fallback.qweight))
         self.assertTrue(torch.equal(q_cpu.qzeros, q_fallback.qzeros))

@@ -579,6 +579,77 @@ def test_torch_ops_jit_extension_reuses_cached_namespace_after_first_load(monkey
     assert loader.op("kernel") is runtime.kernel
 
 
+def test_torch_ops_jit_extension_resolves_relative_source_once_per_load(monkeypatch, tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_path = source_root / "unit_test.cpp"
+    source_path.write_text("int kernel() { return 1; }\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    resolve_calls = 0
+
+    def resolve_sources():
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return [str(source_path.relative_to(tmp_path))]
+
+    loader = _make_loader(tmp_path, sources=resolve_sources)
+    state = {"ready": False}
+    compile_calls = []
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert loader.load() is True
+    assert resolve_calls == 1
+    assert compile_calls[0]["sources"] == ["source/unit_test.cpp"]
+
+
+def test_torch_ops_jit_extension_caches_missing_source_failure_until_clear(monkeypatch, tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source_path = source_root / "missing.cpp"
+    monkeypatch.chdir(tmp_path)
+
+    resolve_calls = 0
+
+    def resolve_sources():
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return [str(source_path.relative_to(tmp_path))]
+
+    loader = _make_loader(tmp_path, sources=resolve_sources)
+    state = {"ready": False}
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+
+    def fake_compile(**kwargs):
+        resolved_source = Path(kwargs["sources"][0])
+        if not resolved_source.is_file():
+            raise FileNotFoundError(resolved_source)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is False
+    assert loader.load() is False
+    assert resolve_calls == 1
+
+    loader.clear_cache()
+    source_path.write_text("int kernel() { return 1; }\n", encoding="utf-8")
+
+    assert loader.load() is True
+    assert resolve_calls == 2
+
+
 def test_torch_ops_jit_extension_serializes_different_extensions_with_one_shared_lock(monkeypatch, tmp_path):
     """Guard that different JIT extensions do not compile in parallel."""
 

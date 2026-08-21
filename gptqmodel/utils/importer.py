@@ -566,37 +566,44 @@ def select_quant_linear(
 
             validated = False
             contract_err = None
-            if multi_select:
-                for contract in contracts:
+            # A broken optional runtime should reject only this AUTO candidate, not every fallback.
+            try:
+                if multi_select:
+                    for contract in contracts:
+                        validated, contract_err = cls.validate(
+                            bits=contract["bits"],
+                            group_size=contract["group_size"],
+                            desc_act=contract["desc_act"],
+                            sym=contract["sym"],
+                            pack_dtype=contract["pack_dtype"],
+                            dtype=dtype,
+                            dynamic=None,
+                            device=device,
+                            trainable=trainable,
+                            adapter=adapter,
+                            format=format,
+                        )
+                        if validated:
+                            break
+                else:
                     validated, contract_err = cls.validate(
-                        bits=contract["bits"],
-                        group_size=contract["group_size"],
-                        desc_act=contract["desc_act"],
-                        sym=contract["sym"],
-                        pack_dtype=contract["pack_dtype"],
+                        bits=bits,
+                        group_size=group_size,
+                        desc_act=desc_act,
+                        sym=sym,
+                        pack_dtype=pack_dtype,
                         dtype=dtype,
-                        dynamic=None,
+                        dynamic=dynamic,
                         device=device,
                         trainable=trainable,
                         adapter=adapter,
                         format=format,
                     )
-                    if validated:
-                        break
-            else:
-                validated, contract_err = cls.validate(
-                    bits=bits,
-                    group_size=group_size,
-                    desc_act=desc_act,
-                    sym=sym,
-                    pack_dtype=pack_dtype,
-                    dtype=dtype,
-                    dynamic=dynamic,
-                    device=device,
-                    trainable=trainable,
-                    adapter=adapter,
-                    format=format,
-                )
+            except Exception as exc:
+                last_err = exc
+                if os.environ.get("DEBUG"):
+                    log.info(f"skip {k} because capability validation raised {exc!r}")
+                continue
             if not validated:
                 last_err = contract_err
                 if os.environ.get("DEBUG"):
@@ -637,6 +644,7 @@ def select_quant_linear(
     if is_sharded and not supports_sharded_load:
         raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")
 
+    # Explicit selection must validate the same adapter capability as AUTO selection.
     validate, err = qlinear.validate(
         bits=bits,
         group_size=group_size,
@@ -647,6 +655,7 @@ def select_quant_linear(
         dynamic=dynamic,
         device=device,
         trainable=trainable,
+        adapter=adapter,
         format=format,
     )
 
