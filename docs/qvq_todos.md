@@ -2914,15 +2914,15 @@ For 100%-chat deployment:
 
 ```text
 chat-formatted rows: 100%
-content-token Fisher weight: 95%
-template-structure Fisher weight: 5%
+content-token Fisher weight: 97%
+template-structure Fisher weight: 3%
 ```
 
 The cap is an objective weight, not a row-count limit:
 
 ```text
-H_chat = 0.95 * H_content + 0.05 * H_template
-F_chat = 0.95 * F_content + 0.05 * F_template
+H_chat = 0.97 * H_content + 0.03 * H_template
+F_chat = 0.97 * F_content + 0.03 * F_template
 ```
 
 For mixed raw/chat deployment, use an explicit row-stream mixture and normalize each stream independently before
@@ -2940,7 +2940,7 @@ template_mask[t] = 1 for system/role/separator/EOT tokens
 For a row with `C` content tokens and `T` template tokens, use content weight `1` and template weight:
 
 ```text
-gamma = (0.05 * C) / (0.95 * T)
+gamma = (0.03 * C) / (0.97 * T)
 ```
 
 This makes the normalized direct template-token mass exactly 5% regardless of sequence length. The forward pass still

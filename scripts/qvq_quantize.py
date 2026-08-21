@@ -123,7 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yaqa-no-activation-checkpointing", action="store_true")
     parser.add_argument("--yaqa-max-factor-bytes-per-pass", type=int)
     parser.add_argument("--yaqa-chat-template-weighting", action="store_true")
-    parser.add_argument("--yaqa-chat-template-content-weight", type=float, default=0.95)
+    parser.add_argument("--yaqa-chat-template-content-weight", type=float, default=0.97)
 
     parser.add_argument("--output-alignment", action="store_true")
     parser.add_argument("--output-alignment-lr", type=float, default=1e-5)

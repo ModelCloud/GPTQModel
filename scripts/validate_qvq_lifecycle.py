@@ -172,7 +172,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Down-weight tokenizer-provided chat control tokens in the YAQA Fisher objective.",
     )
-    parser.add_argument("--yaqa-chat-template-content-weight", type=float, default=0.95)
+    parser.add_argument("--yaqa-chat-template-content-weight", type=float, default=0.97)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-forward-kld", type=float, required=True)
     parser.add_argument("--min-top1-agreement", type=float, required=True)

@@ -45,7 +45,7 @@ class ChatTemplateConfig:
     """Controls optional YAQA down-weighting of formatter/control tokens."""
 
     enabled: bool = False
-    content_weight: float = 0.95
+    content_weight: float = 0.97
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):

@@ -554,7 +554,7 @@ def capture_yaqa_sketch_b(
                     valid_content = active_mask.bool() & ~template_mask
                     content_count = valid_content.sum(dim=1).to(dtype=logits.dtype)
                     template_count = valid_template.sum(dim=1).to(dtype=logits.dtype)
-                    content_mass = float(getattr(chat_template_config, "content_weight", 0.95))
+                    content_mass = float(getattr(chat_template_config, "content_weight", 0.97))
                     template_mass = 1.0 - content_mass
                     gamma = (template_mass * content_count) / (content_mass * template_count.clamp_min(1.0))
                     token_weights = torch.where(valid_template, gamma.unsqueeze(1), torch.ones_like(gamma).unsqueeze(1))
