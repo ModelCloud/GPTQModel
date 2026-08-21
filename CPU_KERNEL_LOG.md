@@ -251,3 +251,26 @@ Rejected (CUDA commit 6b66f16f "batch YAQA family candidates on CUDA", family-gr
 - Follow-up worth trying instead (not attempted here, and independent of this CUDA commit): block the existing CPU
   banked Viterbi over the batch dimension so the cost/emission buffers stay cache-resident. That would help the
   looped path too, and would be the precondition for family batching ever being neutral on CPU.
+
+## 2026-08-21 sync: CUDA commit 05f5152d "batch B2 Block-LDLQ families on CUDA"
+
+Not CPU-portable (same conclusion and evidence as the YAQA family batching in 6b66f16f):
+
+- The commit adds `_block_ldlq_v2b2_family_batch_cuda`, which runs the three alternative B2 Block-LDLQ error
+  histories in one candidate-batched pass through the CUDA family-grid Viterbi op
+  (`viterbi_v2_segment_family_grid_trusted`). The win comes from filling an under-occupied CUDA grid (six CTAs per
+  logical tile) and amortizing launch latency/segment barriers with a 128-tile window.
+- The CPU equivalent was already built and measured for 6b66f16f (family-aware `viterbi_banked_family_cpu`
+  experiment recorded above): bit-exact but 0.68x-0.83x versus looping the existing native banked Viterbi once per
+  family, because the per-row cost/emission working set (~67 MB at 128 tiles) is already out of cache and tripling
+  the row count only makes the recurrence more memory-bound. That measured regression applies unchanged to the
+  Block-LDLQ family loop, which uses the same banked Viterbi kernel per candidate.
+- The new dispatch is explicitly gated on `inner_weight.device.type == "cuda"`; the CPU path keeps the serial
+  per-family `_block_ldlq_inner_v2_banked` loop (now expressed as a generator) with identical semantics.
+- Verified the refactor left CPU behavior intact (Intel CPU, torch 2.13.0+cpu, native qvq_cpu extension built via
+  the JIT path): `tests/test_qvq_v2b2_p32.py` 119 passed / 12 skipped / 1 pre-existing config failure
+  (`test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq`, reproduces on a clean tree);
+  `tests/test_qvq.py -k "v2b2 or block_ldlq or family"` 25 passed; `tests/test_qvq_cpu_yaqa.py` 4 passed;
+  `ruff check gptqmodel/quantization/qvq.py` and `git diff --check` clean.
+- The batch-dimension cache-blocking follow-up noted above remains the precondition for family batching ever being
+  neutral on CPU; still not attempted.
