@@ -274,3 +274,42 @@ Not CPU-portable (same conclusion and evidence as the YAQA family batching in 6b
   `ruff check gptqmodel/quantization/qvq.py` and `git diff --check` clean.
 - The batch-dimension cache-blocking follow-up noted above remains the precondition for family batching ever being
   neutral on CPU; still not attempted.
+
+## 2026-08-21 CPU follow-up: batch-dimension cache blocking in the banked Viterbi kernel
+
+This is the follow-up flagged twice above (the precondition for CPU family batching): instead of widening the row
+dimension, keep each row's recurrence independent but cache-resident.
+
+- File changed: `gptqmodel_ext/qvq/qvq_viterbi_banked_cpu.cpp` (new benchmark: `scripts/benchmark_qvq_viterbi_banked_cpu.py`).
+- Technique: the per-step loop was hoisted into a single shared `run_tile(tile_start, tile_end, parallel_inner)`
+  body, so scratch (`costs`, `next_costs`, `emission`, `column_argmin` results) is allocated per tile rather than
+  for the whole batch. Two regimes:
+  - `batch >= at::get_num_threads()`: one row per thread (`parallel_inner=false`), so each thread's working set is
+    `3 * banks * states * 4 B` (~1.5 MB at 2 banks / 65536 states) and the state loops run without inner
+    `at::parallel_for` overhead.
+  - smaller batches: tiles sized to a 4 MB budget, with the existing state/suffix `at::parallel_for` splits kept
+    inside the tile so small batches still use all cores.
+  The large `final_costs`-style staging buffer is gone; only compact per-row `best_final_costs` /
+  `best_final_banks` / `final_end_states` survive the recurrence for traceback. Final-state selection keeps the
+  original bank-major, state-minor scan with strict `<`, so tie-breaking is unchanged.
+- Everything else is untouched: operator signature and registration, validation, codebook transpose + norm
+  precompute, weighted/overlap/entry-exit constraint paths, int16 vs int32 backpointer choice and layouts, and the
+  output tensors.
+- Exactness: `states`, `squared_error`, and `segment_bank_ids` are bit-identical (`torch.equal`) to the previous
+  implementation for batches 8/16/32/64/128, plain and weighted+overlap, plus edge sweeps over V=2/4, 1-4 banks,
+  entry/exit constraints, transition-bit edges (int32 backpointer case) and both regimes.
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu; 128 steps, V=2, 65536 states,
+  2 banks, transition_bits=5, segment 16; median of 5 timed iterations, 2 warmups, 3 interleaved A/B rebuilds):
+  - batch 16: 28.8 ms -> 22.4 ms (1.29x)
+  - batch 32: 58.9 ms -> 44.2 ms (1.33x)
+  - batch 64: 142.8 ms -> 90.3 ms (1.58x)
+  - batch 128: 301.3 ms -> 180.6 ms (1.67x)
+  Speedup grows with batch size, as expected for a footprint fix. Single-shot runs of this kernel are noisy
+  (+-15%); only interleaved rebuild-and-measure passes were trusted.
+- Tests: `tests/test_qvq.py -k "banked or viterbi"` 78 passed / 87 skipped / 1 pre-existing L18 tolerance failure
+  (1.1920928955078125e-06 vs atol 1e-06, reproduces on a clean tree); `tests/test_qvq_v2b2_p32.py` 119 passed /
+  12 skipped / 1 pre-existing YAQA config failure (`YAQA requires viterbi_objective='euclidean'`, also reproduces
+  on a clean tree); `tests/test_qvq_cpu_yaqa.py` 4 passed; `ruff check` and `git diff --check` clean. No CUDA test
+  ran (CPU-only host).
+- Family batching on CPU is still not worth revisiting: the regression measured for 6b66f16f came from tripling an
+  out-of-cache row footprint, and this change lowers the footprint per row rather than making wide rows cheaper.
