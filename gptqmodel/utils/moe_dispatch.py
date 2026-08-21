@@ -113,6 +113,17 @@ _ORIENTATION_CACHE: dict[int, bool | None] = {}
 _MARLIN_MOE_AVAILABLE: bool | None = None
 
 
+def _sanitize_expert_ids(
+    expert_ids: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Clamp routing ids for tensor indexing and identify entries that must contribute zero."""
+    if num_experts <= 0:
+        raise ValueError("num_experts must be positive")
+    sentinel_mask = (expert_ids < 0) | (expert_ids >= num_experts)
+    return expert_ids.clamp(min=0, max=num_experts - 1), sentinel_mask
+
+
 def _grouped_mm_min_tokens() -> int:
     """Minimum token-expert pairs before the grouped dispatch path is attempted.
 
@@ -773,8 +784,8 @@ def _marlin_experts_project_one_token(
     num_experts = self.num_experts
 
     # top_k_index has shape (1, top_k) after the batched reshape.
-    expert_ids = top_k_index[0].clamp(max=num_experts - 1)
-    weights = top_k_weights[0].to(dtype)
+    expert_ids, sentinel_mask = _sanitize_expert_ids(top_k_index[0], num_experts)
+    weights = top_k_weights[0].to(dtype).masked_fill(sentinel_mask, 0.0)
 
     # One small device->host transfer per MoE layer instead of per pair.
     expert_ids_list = expert_ids.tolist()
@@ -783,7 +794,7 @@ def _marlin_experts_project_one_token(
     # Accumulate weight per expert so duplicated top-k ids only compute once.
     expert_to_weight: dict[int, float] = {}
     for e, w in zip(expert_ids_list, weights_list):
-        if e >= num_experts:
+        if w == 0.0:
             continue
         expert_to_weight[e] = expert_to_weight.get(e, 0.0) + float(w)
 
@@ -930,7 +941,7 @@ def _active_cluster_key(target: object) -> tuple:
 
 
 def _build_active_clusters_for_proj(
-    proj_targets: list[object],
+    active_proj_targets: list[object],
     active_global_ids: list[int],
     num_experts: int,
     device: torch.device,
@@ -944,15 +955,26 @@ def _build_active_clusters_for_proj(
     """
     if not active_global_ids:
         return []
+    if len(active_proj_targets) != len(active_global_ids):
+        raise ValueError(
+            "active_proj_targets and active_global_ids must contain the same number of experts"
+        )
+
+    # Callers materialize only the routed experts, so this list is compact and
+    # cannot be indexed by a sparse global expert id (for example [3, 7]).
+    # Preserve the upstream-known identity explicitly for clustering and copies.
+    target_by_global_id = dict(zip(active_global_ids, active_proj_targets, strict=True))
+    if len(target_by_global_id) != len(active_global_ids):
+        raise ValueError("active_global_ids must be unique")
 
     cluster_map: dict[tuple, list[int]] = {}
     for global_id in active_global_ids:
-        target = proj_targets[global_id]
+        target = target_by_global_id[global_id]
         cluster_map.setdefault(_active_cluster_key(target), []).append(global_id)
 
     clusters: list[dict[str, object]] = []
     for global_ids in cluster_map.values():
-        first = proj_targets[global_ids[0]]
+        first = target_by_global_id[global_ids[0]]
         num = len(global_ids)
 
         stacked_qw = torch.empty(
@@ -968,7 +990,7 @@ def _build_active_clusters_for_proj(
         in_cluster = torch.zeros(num_experts, dtype=torch.bool, device=device)
         cluster_global_ids = torch.empty(num, dtype=torch.int64, device=device)
         for local_id, global_id in enumerate(global_ids):
-            target = proj_targets[global_id]
+            target = target_by_global_id[global_id]
             stacked_qw[local_id].copy_(target.qweight)
             stacked_sc[local_id].copy_(target.scales)
             membership[global_id] = local_id
@@ -1062,11 +1084,21 @@ def _batched_marlin_moe_forward(
     num_tokens = hidden_states.size(0)
     num_experts = self.num_experts
 
+    if num_tokens == 0 or num_top_k == 0:
+        final_hidden_states = torch.zeros(
+            num_tokens,
+            hidden_dim,
+            device=device,
+            dtype=dtype,
+        )
+        if batch_size is not None:
+            final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
+        return final_hidden_states
+
     topk_ids = top_k_index.to(torch.int32)
     topk_w = top_k_weights.to(torch.float32)
-    sentinel_mask = topk_ids >= num_experts
+    topk_ids, sentinel_mask = _sanitize_expert_ids(topk_ids, num_experts)
     topk_w = topk_w.masked_fill(sentinel_mask, 0.0)
-    topk_ids = topk_ids.clamp(max=num_experts - 1)
 
     cache = _get_expert_dispatch_cache(self)
     expert0 = cache["experts"][0]
@@ -1446,6 +1478,17 @@ def _grouped_mm_dequant_experts_forward(
     num_tokens = hidden_states.size(0)
     num_experts = self.num_experts
 
+    if num_tokens == 0 or num_top_k == 0:
+        final_hidden_states = torch.zeros(
+            num_tokens,
+            hidden_dim,
+            device=device,
+            dtype=hidden_states.dtype,
+        )
+        if batch_size is not None:
+            final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
+        return final_hidden_states
+
     # Single-token decode fast path for the per-expert Marlin dispatcher.
     # The general path below builds a sorted/padded token-expert index which
     # costs several kernel launches per layer; for M=1 those are all overhead.
@@ -1462,16 +1505,9 @@ def _grouped_mm_dequant_experts_forward(
     sample_weights = top_k_weights.reshape(-1).to(hidden_states.dtype)
     expert_ids = top_k_index.reshape(-1)
 
-    sentinel_mask = expert_ids >= num_experts
-    # Clamp without a device->host sync; the masked_fill below zeros the weight
-    # for any sentinel entries.
-    expert_ids = expert_ids.clamp(max=num_experts - 1)
-
-    if expert_ids.numel() == 0:
-        final_hidden_states = torch.zeros(num_tokens, hidden_dim, device=device, dtype=hidden_states.dtype)
-        if batch_size is not None:
-            final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
-        return final_hidden_states
+    # Normalize without a device->host sync; invalid entries are masked after
+    # projection so they preserve the generic per-expert fallback's zero output.
+    expert_ids, sentinel_mask = _sanitize_expert_ids(expert_ids, num_experts)
 
     active_experts = torch.unique(expert_ids, sorted=True)
     local_ids = torch.searchsorted(active_experts, expert_ids)
