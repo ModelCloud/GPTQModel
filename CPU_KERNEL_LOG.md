@@ -161,3 +161,28 @@ Done (CPU GEMV wrapper / `QVQLinear` dense-weight cache pass):
 - `ruff check` passes for `gptqmodel/utils/qvq_cpu.py`, `gptqmodel/quantization/qvq_rates.py`, and `gptqmodel/nn_modules/qlinear/qvq.py`.
 - `tests/test_qvq.py -k "viterbi or tail_biting"` results unchanged: 89 passed, 112 skipped, 1 failed (pre-existing `squared_error` 1.19e-6 tolerance edge case in `test_qvq_l18_v4_torch_viterbi_recovers_exact_transition_consistent_path`).
 - `tests/test_qvq_v2b2_p32.py` shows 1 new unrelated failure (`test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq`) caused by a recent `QVQConfig` validation rule (YAQA requires `viterbi_objective='euclidean'`) conflicting with that test; it is not touched by this CPU kernel pass.
+
+Done (mimic CUDA VAQA/YAQA factored feedback on CPU):
+- Added `gptqmodel_ext/qvq/qvq_yaqa_cpu.cpp` implementing a native CPU `yaqa_feedback` op that mirrors the CUDA factored kernel.
+  - Computes the corrected 16x16 tile stack for one anti-diagonal:
+    `corrected = source + bias + left(16,K) @ output_feedback(K,16) + left(16,16) + right(16,16)`.
+  - Reuses a single `cross_tile` buffer and calls `at::mm_out` per tile, then fuses the source/bias/left/right/cross epilogue in a scalar C++ loop.
+- Registered the op as `gptqmodel_qvq.yaqa_feedback` for CPU dispatch and exposed it through `gptqmodel/utils/qvq_cpu.py` as `qvq_cpu_yaqa_feedback` (with validation/contiguity helpers) and `_qvq_cpu_yaqa_feedback_op`.
+- Updated `gptqmodel/quantization/qvq.py`:
+  - Added `_incremental_cpu_factored_feedback` to `yaqa_inner` and the `yaqa_inner_v2b2_p32`/`encode_at_scale` call sites.
+  - CPU factored feedback is now enabled for `device.type in ("cpu", "mps")` when `qvq_cpu_supported()` is true, replacing the per-tile Python `torch.matmul` fallback.
+  - The precomputed `left_transformed_error`/`right_transformed_error` caches and the bottom-of-anti-diagonal update loop are reused directly for CPU (previously CUDA-only).
+- Added `scripts/benchmark_qvq_yaqa_feedback_cpu.py` to compare the native op against the equivalent Python reference for one or more anti-diagonals.
+- Accuracy:
+  - `tests/test_qvq.py -k yaqa`: 91 passed, 1 skipped, 1 failed (`test_yaqa_config_supports_exact_rate_regularization_overrides`, pre-existing config regression not touched by this pass).
+  - `tests/test_qvq_v2b2_p32.py -k yaqa`: 35 passed, 1 failed (pre-existing `test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq` config issue).
+  - `tests/test_qvq.py::test_qvq_dual_v2_quantize_pack_and_torch_linear_are_synchronized[yaqa]` and `test_qvq_l18_v4_yaqa_quantize_pack_and_torch_linear_are_synchronized` pass with exact reconstruction.
+  - Native `qvq_cpu_yaqa_feedback` is bit-exact vs the Python reference (`max abs diff = 0.0`).
+- Performance (Intel Xeon Platinum 8559C, AVX-512, 8 logical cores, torch 2.13.0+cpu) from `scripts/benchmark_qvq_yaqa_feedback_cpu.py`:
+  - 256x256: Python 4.18 ms -> native 1.47 ms (~2.84x)
+  - 512x512: Python 14.72 ms -> native 3.34 ms (~4.41x)
+  - 1024x1024: Python 60.02 ms -> native 44.79 ms (~1.34x)
+  - 2048x2048: Python 237.74 ms -> native 63.28 ms (~3.76x)
+  - 4096x4096: Python 1038.54 ms -> native 327.71 ms (~3.17x)
+- `ruff check` passes for `gptqmodel/quantization/qvq.py`, `gptqmodel/utils/qvq_cpu.py`, and `scripts/benchmark_qvq_yaqa_feedback_cpu.py`.
+- `git diff --check` passes.

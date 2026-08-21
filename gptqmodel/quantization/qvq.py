@@ -16,6 +16,7 @@ from typing import Callable, Iterator
 import torch
 
 from ..utils.planar_packing import planar_pack_rows, planar_unpack_rows
+from ..utils.qvq_cpu import qvq_cpu_supported
 from .qvq_codecs import (
     PGC16_CODEBOOK_VERSION,
     PGC16_NORMALIZATION_RMS,
@@ -3554,6 +3555,7 @@ def yaqa_inner(
     _defer_segmented_cuda_checks: bool = False,
     _incremental_cuda_feedback: bool = False,
     _incremental_cuda_factored_feedback: bool = False,
+    _incremental_cpu_factored_feedback: bool = False,
     _trusted_inputs: bool = False,
 ) -> tuple[torch.Tensor, ...]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
@@ -3748,6 +3750,7 @@ def yaqa_inner(
                 _rounding_bias=_rounding_bias,
                 _incremental_cuda_feedback=_incremental_cuda_feedback,
                 _incremental_cuda_factored_feedback=_incremental_cuda_factored_feedback,
+                _incremental_cpu_factored_feedback=_incremental_cpu_factored_feedback,
             )
         elif _bank0_oracle is not None:
             bank0_reference, bank0_reference_states = _bank0_oracle
@@ -3832,6 +3835,11 @@ def yaqa_inner(
         and feedback_device.type == "cuda"
         and not incremental_cuda_feedback
     )
+    incremental_cpu_factored_feedback = (
+        _incremental_cpu_factored_feedback
+        and feedback_device.type == "cpu"
+        and qvq_cpu_supported()
+    )
     transformed_error = None
     feedback_temp = None
     left_transformed_error = None
@@ -3841,7 +3849,7 @@ def yaqa_inner(
         transformed_error = torch.empty_like(source)
         torch.mm(input_L.transpose(0, 1), error, out=feedback_temp)
         torch.mm(feedback_temp, output_L, out=transformed_error)
-    elif incremental_cuda_factored_feedback:
+    elif incremental_cuda_factored_feedback or incremental_cpu_factored_feedback:
         if telemetry is not None:
             telemetry.count("yaqa_factored_feedback_calls")
         left_transformed_error = torch.empty_like(source)
@@ -3938,6 +3946,20 @@ def yaqa_inner(
                 from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_op
 
                 corrected_tile_stack = _qvq_cuda_yaqa_feedback_op()(
+                    source,
+                    left_transformed_error,
+                    right_transformed_error,
+                    output_feedback,
+                    coordinates[0][0],
+                    coordinates[0][1],
+                    len(coordinates),
+                    rounding_bias,
+                )
+            elif incremental_cpu_factored_feedback:
+                assert left_transformed_error is not None and right_transformed_error is not None
+                from ..utils.qvq_cpu import qvq_cpu_yaqa_feedback
+
+                corrected_tile_stack = qvq_cpu_yaqa_feedback(
                     source,
                     left_transformed_error,
                     right_transformed_error,
@@ -4198,7 +4220,7 @@ def yaqa_inner(
                     alpha=-1,
                     out=transformed_error,
                 )
-        elif incremental_cuda_factored_feedback:
+        elif incremental_cuda_factored_feedback or incremental_cpu_factored_feedback:
             assert left_transformed_error is not None and right_transformed_error is not None
             with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
                 # Maintain P = L_I'.T @ E and R = E @ L_O'. Distinct input
@@ -4335,6 +4357,10 @@ def yaqa_inner_v2b2_p32(
     kwargs.setdefault(
         "_incremental_cuda_feedback",
         inner_weight.device.type == "cuda" and max(inner_weight.shape) <= 2048,
+    )
+    kwargs.setdefault(
+        "_incremental_cpu_factored_feedback",
+        inner_weight.device.type in ("cpu", "mps") and qvq_cpu_supported(),
     )
 
     if len(codebook_library) != 4:
@@ -6485,6 +6511,9 @@ def quantize_qvq_linear(
             # tile drift against the direct FP32 expression to 1e-6.
             incremental_cuda_feedback = device.type == "cuda" and max(normalized_weight.shape) <= 2048
             incremental_cuda_factored_feedback = device.type == "cuda" and max(normalized_weight.shape) > 2048
+            incremental_cpu_factored_feedback = (
+                device.type in ("cpu", "mps") and qvq_cpu_supported()
+            )
             if v2b4_p64:
                 assert bank_codebooks is not None
                 return yaqa_inner_v2b4_p64(
@@ -6502,6 +6531,7 @@ def quantize_qvq_linear(
                     telemetry=telemetry,
                     _incremental_cuda_feedback=incremental_cuda_feedback,
                     _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
+                    _incremental_cpu_factored_feedback=incremental_cpu_factored_feedback,
                     _trusted_inputs=True,
                 )
             if v2b2_p32:
@@ -6519,6 +6549,7 @@ def quantize_qvq_linear(
                         telemetry=telemetry,
                         _incremental_cuda_feedback=incremental_cuda_feedback,
                         _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
+                        _incremental_cpu_factored_feedback=incremental_cpu_factored_feedback,
                         _trusted_inputs=True,
                     )
                     yaqa_bank_diagnostics["fallback_to_v2"] = True
@@ -6550,6 +6581,7 @@ def quantize_qvq_linear(
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,
                     telemetry=telemetry,
                     _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
+                    _incremental_cpu_factored_feedback=incremental_cpu_factored_feedback,
                     _trusted_inputs=True,
                 )
             return yaqa_inner(
@@ -6567,6 +6599,7 @@ def quantize_qvq_linear(
                 telemetry=telemetry,
                 _incremental_cuda_feedback=incremental_cuda_feedback,
                 _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
+                _incremental_cpu_factored_feedback=incremental_cpu_factored_feedback,
                 _trusted_inputs=True,
             )
         if v2b4_p64:

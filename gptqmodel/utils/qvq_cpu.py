@@ -36,6 +36,7 @@ def _qvq_cpu_sources() -> list[str]:
         str(_qvq_cpu_root() / "qvq_viterbi_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_viterbi_banked_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_hadamard_cpu.cpp"),
+        str(_qvq_cpu_root() / "qvq_yaqa_cpu.cpp"),
     ]
 
 
@@ -53,7 +54,7 @@ def _qvq_cpu_extra_ldflags() -> list[str]:
 _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_CPU_OPS_NAME,
     namespace=_QVQ_CPU_NAMESPACE,
-    required_ops=("gemv_cpu", "inner_weight_cpu", "viterbi_cpu", "viterbi_banked_cpu", "hadamard"),
+    required_ops=("gemv_cpu", "inner_weight_cpu", "viterbi_cpu", "viterbi_banked_cpu", "hadamard", "yaqa_feedback"),
     sources=_qvq_cpu_sources,
     build_root_env="GPTQMODEL_QVQ_CPU_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_cpu"),
@@ -337,6 +338,7 @@ def _qvq_cpu_viterbi_banked_op() -> Callable:
 
 
 _QVQ_CPU_HADAMARD_OP: Callable | None = None
+_QVQ_CPU_YAQA_FEEDBACK_OP: Callable | None = None
 
 
 def _qvq_cpu_hadamard_op() -> Callable:
@@ -346,6 +348,72 @@ def _qvq_cpu_hadamard_op() -> Callable:
             if _QVQ_CPU_HADAMARD_OP is None:
                 _QVQ_CPU_HADAMARD_OP = _extension_api().op("qvq_cpu", "hadamard")
     return _QVQ_CPU_HADAMARD_OP
+
+
+def _qvq_cpu_yaqa_feedback_op() -> Callable:
+    global _QVQ_CPU_YAQA_FEEDBACK_OP
+    if _QVQ_CPU_YAQA_FEEDBACK_OP is None:
+        with _QVQ_CPU_OP_LOCK:
+            if _QVQ_CPU_YAQA_FEEDBACK_OP is None:
+                _QVQ_CPU_YAQA_FEEDBACK_OP = _extension_api().op("qvq_cpu", "yaqa_feedback")
+    return _QVQ_CPU_YAQA_FEEDBACK_OP
+
+
+def qvq_cpu_yaqa_feedback(
+    source: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    output_feedback: torch.Tensor,
+    first_input_block: int,
+    first_output_block: int,
+    count: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Native CPU fused YAQA factored feedback for one anti-diagonal.
+
+    Args:
+        source: [in_features, out_features] float32 CPU source matrix.
+        left: [in_features, out_features] float32 CPU transformed error,
+            ``input_feedback.transpose(0, 1) @ error``.
+        right: [in_features, out_features] float32 CPU transformed error,
+            ``error @ output_feedback``.
+        output_feedback: [out_features, out_features] float32 CPU strictly lower
+            triangular output feedback matrix.
+        first_input_block: input block coordinate of the anti-diagonal's first tile.
+        first_output_block: output block coordinate of the anti-diagonal's first tile.
+        count: number of tiles along this anti-diagonal.
+        bias: optional [in_features, out_features] float32 CPU rounding bias.
+
+    Returns:
+        [count, 16, 16] float32 corrected tile stack.
+    """
+
+    if not qvq_cpu_supported():
+        raise RuntimeError("QVQ CPU kernel requires x86-64 (AMD64).")
+    if source.device.type != "cpu" or left.device.type != "cpu" or right.device.type != "cpu":
+        raise ValueError("qvq_cpu_yaqa_feedback requires CPU tensors")
+    if output_feedback.device.type != "cpu":
+        raise ValueError("qvq_cpu_yaqa_feedback requires CPU output_feedback")
+    for name, tensor in (("source", source), ("left", left), ("right", right)):
+        if tensor.dtype != torch.float32:
+            raise TypeError(f"qvq_cpu_yaqa_feedback: {name} must be float32")
+        if not tensor.is_contiguous():
+            raise ValueError(f"qvq_cpu_yaqa_feedback: {name} must be contiguous")
+    if output_feedback.dtype != torch.float32 or not output_feedback.is_contiguous():
+        raise TypeError("qvq_cpu_yaqa_feedback: output_feedback must be contiguous float32")
+    if bias is not None and (bias.device.type != "cpu" or bias.dtype != torch.float32 or not bias.is_contiguous()):
+        raise TypeError("qvq_cpu_yaqa_feedback: bias must be contiguous float32 on CPU")
+
+    return _qvq_cpu_yaqa_feedback_op()(
+        source,
+        left,
+        right,
+        output_feedback,
+        int(first_input_block),
+        int(first_output_block),
+        int(count),
+        bias,
+    )
 
 
 def qvq_cpu_hadamard(
