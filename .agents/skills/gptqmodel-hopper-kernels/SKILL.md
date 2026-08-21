@@ -36,4 +36,10 @@ The 2026-07-20 audit host had no Hopper GPU. An actual H100 run is therefore req
 - Compare specialized Hopper paths to the repository's production alternatives, including Machete or Marlin where their method/format contract matches.
 - Measure decode and prefill separately; large Hopper GEMM gains do not imply small-M latency gains.
 
+### TMA and warp specialization
+
+TMA copies are started by one thread (or a small subset of a warp) and executed asynchronously by the hardware unit. The remaining warp threads do not have to compute addresses or move individual bytes; they can either wait on the transfer or continue with unrelated work. This is one instance of warp specialization: different warps in the same kernel can be assigned different roles (load, compute, store, tile scheduling) and hand off data through `__syncwarp()` or cluster barriers.
+
+See the modern SIMT/warp-specialization note in `$gptqmodel-cuda-kernels` for the Volta+ independent-thread-scheduling caveats that affect cross-warp handoffs, including why legacy assumptions that “all threads in a warp move together” can break.
+
 Retain a deterministic dense/dequantized reference and test architecture dispatch independently from kernel math.

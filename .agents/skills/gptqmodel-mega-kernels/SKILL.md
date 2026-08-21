@@ -57,6 +57,9 @@ when removing GPU launch/gap costs or enabling phase-local data reuse is materia
 ## Design from phase boundaries inward
 
 1. Keep phase roles explicit in source even when they share one launch.
+   In modern CUDA this maps to warp specialization: different warps can hold
+   different phase roles (load, compute, store, tile scheduling) in one kernel.
+   See the modern SIMT/warp-specialization note in `$gptqmodel-cuda-kernels`.
 2. Budget the worst live registers and launch-reserved shared memory before
    implementation. A later lightweight phase does not release earlier resources.
 3. Use block synchronization for shared-memory handoff and cooperative grid
