@@ -65,3 +65,65 @@ python scripts/qvq_evaluate.py tasks \
 The former model-specific comparison and lifecycle-validation scripts remain research and compatibility tools. New
 production sweeps should invoke these two unified harnesses so quantization and post-quant evaluation cannot silently
 use different lifecycle implementations.
+
+## Experiment ledger: Qwen3-8B QVQ W2 acceptance harness (2026-08-22)
+
+This implementation adds a stricter architecture-locked authority in `scripts/accept_qwen3_8b_qvq.py` without
+changing the general harness. The target is Qwen/Qwen3-8B revision
+`b968826d9c46dd6066d109eabc6255188de91218`; the frozen source is `neuralmagic/calibration` revision
+`fb6bc2f8c66543876fb31613f5872b9030220e15`, config `LLM`, split `train`. The branch is
+`polly/qwen3-acceptance`, based on `5f1183c0`.
+
+The split plan is calibration rows 0--511, YAQA/tuning 512--1023, validation 1024--1535, held-out diagnostics
+1536--2047, and a disjoint diverse pool 2048--2559. Diverse-32 sorts the pool by canonical UTF-8 content length and
+stable row identity, partitions it into 32 bins of 16, and selects rank 8 per bin. Manifests contain source identities
+and SHA-256 content hashes; all ten pairwise comparisons must be empty.
+
+```bash
+python scripts/accept_qwen3_8b_qvq.py export-frozen-splits \
+  --dataset neuralmagic/calibration --dataset-config LLM --dataset-split train \
+  --dataset-revision fb6bc2f8c66543876fb31613f5872b9030220e15 \
+  --output-dir artifacts/qwen3_8b_qvq_w2/splits
+
+huggingface-cli download Qwen/Qwen3-8B \
+  --revision b968826d9c46dd6066d109eabc6255188de91218 \
+  --local-dir artifacts/qwen3_8b_qvq_w2/dense-model
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<verified-idle-GPU-UUIDs> python scripts/qvq_quantize.py \
+  --model artifacts/qwen3_8b_qvq_w2/dense-model --output artifacts/qwen3_8b_qvq_w2/checkpoint \
+  --quant-config configs/qwen3_8b_qvq_w2_acceptance.json \
+  --calibration-dataset artifacts/qwen3_8b_qvq_w2/splits/calibration.jsonl --calibration-rows 512 \
+  --yaqa-dataset artifacts/qwen3_8b_qvq_w2/splits/yaqa_tuning.jsonl --yaqa-rows 512 \
+  --validation-dataset artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl --validation-rows 512
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<same-verified-idle-GPU-UUIDs> \
+python scripts/accept_qwen3_8b_qvq.py evaluate \
+  --dense-model artifacts/qwen3_8b_qvq_w2/dense-model \
+  --revision b968826d9c46dd6066d109eabc6255188de91218 \
+  --checkpoint artifacts/qwen3_8b_qvq_w2/checkpoint --manifest-dir artifacts/qwen3_8b_qvq_w2/splits \
+  --validation-jsonl artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl \
+  --diverse-jsonl artifacts/qwen3_8b_qvq_w2/splits/diverse_32.jsonl \
+  --maximum-bpw 2.1 --score-min 0.85 --final-kl-max-nats 0.10 \
+  --output artifacts/qwen3_8b_qvq_w2/acceptance.json
+
+python scripts/accept_qwen3_8b_qvq.py gate --report artifacts/qwen3_8b_qvq_w2/acceptance.json
+sha256sum artifacts/qwen3_8b_qvq_w2/acceptance.json artifacts/qwen3_8b_qvq_w2/checkpoint/*.safetensors
+```
+
+Evaluation performs a fresh `GPTQModel.load`, requires 252 exact-type `QVQLinear` modules, and accounts every tensor
+below each requested projection prefix: trellis, packed selectors/bank metadata, FP32 SU/SV, bias, explicit outliers,
+and future auxiliaries. Non-target tensors are separate. Per-cell final-KL is direct evidence: one dense projection
+output is replaced with the reloaded QVQ module output on the identical dense input before observing final logits.
+
+Focused tests cover leakage, diverse cardinality, missing modules, dense/higher-precision fallback, auxiliary/BPW
+accounting, thresholds, missing cells, coverage, and report schema. The implementation gate passed 28 focused and
+existing unified-harness tests, Ruff on all changed Python paths, `compileall`, config construction, CLI imports, and
+`git diff --check`. After safely installing missing declared dependencies (`accelerate`, `threadpoolctl`, `device-smi`,
+`defuser`, and `pillow`), the exact `export-frozen-splits` command above succeeded against the pinned real dataset:
+four 512-row manifests and one 32-row manifest were emitted and all pairwise identity/content checks passed.
+
+No Qwen3-8B quantization or accuracy run has been performed for this ledger entry, so no model artifact or accuracy
+result exists. The host exposes one idle NVIDIA PG506-232 (`GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855`, PCI
+`00000000:2B:00.0`, 98,304 MiB, 0 MiB used and 0% utilization at inspection), but the pinned 8B model snapshot is not
+materialized. Still required are model download, the full quantize/save/reload run, BPW <=2.1, all 252 interventions,
+global metrics, and artifact hashes. Missing evidence is a hard rejection and is not represented as a passing score.
