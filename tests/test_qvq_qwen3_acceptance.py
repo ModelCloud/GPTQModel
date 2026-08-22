@@ -5,6 +5,7 @@ import json
 
 import pytest
 import torch
+from safetensors.torch import save_file
 from torch import nn
 
 import gptqmodel.utils.qvq_acceptance as acceptance
@@ -12,6 +13,7 @@ from gptqmodel.utils.qvq_acceptance import (
     PROJECTION_BOUNDARY,
     AcceptanceError,
     ProjectionCell,
+    account_serialized_checkpoint,
     account_serialized_state,
     expected_cells,
     materialize_manifest,
@@ -24,11 +26,16 @@ class _Packed(nn.Module):
     def __init__(self, bits=2.0):
         super().__init__()
         self.bits = bits
+        self.bank_count = 2
+        self.v2b2_p32 = True
+        self._bank_ids_loaded = True
         self.in_features = 16
         self.out_features = 16
         self.register_buffer("trellis", torch.zeros(1, dtype=torch.int32))
         self.register_buffer("SU", torch.zeros(1))
         self.register_buffer("SV", torch.zeros(1))
+        self.register_buffer("bank_ids", torch.zeros(1, dtype=torch.uint8))
+        self.register_buffer("bank_alt_id", torch.zeros(1, dtype=torch.uint8))
 
 
 def _census_model(module_factory):
@@ -69,6 +76,16 @@ def test_census_rejects_higher_precision_fallback(monkeypatch):
     model.model.layers[3].self_attn.q_proj = _Packed(bits=2.5)
     with pytest.raises(AcceptanceError, match="higher-precision"):
         acceptance.census_reloaded_model(model)
+
+
+def test_census_separates_wrapper_runtime_name_from_serialized_identity(monkeypatch):
+    monkeypatch.setattr(acceptance, "QVQLinear", _Packed)
+    wrapper = nn.Module()
+    wrapper.model = _census_model(_Packed)
+    cells = acceptance.census_reloaded_model(wrapper)
+    assert len(cells) == 252
+    assert cells[0].name == "model.layers.0.self_attn.q_proj"
+    assert cells[0].runtime_name == "model.model.layers.0.self_attn.q_proj"
 
 
 def _manifests(tmp_path):
@@ -116,23 +133,79 @@ def test_accounting_includes_every_projection_auxiliary_tensor_and_bias():
 def test_accounting_rejects_bpw_above_limit():
     cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 1, 1)
     with pytest.raises(AcceptanceError, match="exceeds"):
-        account_serialized_state({f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32)}, [cell])
+        account_serialized_state(
+            {
+                f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32),
+                f"{cell.name}.SU": torch.zeros(0),
+                f"{cell.name}.SV": torch.zeros(0),
+            },
+            [cell],
+        )
+
+
+def test_accounting_reads_exact_saved_safetensors_extents(tmp_path):
+    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
+    save_file(
+        {
+            f"{cell.name}.trellis": torch.zeros(16, dtype=torch.int32),
+            f"{cell.name}.SU": torch.zeros(16, dtype=torch.float32),
+            f"{cell.name}.SV": torch.zeros(16, dtype=torch.float32),
+            "model.embed_tokens.weight": torch.zeros(8, dtype=torch.float16),
+        },
+        tmp_path / "model.safetensors",
+    )
+    report = account_serialized_checkpoint(tmp_path, [cell], maximum_bpw=100)
+    assert report["requested_projection_tensor_bytes"] == 192
+    assert report["dense_non_target_tensor_bytes"] == 16
+    assert report["container_header_and_padding_bytes"] > 0
+
+
+def test_accounting_rejects_shards_without_authoritative_index(tmp_path):
+    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
+    save_file({f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32)}, tmp_path / "model-00001.safetensors")
+    save_file(
+        {
+            f"{cell.name}.SU": torch.zeros(1),
+            f"{cell.name}.SV": torch.zeros(1),
+        },
+        tmp_path / "model-00002.safetensors",
+    )
+    with pytest.raises(AcceptanceError, match="lacks model.safetensors.index.json"):
+        account_serialized_checkpoint(tmp_path, [cell], maximum_bpw=100)
 
 
 def _complete_report(score=0.85, kl=0.1):
     metric = {
         "coverage_complete": True,
+        "sample_count": 1056,
+        "diverse_32_sample_count": 32,
         "top1_agreement": score,
         "final_kl_nats": kl,
         "diverse_32": score,
     }
     return {
         "schema_version": 1,
-        "artifact": {"fresh_reload_verified": True, "checkpoint_sha256": {"model.safetensors": "a" * 64}},
+        "artifact": {
+            "fresh_reload_verified": True,
+            "checkpoint_sha256": {"model.safetensors": "a" * 64},
+            "dense_model_sha256": {"model.safetensors": "b" * 64},
+        },
         "census": {"expected": 252, "actual": 252, "complete": True},
-        "accounting": {"boundary": PROJECTION_BOUNDARY, "effective_bpw": 2.05, "maximum_bpw": 2.1},
+        "accounting": {
+            "boundary": PROJECTION_BOUNDARY,
+            "effective_bpw": 2.05,
+            "maximum_bpw": 2.1,
+            "per_module": {f"module-{index}": {} for index in range(252)},
+        },
         "manifests": {
             "pairwise_disjoint": True,
+            "counts": {
+                "calibration": 512,
+                "yaqa_tuning": 512,
+                "validation": 512,
+                "held_out_diagnostics": 512,
+                "diverse_32": 32,
+            },
             "comparisons": [
                 {"identity_overlap": [], "content_overlap": []}
                 for _ in range(10)
@@ -140,7 +213,15 @@ def _complete_report(score=0.85, kl=0.1):
         },
         "thresholds": {"top1_agreement_min": 0.85, "diverse_32_min": 0.85, "final_kl_max_nats": 0.2},
         "global": dict(metric),
-        "cells": [{"layer": layer, "role": role, **metric} for layer, role in expected_cells()],
+        "cells": [
+            {
+                "layer": layer,
+                "role": role,
+                "module": acceptance.expected_projection_name(layer, role),
+                **metric,
+            }
+            for layer, role in expected_cells()
+        ],
     }
 
 

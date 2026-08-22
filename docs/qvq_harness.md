@@ -72,7 +72,8 @@ This implementation adds a stricter architecture-locked authority in `scripts/ac
 changing the general harness. The target is Qwen/Qwen3-8B revision
 `b968826d9c46dd6066d109eabc6255188de91218`; the frozen source is `neuralmagic/calibration` revision
 `fb6bc2f8c66543876fb31613f5872b9030220e15`, config `LLM`, split `train`. The branch is
-`polly/qwen3-acceptance`, based on `5f1183c0`.
+`polly/qwen3-acceptance`, based on `5f1183c0`; the initial harness implementation commit is
+`3793fa9d05cf6f78365d407ec03494ce73842cd4`.
 
 The split plan is calibration rows 0--511, YAQA/tuning 512--1023, validation 1024--1535, held-out diagnostics
 1536--2047, and a disjoint diverse pool 2048--2559. Diverse-32 sorts the pool by canonical UTF-8 content length and
@@ -102,6 +103,7 @@ python scripts/accept_qwen3_8b_qvq.py evaluate \
   --revision b968826d9c46dd6066d109eabc6255188de91218 \
   --checkpoint artifacts/qwen3_8b_qvq_w2/checkpoint --manifest-dir artifacts/qwen3_8b_qvq_w2/splits \
   --validation-jsonl artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl \
+  --held-out-diagnostics-jsonl artifacts/qwen3_8b_qvq_w2/splits/held_out_diagnostics.jsonl \
   --diverse-jsonl artifacts/qwen3_8b_qvq_w2/splits/diverse_32.jsonl \
   --maximum-bpw 2.1 --score-min 0.85 --final-kl-max-nats 0.10 \
   --output artifacts/qwen3_8b_qvq_w2/acceptance.json
@@ -110,17 +112,21 @@ python scripts/accept_qwen3_8b_qvq.py gate --report artifacts/qwen3_8b_qvq_w2/ac
 sha256sum artifacts/qwen3_8b_qvq_w2/acceptance.json artifacts/qwen3_8b_qvq_w2/checkpoint/*.safetensors
 ```
 
-Evaluation performs a fresh `GPTQModel.load`, requires 252 exact-type `QVQLinear` modules, and accounts every tensor
-below each requested projection prefix: trellis, packed selectors/bank metadata, FP32 SU/SV, bias, explicit outliers,
-and future auxiliaries. Non-target tensors are separate. Per-cell final-KL is direct evidence: one dense projection
-output is replaced with the reloaded QVQ module output on the identical dense input before observing final logits.
+Evaluation performs a fresh `GPTQModel.load`, requires 252 exact-type W2 `QVQLinear` modules, and parses the saved
+safetensors headers/data offsets to account every tensor below each requested projection prefix: trellis, packed
+selectors/bank metadata, FP32 SU/SV, bias, explicit outliers, and future auxiliaries. Container overhead and non-target
+tensors are separate. Global and per-cell metrics cover all 512 validation, 512 held-out diagnostic, and 32 diverse
+records. Per-cell final-KL is direct evidence: one dense projection output is replaced with the reloaded QVQ module
+output on the identical dense input before observing final logits.
 
 Focused tests cover leakage, diverse cardinality, missing modules, dense/higher-precision fallback, auxiliary/BPW
-accounting, thresholds, missing cells, coverage, and report schema. The implementation gate passed 28 focused and
+accounting, thresholds, missing cells, coverage, and report schema. The implementation gate passed 31 focused and
 existing unified-harness tests, Ruff on all changed Python paths, `compileall`, config construction, CLI imports, and
 `git diff --check`. After safely installing missing declared dependencies (`accelerate`, `threadpoolctl`, `device-smi`,
 `defuser`, and `pillow`), the exact `export-frozen-splits` command above succeeded against the pinned real dataset:
 four 512-row manifests and one 32-row manifest were emitted and all pairwise identity/content checks passed.
+`pyright` was not installed in this worktree environment, so no static-typecheck result is claimed; Python bytecode
+compilation and the executable config/CLI import checks passed.
 
 No Qwen3-8B quantization or accuracy run has been performed for this ledger entry, so no model artifact or accuracy
 result exists. The host exposes one idle NVIDIA PG506-232 (`GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855`, PCI

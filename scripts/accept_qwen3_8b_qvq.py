@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -39,7 +40,7 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.utils.qvq_acceptance import (
     MANIFEST_SPLITS,
     REPORT_SCHEMA_VERSION,
-    account_serialized_state,
+    account_serialized_checkpoint,
     census_reloaded_model,
     materialize_manifest,
     validate_acceptance_report,
@@ -67,10 +68,10 @@ def _write_new(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _checkpoint_hashes(checkpoint: Path) -> dict[str, str]:
-    files = sorted(path for path in checkpoint.iterdir() if path.is_file() and path.suffix in {".json", ".safetensors"})
+def _artifact_hashes(directory: Path) -> dict[str, str]:
+    files = sorted(path for path in directory.iterdir() if path.is_file() and path.suffix in {".json", ".safetensors"})
     if not files or not any(path.suffix == ".safetensors" for path in files):
-        raise RuntimeError("checkpoint has no serialized safetensors artifact")
+        raise RuntimeError(f"artifact has no serialized safetensors files: {directory}")
     result = {}
     for path in files:
         digest = hashlib.sha256()
@@ -147,6 +148,11 @@ def _check_manifests(directory: Path) -> dict[str, Any]:
     return validate_manifest_disjointness(manifests)
 
 
+def _verify_all_manifest_sources(directory: Path) -> None:
+    for split in MANIFEST_SPLITS:
+        _verify_records_against_manifest(split, _read_jsonl(directory / f"{split}.jsonl"), directory)
+
+
 def _verify_records_against_manifest(split: str, records: list[dict[str, Any]], directory: Path) -> None:
     expected = json.loads((directory / f"{split}.manifest.json").read_text(encoding="utf-8"))
     from tempfile import TemporaryDirectory
@@ -157,11 +163,33 @@ def _verify_records_against_manifest(split: str, records: list[dict[str, Any]], 
         raise RuntimeError(f"{split} evaluation JSONL does not match its accepted identity/content manifest")
 
 
-def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path) -> dict[str, Any]:
+def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_model: Path) -> dict[str, Any]:
     path = checkpoint / "qvq_quantize_run.json"
     if not path.is_file():
         raise RuntimeError("checkpoint is missing qvq_quantize_run.json")
     payload = json.loads(path.read_text(encoding="utf-8"))
+    recorded_model = Path(str(payload.get("model", ""))).expanduser().resolve()
+    if recorded_model != dense_model.resolve():
+        raise RuntimeError("quantization report dense-model path does not match the acceptance reference")
+    quantize_config = payload.get("quantize_config")
+    if not isinstance(quantize_config, dict):
+        raise TypeError("quantization report lacks a resolved quantize_config")
+    expected_config = {
+        "bits": 2,
+        "format": "qvq_v2b2_p32",
+        "group_size": -1,
+        "rounding": "yaqa",
+        "sym": True,
+        "pack_dtype": "int32",
+        "bank_count": 2,
+    }
+    mismatches = {
+        key: {"expected": expected, "actual": quantize_config.get(key)}
+        for key, expected in expected_config.items()
+        if quantize_config.get(key) != expected
+    }
+    if mismatches:
+        raise RuntimeError(f"quantization report does not match the frozen W2 config: {mismatches}")
     expected_files = {
         "calibration": manifest_dir / "calibration.jsonl",
         "yaqa": manifest_dir / "yaqa_tuning.jsonl",
@@ -178,6 +206,7 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path) -> dict[s
         evidence[split] = {"source": str(actual_path), "rows": 512, "manifest_verified": True}
     if payload.get("layer_scope") != "all":
         raise RuntimeError("quantization report did not request all decoder layers")
+    evidence["quantize_config"] = expected_config
     return evidence
 
 
@@ -219,8 +248,8 @@ def _metric_accumulator() -> dict[str, float]:
 
 
 def _add_metric(acc: dict[str, float], dense: torch.Tensor, candidate: torch.Tensor, *, diverse: bool) -> None:
-    if dense.shape != candidate.shape or not torch.isfinite(candidate).all():
-        raise RuntimeError("candidate final logits are non-finite or shape-incompatible")
+    if dense.shape != candidate.shape or not torch.isfinite(dense).all() or not torch.isfinite(candidate).all():
+        raise RuntimeError("dense/candidate final logits are non-finite or shape-incompatible")
     acc["top1"] += float(dense.argmax() == candidate.argmax())
     acc["kl"] += float(F.kl_div(candidate.log_softmax(-1), dense.softmax(-1), reduction="sum").item())
     acc["count"] += 1
@@ -256,18 +285,43 @@ def _projection_intervention(dense_module: torch.nn.Module, quant_module: torch.
         handle.remove()
 
 
+def _resolve_runtime_module(
+    modules: Mapping[str, torch.nn.Module], canonical_name: str, *, preferred_name: str | None = None
+) -> torch.nn.Module:
+    if preferred_name is not None and preferred_name in modules:
+        return modules[preferred_name]
+    matches = [
+        module for name, module in modules.items() if name == canonical_name or name.endswith("." + canonical_name)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected exactly one runtime module for {canonical_name!r}, found {len(matches)}")
+    return matches[0]
+
+
 @torch.inference_mode()
 def _evaluate(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite {args.output}")
+    if not math.isfinite(args.maximum_bpw) or args.maximum_bpw <= 0 or args.maximum_bpw > 2.1:
+        raise ValueError("maximum BPW must be finite, positive, and no greater than 2.1")
+    if not math.isfinite(args.score_min) or not 0.85 <= args.score_min <= 1:
+        raise ValueError("score minimum must be a finite fraction in [0.85, 1]")
+    if not math.isfinite(args.final_kl_max_nats) or args.final_kl_max_nats < 0:
+        raise ValueError("final KL maximum must be finite, nonnegative, and expressed in nats")
     disjointness = _check_manifests(args.manifest_dir)
+    _verify_all_manifest_sources(args.manifest_dir)
     validation = _read_jsonl(args.validation_jsonl)
+    held_out = _read_jsonl(args.held_out_diagnostics_jsonl)
     diverse = _read_jsonl(args.diverse_jsonl)
-    if not validation or len(diverse) != 32:
-        raise ValueError("validation must be nonempty and diverse JSONL must contain exactly 32 records")
+    if len(validation) != 512 or len(held_out) != 512 or len(diverse) != 32:
+        raise ValueError("evaluation requires exactly 512 validation, 512 held-out diagnostic, and 32 diverse records")
     _verify_records_against_manifest("validation", validation, args.manifest_dir)
+    _verify_records_against_manifest("held_out_diagnostics", held_out, args.manifest_dir)
     _verify_records_against_manifest("diverse_32", diverse, args.manifest_dir)
-    quantization_streams = _verify_quantization_streams(args.checkpoint, args.manifest_dir)
+    dense_model_path = Path(args.dense_model).expanduser().resolve()
+    if not dense_model_path.is_dir():
+        raise FileNotFoundError(f"pinned dense model directory does not exist: {dense_model_path}")
+    quantization_streams = _verify_quantization_streams(args.checkpoint, args.manifest_dir, dense_model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(args.dense_model, revision=args.revision, local_files_only=True)
     dense = AutoModelForCausalLM.from_pretrained(
@@ -288,22 +342,20 @@ def _evaluate(args: argparse.Namespace) -> int:
         local_files_only=True,
     ).eval()
     cells = census_reloaded_model(quantized)
-    accounting = account_serialized_state(quantized.state_dict(), cells, maximum_bpw=args.maximum_bpw)
+    accounting = account_serialized_checkpoint(args.checkpoint, cells, maximum_bpw=args.maximum_bpw)
     dense_modules = dict(dense.named_modules())
     quant_modules = dict(quantized.named_modules())
     global_acc = _metric_accumulator()
     cell_acc = {(cell.layer, cell.role): _metric_accumulator() for cell in cells}
 
-    for is_diverse, records in ((False, validation), (True, diverse)):
+    for is_diverse, records in ((False, validation), (False, held_out), (True, diverse)):
         for record in records:
             encoded = _encode(tokenizer, record["content"], args.device)
             dense_logits = _last_logits(dense, encoded)
             _add_metric(global_acc, dense_logits, _last_logits(quantized, encoded), diverse=is_diverse)
             for cell in cells:
-                dense_module = dense_modules.get(cell.name)
-                quant_module = quant_modules.get(cell.name)
-                if dense_module is None or quant_module is None:
-                    raise RuntimeError(f"fresh models do not share requested projection path {cell.name}")
+                dense_module = _resolve_runtime_module(dense_modules, cell.name)
+                quant_module = _resolve_runtime_module(quant_modules, cell.name, preferred_name=cell.runtime_name)
                 with _projection_intervention(dense_module, quant_module):
                     intervened_logits = _last_logits(dense, encoded)
                 _add_metric(cell_acc[(cell.layer, cell.role)], dense_logits, intervened_logits, diverse=is_diverse)
@@ -320,7 +372,8 @@ def _evaluate(args: argparse.Namespace) -> int:
             "dense_model": args.dense_model,
             "revision": args.revision,
             "fresh_reload_verified": True,
-            "checkpoint_sha256": _checkpoint_hashes(args.checkpoint),
+            "checkpoint_sha256": _artifact_hashes(args.checkpoint),
+            "dense_model_sha256": _artifact_hashes(dense_model_path),
         },
         "census": {"expected": 252, "actual": len(cells), "complete": True},
         "accounting": accounting,
@@ -368,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--checkpoint", type=Path, required=True)
     evaluate.add_argument("--manifest-dir", type=Path, required=True)
     evaluate.add_argument("--validation-jsonl", type=Path, required=True)
+    evaluate.add_argument("--held-out-diagnostics-jsonl", type=Path, required=True)
     evaluate.add_argument("--diverse-jsonl", type=Path, required=True)
     evaluate.add_argument("--device", default="cuda:0")
     evaluate.add_argument("--maximum-bpw", type=float, default=2.1)
