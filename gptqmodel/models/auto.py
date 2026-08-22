@@ -80,6 +80,7 @@ from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
+from .definitions.deepseek_v32 import DeepSeekV32QModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
@@ -137,6 +138,7 @@ from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
+from .definitions.mage_vl import MageVLQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.mimo_v2 import MimoV2QModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
@@ -153,10 +155,12 @@ from .definitions.mllama import MLlamaQModel, MLlamaTextQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
+from .definitions.muse_glimmer import MuseGlimmerQModel  # noqa: E402
 from .definitions.nemotron_labs_diffusion import NemotronLabsDiffusionQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
+from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
@@ -217,6 +221,7 @@ MODEL_MAP = {
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
+    "smollm3": LlamaQModel,  # llama-compatible quantization module tree
     "llama4": Llama4QModel,
     "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
@@ -288,6 +293,7 @@ MODEL_MAP = {
     "minimax": MiniMaxM2GPTQ,
     "minimax_m2": MiniMaxM2GPTQ,
     "minimax_m3_vl": MiniMaxM3VLGPTQ,
+    "muse_glimmer": MuseGlimmerQModel,
     "ministral3": Ministral3GPTQ,
     "qwen2_moe": Qwen2MoeQModel,
     "qwen3_moe": Qwen3MoeQModel,
@@ -303,6 +309,7 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
     "deepseek_v3": DeepSeekV3QModel,
+    "deepseek_v32": DeepSeekV32QModel,
     "deepseek_v4": DeepSeekV4QModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
@@ -314,11 +321,13 @@ MODEL_MAP = {
     "mllama": MLlamaQModel,
     "mllama_text_model": MLlamaTextQModel,
     "marin": Qwen3QModel,
+    "mage_vl": MageVLQModel,
     "granite": LlamaQModel, # 100% llama clone
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
+    "olmo3": Olmo3QModel,
     "ovis": OvisQModel,
     "ovis2": Ovis2QModel,
     "ovis2_5": Ovis2_5QModel,

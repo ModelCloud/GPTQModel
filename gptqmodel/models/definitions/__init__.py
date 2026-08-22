@@ -20,6 +20,7 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .deepseek_v32 import DeepSeekV32QModel
 from .deepseek_v4 import DeepSeekV4QModel
 from .deepseek_ocr2 import DeepSeekOCR2QModel
 from .deepseek_vl import DeepSeekVLQModel
@@ -59,6 +60,7 @@ from .intern_s2_preview import InternS2PreviewQModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
 from .lfm2_vl import LFM2VLQModel
+from .mage_vl import MageVLQModel
 from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
@@ -74,8 +76,10 @@ from .mllama import MLlamaQModel, MLlamaTextQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
+from .muse_glimmer import MuseGlimmerQModel
 from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
+from .olmo3 import Olmo3QModel
 from .opt import OptQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel
