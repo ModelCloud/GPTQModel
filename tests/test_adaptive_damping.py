@@ -1166,6 +1166,13 @@ def test_adaptive_damping_damp_auto_increment_sync():
     assert cfg.damp_auto_increment == pytest.approx(0.007)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 1.0, True])
+def test_legacy_damp_auto_increment_rejects_invalid_step(value):
+    """The legacy scalar must obey the same finite [0, 1) contract as DampConfig.step."""
+    with pytest.raises(ValueError, match="damp_auto_increment"):
+        QuantizeConfig(method="gptq", damp_auto_increment=value)
+
+
 def test_adaptive_damping_explicit_step_not_overwritten():
     """An explicit AdaptiveDampingConfig.step must not be overwritten by legacy damp_auto_increment."""
     cfg = QuantizeConfig(

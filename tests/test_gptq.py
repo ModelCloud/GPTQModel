@@ -1103,6 +1103,7 @@ class TestGPTQProcessorStreaming(ModelTest):
             )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_hessian_inverse_correctness(dtype):
     """hessian_inverse must produce a valid Cholesky factor of the damped Hessian."""

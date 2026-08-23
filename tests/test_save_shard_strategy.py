@@ -236,6 +236,26 @@ def test_save_quantized_per_layer_moe_api_and_unsupported_kernel_fallback(tmp_pa
     }
     state_dict = _state_dict_from_tensors(tensors)
     writer = _build_writer_with_out_of_model_file(str(original))
+    writer.quantize_config = QuantizeConfig(
+        bits=4,
+        group_size=128,
+        shard_strategy=ShardStrategy.PER_LAYER,
+    )
+
+    def save_pretrained_with_quantization_config(save_dir, state_dict=None, is_main_process=True):
+        del state_dict, is_main_process
+        with open(os.path.join(save_dir, "config.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "dummy": True,
+                    "quantization_config": writer.model.config.quantization_config,
+                },
+                handle,
+            )
+        with open(os.path.join(save_dir, "generation_config.json"), "w", encoding="utf-8") as handle:
+            json.dump({"do_sample": True}, handle)
+
+    monkeypatch.setattr(writer.model, "save_pretrained", save_pretrained_with_quantization_config)
     writer.extract_layers_node = lambda: ["model.layers"]
     _patch_basic_env(monkeypatch, state_dict)
     monkeypatch.setattr(
@@ -256,6 +276,16 @@ def test_save_quantized_per_layer_moe_api_and_unsupported_kernel_fallback(tmp_pa
     assert weight_map["model.layers.0.mlp.experts.0.gate_proj.qweight"] == weight_map[
         "model.layers.0.mlp.experts.0.gate_proj.scales"
     ]
+    with open(moe_dir / "quantize_config.json", encoding="utf-8") as handle:
+        saved_quantize_config = json.load(handle)
+    with open(moe_dir / "config.json", encoding="utf-8") as handle:
+        saved_model_config = json.load(handle)
+    assert saved_quantize_config["meta"]["shard_strategy"] == ShardStrategy.PER_LAYER_MOE.value
+    assert (
+        saved_model_config["quantization_config"]["meta"]["shard_strategy"]
+        == ShardStrategy.PER_LAYER_MOE.value
+    )
+    assert writer.quantize_config.shard_strategy is ShardStrategy.PER_LAYER
 
     fallback_state = _state_dict_from_tensors({"model.layers.0.weight": torch.ones(2, 2)})
     _patch_basic_env(monkeypatch, fallback_state)
@@ -272,3 +302,10 @@ def test_save_quantized_per_layer_moe_api_and_unsupported_kernel_fallback(tmp_pa
 
     assert (fallback_dir / "model.safetensors").is_file()
     assert not stale_index.exists()
+    with open(fallback_dir / "quantize_config.json", encoding="utf-8") as handle:
+        fallback_quantize_config = json.load(handle)
+    with open(fallback_dir / "config.json", encoding="utf-8") as handle:
+        fallback_model_config = json.load(handle)
+    assert fallback_quantize_config["meta"]["shard_strategy"] is None
+    assert fallback_model_config["quantization_config"]["meta"]["shard_strategy"] is None
+    assert writer.quantize_config.shard_strategy is ShardStrategy.PER_LAYER

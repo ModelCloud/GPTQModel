@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -571,24 +572,134 @@ def test_moe_scatter_cluster_output_respects_pair_id_order() -> None:
     num_pairs = 12
     hidden = 4
     # Each row encodes its pair id in the first column.
-    cluster_out = torch.arange(num_pairs, dtype=torch.float32, device="cuda").view(-1, 1).expand(-1, hidden)
+    cluster_out = torch.arange(num_pairs, dtype=torch.float32).view(-1, 1).expand(-1, hidden)
     # Non-monotonic token-expert ids: the argsort below will permute pair ids.
     topk_ids = torch.tensor(
         [[0, 2], [3, 1], [0, 3], [2, 1], [1, 0], [3, 2]],
         dtype=torch.int64,
-        device="cuda",
     )
     flat = topk_ids.flatten()
     sorted_indices = torch.argsort(flat, stable=True)
-    sorted_token_ids = torch.full((16,), num_pairs, dtype=torch.int32, device="cuda")
+    sorted_token_ids = torch.full((16,), num_pairs, dtype=torch.int32)
     sorted_token_ids[:num_pairs] = sorted_indices
-    in_cluster = torch.tensor([True, True, True, True], dtype=torch.bool, device="cuda")
-    global_out = torch.full((num_pairs, hidden), -1.0, device="cuda")
+    in_cluster = torch.tensor([True, True, True, True], dtype=torch.bool)
+    global_out = torch.full((num_pairs, hidden), -1.0)
 
     _moe_scatter_cluster_output(cluster_out, sorted_token_ids, in_cluster, topk_ids, global_out)
 
     expected = cluster_out[:num_pairs]
     torch.testing.assert_close(global_out, expected)
+
+
+def test_active_cluster_builder_maps_sparse_global_expert_ids_to_compact_targets() -> None:
+    """Shape clustering must not index an active-only target list with global expert ids."""
+    from gptqmodel.utils.moe_dispatch import _build_active_clusters_for_proj
+
+    weight_type = SimpleNamespace(id=4)
+    active_global_ids = [3, 7]
+    active_targets = [
+        SimpleNamespace(
+            qweight=torch.full((1, 2), 3, dtype=torch.int32),
+            scales=torch.full((1, 1), 0.3),
+            weight_type=weight_type,
+            padded_in_features=16,
+            padded_out_features=32,
+            is_k_full=True,
+        ),
+        SimpleNamespace(
+            qweight=torch.full((2, 2), 7, dtype=torch.int32),
+            scales=torch.full((2, 1), 0.7),
+            weight_type=weight_type,
+            padded_in_features=16,
+            padded_out_features=32,
+            is_k_full=True,
+        ),
+    ]
+
+    clusters = _build_active_clusters_for_proj(
+        active_targets,
+        active_global_ids,
+        num_experts=8,
+        device=torch.device("cpu"),
+    )
+
+    assert len(clusters) == 2
+    for cluster, global_id, target in zip(clusters, active_global_ids, active_targets):
+        assert cluster["global_ids"].tolist() == [global_id]
+        assert cluster["in_cluster"].nonzero().flatten().tolist() == [global_id]
+        assert cluster["membership"][global_id].item() == 0
+        torch.testing.assert_close(cluster["qweight"][0], target.qweight)
+        torch.testing.assert_close(cluster["scales"][0], target.scales)
+
+
+@pytest.mark.parametrize("invalid_expert_id", [-1, 2])
+def test_marlin_one_token_invalid_expert_ids_match_fallback(invalid_expert_id: int) -> None:
+    """The Marlin decode path must not route sentinel ids to the first or last expert."""
+    from defuser.modeling.moe_experts_interface import linear_loop_experts_forward as per_expert_forward
+    from gptqmodel.utils.moe_dispatch import _marlin_experts_project_one_token
+
+    module = _gated_experts_fixture(num_experts=2, hidden_dim=4, intermediate_dim=3, dtype=torch.float32)
+    # Avoid selecting the CUDA-only fused SiLU helper in this CPU semantic test.
+    module.act_fn = torch.tanh
+    hidden_states = torch.randn(1, 4)
+    topk_idx = torch.tensor([[invalid_expert_id, 0]])
+    topk_w = torch.tensor([[0.75, 0.25]])
+
+    expected = per_expert_forward(module, hidden_states, topk_idx, topk_w)
+    actual = _marlin_experts_project_one_token(module, hidden_states, topk_idx, topk_w)
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_grouped_moe_invalid_expert_ids_match_fallback(monkeypatch) -> None:
+    """Grouped dispatch must preserve fallback semantics for both low and high sentinel ids."""
+    from defuser.modeling.moe_experts_interface import linear_loop_experts_forward as per_expert_forward
+    from gptqmodel.utils.moe_dispatch import _grouped_mm_dequant_experts_forward
+
+    module = _gated_experts_fixture(num_experts=2, hidden_dim=4, intermediate_dim=3, dtype=torch.float32)
+    module.act_fn = torch.tanh
+    module._moe_dispatch_backend = "grouped_mm"
+
+    def grouped_mm(x: torch.Tensor, weights: torch.Tensor, *, offs: torch.Tensor) -> torch.Tensor:
+        outputs = []
+        start = 0
+        for weight, end in zip(weights, offs.tolist()):
+            outputs.append(x[start:end] @ weight)
+            start = end
+        return torch.cat(outputs, dim=0)
+
+    monkeypatch.setattr(torch.nn.functional, "grouped_mm", grouped_mm, raising=False)
+    hidden_states = torch.randn(2, 4)
+    topk_idx = torch.tensor([[-1, 0], [1, 2]])
+    topk_w = torch.tensor([[0.75, 0.25], [0.4, 0.6]])
+
+    expected = per_expert_forward(module, hidden_states, topk_idx, topk_w)
+    actual = _grouped_mm_dequant_experts_forward(module, hidden_states, topk_idx, topk_w)
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("hidden_states", "topk_idx", "topk_w"),
+    [
+        (torch.empty(0, 4), torch.empty(0, 2, dtype=torch.long), torch.empty(0, 2)),
+        (torch.empty(2, 0, 4), torch.empty(2, 0, 2, dtype=torch.long), torch.empty(2, 0, 2)),
+        (torch.randn(3, 4), torch.empty(3, 0, dtype=torch.long), torch.empty(3, 0)),
+    ],
+)
+def test_batched_marlin_moe_empty_routes_return_zero_output(
+    hidden_states: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_w: torch.Tensor,
+) -> None:
+    """Empty token and empty top-k batches must match the generic MoE fallback shape contract."""
+    from gptqmodel.utils.moe_dispatch import _batched_marlin_moe_forward
+
+    module = SimpleNamespace(num_experts=2)
+    actual = _batched_marlin_moe_forward(module, hidden_states, topk_idx, topk_w)
+
+    assert actual.shape == hidden_states.shape
+    torch.testing.assert_close(actual, torch.zeros_like(hidden_states))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Marlin dispatch requires CUDA")

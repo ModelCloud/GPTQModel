@@ -1283,6 +1283,37 @@ def test_deepseek_ocr2_materializes_vision_tower_from_legacy_checkpoint_paths(tm
     assert torch.equal(shell.model.multi_modal_projector.bias, projector_bias)
 
 
+def test_deepseek_ocr2_prefers_upstream_conversion_rules_and_merges_missing_fallbacks(monkeypatch):
+    upstream_map = [
+        _WeightRenamingStub(r"view_separator", r"future_checkpoint.view_separator"),
+        _WeightRenamingStub(r"future_runtime", r"future_checkpoint"),
+    ]
+    monkeypatch.setattr(
+        LazyTurtle,
+        "infer_hf_conversion_map_reversed",
+        classmethod(lambda cls, *, target_model=None: upstream_map),
+    )
+
+    resolved = DeepSeekOCR2QModel.resolve_hf_conversion_map_reversed(
+        target_model=_DeepseekOCR2DirectParamShell()
+    )
+    pairs = _renaming_pairs(resolved)
+
+    assert pairs[:2] == [
+        (r"view_separator", r"future_checkpoint.view_separator"),
+        (r"future_runtime", r"future_checkpoint"),
+    ]
+    assert (r"view_separator", r"view_seperator") not in pairs
+    assert (
+        "vision_tower.sam_encoder.patch_embed.projection.",
+        r"sam_model\.patch_embed\.proj\.",
+    ) in pairs
+    assert ("multi_modal_projector.", r"projector\.layers\.") in pairs
+
+    resolved[0].target_patterns[0] = "mutated"
+    assert upstream_map[0].target_patterns[0] == r"future_checkpoint.view_separator"
+
+
 def test_gemma3_definition_hf_conversion_map_reversed_fixes_shell_vision_paths(tmp_path):
     resolved_hf = Gemma3ForConditionalGenerationGPTQ.resolve_hf_conversion_map_reversed(
         target_model=_Gemma3DummyModel()

@@ -1170,6 +1170,29 @@ def test_length_aware_rejects_malformed_bucket_geometry(kwargs):
         LengthAwareConfig(**kwargs)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"max_bucket_ratio": float("nan")}, "max_bucket_ratio"),
+        ({"max_bucket_ratio": float("inf")}, "max_bucket_ratio"),
+        ({"bucket_weight_exponent": float("nan")}, "bucket_weight_exponent"),
+        ({"bucket_weight_exponent": float("inf")}, "bucket_weight_exponent"),
+        (
+            {"bucket_boundaries": [0, None], "bucket_scales": [float("inf")]},
+            "bucket_scales",
+        ),
+        (
+            {"bucket_boundaries": [0, None], "bucket_weights": [float("inf")]},
+            "bucket_weights",
+        ),
+    ],
+)
+def test_length_aware_rejects_nonfinite_normalization_values(kwargs, field):
+    """Non-finite normalization values must not erase or poison Hessian contributions."""
+    with pytest.raises(ValueError, match=field):
+        LengthAwareConfig(**kwargs)
+
+
 def test_length_aware_allows_clamped_finite_custom_boundaries():
     """Custom boundaries need not span all lengths because runtime lookup clamps both tails."""
     config = LengthAwareConfig(

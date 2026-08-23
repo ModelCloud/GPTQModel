@@ -33,10 +33,17 @@ try:
 except Exception:  # pragma: no cover - older transformers builds do not expose Gemma 4 yet
     Gemma4RMSNorm = None
 
+try:
+    from transformers.models.cohere_compass.modeling_cohere_compass import CohereCompassLayerNorm
+except Exception:  # pragma: no cover - older transformers builds do not expose Cohere Compass yet
+    CohereCompassLayerNorm = None
+
 
 allowed_norms = [nn.LayerNorm, LlamaRMSNorm, GemmaRMSNorm, Gemma2RMSNorm, CohereLayerNorm]
 if Gemma4RMSNorm is not None:
     allowed_norms.append(Gemma4RMSNorm)
+if CohereCompassLayerNorm is not None:
+    allowed_norms.append(CohereCompassLayerNorm)
 allowed_act_fns = [
     nn.GELU,
     BloomGelu,

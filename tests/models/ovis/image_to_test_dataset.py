@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
+from gptqmodel.models.definitions.cohere_compass import CohereCompassQModel
 from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
@@ -15,11 +16,12 @@ from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
+from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
-from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
+from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
 
 
 def format_ovis_dataset(image, assistant):
@@ -159,7 +161,7 @@ def get_calib_dataset(model):
 
     if (
         isinstance(model, BaseQwen2VLGPTQ)
-        or isinstance(model, Qwen3_VLQModel)
+        or isinstance(model, BaseQwen3VLGPTQ)
         or isinstance(model, MiniCPMOQModel)
         or isinstance(model, MiniCPMVQModel)
         or isinstance(model, MiniCPMV4_6QModel)
@@ -168,6 +170,7 @@ def get_calib_dataset(model):
         or isinstance(model, InternVLChatQModel)
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
+        or isinstance(model, MuseGlimmerQModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 
@@ -177,7 +180,7 @@ def get_calib_dataset(model):
     if isinstance(model, DeepSeekVLV2QModel):
         return prepare_deepseek_vl_v2_dataset(n_sample=20)
 
-    if isinstance(model, DeepSeekVLQModel):
+    if isinstance(model, (CohereCompassQModel, DeepSeekVLQModel)):
         return prepare_deepseek_vl_dataset(n_sample=20)
 
     if isinstance(model, DeepSeekOCR2QModel):

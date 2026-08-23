@@ -285,7 +285,7 @@ class ModelTest(unittest.TestCase):
             if not isinstance(metrics, dict):
                 continue
             for metric_name, spec in list(metrics.items()):
-                if metric_name == "chat_template":
+                if metric_name == "chat_template" or metric_name.startswith("evalution_"):
                     continue
                 if isinstance(spec, dict):
                     current_ceil = spec.get("ceil_pct", spec.get("max_delta_ceil_percent", DEFAULT_CEIL_PCT))

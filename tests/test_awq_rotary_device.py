@@ -37,7 +37,19 @@ class _MetaSelfAttention(nn.Module):
         return x
 
 
-def _make_processor(rotary: nn.Module) -> AWQProcessor:
+class _RecordingMetaSelfAttention(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = nn.Linear(4, 4, bias=False, device="meta")
+        self.position_embeddings = "unset"
+
+    def forward(self, x, position_embeddings=None, position_ids=None):
+        self.position_embeddings = position_embeddings
+        assert position_ids is not None
+        return x
+
+
+def _make_processor(rotary: nn.Module, *, preserve_explicit_position_embeddings: bool = False) -> AWQProcessor:
     qcfg = QuantizeConfig(
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
@@ -54,6 +66,7 @@ def _make_processor(rotary: nn.Module) -> AWQProcessor:
         batch_size=1,
         gptq_model=types.SimpleNamespace(
             rotary_embedding=None,
+            awq_preserve_explicit_position_embeddings=preserve_explicit_position_embeddings,
         ),
         model=model,
         require_fwd=True,
@@ -80,6 +93,63 @@ def test_module_forward_builds_rotary_embeddings_on_module_device():
     assert cached_rotary.calls == [
         (torch.device("meta"), torch.device("meta"), torch.device("meta"))
     ]
+
+
+def test_module_forward_rebuilds_explicit_position_embeddings_by_default():
+    rotary = _TrackingRotary()
+    processor = _make_processor(rotary)
+    attn = _RecordingMetaSelfAttention()
+    hidden_states = torch.empty(2, 3, 4, device="meta")
+
+    output = processor._module_forward(
+        hidden_states,
+        attn,
+        {"position_embeddings": None},
+    )
+
+    assert output.device == torch.device("meta")
+    assert isinstance(attn.position_embeddings, tuple)
+    assert processor._rotary_cache["meta"].calls
+
+
+def test_module_forward_preserves_explicit_none_position_embeddings_when_model_opts_in():
+    rotary = _TrackingRotary()
+    processor = _make_processor(rotary, preserve_explicit_position_embeddings=True)
+    attn = _RecordingMetaSelfAttention()
+    hidden_states = torch.empty(2, 3, 4, device="meta")
+
+    output = processor._module_forward(
+        hidden_states,
+        attn,
+        {"position_embeddings": None},
+    )
+
+    assert output.device == torch.device("meta")
+    assert attn.position_embeddings is None
+    assert rotary.calls == []
+    assert processor._rotary_cache == {}
+
+
+def test_module_forward_preserves_explicit_rotary_embeddings_when_model_opts_in():
+    rotary = _TrackingRotary()
+    processor = _make_processor(rotary, preserve_explicit_position_embeddings=True)
+    attn = _RecordingMetaSelfAttention()
+    hidden_states = torch.empty(1, 3, 4, device="meta")
+    position_embeddings = (
+        torch.empty(1, 3, 4, device="meta"),
+        torch.empty(1, 3, 4, device="meta"),
+    )
+
+    output = processor._module_forward(
+        hidden_states,
+        attn,
+        {"position_embeddings": position_embeddings},
+    )
+
+    assert output.device == torch.device("meta")
+    assert attn.position_embeddings is position_embeddings
+    assert rotary.calls == []
+    assert processor._rotary_cache == {}
 
 
 def test_refresh_forward_kwargs_uses_device_local_rotary_cache():

@@ -372,14 +372,26 @@ class _FusedMarlinKernel:
     and concatenate `scales`/`bias` along the output dimension as well.
     """
 
+    _WORKSPACE_MAX_BLOCKS_PER_SM = 1
+    _WORKSPACE_MIN_BLOCKS = 128
+
+    def _make_workspace(self, device: torch.device) -> torch.Tensor:
+        """Create fresh device-local scratch state for Marlin synchronization."""
+
+        from ..utils.marlin import marlin_make_workspace_new
+
+        return marlin_make_workspace_new(
+            device,
+            max_blocks_per_sm=self._WORKSPACE_MAX_BLOCKS_PER_SM,
+            min_workspace_blocks=self._WORKSPACE_MIN_BLOCKS,
+        )
+
     def __init__(
         self,
         modules: List[nn.Module],
         total_out_features: int,
         device: torch.device,
     ):
-        from ..utils.marlin import marlin_make_workspace_new
-
         first = modules[0]
         self.in_features = first.in_features
         self.padded_in_features = first.padded_in_features
@@ -403,7 +415,7 @@ class _FusedMarlinKernel:
         self.g_idx = first.g_idx.contiguous().to(device)
         self.g_idx_sort_indices = first.g_idx_sort_indices.contiguous().to(device)
         self.bias = None
-        self.workspace = marlin_make_workspace_new(device, min_workspace_blocks=128)
+        self.workspace = self._make_workspace(device)
 
     def compute(self, x: torch.Tensor) -> torch.Tensor:
         from ..utils.marlin import apply_gptq_marlin_linear
@@ -461,7 +473,7 @@ class _FusedMarlinKernel:
         the Marlin GEMM.  The result is exact with respect to `self.compute` and
         can be sliced into per-member dense weights for grouped GEMM dispatch.
         """
-        from ..utils.marlin import gptq_marlin_gemm, marlin_make_workspace_new
+        from ..utils.marlin import gptq_marlin_gemm
 
         target_dtype = dtype or self.scales.dtype
         device = self.qweight.device
@@ -476,7 +488,7 @@ class _FusedMarlinKernel:
 
         workspace = getattr(self, "workspace", None)
         if workspace is None:
-            workspace = marlin_make_workspace_new(device, min_workspace_blocks=128)
+            workspace = self._make_workspace(device)
 
         chunks: list[torch.Tensor] = []
         c = torch.empty((max_chunk_rows, n_padded), dtype=target_dtype, device=device)
@@ -619,6 +631,44 @@ class _FusedQuantGroup:
 
     def _compute(self, x: torch.Tensor) -> torch.Tensor:
         return self.kernel.compute(x)
+
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> "_FusedQuantGroup":
+        """Apply a module-style tensor transform to fusion-owned state."""
+
+        kernel = self.kernel
+        for name in (
+            "qweight",
+            "scales",
+            "qzeros",
+            "g_idx",
+            "g_idx_sort_indices",
+            "bias",
+        ):
+            tensor = getattr(kernel, name, None)
+            if isinstance(tensor, torch.Tensor):
+                setattr(kernel, name, fn(tensor))
+
+        workspace = getattr(kernel, "workspace", None)
+        if isinstance(workspace, torch.Tensor):
+            qweight = getattr(kernel, "qweight", None)
+            if (
+                isinstance(kernel, _FusedMarlinKernel)
+                and isinstance(qweight, torch.Tensor)
+                and qweight.device.type == "cuda"
+                and qweight.device != workspace.device
+            ):
+                # Workspace contains device-local synchronization scratch state.
+                # Rebuild it directly instead of copying state that will be discarded.
+                kernel.workspace = kernel._make_workspace(qweight.device)
+            else:
+                kernel.workspace = fn(workspace)
+        return self
+
+    def to(self, device: torch.device | str) -> "_FusedQuantGroup":
+        """Move fusion-owned tensors that are not registered as module buffers."""
+
+        target = torch.device(device)
+        return self._apply(lambda tensor: tensor.to(target))
 
     def forward(self, member_idx: int, x: torch.Tensor) -> torch.Tensor:
         cache_attr = self.attr_name
@@ -1037,9 +1087,37 @@ def install_fused_quant_modules(
     }
 
 
+def apply_fused_quant_modules(
+    model: torch.nn.Module,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+) -> int:
+    """Apply a tensor transform to every unique fusion group outside the module tree."""
+
+    moved = 0
+    seen: set[int] = set()
+    for module in model.modules():
+        for attr_name in ("_gptqmodel_fused_group", "_gptqmodel_fused_gateup_group"):
+            group = getattr(module, attr_name, None)
+            if not isinstance(group, _FusedQuantGroup) or id(group) in seen:
+                continue
+            group._apply(fn)
+            seen.add(id(group))
+            moved += 1
+    return moved
+
+
+def move_fused_quant_modules(model: torch.nn.Module, device: torch.device | str) -> int:
+    """Move every unique fusion group attached outside the module buffer tree."""
+
+    target = torch.device(device)
+    return apply_fused_quant_modules(model, lambda tensor: tensor.to(target))
+
+
 __all__ = [
+    "apply_fused_quant_modules",
     "install_fused_qkv",
     "install_fused_gate_up",
     "install_fused_quant_modules",
+    "move_fused_quant_modules",
     "get_module_tree_fusion_candidates",
 ]

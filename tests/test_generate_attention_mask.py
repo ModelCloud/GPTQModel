@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
@@ -14,6 +15,14 @@ class _RecorderModel:
     def generate(self, *args, **kwargs):
         self.last_kwargs = kwargs
         return kwargs["attention_mask"]
+
+
+def test_base_qmodel_to_rejects_wrapped_model_without_to():
+    qmodel = BaseQModel.__new__(BaseQModel)
+    qmodel.model = object()
+
+    with pytest.raises(NotImplementedError, match=r"object does not support the to\(\) method"):
+        qmodel.to("cpu")
 
 
 def test_base_qmodel_generate_normalizes_causal_attention_mask():

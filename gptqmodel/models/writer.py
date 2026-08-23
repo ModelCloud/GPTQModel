@@ -1255,6 +1255,18 @@ def ModelWriter(cls):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
 
+        if shard_strategy is None:
+            shard_strategy = getattr(self.quantize_config, "shard_strategy", None)
+        if isinstance(shard_strategy, str):
+            shard_strategy = _normalize_shard_strategy_for_save(shard_strategy)
+
+        if (
+            shard_strategy in (ShardStrategy.PER_LAYER, ShardStrategy.PER_LAYER_MOE)
+            and not self.qlinear_kernel.SUPPORTS_SHARDS
+        ):
+            log.warn("Per-layer sharding is not supported for this quant. Falling back to a single checkpoint file.")
+            shard_strategy = None
+
         quantization_diagnostics = getattr(self, "quantization_diagnostics", None)
         if quantization_diagnostics:
             with open(os.path.join(save_dir, QUANTIZATION_DIAGNOSTICS_FILE), mode="w", encoding="utf-8") as file:
@@ -1395,6 +1407,10 @@ def ModelWriter(cls):
         config = copy.deepcopy(self.model.config)
 
         quantize_config = copy.deepcopy(self.quantize_config)
+        # Persist the effective save layout rather than the constructor default
+        # when the caller overrides the strategy or the selected kernel forces
+        # a single-file fallback.
+        quantize_config.shard_strategy = shard_strategy
 
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
@@ -1562,15 +1578,6 @@ def ModelWriter(cls):
         metadata_dict = _normalize_metadata(safetensors_metadata)
         metadata_dict["format"] = "pt"
         split_by_mode = _parse_split_by(split_by)
-
-        if shard_strategy is None and getattr(self.quantize_config, "shard_strategy", None):
-            shard_strategy = self.quantize_config.shard_strategy
-        if isinstance(shard_strategy, str):
-            shard_strategy = _normalize_shard_strategy_for_save(shard_strategy)
-
-        if shard_strategy in (ShardStrategy.PER_LAYER, ShardStrategy.PER_LAYER_MOE) and not self.qlinear_kernel.SUPPORTS_SHARDS:
-            log.warn("Per-layer sharding is not supported for this quant. Falling back to a single checkpoint file.")
-            shard_strategy = None
 
         if shard_strategy in (ShardStrategy.PER_LAYER, ShardStrategy.PER_LAYER_MOE):
             expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_per_layer_shards(
