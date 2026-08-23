@@ -9,9 +9,11 @@
 #include <immintrin.h>
 
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <vector>
 
 #include "pgc16_cpu_tables.h"
@@ -703,13 +705,29 @@ void accumulate_tile_mn_avx512(
   }
 }
 
-// Blocked M > 1 accumulation. A decoded tile is reused by a small register
-// panel of input rows before the next tile is decoded.
+struct AlignedFloatBuffer {
+  explicit AlignedFloatBuffer(size_t count) {
+    const size_t bytes = ((count * sizeof(float) + 63) / 64) * 64;
+    data = static_cast<float*>(std::aligned_alloc(64, bytes));
+    if (data == nullptr) {
+      throw std::bad_alloc();
+    }
+  }
+
+  ~AlignedFloatBuffer() { std::free(data); }
+
+  AlignedFloatBuffer(const AlignedFloatBuffer&) = delete;
+  AlignedFloatBuffer& operator=(const AlignedFloatBuffer&) = delete;
+
+  float* data;
+};
+
+// Blocked M > 1 accumulation. Each output block decodes each input tile once,
+// then reuses the decoded tiles across all input rows.
 template <int P, int B, int E>
 __attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,avx2,fma")))
 void accumulate_block_mn_avx512_specialized(
-    int64_t m_start,
-    int active_rows,
+    int64_t M,
     int tc_start,
     int I,
     int O,
@@ -722,18 +740,12 @@ void accumulate_block_mn_avx512_specialized(
     int states_per_segment,
     bool v2b2_p32,
     int bank_alt_id,
+    float* acc_buffer,
     float* out) {
   static_assert(P >= 1 && P <= 8, "P must be 1..8");
   static_assert(B >= 1 && B <= 8, "B must be 1..8");
   alignas(64) float tile_weights[B * 256];
-  __m512 acc[P][B];
-#pragma GCC unroll 8
-  for (int p = 0; p < P; ++p) {
-#pragma GCC unroll 8
-    for (int t = 0; t < B; ++t) {
-      acc[p][t] = _mm512_setzero_ps();
-    }
-  }
+  std::memset(acc_buffer, 0, static_cast<size_t>(M) * B * 16 * sizeof(float));
 
   for (int tr = 0; tr < I; ++tr) {
 #pragma GCC unroll 8
@@ -756,35 +768,37 @@ void accumulate_block_mn_avx512_specialized(
           tile_weights + t * 256);
     }
 
+    for (int64_t m_start = 0; m_start < M; m_start += P) {
+      const int active_rows = static_cast<int>(std::min<int64_t>(P, M - m_start));
 #pragma GCC unroll 8
-    for (int p = 0; p < P; ++p) {
-      if (p < active_rows) {
-        const float* x_row = x + static_cast<int64_t>(m_start + p) * K + tr * 16;
+      for (int p = 0; p < P; ++p) {
+        if (p < active_rows) {
+          const int64_t row = m_start + p;
+          const float* x_row = x + row * K + tr * 16;
 #pragma GCC unroll 8
-        for (int t = 0; t < B; ++t) {
-          __m512 value = acc[p][t];
+          for (int t = 0; t < B; ++t) {
+            float* acc_base = acc_buffer + (row * B + t) * 16;
+            __m512 value = _mm512_load_ps(acc_base);
 #pragma GCC unroll 16
-          for (int i = 0; i < 16; ++i) {
-            value = _mm512_fmadd_ps(
-                _mm512_loadu_ps(tile_weights + t * 256 + i * 16),
-                _mm512_set1_ps(x_row[i]),
-                value);
+            for (int i = 0; i < 16; ++i) {
+              value = _mm512_fmadd_ps(
+                  _mm512_loadu_ps(tile_weights + t * 256 + i * 16),
+                  _mm512_set1_ps(x_row[i]),
+                  value);
+            }
+            _mm512_store_ps(acc_base, value);
           }
-          acc[p][t] = value;
         }
       }
     }
   }
 
+  for (int64_t m = 0; m < M; ++m) {
 #pragma GCC unroll 8
-  for (int p = 0; p < P; ++p) {
-    if (p < active_rows) {
-#pragma GCC unroll 8
-      for (int t = 0; t < B; ++t) {
-        _mm512_storeu_ps(
-            out + static_cast<int64_t>(m_start + p) * N + (tc_start + t) * 16,
-            acc[p][t]);
-      }
+    for (int t = 0; t < B; ++t) {
+      _mm512_storeu_ps(
+          out + m * N + (tc_start + t) * 16,
+          _mm512_load_ps(acc_buffer + (m * B + t) * 16));
     }
   }
 }
@@ -1024,9 +1038,8 @@ void accumulate_tile_m1_dispatch(
 }
 
 template <int E>
-void accumulate_mn_panel_block_dispatch(
-    int64_t m_start,
-    int active_rows,
+void accumulate_mn_block_dispatch(
+    int64_t M,
     int tc_start,
     int block_width,
     int I,
@@ -1040,34 +1053,34 @@ void accumulate_mn_panel_block_dispatch(
     int states_per_segment,
     bool v2b2_p32,
     int bank_alt_id,
+    float* acc_buffer,
     float* out) {
   switch (block_width) {
     case 1:
       accumulate_block_mn_avx512_specialized<4, 1, E>(
-          m_start, active_rows, tc_start, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+          M, tc_start, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 2:
       accumulate_block_mn_avx512_specialized<4, 2, E>(
-          m_start, active_rows, tc_start, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+          M, tc_start, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 3:
       accumulate_block_mn_avx512_specialized<4, 3, E>(
-          m_start, active_rows, tc_start, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+          M, tc_start, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     default:
       accumulate_block_mn_avx512_specialized<4, 4, E>(
-          m_start, active_rows, tc_start, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+          M, tc_start, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
   }
 }
 
-void accumulate_mn_panel_block_dispatch(
-    int64_t m_start,
-    int active_rows,
+void accumulate_mn_block_dispatch(
+    int64_t M,
     int tc_start,
     int block_width,
     int I,
@@ -1082,51 +1095,52 @@ void accumulate_mn_panel_block_dispatch(
     int states_per_segment,
     bool v2b2_p32,
     int bank_alt_id,
+    float* acc_buffer,
     float* out) {
   switch (E) {
     case 2:
-      accumulate_mn_panel_block_dispatch<2>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<2>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 3:
-      accumulate_mn_panel_block_dispatch<3>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<3>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 4:
-      accumulate_mn_panel_block_dispatch<4>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<4>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 5:
-      accumulate_mn_panel_block_dispatch<5>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<5>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 6:
-      accumulate_mn_panel_block_dispatch<6>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<6>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 7:
-      accumulate_mn_panel_block_dispatch<7>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<7>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     case 8:
-      accumulate_mn_panel_block_dispatch<8>(
-          m_start, active_rows, tc_start, block_width, I, O, x, K, N, trellis, bank_ids,
-          segments_per_tile, states_per_segment, v2b2_p32, bank_alt_id, out);
+      accumulate_mn_block_dispatch<8>(
+          M, tc_start, block_width, I, O, x, K, N, trellis, bank_ids, segments_per_tile,
+          states_per_segment, v2b2_p32, bank_alt_id, acc_buffer, out);
       break;
     default:
       for (int t = 0; t < block_width; ++t) {
         accumulate_tile_mn_avx512(
-            active_rows,
+            M,
             I,
             O,
             tc_start + t,
-            x + m_start * K,
+            x,
             K,
             N,
             trellis,
@@ -1136,7 +1150,7 @@ void accumulate_mn_panel_block_dispatch(
             states_per_segment,
             v2b2_p32,
             bank_alt_id,
-            out + m_start * N);
+            out);
       }
       break;
   }
@@ -1258,35 +1272,32 @@ torch::Tensor qvq_gemv_cpu(
       }
     });
   } else if (cpu_has_avx512()) {
-    constexpr int kPanel = 4;
     constexpr int kTileBlock = 4;
     const int64_t output_blocks = (O + kTileBlock - 1) / kTileBlock;
     const int64_t grain = std::max<int64_t>(1, output_blocks / num_threads);
     at::parallel_for(0, output_blocks, grain, [&](int64_t begin, int64_t end) {
+      AlignedFloatBuffer acc_buffer(static_cast<size_t>(M) * kTileBlock * 16);
       for (int64_t block = begin; block < end; ++block) {
         const int tc = static_cast<int>(block * kTileBlock);
         const int block_width = std::min(kTileBlock, O - tc);
-        for (int64_t m_start = 0; m_start < M; m_start += kPanel) {
-          const int active_rows = static_cast<int>(std::min<int64_t>(kPanel, M - m_start));
-          accumulate_mn_panel_block_dispatch(
-              m_start,
-              active_rows,
-              tc,
-              block_width,
-              I,
-              O,
-              x_ptr,
-              static_cast<int>(K),
-              static_cast<int>(N),
-              trellis_ptr,
-              E,
-              bank_ptr,
-              segments_per_tile,
-              states_per_segment,
-              v2b2_p32,
-              static_cast<int>(bank_alt_id),
-              out_ptr);
-        }
+        accumulate_mn_block_dispatch(
+            M,
+            tc,
+            block_width,
+            I,
+            O,
+            x_ptr,
+            static_cast<int>(K),
+            static_cast<int>(N),
+            trellis_ptr,
+            E,
+            bank_ptr,
+            segments_per_tile,
+            states_per_segment,
+            v2b2_p32,
+            static_cast<int>(bank_alt_id),
+            acc_buffer.data,
+            out_ptr);
       }
     });
   } else {
