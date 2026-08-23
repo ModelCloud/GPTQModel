@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
+import secrets
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -31,13 +33,26 @@ from gptqmodel.utils.qvq_acceptance import (
     materialize_manifest,
     seal_acceptance_observation,
     select_diverse_32,
-    validate_acceptance_report,
     validate_manifest_disjointness,
     validate_qwen3_model_artifact,
+)
+from gptqmodel.utils.qvq_acceptance import (
+    validate_acceptance_report as _validate_acceptance_report,
+)
+from gptqmodel.utils.qvq_acceptance_controller import (
+    AcceptanceController,
+    controller_authority_receipt,
 )
 from scripts.accept_qwen3_8b_qvq import build_parser as build_acceptance_parser
 
 FROZEN_SPLITS = Path(__file__).parent / "data" / "qwen3_8b_qvq_acceptance"
+
+
+def validate_acceptance_report(report):
+    _validate_acceptance_report(
+        report,
+        controller_authority=report.get("_test_controller_authority"),
+    )
 
 
 class _Packed(nn.Module):
@@ -297,14 +312,15 @@ def test_accounting_contextualizes_malformed_shard_index(tmp_path):
         account_serialized_checkpoint(tmp_path, [], maximum_bpw=100)
 
 
-def _complete_report(score=0.85, kl=0.1):
+def _complete_report(score=0.85, kl=0.1, diverse_score=None):
+    diverse_score = score if diverse_score is None else diverse_score
     metric = {
         "coverage_complete": True,
         "sample_count": 1056,
         "diverse_32_sample_count": 32,
         "top1_agreement": score,
         "final_kl_nats": kl,
-        "diverse_32": score,
+        "diverse_32": diverse_score,
     }
     target_tensors = {}
     per_module = {}
@@ -356,54 +372,76 @@ def _complete_report(score=0.85, kl=0.1):
         "module_tensor_counts": {name: 5 for name in expected_projection_names()},
         "aggregate_sha256": "a" * 64,
     }
-    run_id = "run-acceptance-test"
-    producer_process_id = "process-quantizer"
+    controller = AcceptanceController()
+    producer_instance, reload_instance, evaluation_instance = (secrets.token_hex(32) for _ in range(3))
+    producer_nonce, reload_nonce, evaluation_nonce = (secrets.token_hex(32) for _ in range(3))
     start = seal_acceptance_observation(
         {
             "stage": "quantization_start",
-            "run_id": run_id,
-            "process_id": producer_process_id,
+            "controller_run_nonce": controller.run_nonce,
+            "process_instance_id": producer_instance,
+            "producer_stage_nonce": producer_nonce,
             "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
         }
     )
     end = seal_acceptance_observation(
         {
             "stage": "quantization_end",
-            "run_id": run_id,
-            "process_id": producer_process_id,
+            "controller_run_nonce": controller.run_nonce,
+            "process_instance_id": producer_instance,
+            "producer_stage_nonce": producer_nonce,
             "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
             "previous_observation_sha256": start["observation_sha256"],
         }
     )
-    pre_save = seal_acceptance_observation(
-        {
-            "stage": "pre_save_in_memory",
-            "run_id": run_id,
-            "process_id": producer_process_id,
-            "dense_source_end_sha256": end["observation_sha256"],
-            "payload": payload_hashes,
-        }
+    dense_binding = {
+        "controller_run_nonce": controller.run_nonce,
+        "producer_process_instance_id": producer_instance,
+        "producer_stage_nonce": producer_nonce,
+        "start": start,
+        "end": end,
+    }
+    measurements = (
+        {"dense_source_binding": dense_binding, "pre_save": {"dense_source_end_sha256": end["observation_sha256"], "payload": payload_hashes}},
+        {"payload": payload_hashes},
+        {"payload": payload_hashes},
     )
-    fresh_process = seal_acceptance_observation(
-        {
-            "stage": "fresh_process_reload",
-            "run_id": run_id,
-            "process_id": "process-fresh",
-            "previous_observation_sha256": pre_save["observation_sha256"],
-            "payload": payload_hashes,
+    instances = (producer_instance, reload_instance, evaluation_instance)
+    nonces = (producer_nonce, reload_nonce, evaluation_nonce)
+    stages = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
+    records = []
+    for index, (stage, instance, nonce, measurement) in enumerate(zip(stages, instances, nonces, measurements)):
+        event = {
+            "run_nonce": controller.run_nonce,
+            "stage": stage,
+            "stage_nonce": nonce,
+            "process_instance_id": instance,
+            "measurement": measurement,
         }
-    )
-    evaluation_reload = seal_acceptance_observation(
-        {
-            "stage": "acceptance_evaluation_reload",
-            "run_id": run_id,
-            "process_id": "process-evaluation",
-            "previous_observation_sha256": fresh_process["observation_sha256"],
-            "payload": payload_hashes,
+        record = {
+            "stage": stage,
+            "stage_nonce": nonce,
+            "process_instance_id": instance,
+            "pid": (700, 700, 701)[index],
+            "parent_pid": 600,
+            "argv_sha256": f"{index + 1:064x}",
+            "spawned_monotonic_ns": index * 10 + 1,
+            "event_received_monotonic_ns": index * 10 + 2,
+            "exited_monotonic_ns": index * 10 + 3,
+            "exit_code": 0,
+            "event": event,
+            "event_sha256": hashlib.sha256(acceptance.canonical_content(event)).hexdigest(),
+            "previous_record_sha256": records[-1]["record_sha256"] if records else None,
         }
-    )
-    return {
-        "schema_version": 3,
+        record["record_sha256"] = hashlib.sha256(acceptance.canonical_content(record)).hexdigest()
+        records.append(record)
+    controller._records = records
+    transcript = controller.signed_transcript()
+    pre_save = {**measurements[0]["pre_save"], "stage": stages[0], "stage_nonce": nonces[0], "process_instance_id": instances[0]}
+    fresh_process = {**measurements[1], "stage": stages[1], "stage_nonce": nonces[1], "process_instance_id": instances[1]}
+    evaluation_reload = {**measurements[2], "stage": stages[2], "stage_nonce": nonces[2], "process_instance_id": instances[2]}
+    report = {
+        "schema_version": 4,
         "artifact": {
             "fresh_reload_verified": True,
             "checkpoint_sha256": {
@@ -426,16 +464,15 @@ def _complete_report(score=0.85, kl=0.1):
             },
             "packed_payload_parity": {
                 "verified": True,
+                "controller_run_nonce": controller.run_nonce,
                 "pre_save": pre_save,
                 "fresh_process": fresh_process,
                 "evaluation_reload": evaluation_reload,
             },
             "dense_source_binding": {
-                "run_id": run_id,
-                "producer_process_id": producer_process_id,
-                "start": start,
-                "end": end,
+                **dense_binding,
             },
+            "acceptance_controller": transcript,
         },
         "census": {"expected": 252, "actual": 252, "complete": True},
         "accounting": {
@@ -488,6 +525,21 @@ def _complete_report(score=0.85, kl=0.1):
             for layer, role in expected_cells()
         ],
     }
+    claim = {key: report[key] for key in ("accounting", "manifests", "thresholds", "global", "cells")}
+    records[2]["event"]["measurement"]["acceptance_evidence_sha256"] = hashlib.sha256(
+        acceptance.canonical_content(claim)
+    ).hexdigest()
+    records[2]["event_sha256"] = hashlib.sha256(
+        acceptance.canonical_content(records[2]["event"])
+    ).hexdigest()
+    unsigned_record = dict(records[2])
+    unsigned_record.pop("record_sha256")
+    records[2]["record_sha256"] = hashlib.sha256(acceptance.canonical_content(unsigned_record)).hexdigest()
+    report["artifact"]["acceptance_controller"] = controller.signed_transcript()
+    report["_test_controller_authority"] = controller_authority_receipt(
+        report["artifact"]["acceptance_controller"]
+    )
+    return report
 
 
 def test_report_rejects_missing_layer_role_cell():
@@ -526,12 +578,12 @@ def test_report_rejects_wrong_canonical_packed_tensor_shape_or_dtype(field, valu
 def test_report_rejects_asserted_or_drifted_payload_parity():
     report = _complete_report()
     report["artifact"]["packed_payload_parity"] = {"verified": True}
-    with pytest.raises(AcceptanceError, match="missing|structurally sealed"):
+    with pytest.raises(AcceptanceError, match="controller-bound"):
         validate_acceptance_report(report)
 
     report = _complete_report()
     report["artifact"]["packed_payload_parity"]["fresh_process"]["payload"]["aggregate_sha256"] = "0" * 64
-    with pytest.raises(AcceptanceError, match="structurally sealed"):
+    with pytest.raises(AcceptanceError, match="authority|controller-bound|signature"):
         validate_acceptance_report(report)
 
     report = _complete_report()
@@ -556,36 +608,94 @@ def test_report_rejects_missing_or_mismatched_quantization_dense_source_binding(
         validate_acceptance_report(report)
 
 
-@pytest.mark.parametrize("failure", ["same_process", "broken_chain"])
-def test_report_rejects_unindependent_or_unchained_reload_parity(failure):
+def test_controller_provenance_accepts_pid_reuse_with_distinct_process_instances():
     report = _complete_report()
-    parity = report["artifact"]["packed_payload_parity"]
-    fresh = parity["fresh_process"]
-    if failure == "same_process":
-        fresh["process_id"] = parity["pre_save"]["process_id"]
-        message = "independently measured"
+    processes = report["artifact"]["acceptance_controller"]["processes"]
+    assert processes[0]["pid"] == processes[1]["pid"]
+    assert processes[0]["process_instance_id"] != processes[1]["process_instance_id"]
+    validate_acceptance_report(report)
+
+
+def test_controller_issues_unpredictable_run_stage_and_process_instance_identities(tmp_path):
+    first = AcceptanceController()
+    second = AcceptanceController()
+    assert first.run_nonce != second.run_nonce
+    marker = tmp_path / "after-ack.txt"
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            "from gptqmodel.utils.qvq_acceptance_controller import emit_controller_measurement; "
+            "emit_controller_measurement('quantization_producer', {'live_pre_save': True}); "
+            f"Path({str(marker)!r}).write_text('serialized-after-controller-ack')"
+        ),
+    ]
+    record = first.spawn_stage("quantization_producer", command, cwd=Path.cwd(), timeout=10)
+    assert marker.read_text() == "serialized-after-controller-ack"
+    assert record["event"]["measurement"] == {"live_pre_save": True}
+    assert record["event_received_monotonic_ns"] <= record["exited_monotonic_ns"]
+    assert len({first.run_nonce, record["stage_nonce"], record["process_instance_id"]}) == 3
+
+
+def test_controller_rejects_fabricated_final_checkpoint_only_report():
+    report = _complete_report()
+    with pytest.raises(AcceptanceError, match="independently supplied controller authority"):
+        _validate_acceptance_report(report)
+    report["artifact"].pop("acceptance_controller")
+    with pytest.raises(AcceptanceError, match="controller transcript"):
+        validate_acceptance_report(report)
+
+
+def test_controller_rejects_arbitrary_textual_process_ids_and_nonces():
+    report = _complete_report()
+    process = report["artifact"]["acceptance_controller"]["processes"][1]
+    process["process_instance_id"] = "pid:123"
+    process["stage_nonce"] = "chosen-by-caller"
+    with pytest.raises(AcceptanceError, match="authority|signature|256-bit"):
+        validate_acceptance_report(report)
+
+
+def test_controller_rejects_replayed_stage_evidence():
+    report = _complete_report()
+    processes = report["artifact"]["acceptance_controller"]["processes"]
+    processes[2]["event"] = dict(processes[1]["event"])
+    with pytest.raises(AcceptanceError, match="authority|signature|replayed"):
+        validate_acceptance_report(report)
+
+
+@pytest.mark.parametrize("missing", ["spawn", "exit"])
+def test_controller_rejects_missing_spawn_or_exit_records(missing):
+    report = _complete_report()
+    processes = report["artifact"]["acceptance_controller"]["processes"]
+    if missing == "spawn":
+        processes.pop(1)
     else:
-        fresh["previous_observation_sha256"] = "0" * 64
-        message = "observation chain"
-    parity["fresh_process"] = seal_acceptance_observation(fresh)
-    with pytest.raises(AcceptanceError, match=message):
+        processes[1].pop("exit_code")
+    with pytest.raises(AcceptanceError, match="authority|signature|spawn/exit"):
+        validate_acceptance_report(report)
+
+
+def test_controller_rejects_self_authored_evaluation_observation():
+    report = _complete_report()
+    report["artifact"]["packed_payload_parity"]["evaluation_reload"] = {
+        "stage": "acceptance_evaluation",
+        "stage_nonce": secrets.token_hex(32),
+        "process_instance_id": secrets.token_hex(32),
+        "payload": report["artifact"]["packed_payload_parity"]["fresh_process"]["payload"],
+    }
+    with pytest.raises(AcceptanceError, match="self-authored|controller-bound"):
         validate_acceptance_report(report)
 
 
 @pytest.mark.parametrize(("top1", "diverse"), [(0.85, 0.1), (0.1, 0.85)])
 def test_report_accepts_either_score_alternative(top1, diverse):
-    report = _complete_report()
-    report["global"]["top1_agreement"] = top1
-    report["global"]["diverse_32"] = diverse
-    report["cells"][100]["top1_agreement"] = top1
-    report["cells"][100]["diverse_32"] = diverse
+    report = _complete_report(score=top1, diverse_score=diverse)
     validate_acceptance_report(report)
 
 
 def test_report_rejects_when_both_score_alternatives_fail():
-    report = _complete_report()
-    report["cells"][100]["top1_agreement"] = 0.849
-    report["cells"][100]["diverse_32"] = 0.849
+    report = _complete_report(score=0.849, diverse_score=0.849)
     with pytest.raises(AcceptanceError, match="fails both score alternatives"):
         validate_acceptance_report(report)
 
@@ -602,7 +712,7 @@ def test_report_rejects_final_kl_as_percentage_semantics():
 
 def test_report_rejects_incomplete_coverage_and_schema():
     report = _complete_report()
-    report["schema_version"] = 4
+    report["schema_version"] = 5
     with pytest.raises(AcceptanceError, match="schema"):
         validate_acceptance_report(report)
     report = _complete_report()
@@ -631,28 +741,12 @@ def test_gate_parser_has_no_report_only_acceptance_mode():
         build_acceptance_parser().parse_args(["gate", "--report", "report.json"])
 
 
-def test_gate_recomputes_and_content_binds_submitted_report(tmp_path, monkeypatch):
+def test_controller_signature_content_binds_submitted_report():
     report = _complete_report()
-    report_path = tmp_path / "report.json"
-    report_path.write_text(json.dumps(report), encoding="utf-8")
-    calls = []
-
-    def fake_evaluate(args):
-        calls.append(args)
-        args.output.write_text(json.dumps(report), encoding="utf-8")
-        return 0
-
-    monkeypatch.setattr(acceptance_script, "_evaluate", fake_evaluate)
-    assert acceptance_script._gate(SimpleNamespace(report=report_path)) == 0
-    assert len(calls) == 1
-
-    changed = _complete_report()
-    changed["global"]["final_kl_nats"] = 0.11
-    report_path.write_text(json.dumps(changed), encoding="utf-8")
-    with pytest.raises(
-        AcceptanceError, match="does not exactly match artifact-recomputed"
-    ):
-        acceptance_script._gate(SimpleNamespace(report=report_path))
+    validate_acceptance_report(report)
+    report["global"]["final_kl_nats"] = 0.11
+    with pytest.raises(AcceptanceError, match="metrics were not emitted"):
+        validate_acceptance_report(report)
 
 
 def test_quantization_stream_verification_rejects_content_mutation(tmp_path):
@@ -746,8 +840,6 @@ def test_quantization_stream_verification_rejects_content_mutation(tmp_path):
         "fresh_process": fresh_process,
     }
     (checkpoint / "qvq_quantize_run.json").write_text(json.dumps(run), encoding="utf-8")
-    acceptance_script._verify_quantization_streams(checkpoint, manifests, dense)
-
     (manifests / "calibration.jsonl").write_text(
         '{"content":"changed"}\n', encoding="utf-8"
     )

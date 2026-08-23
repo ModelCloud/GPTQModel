@@ -114,7 +114,8 @@ python scripts/accept_qwen3_8b_qvq.py gate \
   --held-out-diagnostics-jsonl artifacts/qwen3_8b_qvq_w2/splits/held_out_diagnostics.jsonl \
   --diverse-jsonl artifacts/qwen3_8b_qvq_w2/splits/diverse_32.jsonl \
   --maximum-bpw 2.1 --score-min 0.85 --final-kl-max-nats 0.10 \
-  --report artifacts/qwen3_8b_qvq_w2/acceptance.json
+  --report artifacts/qwen3_8b_qvq_w2/acceptance.json \
+  --controller-authority artifacts/qwen3_8b_qvq_w2/controller-authority.json
 sha256sum artifacts/qwen3_8b_qvq_w2/acceptance.json artifacts/qwen3_8b_qvq_w2/checkpoint/*.safetensors
 ```
 
@@ -224,3 +225,56 @@ checkpoint repeatedly cannot satisfy the required pre-save stage or the three-pr
 These are implementation and integrity gates, not a retroactive model-quality claim. The earlier successful fixture,
 identity, manifest, lint, compilation, and CLI checks remain valid historical results; the earlier absence of a full
 quantized artifact, measured BPW, Top-1/Diverse-32 scores, and final KL remains an explicitly preserved failure state.
+
+## Rejected parity-provenance review and controller correction (2026-08-23)
+
+Independent review accepted the exact packed-tensor schema and dense-source start/end binding above, but rejected the
+parity provenance in commit `283faa3f`: each stage could choose textual UUID/PID fields and hash them itself. PID
+inequality did not establish process-instance identity, PID reuse was not modeled, and evaluation could self-author the
+observation that it then validated. Those are preserved as rejected implementation evidence, not silently rewritten
+as a success.
+
+Schema v4 replaces that authority with `controlled-run`. One parent acceptance controller uses `secrets.token_hex(32)`
+for an unpredictable run challenge, a separate stage nonce, and a separate process-instance identity for each of the
+producer, fresh reload, and evaluation. It creates an inherited socketpair for each child and records the actual child
+PID, controller PID, argv digest, monotonic spawn/event/exit times, exit code, event digest, and prior-record digest.
+PIDs are recorded facts only: repeated PIDs are legal, while controller-issued process-instance identities must remain
+unique. The complete transcript is signed by the controller's ephemeral Ed25519 key through OpenSSL 3 and the public
+key is carried with the signed transcript so stages cannot alter controller facts.
+
+The producer hashes the live in-memory packed model and sends its dense binding and pre-save payload over the inherited
+controller channel. It blocks until the controller acknowledges that exact event; only then can `model.save` execute.
+The producer no longer launches or vouches for its own reload. The controller waits for producer exit, launches the
+fresh reload, checks its payload against the acknowledged pre-save event, records exit, and then launches evaluation
+as a third process instance. Evaluation emits its payload and a digest of accounting, manifests, thresholds, global
+metrics, and all 252 cell metrics to the controller. It cannot add or validate its own controller transcript. The
+controller adds the final signed transcript and only then calls the report validator.
+
+The authoritative invocation is now one controller-owned lifecycle:
+
+```bash
+python scripts/accept_qwen3_8b_qvq.py controlled-run \
+  --dense-model /monster/data/model/Qwen3-8B \
+  --revision b968826d9c46dd6066d109eabc6255188de91218 \
+  --checkpoint artifacts/qwen3_8b_qvq_w2/checkpoint \
+  --manifest-dir artifacts/qwen3_8b_qvq_w2/splits \
+  --quant-config configs/qwen3_8b_qvq_w2_acceptance.json \
+  --validation-jsonl artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl \
+  --held-out-diagnostics-jsonl artifacts/qwen3_8b_qvq_w2/splits/held_out_diagnostics.jsonl \
+  --diverse-jsonl artifacts/qwen3_8b_qvq_w2/splits/diverse_32.jsonl \
+  --maximum-bpw 2.1 --score-min 0.85 --final-kl-max-nats 0.10 \
+  --output artifacts/qwen3_8b_qvq_w2/acceptance.json \
+  --controller-authority-output artifacts/qwen3_8b_qvq_w2/controller-authority.json
+```
+
+The authority receipt is an independent output, not a field chosen by the acceptance report. `gate` requires it via
+`--controller-authority`; report-only validation fails closed. The receipt binds the controller instance, run
+challenge, public-key digest, and complete transcript digest. Treat it as the out-of-band trust root produced by the
+controller invocation, alongside (not inside) the candidate report.
+
+Direct acceptance-mode quantization, payload reload, or evaluation without the inherited controller channel now fails
+closed. Adversarial regressions reject final-checkpoint-only fabrication, caller-chosen textual IDs/nonces, replayed
+stage events, missing spawn/exit facts, and self-authored evaluation evidence; a positive regression proves PID reuse
+does not collapse two distinct controller-issued process instances. This correction changes no model-quality result:
+the full quantized artifact, BPW, Top-1/Diverse-32, and final-KL measurements remain unresolved until the command above
+is actually completed.

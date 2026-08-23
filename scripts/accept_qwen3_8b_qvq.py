@@ -21,7 +21,6 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -45,17 +44,28 @@ from gptqmodel.utils.qvq_acceptance import (
     QWEN3_PINNED_REVISION,
     REPORT_SCHEMA_VERSION,
     AcceptanceError,
+    ProjectionCell,
     acceptance_observation_digest,
     account_serialized_checkpoint,
     census_reloaded_model,
+    expected_cells,
+    expected_projection_dimensions,
+    expected_projection_name,
     hash_canonical_qwen3_payloads,
     materialize_manifest,
-    seal_acceptance_observation,
     select_diverse_32,
     validate_acceptance_report,
     validate_diverse_selection,
     validate_manifest_disjointness,
     validate_qwen3_model_artifact,
+)
+from gptqmodel.utils.qvq_acceptance_controller import (
+    CONTROLLER_STAGES,
+    AcceptanceController,
+    controller_authority_receipt,
+    controller_environment,
+    emit_controller_measurement,
+    verify_controller_signature,
 )
 
 
@@ -343,10 +353,12 @@ def _verify_quantization_streams(
         or not isinstance(end, dict)
         or start.get("stage") != "quantization_start"
         or end.get("stage") != "quantization_end"
-        or start.get("run_id") != binding.get("run_id")
-        or end.get("run_id") != binding.get("run_id")
-        or start.get("process_id") != binding.get("producer_process_id")
-        or end.get("process_id") != binding.get("producer_process_id")
+        or start.get("controller_run_nonce") != binding.get("controller_run_nonce")
+        or end.get("controller_run_nonce") != binding.get("controller_run_nonce")
+        or start.get("process_instance_id") != binding.get("producer_process_instance_id")
+        or end.get("process_instance_id") != binding.get("producer_process_instance_id")
+        or start.get("producer_stage_nonce") != binding.get("producer_stage_nonce")
+        or end.get("producer_stage_nonce") != binding.get("producer_stage_nonce")
         or start.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
         or end.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
         or start.get("observation_sha256") != acceptance_observation_digest(start)
@@ -355,36 +367,28 @@ def _verify_quantization_streams(
     ):
         raise RuntimeError("quantization report dense source binding is mismatched, missing, or unpinned")
     parity = payload.get("packed_payload_parity")
-    pre_save = parity.get("pre_save") if isinstance(parity, dict) else None
-    fresh_process = parity.get("fresh_process") if isinstance(parity, dict) else None
-    if (
-        not isinstance(parity, dict)
-        or parity.get("verified") is not True
-        or not isinstance(pre_save, dict)
-        or not isinstance(fresh_process, dict)
-        or pre_save.get("observation_sha256") != acceptance_observation_digest(pre_save)
-        or fresh_process.get("observation_sha256") != acceptance_observation_digest(fresh_process)
-        or pre_save.get("stage") != "pre_save_in_memory"
-        or fresh_process.get("stage") != "fresh_process_reload"
-        or pre_save.get("run_id") != binding.get("run_id")
-        or fresh_process.get("run_id") != binding.get("run_id")
-        or pre_save.get("process_id") != binding.get("producer_process_id")
-        or fresh_process.get("process_id") == binding.get("producer_process_id")
-        or pre_save.get("dense_source_end_sha256") != end.get("observation_sha256")
-        or fresh_process.get("previous_observation_sha256") != pre_save.get("observation_sha256")
-        or pre_save.get("payload") != fresh_process.get("payload")
-    ):
-        raise RuntimeError(
-            "quantization report lacks measured pre-save/fresh-process packed payload parity"
-        )
-    evidence["packed_payload_parity"] = parity
-    evidence["dense_source_binding"] = binding
-    evidence["quantize_config"] = expected_config
-    return evidence
+    partial = payload.get("acceptance_controller_partial")
+    if payload.get("controller_pending_evaluation") is True:
+        if (
+            not isinstance(parity, dict)
+            or not isinstance(partial, dict)
+            or not verify_controller_signature(partial)
+            or tuple(record.get("stage") for record in partial.get("processes", ())) != CONTROLLER_STAGES[:2]
+            or parity.get("controller_pending") is not True
+        ):
+            raise RuntimeError("quantization report lacks controller-observed producer/reload authority")
+        evidence["packed_payload_parity"] = parity
+        evidence["dense_source_binding"] = binding
+        evidence["quantize_config"] = expected_config
+        return evidence
+    raise RuntimeError("quantization report is not an active controller-owned evaluation handoff")
 
 
 @torch.inference_mode()
 def _payload_hashes(args: argparse.Namespace) -> int:
+    controller = controller_environment()
+    if controller["stage"] != "fresh_process_reload":
+        raise RuntimeError("payload reload must be spawned by the independent controller")
     model = GPTQModel.load(
         str(args.checkpoint.resolve()),
         backend=BACKEND.QVQ,
@@ -393,37 +397,191 @@ def _payload_hashes(args: argparse.Namespace) -> int:
         attn_implementation="eager",
         local_files_only=True,
     ).eval()
-    process_id = f"pid:{os.getpid()}"
-    if process_id == args.producer_process_id:
-        raise RuntimeError("fresh payload reload did not run in an independent process")
-    observation = seal_acceptance_observation(
-        {
-            "stage": "fresh_process_reload",
-            "run_id": args.run_id,
-            "process_id": process_id,
-            "previous_observation_sha256": args.parent_observation_sha256,
-            "payload": hash_canonical_qwen3_payloads(model, census_reloaded_model(model)),
+    payload = hash_canonical_qwen3_payloads(model, census_reloaded_model(model))
+    emit_controller_measurement("fresh_process_reload", {"payload": payload})
+    _write_new(args.output, payload)
+    return 0
+
+
+def _controller_parity(records: list[dict[str, Any]], *, complete: bool) -> dict[str, Any]:
+    producer, reload = records[:2]
+    parity = {
+        "verified": complete,
+        "controller_run_nonce": producer["event"]["run_nonce"],
+        "pre_save": {
+            **producer["event"]["measurement"]["pre_save"],
+            "stage": producer["stage"],
+            "stage_nonce": producer["stage_nonce"],
+            "process_instance_id": producer["process_instance_id"],
+        },
+        "fresh_process": {
+            **reload["event"]["measurement"],
+            "stage": reload["stage"],
+            "stage_nonce": reload["stage_nonce"],
+            "process_instance_id": reload["process_instance_id"],
+        },
+    }
+    if complete:
+        evaluation = records[2]
+        parity["evaluation_reload"] = {
+            "payload": evaluation["event"]["measurement"]["payload"],
+            "stage": evaluation["stage"],
+            "stage_nonce": evaluation["stage_nonce"],
+            "process_instance_id": evaluation["process_instance_id"],
         }
+    else:
+        parity["controller_pending"] = True
+    return parity
+
+
+def _replace_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _controlled_run(args: argparse.Namespace) -> int:
+    """Run producer, reload, and evaluation as controller-owned process instances."""
+
+    if args.output.exists() or args.controller_authority_output.exists():
+        raise FileExistsError("refusing to overwrite acceptance report or controller authority receipt")
+    controller = AcceptanceController()
+    checkpoint = args.checkpoint.expanduser().resolve()
+    manifest_dir = args.manifest_dir.expanduser().resolve()
+    producer_command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "qvq_quantize.py"),
+        "--model",
+        args.dense_model,
+        "--output",
+        str(checkpoint),
+        "--quant-config",
+        str(args.quant_config),
+        "--calibration-dataset",
+        str(manifest_dir / "calibration.jsonl"),
+        "--calibration-rows",
+        "512",
+        "--yaqa-dataset",
+        str(manifest_dir / "yaqa_tuning.jsonl"),
+        "--yaqa-rows",
+        "512",
+        "--validation-dataset",
+        str(manifest_dir / "validation.jsonl"),
+        "--validation-rows",
+        "512",
+        "--device",
+        args.device,
+        "--verify-qwen3-acceptance-payload-parity",
+    ]
+    producer = controller.spawn_stage(
+        "quantization_producer", producer_command, cwd=REPO_ROOT, timeout=args.controller_timeout
     )
-    _write_new(args.output, observation)
+    with TemporaryDirectory(prefix="qwen3-controller-") as temporary:
+        temporary_path = Path(temporary)
+        reload_output = temporary_path / "reload.json"
+        reload_command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "accept_qwen3_8b_qvq.py"),
+            "payload-hashes",
+            "--checkpoint",
+            str(checkpoint),
+            "--device",
+            args.device,
+            "--output",
+            str(reload_output),
+        ]
+        reload = controller.spawn_stage(
+            "fresh_process_reload", reload_command, cwd=REPO_ROOT, timeout=args.controller_timeout
+        )
+        if producer["event"]["measurement"]["pre_save"]["payload"] != reload["event"]["measurement"]["payload"]:
+            raise AcceptanceError("controller observed packed payload drift between live producer and fresh reload")
+        run_path = checkpoint / "qvq_quantize_run.json"
+        run = _read_json_object(run_path, "controller-owned quantization report")
+        run["dense_source_binding"] = producer["event"]["measurement"]["dense_source_binding"]
+        run["packed_payload_parity"] = _controller_parity([producer, reload], complete=False)
+        run["acceptance_controller_partial"] = controller.signed_transcript(require_complete=False)
+        run["controller_pending_evaluation"] = True
+        _replace_json(run_path, run)
+
+        draft_output = temporary_path / "acceptance-draft.json"
+        evaluation_command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "accept_qwen3_8b_qvq.py"),
+            "evaluate",
+            "--dense-model",
+            args.dense_model,
+            "--revision",
+            args.revision,
+            "--checkpoint",
+            str(checkpoint),
+            "--manifest-dir",
+            str(manifest_dir),
+            "--validation-jsonl",
+            str(args.validation_jsonl),
+            "--held-out-diagnostics-jsonl",
+            str(args.held_out_diagnostics_jsonl),
+            "--diverse-jsonl",
+            str(args.diverse_jsonl),
+            "--device",
+            args.device,
+            "--maximum-bpw",
+            str(args.maximum_bpw),
+            "--score-min",
+            str(args.score_min),
+            "--final-kl-max-nats",
+            str(args.final_kl_max_nats),
+            "--output",
+            str(draft_output),
+        ]
+        evaluation = controller.spawn_stage(
+            "acceptance_evaluation", evaluation_command, cwd=REPO_ROOT, timeout=args.controller_timeout
+        )
+        transcript = controller.signed_transcript()
+        final_parity = _controller_parity([producer, reload, evaluation], complete=True)
+        run["packed_payload_parity"] = final_parity
+        run["acceptance_controller"] = transcript
+        run.pop("acceptance_controller_partial", None)
+        run.pop("controller_pending_evaluation", None)
+        _replace_json(run_path, run)
+
+        report = _read_json_object(draft_output, "controller-owned acceptance draft")
+        report["artifact"]["packed_payload_parity"] = final_parity
+        report["artifact"]["dense_source_binding"] = run["dense_source_binding"]
+        report["artifact"]["acceptance_controller"] = transcript
+        report["artifact"]["checkpoint_sha256"] = _artifact_hashes(checkpoint)
+        authority = controller_authority_receipt(transcript)
+        validate_acceptance_report(report, controller_authority=authority)
+        _write_new(args.output, report)
+        _write_new(args.controller_authority_output, authority)
     return 0
 
 
 def _gate(args: argparse.Namespace) -> int:
     submitted = _read_json_object(args.report, "submitted acceptance report")
-    with TemporaryDirectory(prefix="qwen3-qvq-gate-") as temporary:
-        recomputed_path = Path(temporary) / "recomputed.json"
-        recompute_args = argparse.Namespace(**vars(args))
-        recompute_args.output = recomputed_path
-        _evaluate(recompute_args)
-        recomputed = _read_json_object(
-            recomputed_path, "recomputed acceptance evidence"
+    controller_authority = _read_json_object(args.controller_authority, "controller authority receipt")
+    validate_acceptance_report(submitted, controller_authority=controller_authority)
+    dense = validate_qwen3_model_artifact(Path(args.dense_model), require_pinned_dense=True)
+    checkpoint = validate_qwen3_model_artifact(args.checkpoint, require_pinned_dense=False)
+    cells = [
+        ProjectionCell(
+            layer,
+            role,
+            expected_projection_name(layer, role),
+            *expected_projection_dimensions(role),
+            ("SU", "SV", "bank_alt_id", "bank_ids", "trellis"),
         )
-    if submitted != recomputed:
-        raise AcceptanceError(
-            "submitted report does not exactly match artifact-recomputed acceptance evidence"
-        )
-    validate_acceptance_report(recomputed)
+        for layer, role in expected_cells()
+    ]
+    recomputed_accounting = account_serialized_checkpoint(
+        args.checkpoint, cells, maximum_bpw=args.maximum_bpw
+    )
+    if (
+        submitted["artifact"]["dense_model_identity"] != dense
+        or submitted["artifact"]["checkpoint_model_identity"] != checkpoint
+        or submitted["artifact"]["checkpoint_sha256"] != _artifact_hashes(args.checkpoint)
+        or submitted["accounting"] != recomputed_accounting
+        or submitted["manifests"] | {"quantization_streams": None}
+        != _check_manifests(args.manifest_dir) | {"quantization_streams": None}
+    ):
+        raise AcceptanceError("submitted report does not match controller-bound artifact recomputation")
     print(
         json.dumps(
             {"accepted": True, "report": str(args.report), "artifact_recomputed": True},
@@ -552,6 +710,9 @@ def _resolve_runtime_module(
 
 @torch.inference_mode()
 def _evaluate(args: argparse.Namespace) -> int:
+    controller = controller_environment()
+    if controller["stage"] != "acceptance_evaluation":
+        raise RuntimeError("acceptance evaluation must be spawned by the independent controller")
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite {args.output}")
     if (
@@ -631,16 +792,12 @@ def _evaluate(args: argparse.Namespace) -> int:
         )
     packed_payload_parity = {
         **recorded_parity,
-        "evaluation_reload": seal_acceptance_observation(
-            {
-                "stage": "acceptance_evaluation_reload",
-                "run_id": dense_source_binding["run_id"],
-                "process_id": f"pid:{os.getpid()}",
-                "previous_observation_sha256": recorded_parity["fresh_process"]["observation_sha256"],
-                "payload": evaluation_payload,
-            }
-        ),
-        "verified": True,
+        "evaluation_reload": {
+            "stage": "acceptance_evaluation",
+            "stage_nonce": controller["stage_nonce"],
+            "process_instance_id": controller["process_instance_id"],
+            "payload": evaluation_payload,
+        },
     }
     accounting = account_serialized_checkpoint(
         args.checkpoint, cells, maximum_bpw=args.maximum_bpw
@@ -718,7 +875,18 @@ def _evaluate(args: argparse.Namespace) -> int:
             for cell in cells
         ],
     }
-    validate_acceptance_report(report)
+    acceptance_claim = {
+        key: report[key] for key in ("accounting", "manifests", "thresholds", "global", "cells")
+    }
+    emit_controller_measurement(
+        "acceptance_evaluation",
+        {
+            "payload": evaluation_payload,
+            "acceptance_evidence_sha256": hashlib.sha256(
+                json.dumps(acceptance_claim, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        },
+    )
     _write_new(args.output, report)
     return 0
 
@@ -745,9 +913,6 @@ def build_parser() -> argparse.ArgumentParser:
     payload_hashes.add_argument("--checkpoint", type=Path, required=True)
     payload_hashes.add_argument("--device", default="cuda:0")
     payload_hashes.add_argument("--output", type=Path, required=True)
-    payload_hashes.add_argument("--run-id", required=True)
-    payload_hashes.add_argument("--parent-observation-sha256", required=True)
-    payload_hashes.add_argument("--producer-process-id", required=True)
     payload_hashes.set_defaults(handler=_payload_hashes)
 
     def add_artifact_arguments(command: argparse.ArgumentParser) -> None:
@@ -768,11 +933,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_artifact_arguments(gate)
     gate.add_argument("--report", type=Path, required=True)
+    gate.add_argument("--controller-authority", type=Path, required=True)
     gate.set_defaults(handler=_gate)
     evaluate = commands.add_parser("evaluate")
     add_artifact_arguments(evaluate)
     evaluate.add_argument("--output", type=Path, required=True)
     evaluate.set_defaults(handler=_evaluate)
+    controlled = commands.add_parser(
+        "controlled-run", help="Controller-spawn quantization, reload, and acceptance evaluation."
+    )
+    add_artifact_arguments(controlled)
+    controlled.add_argument("--quant-config", type=Path, required=True)
+    controlled.add_argument("--output", type=Path, required=True)
+    controlled.add_argument("--controller-authority-output", type=Path, required=True)
+    controlled.add_argument("--controller-timeout", type=float)
+    controlled.set_defaults(handler=_controlled_run)
     return parser
 
 

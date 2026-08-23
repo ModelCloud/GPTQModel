@@ -24,6 +24,12 @@ from typing import Any
 import torch
 
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+from gptqmodel.utils.qvq_acceptance_controller import (
+    CONTROLLER_SCHEMA,
+    CONTROLLER_STAGES,
+    controller_authority_receipt,
+    verify_controller_signature,
+)
 
 QWEN3_8B_LAYER_COUNT = 36
 QWEN3_PROJECTION_ROLES = (
@@ -50,7 +56,7 @@ MANIFEST_DISJOINT_PAIRS = tuple(
     for right in MANIFEST_SPLITS[left_index + 1 :]
     if (left, right) != ("diverse_pool_512", "diverse_32")
 )
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
 QWEN3_REQUESTED_BITS = 2.0
 QWEN3_PINNED_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
 QWEN3_LOCAL_TARGET = Path("/monster/data/model/Qwen3-8B")
@@ -199,6 +205,134 @@ def _valid_sealed_observation(observation: Any) -> bool:
         isinstance(observation, dict)
         and observation.get("observation_sha256") == acceptance_observation_digest(observation)
     )
+
+
+def _valid_controller_identity(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def validate_controller_transcript(
+    transcript: Any,
+    *,
+    dense_binding: Any,
+    parity: Any,
+    report: Mapping[str, Any],
+    controller_authority: Any,
+) -> None:
+    """Validate controller-signed process facts and bind every parity measurement to them."""
+
+    if not isinstance(transcript, dict) or transcript.get("schema") != CONTROLLER_SCHEMA:
+        raise AcceptanceError("artifact lacks the independent acceptance controller transcript")
+    try:
+        expected_authority = controller_authority_receipt(transcript)
+    except (TypeError, ValueError) as error:
+        raise AcceptanceError("acceptance controller transcript cannot produce an authority receipt") from error
+    if not isinstance(controller_authority, dict) or controller_authority != expected_authority:
+        raise AcceptanceError("report is not bound to the independently supplied controller authority receipt")
+    if not verify_controller_signature(transcript):
+        raise AcceptanceError("acceptance controller Ed25519 signature is absent or invalid")
+    if not _valid_controller_identity(transcript.get("controller_instance_id")) or not _valid_controller_identity(
+        transcript.get("run_nonce")
+    ):
+        raise AcceptanceError("acceptance controller identities are not unpredictable 256-bit values")
+    records = transcript.get("processes")
+    if not isinstance(records, list) or len(records) != len(CONTROLLER_STAGES):
+        raise AcceptanceError("acceptance controller spawn/exit records are missing")
+    if tuple(record.get("stage") for record in records if isinstance(record, dict)) != CONTROLLER_STAGES:
+        raise AcceptanceError("acceptance controller stages are missing, reordered, or replayed")
+    instances: set[str] = set()
+    nonces: set[str] = set()
+    previous_hash = None
+    previous_exit = None
+    for record in records:
+        stage = record["stage"]
+        event = record.get("event")
+        instance = record.get("process_instance_id")
+        stage_nonce = record.get("stage_nonce")
+        if (
+            not _valid_controller_identity(instance)
+            or not _valid_controller_identity(stage_nonce)
+            or instance in instances
+            or stage_nonce in nonces
+        ):
+            raise AcceptanceError("controller process-instance identities/nonces are invalid or replayed")
+        instances.add(instance)
+        nonces.add(stage_nonce)
+        if (
+            not isinstance(record.get("pid"), int)
+            or isinstance(record.get("pid"), bool)
+            or record["pid"] <= 0
+            or not isinstance(record.get("parent_pid"), int)
+            or record["parent_pid"] <= 0
+            or record.get("exit_code") != 0
+        ):
+            raise AcceptanceError(f"controller {stage} spawn/exit metadata is invalid or unsuccessful")
+        spawned = record.get("spawned_monotonic_ns")
+        received = record.get("event_received_monotonic_ns")
+        exited = record.get("exited_monotonic_ns")
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (spawned, received, exited)) or not (
+            spawned <= received <= exited
+        ):
+            raise AcceptanceError(f"controller {stage} spawn/event/exit ordering is invalid")
+        if previous_exit is not None and spawned < previous_exit:
+            raise AcceptanceError("controller stages overlap or are not sequentially observed")
+        previous_exit = exited
+        if record.get("previous_record_sha256") != previous_hash:
+            raise AcceptanceError("acceptance controller record chain is broken")
+        unsigned_record = dict(record)
+        record_hash = unsigned_record.pop("record_sha256", None)
+        if record_hash != hashlib.sha256(canonical_content(unsigned_record)).hexdigest():
+            raise AcceptanceError("acceptance controller record digest is invalid")
+        previous_hash = record_hash
+        if (
+            not isinstance(event, dict)
+            or event.get("run_nonce") != transcript["run_nonce"]
+            or event.get("stage") != stage
+            or event.get("stage_nonce") != stage_nonce
+            or event.get("process_instance_id") != instance
+            or record.get("event_sha256") != hashlib.sha256(canonical_content(event)).hexdigest()
+        ):
+            raise AcceptanceError(f"controller {stage} event is not bound to its spawned process instance")
+
+    producer_event, reload_event, evaluation_event = (record["event"] for record in records)
+    producer_measurement = producer_event.get("measurement")
+    reload_measurement = reload_event.get("measurement")
+    evaluation_measurement = evaluation_event.get("measurement")
+    if not all(isinstance(value, dict) for value in (producer_measurement, reload_measurement, evaluation_measurement)):
+        raise AcceptanceError("controller stage measurements are absent")
+    if producer_measurement.get("dense_source_binding") != dense_binding:
+        raise AcceptanceError("dense source binding was not emitted by the controller-spawned producer")
+    expected_parity = {
+        "verified": True,
+        "controller_run_nonce": transcript["run_nonce"],
+        "pre_save": {
+            **producer_measurement.get("pre_save", {}),
+            "stage": CONTROLLER_STAGES[0],
+            "stage_nonce": producer_event["stage_nonce"],
+            "process_instance_id": producer_event["process_instance_id"],
+        },
+        "fresh_process": {
+            **reload_measurement,
+            "stage": CONTROLLER_STAGES[1],
+            "stage_nonce": reload_event["stage_nonce"],
+            "process_instance_id": reload_event["process_instance_id"],
+        },
+        "evaluation_reload": {
+            "payload": evaluation_measurement.get("payload"),
+            "stage": CONTROLLER_STAGES[2],
+            "stage_nonce": evaluation_event["stage_nonce"],
+            "process_instance_id": evaluation_event["process_instance_id"],
+        },
+    }
+    if parity != expected_parity:
+        raise AcceptanceError("parity evidence is self-authored, replayed, or not controller-bound")
+    claim = {key: report.get(key) for key in ("accounting", "manifests", "thresholds", "global", "cells")}
+    if evaluation_measurement.get("acceptance_evidence_sha256") != hashlib.sha256(canonical_content(claim)).hexdigest():
+        raise AcceptanceError("acceptance metrics were not emitted by the controller-spawned evaluation process")
 
 
 def _sha256_file(path: Path) -> str:
@@ -1052,7 +1186,9 @@ def validate_diverse_selection(
     }
 
 
-def validate_acceptance_report(report: Mapping[str, Any]) -> None:
+def validate_acceptance_report(
+    report: Mapping[str, Any], *, controller_authority: Mapping[str, Any] | None = None
+) -> None:
     """Validate complete machine-readable evidence and every declared gate."""
 
     required = {
@@ -1139,21 +1275,23 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
         raise AcceptanceError("artifact lacks quantization-start/end dense source binding")
     start = dense_binding.get("start")
     end = dense_binding.get("end")
-    run_id = dense_binding.get("run_id")
-    producer_process_id = dense_binding.get("producer_process_id")
+    controller_run_nonce = dense_binding.get("controller_run_nonce")
+    producer_instance = dense_binding.get("producer_process_instance_id")
+    producer_stage_nonce = dense_binding.get("producer_stage_nonce")
     if (
-        not isinstance(run_id, str)
-        or not run_id
-        or not isinstance(producer_process_id, str)
-        or not producer_process_id
+        not _valid_controller_identity(controller_run_nonce)
+        or not _valid_controller_identity(producer_instance)
+        or not _valid_controller_identity(producer_stage_nonce)
         or not _valid_sealed_observation(start)
         or not _valid_sealed_observation(end)
         or start.get("stage") != "quantization_start"
         or end.get("stage") != "quantization_end"
-        or start.get("run_id") != run_id
-        or end.get("run_id") != run_id
-        or start.get("process_id") != producer_process_id
-        or end.get("process_id") != producer_process_id
+        or start.get("controller_run_nonce") != controller_run_nonce
+        or end.get("controller_run_nonce") != controller_run_nonce
+        or start.get("process_instance_id") != producer_instance
+        or end.get("process_instance_id") != producer_instance
+        or start.get("producer_stage_nonce") != producer_stage_nonce
+        or end.get("producer_stage_nonce") != producer_stage_nonce
         or start.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
         or end.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
         or end.get("previous_observation_sha256") != start.get("observation_sha256")
@@ -1190,26 +1328,8 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
             and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in tensor_counts.values())
             and valid_sha256(aggregate)
         )
-    stages = ("pre_save_in_memory", "fresh_process_reload", "acceptance_evaluation_reload")
-    if any(not _valid_sealed_observation(item) for item in observations):
-        raise AcceptanceError("packed payload parity observations are missing or not structurally sealed")
-    if any(item.get("stage") != stage for item, stage in zip(observations, stages)):
-        raise AcceptanceError("packed payload parity stages are not canonical")
-    if any(item.get("run_id") != run_id for item in observations):
-        raise AcceptanceError("packed payload parity run provenance is inconsistent")
-    process_ids = [item.get("process_id") for item in observations]
-    if (
-        any(not isinstance(value, str) or not value for value in process_ids)
-        or process_ids[0] != producer_process_id
-        or len(set(process_ids)) != len(process_ids)
-    ):
-        raise AcceptanceError("packed payload parity was not independently measured in three processes")
-    if (
-        observations[0].get("dense_source_end_sha256") != end.get("observation_sha256")
-        or observations[1].get("previous_observation_sha256") != observations[0].get("observation_sha256")
-        or observations[2].get("previous_observation_sha256") != observations[1].get("observation_sha256")
-    ):
-        raise AcceptanceError("packed payload parity observation chain is broken")
+    if any(not isinstance(item, dict) for item in observations):
+        raise AcceptanceError("packed payload parity evidence is incomplete or not controller-bound")
     payloads = [item.get("payload") for item in observations]
     if any(not valid_payload_hashes(payload) for payload in payloads):
         raise AcceptanceError(
@@ -1531,6 +1651,13 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
             raise AcceptanceError(
                 f"{scope} final KL {final_kl} nats exceeds threshold {kl_max}"
             )
+    validate_controller_transcript(
+        artifact.get("acceptance_controller"),
+        dense_binding=dense_binding,
+        parity=parity,
+        report=report,
+        controller_authority=controller_authority,
+    )
 
 
 __all__ = [

@@ -13,7 +13,6 @@ Post-quantization quality measurement belongs in ``qvq_evaluate.py``.
 from __future__ import annotations
 
 import argparse
-import gc
 import hashlib
 import json
 import os
@@ -21,11 +20,9 @@ import platform
 import subprocess
 import sys
 import time
-import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +47,10 @@ from gptqmodel.utils.qvq_acceptance import (
     hash_canonical_qwen3_payloads,
     seal_acceptance_observation,
     validate_qwen3_model_artifact,
+)
+from gptqmodel.utils.qvq_acceptance_controller import (
+    controller_environment,
+    emit_controller_measurement,
 )
 
 QVQ_FORMATS = tuple(
@@ -476,18 +477,21 @@ def main(argv: list[str] | None = None) -> int:
     replay_search_spec = _slice_from_args(args, "replay_search")
     replay_confirmation_spec = _slice_from_args(args, "replay_confirmation")
     config = build_quantize_config(args)
-    run_id = uuid.uuid4().hex
-    process_id = f"pid:{os.getpid()}"
+    controller = None
     dense_source_binding = None
     if args.verify_qwen3_acceptance_payload_parity:
+        controller = controller_environment()
+        if controller["stage"] != "quantization_producer":
+            raise RuntimeError("acceptance quantization must be spawned as the controller producer stage")
         start_identity = validate_qwen3_model_artifact(
             Path(args.model), require_pinned_dense=True
         )
         start_observation = seal_acceptance_observation(
             {
                 "stage": "quantization_start",
-                "run_id": run_id,
-                "process_id": process_id,
+                "controller_run_nonce": controller["run_nonce"],
+                "process_instance_id": controller["process_instance_id"],
+                "producer_stage_nonce": controller["stage_nonce"],
                 "artifact_sha256": start_identity["artifact_sha256"],
             }
         )
@@ -573,8 +577,9 @@ def main(argv: list[str] | None = None) -> int:
         end_observation = seal_acceptance_observation(
             {
                 "stage": "quantization_end",
-                "run_id": run_id,
-                "process_id": process_id,
+                "controller_run_nonce": controller["run_nonce"],
+                "process_instance_id": controller["process_instance_id"],
+                "producer_stage_nonce": controller["stage_nonce"],
                 "artifact_sha256": end_identity["artifact_sha256"],
                 "previous_observation_sha256": start_observation["observation_sha256"],
             }
@@ -584,25 +589,25 @@ def main(argv: list[str] | None = None) -> int:
         ] != QWEN3_DENSE_ARTIFACT_SHA256:
             raise RuntimeError("pinned dense source digest map changed during quantization")
         dense_source_binding = {
-            "run_id": run_id,
-            "producer_process_id": process_id,
+            "controller_run_nonce": controller["run_nonce"],
+            "producer_process_instance_id": controller["process_instance_id"],
+            "producer_stage_nonce": controller["stage_nonce"],
             "start": start_observation,
             "end": end_observation,
         }
     packed_payload_parity = None
     if args.verify_qwen3_acceptance_payload_parity:
+        pre_save = {
+            "dense_source_end_sha256": end_observation["observation_sha256"],
+            "payload": hash_canonical_qwen3_payloads(model, census_reloaded_model(model)),
+        }
+        emit_controller_measurement(
+            "quantization_producer",
+            {"dense_source_binding": dense_source_binding, "pre_save": pre_save},
+        )
         packed_payload_parity = {
-            "pre_save": seal_acceptance_observation(
-                {
-                    "stage": "pre_save_in_memory",
-                    "run_id": run_id,
-                    "process_id": process_id,
-                    "dense_source_end_sha256": end_observation["observation_sha256"],
-                    "payload": hash_canonical_qwen3_payloads(
-                        model, census_reloaded_model(model)
-                    ),
-                }
-            ),
+            "controller_pending": True,
+            "pre_save": pre_save,
         }
     lifecycle_telemetry = {
         "aggregate": model.quant_region_timer.snapshot(),
@@ -611,42 +616,6 @@ def main(argv: list[str] | None = None) -> int:
     save_started = time.perf_counter()
     model.save(str(output))
     save_seconds = time.perf_counter() - save_started
-    if packed_payload_parity is not None:
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        with TemporaryDirectory(prefix="qvq-payload-reload-") as temporary:
-            fresh_path = Path(temporary) / "fresh-process.json"
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "scripts" / "accept_qwen3_8b_qvq.py"),
-                    "payload-hashes",
-                    "--checkpoint",
-                    str(output),
-                    "--device",
-                    args.device,
-                    "--output",
-                    str(fresh_path),
-                    "--run-id",
-                    run_id,
-                    "--parent-observation-sha256",
-                    packed_payload_parity["pre_save"]["observation_sha256"],
-                    "--producer-process-id",
-                    process_id,
-                ],
-                cwd=REPO_ROOT,
-                check=True,
-            )
-            fresh_process = json.loads(fresh_path.read_text(encoding="utf-8"))
-        packed_payload_parity["fresh_process"] = fresh_process
-        if packed_payload_parity["pre_save"]["payload"] != fresh_process.get("payload"):
-            raise RuntimeError(
-                "packed QVQ module payloads drifted between pre-save state and fresh-process reload"
-            )
-        packed_payload_parity["verified"] = True
-
     report_path = (
         args.report.expanduser().resolve()
         if args.report
