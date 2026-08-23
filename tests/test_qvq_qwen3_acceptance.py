@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import socket
 import struct
 import subprocess
@@ -20,6 +21,7 @@ from torch import nn
 import gptqmodel.utils.qvq_acceptance as acceptance
 import gptqmodel.utils.qvq_acceptance_controller as controller_module
 import scripts.accept_qwen3_8b_qvq as acceptance_script
+import scripts.qvq_quantize as quantize_script
 from gptqmodel.utils.qvq_acceptance import (
     MANIFEST_SPLITS,
     PROJECTION_BOUNDARY,
@@ -490,7 +492,7 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
     })
     measurements = (
         {"dense_source_binding": dense_binding, "pre_save": {"dense_source_end_sha256": end["observation_sha256"], "payload": payload_hashes},
-         "quantize_config": {"bits": 2, "format": "qvq_v2b2_p32", "group_size": -1, "rounding": "yaqa", "sym": True, "pack_dtype": "int32", "bank_count": 2},
+         "quantize_config": json.loads((Path.cwd() / "configs" / "qwen3_8b_qvq_w2_acceptance.json").read_text()),
          "quant_config_authority_sha256": acceptance._sha256_file(Path.cwd() / "configs" / "qwen3_8b_qvq_w2_acceptance.json"),
          "layer_scope": "all", "datasets": producer_datasets},
         {"payload": payload_hashes},
@@ -503,12 +505,13 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
     records = []
     for index, (stage, instance, nonce, measurement) in enumerate(zip(stages, instances, nonces, measurements)):
         python = controller_module.trusted_python_executable()
-        accept_script = str(Path.cwd() / "scripts" / "accept_qwen3_8b_qvq.py")
+        trust = controller_module.load_trust_config()
+        accept_script = trust["stage_scripts"][stage]["path"]
         if index == 0:
             command = [
-                python, str(Path.cwd() / "scripts" / "qvq_quantize.py"),
+                python, trust["stage_scripts"][stage]["path"],
                 "--model", "/monster/data/model/Qwen3-8B", "--output", str(test_root / "checkpoint"),
-                "--quant-config", str(Path.cwd() / "configs" / "qwen3_8b_qvq_w2_acceptance.json"),
+                "--quant-config", trust["quant_config"],
                 "--calibration-dataset", str(test_root / "calibration.jsonl"), "--calibration-rows", "512",
                 "--yaqa-dataset", str(test_root / "yaqa_tuning.jsonl"), "--yaqa-rows", "512",
                 "--validation-dataset", str(test_root / "validation.jsonl"), "--validation-rows", "512",
@@ -547,7 +550,6 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
             "os_process": {
                 "pid": (700, 700, 701)[index], "ppid": controller.controller_pid,
                 "start_time_ticks": 1000 + index,
-                "executable": controller_module.trusted_python_executable(),
                 "executable_sha256": controller_module.load_trust_config()["python_executable_sha256"],
                 "executable_device": python_identity.st_dev, "executable_inode": python_identity.st_ino,
                 "cmdline_sha256": hashlib.sha256(
@@ -768,7 +770,8 @@ def test_controller_observes_process_facts_from_linux_proc():
     assert observed["pid"] == os.getpid()
     assert observed["ppid"] == os.getppid()
     assert observed["start_time_ticks"] > 0
-    assert observed["executable_sha256"] == acceptance_script._sha256_file(Path(observed["executable"]))
+    with Path("/proc/self/exe").open("rb") as executable:
+        assert observed["executable_sha256"] == hashlib.sha256(executable.read()).hexdigest()
 
 
 def test_proc_stat_parser_handles_spaces_and_parentheses_in_comm():
@@ -797,6 +800,50 @@ def test_controller_fails_closed_without_or_with_mismatched_trust_root(tmp_path,
     monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(attacker))
     with pytest.raises(RuntimeError, match="does not match the pinned public trust root"):
         AcceptanceController()
+
+
+def _open_fd_count():
+    return len(list(Path("/proc/self/fd").iterdir()))
+
+
+def test_policy_parse_failure_closes_owned_trust_descriptors(tmp_path):
+    trust_path = Path(os.environ[controller_module.TRUST_CONFIG_ENV])
+    trust = json.loads(trust_path.read_text())
+    malformed = tmp_path / "malformed-policy.json"
+    malformed.write_text("{", encoding="utf-8")
+    trust["acceptance_policy"] = str(malformed)
+    trust["acceptance_policy_sha256"] = acceptance_script._sha256_file(malformed)
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+    before = _open_fd_count()
+    with pytest.raises(json.JSONDecodeError):
+        controller_module._acceptance_policy()
+    assert _open_fd_count() == before
+
+
+def test_standalone_signing_key_mismatch_closes_every_owned_descriptor(tmp_path, monkeypatch):
+    attacker = tmp_path / "attacker.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(attacker)], check=True)
+    attacker.chmod(0o600)
+    monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(attacker))
+    before = _open_fd_count()
+    with pytest.raises(RuntimeError, match="does not match"):
+        controller_module._load_trusted_signing_key()
+    assert _open_fd_count() == before
+
+
+def test_standalone_signing_key_context_owns_live_descriptors():
+    with controller_module._load_trusted_signing_key() as authority:
+        private_fd = authority.private_file.descriptor
+        resource_fds = [trusted.descriptor for trusted in authority.resources.files.values()]
+        os.fstat(private_fd)
+        for descriptor in resource_fds:
+            os.fstat(descriptor)
+    with pytest.raises(OSError):
+        os.fstat(private_fd)
+    for descriptor in resource_fds:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 @pytest.mark.parametrize("mode", [0o700, 0o644])
@@ -1015,6 +1062,63 @@ def test_verified_policy_and_stage_are_consumed_from_retained_descriptors(tmp_pa
         resources.close()
 
 
+def _copy_all_candidate_trust_inputs(tmp_path):
+    trust_path = Path(os.environ[controller_module.TRUST_CONFIG_ENV])
+    trust = json.loads(trust_path.read_text())
+    replacements = {}
+    for key in ("python_executable", "acceptance_policy", "quant_config"):
+        source = Path(trust[key])
+        copied = tmp_path / source.name
+        shutil.copy2(source, copied)
+        trust[key] = str(copied)
+        trust[f"{key}_sha256"] = acceptance_script._sha256_file(copied)
+        replacements[key] = copied
+    for index, (stage, identity) in enumerate(trust["stage_scripts"].items()):
+        source = Path(identity["path"])
+        copied = tmp_path / f"stage-{index}.py"
+        shutil.copy2(source, copied)
+        identity.update(path=str(copied), sha256=acceptance_script._sha256_file(copied))
+        replacements[stage] = copied
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+    return replacements
+
+
+def test_transcript_validation_uses_retained_trust_after_path_replacement(tmp_path):
+    paths = _copy_all_candidate_trust_inputs(tmp_path)
+    report = _complete_report()
+    resources = controller_module._TrustedResources()
+    try:
+        for path in paths.values():
+            replacement = path.with_suffix(path.suffix + ".replacement")
+            replacement.write_bytes(b"attacker replacement")
+            replacement.chmod(path.stat().st_mode & 0o777)
+            replacement.replace(path)
+        _validate_acceptance_report(
+            report,
+            controller_authority=report["_test_controller_authority"],
+            trust_resources=resources,
+        )
+    finally:
+        resources.close()
+
+
+def test_transcript_validation_rejects_mutated_retained_identity(tmp_path):
+    paths = _copy_all_candidate_trust_inputs(tmp_path)
+    report = _complete_report()
+    resources = controller_module._TrustedResources()
+    try:
+        paths["acceptance_policy"].write_bytes(b"same inode attacker mutation")
+        with pytest.raises(RuntimeError, match="retained operator-trusted acceptance_policy descriptor changed"):
+            _validate_acceptance_report(
+                report,
+                controller_authority=report["_test_controller_authority"],
+                trust_resources=resources,
+            )
+    finally:
+        resources.close()
+
+
 def test_controller_rejects_rename_capable_trusted_parent(tmp_path):
     unsafe = tmp_path / "unsafe"
     unsafe.mkdir(mode=0o777)
@@ -1040,6 +1144,35 @@ def test_controller_rejects_dataset_dotdot_alias():
     command[index] = str(source.parent / "alias" / ".." / source.name)
     with pytest.raises(ValueError, match="normalized path"):
         controller_module.validate_required_command("quantization_producer", command)
+
+
+@pytest.mark.parametrize("value", ["", "{}", "null", "[]", '{"schema":"wrong","fds":{},"evidence":{}}'])
+def test_present_malformed_snapshot_authority_never_falls_back(monkeypatch, value):
+    monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", value)
+    with pytest.raises(RuntimeError, match="snapshot authority"):
+        quantize_script._controller_snapshot_authority()
+
+
+def test_snapshot_authority_missing_fd_and_evidence_fail_closed(monkeypatch):
+    root = Path(os.environ["GPTQMODEL_QVQ_TEST_INPUT_ROOT"])
+    evidence = controller_module.controller_dataset_evidence({
+        "--calibration-dataset": str(root / "calibration.jsonl"),
+        "--yaqa-dataset": str(root / "yaqa_tuning.jsonl"),
+        "--validation-dataset": str(root / "validation.jsonl"),
+    })
+    authority = {
+        "schema": "qvq-controller-dataset-snapshots-v1",
+        "fds": {str(root / "yaqa_tuning.jsonl"): 99},
+        "evidence": evidence,
+    }
+    monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+    spec = quantize_script.DatasetSlice(str(root / "calibration.jsonl"), None, "train", 0, 1)
+    with pytest.raises(RuntimeError, match="snapshot is absent"):
+        quantize_script.load_dataset_slice(spec)
+    with pytest.raises(RuntimeError, match="evidence is absent"):
+        quantize_script.dataset_slice_evidence(
+            quantize_script.DatasetSlice(str(root / "unknown.jsonl"), None, "train", 0, 1)
+        )
 
 
 def test_live_producer_ipc_keeps_reader_open_until_validation_and_ack(monkeypatch):
@@ -1142,6 +1275,22 @@ def test_process_observation_rejects_mixed_start_identity(monkeypatch):
     monkeypatch.setattr(Path, "read_text", changing_stat)
     with pytest.raises(RuntimeError, match="mixed or reused"):
         controller_module._observe_linux_process(os.getpid())
+
+
+def test_process_observation_hashes_unlinked_executable_descriptor(tmp_path):
+    executable = tmp_path / "retained-sleep"
+    shutil.copy2(Path("/bin/sleep").resolve(), executable)
+    expected_digest = acceptance_script._sha256_file(executable)
+    process = subprocess.Popen([str(executable), "30"])
+    executable.unlink()
+    try:
+        observed = controller_module._observe_linux_process(process.pid)
+        assert observed["pid"] == process.pid
+        assert observed["executable_sha256"] == expected_digest
+        assert "executable" not in observed
+    finally:
+        process.kill()
+        process.wait()
 
 
 def test_controller_rejects_fabricated_252_digest_payload_without_live_bytes():
@@ -1254,7 +1403,37 @@ def test_invalid_producer_payload_is_rejected_before_acknowledgement():
     event["measurement"]["pre_save"]["payload"]["module_sha256"].pop(expected_projection_names()[0])
     with pytest.raises(AcceptanceError, match="pre-save controller validation"):
         acceptance.validate_producer_pre_save_measurement(
-            event["measurement"], event=event, controller_datasets=event["measurement"]["datasets"]
+            event["measurement"],
+            event=event,
+            controller_datasets=event["measurement"]["datasets"],
+            controller_quant_config_sha256=event["measurement"]["quant_config_authority_sha256"],
+            controller_quant_config=event["measurement"]["quantize_config"],
+        )
+
+
+@pytest.mark.parametrize("nested", ["measurement", "config", "dataset", "dense", "start", "pre_save", "payload"])
+def test_producer_pre_save_rejects_extra_nested_keys(nested):
+    report = _complete_report()
+    event = report["artifact"]["acceptance_controller"]["processes"][0]["event"]
+    measurement = event["measurement"]
+    trusted_config = json.loads(json.dumps(measurement["quantize_config"]))
+    target = {
+        "measurement": measurement,
+        "config": measurement["quantize_config"],
+        "dataset": measurement["datasets"]["calibration"],
+        "dense": measurement["dense_source_binding"],
+        "start": measurement["dense_source_binding"]["start"],
+        "pre_save": measurement["pre_save"],
+        "payload": measurement["pre_save"]["payload"],
+    }[nested]
+    target["attacker_extra"] = True
+    with pytest.raises(AcceptanceError):
+        acceptance.validate_producer_pre_save_measurement(
+            measurement,
+            event=event,
+            controller_datasets=measurement["datasets"],
+            controller_quant_config_sha256=measurement["quant_config_authority_sha256"],
+            controller_quant_config=trusted_config,
         )
 
 

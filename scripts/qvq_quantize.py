@@ -399,13 +399,48 @@ def validate_disjoint_slices(named_slices: dict[str, DatasetSlice | None]) -> No
                 )
 
 
+def _controller_snapshot_authority() -> dict[str, Any] | None:
+    name = "GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS"
+    if name not in os.environ:
+        return None
+    try:
+        payload = json.loads(os.environ[name])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("controller dataset snapshot authority is malformed") from error
+    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    evidence_keys = {
+        "source", "config", "split", "row_start", "rows", "content_sha256", "identity_manifest",
+        "identity_manifest_sha256", "manifest_verified",
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema", "fds", "evidence"}
+        or payload.get("schema") != "qvq-controller-dataset-snapshots-v1"
+        or not isinstance(payload.get("fds"), dict)
+        or not payload["fds"]
+        or not isinstance(payload.get("evidence"), dict)
+        or set(payload["evidence"]) != {"calibration", "yaqa", "validation"}
+        or any(
+            not isinstance(path, str)
+            or path != os.path.realpath(path)
+            or not isinstance(fd, int)
+            or isinstance(fd, bool)
+            or fd < 0
+            for path, fd in payload["fds"].items()
+        )
+        or any(not isinstance(item, dict) or set(item) != evidence_keys for item in evidence.values())
+    ):
+        raise RuntimeError("controller dataset snapshot authority has an invalid closed schema")
+    return payload
+
+
 def load_dataset_slice(spec: DatasetSlice):
     path = Path(spec.source).expanduser()
-    snapshot_payload = json.loads(os.environ.get("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", "{}"))
-    snapshot_fds = snapshot_payload.get("fds", {}) if isinstance(snapshot_payload, dict) else {}
+    snapshot_payload = _controller_snapshot_authority()
+    snapshot_fds = snapshot_payload["fds"] if snapshot_payload is not None else {}
     canonical_source = str(path.resolve())
     snapshot_fd = snapshot_fds.get(canonical_source)
-    if snapshot_payload and not isinstance(snapshot_fd, int):
+    if snapshot_payload is not None and not isinstance(snapshot_fd, int):
         raise RuntimeError(f"controller dataset snapshot is absent for canonical source: {canonical_source}")
     read_path = Path(f"/proc/self/fd/{snapshot_fd}") if isinstance(snapshot_fd, int) else path
     kwargs: dict[str, Any] = {"split": spec.split}
@@ -452,11 +487,13 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
 
     evidence = asdict(spec)
     path = Path(spec.source).expanduser()
-    snapshot_payload = json.loads(os.environ.get("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", "{}"))
-    snapshot_evidence = snapshot_payload.get("evidence", {}) if isinstance(snapshot_payload, dict) else {}
+    snapshot_payload = _controller_snapshot_authority()
+    snapshot_evidence = snapshot_payload["evidence"] if snapshot_payload is not None else {}
     evidence_name = "yaqa" if path.name == "yaqa_tuning.jsonl" else path.stem
     if evidence_name in snapshot_evidence:
         return dict(snapshot_evidence[evidence_name])
+    if snapshot_payload is not None:
+        raise RuntimeError(f"controller dataset evidence is absent for canonical source: {path.resolve()}")
     if not path.is_file():
         evidence["content_sha256"] = None
         evidence["identity_manifest"] = None
@@ -623,7 +660,9 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "dense_source_binding": dense_source_binding,
                 "pre_save": pre_save,
-                "quantize_config": config.to_dict(),
+                "quantize_config": json.loads(
+                    Path(f"/proc/self/fd/{os.environ['GPTQMODEL_QVQ_CONTROLLER_QUANT_CONFIG_FD']}").read_bytes()
+                ),
                 "quant_config_authority_sha256": hashlib.sha256(
                     Path(f"/proc/self/fd/{os.environ['GPTQMODEL_QVQ_CONTROLLER_QUANT_CONFIG_FD']}").read_bytes()
                 ).hexdigest(),

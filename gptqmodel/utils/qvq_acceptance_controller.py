@@ -20,9 +20,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
 
-CONTROLLER_SCHEMA = "qvq-acceptance-controller-v5"
+CONTROLLER_SCHEMA = "qvq-acceptance-controller-v6"
 CONTROLLER_STAGES = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
 _ENV_PREFIX = "GPTQMODEL_QVQ_CONTROLLER_"
 VERIFIER_PRIVATE_KEY_ENV = "GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY"
@@ -252,6 +253,17 @@ class _TrustedResources:
         for trusted in self.files.values():
             trusted.close()
 
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _type: type[BaseException] | None,
+        _value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
     def pass_fds(self, *names: str) -> tuple[int, ...]:
         return tuple(self.files[name].descriptor for name in names)
 
@@ -261,8 +273,8 @@ class _TrustedResources:
             content = os.pread(trusted.descriptor, current.st_size, 0)
             expected = trusted.identity
             if (
-                (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
-                != (expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns, expected.st_ctime_ns)
+                (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+                != (expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns)
                 or hashlib.sha256(content).hexdigest() != trusted.digest
             ):
                 raise RuntimeError(f"retained operator-trusted {name} descriptor changed")
@@ -275,17 +287,22 @@ def trusted_python_executable() -> str:
 def _acceptance_policy(resources: _TrustedResources | None = None) -> dict[str, Any]:
     owned = resources is None
     resources = resources or _TrustedResources()
-    raw = resources.files["acceptance_policy"].content
-    policy = json.loads(raw)
-    required = {
-        "schema", "dense_model", "revision", "device", "layer_scope", "calibration_rows", "yaqa_rows",
-        "validation_rows", "maximum_bpw", "score_min", "final_kl_max_nats",
-    }
-    if not isinstance(policy, dict) or set(policy) != required or policy.get("schema") != "qwen3-8b-qvq-acceptance-policy-v1":
-        raise RuntimeError("locked acceptance policy has an invalid closed schema")
-    if owned:
-        resources.close()
-    return policy
+    try:
+        policy = json.loads(resources.files["acceptance_policy"].content)
+        required = {
+            "schema", "dense_model", "revision", "device", "layer_scope", "calibration_rows", "yaqa_rows",
+            "validation_rows", "maximum_bpw", "score_min", "final_kl_max_nats",
+        }
+        if (
+            not isinstance(policy, dict)
+            or set(policy) != required
+            or policy.get("schema") != "qwen3-8b-qvq-acceptance-policy-v1"
+        ):
+            raise RuntimeError("locked acceptance policy has an invalid closed schema")
+        return policy
+    finally:
+        if owned:
+            resources.close()
 
 
 def _controller_dataset_bundle(values: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -396,9 +413,7 @@ def _observe_linux_process(pid: int, *, expected: Mapping[str, Any] | None = Non
         observed_pid, comm, ppid, start_time_ticks = first
         if observed_pid != pid:
             raise RuntimeError(f"controller observed PID {observed_pid}, expected Popen PID {pid}")
-        executable_link = proc / "exe"
-        executable = Path(os.readlink(executable_link)).resolve(strict=True)
-        descriptor = os.open(executable_link, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(proc / "exe", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
         try:
             executable_identity = os.fstat(descriptor)
             digest = hashlib.sha256()
@@ -416,7 +431,7 @@ def _observe_linux_process(pid: int, *, expected: Mapping[str, Any] | None = Non
         raise RuntimeError(f"controller observed malformed cmdline for child PID {pid}")
     observation = {
         "pid": observed_pid, "comm": comm, "ppid": ppid, "start_time_ticks": start_time_ticks,
-        "executable": str(executable), "executable_sha256": digest.hexdigest(),
+        "executable_sha256": digest.hexdigest(),
         "executable_device": executable_identity.st_dev, "executable_inode": executable_identity.st_ino,
         "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
     }
@@ -548,47 +563,87 @@ def _openssl(
 def _pinned_public_key(resources: _TrustedResources | None = None) -> bytes:
     owned = resources is None
     resources = resources or _TrustedResources()
-    trust = resources.trust
-    value = resources.files["verifier_public_key"].content
-    if hashlib.sha256(value).hexdigest() != trust["verifier_public_key_sha256"]:
-        raise RuntimeError("operator verifier public key fingerprint mismatches trusted deployment input")
-    if not value.startswith(b"-----BEGIN PUBLIC KEY-----"):
-        raise RuntimeError("pinned Qwen3 acceptance verifier public key is malformed")
-    if owned:
-        resources.close()
-    return value
+    try:
+        trust = resources.trust
+        value = resources.files["verifier_public_key"].content
+        if hashlib.sha256(value).hexdigest() != trust["verifier_public_key_sha256"]:
+            raise RuntimeError("operator verifier public key fingerprint mismatches trusted deployment input")
+        if not value.startswith(b"-----BEGIN PUBLIC KEY-----"):
+            raise RuntimeError("pinned Qwen3 acceptance verifier public key is malformed")
+        return value
+    finally:
+        if owned:
+            resources.close()
+
+
+@dataclass
+class _TrustedSigningAuthority:
+    private_key: bytes
+    public_key: bytes
+    path: Path
+    identity: os.stat_result
+    digest: str
+    private_file: _TrustedFile
+    resources: _TrustedResources
+    owns_resources: bool
+
+    def close(self) -> None:
+        self.private_file.close()
+        if self.owns_resources:
+            self.resources.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        _type: type[BaseException] | None,
+        _value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 def _load_trusted_signing_key(
     resources: _TrustedResources | None = None,
-) -> tuple[bytes, bytes, Path, os.stat_result, str, _TrustedFile]:
+) -> _TrustedSigningAuthority:
+    """Return a context-owned authority; standalone callers must close it or use ``with``."""
+
     owned = resources is None
     resources = resources or _TrustedResources()
-    configured = os.environ.get(VERIFIER_PRIVATE_KEY_ENV)
-    if not configured:
-        raise RuntimeError(f"trusted verifier signing authority is absent: set {VERIFIER_PRIVATE_KEY_ENV}")
-    private_path = Path(configured)
-    if not private_path.is_absolute():
-        raise RuntimeError("trusted verifier private key must be an existing absolute external path")
-    private_file = _open_trusted_file(private_path, exact_mode=0o600)
-    resolved_private_path = Path(os.readlink(private_file.fd_path))
-    if resolved_private_path.is_relative_to(_REPO_ROOT.resolve()):
-        raise RuntimeError("trusted verifier private key must not reside in the candidate repository")
-    private_key, identity = private_file.content, private_file.identity
-    private_digest = hashlib.sha256(private_key).hexdigest()
-    with TemporaryDirectory(prefix="qvq-controller-key-check-") as temporary:
-        private_copy = Path(temporary) / "stable-private.pem"
-        derived_path = Path(temporary) / "derived-public.pem"
-        private_copy.write_bytes(private_key)
-        private_copy.chmod(0o600)
-        _openssl(["pkey", "-in", str(private_copy), "-pubout", "-out", str(derived_path)], resources=resources)
-        derived_public = derived_path.read_bytes()
-    pinned_public = _pinned_public_key(resources)
-    if derived_public != pinned_public:
-        raise RuntimeError("trusted verifier private key does not match the pinned public trust root")
-    if owned:
-        resources.close()
-    return private_key, pinned_public, private_path, identity, private_digest, private_file
+    private_file = None
+    try:
+        configured = os.environ.get(VERIFIER_PRIVATE_KEY_ENV)
+        if not configured:
+            raise RuntimeError(f"trusted verifier signing authority is absent: set {VERIFIER_PRIVATE_KEY_ENV}")
+        private_path = Path(configured)
+        if not private_path.is_absolute():
+            raise RuntimeError("trusted verifier private key must be an existing absolute external path")
+        private_file = _open_trusted_file(private_path, exact_mode=0o600)
+        resolved_private_path = Path(os.readlink(private_file.fd_path))
+        if resolved_private_path.is_relative_to(_REPO_ROOT.resolve()):
+            raise RuntimeError("trusted verifier private key must not reside in the candidate repository")
+        private_key, identity = private_file.content, private_file.identity
+        private_digest = hashlib.sha256(private_key).hexdigest()
+        with TemporaryDirectory(prefix="qvq-controller-key-check-") as temporary:
+            private_copy = Path(temporary) / "stable-private.pem"
+            derived_path = Path(temporary) / "derived-public.pem"
+            private_copy.write_bytes(private_key)
+            private_copy.chmod(0o600)
+            _openssl(["pkey", "-in", str(private_copy), "-pubout", "-out", str(derived_path)], resources=resources)
+            derived_public = derived_path.read_bytes()
+        pinned_public = _pinned_public_key(resources)
+        if derived_public != pinned_public:
+            raise RuntimeError("trusted verifier private key does not match the pinned public trust root")
+        return _TrustedSigningAuthority(
+            private_key, pinned_public, private_path, identity, private_digest, private_file, resources, owned
+        )
+    except BaseException:
+        if private_file is not None:
+            private_file.close()
+        if owned:
+            resources.close()
+        raise
 
 
 def _sign(private_key: bytes, payload: bytes, *, resources: _TrustedResources | None = None) -> str:
@@ -615,13 +670,15 @@ def _sign(private_key: bytes, payload: bytes, *, resources: _TrustedResources | 
         return base64.b64encode(signature_path.read_bytes()).decode("ascii")
 
 
-def verify_controller_signature(transcript: Mapping[str, Any]) -> bool:
+def verify_controller_signature(
+    transcript: Mapping[str, Any], *, resources: _TrustedResources | None = None
+) -> bool:
     unsigned = dict(transcript)
     signature = unsigned.pop("controller_signature_ed25519", None)
     if not isinstance(signature, str):
         return False
     try:
-        public_key = _pinned_public_key()
+        public_key = _pinned_public_key(resources)
     except RuntimeError:
         return False
     if unsigned.get("verifier_public_key_sha256") != hashlib.sha256(public_key).hexdigest():
@@ -650,20 +707,23 @@ def verify_controller_signature(transcript: Mapping[str, Any]) -> bool:
                     str(message_path),
                     "-sigfile",
                     str(signature_path),
-                ]
+                ],
+                resources=resources,
             )
         except RuntimeError:
             return False
     return True
 
 
-def controller_authority_receipt(transcript: Mapping[str, Any]) -> dict[str, Any]:
-    public_key = _pinned_public_key()
+def controller_authority_receipt(
+    transcript: Mapping[str, Any], *, resources: _TrustedResources | None = None
+) -> dict[str, Any]:
+    public_key = _pinned_public_key(resources)
     fingerprint = hashlib.sha256(public_key).hexdigest()
     if transcript.get("verifier_public_key_sha256") != fingerprint:
         raise ValueError("controller transcript does not identify the pinned verifier trust root")
     return {
-        "schema": "qvq-acceptance-controller-trust-root-v5",
+        "schema": "qvq-acceptance-controller-trust-root-v6",
         "controller_instance_id": transcript.get("controller_instance_id"),
         "run_nonce": transcript.get("run_nonce"),
         "verifier_public_key_sha256": fingerprint,
@@ -845,15 +905,13 @@ class AcceptanceController:
         self._resources = _TrustedResources()
         self.run_nonce = _new_identity()
         self.controller_instance_id = _new_identity()
-        (
-            self._private_key,
-            public_key,
-            self._private_key_path,
-            self._private_key_identity,
-            self._private_key_digest,
-            self._private_key_file,
-        ) = _load_trusted_signing_key(self._resources)
-        self._public_key_sha256 = hashlib.sha256(public_key).hexdigest()
+        self._signing_authority = _load_trusted_signing_key(self._resources)
+        self._private_key = self._signing_authority.private_key
+        self._private_key_path = self._signing_authority.path
+        self._private_key_identity = self._signing_authority.identity
+        self._private_key_digest = self._signing_authority.digest
+        self._private_key_file = self._signing_authority.private_file
+        self._public_key_sha256 = hashlib.sha256(self._signing_authority.public_key).hexdigest()
         self.controller_pid = os.getpid()
         self.controller_parent_pid = os.getppid()
         self._records: list[dict[str, Any]] = []
@@ -911,6 +969,7 @@ class AcceptanceController:
                 _ENV_PREFIX + "PROCESS_INSTANCE_ID": process_instance_id,
                 _ENV_PREFIX + "EVENT_FD": str(child_channel.fileno()),
                 _ENV_PREFIX + "DATASET_SNAPSHOTS": json.dumps({
+                    "schema": "qvq-controller-dataset-snapshots-v1",
                     "fds": snapshot_mapping,
                     "evidence": controller_datasets,
                 }, sort_keys=True),
@@ -986,6 +1045,7 @@ class AcceptanceController:
                     event=event,
                     controller_datasets=controller_datasets,
                     controller_quant_config_sha256=self._resources.files["quant_config"].digest,
+                    controller_quant_config=json.loads(self._resources.files["quant_config"].content),
                 )
                 if event["measurement"]["pre_save"]["payload"] != controller_live_payload:
                     raise RuntimeError("producer payload digests do not match controller-hashed live tensor bytes")

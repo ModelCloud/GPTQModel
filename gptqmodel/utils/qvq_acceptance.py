@@ -28,9 +28,9 @@ from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.utils.qvq_acceptance_controller import (
     CONTROLLER_SCHEMA,
     CONTROLLER_STAGES,
+    _TrustedResources,
     controller_authority_receipt,
     controller_dataset_evidence,
-    load_trust_config,
     validate_required_command,
     verify_controller_signature,
 )
@@ -248,6 +248,8 @@ def valid_qwen3_payload_hashes(payload: Any) -> bool:
 
     if not isinstance(payload, dict):
         return False
+    if set(payload) != {"scheme", "module_count", "module_sha256", "module_tensor_counts", "aggregate_sha256"}:
+        return False
     module_hashes = payload.get("module_sha256")
     tensor_counts = payload.get("module_tensor_counts")
     structurally_valid = (
@@ -272,22 +274,24 @@ def validate_producer_pre_save_measurement(
     event: Mapping[str, Any],
     controller_datasets: Mapping[str, Any] | None = None,
     controller_quant_config_sha256: str | None = None,
+    controller_quant_config: Mapping[str, Any] | None = None,
 ) -> None:
     """Fail closed before save unless the producer supplied the entire pinned live evidence."""
 
-    if not isinstance(measurement, dict):
+    if not isinstance(measurement, dict) or set(measurement) != {
+        "dense_source_binding", "pre_save", "quantize_config", "quant_config_authority_sha256", "layer_scope",
+        "datasets",
+    }:
         raise AcceptanceError("producer pre-save measurement is absent")
     dense = measurement.get("dense_source_binding")
     pre_save = measurement.get("pre_save")
-    expected_config = {
-        "bits": 2, "format": "qvq_v2b2_p32", "group_size": -1, "rounding": "yaqa",
-        "sym": True, "pack_dtype": "int32", "bank_count": 2,
-    }
+    if controller_quant_config is None:
+        raise AcceptanceError("producer validation lacks retained quantization-config authority")
     actual_config = measurement.get("quantize_config")
     pinned_config_path = Path(__file__).resolve().parents[2] / "configs" / "qwen3_8b_qvq_w2_acceptance.json"
     if (
         not isinstance(actual_config, dict)
-        or any(actual_config.get(key) != value for key, value in expected_config.items())
+        or actual_config != controller_quant_config
         or measurement.get("quant_config_authority_sha256")
         != (controller_quant_config_sha256 or _sha256_file(pinned_config_path))
         or measurement.get("layer_scope") != "all"
@@ -303,14 +307,46 @@ def validate_producer_pre_save_measurement(
         raise AcceptanceError("producer calibration/evaluation manifest evidence is incomplete")
     for evidence in datasets.values():
         if (
-            not isinstance(evidence, dict) or evidence.get("rows") != 512
+            not isinstance(evidence, dict)
+            or set(evidence) != {
+                "source", "config", "split", "row_start", "rows", "content_sha256", "identity_manifest",
+                "identity_manifest_sha256", "manifest_verified",
+            }
+            or evidence.get("rows") != 512
             or not _valid_sha256(evidence.get("content_sha256"))
             or not _valid_sha256(evidence.get("identity_manifest_sha256"))
             or evidence.get("manifest_verified") is not True
         ):
             raise AcceptanceError("producer calibration/evaluation manifest evidence is invalid")
-    if not isinstance(dense, dict) or not isinstance(pre_save, dict):
+    if (
+        not isinstance(event, dict)
+        or set(event) != {
+            "run_nonce", "controller_instance_id", "controller_pid", "stage", "stage_nonce",
+            "process_instance_id", "measurement",
+        }
+        or not isinstance(dense, dict)
+        or set(dense) != {
+            "controller_run_nonce", "producer_process_instance_id", "producer_stage_nonce", "start", "end",
+        }
+        or not isinstance(pre_save, dict)
+        or set(pre_save) != {"dense_source_end_sha256", "payload"}
+    ):
         raise AcceptanceError("producer dense/live pre-save evidence is incomplete")
+    start = dense.get("start")
+    end = dense.get("end")
+    if (
+        not isinstance(start, dict)
+        or set(start) != {
+            "stage", "controller_run_nonce", "process_instance_id", "producer_stage_nonce", "artifact_sha256",
+            "observation_sha256",
+        }
+        or not isinstance(end, dict)
+        or set(end) != {
+            "stage", "controller_run_nonce", "process_instance_id", "producer_stage_nonce", "artifact_sha256",
+            "previous_observation_sha256", "observation_sha256",
+        }
+    ):
+        raise AcceptanceError("producer payload/dense binding failed pre-save controller validation")
     identity = (event.get("run_nonce"), event.get("process_instance_id"), event.get("stage_nonce"))
     if (
         (dense.get("controller_run_nonce"), dense.get("producer_process_instance_id"), dense.get("producer_stage_nonce")) != identity
@@ -332,25 +368,28 @@ def validate_controller_transcript(
     parity: Any,
     report: Mapping[str, Any],
     controller_authority: Any,
+    trust_resources: _TrustedResources,
 ) -> None:
     """Validate controller-signed process facts and bind every parity measurement to them."""
 
     if not isinstance(transcript, dict) or transcript.get("schema") != CONTROLLER_SCHEMA:
         raise AcceptanceError("artifact lacks the independent acceptance controller transcript")
     try:
-        expected_authority = controller_authority_receipt(transcript)
+        expected_authority = controller_authority_receipt(transcript, resources=trust_resources)
     except (RuntimeError, TypeError, ValueError) as error:
         raise AcceptanceError("acceptance controller transcript cannot produce an authority receipt") from error
     if not isinstance(controller_authority, dict) or controller_authority != expected_authority:
         raise AcceptanceError("report is not bound to the independently supplied controller authority receipt")
-    if not verify_controller_signature(transcript):
+    if not verify_controller_signature(transcript, resources=trust_resources):
         raise AcceptanceError("acceptance controller Ed25519 signature is absent or invalid")
     if not _valid_controller_identity(transcript.get("controller_instance_id")) or not _valid_controller_identity(
         transcript.get("run_nonce")
     ):
         raise AcceptanceError("acceptance controller identities are not unpredictable 256-bit values")
     records = transcript.get("processes")
-    if transcript.get("trust_config_sha256") != hashlib.sha256(canonical_content(load_trust_config())).hexdigest():
+    if transcript.get("trust_config_sha256") != hashlib.sha256(
+        canonical_content(trust_resources.trust)
+    ).hexdigest():
         raise AcceptanceError("controller transcript is not bound to the external operator trust configuration")
     if (
         not isinstance(records, list)
@@ -434,21 +473,20 @@ def validate_controller_transcript(
         ):
             raise AcceptanceError(f"controller {stage} canonical required command has invalid descriptor execution")
         try:
-            command_values = validate_required_command(stage, argv)
+            command_values = validate_required_command(stage, argv, resources=trust_resources)
         except (RuntimeError, ValueError) as error:
             raise AcceptanceError(f"controller {stage} command is not the canonical required command") from error
         parsed_commands.append(command_values)
         os_process = record.get("os_process")
-        trust = load_trust_config()
+        trust = trust_resources.trust
         expected_cmdline = b"\0".join(os.fsencode(item) for item in execution_argv) + b"\0"
-        python_identity = os.stat(trust["python_executable"], follow_symlinks=False)
+        python_identity = trust_resources.files["python_executable"].identity
         if (
             not isinstance(os_process, dict)
             or os_process.get("pid") != record.get("pid")
             or os_process.get("ppid") != controller_pid
             or not isinstance(os_process.get("start_time_ticks"), int)
             or os_process.get("start_time_ticks") <= 0
-            or os_process.get("executable") != str(Path(trust["python_executable"]).resolve())
             or os_process.get("executable_sha256") != trust["python_executable_sha256"]
             or not isinstance(os_process.get("executable_device"), int)
             or not isinstance(os_process.get("executable_inode"), int)
@@ -1423,8 +1461,11 @@ def validate_diverse_selection(
     }
 
 
-def validate_acceptance_report(
-    report: Mapping[str, Any], *, controller_authority: Mapping[str, Any] | None = None
+def _validate_acceptance_report_retained(
+    report: Mapping[str, Any],
+    *,
+    controller_authority: Mapping[str, Any] | None,
+    trust_resources: _TrustedResources,
 ) -> None:
     """Validate complete machine-readable evidence and every declared gate."""
 
@@ -1870,7 +1911,26 @@ def validate_acceptance_report(
         parity=parity,
         report=report,
         controller_authority=controller_authority,
+        trust_resources=trust_resources,
     )
+
+
+def validate_acceptance_report(
+    report: Mapping[str, Any],
+    *,
+    controller_authority: Mapping[str, Any] | None = None,
+    trust_resources: _TrustedResources | None = None,
+) -> None:
+    """Validate with one retained trust descriptor set for the entire operation."""
+
+    if trust_resources is not None:
+        trust_resources.revalidate()
+        _validate_acceptance_report_retained(
+            report, controller_authority=controller_authority, trust_resources=trust_resources
+        )
+        return
+    with _TrustedResources() as owned:
+        _validate_acceptance_report_retained(report, controller_authority=controller_authority, trust_resources=owned)
 
 
 __all__ = [

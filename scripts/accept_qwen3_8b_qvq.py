@@ -549,8 +549,10 @@ def _controlled_run(args: argparse.Namespace) -> int:
         report["artifact"]["dense_source_binding"] = run["dense_source_binding"]
         report["artifact"]["acceptance_controller"] = transcript
         report["artifact"]["checkpoint_sha256"] = _artifact_hashes(checkpoint)
-        authority = controller_authority_receipt(transcript)
-        validate_acceptance_report(report, controller_authority=authority)
+        authority = controller_authority_receipt(transcript, resources=controller._resources)
+        validate_acceptance_report(
+            report, controller_authority=authority, trust_resources=controller._resources
+        )
         _write_new(args.output, report)
         _write_new(args.controller_authority_output, authority)
     return 0

@@ -508,3 +508,38 @@ Implementation gates for schema v5, from parent `752b9adffe6ea5f8538eb7a0525eff3
 - Pinned `/monster/data/model/Qwen3-8B` identity/integrity passed for revision
   `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers, seven authoritative artifact hashes, and seven local
   Hub content identities.
+
+## Rejected open producer schemas and retained-validation schema v6 (2026-08-23)
+
+Review rejected commit `32e4a243`: schema v5 still permitted additional producer/config fields, treated a present
+but falsey snapshot authority as absence, reopened trusted paths while validating the transcript, resolved the
+textual `/proc/<pid>/exe` symlink, and left exceptional/standalone signing-resource ownership ambiguous. These are
+preserved as rejected findings, not amended into the schema-v5 success ledger.
+
+Schema v6 requires exact key equality for the producer event, measurement, dense binding, start/end observations,
+pre-save payload, quantization config (equal to the retained verified JSON bytes), each dataset observation, and the
+252-module hash object. Snapshot authority has one closed schema; if its environment variable exists, empty text,
+`{}`, `null`, the wrong type/schema, malformed evidence, or a missing canonical FD/evidence entry fails closed. Only
+complete controller-issued sealed descriptors can be consumed; mutable fallback exists solely when the authority
+environment variable is genuinely absent.
+
+One `_TrustedResources` descriptor set is now passed through authority receipt construction, signature verification,
+policy/command validation, and executable identity checks. Transcript validation performs no trust-config reload,
+trusted-path `stat`, or Python/script/policy/config reopen. Path replacement after retention therefore validates the
+reviewed descriptors, while same-inode/content mutation fails retained identity revalidation. Process executable
+identity comes only from opening `/proc/<pid>/exe` and hashing/fstat-ing that descriptor, so an unlinked running
+executable remains observable without interpreting a `(deleted)` pathname.
+
+Policy parsing and public/private-key derivation close owned resources on every success and exception. Standalone
+signing-key loading returns a context-owned authority containing live private/trust descriptors; leaving its context
+closes all of them, while controller-supplied resources remain controller-owned. FD-count regressions cover malformed
+policy and mismatched-key failures. No real BPW, Top-1, Diverse-32, or final-KL result is claimed.
+
+Implementation gates for schema v6, from parent `32e4a2437f94d0248d3ca21b7258bbb1d9050255`:
+
+- The exact focused-plus-unified pytest command passed all 119 tests with 14 upstream `torch.jit` warnings; the
+  identical collect-only command found exactly 119 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v6 trust/signing validation, and the
+  repository private-key scan passed.
+- Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
+  seven authoritative artifact hashes, and seven local Hub identities.
