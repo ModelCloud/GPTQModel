@@ -4,6 +4,7 @@
 import hashlib
 import json
 import secrets
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 import gptqmodel.utils.qvq_acceptance as acceptance
+import gptqmodel.utils.qvq_acceptance_controller as controller_module
 import scripts.accept_qwen3_8b_qvq as acceptance_script
 from gptqmodel.utils.qvq_acceptance import (
     MANIFEST_SPLITS,
@@ -46,6 +48,17 @@ from gptqmodel.utils.qvq_acceptance_controller import (
 from scripts.accept_qwen3_8b_qvq import build_parser as build_acceptance_parser
 
 FROZEN_SPLITS = Path(__file__).parent / "data" / "qwen3_8b_qvq_acceptance"
+
+
+@pytest.fixture(autouse=True)
+def _trusted_test_verifier(tmp_path, monkeypatch):
+    private = tmp_path / "verifier-private.pem"
+    public = tmp_path / "verifier-public.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private)], check=True)
+    subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)], check=True)
+    private.chmod(0o600)
+    monkeypatch.setattr(controller_module, "PINNED_VERIFIER_PUBLIC_KEY", public)
+    monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(private))
 
 
 def validate_acceptance_report(report):
@@ -402,7 +415,10 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
         "end": end,
     }
     measurements = (
-        {"dense_source_binding": dense_binding, "pre_save": {"dense_source_end_sha256": end["observation_sha256"], "payload": payload_hashes}},
+        {"dense_source_binding": dense_binding, "pre_save": {"dense_source_end_sha256": end["observation_sha256"], "payload": payload_hashes},
+         "quantize_config": {"bits": 2, "format": "qvq_v2b2_p32", "group_size": -1, "rounding": "yaqa", "sym": True, "pack_dtype": "int32", "bank_count": 2},
+         "quant_config_authority_sha256": acceptance._sha256_file(Path.cwd() / "configs" / "qwen3_8b_qvq_w2_acceptance.json"),
+         "layer_scope": "all", "datasets": {name: {"rows": 512, "content_sha256": "1" * 64, "identity_manifest_sha256": "2" * 64, "manifest_verified": True} for name in ("calibration", "yaqa", "validation")}},
         {"payload": payload_hashes},
         {"payload": payload_hashes},
     )
@@ -411,11 +427,21 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
     stages = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
     records = []
     for index, (stage, instance, nonce, measurement) in enumerate(zip(stages, instances, nonces, measurements)):
+        command = [
+            sys.executable,
+            str(Path.cwd() / "scripts" / ("qvq_quantize.py" if index == 0 else "accept_qwen3_8b_qvq.py")),
+            *([] if index == 0 else ["payload-hashes" if index == 1 else "evaluate"]),
+            *(["--verify-qwen3-acceptance-payload-parity"] if index == 0 else []),
+        ]
         event = {
             "run_nonce": controller.run_nonce,
+            "controller_instance_id": controller.controller_instance_id,
+            "controller_pid": controller.controller_pid,
             "stage": stage,
             "stage_nonce": nonce,
             "process_instance_id": instance,
+            "child_pid": (700, 700, 701)[index],
+            "child_parent_pid": controller.controller_pid,
             "measurement": measurement,
         }
         record = {
@@ -423,15 +449,24 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
             "stage_nonce": nonce,
             "process_instance_id": instance,
             "pid": (700, 700, 701)[index],
-            "parent_pid": 600,
-            "argv_sha256": f"{index + 1:064x}",
+            "parent_pid": controller.controller_pid,
+            "argv": command,
+            "argv_sha256": hashlib.sha256(b"\0".join(item.encode() for item in command)).hexdigest(),
             "spawned_monotonic_ns": index * 10 + 1,
             "event_received_monotonic_ns": index * 10 + 2,
-            "exited_monotonic_ns": index * 10 + 3,
+            "acknowledgement_sent_monotonic_ns": index * 10 + 4,
+            "exited_monotonic_ns": index * 10 + 5,
             "exit_code": 0,
             "event": event,
             "event_sha256": hashlib.sha256(acceptance.canonical_content(event)).hexdigest(),
             "previous_record_sha256": records[-1]["record_sha256"] if records else None,
+        }
+        record["acknowledgement"] = {
+            "acknowledged_event_sha256": record["event_sha256"],
+            **(
+                {"validation_policy": "qwen3-producer-pre-save-v1", "validated_before_save_monotonic_ns": 3}
+                if index == 0 else {}
+            ),
         }
         record["record_sha256"] = hashlib.sha256(acceptance.canonical_content(record)).hexdigest()
         records.append(record)
@@ -532,6 +567,7 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
     records[2]["event_sha256"] = hashlib.sha256(
         acceptance.canonical_content(records[2]["event"])
     ).hexdigest()
+    records[2]["acknowledgement"]["acknowledged_event_sha256"] = records[2]["event_sha256"]
     unsigned_record = dict(records[2])
     unsigned_record.pop("record_sha256")
     records[2]["record_sha256"] = hashlib.sha256(acceptance.canonical_content(unsigned_record)).hexdigest()
@@ -620,22 +656,80 @@ def test_controller_issues_unpredictable_run_stage_and_process_instance_identiti
     first = AcceptanceController()
     second = AcceptanceController()
     assert first.run_nonce != second.run_nonce
-    marker = tmp_path / "after-ack.txt"
-    command = [
-        sys.executable,
-        "-c",
-        (
-            "from pathlib import Path; "
-            "from gptqmodel.utils.qvq_acceptance_controller import emit_controller_measurement; "
-            "emit_controller_measurement('quantization_producer', {'live_pre_save': True}); "
-            f"Path({str(marker)!r}).write_text('serialized-after-controller-ack')"
-        ),
-    ]
-    record = first.spawn_stage("quantization_producer", command, cwd=Path.cwd(), timeout=10)
-    assert marker.read_text() == "serialized-after-controller-ack"
-    assert record["event"]["measurement"] == {"live_pre_save": True}
-    assert record["event_received_monotonic_ns"] <= record["exited_monotonic_ns"]
-    assert len({first.run_nonce, record["stage_nonce"], record["process_instance_id"]}) == 3
+    assert first.controller_instance_id != second.controller_instance_id
+    assert len({first.run_nonce, second.run_nonce, first.controller_instance_id, second.controller_instance_id}) == 4
+
+
+def test_controller_fails_closed_without_or_with_mismatched_trust_root(tmp_path, monkeypatch):
+    monkeypatch.delenv(controller_module.VERIFIER_PRIVATE_KEY_ENV)
+    with pytest.raises(RuntimeError, match="signing authority is absent"):
+        AcceptanceController()
+    attacker = tmp_path / "attacker.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(attacker)], check=True)
+    attacker.chmod(0o600)
+    monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(attacker))
+    with pytest.raises(RuntimeError, match="does not match the pinned public trust root"):
+        AcceptanceController()
+
+
+def test_controller_production_api_rejects_command_substitution():
+    controller = AcceptanceController()
+    with pytest.raises(ValueError, match="substituted the required executable"):
+        controller.spawn_stage(
+            "fresh_process_reload", [sys.executable, "-c", "raise SystemExit(0)"], cwd=Path.cwd()
+        )
+
+
+def test_gate_rejects_complete_attacker_key_final_checkpoint_fabrication(tmp_path):
+    report = _complete_report()
+    transcript = dict(report["artifact"]["acceptance_controller"])
+    transcript.pop("controller_signature_ed25519")
+    attacker_private = tmp_path / "attacker.pem"
+    attacker_public = tmp_path / "attacker.pub"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(attacker_private)], check=True)
+    subprocess.run(["openssl", "pkey", "-in", str(attacker_private), "-pubout", "-out", str(attacker_public)], check=True)
+    attacker_public_bytes = attacker_public.read_bytes()
+    transcript["verifier_public_key_sha256"] = hashlib.sha256(attacker_public_bytes).hexdigest()
+    transcript["controller_signature_ed25519"] = controller_module._sign(
+        attacker_private.read_bytes(), acceptance.canonical_content(transcript)
+    )
+    report["artifact"]["acceptance_controller"] = transcript
+    attacker_receipt = {
+        "schema": "qvq-acceptance-controller-trust-root-v2",
+        "controller_instance_id": transcript["controller_instance_id"],
+        "run_nonce": transcript["run_nonce"],
+        "verifier_public_key_sha256": hashlib.sha256(attacker_public_bytes).hexdigest(),
+        "transcript_sha256": hashlib.sha256(acceptance.canonical_content(transcript)).hexdigest(),
+    }
+    with pytest.raises(AcceptanceError, match="trust root|authority receipt"):
+        _validate_acceptance_report(report, controller_authority=attacker_receipt)
+
+
+@pytest.mark.parametrize("attack", ["command", "parent", "child", "injected", "split_identity"])
+def test_controller_rejects_signed_record_fact_substitution(attack):
+    report = _complete_report()
+    transcript = report["artifact"]["acceptance_controller"]
+    records = transcript["processes"]
+    if attack == "command":
+        records[1]["argv"][2] = "evaluate"
+    elif attack == "parent":
+        records[0]["parent_pid"] += 1
+    elif attack == "child":
+        records[0]["event"]["child_pid"] += 1
+    elif attack == "injected":
+        records.append(dict(records[-1]))
+    else:
+        report["artifact"]["dense_source_binding"]["producer_stage_nonce"] = records[1]["stage_nonce"]
+    with pytest.raises(AcceptanceError):
+        validate_acceptance_report(report)
+
+
+def test_invalid_producer_payload_is_rejected_before_acknowledgement():
+    report = _complete_report()
+    event = report["artifact"]["acceptance_controller"]["processes"][0]["event"]
+    event["measurement"]["pre_save"]["payload"]["module_sha256"].pop(expected_projection_names()[0])
+    with pytest.raises(AcceptanceError, match="pre-save controller validation"):
+        acceptance.validate_producer_pre_save_measurement(event["measurement"], event=event)
 
 
 def test_controller_rejects_fabricated_final_checkpoint_only_report():

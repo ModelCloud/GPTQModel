@@ -239,8 +239,9 @@ for an unpredictable run challenge, a separate stage nonce, and a separate proce
 producer, fresh reload, and evaluation. It creates an inherited socketpair for each child and records the actual child
 PID, controller PID, argv digest, monotonic spawn/event/exit times, exit code, event digest, and prior-record digest.
 PIDs are recorded facts only: repeated PIDs are legal, while controller-issued process-instance identities must remain
-unique. The complete transcript is signed by the controller's ephemeral Ed25519 key through OpenSSL 3 and the public
-key is carried with the signed transcript so stages cannot alter controller facts.
+unique. This revision signed the transcript with a controller-generated ephemeral Ed25519 key and carried that public
+key in the candidate transcript. The later trust-root review below rejects that self-selected-key authority while
+preserving this description as implementation history.
 
 The producer hashes the live in-memory packed model and sends its dense binding and pre-save payload over the inherited
 controller channel. It blocks until the controller acknowledges that exact event; only then can `model.save` execute.
@@ -278,3 +279,54 @@ stage events, missing spawn/exit facts, and self-authored evaluation evidence; a
 does not collapse two distinct controller-issued process instances. This correction changes no model-quality result:
 the full quantized artifact, BPW, Top-1/Diverse-32, and final-KL measurements remain unresolved until the command above
 is actually completed.
+
+## Rejected self-selected verifier and pinned trust-root correction (2026-08-23)
+
+Review of commit `49074531` rejected the preceding controller design. Its transcript-selected ephemeral public key and
+matching receipt were internally consistent but not independent authority: a final-checkpoint-only fabricator could
+generate another key and re-sign the entire construction. The receipt described above is therefore retained only as
+rejected history and is not the operational trust root.
+
+Controller schema v2 pins the verifier public key at
+`configs/qwen3_8b_acceptance_verifier_public.pem`, committed independently of candidate outputs. The corresponding
+Ed25519 private key is never stored in this repository. Before a run, an operator provisions it at an absolute path
+outside the checkout with mode `0600` and exports `GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY=/absolute/external/key.pem`.
+The controller derives its public key and requires an exact match with the pinned key before it creates a candidate
+run. Both controller startup and gate verification fail closed if the trust root is absent, malformed, or mismatched;
+a transcript-carried attacker key cannot override it. The output receipt binds the already-pinned fingerprint and is
+transport evidence, not authority selection.
+
+```bash
+install -m 600 /secure/operator/qwen3-acceptance-verifier-private.pem /secure/runtime/verifier.pem
+export GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY=/secure/runtime/verifier.pem
+openssl pkey -in "$GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY" -pubout |
+  cmp - configs/qwen3_8b_acceptance_verifier_public.pem
+```
+
+The controller now rejects substituted stage executables/subcommands and noncanonical producer model/row arguments
+before spawn. Signed records contain the exact argv plus digest, controller identity and parent PID, observed child and
+child-parent PIDs, unique stage/process identities, and monotonic spawn/event/exit chain. PID reuse remains permitted
+only when controller-issued process-instance identities differ. The validator independently rechecks those facts and
+directly joins the producer record identity tuple to dense start/end and all three parity observations.
+
+Most importantly, the producer cannot receive its pre-save acknowledgement after supplying only nonce-shaped data.
+Before acknowledging, the controller validates the pinned dense start/end map and seal, exact 252-module canonical
+live payload census/hashes, frozen W2 V2B2-P32 config, all-layer scope, and three verified 512-row manifest streams,
+all joined to the controller challenge and observed producer instance. Only that validated acknowledgement lets the
+producer proceed to `model.save`. Regressions cover a complete attacker-key/re-signed transcript and receipt,
+command substitution, false parent/child facts, injected records, split identity tuples, replay, and malformed live
+producer payload before acknowledgement. Real quantization quality evidence remains unresolved.
+
+Implementation gates for this trust-root correction, from parent `49074531c681e41fb2724b8d797c658f6f3ba5e9`:
+
+- `HOME=/root pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: 72 passed,
+  14 upstream `torch.jit` deprecation warnings.
+- The identical two-file `pytest --collect-only -q` command: exactly 72 tests collected.
+- `ruff check` and `python -m compileall -q` on both acceptance utilities, both CLIs, and both focused test files:
+  passed; `git diff --check` passed.
+- Help smokes passed for the acceptance root, `gate`, `controlled-run`, `payload-hashes`, `evaluate`, and the quantizer.
+- OpenSSL derived the external private key's public half and `cmp` matched the pinned PEM; repository scanning found
+  no private-key material; a controller signed/verified a schema-v2 empty-prefix transcript with pinned fingerprint
+  `5a16757e0eea7aa47b93b1ffa7e0b6000390cd61264e35ea960681e0dace0930`.
+- Pinned dense identity/integrity revalidation passed for all seven authoritative files, all 36 layers, and revision
+  `b968826d9c46dd6066d109eabc6255188de91218`.

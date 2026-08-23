@@ -603,7 +603,23 @@ def main(argv: list[str] | None = None) -> int:
         }
         emit_controller_measurement(
             "quantization_producer",
-            {"dense_source_binding": dense_source_binding, "pre_save": pre_save},
+            {
+                "dense_source_binding": dense_source_binding,
+                "pre_save": pre_save,
+                "quantize_config": config.to_dict(),
+                "quant_config_authority_sha256": hashlib.sha256(
+                    args.quant_config.expanduser().resolve().read_bytes()
+                ).hexdigest(),
+                "layer_scope": "all" if args.layers is None else {"first_layers": args.layers},
+                "datasets": {
+                    name: dataset_slice_evidence(spec)
+                    for name, spec in {
+                        "calibration": calibration_spec,
+                        "yaqa": yaqa_spec,
+                        "validation": validation_spec,
+                    }.items()
+                },
+            },
         )
         packed_payload_parity = {
             "controller_pending": True,

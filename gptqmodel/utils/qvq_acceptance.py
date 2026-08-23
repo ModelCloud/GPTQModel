@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import struct
 import sys
 from collections.abc import Iterable, Mapping, Sequence
@@ -215,6 +216,77 @@ def _valid_controller_identity(value: Any) -> bool:
     )
 
 
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def valid_qwen3_payload_hashes(payload: Any) -> bool:
+    """Validate the complete canonical 252-module live/reloaded payload census."""
+
+    if not isinstance(payload, dict):
+        return False
+    module_hashes = payload.get("module_sha256")
+    tensor_counts = payload.get("module_tensor_counts")
+    return (
+        payload.get("scheme") == QVQ_PAYLOAD_HASH_SCHEME
+        and payload.get("module_count") == QWEN3_EXPECTED_MODULE_COUNT
+        and isinstance(module_hashes, dict)
+        and set(module_hashes) == set(expected_projection_names())
+        and all(_valid_sha256(value) for value in module_hashes.values())
+        and isinstance(tensor_counts, dict)
+        and set(tensor_counts) == set(expected_projection_names())
+        and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in tensor_counts.values())
+        and _valid_sha256(payload.get("aggregate_sha256"))
+    )
+
+
+def validate_producer_pre_save_measurement(measurement: Any, *, event: Mapping[str, Any]) -> None:
+    """Fail closed before save unless the producer supplied the entire pinned live evidence."""
+
+    if not isinstance(measurement, dict):
+        raise AcceptanceError("producer pre-save measurement is absent")
+    dense = measurement.get("dense_source_binding")
+    pre_save = measurement.get("pre_save")
+    expected_config = {
+        "bits": 2, "format": "qvq_v2b2_p32", "group_size": -1, "rounding": "yaqa",
+        "sym": True, "pack_dtype": "int32", "bank_count": 2,
+    }
+    actual_config = measurement.get("quantize_config")
+    pinned_config_path = Path(__file__).resolve().parents[2] / "configs" / "qwen3_8b_qvq_w2_acceptance.json"
+    if (
+        not isinstance(actual_config, dict)
+        or any(actual_config.get(key) != value for key, value in expected_config.items())
+        or measurement.get("quant_config_authority_sha256") != _sha256_file(pinned_config_path)
+        or measurement.get("layer_scope") != "all"
+    ):
+        raise AcceptanceError("producer config/scope is not the canonical all-layer Qwen3 acceptance run")
+    datasets = measurement.get("datasets")
+    if not isinstance(datasets, dict) or set(datasets) != {"calibration", "yaqa", "validation"}:
+        raise AcceptanceError("producer calibration/evaluation manifest evidence is incomplete")
+    for evidence in datasets.values():
+        if (
+            not isinstance(evidence, dict) or evidence.get("rows") != 512
+            or not _valid_sha256(evidence.get("content_sha256"))
+            or not _valid_sha256(evidence.get("identity_manifest_sha256"))
+            or evidence.get("manifest_verified") is not True
+        ):
+            raise AcceptanceError("producer calibration/evaluation manifest evidence is invalid")
+    if not isinstance(dense, dict) or not isinstance(pre_save, dict):
+        raise AcceptanceError("producer dense/live pre-save evidence is incomplete")
+    identity = (event.get("run_nonce"), event.get("process_instance_id"), event.get("stage_nonce"))
+    if (
+        (dense.get("controller_run_nonce"), dense.get("producer_process_instance_id"), dense.get("producer_stage_nonce")) != identity
+        or not _valid_sealed_observation(dense.get("start"))
+        or not _valid_sealed_observation(dense.get("end"))
+        or dense["start"].get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
+        or dense["end"].get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
+        or dense["end"].get("previous_observation_sha256") != dense["start"].get("observation_sha256")
+        or pre_save.get("dense_source_end_sha256") != dense["end"].get("observation_sha256")
+        or not valid_qwen3_payload_hashes(pre_save.get("payload"))
+    ):
+        raise AcceptanceError("producer payload/dense binding failed pre-save controller validation")
+
+
 def validate_controller_transcript(
     transcript: Any,
     *,
@@ -229,7 +301,7 @@ def validate_controller_transcript(
         raise AcceptanceError("artifact lacks the independent acceptance controller transcript")
     try:
         expected_authority = controller_authority_receipt(transcript)
-    except (TypeError, ValueError) as error:
+    except (RuntimeError, TypeError, ValueError) as error:
         raise AcceptanceError("acceptance controller transcript cannot produce an authority receipt") from error
     if not isinstance(controller_authority, dict) or controller_authority != expected_authority:
         raise AcceptanceError("report is not bound to the independently supplied controller authority receipt")
@@ -240,6 +312,10 @@ def validate_controller_transcript(
     ):
         raise AcceptanceError("acceptance controller identities are not unpredictable 256-bit values")
     records = transcript.get("processes")
+    controller_pid = transcript.get("controller_pid")
+    controller_parent_pid = transcript.get("controller_parent_pid")
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in (controller_pid, controller_parent_pid)):
+        raise AcceptanceError("acceptance controller identity/parent PID binding is invalid")
     if not isinstance(records, list) or len(records) != len(CONTROLLER_STAGES):
         raise AcceptanceError("acceptance controller spawn/exit records are missing")
     if tuple(record.get("stage") for record in records if isinstance(record, dict)) != CONTROLLER_STAGES:
@@ -268,14 +344,16 @@ def validate_controller_transcript(
             or record["pid"] <= 0
             or not isinstance(record.get("parent_pid"), int)
             or record["parent_pid"] <= 0
+            or record.get("parent_pid") != controller_pid
             or record.get("exit_code") != 0
         ):
             raise AcceptanceError(f"controller {stage} spawn/exit metadata is invalid or unsuccessful")
         spawned = record.get("spawned_monotonic_ns")
         received = record.get("event_received_monotonic_ns")
+        acknowledged = record.get("acknowledgement_sent_monotonic_ns")
         exited = record.get("exited_monotonic_ns")
-        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (spawned, received, exited)) or not (
-            spawned <= received <= exited
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (spawned, received, acknowledged, exited)) or not (
+            spawned <= received <= acknowledged <= exited
         ):
             raise AcceptanceError(f"controller {stage} spawn/event/exit ordering is invalid")
         if previous_exit is not None and spawned < previous_exit:
@@ -288,12 +366,41 @@ def validate_controller_transcript(
         if record_hash != hashlib.sha256(canonical_content(unsigned_record)).hexdigest():
             raise AcceptanceError("acceptance controller record digest is invalid")
         previous_hash = record_hash
+        argv = record.get("argv")
+        if not isinstance(argv, list) or not argv or any(not isinstance(item, str) for item in argv):
+            raise AcceptanceError(f"controller {stage} canonical argv is absent")
+        argv_digest = hashlib.sha256(b"\0".join(os.fsencode(item) for item in argv)).hexdigest()
+        if record.get("argv_sha256") != argv_digest:
+            raise AcceptanceError(f"controller {stage} argv digest is invalid")
+        script = argv[1] if len(argv) > 1 else ""
+        tail = argv[2:]
+        if stage == CONTROLLER_STAGES[0]:
+            canonical = script.endswith("/scripts/qvq_quantize.py") and "--verify-qwen3-acceptance-payload-parity" in tail
+        elif stage == CONTROLLER_STAGES[1]:
+            canonical = script.endswith("/scripts/accept_qwen3_8b_qvq.py") and tail[:1] == ["payload-hashes"]
+        else:
+            canonical = script.endswith("/scripts/accept_qwen3_8b_qvq.py") and tail[:1] == ["evaluate"]
+        if not canonical:
+            raise AcceptanceError(f"controller {stage} command is not the canonical required command")
+        acknowledgement = record.get("acknowledgement")
+        if not isinstance(acknowledgement, dict) or acknowledgement.get("acknowledged_event_sha256") != record.get("event_sha256"):
+            raise AcceptanceError(f"controller {stage} acknowledgement is absent or unbound")
+        if stage == CONTROLLER_STAGES[0] and (
+            acknowledgement.get("validation_policy") != "qwen3-producer-pre-save-v1"
+            or not isinstance(acknowledgement.get("validated_before_save_monotonic_ns"), int)
+            or not received <= acknowledgement["validated_before_save_monotonic_ns"] <= acknowledged
+        ):
+            raise AcceptanceError("producer acknowledgement does not prove pre-save evidence validation")
         if (
             not isinstance(event, dict)
             or event.get("run_nonce") != transcript["run_nonce"]
+            or event.get("controller_instance_id") != transcript["controller_instance_id"]
+            or event.get("controller_pid") != controller_pid
             or event.get("stage") != stage
             or event.get("stage_nonce") != stage_nonce
             or event.get("process_instance_id") != instance
+            or event.get("child_pid") != record.get("pid")
+            or event.get("child_parent_pid") != controller_pid
             or record.get("event_sha256") != hashlib.sha256(canonical_content(event)).hexdigest()
         ):
             raise AcceptanceError(f"controller {stage} event is not bound to its spawned process instance")
@@ -1304,34 +1411,10 @@ def validate_acceptance_report(
         )
     observations = [parity.get(name) for name in ("pre_save", "fresh_process", "evaluation_reload")]
 
-    def valid_sha256(value: Any) -> bool:
-        return (
-            isinstance(value, str)
-            and len(value) == 64
-            and all(character in "0123456789abcdef" for character in value)
-        )
-
-    def valid_payload_hashes(payload: Any) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        module_hashes = payload.get("module_sha256")
-        tensor_counts = payload.get("module_tensor_counts")
-        aggregate = payload.get("aggregate_sha256")
-        return (
-            payload.get("scheme") == QVQ_PAYLOAD_HASH_SCHEME
-            and payload.get("module_count") == QWEN3_EXPECTED_MODULE_COUNT
-            and isinstance(module_hashes, dict)
-            and set(module_hashes) == set(expected_projection_names())
-            and all(valid_sha256(value) for value in module_hashes.values())
-            and isinstance(tensor_counts, dict)
-            and set(tensor_counts) == set(expected_projection_names())
-            and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in tensor_counts.values())
-            and valid_sha256(aggregate)
-        )
     if any(not isinstance(item, dict) for item in observations):
         raise AcceptanceError("packed payload parity evidence is incomplete or not controller-bound")
     payloads = [item.get("payload") for item in observations]
-    if any(not valid_payload_hashes(payload) for payload in payloads):
+    if any(not valid_qwen3_payload_hashes(payload) for payload in payloads):
         raise AcceptanceError(
             "packed payload parity evidence is incomplete or uses a noncanonical hash scheme"
         )

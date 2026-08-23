@@ -454,7 +454,7 @@ def _controlled_run(args: argparse.Namespace) -> int:
         "--output",
         str(checkpoint),
         "--quant-config",
-        str(args.quant_config),
+        str(args.quant_config.expanduser().resolve()),
         "--calibration-dataset",
         str(manifest_dir / "calibration.jsonl"),
         "--calibration-rows",
