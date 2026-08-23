@@ -1,5 +1,5 @@
 {
-  "wall_seconds_qvq_quantize_main": 187.98127346672118,
+  "wall_seconds_qvq_quantize_main": 181.60150829143822,
   "instrumented": [
     "qvq_cuda._qvq_cuda_hadamard_op",
     "qvq_cuda._qvq_cuda_op",
@@ -91,7 +91,7 @@
     "--model",
     "/monster/data/model/Llama-3.2-1B-Instruct",
     "--output",
-    "/root/qvq_prof/llama32_1b_layers2_fused",
+    "/root/qvq_prof/llama32_1b_layers2_fused_final3",
     "--format",
     "qvq_v2b2_p32",
     "--bits",
@@ -120,82 +120,82 @@
   "ranges": {
     "stage.process": {
       "calls": 14,
-      "host_seconds_total": 151.6697711115703,
-      "host_seconds_avg": 10.833555079397879,
-      "host_seconds_max": 19.264747119508684
+      "host_seconds_total": 146.69416485447437,
+      "host_seconds_avg": 10.478154632462454,
+      "host_seconds_max": 19.211580701172352
     },
     "stage.prepare_yaqa": {
       "calls": 1,
-      "host_seconds_total": 24.095472297631204,
-      "host_seconds_avg": 24.095472297631204,
-      "host_seconds_max": 24.095472297631204
+      "host_seconds_total": 23.41011006385088,
+      "host_seconds_avg": 23.41011006385088,
+      "host_seconds_max": 23.41011006385088
     },
     "qvq_cuda.viterbi_v2_segment_family_grid_trusted": {
       "calls": 12788,
-      "host_seconds_total": 12.624515968374908,
-      "host_seconds_avg": 0.0009872158248651008,
-      "host_seconds_max": 0.02448392938822508
-    },
-    "qvq_cuda.viterbi_v2_segment_tail_trusted": {
-      "calls": 4968,
-      "host_seconds_total": 10.591650397516787,
-      "host_seconds_avg": 0.0021319747176966157,
-      "host_seconds_max": 0.010979355312883854
+      "host_seconds_total": 12.769859951920807,
+      "host_seconds_avg": 0.0009985814788802633,
+      "host_seconds_max": 0.017222601920366287
     },
     "qvq_api.qvq_cuda_viterbi": {
       "calls": 5120,
-      "host_seconds_total": 5.669442747719586,
-      "host_seconds_avg": 0.0011073130366639817,
-      "host_seconds_max": 0.07699105236679316
+      "host_seconds_total": 5.557853291742504,
+      "host_seconds_avg": 0.0010855182210434578,
+      "host_seconds_max": 0.08032586518675089
+    },
+    "qvq_cuda.viterbi_v2_segment_tail_trusted": {
+      "calls": 4968,
+      "host_seconds_total": 3.119896980933845,
+      "host_seconds_avg": 0.0006279985871444938,
+      "host_seconds_max": 0.0068056657910346985
     },
     "qvq_cuda.viterbi": {
       "calls": 5120,
-      "host_seconds_total": 2.6914163874462247,
-      "host_seconds_avg": 0.0005256672631730908,
-      "host_seconds_max": 0.0761147839948535
+      "host_seconds_total": 2.656774453818798,
+      "host_seconds_avg": 0.000518901260511484,
+      "host_seconds_max": 0.07952452730387449
     },
     "qvq_cuda.viterbi_tail_trusted": {
       "calls": 5490,
-      "host_seconds_total": 1.4946262491866946,
-      "host_seconds_avg": 0.0002722452184310919,
-      "host_seconds_max": 0.007716328836977482
+      "host_seconds_total": 1.5099648339673877,
+      "host_seconds_avg": 0.0002750391318701981,
+      "host_seconds_max": 0.005668058060109615
     },
     "qvq_cuda.yaqa_feedback": {
       "calls": 7668,
-      "host_seconds_total": 0.7703291643410921,
-      "host_seconds_avg": 0.00010046024574088317,
-      "host_seconds_max": 0.022000549361109734
-    },
-    "stage.submodule_finalize": {
-      "calls": 14,
-      "host_seconds_total": 0.6524128569290042,
-      "host_seconds_avg": 0.04660091835207173,
-      "host_seconds_max": 0.06584305688738823
+      "host_seconds_total": 0.8123368574306369,
+      "host_seconds_avg": 0.00010593855730707314,
+      "host_seconds_max": 0.020135080441832542
     },
     "qvq_cuda.yaqa_feedback_update": {
       "calls": 7668,
-      "host_seconds_total": 0.5991935776546597,
-      "host_seconds_avg": 7.814209411250126e-05,
-      "host_seconds_max": 0.0006564911454916
+      "host_seconds_total": 0.6218865346163511,
+      "host_seconds_avg": 8.110153033598737e-05,
+      "host_seconds_max": 0.004035678692162037
+    },
+    "stage.submodule_finalize": {
+      "calls": 14,
+      "host_seconds_total": 0.5948497764766216,
+      "host_seconds_avg": 0.042489269748330116,
+      "host_seconds_max": 0.08323233295232058
     },
     "stage.preprocess": {
       "calls": 14,
-      "host_seconds_total": 0.014304790645837784,
-      "host_seconds_avg": 0.0010217707604169846,
-      "host_seconds_max": 0.003079746849834919
+      "host_seconds_total": 0.012768835760653019,
+      "host_seconds_avg": 0.0009120596971895013,
+      "host_seconds_max": 0.0019046077504754066
     },
     "stage.finalize": {
       "calls": 1,
-      "host_seconds_total": 0.0002869153395295143,
-      "host_seconds_avg": 0.0002869153395295143,
-      "host_seconds_max": 0.0002869153395295143
+      "host_seconds_total": 0.0002425219863653183,
+      "host_seconds_avg": 0.0002425219863653183,
+      "host_seconds_max": 0.0002425219863653183
     },
     "stage.prepare_module_granular_replay": {
       "calls": 1,
-      "host_seconds_total": 6.78282231092453e-06,
-      "host_seconds_avg": 6.78282231092453e-06,
-      "host_seconds_max": 6.78282231092453e-06
+      "host_seconds_total": 3.826804459095001e-06,
+      "host_seconds_avg": 3.826804459095001e-06,
+      "host_seconds_max": 3.826804459095001e-06
     }
   },
-  "pid": 2306166
+  "pid": 2429084
 }
