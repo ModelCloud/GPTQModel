@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import platform
+import stat
 import subprocess
 import sys
 import time
@@ -399,6 +400,121 @@ def validate_disjoint_slices(named_slices: dict[str, DatasetSlice | None]) -> No
                 )
 
 
+def _validated_snapshot_candidate(
+    role: str, expected_manifest_split: str, item: Any, evidence_keys: set[str]
+) -> dict[str, Any]:
+    """Build one complete role-local resource pair without consulting global uniqueness state."""
+
+    item_keys = {
+        "role", "source", "source_fd", "identity_manifest", "identity_manifest_fd",
+        "manifest_split", "evidence",
+    }
+    if not isinstance(item, dict) or set(item) != item_keys:
+        raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+    source = item["source"]
+    manifest_path = item["identity_manifest"]
+    source_fd = item["source_fd"]
+    manifest_fd = item["identity_manifest_fd"]
+    evidence = item["evidence"]
+    if (
+        item["role"] != role
+        or item["manifest_split"] != expected_manifest_split
+        or not isinstance(source, str)
+        or source != os.path.realpath(source)
+        or source != os.path.normpath(source)
+        or not isinstance(manifest_path, str)
+        or manifest_path != os.path.realpath(manifest_path)
+        or manifest_path != os.path.normpath(manifest_path)
+        or any(not isinstance(fd, int) or isinstance(fd, bool) or fd < 0 for fd in (source_fd, manifest_fd))
+        or not isinstance(evidence, dict)
+        or set(evidence) != evidence_keys
+    ):
+        raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+    try:
+        source_before = os.fstat(source_fd)
+        manifest_before = os.fstat(manifest_fd)
+        source_raw = os.pread(source_fd, source_before.st_size, 0)
+        manifest_raw = os.pread(manifest_fd, manifest_before.st_size, 0)
+        source_after = os.fstat(source_fd)
+        manifest_after = os.fstat(manifest_fd)
+    except OSError as error:
+        raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (
+        not stat.S_ISREG(source_before.st_mode)
+        or not stat.S_ISREG(manifest_before.st_mode)
+        or any(getattr(source_before, field) != getattr(source_after, field) for field in identity_fields)
+        or any(getattr(manifest_before, field) != getattr(manifest_after, field) for field in identity_fields)
+        or len(source_raw) != source_before.st_size
+        or len(manifest_raw) != manifest_before.st_size
+    ):
+        raise RuntimeError("controller dataset snapshot descriptor physical identity is unstable")
+    source_sha256 = hashlib.sha256(source_raw).hexdigest()
+    manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
+    if (
+        evidence["source"] != source
+        or evidence["config"] is not None
+        or evidence["split"] != "train"
+        or evidence["row_start"] != 0
+        or isinstance(evidence["row_start"], bool)
+        or evidence["rows"] != 512
+        or isinstance(evidence["rows"], bool)
+        or evidence["manifest_verified"] is not True
+        or evidence["identity_manifest"] != manifest_path
+        or evidence["content_sha256"] != source_sha256
+        or evidence["identity_manifest_sha256"] != manifest_sha256
+        or any(
+            not isinstance(value, str) or len(value) != 64 or value.lower() != value
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in (evidence["content_sha256"], evidence["identity_manifest_sha256"])
+        )
+    ):
+        raise RuntimeError("controller dataset snapshot evidence does not match retained descriptors")
+    if manifest_path != str(Path(source).with_suffix(".manifest.json")):
+        raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+    try:
+        lines = source_raw.decode("utf-8").splitlines()
+        manifest = json.loads(manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "split", "count", "samples"}
+        or manifest["schema_version"] != 1
+        or isinstance(manifest["schema_version"], bool)
+        or manifest["split"] != expected_manifest_split
+        or manifest["count"] != 512
+        or isinstance(manifest["count"], bool)
+        or not isinstance(manifest["samples"], list)
+        or len(manifest["samples"]) != 512
+        or len(lines) != 512
+    ):
+        raise RuntimeError("controller dataset identity manifest is not canonical")
+    identities: set[str] = set()
+    content_hashes: set[str] = set()
+    for ordinal, (line, sample) in enumerate(zip(lines, manifest["samples"])):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("controller dataset JSONL row is invalid") from error
+        identity = row.get("identity") if isinstance(row, dict) else None
+        if not isinstance(identity, str) or not identity:
+            raise RuntimeError("controller dataset JSONL identity is invalid")
+        content_hash = hashlib.sha256(
+            json.dumps(row.get("content"), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if sample != {"ordinal": ordinal, "identity": identity, "content_sha256": content_hash}:
+            raise RuntimeError("controller dataset identity manifest record does not match JSONL")
+        identities.add(identity)
+        content_hashes.add(content_hash)
+    if len(identities) != 512 or len(content_hashes) != 512:
+        raise RuntimeError("controller dataset identity manifest contains duplicate rows")
+    return {
+        "item": item, "paths": (source, manifest_path), "fds": (source_fd, manifest_fd),
+        "identities": identities, "content_hashes": content_hashes,
+    }
+
+
 def _controller_snapshot_authority() -> dict[str, Any] | None:
     name = "GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS"
     if name not in os.environ:
@@ -425,122 +541,34 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
     }
     seen_resource_paths: set[str] = set()
     seen_resource_fds: set[int] = set()
+    validated_sources: dict[str, dict[str, Any]] = {}
     identity_sets: dict[str, set[str]] = {}
     content_sets: dict[str, set[str]] = {}
     for role, expected_manifest_split in expected_manifest_splits.items():
-        item = sources[role]
-        item_keys = {
-            "role", "source", "source_fd", "identity_manifest", "identity_manifest_fd",
-            "manifest_split", "evidence",
-        }
-        if not isinstance(item, dict) or set(item) != item_keys:
-            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
-        source = item["source"]
-        manifest_path = item["identity_manifest"]
-        source_fd = item["source_fd"]
-        manifest_fd = item["identity_manifest_fd"]
-        evidence = item["evidence"]
-        if (
-            item["role"] != role
-            or item["manifest_split"] != expected_manifest_split
-            or not isinstance(source, str)
-            or source != os.path.realpath(source)
-            or source != os.path.normpath(source)
-            or not isinstance(manifest_path, str)
-            or manifest_path != os.path.realpath(manifest_path)
-            or manifest_path != os.path.normpath(manifest_path)
-            or any(not isinstance(fd, int) or isinstance(fd, bool) or fd < 0 for fd in (source_fd, manifest_fd))
-            or not isinstance(evidence, dict)
-            or set(evidence) != evidence_keys
-        ):
-            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+        candidate = _validated_snapshot_candidate(role, expected_manifest_split, sources[role], evidence_keys)
+        source, manifest_path = candidate["paths"]
+        source_fd, manifest_fd = candidate["fds"]
         if source == manifest_path:
             raise RuntimeError("controller dataset snapshot has duplicate path ambiguity within a role")
         if source_fd == manifest_fd:
             raise RuntimeError("controller dataset snapshot has duplicate descriptor ambiguity within a role")
-        try:
-            source_stat = os.fstat(source_fd)
-            manifest_stat = os.fstat(manifest_fd)
-            source_raw = os.pread(source_fd, source_stat.st_size, 0)
-            manifest_raw = os.pread(manifest_fd, manifest_stat.st_size, 0)
-        except OSError as error:
-            raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
-        source_sha256 = hashlib.sha256(source_raw).hexdigest()
-        manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
-        if (
-            evidence["source"] != source
-            or evidence["config"] is not None
-            or evidence["split"] != "train"
-            or evidence["row_start"] != 0
-            or isinstance(evidence["row_start"], bool)
-            or evidence["rows"] != 512
-            or isinstance(evidence["rows"], bool)
-            or evidence["manifest_verified"] is not True
-            or evidence["identity_manifest"] != manifest_path
-            or evidence["content_sha256"] != source_sha256
-            or evidence["identity_manifest_sha256"] != manifest_sha256
-            or any(
-                not isinstance(value, str) or len(value) != 64 or value.lower() != value
-                or any(character not in "0123456789abcdef" for character in value)
-                for value in (evidence["content_sha256"], evidence["identity_manifest_sha256"])
-            )
-        ):
-            raise RuntimeError("controller dataset snapshot evidence does not match retained descriptors")
-        role_paths = (source, manifest_path)
-        role_descriptors = (source_fd, manifest_fd)
+        role_paths = candidate["paths"]
+        role_descriptors = candidate["fds"]
         if any(path in seen_resource_paths for path in role_paths):
             raise RuntimeError("controller dataset snapshot has duplicate path ambiguity across resources")
         if any(fd in seen_resource_fds for fd in role_descriptors):
             raise RuntimeError("controller dataset snapshot has duplicate descriptor ambiguity across resources")
         seen_resource_paths.update(role_paths)
         seen_resource_fds.update(role_descriptors)
-        if manifest_path != str(Path(source).with_suffix(".manifest.json")):
-            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
-        try:
-            lines = source_raw.decode("utf-8").splitlines()
-            manifest = json.loads(manifest_raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
-        if (
-            not isinstance(manifest, dict)
-            or set(manifest) != {"schema_version", "split", "count", "samples"}
-            or manifest["schema_version"] != 1
-            or isinstance(manifest["schema_version"], bool)
-            or manifest["split"] != expected_manifest_split
-            or manifest["count"] != 512
-            or isinstance(manifest["count"], bool)
-            or not isinstance(manifest["samples"], list)
-            or len(manifest["samples"]) != 512
-            or len(lines) != 512
-        ):
-            raise RuntimeError("controller dataset identity manifest is not canonical")
-        identities: set[str] = set()
-        content_hashes: set[str] = set()
-        for ordinal, (line, sample) in enumerate(zip(lines, manifest["samples"])):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise RuntimeError("controller dataset JSONL row is invalid") from error
-            identity = row.get("identity") if isinstance(row, dict) else None
-            if not isinstance(identity, str) or not identity:
-                raise RuntimeError("controller dataset JSONL identity is invalid")
-            content_hash = hashlib.sha256(
-                json.dumps(row.get("content"), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
-            if sample != {"ordinal": ordinal, "identity": identity, "content_sha256": content_hash}:
-                raise RuntimeError("controller dataset identity manifest record does not match JSONL")
-            identities.add(identity)
-            content_hashes.add(content_hash)
-        if len(identities) != 512 or len(content_hashes) != 512:
-            raise RuntimeError("controller dataset identity manifest contains duplicate rows")
-        identity_sets[role] = identities
-        content_sets[role] = content_hashes
+        validated_sources[role] = candidate["item"]
+        identity_sets[role] = candidate["identities"]
+        content_sets[role] = candidate["content_hashes"]
     roles = tuple(expected_manifest_splits)
     for index, left in enumerate(roles):
         for right in roles[index + 1:]:
             if identity_sets[left] & identity_sets[right] or content_sets[left] & content_sets[right]:
                 raise RuntimeError("controller dataset snapshot splits are not content-disjoint")
-    return payload
+    return {"schema": payload["schema"], "sources": validated_sources}
 
 
 def load_dataset_slice(spec: DatasetSlice):

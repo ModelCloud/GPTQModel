@@ -509,6 +509,33 @@ Implementation gates for schema v5, from parent `752b9adffe6ea5f8538eb7a0525eff3
   `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers, seven authoritative artifact hashes, and seven local
   Hub content identities.
 
+## Rejected pre-coherence uniqueness ordering and local-candidate correction (2026-08-23)
+
+Independent verification rejected commit `b9de5c74`: despite its green tests, it consulted and mutated the global
+resource-uniqueness sets after only descriptor/evidence hash checks and before complete manifest/schema/512-record
+coherence. A malformed candidate that also aliased an earlier resource could therefore report uniqueness instead of
+its local trust failure, and the ledger's earlier success statement did not prove the required ordering.
+
+Each role is now built by `_validated_snapshot_candidate`, which has no access to the function-wide uniqueness sets.
+It validates canonical physical paths; stable regular-file descriptor identities before and after retained reads;
+exact path/hash evidence correspondence; the canonical source/manifest path relationship; manifest split, closed
+schema, count, and samples; and every one of the 512 JSONL identities and content hashes. Only the returned coherent
+candidate reaches same-role inequality and the shared path/FD uniqueness transaction. Both paths and both FDs are
+inserted only after all checks pass, and only then is the candidate committed to validated authority state.
+
+Ordering regressions prove a malformed aliased candidate reports coherence rather than uniqueness, locally coherent
+aliases reach the global uniqueness gate, and a failed local candidate cannot poison subsequent candidate
+validation. No real BPW, Top-1, Diverse-32, or final-KL metric is claimed.
+
+Implementation gates for this ordering correction, from parent `b9de5c74d0a990deac2db858a50c59a5d456f05b`:
+
+- The exact focused-plus-unified pytest invocation passed all 144 tests with 14 upstream `torch.jit` warnings; the
+  identical collect-only invocation found exactly 144 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v7 trust/signing validation, and the
+  repository private-key scan passed.
+- Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
+  seven authoritative artifact hashes, and seven local Hub identities.
+
 ## Rejected split-category uniqueness and schema-v7 ambiguity correction (2026-08-23)
 
 Review rejected commit `46863ae1`: its snapshot authority maintained separate source-path and manifest-path sets,
