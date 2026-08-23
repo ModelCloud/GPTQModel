@@ -533,6 +533,38 @@ Implementation gates for this correction, from parent `46863ae1f569480dbd7c47ca5
 - Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
   seven authoritative artifact hashes, and seven local Hub identities.
 
+## Rejected incoherent alias tests and resource-uniqueness correction (2026-08-23)
+
+Review rejected commit `eac9033a`: the ledger's claimed ambiguity coverage was a false positive. Its negative tests
+changed a path or FD without replacing the corresponding resource, so earlier path/evidence/content checks could
+reject incoherent mappings without demonstrating the intended global uniqueness gate. The implementation also made
+the uniqueness decision before establishing each path/FD resource from retained bytes and evidence. The preceding
+gate results remain historical execution results, but they are not evidence that the reviewed ambiguity was fixed.
+
+The producer now establishes coherent source and manifest resources from their canonical physical paths, retained
+descriptor bytes, and exact evidence hashes before uniqueness insertion. One `seen_resource_paths` set spans both
+path categories and all roles, and one `seen_resource_fds` set spans both FD categories and all roles. Within-role
+source/manifest equality has a dedicated duplicate-path or duplicate-descriptor failure. Globally, either resource
+path is checked against the shared path set and either descriptor against the shared FD set, with both inserted only
+after the coherent resource checks succeed. Errors state whether path or descriptor ambiguity caused rejection.
+
+The replacement regressions use coherent resource aliases. Path attacks pair the aliased path with a duplicate FD
+for the same retained bytes; FD attacks pair the reused FD with a distinct physical copy containing those bytes.
+They independently cover same-role source/manifest equality, source/source, manifest/manifest, both cross-category
+path directions, both same-category FD directions, and both cross-category FD directions, while preserving a valid
+distinct mapping. The constructor cleanup regression instruments assignment itself, proves the fully acquired
+authority was transferred into controller state, captures every authority/resource FD, and proves each FD is closed
+and the aggregate FD count restored after injected failure. No real metrics are claimed.
+
+Implementation gates for this correction, from parent `eac9033a6c91bc177e0e99b3cc02aac262b30f71`:
+
+- The exact focused-plus-unified pytest invocation passed all 142 tests with 14 upstream `torch.jit` warnings; the
+  identical collect-only invocation found exactly 142 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v7 trust/signing validation, and the
+  repository private-key scan passed.
+- Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
+  seven authoritative artifact hashes, and seven local Hub identities.
+
 ## Rejected open producer schemas and retained-validation schema v6 (2026-08-23)
 
 Review rejected commit `32e4a243`: schema v5 still permitted additional producer/config fields, treated a present

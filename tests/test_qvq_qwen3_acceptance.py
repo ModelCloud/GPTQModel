@@ -854,26 +854,29 @@ def test_failed_controller_constructor_closes_all_partially_owned_descriptors(tm
 
 
 def test_failed_controller_constructor_after_signing_authority_assignment_closes_all_descriptors(monkeypatch):
-    original = controller_module._load_trusted_signing_key
+    assigned: dict[str, object] = {}
+    original_setattr = AcceptanceController.__setattr__
 
-    class InjectedFailureAuthority:
-        def __init__(self, authority):
-            self.authority = authority
-
-        @property
-        def private_key(self):
+    def fail_after_transfer(controller, name, value):
+        original_setattr(controller, name, value)
+        if name == "_signing_authority" and value is not None:
+            assigned["controller"] = controller
+            assigned["authority"] = value
+            assigned["fds"] = [
+                value.private_file.descriptor,
+                *(trusted.descriptor for trusted in controller._resources.files.values()),
+            ]
+            assert controller._signing_authority is value
             raise RuntimeError("injected failure after signing-authority assignment")
 
-        def close(self):
-            self.authority.close()
-
-    def inject_after_acquisition(resources):
-        return InjectedFailureAuthority(original(resources))
-
-    monkeypatch.setattr(controller_module, "_load_trusted_signing_key", inject_after_acquisition)
+    monkeypatch.setattr(AcceptanceController, "__setattr__", fail_after_transfer)
     before = _open_fd_count()
     with pytest.raises(RuntimeError, match="after signing-authority assignment"):
         AcceptanceController()
+    assert assigned["controller"]._signing_authority is assigned["authority"]
+    for descriptor in assigned["fds"]:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
     assert _open_fd_count() == before
 
 
@@ -1261,43 +1264,59 @@ def test_snapshot_authority_rejects_semantically_false_evidence(monkeypatch, fie
             os.close(descriptor)
 
 
-def test_snapshot_authority_uses_explicit_mapping_and_rejects_ambiguity(monkeypatch):
-    authority, descriptors = _snapshot_authority()
-    try:
-        calibration = authority["sources"]["calibration"]
-        yaqa = authority["sources"]["yaqa"]
-        for key in ("source", "source_fd", "identity_manifest", "identity_manifest_fd", "evidence"):
-            yaqa[key] = calibration[key]
-        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
-        with pytest.raises(RuntimeError, match="ambiguous"):
-            quantize_script._controller_snapshot_authority()
-    finally:
-        for descriptor in descriptors:
-            os.close(descriptor)
-
-
 @pytest.mark.parametrize(
     "attack",
-    ["same_role_fd", "source_equals_other_manifest", "manifest_equals_other_source", "cross_category_fd"],
+    [
+        "same_role_resource", "source_source_path", "manifest_manifest_path",
+        "source_manifest_path", "manifest_source_path", "source_source_fd",
+        "manifest_manifest_fd", "source_manifest_fd", "manifest_source_fd",
+    ],
 )
-def test_snapshot_authority_rejects_global_path_and_descriptor_aliases(monkeypatch, attack):
+def test_snapshot_authority_rejects_coherent_global_resource_aliases(tmp_path, monkeypatch, attack):
     authority, descriptors = _snapshot_authority()
     calibration = authority["sources"]["calibration"]
     yaqa = authority["sources"]["yaqa"]
-    try:
-        if attack == "same_role_fd":
-            calibration["identity_manifest_fd"] = calibration["source_fd"]
-        elif attack == "source_equals_other_manifest":
-            yaqa["source"] = calibration["identity_manifest"]
-        elif attack == "manifest_equals_other_source":
-            yaqa["identity_manifest"] = calibration["source"]
+    extra_descriptors: list[int] = []
+
+    def replace_resource(target, target_kind, alias, alias_kind, *, duplicate_fd):
+        path_key = "source" if target_kind == "source" else "identity_manifest"
+        fd_key = "source_fd" if target_kind == "source" else "identity_manifest_fd"
+        hash_key = "content_sha256" if target_kind == "source" else "identity_manifest_sha256"
+        alias_path_key = "source" if alias_kind == "source" else "identity_manifest"
+        alias_fd_key = "source_fd" if alias_kind == "source" else "identity_manifest_fd"
+        alias_hash_key = "content_sha256" if alias_kind == "source" else "identity_manifest_sha256"
+        if duplicate_fd:
+            unique_path = tmp_path / f"unique-{attack}.{'jsonl' if target_kind == 'source' else 'json'}"
+            unique_path.write_bytes(os.pread(alias[alias_fd_key], os.fstat(alias[alias_fd_key]).st_size, 0))
+            target[path_key] = str(unique_path.resolve())
+            target[fd_key] = alias[alias_fd_key]
         else:
-            yaqa["source_fd"] = calibration["identity_manifest_fd"]
+            target[path_key] = alias[alias_path_key]
+            target[fd_key] = os.dup(alias[alias_fd_key])
+            extra_descriptors.append(target[fd_key])
+        target["evidence"][path_key] = target[path_key]
+        target["evidence"][hash_key] = alias["evidence"][alias_hash_key]
+
+    try:
+        if attack == "same_role_resource":
+            calibration["identity_manifest"] = calibration["source"]
+            calibration["identity_manifest_fd"] = calibration["source_fd"]
+            calibration["evidence"]["identity_manifest"] = calibration["source"]
+            calibration["evidence"]["identity_manifest_sha256"] = calibration["evidence"]["content_sha256"]
+            expected = "duplicate path ambiguity within a role"
+        elif attack.endswith("_path"):
+            target_kind, alias_kind, _suffix = attack.split("_")
+            replace_resource(yaqa, target_kind, calibration, alias_kind, duplicate_fd=False)
+            expected = "duplicate path ambiguity across resources"
+        else:
+            target_kind, alias_kind, _suffix = attack.split("_")
+            replace_resource(yaqa, target_kind, calibration, alias_kind, duplicate_fd=True)
+            expected = "duplicate descriptor ambiguity across resources"
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
-        with pytest.raises(RuntimeError, match="ambiguous"):
+        with pytest.raises(RuntimeError, match=expected):
             quantize_script._controller_snapshot_authority()
     finally:
-        for descriptor in descriptors:
+        for descriptor in [*descriptors, *extra_descriptors]:
             os.close(descriptor)
 
 

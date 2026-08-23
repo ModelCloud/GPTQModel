@@ -423,8 +423,8 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
     expected_manifest_splits = {
         "calibration": "calibration", "yaqa": "yaqa_tuning", "validation": "validation",
     }
-    physical_paths: set[str] = set()
-    descriptors: set[int] = set()
+    seen_resource_paths: set[str] = set()
+    seen_resource_fds: set[int] = set()
     identity_sets: dict[str, set[str]] = {}
     content_sets: dict[str, set[str]] = {}
     for role, expected_manifest_split in expected_manifest_splits.items():
@@ -454,27 +454,16 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
             or set(evidence) != evidence_keys
         ):
             raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
-        role_paths = (source, manifest_path)
-        role_descriptors = (source_fd, manifest_fd)
-        if (
-            len(set(role_paths)) != 2
-            or len(set(role_descriptors)) != 2
-            or any(path in physical_paths for path in role_paths)
-            or any(fd in descriptors for fd in role_descriptors)
-        ):
-            raise RuntimeError("controller dataset snapshot authority is ambiguous")
-        physical_paths.update(role_paths)
-        descriptors.update(role_descriptors)
-        if manifest_path != str(Path(source).with_suffix(".manifest.json")):
-            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+        if source == manifest_path:
+            raise RuntimeError("controller dataset snapshot has duplicate path ambiguity within a role")
+        if source_fd == manifest_fd:
+            raise RuntimeError("controller dataset snapshot has duplicate descriptor ambiguity within a role")
         try:
             source_stat = os.fstat(source_fd)
             manifest_stat = os.fstat(manifest_fd)
             source_raw = os.pread(source_fd, source_stat.st_size, 0)
             manifest_raw = os.pread(manifest_fd, manifest_stat.st_size, 0)
-            lines = source_raw.decode("utf-8").splitlines()
-            manifest = json.loads(manifest_raw)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        except OSError as error:
             raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
         source_sha256 = hashlib.sha256(source_raw).hexdigest()
         manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
@@ -497,6 +486,21 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
             )
         ):
             raise RuntimeError("controller dataset snapshot evidence does not match retained descriptors")
+        role_paths = (source, manifest_path)
+        role_descriptors = (source_fd, manifest_fd)
+        if any(path in seen_resource_paths for path in role_paths):
+            raise RuntimeError("controller dataset snapshot has duplicate path ambiguity across resources")
+        if any(fd in seen_resource_fds for fd in role_descriptors):
+            raise RuntimeError("controller dataset snapshot has duplicate descriptor ambiguity across resources")
+        seen_resource_paths.update(role_paths)
+        seen_resource_fds.update(role_descriptors)
+        if manifest_path != str(Path(source).with_suffix(".manifest.json")):
+            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+        try:
+            lines = source_raw.decode("utf-8").splitlines()
+            manifest = json.loads(manifest_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
         if (
             not isinstance(manifest, dict)
             or set(manifest) != {"schema_version", "split", "count", "samples"}
