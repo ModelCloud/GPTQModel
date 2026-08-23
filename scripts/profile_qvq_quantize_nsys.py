@@ -11,7 +11,8 @@ monkeypatches, at the Python module boundary only:
 * every ``gptqmodel.utils.qvq_cuda._qvq_cuda_*_op`` resolver so the returned ``torch.ops`` callable is
   wrapped in an NVTX range named ``qvq_cuda.<op>``; any op in ``required_ops`` that has no resolver and is
   dispatched directly (today: ``gemv_v4`` via ``torch.ops.gptqmodel_qvq.gemv_v4``) is wrapped at the
-  ``torch.ops`` namespace instead, so every registered op gets its own ``qvq_cuda.<op>`` range,
+  ``torch.ops`` namespace instead (the extension is force-loaded at setup so the wrap is in place before any
+  dispatch), so every registered op gets its own ``qvq_cuda.<op>`` range,
 * the public ``qvq_cuda_gemv`` / ``qvq_cuda_hadamard`` / ``qvq_cuda_viterbi*`` wrappers
   (``qvq_api.<name>``) so codec/GEMV paths are attributable even when the op is reached through them,
 * the ``gptqmodel.utils.qvq_cpu`` viterbi/hadamard/yaqa resolvers (``qvq_cpu.<op>``) so CPU fallbacks
@@ -84,7 +85,9 @@ def _ranged(name: str, fn):
     def wrapper(*args, **kwargs):
         patch = INSTRUMENTATION.get("direct_ops_patch")
         if patch is not None:
-            patch()
+            patch()  # lazy fallback; a no-op once every direct op is wrapped
+            if len(_DIRECT_OPS_PATCHED) < len(INSTRUMENTATION.get("direct_ops", ())):
+                INSTRUMENTATION["wrapped_calls_before_direct_patch"] += 1
         _nvtx.range_push(name)
         start = time.perf_counter()
         try:
@@ -133,8 +136,8 @@ def _patch_direct_torch_ops(namespace: str, ops: tuple[str, ...], installed: lis
 
     ``qvq_cuda_gemv`` calls ``torch.ops.gptqmodel_qvq.gemv_v4`` directly instead of going through a
     ``_qvq_cuda_*_op`` resolver, so wrapping resolvers alone can never produce a ``qvq_cuda.gemv_v4``
-    range.  The namespace only exposes the op once the JIT extension is loaded, so this is retried
-    lazily from every instrumented entry point until each op has been wrapped once.
+    range.  The namespace only exposes the op once the JIT extension is loaded, so ``install_instrumentation``
+    force-loads the extension and patches eagerly; the lazy retry from the wrappers is only a fallback.
     """
 
     pending = [op for op in ops if op not in _DIRECT_OPS_PATCHED]
@@ -173,7 +176,21 @@ def install_instrumentation() -> list[str]:
     namespace = qvq_cuda._QVQ_CUDA_NAMESPACE
     print(f"[profile_qvq_quantize_nsys] required_ops={len(required_ops)} resolver-wrapped={len(resolver_ops)} "
           f"direct (namespace-wrapped): {list(direct_ops)}", flush=True)
-    _patch_direct_torch_ops(namespace, direct_ops, installed)
+    # Force the JIT extension to load NOW so the namespace patch is in place before any op call can
+    # happen.  Without this, the first `qvq_cuda_gemv(..., vector_size=4)` call would resolve
+    # `_qvq_cuda_op()` (loading the extension) and then dispatch `torch.ops.gptqmodel_qvq.gemv_v4`
+    # directly, before any lazy retry could wrap it.
+    if direct_ops:
+        loaded = qvq_cuda.prewarm_qvq_cuda()
+        if not loaded:
+            raise RuntimeError(f"QVQ CUDA extension failed to load, cannot instrument {direct_ops}: "
+                               f"{qvq_cuda.qvq_cuda_error()}")
+        _patch_direct_torch_ops(namespace, direct_ops, installed)
+        missing = [op for op in direct_ops if op not in _DIRECT_OPS_PATCHED]
+        if missing:
+            raise RuntimeError(f"direct ops not wrapped after eager extension load: {missing}")
+    INSTRUMENTATION["direct_ops_patched_at_setup"] = sorted(_DIRECT_OPS_PATCHED)
+    INSTRUMENTATION["wrapped_calls_before_direct_patch"] = 0
     INSTRUMENTATION["required_ops"] = list(required_ops)
     INSTRUMENTATION["resolver_ops"] = sorted(resolver_ops)
     INSTRUMENTATION["direct_ops"] = list(direct_ops)
@@ -245,7 +262,8 @@ def main() -> int:
         forwarded += ["--layers", str(args.max_layers)]
 
     installed = install_instrumentation()
-    print(f"[profile_qvq_quantize_nsys] instrumented {len(installed)} call sites", flush=True)
+    print(f"[profile_qvq_quantize_nsys] instrumented {len(installed)} call sites; direct ops wrapped at setup: "
+          f"{INSTRUMENTATION.get('direct_ops_patched_at_setup')}", flush=True)
 
     import importlib.util
 
@@ -282,6 +300,9 @@ def main() -> int:
         "resolver_wrapped_ops": INSTRUMENTATION.get("resolver_ops", []),
         "direct_ops": INSTRUMENTATION.get("direct_ops", []),
         "direct_ops_patched": sorted(_DIRECT_OPS_PATCHED),
+        "direct_ops_patched_at_setup": INSTRUMENTATION.get("direct_ops_patched_at_setup", []),
+        # must be 0: number of instrumented calls that ran while a direct op was still unwrapped
+        "wrapped_calls_before_direct_patch": INSTRUMENTATION.get("wrapped_calls_before_direct_patch", 0),
         "forwarded_args": forwarded,
         "ranges": STATS.to_dict(),
         "pid": os.getpid(),

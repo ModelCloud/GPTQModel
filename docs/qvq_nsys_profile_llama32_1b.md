@@ -92,7 +92,7 @@ NVTX ranges (all injected by monkeypatching module attributes, nothing in `gptqm
   resolver (16 of the 17 `required_ops`; the resolver for `yaqa_feedback_update_` yields the range name
   `qvq_cuda.yaqa_feedback_update`). The one op with no resolver, `gemv_v4`, is called directly as
   `torch.ops.gptqmodel_qvq.gemv_v4` from `qvq_cuda_gemv()` (`qvq_cuda.py:737`) and is wrapped at the `torch.ops`
-  namespace instead (lazily, once the extension is loaded), so each of the 17 registered ops has its own range. The
+  namespace instead — the wrapper force-loads the extension at setup and patches immediately, so the wrap is in place before any dispatch (smoke-verified: the first `qvq_cuda_gemv(..., vector_size=4)` call lands in `qvq_cuda.gemv_v4`; the host JSON records `direct_ops_patched_at_setup` and a `wrapped_calls_before_direct_patch` counter that must be 0) — so each of the 17 registered ops has its own range. The
   wrapper records which ops were resolver-wrapped / namespace-wrapped in `*_host_attribution.json`
   (`resolver_wrapped_ops`, `direct_ops_patched`) and `summarize_qvq_nsys_stats.py` derives "invoked / not invoked"
   only for ops that were actually instrumented, listing any uninstrumented op separately.
