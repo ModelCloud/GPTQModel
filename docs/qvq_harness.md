@@ -509,6 +509,30 @@ Implementation gates for schema v5, from parent `752b9adffe6ea5f8538eb7a0525eff3
   `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers, seven authoritative artifact hashes, and seven local
   Hub content identities.
 
+## Rejected split-category uniqueness and schema-v7 ambiguity correction (2026-08-23)
+
+Review rejected commit `46863ae1`: its snapshot authority maintained separate source-path and manifest-path sets,
+so it did not explicitly reject a source path aliased to another role's manifest path, and it did not explicitly
+reject reuse of one FD as both source and manifest within a role. The accepted schema-v7 checks and all earlier
+results remain recorded above; this is a focused correction rather than a claim that the rejected ambiguity was safe.
+
+Snapshot validation now uses one global physical-path uniqueness set spanning every source and manifest path and one
+global descriptor uniqueness set spanning every source and manifest FD. It first requires the two paths and two FDs
+inside each role to be distinct, then rejects any cross-role or cross-category reuse before reading evidence. Runtime
+regressions cover same-role FD equality, source-to-other-manifest and manifest-to-other-source path aliases,
+cross-category FD reuse, and preservation of a valid mapping. A further FD-count regression acquires the complete
+signing authority, injects a constructor failure immediately after assignment, and proves both that authority and all
+trusted resources are closed. No real BPW, Top-1, Diverse-32, or final-KL result is claimed.
+
+Implementation gates for this correction, from parent `46863ae1f569480dbd7c47ca5c4a3a3d87ce55d6`:
+
+- The exact focused-plus-unified pytest invocation passed all 138 tests with 14 upstream `torch.jit` warnings; the
+  identical collect-only invocation found exactly 138 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v7 trust/signing validation, and the
+  repository private-key scan passed.
+- Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
+  seven authoritative artifact hashes, and seven local Hub identities.
+
 ## Rejected open producer schemas and retained-validation schema v6 (2026-08-23)
 
 Review rejected commit `32e4a243`: schema v5 still permitted additional producer/config fields, treated a present

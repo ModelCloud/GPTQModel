@@ -853,6 +853,30 @@ def test_failed_controller_constructor_closes_all_partially_owned_descriptors(tm
     assert _open_fd_count() == before
 
 
+def test_failed_controller_constructor_after_signing_authority_assignment_closes_all_descriptors(monkeypatch):
+    original = controller_module._load_trusted_signing_key
+
+    class InjectedFailureAuthority:
+        def __init__(self, authority):
+            self.authority = authority
+
+        @property
+        def private_key(self):
+            raise RuntimeError("injected failure after signing-authority assignment")
+
+        def close(self):
+            self.authority.close()
+
+    def inject_after_acquisition(resources):
+        return InjectedFailureAuthority(original(resources))
+
+    monkeypatch.setattr(controller_module, "_load_trusted_signing_key", inject_after_acquisition)
+    before = _open_fd_count()
+    with pytest.raises(RuntimeError, match="after signing-authority assignment"):
+        AcceptanceController()
+    assert _open_fd_count() == before
+
+
 def test_standalone_signing_key_context_owns_live_descriptors():
     with controller_module._load_trusted_signing_key() as authority:
         private_fd = authority.private_file.descriptor
@@ -1247,6 +1271,41 @@ def test_snapshot_authority_uses_explicit_mapping_and_rejects_ambiguity(monkeypa
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
         with pytest.raises(RuntimeError, match="ambiguous"):
             quantize_script._controller_snapshot_authority()
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["same_role_fd", "source_equals_other_manifest", "manifest_equals_other_source", "cross_category_fd"],
+)
+def test_snapshot_authority_rejects_global_path_and_descriptor_aliases(monkeypatch, attack):
+    authority, descriptors = _snapshot_authority()
+    calibration = authority["sources"]["calibration"]
+    yaqa = authority["sources"]["yaqa"]
+    try:
+        if attack == "same_role_fd":
+            calibration["identity_manifest_fd"] = calibration["source_fd"]
+        elif attack == "source_equals_other_manifest":
+            yaqa["source"] = calibration["identity_manifest"]
+        elif attack == "manifest_equals_other_source":
+            yaqa["identity_manifest"] = calibration["source"]
+        else:
+            yaqa["source_fd"] = calibration["identity_manifest_fd"]
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="ambiguous"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def test_snapshot_authority_preserves_valid_distinct_mapping(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        assert quantize_script._controller_snapshot_authority() == authority
     finally:
         for descriptor in descriptors:
             os.close(descriptor)

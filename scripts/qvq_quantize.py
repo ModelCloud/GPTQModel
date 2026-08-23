@@ -423,8 +423,7 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
     expected_manifest_splits = {
         "calibration": "calibration", "yaqa": "yaqa_tuning", "validation": "validation",
     }
-    source_paths: set[str] = set()
-    manifest_paths: set[str] = set()
+    physical_paths: set[str] = set()
     descriptors: set[int] = set()
     identity_sets: dict[str, set[str]] = {}
     content_sets: dict[str, set[str]] = {}
@@ -450,17 +449,24 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
             or not isinstance(manifest_path, str)
             or manifest_path != os.path.realpath(manifest_path)
             or manifest_path != os.path.normpath(manifest_path)
-            or manifest_path != str(Path(source).with_suffix(".manifest.json"))
             or any(not isinstance(fd, int) or isinstance(fd, bool) or fd < 0 for fd in (source_fd, manifest_fd))
             or not isinstance(evidence, dict)
             or set(evidence) != evidence_keys
         ):
             raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
-        if source in source_paths or manifest_path in manifest_paths or source_fd in descriptors or manifest_fd in descriptors:
+        role_paths = (source, manifest_path)
+        role_descriptors = (source_fd, manifest_fd)
+        if (
+            len(set(role_paths)) != 2
+            or len(set(role_descriptors)) != 2
+            or any(path in physical_paths for path in role_paths)
+            or any(fd in descriptors for fd in role_descriptors)
+        ):
             raise RuntimeError("controller dataset snapshot authority is ambiguous")
-        source_paths.add(source)
-        manifest_paths.add(manifest_path)
-        descriptors.update((source_fd, manifest_fd))
+        physical_paths.update(role_paths)
+        descriptors.update(role_descriptors)
+        if manifest_path != str(Path(source).with_suffix(".manifest.json")):
+            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
         try:
             source_stat = os.fstat(source_fd)
             manifest_stat = os.fstat(manifest_fd)
