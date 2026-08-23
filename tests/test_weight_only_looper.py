@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import torch
+import pytest
 from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
@@ -285,6 +286,62 @@ def test_weight_only_looper_quantizes_input_and_lm_head_embeddings_only(monkeypa
     assert qcfg.offload_to_disk is False
     assert qcfg.dynamic["embed_tokens"] == {"bits": 8, "group_size": 32}
     assert qcfg.dynamic["lm_head"] == {"bits": 8, "group_size": 32}
+
+
+@pytest.mark.parametrize(
+    "embed_quant_config",
+    [
+        QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+        QuantizeEmbedConfig(),
+    ],
+)
+def test_weight_only_looper_rejects_tied_embedding_parameters_before_quantization(
+    monkeypatch,
+    embed_quant_config,
+):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.lm_head.weight = model.model.embed_tokens.weight
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+
+    looper = WeightOnlyLooper(model=model, processor=processor, embed_quant_config=embed_quant_config)
+    with pytest.raises(NotImplementedError, match="shared weight parameter"):
+        looper.loop()
+
+    assert processor.quantized == []
+    assert processor.finalize_called is False
+    assert not hasattr(model, "_embedding_replacement_prefixes")
+    assert not hasattr(model, "_model_free_weight_only_embeddings_only")
+    assert qcfg.dynamic is None
+
+
+def test_weight_only_looper_deduplicates_same_embedding_parameter(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.get_output_embeddings_name = model.get_input_embeddings_name
+    model.get_output_embeddings = model.get_input_embeddings
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+    )
+    looper.loop()
+
+    assert processor.quantized == ["embed_tokens"]
+    assert model._embedding_replacement_prefixes == {"embed_tokens"}
 
 
 def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch):

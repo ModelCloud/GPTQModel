@@ -686,8 +686,27 @@ class WeightOnlyLooper:
         if self.embed_quant_mode is None:
             return []
 
+        input_name = self.gptq_model.get_input_embeddings_name()
+        input_module = self.gptq_model.get_input_embeddings()
+        output_name = self.gptq_model.get_output_embeddings_name()
+        output_module = self.gptq_model.get_output_embeddings()
+        input_weight = getattr(input_module, "weight", None)
+        output_weight = getattr(output_module, "weight", None)
+        if (
+            input_name is not None
+            and output_name is not None
+            and input_name != output_name
+            and input_weight is not None
+            and input_weight is output_weight
+        ):
+            raise NotImplementedError(
+                "Embedding quantization does not support distinct input and output modules with a shared weight "
+                "parameter. Untie the model weights before quantization."
+            )
+
         targets: List[Tuple[str, torch.nn.Module, str]] = []
         seen_names = set()
+        seen_weight_parameters = set()
 
         def append_target(name: Optional[str], module: Optional[torch.nn.Module], label: str) -> None:
             if module is None or name is None:
@@ -697,20 +716,25 @@ class WeightOnlyLooper:
                     f"This type({type(module)}) of {label} embeddings quantization is currently not supported. "
                     f"SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}"
                 )
-            if name not in seen_names:
-                seen_names.add(name)
-                targets.append((name, module, label))
+            weight = getattr(module, "weight", None)
+            weight_parameter_id = id(weight) if weight is not None else None
+            if name in seen_names or weight_parameter_id in seen_weight_parameters:
+                return
+            seen_names.add(name)
+            if weight_parameter_id is not None:
+                seen_weight_parameters.add(weight_parameter_id)
+            targets.append((name, module, label))
 
         if self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             append_target(
-                self.gptq_model.get_input_embeddings_name(),
-                self.gptq_model.get_input_embeddings(),
+                input_name,
+                input_module,
                 "input",
             )
         if self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
             append_target(
-                self.gptq_model.get_output_embeddings_name(),
-                self.gptq_model.get_output_embeddings(),
+                output_name,
+                output_module,
                 "output",
             )
         return targets
