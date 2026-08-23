@@ -362,6 +362,10 @@ Provision after installing the reviewed code and interpreter, before exposing an
   "python_executable_sha256": "<sha256sum of that interpreter>",
   "openssl_executable": "/absolute/resolved/operator/openssl",
   "openssl_executable_sha256": "<sha256sum of that OpenSSL executable>",
+  "acceptance_policy": "/reviewed/repo/configs/qwen3_8b_qvq_acceptance_policy.json",
+  "acceptance_policy_sha256": "<sha256>",
+  "quant_config": "/reviewed/repo/configs/qwen3_8b_qvq_w2_acceptance.json",
+  "quant_config_sha256": "<sha256>",
   "stage_scripts": {
     "quantization_producer": {"path": "/reviewed/repo/scripts/qvq_quantize.py", "sha256": "<sha256>"},
     "fresh_process_reload": {"path": "/reviewed/repo/scripts/accept_qwen3_8b_qvq.py", "sha256": "<sha256>"},
@@ -410,3 +414,57 @@ Implementation gates for the schema-v3 correction, from parent
   private key material.
 - Pinned dense identity/integrity passed for seven files, layers 0--35, and revision
   `b968826d9c46dd6066d109eabc6255188de91218`.
+
+## Rejected path/digest assertions and descriptor-owned schema v4 (2026-08-23)
+
+Review rejected commit `f4ba2e38`: it strengthened schema v3 but still hashed trusted executables through paths,
+checked containment lexically, accepted producer-authored 252-module digests without seeing tensor bytes, verified
+datasets before reopening them by name, omitted same-inode key mutation fields, left evaluation semantics and
+cross-stage paths partly caller-selectable, and split `/proc/<pid>/stat` on spaces. This is preserved as rejected
+design history rather than amended into a success.
+
+Schema v4 opens the trust JSON, external public/private keys, Python, OpenSSL, locked policy, quantization config, and
+stage scripts descriptor-first. Every path component is inspected with `lstat`; any final or parent-directory symlink
+fails closed. The opened descriptor must be a stable regular file with safe owner/mode, and its bytes are hashed
+between matching `fstat` observations. Trust/private containment uses the fully resolved physical path. Immediately
+before spawn and after the child's live event, the controller reopens/revalidates the exact trusted executable/script
+identities; `/proc/<pid>/exe` is itself opened and hashed to bind the running interpreter inode. The signing key's
+device, inode, size, nanosecond mtime/ctime, and content digest are rechecked before every signature, rejecting both
+path replacement and same-inode mutation.
+
+The controller snapshots all verified JSONL and manifest bytes into sealed Linux memfds. The producer inherits only
+those immutable descriptors and its dataset loader consumes `/proc/self/fd/<n>`, while reported evidence comes from
+the same controller snapshot. Changes to original paths after verification cannot affect calibration. Snapshot
+creation seals writes, growth, shrinkage, and further seal changes.
+
+Live pre-save evidence is no longer a digest assertion. Before `model.save`, the producer streams every direct packed
+tensor's canonical module/tensor name, dtype, shape, byte count, and actual contiguous bytes over the controller-owned
+socket. The controller enforces canonical order, exact 252-module census, all required packed tensor metadata,
+dtype/shape byte extents, hashes every frame itself, and recomputes module and aggregate digests. It acknowledges only
+when that independently computed payload equals the producer claim; a complete fabricated set of 252 coherent
+digests cannot pass.
+
+The externally pinned acceptance policy fixes revision
+`b968826d9c46dd6066d109eabc6255188de91218`, device `cuda:0`, all-layer scope, three 512-row streams, BPW `2.1`, score
+minimum `0.85`, and final-KL maximum `0.1`. Exact argv validation and the signed transcript require producer output,
+reload checkpoint, and evaluation checkpoint to be identical; all manifest/evaluation paths must derive from the
+same producer manifest directory. Re-signed revision, threshold, checkpoint, or dataset path substitutions fail.
+Linux stat parsing now finds the final `)` comm boundary and indexes fields 4 and 22 from the remaining fields, so
+spaces and parentheses in process names cannot shift PPID or process-start identity.
+
+New adversarial coverage includes parent-directory symlinks, same-inode key mutation, verify/use dataset mutation,
+fabricated coherent 252-module digests, re-signed revision/threshold/path swaps, and hostile proc comm strings. No
+private material is committed, and no real BPW, Top-1, Diverse-32, or final-KL result is claimed.
+
+Implementation gates for this schema-v4 correction, from parent
+`f4ba2e3867096aaa2ba8499bfb78a973dc20208d`:
+
+- `HOME=/root pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: 93 passed with
+  14 upstream `torch.jit` deprecation warnings; the identical two-file collect-only invocation found exactly 93.
+- Ruff, `compileall`, and `git diff --check` passed for the changed acceptance/controller, quantizer, and focused
+  test files. Six CLI help smokes passed, including the acceptance root/gate and controller entry points.
+- The operator provisioned an external root-owned trust configuration, Ed25519 public key, and private signing key
+  under `/root/.config/qvq`, all exact mode `0600`. Descriptor-first trust loading and signing-key/public-key matching
+  passed; repository scanning found no private key material.
+- The pinned dense model identity gate passed for `/monster/data/model/Qwen3-8B`, revision
+  `b968826d9c46dd6066d109eabc6255188de91218`, exact decoder layers 0--35, and the authoritative artifact hashes.

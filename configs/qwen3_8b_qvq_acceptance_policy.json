@@ -1,0 +1,13 @@
+{
+  "schema": "qwen3-8b-qvq-acceptance-policy-v1",
+  "dense_model": "/monster/data/model/Qwen3-8B",
+  "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "device": "cuda:0",
+  "layer_scope": "all",
+  "calibration_rows": 512,
+  "yaqa_rows": 512,
+  "validation_rows": 512,
+  "maximum_bpw": 2.1,
+  "score_min": 0.85,
+  "final_kl_max_nats": 0.1
+}

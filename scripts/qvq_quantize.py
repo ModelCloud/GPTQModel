@@ -45,6 +45,7 @@ from gptqmodel.utils.qvq_acceptance import (
     QWEN3_DENSE_ARTIFACT_SHA256,
     census_reloaded_model,
     hash_canonical_qwen3_payloads,
+    iter_canonical_qwen3_payload_records,
     seal_acceptance_observation,
     validate_qwen3_model_artifact,
 )
@@ -398,15 +399,19 @@ def validate_disjoint_slices(named_slices: dict[str, DatasetSlice | None]) -> No
 
 def load_dataset_slice(spec: DatasetSlice):
     path = Path(spec.source).expanduser()
+    snapshot_payload = json.loads(os.environ.get("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", "{}"))
+    snapshot_fds = snapshot_payload.get("fds", {}) if isinstance(snapshot_payload, dict) else {}
+    snapshot_fd = snapshot_fds.get(str(path.resolve()))
+    read_path = Path(f"/proc/self/fd/{snapshot_fd}") if isinstance(snapshot_fd, int) else path
     kwargs: dict[str, Any] = {"split": spec.split}
-    if path.is_file():
+    if isinstance(snapshot_fd, int) or path.is_file():
         suffix = path.suffix.lower()
         if suffix == ".parquet":
             dataset = load_dataset(
-                "parquet", data_files={spec.split: str(path)}, **kwargs
+                "parquet", data_files={spec.split: str(read_path)}, **kwargs
             )
         elif suffix in {".json", ".jsonl"}:
-            dataset = load_dataset("json", data_files={spec.split: str(path)}, **kwargs)
+            dataset = load_dataset("json", data_files={spec.split: str(read_path)}, **kwargs)
         else:
             raise ValueError(f"Unsupported local dataset file: {path}")
     else:
@@ -442,6 +447,11 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
 
     evidence = asdict(spec)
     path = Path(spec.source).expanduser()
+    snapshot_payload = json.loads(os.environ.get("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", "{}"))
+    snapshot_evidence = snapshot_payload.get("evidence", {}) if isinstance(snapshot_payload, dict) else {}
+    evidence_name = "yaqa" if path.name == "yaqa_tuning.jsonl" else path.stem
+    if evidence_name in snapshot_evidence:
+        return dict(snapshot_evidence[evidence_name])
     if not path.is_file():
         evidence["content_sha256"] = None
         evidence["identity_manifest"] = None
@@ -598,9 +608,10 @@ def main(argv: list[str] | None = None) -> int:
         }
     packed_payload_parity = None
     if args.verify_qwen3_acceptance_payload_parity:
+        acceptance_cells = census_reloaded_model(model)
         pre_save = {
             "dense_source_end_sha256": end_observation["observation_sha256"],
-            "payload": hash_canonical_qwen3_payloads(model, census_reloaded_model(model)),
+            "payload": hash_canonical_qwen3_payloads(model, acceptance_cells),
         }
         emit_controller_measurement(
             "quantization_producer",
@@ -621,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
                     }.items()
                 },
             },
+            live_payload_records=iter_canonical_qwen3_payload_records(model, acceptance_cells),
         )
         packed_payload_parity = {
             "controller_pending": True,

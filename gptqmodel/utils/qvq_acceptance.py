@@ -355,6 +355,7 @@ def validate_controller_transcript(
     nonces: set[str] = set()
     previous_hash = None
     previous_exit = None
+    parsed_commands: list[dict[str, str]] = []
     for record in records:
         stage = record["stage"]
         event = record.get("event")
@@ -407,6 +408,7 @@ def validate_controller_transcript(
             command_values = validate_required_command(stage, argv)
         except (RuntimeError, ValueError) as error:
             raise AcceptanceError(f"controller {stage} command is not the canonical required command") from error
+        parsed_commands.append(command_values)
         os_process = record.get("os_process")
         trust = load_trust_config()
         expected_cmdline = b"\0".join(os.fsencode(item) for item in argv) + b"\0"
@@ -418,6 +420,8 @@ def validate_controller_transcript(
             or os_process.get("start_time_ticks") <= 0
             or os_process.get("executable") != str(Path(trust["python_executable"]).resolve())
             or os_process.get("executable_sha256") != trust["python_executable_sha256"]
+            or not isinstance(os_process.get("executable_device"), int)
+            or not isinstance(os_process.get("executable_inode"), int)
             or os_process.get("cmdline_sha256") != hashlib.sha256(expected_cmdline).hexdigest()
         ):
             raise AcceptanceError(f"controller {stage} command is not the canonical required command")
@@ -449,6 +453,28 @@ def validate_controller_transcript(
         ):
             raise AcceptanceError(f"controller {stage} event is not bound to its spawned process instance")
 
+    producer_command, reload_command, evaluation_command = parsed_commands
+    manifest_dir = str(Path(producer_command["--calibration-dataset"]).parent)
+    cross_stage_paths = (
+        producer_command["--output"] == reload_command["--checkpoint"] == evaluation_command["--checkpoint"]
+        and producer_command["--yaqa-dataset"] == str(Path(manifest_dir) / "yaqa_tuning.jsonl")
+        and producer_command["--validation-dataset"] == evaluation_command["--validation-jsonl"]
+        and evaluation_command["--manifest-dir"] == manifest_dir
+        and evaluation_command["--held-out-diagnostics-jsonl"] == str(Path(manifest_dir) / "held_out_diagnostics.jsonl")
+        and evaluation_command["--diverse-jsonl"] == str(Path(manifest_dir) / "diverse_32.jsonl")
+    )
+    if not cross_stage_paths:
+        raise AcceptanceError("controller stage paths are split across checkpoint or manifest authorities")
+    if (
+        report.get("accounting", {}).get("maximum_bpw") != float(evaluation_command["--maximum-bpw"])
+        or report.get("thresholds") != {
+            "top1_agreement_min": float(evaluation_command["--score-min"]),
+            "diverse_32_min": float(evaluation_command["--score-min"]),
+            "final_kl_max_nats": float(evaluation_command["--final-kl-max-nats"]),
+        }
+    ):
+        raise AcceptanceError("report thresholds are split from the locked controller evaluation policy")
+
     producer_event, reload_event, evaluation_event = (record["event"] for record in records)
     producer_measurement = producer_event.get("measurement")
     reload_measurement = reload_event.get("measurement")
@@ -459,6 +485,8 @@ def validate_controller_transcript(
         raise AcceptanceError("dense source binding was not emitted by the controller-spawned producer")
     if producer_measurement.get("datasets") != transcript.get("controller_datasets"):
         raise AcceptanceError("producer manifest assertions do not match controller-opened trusted inputs")
+    if records[0].get("controller_live_payload") != producer_measurement.get("pre_save", {}).get("payload"):
+        raise AcceptanceError("producer payload digests are not backed by controller-hashed live tensor bytes")
     expected_parity = {
         "verified": True,
         "controller_run_nonce": transcript["run_nonce"],
@@ -833,6 +861,35 @@ def hash_canonical_qwen3_payloads(
             )
         selected.append((cell.name, module))
     return hash_qvq_module_payloads(selected)
+
+
+def iter_canonical_qwen3_payload_records(
+    model: torch.nn.Module, cells: Sequence[ProjectionCell]
+) -> Iterable[tuple[dict[str, Any], bytes]]:
+    """Yield canonical tensor metadata/bytes for controller-side independent live hashing."""
+
+    runtime_modules = dict(model.named_modules(remove_duplicate=False))
+    for cell in sorted(cells, key=lambda item: item.name.encode("utf-8")):
+        module = runtime_modules.get(cell.runtime_name or cell.name)
+        if module is None:
+            raise AcceptanceError(f"live payload stream cannot resolve {cell.name!r}")
+        tensors = {
+            **dict(module.named_parameters(prefix="", recurse=False)),
+            **dict(module.named_buffers(prefix="", recurse=False)),
+        }
+        for tensor_name in sorted(tensors, key=lambda value: value.encode("utf-8")):
+            tensor = tensors[tensor_name]
+            if tensor.is_meta:
+                raise AcceptanceError(f"live payload tensor {cell.name}.{tensor_name} is meta")
+            value = tensor.detach().contiguous().cpu()
+            raw = value.view(torch.uint8).numpy().tobytes(order="C")
+            yield ({
+                "module": cell.name,
+                "tensor": tensor_name,
+                "dtype": str(value.dtype),
+                "shape": list(value.shape),
+                "byte_count": len(raw),
+            }, raw)
 
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
