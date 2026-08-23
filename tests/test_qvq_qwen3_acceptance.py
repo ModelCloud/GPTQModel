@@ -1210,22 +1210,29 @@ def _snapshot_authority():
     }
     evidence, snapshots = controller_module._controller_dataset_bundle(values)
     mapping, descriptors = controller_module._sealed_snapshot_descriptors(snapshots)
+    path_mapping, path_descriptors = controller_module._dataset_path_descriptors(tuple(snapshots))
     authority = {
         "schema": "qvq-controller-dataset-snapshots-v2",
         "sources": {
             role: {
                 "role": role,
                 "source": item["source"],
-                "source_fd": mapping[item["source"]],
+                "source_fd": path_mapping[item["source"]],
+                "source_identity": controller_module._descriptor_identity(path_mapping[item["source"]]),
+                "source_snapshot_fd": mapping[item["source"]],
                 "identity_manifest": item["identity_manifest"],
-                "identity_manifest_fd": mapping[item["identity_manifest"]],
+                "identity_manifest_fd": path_mapping[item["identity_manifest"]],
+                "identity_manifest_identity": controller_module._descriptor_identity(
+                    path_mapping[item["identity_manifest"]]
+                ),
+                "identity_manifest_snapshot_fd": mapping[item["identity_manifest"]],
                 "manifest_split": "yaqa_tuning" if role == "yaqa" else role,
                 "evidence": item,
             }
             for role, item in evidence.items()
         },
     }
-    return authority, descriptors
+    return authority, [*descriptors, *path_descriptors]
 
 
 def test_snapshot_authority_missing_fd_and_evidence_fail_closed(monkeypatch):
@@ -1278,6 +1285,33 @@ def test_snapshot_authority_rejects_coherent_global_resource_aliases(tmp_path, m
     yaqa = authority["sources"]["yaqa"]
     extra_descriptors: list[int] = []
 
+    def make_yaqa_manifest_match_calibration():
+        manifest = json.loads(os.pread(
+            calibration["identity_manifest_fd"], os.fstat(calibration["identity_manifest_fd"]).st_size, 0
+        ))
+        manifest["split"] = "yaqa_tuning"
+        raw = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        path = tmp_path / f"{attack}.manifest.json"
+        path.write_bytes(raw)
+        path_fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        snapshot_fd = os.memfd_create(f"{attack}-manifest", os.MFD_CLOEXEC)
+        os.write(snapshot_fd, raw)
+        extra_descriptors.extend((path_fd, snapshot_fd))
+        yaqa["identity_manifest"] = str(path.resolve())
+        yaqa["identity_manifest_fd"] = path_fd
+        yaqa["identity_manifest_identity"] = controller_module._descriptor_identity(path_fd)
+        yaqa["identity_manifest_snapshot_fd"] = snapshot_fd
+        yaqa["evidence"]["identity_manifest"] = str(path.resolve())
+        yaqa["evidence"]["identity_manifest_sha256"] = hashlib.sha256(raw).hexdigest()
+
+    def alias_calibration_source(*, path: str, descriptor: int):
+        yaqa["source"] = path
+        yaqa["source_fd"] = descriptor
+        yaqa["source_identity"] = calibration["source_identity"]
+        yaqa["source_snapshot_fd"] = calibration["source_snapshot_fd"]
+        yaqa["evidence"]["source"] = path
+        yaqa["evidence"]["content_sha256"] = calibration["evidence"]["content_sha256"]
+
     def replace_resource(target, target_kind, alias, alias_kind, *, duplicate_fd):
         path_key = "source" if target_kind == "source" else "identity_manifest"
         fd_key = "source_fd" if target_kind == "source" else "identity_manifest_fd"
@@ -1303,35 +1337,26 @@ def test_snapshot_authority_rejects_coherent_global_resource_aliases(tmp_path, m
             calibration["identity_manifest_fd"] = calibration["source_fd"]
             calibration["evidence"]["identity_manifest"] = calibration["source"]
             calibration["evidence"]["identity_manifest_sha256"] = calibration["evidence"]["content_sha256"]
-            expected = "invalid source mapping"
-        elif attack.endswith("_path"):
-            # Alias both canonical labels while retaining the target's independently valid bytes/FDs.
-            yaqa["source"] = calibration["source"]
-            yaqa["identity_manifest"] = calibration["identity_manifest"]
-            yaqa["evidence"]["source"] = yaqa["source"]
-            yaqa["evidence"]["identity_manifest"] = yaqa["identity_manifest"]
+            expected = "retained descriptor identity|correspondence|sealed dataset snapshot|identity manifest"
+        elif attack == "source_source_path":
+            alias_calibration_source(path=calibration["source"], descriptor=calibration["source_fd"])
+            make_yaqa_manifest_match_calibration()
             expected = "duplicate path ambiguity across resources"
         elif attack == "source_source_fd":
-            # Reuse a prior source FD and construct a role-valid manifest for those exact rows.
-            yaqa["source_fd"] = calibration["source_fd"]
-            yaqa["evidence"]["content_sha256"] = calibration["evidence"]["content_sha256"]
-            manifest = json.loads(os.pread(
-                calibration["identity_manifest_fd"],
-                os.fstat(calibration["identity_manifest_fd"]).st_size,
-                0,
-            ))
-            manifest["split"] = "yaqa_tuning"
-            manifest_raw = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
-            manifest_fd = os.memfd_create("coherent-duplicate-source", os.MFD_CLOEXEC)
-            os.write(manifest_fd, manifest_raw)
-            extra_descriptors.append(manifest_fd)
-            yaqa["identity_manifest_fd"] = manifest_fd
-            yaqa["evidence"]["identity_manifest_sha256"] = hashlib.sha256(manifest_raw).hexdigest()
+            hardlink = tmp_path / "same-source-inode.jsonl"
+            os.link(calibration["source"], hardlink)
+            calibration["source_identity"] = controller_module._descriptor_identity(calibration["source_fd"])
+            alias_calibration_source(path=str(hardlink.resolve()), descriptor=calibration["source_fd"])
+            make_yaqa_manifest_match_calibration()
             expected = "duplicate descriptor ambiguity across resources"
         else:
-            target_kind, alias_kind, _suffix = attack.split("_")
-            replace_resource(yaqa, target_kind, calibration, alias_kind, duplicate_fd=True)
-            expected = "invalid source mapping|descriptor content|identity manifest"
+            if attack.endswith("_path"):
+                target_kind, alias_kind, _suffix = attack.split("_")
+                replace_resource(yaqa, target_kind, calibration, alias_kind, duplicate_fd=False)
+            else:
+                target_kind, alias_kind, _suffix = attack.split("_")
+                replace_resource(yaqa, target_kind, calibration, alias_kind, duplicate_fd=True)
+            expected = "correspondence|retained descriptor identity|sealed dataset snapshot|identity manifest"
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
         with pytest.raises(RuntimeError, match=expected):
             quantize_script._controller_snapshot_authority()
@@ -1346,9 +1371,11 @@ def test_snapshot_authority_coherence_precedes_alias_uniqueness(monkeypatch):
     yaqa = authority["sources"]["yaqa"]
     try:
         yaqa["source"] = calibration["source"]
-        yaqa["identity_manifest"] = calibration["identity_manifest"]
+        yaqa["source_fd"] = calibration["source_fd"]
+        yaqa["source_identity"] = calibration["source_identity"]
+        yaqa["source_snapshot_fd"] = calibration["source_snapshot_fd"]
         yaqa["evidence"]["source"] = yaqa["source"]
-        yaqa["evidence"]["identity_manifest"] = yaqa["identity_manifest"]
+        yaqa["evidence"]["content_sha256"] = calibration["evidence"]["content_sha256"]
         yaqa["evidence"]["rows"] = 511
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
         with pytest.raises(RuntimeError, match="evidence does not match"):
@@ -1387,6 +1414,76 @@ def test_snapshot_authority_preserves_valid_distinct_mapping(monkeypatch):
     try:
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
         assert quantize_script._controller_snapshot_authority() == authority
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["nonexistent", "path_fd_swap", "same_content_other_inode", "source_descriptor", "manifest_descriptor"],
+)
+def test_snapshot_candidate_rejects_physical_path_descriptor_mismatch(tmp_path, monkeypatch, attack):
+    authority, descriptors = _snapshot_authority()
+    calibration = authority["sources"]["calibration"]
+    validation = authority["sources"]["validation"]
+    extra_descriptors: list[int] = []
+    try:
+        if attack == "nonexistent":
+            missing = str((tmp_path / "missing.jsonl").resolve())
+            calibration["source"] = missing
+            calibration["evidence"]["source"] = missing
+            expected = "physical path cannot be opened"
+        elif attack == "path_fd_swap":
+            calibration["source_fd"], calibration["identity_manifest_fd"] = (
+                calibration["identity_manifest_fd"], calibration["source_fd"],
+            )
+            expected = "retained descriptor identity|correspondence"
+        elif attack == "same_content_other_inode":
+            copied = tmp_path / "same-content.jsonl"
+            copied.write_bytes(Path(calibration["source"]).read_bytes())
+            copied_fd = os.open(copied, os.O_RDONLY | os.O_CLOEXEC)
+            extra_descriptors.append(copied_fd)
+            calibration["source"] = str(copied.resolve())
+            calibration["source_fd"] = copied_fd
+            calibration["evidence"]["source"] = str(copied.resolve())
+            expected = "retained descriptor identity"
+        elif attack == "source_descriptor":
+            calibration["source_fd"] = validation["source_fd"]
+            expected = "retained descriptor identity|correspondence"
+        else:
+            calibration["identity_manifest_fd"] = validation["identity_manifest_fd"]
+            expected = "retained descriptor identity|correspondence"
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match=expected):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        for descriptor in [*descriptors, *extra_descriptors]:
+            os.close(descriptor)
+
+
+def test_snapshot_candidate_rejects_path_replacement_during_validation(tmp_path, monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    source = Path(authority["sources"]["calibration"]["source"])
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(source.read_bytes())
+    original_open = quantize_script._open_snapshot_physical_path
+    source_opens = 0
+
+    def replace_between_opens(path):
+        nonlocal source_opens
+        descriptor = original_open(path)
+        if path == str(source):
+            source_opens += 1
+            if source_opens == 1:
+                replacement.replace(source)
+        return descriptor
+
+    monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", replace_between_opens)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="physical identity is unstable|correspondence"):
+            quantize_script._controller_snapshot_authority()
     finally:
         for descriptor in descriptors:
             os.close(descriptor)

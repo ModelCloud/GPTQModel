@@ -391,6 +391,35 @@ def _sealed_snapshot_descriptors(snapshots: Mapping[str, bytes]) -> tuple[dict[s
     return mapping, descriptors
 
 
+def _dataset_path_descriptors(paths: Sequence[str]) -> tuple[dict[str, int], list[int]]:
+    """Retain the canonical original files so the producer can prove path/inode correspondence."""
+
+    mapping: dict[str, int] = {}
+    descriptors: list[int] = []
+    try:
+        for path in paths:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+            identity = os.fstat(descriptor)
+            if not stat.S_ISREG(identity.st_mode):
+                os.close(descriptor)
+                raise RuntimeError(f"controller dataset authority is not a regular file: {path}")
+            mapping[path] = descriptor
+            descriptors.append(descriptor)
+    except BaseException:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
+    return mapping, descriptors
+
+
+def _descriptor_identity(descriptor: int) -> dict[str, int]:
+    identity = os.fstat(descriptor)
+    return {
+        "device": identity.st_dev, "inode": identity.st_ino, "size": identity.st_size,
+        "mtime_ns": identity.st_mtime_ns, "ctime_ns": identity.st_ctime_ns,
+    }
+
+
 def _parse_linux_proc_stat(value: str) -> tuple[int, str, int, int]:
     opening = value.find("(")
     closing = value.rfind(")")
@@ -978,8 +1007,10 @@ class AcceptanceController:
         if stage == CONTROLLER_STAGES[0]:
             controller_datasets, dataset_snapshots = _controller_dataset_bundle(command_values)
             snapshot_mapping, snapshot_descriptors = _sealed_snapshot_descriptors(dataset_snapshots)
+            path_mapping, path_descriptors = _dataset_path_descriptors(tuple(dataset_snapshots))
         else:
             controller_datasets, snapshot_mapping, snapshot_descriptors = None, {}, []
+            path_mapping, path_descriptors = {}, []
         stage_nonce = _new_identity()
         process_instance_id = _new_identity()
         parent_channel, child_channel = socket.socketpair()
@@ -999,9 +1030,15 @@ class AcceptanceController:
                         name: {
                             "role": name,
                             "source": evidence["source"],
-                            "source_fd": snapshot_mapping[evidence["source"]],
+                            "source_fd": path_mapping[evidence["source"]],
+                            "source_identity": _descriptor_identity(path_mapping[evidence["source"]]),
+                            "source_snapshot_fd": snapshot_mapping[evidence["source"]],
                             "identity_manifest": evidence["identity_manifest"],
-                            "identity_manifest_fd": snapshot_mapping[evidence["identity_manifest"]],
+                            "identity_manifest_fd": path_mapping[evidence["identity_manifest"]],
+                            "identity_manifest_identity": _descriptor_identity(
+                                path_mapping[evidence["identity_manifest"]]
+                            ),
+                            "identity_manifest_snapshot_fd": snapshot_mapping[evidence["identity_manifest"]],
                             "manifest_split": "yaqa_tuning" if name == "yaqa" else name,
                             "evidence": evidence,
                         }
@@ -1028,13 +1065,15 @@ class AcceptanceController:
             env=environment,
             pass_fds=(
                 child_channel.fileno(), python_file.descriptor, script_file.descriptor,
-                *((quant_fd,) if quant_fd is not None else ()), *snapshot_descriptors,
+                *((quant_fd,) if quant_fd is not None else ()), *snapshot_descriptors, *path_descriptors,
             ),
         )
         pid_descriptor = os.pidfd_open(process.pid, 0)
         initial_os_process = _observe_linux_process(process.pid)
         child_channel.close()
         for descriptor in snapshot_descriptors:
+            os.close(descriptor)
+        for descriptor in path_descriptors:
             os.close(descriptor)
         parent_channel.settimeout(timeout)
         try:

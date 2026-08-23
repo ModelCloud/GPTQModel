@@ -536,6 +536,35 @@ Implementation gates for this ordering correction, from parent `b9de5c74d0a990de
 - Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
   seven authoritative artifact hashes, and seven local Hub identities.
 
+## Rejected content-only path labels and physical path/FD correction (2026-08-23)
+
+Independent verification rejected commit `2098f9b5`: the local candidate checked descriptor stability and evidence
+content but did not prove that the canonical source and manifest pathnames still named the same inodes as the
+controller-retained descriptors. A nonexistent, swapped, replaced, or unrelated same-content path could therefore
+evade the intended path/FD trust boundary before uniqueness.
+
+The controller now retains two descriptor classes for every input: an original path-identity descriptor with an
+operator-issued device/inode/size/mtime/ctime identity, and the existing sealed memfd snapshot consumed by the
+producer. Candidate validation opens every physical path component descriptor-first with `openat` and `O_NOFOLLOW`,
+requires a stable regular file, matches device/inode and the complete issued identity to the retained original FD,
+compares bytes, reopens the pathname to detect replacement, and independently proves the sealed snapshot is
+byte-identical. All of this completes before any same-role or global uniqueness check or set mutation. Dataset loading
+continues exclusively through the sealed snapshot FD, preserving immutable verify/use behavior.
+
+Regressions reject nonexistent paths, path/FD swaps, unrelated same-content inodes, mismatched source and manifest
+descriptors, and replacement during validation. The coherent alias regression now pairs a physical path with the FD
+for that exact inode and supplies a role-valid independent manifest/evidence pair, so it reaches the intended global
+path or descriptor uniqueness gate; mislabeled FDs fail local correspondence. No real metrics are claimed.
+
+Implementation gates for this correction, from parent `2098f9b589f10c43f9c666e4feb0b7c171817657`:
+
+- The exact focused-plus-unified pytest invocation passed all 150 tests with 14 upstream `torch.jit` warnings; the
+  identical collect-only invocation found exactly 150 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v7 trust/signing validation, and the
+  repository private-key scan passed.
+- Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
+  seven authoritative artifact hashes, and seven local Hub identities.
+
 ## Rejected split-category uniqueness and schema-v7 ambiguity correction (2026-08-23)
 
 Review rejected commit `46863ae1`: its snapshot authority maintained separate source-path and manifest-path sets,
