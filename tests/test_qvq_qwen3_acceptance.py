@@ -1649,6 +1649,76 @@ def test_snapshot_candidate_rejects_entry_replacement_after_final_open(monkeypat
             os.close(descriptor)
 
 
+def test_snapshot_candidate_rejects_source_replacement_after_third_reopen(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    source = Path(authority["sources"]["calibration"]["source"])
+    replacement = source.with_name(f".{source.name}.replacement")
+    backup = source.with_name(f".{source.name}.original")
+    replacement.write_bytes(source.read_bytes())
+    original_open = quantize_script._open_snapshot_entry
+    original_read = quantize_script._stable_exact_descriptor_read
+    source_opens = 0
+    source_entry_fd = None
+    replaced = False
+
+    def identify_third_source_open(parent_fd, name, resources):
+        nonlocal source_opens, source_entry_fd
+        descriptor = original_open(parent_fd, name, resources)
+        if name == source.name:
+            source_opens += 1
+            if source_opens == 3:
+                source_entry_fd = descriptor
+        return descriptor
+
+    def replace_after_source_entry_read(descriptor, resource):
+        nonlocal replaced
+        result = original_read(descriptor, resource)
+        if descriptor == source_entry_fd and not replaced:
+            replaced = True
+            source.replace(backup)
+            replacement.replace(source)
+        return result
+
+    monkeypatch.setattr(quantize_script, "_open_snapshot_entry", identify_third_source_open)
+    monkeypatch.setattr(quantize_script, "_stable_exact_descriptor_read", replace_after_source_entry_read)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="closing source directory entry changed"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        if source.exists():
+            source.unlink()
+        if backup.exists():
+            backup.replace(source)
+        if replacement.exists():
+            replacement.unlink()
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def test_snapshot_candidate_source_manifest_source_closing_check_accepts_valid_mapping(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    source = Path(authority["sources"]["calibration"]["source"])
+    original_open = quantize_script._open_snapshot_entry
+    source_opens = 0
+
+    def count_source_opens(parent_fd, name, resources):
+        nonlocal source_opens
+        descriptor = original_open(parent_fd, name, resources)
+        if name == source.name:
+            source_opens += 1
+        return descriptor
+
+    monkeypatch.setattr(quantize_script, "_open_snapshot_entry", count_source_opens)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        assert quantize_script._controller_snapshot_authority()["schema"] == authority["schema"]
+        assert source_opens == 4
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
 @pytest.mark.parametrize("failure_call", [2, 4])
 def test_snapshot_candidate_second_open_failure_closes_every_acquired_fd(monkeypatch, failure_call):
     original_open = quantize_script._open_snapshot_entry

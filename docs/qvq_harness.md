@@ -529,6 +529,18 @@ injected failures at the initial and final second-entry opens prove aggregate FD
 replacement backups live beside their target for same-filesystem rename-safe restoration. Mutation fixtures restore
 bytes and mtime only; ctime is deliberately neither restored nor claimed. No real metrics are claimed.
 
+Bounded follow-up review of `44c2e02a` found one remaining ordering window: the source entry could change after its
+third open while the manifest entry was opened and read. The final sequence is now source-manifest-source. A closing
+`O_NOFOLLOW` source reopen through the retained parent immediately precedes candidate success and exactly revalidates
+regular identity, device/inode, size, mtime, ctime, bytes, and digest against the issued identity and prior final
+source descriptor. A targeted third-open replacement regression rejects that window; a distinct-mapping positive
+control proves all four source opens complete normally. No metrics are claimed.
+
+Implementation gates for this bounded correction, from parent
+`44c2e02a183503493fe16b46a82b6a8667ea1cb9`: the exact focused-plus-unified pytest invocation passed all 161 tests
+with 14 upstream `torch.jit` warnings, and its collect-only counterpart found exactly 161 tests. Focused Ruff,
+`compileall`, `git diff --check`, and all six CLI help smokes passed.
+
 Implementation gates for this correction, from parent `0157b3b5358fd26298164a30f12f0acc108e0e0b`:
 
 - `HOME=/root pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py` passed all 159 tests

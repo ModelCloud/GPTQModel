@@ -669,6 +669,20 @@ def _validated_snapshot_candidate_owned(
         or hashlib.sha256(manifest_entry_raw).hexdigest() != evidence["identity_manifest_sha256"]
     ):
         raise RuntimeError("controller dataset snapshot final manifest directory entry changed")
+    # Close the source-manifest-source window: source may have been replaced
+    # after source_entry_fd opened while the manifest entry was validated.
+    source_closing_fd = _open_snapshot_entry(source_parent_fd, source_name, resources)
+    source_closing_raw, source_closing_identity = _stable_exact_descriptor_read(
+        source_closing_fd, "closing source directory entry"
+    )
+    if (
+        _descriptor_identity_value(source_closing_identity) != source_identity
+        or _descriptor_identity_value(source_closing_identity)
+        != _descriptor_identity_value(source_final_identity)
+        or source_closing_raw != source_final_raw
+        or hashlib.sha256(source_closing_raw).hexdigest() != evidence["content_sha256"]
+    ):
+        raise RuntimeError("controller dataset snapshot closing source directory entry changed")
     return {
         "item": item, "paths": (source, manifest_path), "fds": (source_fd, manifest_fd),
         "snapshot_fds": (source_snapshot_fd, manifest_snapshot_fd),
