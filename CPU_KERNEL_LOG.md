@@ -512,6 +512,9 @@ shape bits/E M before_med before_min after_med after_min speed speed_min python 
 For E=2/4 and E=3.5/7, every required M>1 case beats the pristine baseline by median. E=5.0/10 remains on
 the generic fallback; its near-neutral and negative deltas are not attributed to the specialized panel. The
 maximum native-vs-dense errors are `max_abs=8.697510e-04`, `mean_abs=5.436152e-05`, and `relative-L2=1.200765e-06`.
+The sub-10% and generic-path cases were repeated with the same five-warmup/30-timing protocol; results varied
+substantially between runs (for example, 4096/E10/M1 was 1.408 -> 2.347 ms and 2048/E10/M1 was 0.349 -> 0.351
+ms), confirming that those small deltas are measurement noise rather than a panel conclusion.
 
 The requested test command reported `764 passed, 263 skipped, 9 failed`; eight failures reproduce on clean origin.
 The bitshift case was run isolated and in the full selected set on clean origin and passed in both modes, so it is
