@@ -650,7 +650,7 @@ class WeightOnlyLooper:
         if isinstance(resolved, NamedModule):
             return resolved
 
-        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layer_path}.{module_name}"
+        layer_name = module_name if is_lm_head_module else f"{layer_path}.{module_name}"
         named = NamedModule(
             resolved,
             name=module_name,
@@ -790,18 +790,19 @@ class WeightOnlyLooper:
 
         self._configure_embedding_dynamic_defaults(embedding_targets)
         embedding_target_names = {name for name, _module, _label in embedding_targets}
-        if not embed_only and quant_config.lm_head and self.gptq_model.lm_head not in embedding_target_names:
+        lm_head_name = self.gptq_model.get_output_embeddings_name() or self.gptq_model.lm_head
+        if not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
                 for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
+                    if lm_head_name in item:
                         raise NotImplementedError(
                             "quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`."
                         )
 
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            lm_head_module = get_module(self.gptq_model.model, key=lm_head_name)
             if lm_head_module is None:
-                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
+                raise ValueError(f"could not find layer {lm_head_name} in the model, exit...")
             if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
                 raise NotImplementedError(
                     f"This type({type(lm_head_module)}) of lm_head quantization is currently not supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}"
@@ -859,7 +860,7 @@ class WeightOnlyLooper:
 
         layer_count = len(layers)
         quant_lm_head_in_loop = bool(
-            not embed_only and quant_config.lm_head and self.gptq_model.lm_head not in embedding_target_names
+            not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names
         )
         total_layers = (
             len(embedding_targets)
@@ -924,8 +925,8 @@ class WeightOnlyLooper:
                 # Transformer blocks and lm_head follow the same weight-only
                 # lifecycle, but lm_head is resolved from the root model.
                 if is_lm_head_module:
-                    module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-                    subsets = [[self.gptq_model.lm_head]]
+                    module = get_module(self.gptq_model.model, key=lm_head_name)
+                    subsets = [[lm_head_name]]
                 else:
                     module = layers[layer_index]
                     subsets = layer_modules
@@ -956,7 +957,7 @@ class WeightOnlyLooper:
                 # Resolve concrete submodules after any pre-quantization
                 # transforms so quantization targets the final layer layout.
                 materialize_model(module)
-                full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
+                full = find_modules(module, name=lm_head_name if is_lm_head_module else "")
                 layer_strategy_modules = None if is_lm_head_module else planning_layer_modules
                 layer_strategy_device_map = self._build_layer_strategy_device_map(
                     full=full,
