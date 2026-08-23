@@ -29,7 +29,10 @@
 #include <torch/library.h>
 #include <torch/types.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <type_traits>
 #include <limits>
 #include <mutex>
@@ -2166,6 +2169,636 @@ void launch_qvq_v2_segment_w25_cooperative(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Fused W2 (Shift=4) two-bank P32 family-grid recurrence.
+//
+// Replaces the 8 x qvq_v2_segment_grid_kernel<4,2,16,fused> + finalize +
+// codebook-norm-pack launches of viterbi_v2_segment_family_grid_trusted with a
+// persistent kernel that owns one whole sequence (both banks) per CTA:
+//
+//  * work unit = (sequence, 16-step segment); CTAs pull units from an atomic
+//    queue in segment-major order and wait on a per-sequence done flag, so the
+//    grid never suffers a partial wave and the segment boundary merge is a
+//    plain __syncthreads instead of a kernel boundary;
+//  * bank 1 of every PGC16 V2B4 family is bank 0 with the state index XOR'ed by
+//    a rate-keyed mask (pgc16.py: PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS),
+//    i.e. e_1(s) == e_0(s ^ mask) bit for bit.  A device-side check confirms the
+//    relation per family, after which every emission is evaluated once and fed
+//    to both banks' min-plus updates (half the emission work, half the codebook
+//    traffic).  Families whose codebooks are not related fall back to a general
+//    two-codebook loop inside the same kernel;
+//  * prefixes h < 8 of the fp16 bank-0 codebook live in shared memory (128 KB),
+//    the other half streams from L2 as 4-byte fp16 pairs with the norm
+//    recomputed exactly, instead of the 8-byte packed codebook/norm record;
+//  * the step-127 argmin is fused; the serial traceback runs in a tiny follow-up
+//    kernel so the SM is released as soon as the forward pass ends.
+//
+// Arithmetic is identical to emission<2, half>() and the reference recurrence:
+// same FP32 operation sequence, same lowest-prefix tie precedence (bank-1
+// candidates are visited in ascending bank-1 prefix order inside each block of
+// four prefixes and the block winners are merged with lower_pair()), same
+// bank-0-first boundary merge and bank-major / state-major terminal argmin.
+// ---------------------------------------------------------------------------
+
+constexpr int kFusedThreads = 1024;
+constexpr int kFusedShift = 4;
+constexpr int kFusedPrefixCount = 1 << kFusedShift;            // 16
+constexpr int kFusedSuffixCount = 1 << (16 - kFusedShift);     // 4096
+constexpr int kFusedSegmentSteps = 16;
+constexpr int kFusedSegmentCount = 128 / kFusedSegmentSteps;   // 8
+constexpr int kFusedSharedPrefixes = 8;                        // prefixes cached in shared memory
+constexpr int kFusedSharedStates = kFusedSharedPrefixes * kFusedSuffixCount;  // 32768
+constexpr int kFusedMaskCandidates = 3;
+constexpr size_t kFusedCodebookSharedBytes = static_cast<size_t>(kFusedSharedStates) * sizeof(uint32_t);  // 128 KB
+constexpr size_t kFusedFrontierSharedBytes = 2 * static_cast<size_t>(kFusedSuffixCount) * sizeof(float); // 32 KB
+constexpr size_t kFusedSharedBytes = kFusedCodebookSharedBytes + kFusedFrontierSharedBytes;
+
+// PGC16_V2B4_BANK_XOR_MASKS_BY_TRANSITION_BITS[4][1:] -- the three non-canonical
+// banks a W2 family can pair with canonical bank 0.
+__constant__ uint16_t g_fused_w2_masks[kFusedMaskCandidates] = {0x5A5A, 0x3C3C, 0xC3C3};
+
+// One CTA per (family, candidate mask): does bank 1 equal bank 0 permuted by mask?
+__global__ __launch_bounds__(kFusedThreads) void qvq_fused_detect_family_mask_kernel(
+    const uint32_t* __restrict__ codebooks,  // [families][2][65536] fp16 pairs as u32
+    int* __restrict__ match) {               // [families][kFusedMaskCandidates]
+  const int family = static_cast<int>(blockIdx.x) / kFusedMaskCandidates;
+  const int candidate = static_cast<int>(blockIdx.x) - family * kFusedMaskCandidates;
+  const int mask = g_fused_w2_masks[candidate];
+  const uint32_t* bank0 = codebooks + static_cast<int64_t>(family) * 2 * kStateCount;
+  const uint32_t* bank1 = bank0 + kStateCount;
+  bool equal = true;
+  for (int state = static_cast<int>(threadIdx.x); state < kStateCount; state += kFusedThreads) {
+    equal &= bank1[state] == bank0[state ^ mask];
+  }
+  const bool all_equal = __syncthreads_and(equal);
+  if (threadIdx.x == 0) {
+    match[blockIdx.x] = all_equal ? 1 : 0;
+  }
+}
+
+// Bit-identical to emission<2, half>() with the norm recomputed from the fp16
+// pair: codebook_norm_value() is fadd(fadd(0, c0*c0), c1*c1) and fadd(0, v) == v
+// for v = c0*c0 >= +0.  fsub(a, fmul(2, d)) == fma(-2, d, a) because 2*d is exact.
+template <bool Weighted>
+__device__ __forceinline__ float fused_emission(
+    float t0, float t1, float target_norm, uint32_t code_bits, float weight) {
+  const half2 code2_half = *reinterpret_cast<const half2*>(&code_bits);
+  const float2 code2 = __half22float2(code2_half);
+  const float norm = __fadd_rn(__fmul_rn(code2.x, code2.x), __fmul_rn(code2.y, code2.y));
+  float dot = __fmaf_rn(t0, code2.x, 0.0f);
+  dot = __fmaf_rn(t1, code2.y, dot);
+  const float distance = __fmaf_rn(-2.0f, dot, __fadd_rn(target_norm, norm));
+  const float clipped = fmaxf(distance, 0.0f);
+  if constexpr (Weighted) {
+    return __fmul_rn(clipped, weight);
+  } else {
+    return clipped;
+  }
+}
+
+struct FusedThreadMap {
+  int row;        // suffix >> 4 of the thread's four base suffixes
+  int base;       // first base suffix (row * 16 + group * 4)
+  int prow;       // partner row (row ^ (mask_x >> 4))
+  int pbase;      // first partner suffix of the aligned partner group
+};
+
+__device__ __forceinline__ FusedThreadMap fused_thread_map(int thread, int mask_x) {
+  FusedThreadMap m;
+  const int warp = thread >> 5;
+  const int lane = thread & 31;
+  m.row = warp * 8 + (lane >> 2);
+  m.base = m.row * 16 + (lane & 3) * 4;
+  m.prow = m.row ^ (mask_x >> 4);
+  m.pbase = m.prow * 16 + (((lane & 3) ^ ((mask_x >> 2) & 3)) * 4);
+  return m;
+}
+
+// Load the four fp16 pairs of states (h, base .. base+3) of bank 0.
+__device__ __forceinline__ uint4 fused_load_codes(
+    const uint32_t* __restrict__ shared_codes,
+    const uint32_t* __restrict__ global_codes,
+    int h,
+    int base) {
+  const int state = h * kFusedSuffixCount + base;
+  if (h < kFusedSharedPrefixes) {
+    return *reinterpret_cast<const uint4*>(shared_codes + state);
+  }
+  return __ldg(reinterpret_cast<const uint4*>(global_codes + state));
+}
+
+__device__ __forceinline__ uint32_t fused_code_at(const uint4& codes, int index) {
+  return index == 0 ? codes.x : (index == 1 ? codes.y : (index == 2 ? codes.z : codes.w));
+}
+
+// One recurrence step for a thread's four base suffixes (bank 0) and their four
+// partner suffixes (bank 1), with the emission shared between the banks.
+template <int Mask, bool Weighted>
+__device__ __forceinline__ void fused_step_shared(
+    const FusedThreadMap& map,
+    const uint32_t* __restrict__ shared_codes,
+    const uint32_t* __restrict__ global_codes,
+    const float* __restrict__ g0,
+    const float* __restrict__ g1,
+    float t0, float t1, float target_norm, float weight,
+    float (&best0)[4], int (&best_h0)[4],
+    float (&best1)[4], int (&best_h1)[4]) {
+  constexpr int mask_h = Mask >> 12;
+  constexpr int mask_h_block = mask_h >> 2;
+  constexpr int mask_h_inner = mask_h & 3;
+  #pragma unroll
+  for (int jj = 0; jj < 4; ++jj) {
+    best0[jj] = CUDART_INF_F;
+    best_h0[jj] = 0;
+    best1[jj] = CUDART_INF_F;
+    best_h1[jj] = 0;
+  }
+  #pragma unroll
+  for (int block = 0; block < kFusedPrefixCount / 4; ++block) {
+    uint4 codes[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      codes[i] = fused_load_codes(shared_codes, global_codes, block * 4 + i, map.base);
+    }
+    float emissions[4][4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      #pragma unroll
+      for (int jj = 0; jj < 4; ++jj) {
+        emissions[i][jj] = fused_emission<Weighted>(
+            t0, t1, target_norm, fused_code_at(codes[i], jj), weight);
+      }
+    }
+    // Bank 0: ascending prefix order, strict '<' keeps the lowest prefix on ties.
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int h = block * 4 + i;
+      const float predecessor = g0[h * 256 + map.row];
+      #pragma unroll
+      for (int jj = 0; jj < 4; ++jj) {
+        const float candidate = __fadd_rn(predecessor, emissions[i][jj]);
+        if (candidate < best0[jj]) {
+          best0[jj] = candidate;
+          best_h0[jj] = h;
+        }
+      }
+    }
+    // Bank 1: partner state (h', base ^ mask_x) uses e_0(h' ^ mask_h, base).
+    // Visit h' ascending inside the block (h' = 4*(block ^ mask_h_block) + i'),
+    // then merge block winners with the reference tie precedence.
+    const int block1 = block ^ mask_h_block;
+    float block_best[4];
+    int block_best_h[4];
+    #pragma unroll
+    for (int jj = 0; jj < 4; ++jj) {
+      block_best[jj] = CUDART_INF_F;
+      block_best_h[jj] = 0;
+    }
+    #pragma unroll
+    for (int ip = 0; ip < 4; ++ip) {
+      const int i = ip ^ mask_h_inner;
+      const int hp = block1 * 4 + ip;
+      const float predecessor = g1[hp * 256 + map.prow];
+      #pragma unroll
+      for (int jj = 0; jj < 4; ++jj) {
+        const float candidate = __fadd_rn(predecessor, emissions[i][jj]);
+        if (candidate < block_best[jj]) {
+          block_best[jj] = candidate;
+          block_best_h[jj] = hp;
+        }
+      }
+    }
+    #pragma unroll
+    for (int jj = 0; jj < 4; ++jj) {
+      if constexpr (mask_h_block == 0) {
+        // Blocks arrive in ascending h' order: strict '<' already keeps the lowest prefix.
+        if (block_best[jj] < best1[jj]) {
+          best1[jj] = block_best[jj];
+          best_h1[jj] = block_best_h[jj];
+        }
+      } else {
+        if (lower_pair(block_best[jj], block_best_h[jj], best1[jj], best_h1[jj])) {
+          best1[jj] = block_best[jj];
+          best_h1[jj] = block_best_h[jj];
+        }
+      }
+    }
+  }
+}
+
+// General fallback: bank 1 is an arbitrary codebook; both banks' emissions are
+// evaluated separately (bank 0 h < 8 from shared memory, everything else from L2).
+template <bool Weighted>
+__device__ __forceinline__ void fused_step_general(
+    const FusedThreadMap& map,
+    const uint32_t* __restrict__ shared_codes,
+    const uint32_t* __restrict__ global_codes0,
+    const uint32_t* __restrict__ global_codes1,
+    const float* __restrict__ g0,
+    const float* __restrict__ g1,
+    float t0, float t1, float target_norm, float weight,
+    float (&best0)[4], int (&best_h0)[4],
+    float (&best1)[4], int (&best_h1)[4]) {
+  #pragma unroll
+  for (int jj = 0; jj < 4; ++jj) {
+    best0[jj] = CUDART_INF_F;
+    best_h0[jj] = 0;
+    best1[jj] = CUDART_INF_F;
+    best_h1[jj] = 0;
+  }
+  #pragma unroll 4
+  for (int h = 0; h < kFusedPrefixCount; ++h) {
+    const uint4 codes0 = fused_load_codes(shared_codes, global_codes0, h, map.base);
+    const uint4 codes1 = __ldg(reinterpret_cast<const uint4*>(
+        global_codes1 + h * kFusedSuffixCount + map.base));
+    const float predecessor0 = g0[h * 256 + map.row];
+    const float predecessor1 = g1[h * 256 + map.row];
+    #pragma unroll
+    for (int jj = 0; jj < 4; ++jj) {
+      const float candidate0 = __fadd_rn(
+          predecessor0,
+          fused_emission<Weighted>(t0, t1, target_norm, fused_code_at(codes0, jj), weight));
+      if (candidate0 < best0[jj]) {
+        best0[jj] = candidate0;
+        best_h0[jj] = h;
+      }
+      const float candidate1 = __fadd_rn(
+          predecessor1,
+          fused_emission<Weighted>(t0, t1, target_norm, fused_code_at(codes1, jj), weight));
+      if (candidate1 < best1[jj]) {
+        best1[jj] = candidate1;
+        best_h1[jj] = h;
+      }
+    }
+  }
+}
+
+struct FusedSequenceArgs {
+  const float* __restrict__ sequences;      // [batch][128][2]
+  const uint32_t* __restrict__ codebooks;   // [families][2][65536] fp16 pairs
+  const int64_t* __restrict__ overlap;      // [batch] or nullptr
+  const float* __restrict__ step_weights;   // [batch][128] or nullptr
+  const int* __restrict__ family_mask_match;// [families][kFusedMaskCandidates]
+  float* __restrict__ frontiers;            // [batch][2][4096] inter-segment hand-off
+  uint8_t* __restrict__ backpointers;       // [batch][127][2][4096]
+  uint8_t* __restrict__ boundary_banks;     // [batch][7][4096]
+  int* __restrict__ best_flat;              // [batch]
+  float* __restrict__ squared_error;        // [batch]
+  int* __restrict__ queue;                  // [1 + batch]: unit counter, then done-segment count per sequence
+  int batch;
+  int family_batch;
+  bool constrained;
+};
+
+template <int Mask, bool Weighted, bool Shared>
+__device__ __forceinline__ void fused_run_segment(
+    const FusedSequenceArgs& args,
+    uint32_t* __restrict__ shared_codes,
+    float* __restrict__ g0,
+    float* __restrict__ g1,
+    int sequence,
+    int segment,
+    int family) {
+  constexpr int mask_x = Mask & 0xFFF;
+  constexpr int mask_x_inner = mask_x & 3;
+  const int thread = static_cast<int>(threadIdx.x);
+  const FusedThreadMap map = fused_thread_map(thread, Shared ? mask_x : 0);
+  const uint32_t* global_codes0 = args.codebooks + static_cast<int64_t>(family) * 2 * kStateCount;
+  const uint32_t* global_codes1 = global_codes0 + kStateCount;
+  const float* sequence_targets = args.sequences + static_cast<int64_t>(sequence) * 128 * 2;
+  const float* sequence_weights =
+      Weighted ? args.step_weights + static_cast<int64_t>(sequence) * 128 : nullptr;
+  uint8_t* sequence_backpointers =
+      args.backpointers + static_cast<int64_t>(sequence) * 127 * 2 * kFusedSuffixCount;
+  const int first_step = segment * kFusedSegmentSteps;
+  const int end_step = min(first_step + kFusedSegmentSteps, 127);
+
+  // ---- frontier entry: reference step-0 constraint mask or segment-boundary merge ----
+  if (segment == 0) {
+    const int required_overlap = args.constrained ? static_cast<int>(args.overlap[sequence]) : 0;
+    for (int x = thread; x < kFusedSuffixCount; x += kFusedThreads) {
+      const float value = (args.constrained && x != required_overlap) ? CUDART_INF_F : 0.0f;
+      g0[x] = value;
+      g1[x] = value;
+    }
+  } else {
+    const float* frontier = args.frontiers + static_cast<int64_t>(sequence) * 2 * kFusedSuffixCount;
+    uint8_t* boundary = args.boundary_banks +
+        (static_cast<int64_t>(sequence) * (kFusedSegmentCount - 1) + (segment - 1)) * kFusedSuffixCount;
+    for (int x = thread; x < kFusedSuffixCount; x += kFusedThreads) {
+      // Written by another SM: bypass the (non-coherent) L1.
+      const float value0 = __ldcg(frontier + x);
+      const float value1 = __ldcg(frontier + kFusedSuffixCount + x);
+      const bool take1 = value1 < value0;
+      const float merged = take1 ? value1 : value0;
+      g0[x] = merged;
+      g1[x] = merged;
+      boundary[x] = static_cast<uint8_t>(take1);
+    }
+  }
+  __syncthreads();
+
+  // ---- recurrence ----
+  for (int step = first_step; step < end_step; ++step) {
+    const float t0 = sequence_targets[step * 2];
+    const float t1 = sequence_targets[step * 2 + 1];
+    const float target_norm = __fadd_rn(__fmul_rn(t0, t0), __fmul_rn(t1, t1));
+    const float weight = Weighted ? sequence_weights[step] : 1.0f;
+    float best0[4], best1[4];
+    int best_h0[4], best_h1[4];
+    if constexpr (Shared) {
+      fused_step_shared<Mask, Weighted>(
+          map, shared_codes, global_codes0, g0, g1, t0, t1, target_norm, weight,
+          best0, best_h0, best1, best_h1);
+    } else {
+      fused_step_general<Weighted>(
+          map, shared_codes, global_codes0, global_codes1, g0, g1, t0, t1, target_norm, weight,
+          best0, best_h0, best1, best_h1);
+    }
+    __syncthreads();
+    *reinterpret_cast<float4*>(g0 + map.base) = make_float4(best0[0], best0[1], best0[2], best0[3]);
+    uint8_t* step_pointers = sequence_backpointers + static_cast<int64_t>(step) * 2 * kFusedSuffixCount;
+    *reinterpret_cast<uint32_t*>(step_pointers + map.base) =
+        static_cast<uint32_t>(best_h0[0]) | (static_cast<uint32_t>(best_h0[1]) << 8) |
+        (static_cast<uint32_t>(best_h0[2]) << 16) | (static_cast<uint32_t>(best_h0[3]) << 24);
+    if constexpr (Shared) {
+      // Partner suffix of base jj sits at position jj ^ mask_x_inner of the partner group.
+      float out1[4];
+      int out_h1[4];
+      #pragma unroll
+      for (int jj = 0; jj < 4; ++jj) {
+        out1[jj ^ mask_x_inner] = best1[jj];
+        out_h1[jj ^ mask_x_inner] = best_h1[jj];
+      }
+      *reinterpret_cast<float4*>(g1 + map.pbase) = make_float4(out1[0], out1[1], out1[2], out1[3]);
+      *reinterpret_cast<uint32_t*>(step_pointers + kFusedSuffixCount + map.pbase) =
+          static_cast<uint32_t>(out_h1[0]) | (static_cast<uint32_t>(out_h1[1]) << 8) |
+          (static_cast<uint32_t>(out_h1[2]) << 16) | (static_cast<uint32_t>(out_h1[3]) << 24);
+    } else {
+      *reinterpret_cast<float4*>(g1 + map.base) = make_float4(best1[0], best1[1], best1[2], best1[3]);
+      *reinterpret_cast<uint32_t*>(step_pointers + kFusedSuffixCount + map.base) =
+          static_cast<uint32_t>(best_h1[0]) | (static_cast<uint32_t>(best_h1[1]) << 8) |
+          (static_cast<uint32_t>(best_h1[2]) << 16) | (static_cast<uint32_t>(best_h1[3]) << 24);
+    }
+    __syncthreads();
+  }
+
+  // ---- segment exit: hand the frontier to the next segment, or run the terminal argmin ----
+  if (segment + 1 < kFusedSegmentCount) {
+    float* frontier = args.frontiers + static_cast<int64_t>(sequence) * 2 * kFusedSuffixCount;
+    for (int x = thread; x < kFusedSuffixCount; x += kFusedThreads) {
+      frontier[x] = g0[x];
+      frontier[kFusedSuffixCount + x] = g1[x];
+    }
+    __threadfence();
+    __syncthreads();
+    if (thread == 0) {
+      atomicExch(args.queue + 1 + sequence, segment + 1);
+    }
+    return;
+  }
+
+  // Step 127 folded into the terminal reduction exactly as the reference finalize:
+  // flat index = bank * 65536 + state, lowest flat index wins ties.
+  {
+    const int required_overlap = args.constrained ? static_cast<int>(args.overlap[sequence]) : 0;
+    const float t0 = sequence_targets[127 * 2];
+    const float t1 = sequence_targets[127 * 2 + 1];
+    const float target_norm = __fadd_rn(__fmul_rn(t0, t0), __fmul_rn(t1, t1));
+    const float weight = Weighted ? sequence_weights[127] : 1.0f;
+    float best = CUDART_INF_F;
+    int best_flat = 2 * kStateCount;
+    for (int flat = thread; flat < 2 * kStateCount; flat += kFusedThreads) {
+      const int bank = flat >> 16;
+      const int state = flat & (kStateCount - 1);
+      const uint32_t code = bank == 0 ? __ldg(global_codes0 + state) : __ldg(global_codes1 + state);
+      const float* g = bank == 0 ? g0 : g1;
+      float candidate = __fadd_rn(
+          g[state >> kFusedShift],
+          fused_emission<Weighted>(t0, t1, target_norm, code, weight));
+      if (args.constrained && (state & (kFusedSuffixCount - 1)) != required_overlap) {
+        candidate = CUDART_INF_F;
+      }
+      if (lower_pair(candidate, flat, best, best_flat)) {
+        best = candidate;
+        best_flat = flat;
+      }
+    }
+    block_argmin(best, best_flat);
+    if (thread == 0) {
+      args.squared_error[sequence] = best;
+      args.best_flat[sequence] = best_flat;
+    }
+    __syncthreads();
+  }
+}
+
+template <bool Weighted>
+__global__ __launch_bounds__(kFusedThreads, 1) void qvq_fused_w2_family_grid_kernel(FusedSequenceArgs args) {
+  extern __shared__ __align__(16) unsigned char fused_shared_raw[];
+  uint32_t* shared_codes = reinterpret_cast<uint32_t*>(fused_shared_raw);
+  float* g0 = reinterpret_cast<float*>(fused_shared_raw + kFusedCodebookSharedBytes);
+  float* g1 = g0 + kFusedSuffixCount;
+  __shared__ int unit_shared;
+  const int thread = static_cast<int>(threadIdx.x);
+  const int total_units = args.batch * kFusedSegmentCount;
+  int loaded_family = -1;
+  int mask_id = -1;
+
+  for (;;) {
+    if (thread == 0) {
+      unit_shared = atomicAdd(args.queue, 1);
+    }
+    __syncthreads();
+    const int unit = unit_shared;
+    __syncthreads();
+    if (unit >= total_units) {
+      break;
+    }
+    const int segment = unit / args.batch;
+    const int sequence = unit - segment * args.batch;
+    const int family = sequence / args.family_batch;
+    if (family != loaded_family) {
+      const uint4* source = reinterpret_cast<const uint4*>(
+          args.codebooks + static_cast<int64_t>(family) * 2 * kStateCount);
+      uint4* destination = reinterpret_cast<uint4*>(shared_codes);
+      for (int i = thread; i < kFusedSharedStates / 4; i += kFusedThreads) {
+        destination[i] = __ldg(source + i);
+      }
+      mask_id = -1;
+      #pragma unroll
+      for (int candidate = kFusedMaskCandidates - 1; candidate >= 0; --candidate) {
+        if (args.family_mask_match[family * kFusedMaskCandidates + candidate] != 0) {
+          mask_id = candidate;
+        }
+      }
+      loaded_family = family;
+      __syncthreads();
+    }
+    if (segment > 0) {
+      if (thread == 0) {
+        volatile int* done = args.queue + 1 + sequence;
+        while (*done < segment) {
+          __nanosleep(256);
+        }
+        __threadfence();
+      }
+      __syncthreads();
+    }
+    switch (mask_id) {
+      case 0:
+        fused_run_segment<0x5A5A, Weighted, true>(args, shared_codes, g0, g1, sequence, segment, family);
+        break;
+      case 1:
+        fused_run_segment<0x3C3C, Weighted, true>(args, shared_codes, g0, g1, sequence, segment, family);
+        break;
+      case 2:
+        fused_run_segment<0xC3C3, Weighted, true>(args, shared_codes, g0, g1, sequence, segment, family);
+        break;
+      default:
+        fused_run_segment<0, Weighted, false>(args, shared_codes, g0, g1, sequence, segment, family);
+        break;
+    }
+    __syncthreads();
+  }
+}
+
+// Serial traceback, one thread per sequence: identical to the thread-0 tail of
+// qvq_v2_segment_grid_finalize_kernel<4, 2, 16, false, ...>.
+__global__ void qvq_fused_w2_traceback_kernel(
+    const uint8_t* __restrict__ backpointers,
+    const uint8_t* __restrict__ boundary_banks,
+    const int* __restrict__ best_flat,
+    int64_t* __restrict__ states,
+    uint8_t* __restrict__ segment_bank_ids,
+    int batch) {
+  const int sequence = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (sequence >= batch) {
+    return;
+  }
+  constexpr int suffix_count = kFusedSuffixCount;
+  constexpr int bank_suffix_count = 2 * suffix_count;
+  const int64_t pointer_base = static_cast<int64_t>(sequence) * 127 * bank_suffix_count;
+  const int64_t boundary_base = static_cast<int64_t>(sequence) * (kFusedSegmentCount - 1) * suffix_count;
+  const int64_t state_base = static_cast<int64_t>(sequence) * 128;
+  const int64_t selector_base = static_cast<int64_t>(sequence) * kFusedSegmentCount;
+  const int flat = best_flat[sequence];
+  int current_bank = flat / kStateCount;
+  int current_state = flat - current_bank * kStateCount;
+  states[state_base + 127] = current_state;
+  segment_bank_ids[selector_base + kFusedSegmentCount - 1] = static_cast<uint8_t>(current_bank);
+  for (int step = 127; step > 0; --step) {
+    const int predecessor_suffix = current_state >> kFusedShift;
+    if (step % kFusedSegmentSteps == 0) {
+      const int boundary_index = step / kFusedSegmentSteps - 1;
+      current_bank = static_cast<int>(boundary_banks[
+          boundary_base + static_cast<int64_t>(boundary_index) * suffix_count + predecessor_suffix]);
+      segment_bank_ids[selector_base + boundary_index] = static_cast<uint8_t>(current_bank);
+    }
+    const int prefix = static_cast<int>(backpointers[
+        pointer_base + static_cast<int64_t>(step - 1) * bank_suffix_count +
+        current_bank * suffix_count + predecessor_suffix]);
+    current_state = prefix * suffix_count + predecessor_suffix;
+    states[state_base + step - 1] = current_state;
+  }
+}
+
+// Number of times the fused W2 family-grid kernel was dispatched in this
+// process; exposed as gptqmodel_qvq.fused_family_grid_dispatch_count() so tests
+// can assert that the fused path (not the reference path) produced a result.
+std::atomic<int64_t> g_fused_w2_family_grid_dispatches{0};
+
+int64_t qvq_fused_family_grid_dispatch_count() {
+  return g_fused_w2_family_grid_dispatches.load();
+}
+
+// Read once on first use (cached for the process lifetime).
+bool fused_w2_family_grid_disabled() {
+  static const bool disabled = [] {
+    const char* value = std::getenv("QVQ_DISABLE_FUSED_FAMILY_GRID");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return disabled;
+}
+
+bool fused_w2_family_grid_supported(const cudaDeviceProp& properties) {
+  return properties.major >= 8 &&
+      static_cast<size_t>(properties.sharedMemPerBlockOptin) >= kFusedSharedBytes &&
+      !fused_w2_family_grid_disabled();
+}
+
+// Host side of the fused path; called only for the family op with
+// transition_bits == 4, bank_count == 2, segment_steps == 16, fp16 codebooks.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_fused_w2_family_grid_launch(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    const c10::optional<at::Tensor>& overlap,
+    const c10::optional<at::Tensor>& step_weights,
+    int family_batch,
+    const cudaDeviceProp& properties,
+    cudaStream_t stream) {
+  const int batch = static_cast<int>(sequences.size(0));
+  const int families = static_cast<int>(codebooks.size(0)) / 2;
+  const bool constrained = overlap.has_value();
+  const bool weighted = step_weights.has_value();
+  const auto float_options = sequences.options().dtype(at::kFloat);
+  const auto byte_options = sequences.options().dtype(at::kByte);
+  const auto int_options = sequences.options().dtype(at::kInt);
+  at::Tensor frontiers = at::empty({batch, 2, kFusedSuffixCount}, float_options);
+  at::Tensor backpointers = at::empty({batch, 127, 2, kFusedSuffixCount}, byte_options);
+  at::Tensor boundary_banks = at::empty({batch, kFusedSegmentCount - 1, kFusedSuffixCount}, byte_options);
+  at::Tensor states = at::empty({batch, 128}, sequences.options().dtype(at::kLong));
+  at::Tensor segment_bank_ids = at::empty({batch, kFusedSegmentCount}, byte_options);
+  at::Tensor squared_error = at::empty({batch}, float_options);
+  at::Tensor best_flat = at::empty({batch}, int_options);
+  at::Tensor queue = at::zeros({1 + batch}, int_options);
+  at::Tensor family_mask_match = at::empty({families, kFusedMaskCandidates}, int_options);
+
+  const uint32_t* codebook_words = reinterpret_cast<const uint32_t*>(codebooks.const_data_ptr());
+  qvq_fused_detect_family_mask_kernel<<<families * kFusedMaskCandidates, kFusedThreads, 0, stream>>>(
+      codebook_words, family_mask_match.mutable_data_ptr<int>());
+
+  FusedSequenceArgs args;
+  args.sequences = sequences.const_data_ptr<float>();
+  args.codebooks = codebook_words;
+  args.overlap = constrained ? overlap->const_data_ptr<int64_t>() : nullptr;
+  args.step_weights = weighted ? step_weights->const_data_ptr<float>() : nullptr;
+  args.family_mask_match = family_mask_match.const_data_ptr<int>();
+  args.frontiers = frontiers.mutable_data_ptr<float>();
+  args.backpointers = backpointers.mutable_data_ptr<uint8_t>();
+  args.boundary_banks = boundary_banks.mutable_data_ptr<uint8_t>();
+  args.best_flat = best_flat.mutable_data_ptr<int>();
+  args.squared_error = squared_error.mutable_data_ptr<float>();
+  args.queue = queue.mutable_data_ptr<int>();
+  args.batch = batch;
+  args.family_batch = family_batch;
+  args.constrained = constrained;
+
+  const int total_units = batch * kFusedSegmentCount;
+  const int grid = std::min(properties.multiProcessorCount, total_units);
+  g_fused_w2_family_grid_dispatches.fetch_add(1);
+  if (weighted) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_fused_w2_family_grid_kernel<true>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kFusedSharedBytes)));
+    qvq_fused_w2_family_grid_kernel<true><<<grid, kFusedThreads, kFusedSharedBytes, stream>>>(args);
+  } else {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_fused_w2_family_grid_kernel<false>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kFusedSharedBytes)));
+    qvq_fused_w2_family_grid_kernel<false><<<grid, kFusedThreads, kFusedSharedBytes, stream>>>(args);
+  }
+  qvq_fused_w2_traceback_kernel<<<(batch + 127) / 128, 128, 0, stream>>>(
+      backpointers.const_data_ptr<uint8_t>(),
+      boundary_banks.const_data_ptr<uint8_t>(),
+      best_flat.const_data_ptr<int>(),
+      states.mutable_data_ptr<int64_t>(),
+      segment_bank_ids.mutable_data_ptr<uint8_t>(),
+      batch);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {states, squared_error, segment_bank_ids};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cuda_impl(
     const at::Tensor& sequences,
     const at::Tensor& codebooks,
@@ -2294,6 +2927,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   TORCH_CHECK(!cooperative || (!midpoint_only && transition_bits == 5 && bank_count == 2 && segment_steps == 16),
               "cooperative segmented V2 currently supports only full W2.5 B2-P32 recurrence");
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
+  // Below ~40 sequences both paths are bound by the serial 127-step chain of a
+  // single sequence and the reference layout (one CTA per bank) has twice the
+  // per-sequence parallelism; measured crossover on the 124-SM sm_80 device.
+  constexpr int fused_minimum_batch = 40;
+  if (grid_parallel && !midpoint_only && family_batch > 0 && batch >= fused_minimum_batch &&
+      transition_bits == 4 && bank_count == 2 && segment_steps == 16 &&
+      codebooks.scalar_type() == at::kHalf && fused_w2_family_grid_supported(properties)) {
+    return qvq_fused_w2_family_grid_launch(
+        sequences, codebooks, constrained ? overlap : c10::nullopt, weighted ? step_weights : c10::nullopt,
+        family_batch, properties, stream);
+  }
   const int segments = steps / static_cast<int>(segment_steps);
   const auto float_options = sequences.options().dtype(at::kFloat);
   at::Tensor costs_a = at::empty(
@@ -2567,6 +3211,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trust
   if (step_weights.has_value()) {
     rotated_weights = at::roll(*step_weights, {midpoint}, {1}).contiguous();
   }
+  // A single two-bank codebook stack is one family whose batch is the whole
+  // batch; that lets the W2 two-pass tail share the fused family-grid kernel.
+  const int single_family_batch =
+      (codebooks.dim() == 3 && codebooks.size(0) == 2) ? static_cast<int>(sequences.size(0)) : 0;
   auto provisional = qvq_viterbi_v2_segment_banked_cuda_impl(
       rotated_sequences,
       codebooks,
@@ -2575,11 +3223,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trust
       c10::nullopt,
       rotated_weights,
       2,
-      false);
+      false,
+      single_family_batch);
   const int64_t overlap_mask = (int64_t{1} << (16 - transition_bits)) - 1;
   auto overlap = std::get<0>(provisional).select(1, midpoint - 1).bitwise_and(overlap_mask).contiguous();
   return qvq_viterbi_v2_segment_banked_cuda_impl(
-      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false,
+      single_family_batch);
 }
 
 at::Tensor qvq_viterbi_v2_segment_midpoint_trusted_cuda(
@@ -2676,6 +3326,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "int segment_steps, Tensor? step_weights=None) -> Tensor");
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+  // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
+  m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
