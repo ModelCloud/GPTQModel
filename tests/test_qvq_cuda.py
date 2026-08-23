@@ -873,6 +873,84 @@ def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(bits,
         assert all(torch.equal(expected[family][index], actual[index][family]) for index in range(3))
 
 
+@pytest.mark.parametrize("batch", (1, 2, 3, 7, 33, 128, 131))
+@pytest.mark.parametrize("constrained", (False, True))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("scale", (1.0, 0.05, 4.0))
+def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch, constrained, weighted, scale):
+    """The W2 <4,2,16,fused> family op runs the fused persistent kernel; the per-family
+    ``viterbi_v2_segment_grid_trusted`` op still runs the reference segmented grid kernels."""
+
+    bits = 2.0
+    generator = torch.Generator(device="cuda").manual_seed(20260823 + batch * 7 + int(constrained) + 2 * int(weighted))
+    families = 3
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda") * scale
+    codebooks = torch.stack(
+        tuple(
+            torch.stack(
+                (
+                    pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32),
+                    pgc16_codebook_v2_bank(family, bits=bits, dtype=torch.float32),
+                )
+            )
+            for family in (1, 2, 3)
+        )
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    assert transition_bits == 4
+    overlap = (
+        torch.randint(0, 1 << (16 - transition_bits), (families, batch), generator=generator, device="cuda", dtype=torch.int64)
+        if constrained
+        else None
+    )
+    step_weights = (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
+
+    actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+        sequences, codebooks, transition_bits, 16, overlap, step_weights
+    )
+    for family in range(families):
+        expected = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+            sequences[family],
+            codebooks[family],
+            transition_bits,
+            16,
+            None if overlap is None else overlap[family],
+            None if step_weights is None else step_weights[family],
+        )
+        for index in range(3):
+            assert torch.equal(expected[index], actual[index][family]), (family, index)
+
+
+@pytest.mark.parametrize("constrained", (False, True))
+def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(constrained):
+    """Bank 1 that is not an XOR-permutation of bank 0 must take the in-kernel general path."""
+
+    bits = 2.0
+    generator = torch.Generator(device="cuda").manual_seed(20260824 + int(constrained))
+    families, batch = 3, 5
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+    bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
+    codebooks = torch.stack(
+        tuple(
+            torch.stack((bank0, torch.randn((1 << 16, 2), generator=generator, device="cuda").to(torch.float16)))
+            for _ in range(families)
+        )
+    ).contiguous()
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    overlap = (
+        torch.randint(0, 1 << (16 - transition_bits), (families, batch), generator=generator, device="cuda", dtype=torch.int64)
+        if constrained
+        else None
+    )
+    actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(sequences, codebooks, transition_bits, 16, overlap, None)
+    for family in range(families):
+        expected = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+            sequences[family], codebooks[family], transition_bits, 16, None if overlap is None else overlap[family], None
+        )
+        for index in range(3):
+            assert torch.equal(expected[index], actual[index][family]), (family, index)
+
+
 def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch):
     bits = 2.5
     generator = torch.Generator(device="cuda").manual_seed(20260820)
