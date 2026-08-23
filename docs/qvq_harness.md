@@ -468,3 +468,43 @@ Implementation gates for this schema-v4 correction, from parent
   passed; repository scanning found no private key material.
 - The pinned dense model identity gate passed for `/monster/data/model/Qwen3-8B`, revision
   `b968826d9c46dd6066d109eabc6255188de91218`, exact decoder layers 0--35, and the authoritative artifact hashes.
+
+## Rejected pathname verification and retained-descriptor schema v5 (2026-08-23)
+
+Review rejected commit `752b9adf`: schema v4 still separated component `lstat` from final `open`, reopened verified
+policy/config/script paths at use time, closed the socket reader before consuming producer tensor frames, allowed
+mutable dataset fallback and path aliases, accepted extra live tensors, and did not prove one stable `/proc` identity
+across observation steps. Those findings remain recorded as failures rather than retroactively described as success.
+
+Schema v5 walks every trusted path with directory descriptors and `openat`, applying `O_NOFOLLOW` to every component.
+Each directory must be owned by root/the controller and not rename-capable by group/other (a root-owned sticky
+directory is treated as non-rename-capable); final files must be regular, safely owned, and non-writable by
+group/other. The controller retains the trust, key, Python, OpenSSL, policy, quant config, and stage-script descriptors,
+revalidates their inode/timestamps/content before spawn and after stage evidence, and executes the retained Python
+and script descriptors through `/proc/self/fd`. The producer reads quant configuration and sealed datasets only from
+inherited controller descriptors. Canonical dataset keys are physical absolute paths; aliases and `..` fail closed,
+and the presence of controller snapshot metadata disables every mutable-source fallback.
+
+The producer socket reader now remains alive through event parsing, all 1,260 canonical tensor frames, independent
+controller hashing, validation, and acknowledgement. Every one of the 252 modules must contain exactly the five
+canonical tensors in canonical order with exact names, metadata, byte extents, and no additional parameter/buffer.
+Linux process observation brackets executable/cmdline reads with identical stat tuples, requires the stat PID to
+equal `Popen.pid`, and binds PID, PPID, start ticks, and executable device/inode to the retained pre-spawn Python
+descriptor. A controller-owned Linux pidfd remains open through `Popen.wait`, preventing PID reuse from satisfying an
+exit record. Mixed observations, handoff, and PID reuse within a process instance fail closed.
+
+Runtime regression coverage executes descriptor-backed Python/script bytes after pathname replacement and drives the
+actual producer socket sender through a 252-module live stream; the producer cannot cross the simulated save boundary
+until controller validation returns the acknowledgement. Additional attacks cover unsafe parent directories,
+dataset aliases, extra tensors, mixed process observations, and post-snapshot mutation. This is implementation trust
+evidence only: no real BPW, Top-1, Diverse-32, or final-KL metric is claimed.
+
+Implementation gates for schema v5, from parent `752b9adffe6ea5f8538eb7a0525eff34c8b10e17`:
+
+- The exact focused-plus-unified pytest invocation passed all 100 tests with 14 upstream `torch.jit` deprecation
+  warnings; the identical collect-only invocation found exactly 100 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v5 signing/trust-root validation, and
+  the repository private-key scan passed.
+- Pinned `/monster/data/model/Qwen3-8B` identity/integrity passed for revision
+  `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers, seven authoritative artifact hashes, and seven local
+  Hub content identities.

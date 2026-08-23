@@ -17,11 +17,12 @@ import struct
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-CONTROLLER_SCHEMA = "qvq-acceptance-controller-v4"
+CONTROLLER_SCHEMA = "qvq-acceptance-controller-v5"
 CONTROLLER_STAGES = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
 _ENV_PREFIX = "GPTQMODEL_QVQ_CONTROLLER_"
 VERIFIER_PRIVATE_KEY_ENV = "GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY"
@@ -41,34 +42,74 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _physical_path_without_symlinks(path: Path) -> Path:
-    if not path.is_absolute():
-        raise RuntimeError(f"trusted path is not absolute: {path}")
-    current = Path(path.anchor)
-    for part in path.parts[1:]:
-        current /= part
-        try:
-            identity = os.lstat(current)
-        except OSError as error:
-            raise RuntimeError(f"trusted path component is unavailable: {current}") from error
-        if stat.S_ISLNK(identity.st_mode):
-            raise RuntimeError(f"trusted path traverses a symlink: {current}")
-    return path.resolve(strict=True)
+@dataclass
+class _TrustedFile:
+    path: Path
+    descriptor: int
+    content: bytes
+    identity: os.stat_result
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.content).hexdigest()
+
+    @property
+    def fd_path(self) -> str:
+        return f"/proc/self/fd/{self.descriptor}"
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
 
 
-def _read_nofollow(path: Path, *, exact_mode: int | None = None) -> tuple[bytes, os.stat_result]:
-    path = _physical_path_without_symlinks(path)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+def _safe_directory(identity: os.stat_result, path: Path) -> None:
+    writable = identity.st_mode & 0o022
+    sticky_root_directory = writable and identity.st_uid == 0 and identity.st_mode & stat.S_ISVTX
+    if (
+        not stat.S_ISDIR(identity.st_mode)
+        or identity.st_uid not in {0, os.geteuid()}
+        or (writable and not sticky_root_directory)
+    ):
+        raise RuntimeError(f"trusted path has unsafe parent directory ownership/mode: {path}")
+
+
+def _open_trusted_file(path: Path, *, exact_mode: int | None = None) -> _TrustedFile:
+    """Own a trusted object via openat traversal; never resolve or reopen its pathname."""
+
+    if not path.is_absolute() or path != Path(os.path.normpath(path)):
+        raise RuntimeError(f"trusted path is not absolute and normalized: {path}")
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise RuntimeError(f"trusted file cannot be opened safely: {path}") from error
+        _safe_directory(os.fstat(directory), Path("/"))
+        current = Path("/")
+        for component in path.parts[1:-1]:
+            current /= component
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=directory,
+                )
+            except OSError as error:
+                raise RuntimeError(f"trusted path traverses a symlink or unsafe component: {current}") from error
+            os.close(directory)
+            directory = child
+            _safe_directory(os.fstat(directory), current)
+        try:
+            descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        except OSError as error:
+            raise RuntimeError(f"trusted file cannot be opened safely: {path}") from error
+    finally:
+        os.close(directory)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise RuntimeError(f"trusted file is not regular: {path}")
         if before.st_uid != os.geteuid():
             raise RuntimeError(f"trusted file has unsafe ownership: {path}")
+        if before.st_mode & 0o022:
+            raise RuntimeError(f"trusted file has unsafe writable mode: {path}")
         if exact_mode is not None and stat.S_IMODE(before.st_mode) != exact_mode:
             raise RuntimeError(f"trusted file mode must be exactly {exact_mode:04o}: {path}")
         chunks = []
@@ -79,15 +120,34 @@ def _read_nofollow(path: Path, *, exact_mode: int | None = None) -> tuple[bytes,
             after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
         ):
             raise RuntimeError(f"trusted file changed while being read: {path}")
-        return b"".join(chunks), before
-    finally:
+        return _TrustedFile(path, descriptor, b"".join(chunks), before)
+    except BaseException:
         os.close(descriptor)
+        raise
+
+
+def _physical_path_without_symlinks(path: Path) -> Path:
+    trusted = _open_trusted_file(path)
+    try:
+        return Path(os.readlink(trusted.fd_path))
+    finally:
+        trusted.close()
+
+
+def _read_nofollow(path: Path, *, exact_mode: int | None = None) -> tuple[bytes, os.stat_result]:
+    trusted = _open_trusted_file(path, exact_mode=exact_mode)
+    try:
+        return trusted.content, trusted.identity
+    finally:
+        trusted.close()
 
 
 def _trusted_content_identity(path: Path, *, exact_mode: int | None = None) -> tuple[Path, str, os.stat_result]:
-    resolved = _physical_path_without_symlinks(path)
-    content, identity = _read_nofollow(resolved, exact_mode=exact_mode)
-    return resolved, hashlib.sha256(content).hexdigest(), identity
+    trusted = _open_trusted_file(path, exact_mode=exact_mode)
+    try:
+        return Path(os.readlink(trusted.fd_path)), trusted.digest, trusted.identity
+    finally:
+        trusted.close()
 
 
 def load_trust_config() -> dict[str, Any]:
@@ -134,13 +194,88 @@ def load_trust_config() -> dict[str, Any]:
     return trust
 
 
+class _TrustedResources:
+    """Retained descriptors and verified bytes for one controller instance."""
+
+    def __init__(self) -> None:
+        configured = os.environ.get(TRUST_CONFIG_ENV)
+        if not configured:
+            raise RuntimeError(f"operator trust configuration is absent: set {TRUST_CONFIG_ENV} to an absolute path")
+        self.files: dict[str, _TrustedFile] = {}
+        try:
+            self.files["trust_config"] = _open_trusted_file(Path(configured), exact_mode=0o600)
+            trust_path = Path(os.readlink(self.files["trust_config"].fd_path))
+            if trust_path.is_relative_to(_REPO_ROOT.resolve()):
+                raise RuntimeError("operator trust configuration must reside outside the candidate repository")
+            self.trust = json.loads(self.files["trust_config"].content)
+            # Closed-schema and hash validation stays centralized in the public loader's contract.
+            required = {"schema", "verifier_public_key", "verifier_public_key_sha256", "python_executable",
+                        "python_executable_sha256", "openssl_executable", "openssl_executable_sha256",
+                        "acceptance_policy", "acceptance_policy_sha256", "quant_config", "quant_config_sha256",
+                        "stage_scripts"}
+            if set(self.trust) != required or self.trust.get("schema") != "qvq-acceptance-trust-v1":
+                raise RuntimeError("operator trust configuration has an invalid closed schema")
+            identities = (
+                ("verifier_public_key", "verifier_public_key_sha256"),
+                ("python_executable", "python_executable_sha256"),
+                ("openssl_executable", "openssl_executable_sha256"),
+                ("acceptance_policy", "acceptance_policy_sha256"),
+                ("quant_config", "quant_config_sha256"),
+            )
+            for name, digest_name in identities:
+                trusted = _open_trusted_file(Path(self.trust[name]))
+                self.files[name] = trusted
+                if trusted.digest != self.trust[digest_name]:
+                    raise RuntimeError(f"operator-trusted {name} identity is absent or mismatched")
+                if name == "verifier_public_key" and Path(os.readlink(trusted.fd_path)).is_relative_to(
+                    _REPO_ROOT.resolve()
+                ):
+                    raise RuntimeError("operator verifier public key must reside outside the candidate repository")
+            scripts = self.trust["stage_scripts"]
+            if not isinstance(scripts, dict) or set(scripts) != set(CONTROLLER_STAGES):
+                raise RuntimeError("operator trust configuration lacks exact stage script identities")
+            for stage, identity in scripts.items():
+                if not isinstance(identity, dict) or set(identity) != {"path", "sha256"}:
+                    raise RuntimeError(f"operator-trusted {stage} script identity is absent or mismatched")
+                trusted = _open_trusted_file(Path(identity["path"]))
+                self.files[stage] = trusted
+                if trusted.digest != identity["sha256"]:
+                    raise RuntimeError(f"operator-trusted {stage} script identity is absent or mismatched")
+            for executable in ("python_executable", "openssl_executable"):
+                if not self.files[executable].identity.st_mode & stat.S_IXUSR:
+                    raise RuntimeError(f"operator-trusted {executable} has unsafe executable mode")
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        for trusted in self.files.values():
+            trusted.close()
+
+    def pass_fds(self, *names: str) -> tuple[int, ...]:
+        return tuple(self.files[name].descriptor for name in names)
+
+    def revalidate(self) -> None:
+        for name, trusted in self.files.items():
+            current = os.fstat(trusted.descriptor)
+            content = os.pread(trusted.descriptor, current.st_size, 0)
+            expected = trusted.identity
+            if (
+                (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+                != (expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns, expected.st_ctime_ns)
+                or hashlib.sha256(content).hexdigest() != trusted.digest
+            ):
+                raise RuntimeError(f"retained operator-trusted {name} descriptor changed")
+
+
 def trusted_python_executable() -> str:
     return str(Path(load_trust_config()["python_executable"]).resolve())
 
 
-def _acceptance_policy() -> dict[str, Any]:
-    trust = load_trust_config()
-    raw, _identity = _read_nofollow(Path(trust["acceptance_policy"]))
+def _acceptance_policy(resources: _TrustedResources | None = None) -> dict[str, Any]:
+    owned = resources is None
+    resources = resources or _TrustedResources()
+    raw = resources.files["acceptance_policy"].content
     policy = json.loads(raw)
     required = {
         "schema", "dense_model", "revision", "device", "layer_scope", "calibration_rows", "yaqa_rows",
@@ -148,6 +283,8 @@ def _acceptance_policy() -> dict[str, Any]:
     }
     if not isinstance(policy, dict) or set(policy) != required or policy.get("schema") != "qwen3-8b-qvq-acceptance-policy-v1":
         raise RuntimeError("locked acceptance policy has an invalid closed schema")
+    if owned:
+        resources.close()
     return policy
 
 
@@ -160,6 +297,8 @@ def _controller_dataset_bundle(values: Mapping[str, str]) -> tuple[dict[str, Any
     snapshots: dict[str, bytes] = {}
     for name in ("calibration", "yaqa", "validation"):
         source = Path(values[f"--{name}-dataset"])
+        if str(source) != os.path.realpath(source) or str(source) != os.path.normpath(source):
+            raise RuntimeError(f"controller {name} dataset path is not its physical canonical identity")
         manifest_path = source.with_suffix(".manifest.json")
         try:
             source_raw, _source_identity = _read_nofollow(source)
@@ -250,12 +389,13 @@ def _parse_linux_proc_stat(value: str) -> tuple[int, str, int, int]:
     return pid, value[opening + 1:closing], ppid, start_time_ticks
 
 
-def _observe_linux_process(pid: int) -> dict[str, Any]:
+def _observe_linux_process(pid: int, *, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
     proc = Path("/proc") / str(pid)
     try:
-        observed_pid, comm, ppid, start_time_ticks = _parse_linux_proc_stat(
-            (proc / "stat").read_text(encoding="ascii")
-        )
+        first = _parse_linux_proc_stat((proc / "stat").read_text(encoding="ascii"))
+        observed_pid, comm, ppid, start_time_ticks = first
+        if observed_pid != pid:
+            raise RuntimeError(f"controller observed PID {observed_pid}, expected Popen PID {pid}")
         executable_link = proc / "exe"
         executable = Path(os.readlink(executable_link)).resolve(strict=True)
         descriptor = os.open(executable_link, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
@@ -267,30 +407,41 @@ def _observe_linux_process(pid: int) -> dict[str, Any]:
         finally:
             os.close(descriptor)
         cmdline = (proc / "cmdline").read_bytes()
+        final = _parse_linux_proc_stat((proc / "stat").read_text(encoding="ascii"))
     except OSError as error:
         raise RuntimeError(f"controller cannot independently inspect child PID {pid}") from error
+    if first != final:
+        raise RuntimeError(f"controller observed mixed or reused process identity for PID {pid}")
     if not cmdline.endswith(b"\0"):
         raise RuntimeError(f"controller observed malformed cmdline for child PID {pid}")
-    return {
+    observation = {
         "pid": observed_pid, "comm": comm, "ppid": ppid, "start_time_ticks": start_time_ticks,
         "executable": str(executable), "executable_sha256": digest.hexdigest(),
         "executable_device": executable_identity.st_dev, "executable_inode": executable_identity.st_ino,
         "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
     }
+    stable_fields = ("pid", "ppid", "start_time_ticks", "executable_device", "executable_inode")
+    if expected is not None and any(observation[key] != expected[key] for key in stable_fields):
+        raise RuntimeError(f"controller observed process handoff, mixed facts, or PID reuse for PID {pid}")
+    return observation
 
 
-def validate_required_command(stage: str, command: Sequence[str]) -> dict[str, str]:
+def validate_required_command(
+    stage: str, command: Sequence[str], *, resources: _TrustedResources | None = None
+) -> dict[str, str]:
     """Require the exact trusted interpreter/script and a closed, ordered stage argv."""
 
     command = list(command)
-    trust = load_trust_config()
-    policy = _acceptance_policy()
+    owned = resources is None
+    resources = resources or _TrustedResources()
+    trust = resources.trust
+    policy = _acceptance_policy(resources)
     script_identity = trust["stage_scripts"].get(stage)
     if not script_identity or len(command) < 3:
         raise ValueError(f"controller stage is invalid: {stage!r}")
-    if command[0] != str(Path(trust["python_executable"]).resolve()):
+    if command[0] != trust["python_executable"]:
         raise ValueError(f"controller {stage!r} argv[0] is not the operator-trusted interpreter")
-    if Path(command[1]).resolve() != Path(script_identity["path"]):
+    if command[1] != script_identity["path"]:
         raise ValueError(f"controller {stage!r} command substituted the required executable")
     tail = command[2:]
     if stage == CONTROLLER_STAGES[0]:
@@ -306,7 +457,7 @@ def validate_required_command(stage: str, command: Sequence[str]) -> dict[str, s
             raise ValueError("producer command options are not in exact canonical order")
         fixed = {
             "--model": policy["dense_model"],
-            "--quant-config": str(Path(trust["quant_config"]).resolve()),
+            "--quant-config": trust["quant_config"],
             "--calibration-rows": str(policy["calibration_rows"]),
             "--yaqa-rows": str(policy["yaqa_rows"]),
             "--validation-rows": str(policy["validation_rows"]),
@@ -342,8 +493,16 @@ def validate_required_command(stage: str, command: Sequence[str]) -> dict[str, s
         "--checkpoint", "--manifest-dir", "--validation-jsonl", "--held-out-diagnostics-jsonl", "--diverse-jsonl",
     }
     for flag in path_options & values.keys():
-        if values[flag] != str(Path(values[flag]).expanduser().resolve()):
+        path = Path(values[flag])
+        if not path.is_absolute() or values[flag] != os.path.normpath(values[flag]):
             raise ValueError(f"controller {stage!r} {flag} is not an absolute normalized path")
+        if (
+            flag in {"--quant-config", "--calibration-dataset", "--yaqa-dataset", "--validation-dataset"}
+            and values[flag] != os.path.realpath(values[flag])
+        ):
+            raise ValueError(f"controller {stage!r} {flag} is not a physical canonical path")
+    if owned:
+        resources.close()
     return values
 
 
@@ -364,55 +523,75 @@ def _new_identity() -> str:
     return secrets.token_hex(32)
 
 
-def _openssl(args: Sequence[str], *, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
-    executable = str(Path(load_trust_config()["openssl_executable"]).resolve())
+def _openssl(
+    args: Sequence[str], *, input_bytes: bytes | None = None, resources: _TrustedResources | None = None
+) -> subprocess.CompletedProcess:
+    owned = resources is None
+    resources = resources or _TrustedResources()
+    trusted = resources.files["openssl_executable"]
     try:
         return subprocess.run(
-            [executable, *args],
+            [resources.trust["openssl_executable"], *args],
+            executable=trusted.fd_path,
+            pass_fds=(trusted.descriptor,),
             input=input_bytes,
             check=True,
             capture_output=True,
         )
     except (FileNotFoundError, subprocess.CalledProcessError) as error:
         raise RuntimeError("OpenSSL Ed25519 controller signing is unavailable or failed") from error
+    finally:
+        if owned:
+            resources.close()
 
 
-def _pinned_public_key() -> bytes:
-    trust = load_trust_config()
-    value, _identity = _read_nofollow(Path(trust["verifier_public_key"]))
+def _pinned_public_key(resources: _TrustedResources | None = None) -> bytes:
+    owned = resources is None
+    resources = resources or _TrustedResources()
+    trust = resources.trust
+    value = resources.files["verifier_public_key"].content
     if hashlib.sha256(value).hexdigest() != trust["verifier_public_key_sha256"]:
         raise RuntimeError("operator verifier public key fingerprint mismatches trusted deployment input")
     if not value.startswith(b"-----BEGIN PUBLIC KEY-----"):
         raise RuntimeError("pinned Qwen3 acceptance verifier public key is malformed")
+    if owned:
+        resources.close()
     return value
 
 
-def _load_trusted_signing_key() -> tuple[bytes, bytes, Path, os.stat_result, str]:
+def _load_trusted_signing_key(
+    resources: _TrustedResources | None = None,
+) -> tuple[bytes, bytes, Path, os.stat_result, str, _TrustedFile]:
+    owned = resources is None
+    resources = resources or _TrustedResources()
     configured = os.environ.get(VERIFIER_PRIVATE_KEY_ENV)
     if not configured:
         raise RuntimeError(f"trusted verifier signing authority is absent: set {VERIFIER_PRIVATE_KEY_ENV}")
     private_path = Path(configured)
     if not private_path.is_absolute():
         raise RuntimeError("trusted verifier private key must be an existing absolute external path")
-    resolved_private_path = _physical_path_without_symlinks(private_path)
+    private_file = _open_trusted_file(private_path, exact_mode=0o600)
+    resolved_private_path = Path(os.readlink(private_file.fd_path))
     if resolved_private_path.is_relative_to(_REPO_ROOT.resolve()):
         raise RuntimeError("trusted verifier private key must not reside in the candidate repository")
-    private_key, identity = _read_nofollow(private_path, exact_mode=0o600)
+    private_key, identity = private_file.content, private_file.identity
     private_digest = hashlib.sha256(private_key).hexdigest()
     with TemporaryDirectory(prefix="qvq-controller-key-check-") as temporary:
         private_copy = Path(temporary) / "stable-private.pem"
         derived_path = Path(temporary) / "derived-public.pem"
         private_copy.write_bytes(private_key)
         private_copy.chmod(0o600)
-        _openssl(["pkey", "-in", str(private_copy), "-pubout", "-out", str(derived_path)])
+        _openssl(["pkey", "-in", str(private_copy), "-pubout", "-out", str(derived_path)], resources=resources)
         derived_public = derived_path.read_bytes()
-    pinned_public = _pinned_public_key()
+    pinned_public = _pinned_public_key(resources)
     if derived_public != pinned_public:
         raise RuntimeError("trusted verifier private key does not match the pinned public trust root")
-    return private_key, pinned_public, private_path, identity, private_digest
+    if owned:
+        resources.close()
+    return private_key, pinned_public, private_path, identity, private_digest, private_file
 
 
-def _sign(private_key: bytes, payload: bytes) -> str:
+def _sign(private_key: bytes, payload: bytes, *, resources: _TrustedResources | None = None) -> str:
     with TemporaryDirectory(prefix="qvq-controller-sign-") as temporary:
         key_path = Path(temporary) / "private.pem"
         message_path = Path(temporary) / "message.bin"
@@ -430,7 +609,8 @@ def _sign(private_key: bytes, payload: bytes) -> str:
                 str(message_path),
                 "-out",
                 str(signature_path),
-            ]
+            ],
+            resources=resources,
         )
         return base64.b64encode(signature_path.read_bytes()).decode("ascii")
 
@@ -483,7 +663,7 @@ def controller_authority_receipt(transcript: Mapping[str, Any]) -> dict[str, Any
     if transcript.get("verifier_public_key_sha256") != fingerprint:
         raise ValueError("controller transcript does not identify the pinned verifier trust root")
     return {
-        "schema": "qvq-acceptance-controller-trust-root-v4",
+        "schema": "qvq-acceptance-controller-trust-root-v5",
         "controller_instance_id": transcript.get("controller_instance_id"),
         "run_nonce": transcript.get("run_nonce"),
         "verifier_public_key_sha256": fingerprint,
@@ -523,7 +703,9 @@ def _receive_live_payload(reader: Any) -> dict[str, Any]:
         qwen3_payload_aggregate,
     )
 
-    expected_modules = [expected_projection_name(*cell) for cell in expected_cells()]
+    cells = expected_cells()
+    cell_by_module = {expected_projection_name(*cell): cell for cell in cells}
+    expected_modules = sorted(cell_by_module, key=lambda value: value.encode("utf-8"))
     module_hashes: dict[str, str] = {}
     tensor_counts: dict[str, int] = {}
     current_module = None
@@ -531,7 +713,6 @@ def _receive_live_payload(reader: Any) -> dict[str, Any]:
     previous_key = None
     seen_full_names: set[str] = set()
     required_full_names: set[str] = set()
-    cells = expected_cells()
     for cell in cells:
         required_full_names.update(canonical_packed_tensor_schema(*cell))
     while True:
@@ -584,8 +765,10 @@ def _receive_live_payload(reader: Any) -> dict[str, Any]:
             _hash_frame(current_digest, QVQ_PAYLOAD_HASH_SCHEME.encode("utf-8"))
             _hash_frame(current_digest, module_name.encode("utf-8"))
             tensor_counts[module_name] = 0
-        required = canonical_packed_tensor_schema(*cells[expected_modules.index(module_name)])
+        required = canonical_packed_tensor_schema(*cell_by_module[module_name])
         full_name = f"{module_name}.{tensor_name}"
+        if full_name not in required:
+            raise RuntimeError(f"live payload contains noncanonical extra tensor: {full_name}")
         seen_full_names.add(full_name)
         if full_name in required:
             dtype_map = {"I32": "torch.int32", "F32": "torch.float32", "U8": "torch.uint8"}
@@ -601,8 +784,8 @@ def _receive_live_payload(reader: Any) -> dict[str, Any]:
         module_hashes[current_module] = current_digest.hexdigest()
     if list(module_hashes) != expected_modules:
         raise RuntimeError("live payload stream does not contain the canonical 252-module census")
-    if not required_full_names <= seen_full_names:
-        raise RuntimeError("live payload stream omits required canonical packed tensors")
+    if seen_full_names != required_full_names or any(count != 5 for count in tensor_counts.values()):
+        raise RuntimeError("live payload stream does not contain the exact canonical per-module tensor schema")
     return {
         "scheme": QVQ_PAYLOAD_HASH_SCHEME,
         "module_count": len(module_hashes),
@@ -659,6 +842,7 @@ class AcceptanceController:
     """Own unpredictable identities and observe child measurements/spawn/exit facts."""
 
     def __init__(self) -> None:
+        self._resources = _TrustedResources()
         self.run_nonce = _new_identity()
         self.controller_instance_id = _new_identity()
         (
@@ -667,7 +851,8 @@ class AcceptanceController:
             self._private_key_path,
             self._private_key_identity,
             self._private_key_digest,
-        ) = _load_trusted_signing_key()
+            self._private_key_file,
+        ) = _load_trusted_signing_key(self._resources)
         self._public_key_sha256 = hashlib.sha256(public_key).hexdigest()
         self.controller_pid = os.getpid()
         self.controller_parent_pid = os.getppid()
@@ -684,7 +869,7 @@ class AcceptanceController:
     ) -> dict[str, Any]:
         if stage not in CONTROLLER_STAGES or any(record["stage"] == stage for record in self._records):
             raise ValueError(f"controller stage is invalid or replayed: {stage!r}")
-        command_values = validate_required_command(stage, command)
+        command_values = validate_required_command(stage, command, resources=self._resources)
         if stage == CONTROLLER_STAGES[0]:
             manifest_dir = str(Path(command_values["--calibration-dataset"]).parent)
             if (
@@ -731,14 +916,29 @@ class AcceptanceController:
                 }, sort_keys=True),
             }
         )
-        validate_required_command(stage, command)
+        self._resources.revalidate()
+        validate_required_command(stage, command, resources=self._resources)
+        script_file = self._resources.files[stage]
+        python_file = self._resources.files["python_executable"]
+        execution_command = [command[0], script_file.fd_path, *command[2:]]
+        if stage == CONTROLLER_STAGES[0]:
+            quant_fd = self._resources.files["quant_config"].descriptor
+            environment[_ENV_PREFIX + "QUANT_CONFIG_FD"] = str(quant_fd)
+        else:
+            quant_fd = None
         spawned_ns = time.monotonic_ns()
         process = subprocess.Popen(
-            list(command),
+            execution_command,
+            executable=python_file.fd_path,
             cwd=cwd,
             env=environment,
-            pass_fds=(child_channel.fileno(), *snapshot_descriptors),
+            pass_fds=(
+                child_channel.fileno(), python_file.descriptor, script_file.descriptor,
+                *((quant_fd,) if quant_fd is not None else ()), *snapshot_descriptors,
+            ),
         )
+        pid_descriptor = os.pidfd_open(process.pid, 0)
+        initial_os_process = _observe_linux_process(process.pid)
         child_channel.close()
         for descriptor in snapshot_descriptors:
             os.close(descriptor)
@@ -746,28 +946,30 @@ class AcceptanceController:
         try:
             with parent_channel.makefile("rb") as reader:
                 raw_event = reader.readline()
-            if not raw_event:
-                raise RuntimeError(f"controller stage {stage!r} exited without a measurement")
-            event = json.loads(raw_event)
-            expected = {
-                "run_nonce": self.run_nonce,
-                "controller_instance_id": self.controller_instance_id,
-                "controller_pid": self.controller_pid,
-                "stage": stage,
-                "stage_nonce": stage_nonce,
-                "process_instance_id": process_instance_id,
-            }
-            if not isinstance(event, dict) or any(event.get(key) != value for key, value in expected.items()):
-                raise RuntimeError(f"controller stage {stage!r} returned unauthorized identity data")
-            controller_live_payload = _receive_live_payload(reader) if stage == CONTROLLER_STAGES[0] else None
-            validate_required_command(stage, command)
-            os_process = _observe_linux_process(process.pid)
-            trust = load_trust_config()
-            expected_cmdline = b"\0".join(os.fsencode(item) for item in command) + b"\0"
+                if not raw_event:
+                    raise RuntimeError(f"controller stage {stage!r} exited without a measurement")
+                event = json.loads(raw_event)
+                expected = {
+                    "run_nonce": self.run_nonce,
+                    "controller_instance_id": self.controller_instance_id,
+                    "controller_pid": self.controller_pid,
+                    "stage": stage,
+                    "stage_nonce": stage_nonce,
+                    "process_instance_id": process_instance_id,
+                }
+                if not isinstance(event, dict) or any(event.get(key) != value for key, value in expected.items()):
+                    raise RuntimeError(f"controller stage {stage!r} returned unauthorized identity data")
+                controller_live_payload = _receive_live_payload(reader) if stage == CONTROLLER_STAGES[0] else None
+            self._resources.revalidate()
+            validate_required_command(stage, command, resources=self._resources)
+            os_process = _observe_linux_process(process.pid, expected=initial_os_process)
+            trust = self._resources.trust
+            expected_cmdline = b"\0".join(os.fsencode(item) for item in execution_command) + b"\0"
             if (
                 os_process["ppid"] != self.controller_pid
-                or os_process["executable"] != str(Path(trust["python_executable"]).resolve())
                 or os_process["executable_sha256"] != trust["python_executable_sha256"]
+                or (os_process["executable_device"], os_process["executable_inode"])
+                != (python_file.identity.st_dev, python_file.identity.st_ino)
                 or os_process["cmdline_sha256"] != hashlib.sha256(expected_cmdline).hexdigest()
             ):
                 raise RuntimeError(f"controller stage {stage!r} OS process facts do not match authority")
@@ -780,7 +982,10 @@ class AcceptanceController:
                 )
 
                 validate_producer_pre_save_measurement(
-                    event["measurement"], event=event, controller_datasets=controller_datasets
+                    event["measurement"],
+                    event=event,
+                    controller_datasets=controller_datasets,
+                    controller_quant_config_sha256=self._resources.files["quant_config"].digest,
                 )
                 if event["measurement"]["pre_save"]["payload"] != controller_live_payload:
                     raise RuntimeError("producer payload digests do not match controller-hashed live tensor bytes")
@@ -791,10 +996,12 @@ class AcceptanceController:
         except BaseException:
             process.kill()
             process.wait()
+            os.close(pid_descriptor)
             raise
         finally:
             parent_channel.close()
         exit_code = process.wait(timeout=timeout)
+        os.close(pid_descriptor)
         exited_ns = time.monotonic_ns()
         record = {
             "stage": stage,
@@ -805,11 +1012,16 @@ class AcceptanceController:
             "os_process": os_process,
             "argv": list(command),
             "argv_sha256": hashlib.sha256(b"\0".join(os.fsencode(item) for item in command)).hexdigest(),
+            "execution_argv": execution_command,
+            "execution_argv_sha256": hashlib.sha256(
+                b"\0".join(os.fsencode(item) for item in execution_command)
+            ).hexdigest(),
             "spawned_monotonic_ns": spawned_ns,
             "event_received_monotonic_ns": received_ns,
             "acknowledgement_sent_monotonic_ns": acknowledged_ns,
             "exited_monotonic_ns": exited_ns,
             "exit_code": exit_code,
+            "pidfd_bound_through_wait": True,
             "event": event,
             "event_sha256": event_sha256,
             "acknowledgement": acknowledgement,
@@ -824,11 +1036,17 @@ class AcceptanceController:
         return record
 
     def signed_transcript(self, *, require_complete: bool = True) -> dict[str, Any]:
+        retained = os.fstat(self._private_key_file.descriptor)
+        expected = self._private_key_identity
+        if (
+            (retained.st_dev, retained.st_ino, retained.st_size, retained.st_mtime_ns, retained.st_ctime_ns)
+            != (expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns, expected.st_ctime_ns)
+        ):
+            raise RuntimeError("trusted verifier private-key path changed: retained descriptor identity mutated")
         try:
             current_bytes, current = _read_nofollow(self._private_key_path, exact_mode=0o600)
         except RuntimeError as error:
             raise RuntimeError("trusted verifier private-key path changed after controller initialization") from error
-        expected = self._private_key_identity
         if (
             (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
             != (expected.st_dev, expected.st_ino, expected.st_size, expected.st_mtime_ns, expected.st_ctime_ns)
@@ -845,13 +1063,15 @@ class AcceptanceController:
             "controller_pid": self.controller_pid,
             "controller_parent_pid": self.controller_parent_pid,
             "verifier_public_key_sha256": self._public_key_sha256,
-            "trust_config_sha256": hashlib.sha256(_canonical(load_trust_config())).hexdigest(),
+            "trust_config_sha256": hashlib.sha256(_canonical(self._resources.trust)).hexdigest(),
             "controller_datasets": (
                 self._records[0]["controller_datasets"] if self._records else None
             ),
             "processes": list(self._records),
         }
-        transcript["controller_signature_ed25519"] = _sign(self._private_key, _canonical(transcript))
+        transcript["controller_signature_ed25519"] = _sign(
+            self._private_key, _canonical(transcript), resources=self._resources
+        )
         return transcript
 
 

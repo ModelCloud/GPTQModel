@@ -173,6 +173,16 @@ def expected_projection_dimensions(role: str) -> tuple[int, int]:
         raise ValueError(f"unknown Qwen3 projection role {role!r}") from error
 
 
+def canonical_packed_tensor_schema(layer: int, role: str) -> dict[str, dict[str, Any]]:
+    """Return the exact five-tensor serialized schema for one canonical projection."""
+
+    module_name = expected_projection_name(layer, role)
+    in_features, out_features = expected_projection_dimensions(role)
+    return expected_packed_tensor_metadata(
+        ProjectionCell(layer, role, module_name, in_features, out_features)
+    )
+
+
 def expected_packed_tensor_metadata(cell: ProjectionCell) -> dict[str, dict[str, Any]]:
     """Return the one canonical serialized V2B2-P32 W2 payload for a projection."""
 
@@ -257,7 +267,11 @@ def valid_qwen3_payload_hashes(payload: Any) -> bool:
 
 
 def validate_producer_pre_save_measurement(
-    measurement: Any, *, event: Mapping[str, Any], controller_datasets: Mapping[str, Any] | None = None
+    measurement: Any,
+    *,
+    event: Mapping[str, Any],
+    controller_datasets: Mapping[str, Any] | None = None,
+    controller_quant_config_sha256: str | None = None,
 ) -> None:
     """Fail closed before save unless the producer supplied the entire pinned live evidence."""
 
@@ -274,7 +288,8 @@ def validate_producer_pre_save_measurement(
     if (
         not isinstance(actual_config, dict)
         or any(actual_config.get(key) != value for key, value in expected_config.items())
-        or measurement.get("quant_config_authority_sha256") != _sha256_file(pinned_config_path)
+        or measurement.get("quant_config_authority_sha256")
+        != (controller_quant_config_sha256 or _sha256_file(pinned_config_path))
         or measurement.get("layer_scope") != "all"
     ):
         raise AcceptanceError("producer config/scope is not the canonical all-layer Qwen3 acceptance run")
@@ -378,6 +393,7 @@ def validate_controller_transcript(
             or record["parent_pid"] <= 0
             or record.get("parent_pid") != controller_pid
             or record.get("exit_code") != 0
+            or record.get("pidfd_bound_through_wait") is not True
         ):
             raise AcceptanceError(f"controller {stage} spawn/exit metadata is invalid or unsuccessful")
         spawned = record.get("spawned_monotonic_ns")
@@ -404,6 +420,19 @@ def validate_controller_transcript(
         argv_digest = hashlib.sha256(b"\0".join(os.fsencode(item) for item in argv)).hexdigest()
         if record.get("argv_sha256") != argv_digest:
             raise AcceptanceError(f"controller {stage} argv digest is invalid")
+        execution_argv = record.get("execution_argv")
+        if (
+            not isinstance(execution_argv, list)
+            or len(execution_argv) != len(argv)
+            or execution_argv[0] != argv[0]
+            or execution_argv[2:] != argv[2:]
+            or not isinstance(execution_argv[1], str)
+            or not execution_argv[1].startswith("/proc/self/fd/")
+            or not execution_argv[1].removeprefix("/proc/self/fd/").isdigit()
+            or record.get("execution_argv_sha256")
+            != hashlib.sha256(b"\0".join(os.fsencode(item) for item in execution_argv)).hexdigest()
+        ):
+            raise AcceptanceError(f"controller {stage} canonical required command has invalid descriptor execution")
         try:
             command_values = validate_required_command(stage, argv)
         except (RuntimeError, ValueError) as error:
@@ -411,7 +440,8 @@ def validate_controller_transcript(
         parsed_commands.append(command_values)
         os_process = record.get("os_process")
         trust = load_trust_config()
-        expected_cmdline = b"\0".join(os.fsencode(item) for item in argv) + b"\0"
+        expected_cmdline = b"\0".join(os.fsencode(item) for item in execution_argv) + b"\0"
+        python_identity = os.stat(trust["python_executable"], follow_symlinks=False)
         if (
             not isinstance(os_process, dict)
             or os_process.get("pid") != record.get("pid")
@@ -422,6 +452,8 @@ def validate_controller_transcript(
             or os_process.get("executable_sha256") != trust["python_executable_sha256"]
             or not isinstance(os_process.get("executable_device"), int)
             or not isinstance(os_process.get("executable_inode"), int)
+            or (os_process.get("executable_device"), os_process.get("executable_inode"))
+            != (python_identity.st_dev, python_identity.st_ino)
             or os_process.get("cmdline_sha256") != hashlib.sha256(expected_cmdline).hexdigest()
         ):
             raise AcceptanceError(f"controller {stage} command is not the canonical required command")

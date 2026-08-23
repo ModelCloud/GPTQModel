@@ -5,8 +5,11 @@ import hashlib
 import json
 import os
 import secrets
+import socket
+import struct
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -524,6 +527,8 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
                 "--maximum-bpw", "2.1", "--score-min", "0.85", "--final-kl-max-nats", "0.1",
                 "--output", str(test_root / "draft.json"),
             ]
+        execution_command = [command[0], f"/proc/self/fd/{50 + index}", *command[2:]]
+        python_identity = os.stat(command[0], follow_symlinks=False)
         event = {
             "run_nonce": controller.run_nonce,
             "controller_instance_id": controller.controller_instance_id,
@@ -544,16 +549,23 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
                 "start_time_ticks": 1000 + index,
                 "executable": controller_module.trusted_python_executable(),
                 "executable_sha256": controller_module.load_trust_config()["python_executable_sha256"],
-                "executable_device": 1, "executable_inode": 100 + index,
-                "cmdline_sha256": hashlib.sha256(b"\0".join(item.encode() for item in command) + b"\0").hexdigest(),
+                "executable_device": python_identity.st_dev, "executable_inode": python_identity.st_ino,
+                "cmdline_sha256": hashlib.sha256(
+                    b"\0".join(item.encode() for item in execution_command) + b"\0"
+                ).hexdigest(),
             },
             "argv": command,
             "argv_sha256": hashlib.sha256(b"\0".join(item.encode() for item in command)).hexdigest(),
+            "execution_argv": execution_command,
+            "execution_argv_sha256": hashlib.sha256(
+                b"\0".join(item.encode() for item in execution_command)
+            ).hexdigest(),
             "spawned_monotonic_ns": index * 10 + 1,
             "event_received_monotonic_ns": index * 10 + 2,
             "acknowledgement_sent_monotonic_ns": index * 10 + 4,
             "exited_monotonic_ns": index * 10 + 5,
             "exit_code": 0,
+            "pidfd_bound_through_wait": True,
             "event": event,
             "event_sha256": hashlib.sha256(acceptance.canonical_content(event)).hexdigest(),
             "previous_record_sha256": records[-1]["record_sha256"] if records else None,
@@ -940,6 +952,196 @@ def test_controller_dataset_snapshot_survives_verify_use_mutation():
     finally:
         for descriptor in descriptors:
             os.close(descriptor)
+
+
+def test_descriptor_owned_file_survives_path_replacement(tmp_path):
+    path = tmp_path / "trusted.bin"
+    path.write_bytes(b"reviewed")
+    trusted = controller_module._open_trusted_file(path)
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"attacker")
+    replacement.replace(path)
+    try:
+        os.lseek(trusted.descriptor, 0, os.SEEK_SET)
+        assert os.read(trusted.descriptor, 32) == b"reviewed"
+        assert trusted.content == b"reviewed"
+    finally:
+        trusted.close()
+
+
+def test_verified_policy_and_stage_are_consumed_from_retained_descriptors(tmp_path):
+    trust_path = Path(os.environ[controller_module.TRUST_CONFIG_ENV])
+    trust = json.loads(trust_path.read_text())
+    script = tmp_path / "producer.py"
+    script.write_text("print('descriptor-owned')\n", encoding="utf-8")
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_bytes(Path(trust["acceptance_policy"]).read_bytes())
+    trust["acceptance_policy"] = str(policy_path)
+    trust["acceptance_policy_sha256"] = acceptance_script._sha256_file(policy_path)
+    quant_path = tmp_path / "quant.json"
+    quant_path.write_bytes(Path(trust["quant_config"]).read_bytes())
+    trust["quant_config"] = str(quant_path)
+    trust["quant_config_sha256"] = acceptance_script._sha256_file(quant_path)
+    trust["stage_scripts"]["quantization_producer"] = {
+        "path": str(script), "sha256": acceptance_script._sha256_file(script)
+    }
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+    resources = controller_module._TrustedResources()
+    policy_before = controller_module._acceptance_policy(resources)
+    for path, content in (
+        (script, b"raise SystemExit('attacker')\n"),
+        (policy_path, b'{"schema":"attacker"}'),
+        (quant_path, b'{"format":"attacker"}'),
+    ):
+        replacement = path.with_suffix(path.suffix + ".replacement")
+        replacement.write_bytes(content)
+        replacement.replace(path)
+    try:
+        assert controller_module._acceptance_policy(resources) == policy_before
+        assert json.loads(resources.files["quant_config"].content)["format"] == "qvq_v2b2_p32"
+        python_file = resources.files["python_executable"]
+        script_file = resources.files["quantization_producer"]
+        result = subprocess.run(
+            [trust["python_executable"], script_file.fd_path],
+            executable=python_file.fd_path,
+            pass_fds=(python_file.descriptor, script_file.descriptor),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "descriptor-owned"
+    finally:
+        resources.close()
+
+
+def test_controller_rejects_rename_capable_trusted_parent(tmp_path):
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir(mode=0o777)
+    unsafe.chmod(0o777)
+    policy = unsafe / "policy.json"
+    original = Path.cwd() / "configs" / "qwen3_8b_qvq_acceptance_policy.json"
+    policy.write_bytes(original.read_bytes())
+    trust_path = Path(os.environ[controller_module.TRUST_CONFIG_ENV])
+    trust = json.loads(trust_path.read_text())
+    trust["acceptance_policy"] = str(policy)
+    trust["acceptance_policy_sha256"] = acceptance_script._sha256_file(policy)
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+    with pytest.raises(RuntimeError, match="unsafe parent directory"):
+        AcceptanceController()
+
+
+def test_controller_rejects_dataset_dotdot_alias():
+    report = _complete_report()
+    command = report["artifact"]["acceptance_controller"]["processes"][0]["argv"]
+    index = command.index("--calibration-dataset") + 1
+    source = Path(command[index])
+    command[index] = str(source.parent / "alias" / ".." / source.name)
+    with pytest.raises(ValueError, match="normalized path"):
+        controller_module.validate_required_command("quantization_producer", command)
+
+
+def test_live_producer_ipc_keeps_reader_open_until_validation_and_ack(monkeypatch):
+    module_names = [f"module-{index:03d}" for index in range(252)]
+    cells = [(index, "role") for index in range(252)]
+    monkeypatch.setattr(acceptance, "expected_cells", lambda: cells)
+    monkeypatch.setattr(acceptance, "expected_projection_name", lambda layer, _role: module_names[layer])
+    monkeypatch.setattr(
+        acceptance,
+        "canonical_packed_tensor_schema",
+        lambda layer, _role: {
+            f"{module_names[layer]}.{name}": {"dtype": "U8", "shape": [1]}
+            for name in ("SU", "SV", "bank_alt_id", "bank_ids", "trellis")
+        },
+    )
+    parent, child = socket.socketpair()
+    prefix = "GPTQMODEL_QVQ_CONTROLLER_"
+    authority = {
+        "RUN_NONCE": secrets.token_hex(32), "CONTROLLER_INSTANCE_ID": secrets.token_hex(32),
+        "CONTROLLER_PID": str(os.getpid()), "STAGE": "quantization_producer",
+        "STAGE_NONCE": secrets.token_hex(32), "PROCESS_INSTANCE_ID": secrets.token_hex(32),
+        "EVENT_FD": str(child.detach()),
+    }
+    for key, value in authority.items():
+        monkeypatch.setenv(prefix + key, value)
+    saved = threading.Event()
+    error = []
+
+    def producer():
+        try:
+            records = (
+                ({"module": module, "tensor": tensor, "dtype": "torch.uint8", "shape": [1], "byte_count": 1}, b"x")
+                for module in module_names
+                for tensor in ("SU", "SV", "bank_alt_id", "bank_ids", "trellis")
+            )
+            controller_module.emit_controller_measurement(
+                "quantization_producer", {"live": True}, live_payload_records=records
+            )
+            saved.set()
+        except (OSError, RuntimeError, ValueError) as caught:
+            error.append(caught)
+
+    worker = threading.Thread(target=producer)
+    worker.start()
+    with parent.makefile("rb") as reader:
+        event = json.loads(reader.readline())
+        assert not saved.is_set()
+        live = controller_module._receive_live_payload(reader)
+        assert live["module_count"] == 252
+        parent.sendall(controller_module._canonical({
+            "acknowledged_event_sha256": controller_module._sha256(event),
+            "validation_policy": "qwen3-producer-pre-save-v1",
+        }) + b"\n")
+    worker.join(timeout=5)
+    parent.close()
+    assert not error
+    assert saved.is_set()
+
+
+def test_live_payload_rejects_extra_tensor(monkeypatch):
+    import io
+
+    monkeypatch.setattr(acceptance, "expected_cells", lambda: [(0, "role")])
+    monkeypatch.setattr(acceptance, "expected_projection_name", lambda _layer, _role: "module")
+    monkeypatch.setattr(
+        acceptance,
+        "canonical_packed_tensor_schema",
+        lambda _layer, _role: {
+            f"module.{name}": {"dtype": "U8", "shape": [1]}
+            for name in ("SU", "SV", "bank_alt_id", "bank_ids", "trellis")
+        },
+    )
+    stream = bytearray()
+    for name in ("SU", "SV", "bank_alt_id", "bank_ids", "trellis", "unexpected"):
+        header = controller_module._canonical(
+            {"module": "module", "tensor": name, "dtype": "torch.uint8", "shape": [1], "byte_count": 1}
+        )
+        stream.extend(struct.pack("<Q", len(header)) + header + b"x")
+    stream.extend(struct.pack("<Q", 0))
+    with pytest.raises(RuntimeError, match="extra tensor"):
+        controller_module._receive_live_payload(io.BytesIO(stream))
+
+
+def test_process_observation_rejects_mixed_start_identity(monkeypatch):
+    original = Path.read_text
+    calls = 0
+
+    def changing_stat(path, *args, **kwargs):
+        nonlocal calls
+        value = original(path, *args, **kwargs)
+        if path.name == "stat":
+            calls += 1
+            if calls == 2:
+                opening, closing = value.find("("), value.rfind(")")
+                fields = value[closing + 2:].split()
+                fields[19] = str(int(fields[19]) + 1)
+                return f"{value[:opening]}({value[opening + 1:closing]}) {' '.join(fields)}"
+        return value
+
+    monkeypatch.setattr(Path, "read_text", changing_stat)
+    with pytest.raises(RuntimeError, match="mixed or reused"):
+        controller_module._observe_linux_process(os.getpid())
 
 
 def test_controller_rejects_fabricated_252_digest_payload_without_live_bytes():

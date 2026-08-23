@@ -306,7 +306,9 @@ def _automatic_bank_count(format_value: str) -> int:
 
 def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
     if args.quant_config is not None:
-        payload = json.loads(args.quant_config.read_text(encoding="utf-8"))
+        trusted_fd = os.environ.get("GPTQMODEL_QVQ_CONTROLLER_QUANT_CONFIG_FD")
+        config_path = Path(f"/proc/self/fd/{trusted_fd}") if trusted_fd is not None else args.quant_config
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise TypeError("--quant-config must contain one JSON object")
         return QVQConfig(**payload)
@@ -401,7 +403,10 @@ def load_dataset_slice(spec: DatasetSlice):
     path = Path(spec.source).expanduser()
     snapshot_payload = json.loads(os.environ.get("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", "{}"))
     snapshot_fds = snapshot_payload.get("fds", {}) if isinstance(snapshot_payload, dict) else {}
-    snapshot_fd = snapshot_fds.get(str(path.resolve()))
+    canonical_source = str(path.resolve())
+    snapshot_fd = snapshot_fds.get(canonical_source)
+    if snapshot_payload and not isinstance(snapshot_fd, int):
+        raise RuntimeError(f"controller dataset snapshot is absent for canonical source: {canonical_source}")
     read_path = Path(f"/proc/self/fd/{snapshot_fd}") if isinstance(snapshot_fd, int) else path
     kwargs: dict[str, Any] = {"split": spec.split}
     if isinstance(snapshot_fd, int) or path.is_file():
@@ -620,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
                 "pre_save": pre_save,
                 "quantize_config": config.to_dict(),
                 "quant_config_authority_sha256": hashlib.sha256(
-                    args.quant_config.expanduser().resolve().read_bytes()
+                    Path(f"/proc/self/fd/{os.environ['GPTQMODEL_QVQ_CONTROLLER_QUANT_CONFIG_FD']}").read_bytes()
                 ).hexdigest(),
                 "layer_scope": "all" if args.layers is None else {"first_layers": args.layers},
                 "datasets": {
