@@ -24,6 +24,8 @@ constexpr int kTileColumns = 16;
 constexpr int kTileValues = kTileRows * kTileColumns;
 constexpr int kThreads = 256;
 constexpr int kRowsPerBlock = 32;
+constexpr bool kQvqDebugDisableVecStaging = false;
+
 constexpr int kPgc16LevelCount = 256;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
@@ -163,6 +165,71 @@ __device__ __forceinline__ uint32_t pgc16_mix(uint32_t state) {
   return mixed ^ (mixed >> 7);
 }
 
+// Specialized decode for compile-time transition widths: the planar decoder
+// fully unrolls, the V2 pair state/mix is computed once and shared across the
+// even/odd column pair via a warp shuffle, and the unused second V2 mix from
+// the generic path is never issued. Produces bit-identical weights to
+// qvq_decode_weight (same extraction decomposition, same FP expression order;
+// min-free path so fold order cannot matter).
+template <int TransitionBits, int VectorSize>
+__device__ __forceinline__ float qvq_decode_weight_fast(
+    const uint32_t* packed_words,
+    uint8_t packed_bank_id,
+    const half* cached_levels,
+    int local,
+    int bank_mode,
+    int bank_alt_id) {
+  const int col = local & 15;
+  const int v4_group = local >> 2;
+  if constexpr (VectorSize == 4) {
+    uint32_t mixed_pair = 0;
+    if ((col & 3) == 0) {
+      const uint32_t state = qvq_state<TransitionBits, VectorSize>(packed_words, v4_group);
+      mixed_pair = pgc16_mix(state) |
+          (pgc16_mix(state ^ pgc16_bank_mask_runtime(TransitionBits, packed_bank_id)) << 16);
+    }
+    mixed_pair = __shfl_sync(0xffffffffu, mixed_pair, local & ~3);
+    const uint32_t mixed = mixed_pair & 0xffffu;
+    const uint32_t mixed2 = mixed_pair >> 16;
+    uint32_t level_pair0 = 0;
+    uint32_t level_pair1 = 0;
+    if ((col & 3) == 0) {
+      level_pair0 = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
+          (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
+      level_pair1 = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed2 >> 8])) |
+          (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed2 & 0xffu])) << 16);
+    }
+    level_pair0 = __shfl_sync(0xffffffffu, level_pair0, local & ~3);
+    level_pair1 = __shfl_sync(0xffffffffu, level_pair1, local & ~3);
+    const int component = col & 3;
+    const uint32_t level_bits = component < 2 ? (level_pair0 >> (16 * component))
+                                               : (level_pair1 >> (16 * (component - 2)));
+    return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
+  } else {
+    const int pair = local >> 1;
+    uint32_t level_pair = 0;
+    if ((local & 1) == 0) {
+      const uint32_t state = qvq_state<TransitionBits, VectorSize>(packed_words, pair);
+      uint32_t bank = 0;
+      if (bank_mode == 2) {
+        bank = (static_cast<uint32_t>(packed_bank_id) >> ((pair >> 5) * 2)) & 3u;
+      } else if (bank_mode == 3) {
+        bank = ((static_cast<uint32_t>(packed_bank_id) >> (pair >> 4)) & 1u) *
+            static_cast<uint32_t>(bank_alt_id);
+      }
+      const uint32_t mask = bank_mode == 0 ? 0u : pgc16_v2_bank_mask_runtime(TransitionBits, bank);
+      const uint32_t mixed = pgc16_mix(state ^ mask);
+      level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
+          (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
+    }
+    // Direct-indexed broadcast from the even (pair-leader) lane; an xor
+    // exchange would overwrite the leader's own value with its partner's zero.
+    level_pair = __shfl_sync(0xffffffffu, level_pair, local & ~1);
+    const uint32_t level_bits = (local & 1) == 0 ? level_pair & 0xffffu : level_pair >> 16;
+    return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
+  }
+}
+
 // Shared decode path for normal and split-K GEMV.  Keeping this logic in one
 // device helper prevents the two accumulation kernels from drifting while
 // retaining compile-time V2/V4 and rate specialization at the call site.
@@ -241,7 +308,13 @@ __device__ __forceinline__ float qvq_decode_weight(
 // ROWS is one of {1, 8, 16, 32}: dispatch rounds M up to the next supported
 // value and the row loop is fully unrolled at compile time, avoiding per-k-tile
 // predication overhead for small M.
-template <typename Scalar, typename OutputScalar, int ROWS, int VectorSize = 2>
+//
+// TransitionBits == 0 selects the generic runtime-width decode; any value in
+// [2, 16] (V2) or the even widths [4, 16] (V4) selects a fully specialized
+// decode with identical arithmetic. Trellis and input staging use 16-byte
+// vector loads when the per-tile word count allows it (it always does: both
+// vector layouts emit whole 32-bit words).
+template <typename Scalar, typename OutputScalar, int ROWS, int VectorSize = 2, int TransitionBits = 0>
 __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -286,34 +359,66 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
   // Keep the high-unroll path for the small-row kernels where it hides
   // global-load latency without inflating the register/shared-memory image
   // of the wide-row specializations.
-  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 12 : 8);
+  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 16 : 16);
   constexpr int kMaxWords = VectorSize == 2 ? 64 : 32;
-  __shared__ uint32_t packed_words[kUnroll][kMaxWords];
+  __shared__ __align__(16) uint32_t packed_words[kUnroll][kMaxWords];
   __shared__ uint8_t packed_bank_ids[kUnroll];
-  __shared__ Scalar input_tile[kUnroll][ROWS * kTileRows];
+  __shared__ __align__(16) Scalar input_tile[kUnroll][ROWS * kTileRows];
 
   for (int kb = 0; kb < k_tiles; kb += kUnroll) {
     const int tiles_here = min(kUnroll, k_tiles - kb);
     const int words_per_tile = (VectorSize == 2 ? 4 : 2) * transition_bits;
-    for (int index = thread; index < tiles_here * words_per_tile; index += kThreads) {
-      const int u = index / words_per_tile;
-      const int w = index % words_per_tile;
-      const int tile_index = (kb + u) * n_tiles + n_tile;
-      const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * words_per_tile;
-      packed_words[u][w] = static_cast<uint32_t>(tile[w]);
+    if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
+      const int words_per_vec = words_per_tile >> 2;
+      const int vec_total = tiles_here * words_per_vec;
+      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0]);
+      const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
+      for (int index = thread; index < vec_total; index += kThreads) {
+        const int u = index / words_per_vec;
+        const int w4 = index - u * words_per_vec;
+        words4[u * (kMaxWords / 4) + w4] =
+            trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+      }
+      static_assert(kMaxWords % 4 == 0, "vectorized trellis staging requires padded rows");
+    } else {
+      for (int index = thread; index < tiles_here * words_per_tile; index += kThreads) {
+        const int u = index / words_per_tile;
+        const int w = index % words_per_tile;
+        const int tile_index = (kb + u) * n_tiles + n_tile;
+        const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * words_per_tile;
+        packed_words[u][w] = static_cast<uint32_t>(tile[w]);
+      }
     }
     if (thread < tiles_here) {
       const int tile_index = (kb + thread) * n_tiles + n_tile;
       packed_bank_ids[thread] = bank_ids == nullptr ? 0 : bank_ids[tile_index];
     }
-    for (int index = thread; index < tiles_here * ROWS * kTileRows; index += kThreads) {
-      const int u = index / (ROWS * kTileRows);
-      const int cell = index % (ROWS * kTileRows);
-      const int row = cell / kTileRows;
-      const int k_local = cell % kTileRows;
-      input_tile[u][cell] = row < block_rows
-          ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows + k_local]
-          : ScalarTraits<Scalar>::from_float(0.0f);
+    if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
+      constexpr int row_vecs = kTileRows * static_cast<int>(sizeof(Scalar)) / static_cast<int>(sizeof(uint4));
+      const int vec_total = tiles_here * ROWS * row_vecs;
+      uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
+      const uint4* input4_base = reinterpret_cast<const uint4*>(input);
+      for (int index = thread; index < vec_total; index += kThreads) {
+        const int u = index / (ROWS * row_vecs);
+        const int cell = index - u * (ROWS * row_vecs);
+        const int row = cell / row_vecs;
+        const int vec = cell - row * row_vecs;
+        input4[index] = row < block_rows
+            ? input4_base[(static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
+                      static_cast<int>(sizeof(Scalar)) / 16 +
+                  vec]
+            : make_uint4(0u, 0u, 0u, 0u);
+      }
+    } else {
+      for (int index = thread; index < tiles_here * ROWS * kTileRows; index += kThreads) {
+        const int u = index / (ROWS * kTileRows);
+        const int cell = index % (ROWS * kTileRows);
+        const int row = cell / kTileRows;
+        const int k_local = cell % kTileRows;
+        input_tile[u][cell] = row < block_rows
+            ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows + k_local]
+            : ScalarTraits<Scalar>::from_float(0.0f);
+      }
     }
     __syncthreads();
 
@@ -322,9 +427,16 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
       if (u < tiles_here) {
         // Decode the single weight this thread needs (register; no shared write).
         const int local = (k_slot << 4) | col;
-        const float weight = qvq_decode_weight<VectorSize>(
-            packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
-            bank_mode, bank_alt_id);
+        float weight;
+        if constexpr (TransitionBits != 0) {
+          weight = qvq_decode_weight_fast<TransitionBits, VectorSize>(
+              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local,
+              bank_mode, bank_alt_id);
+        } else {
+          weight = qvq_decode_weight<VectorSize>(
+              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
+              bank_mode, bank_alt_id);
+        }
 
 #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
@@ -366,7 +478,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
 // expose enough N tiles to occupy the GPU: each block owns a contiguous k-tile
 // range and writes FP32 partials reduced by qvq_reduce_splitk_kernel in a fixed
 // order.
-template <typename Scalar, int ROWS, int VectorSize = 2>
+template <typename Scalar, int ROWS, int VectorSize = 2, int TransitionBits = 0>
 __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -407,34 +519,65 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
     accumulator[r] = 0.0f;
   }
 
-  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 12 : 8);
+  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 16 : 16);
   constexpr int kMaxWords = VectorSize == 2 ? 64 : 32;
-  __shared__ uint32_t packed_words[kUnroll][kMaxWords];
+  __shared__ __align__(16) uint32_t packed_words[kUnroll][kMaxWords];
   __shared__ uint8_t packed_bank_ids[kUnroll];
-  __shared__ Scalar input_tile[kUnroll][ROWS * kTileRows];
+  __shared__ __align__(16) Scalar input_tile[kUnroll][ROWS * kTileRows];
 
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kUnroll) {
     const int tiles_here = min(kUnroll, k_tile_end - kb);
     const int words_per_tile = (VectorSize == 2 ? 4 : 2) * transition_bits;
-    for (int index = thread; index < tiles_here * words_per_tile; index += kThreads) {
-      const int u = index / words_per_tile;
-      const int w = index % words_per_tile;
-      const int tile_index = (kb + u) * n_tiles + n_tile;
-      const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * words_per_tile;
-      packed_words[u][w] = static_cast<uint32_t>(tile[w]);
+    if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
+      const int words_per_vec = words_per_tile >> 2;
+      const int vec_total = tiles_here * words_per_vec;
+      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0]);
+      const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
+      for (int index = thread; index < vec_total; index += kThreads) {
+        const int u = index / words_per_vec;
+        const int w4 = index - u * words_per_vec;
+        words4[u * (kMaxWords / 4) + w4] =
+            trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+      }
+    } else {
+      for (int index = thread; index < tiles_here * words_per_tile; index += kThreads) {
+        const int u = index / words_per_tile;
+        const int w = index % words_per_tile;
+        const int tile_index = (kb + u) * n_tiles + n_tile;
+        const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * words_per_tile;
+        packed_words[u][w] = static_cast<uint32_t>(tile[w]);
+      }
     }
     if (thread < tiles_here) {
       const int tile_index = (kb + thread) * n_tiles + n_tile;
       packed_bank_ids[thread] = bank_ids == nullptr ? 0 : bank_ids[tile_index];
     }
-    for (int index = thread; index < tiles_here * ROWS * kTileRows; index += kThreads) {
-      const int u = index / (ROWS * kTileRows);
-      const int cell = index % (ROWS * kTileRows);
-      const int row = cell / kTileRows;
-      const int k_local = cell % kTileRows;
-      input_tile[u][cell] = row < block_rows
-          ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows + k_local]
-          : ScalarTraits<Scalar>::from_float(0.0f);
+    if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
+      constexpr int row_vecs = kTileRows * static_cast<int>(sizeof(Scalar)) / static_cast<int>(sizeof(uint4));
+      const int vec_total = tiles_here * ROWS * row_vecs;
+      uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
+      const uint4* input4_base = reinterpret_cast<const uint4*>(input);
+      for (int index = thread; index < vec_total; index += kThreads) {
+        const int u = index / (ROWS * row_vecs);
+        const int cell = index - u * (ROWS * row_vecs);
+        const int row = cell / row_vecs;
+        const int vec = cell - row * row_vecs;
+        input4[index] = row < block_rows
+            ? input4_base[(static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
+                      static_cast<int>(sizeof(Scalar)) / 16 +
+                  vec]
+            : make_uint4(0u, 0u, 0u, 0u);
+      }
+    } else {
+      for (int index = thread; index < tiles_here * ROWS * kTileRows; index += kThreads) {
+        const int u = index / (ROWS * kTileRows);
+        const int cell = index % (ROWS * kTileRows);
+        const int row = cell / kTileRows;
+        const int k_local = cell % kTileRows;
+        input_tile[u][cell] = row < block_rows
+            ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows + k_local]
+            : ScalarTraits<Scalar>::from_float(0.0f);
+      }
     }
     __syncthreads();
 
@@ -442,9 +585,16 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
     for (int u = 0; u < kUnroll; ++u) {
       if (u < tiles_here) {
         const int local = (k_slot << 4) | col;
-        const float weight = qvq_decode_weight<VectorSize>(
-            packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
-            bank_mode, bank_alt_id);
+        float weight;
+        if constexpr (TransitionBits != 0) {
+          weight = qvq_decode_weight_fast<TransitionBits, VectorSize>(
+              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local,
+              bank_mode, bank_alt_id);
+        } else {
+          weight = qvq_decode_weight<VectorSize>(
+              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
+              bank_mode, bank_alt_id);
+        }
 
 #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
@@ -594,6 +744,19 @@ constexpr int qvq_rows_for_m(int m) {
   return m <= 1 ? 1 : (m <= 8 ? 8 : (m <= 16 ? 16 : kRowsPerBlock));
 }
 
+// Transition widths that receive a fully specialized decode instantiation.
+constexpr bool qvq_tb_specialized_v2(int tb) { return tb >= 2 && tb <= 16; }
+constexpr bool qvq_tb_specialized_v4(int tb) {
+  return tb >= 4 && tb <= 16 && (tb % 2) == 0;
+}
+
+// The vectorized staging paths require naturally aligned trellis/input bases;
+// anything else (odd view offsets) stays on the generic scalar kernels.
+constexpr bool qvq_vec_aligned(const void* trellis, const void* input) {
+  return (reinterpret_cast<uintptr_t>(trellis) % sizeof(uint4)) == 0 &&
+      (reinterpret_cast<uintptr_t>(input) % sizeof(uint4)) == 0;
+}
+
 template <typename Scalar, typename OutputScalar, int VectorSize = 2>
 void launch_qvq_gemv(
     const at::Tensor& input,
@@ -614,9 +777,50 @@ void launch_qvq_gemv(
   OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids == nullptr ? nullptr : bank_ids->const_data_ptr<uint8_t>();
+  const bool specialized = VectorSize == 2 ? qvq_tb_specialized_v2(transition_bits)
+                                           : qvq_tb_specialized_v4(transition_bits);
+  if (specialized && qvq_vec_aligned(trellis_ptr, input_ptr)) {
+#define QVQ_LAUNCH_TB(ROWS, TB)                                                                                    \
+    qvq_gemv_kernel<Scalar, OutputScalar, ROWS, VectorSize, TB>                                                    \
+        <<<grid, kThreads, 0, stream>>>(                                                                           \
+            input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, static_cast<int>(input.size(0)),         \
+            static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits, bank_mode,        \
+            bank_alt_id)
+#define QVQ_LAUNCH_ROWS(ROWS)                                                                                      \
+    switch (transition_bits) {                                                                                     \
+      case 2: QVQ_LAUNCH_TB(ROWS, 2); break;                                                                       \
+      case 3: QVQ_LAUNCH_TB(ROWS, 3); break;                                                                       \
+      case 4: QVQ_LAUNCH_TB(ROWS, 4); break;                                                                       \
+      case 5: QVQ_LAUNCH_TB(ROWS, 5); break;                                                                       \
+      case 6: QVQ_LAUNCH_TB(ROWS, 6); break;                                                                       \
+      case 7: QVQ_LAUNCH_TB(ROWS, 7); break;                                                                       \
+      case 8: QVQ_LAUNCH_TB(ROWS, 8); break;                                                                       \
+      case 9: QVQ_LAUNCH_TB(ROWS, 9); break;                                                                       \
+      case 10: QVQ_LAUNCH_TB(ROWS, 10); break;                                                                     \
+      case 11: QVQ_LAUNCH_TB(ROWS, 11); break;                                                                     \
+      case 12: QVQ_LAUNCH_TB(ROWS, 12); break;                                                                     \
+      case 13: QVQ_LAUNCH_TB(ROWS, 13); break;                                                                     \
+      case 14: QVQ_LAUNCH_TB(ROWS, 14); break;                                                                     \
+      case 15: QVQ_LAUNCH_TB(ROWS, 15); break;                                                                     \
+      case 16: QVQ_LAUNCH_TB(ROWS, 16); break;                                                                     \
+      default: QVQ_LAUNCH_TB(ROWS, 0); break;                                                                      \
+    }
+    if (rows == 1) {
+      QVQ_LAUNCH_ROWS(1);
+    } else if (rows == 8) {
+      QVQ_LAUNCH_ROWS(8);
+    } else if (rows == 16) {
+      QVQ_LAUNCH_ROWS(16);
+    } else {
+      QVQ_LAUNCH_ROWS(kRowsPerBlock);
+    }
+#undef QVQ_LAUNCH_ROWS
+#undef QVQ_LAUNCH_TB
+    return;
+  }
 #define QVQ_LAUNCH(ROWS)                                                                                           \
-  qvq_gemv_kernel<Scalar, OutputScalar, ROWS, VectorSize><<<grid, kThreads, 0, stream>>>(                       \
-      input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, static_cast<int>(input.size(0)),             \
+  qvq_gemv_kernel<Scalar, OutputScalar, ROWS, VectorSize, 0><<<grid, kThreads, 0, stream>>>(                       \
+      input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, static_cast<int>(input.size(0)),               \
       static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits, bank_mode, bank_alt_id)
   if (rows == 1) {
     QVQ_LAUNCH(1);
@@ -654,10 +858,55 @@ void launch_qvq_gemv_splitk(
   OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids == nullptr ? nullptr : bank_ids->const_data_ptr<uint8_t>();
+  const bool specialized = VectorSize == 2 ? qvq_tb_specialized_v2(transition_bits)
+                                           : qvq_tb_specialized_v4(transition_bits);
+  if (specialized && qvq_vec_aligned(trellis_ptr, input_ptr)) {
+#define QVQ_SPLITK_LAUNCH_TB(ROWS, TB)                                                                            \
+    qvq_gemv_splitk_kernel<Scalar, ROWS, VectorSize, TB>                                                          \
+        <<<grid, kThreads, 0, stream>>>(                                                                          \
+            input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, partial_ptr, static_cast<int>(input.size(0)),       \
+            static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits,      \
+            bank_mode, bank_alt_id)
+#define QVQ_SPLITK_LAUNCH_ROWS(ROWS)                                                                              \
+    switch (transition_bits) {                                                                                    \
+      case 2: QVQ_SPLITK_LAUNCH_TB(ROWS, 2); break;                                                               \
+      case 3: QVQ_SPLITK_LAUNCH_TB(ROWS, 3); break;                                                               \
+      case 4: QVQ_SPLITK_LAUNCH_TB(ROWS, 4); break;                                                               \
+      case 5: QVQ_SPLITK_LAUNCH_TB(ROWS, 5); break;                                                               \
+      case 6: QVQ_SPLITK_LAUNCH_TB(ROWS, 6); break;                                                               \
+      case 7: QVQ_SPLITK_LAUNCH_TB(ROWS, 7); break;                                                               \
+      case 8: QVQ_SPLITK_LAUNCH_TB(ROWS, 8); break;                                                               \
+      case 9: QVQ_SPLITK_LAUNCH_TB(ROWS, 9); break;                                                               \
+      case 10: QVQ_SPLITK_LAUNCH_TB(ROWS, 10); break;                                                             \
+      case 11: QVQ_SPLITK_LAUNCH_TB(ROWS, 11); break;                                                             \
+      case 12: QVQ_SPLITK_LAUNCH_TB(ROWS, 12); break;                                                             \
+      case 13: QVQ_SPLITK_LAUNCH_TB(ROWS, 13); break;                                                             \
+      case 14: QVQ_SPLITK_LAUNCH_TB(ROWS, 14); break;                                                             \
+      case 15: QVQ_SPLITK_LAUNCH_TB(ROWS, 15); break;                                                             \
+      case 16: QVQ_SPLITK_LAUNCH_TB(ROWS, 16); break;                                                             \
+      default: QVQ_SPLITK_LAUNCH_TB(ROWS, 0); break;                                                              \
+    }
+    if (rows == 1) {
+      QVQ_SPLITK_LAUNCH_ROWS(1);
+    } else if (rows == 8) {
+      QVQ_SPLITK_LAUNCH_ROWS(8);
+    } else if (rows == 16) {
+      QVQ_SPLITK_LAUNCH_ROWS(16);
+    } else {
+      QVQ_SPLITK_LAUNCH_ROWS(kRowsPerBlock);
+    }
+#undef QVQ_SPLITK_LAUNCH_ROWS
+#undef QVQ_SPLITK_LAUNCH_TB
+    const int64_t output_values = output.numel();
+    const int reduction_blocks = static_cast<int>((output_values + kThreads - 1) / kThreads);
+    qvq_reduce_splitk_kernel<OutputScalar><<<reduction_blocks, kThreads, 0, stream>>>(
+        partial_ptr, output_ptr, static_cast<int>(output.size(0)), static_cast<int>(output.size(1)), split_count);
+    return;
+  }
 #define QVQ_SPLITK_LAUNCH(ROWS)                                                                                   \
-  qvq_gemv_splitk_kernel<Scalar, ROWS, VectorSize><<<grid, kThreads, 0, stream>>>(                               \
-      input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, partial_ptr, static_cast<int>(input.size(0)),            \
-      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits,          \
+  qvq_gemv_splitk_kernel<Scalar, ROWS, VectorSize, 0><<<grid, kThreads, 0, stream>>>(                             \
+      input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, partial_ptr, static_cast<int>(input.size(0)),             \
+      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits,            \
       bank_mode, bank_alt_id)
   if (rows == 1) {
     QVQ_SPLITK_LAUNCH(1);

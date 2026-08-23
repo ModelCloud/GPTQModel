@@ -109,9 +109,17 @@ __device__ __forceinline__ float emission(
     dot = __fmaf_rn(target4.w, code23f.y, dot);
     norm = codebook_norm[state];
   } else if constexpr (std::is_same_v<CodebookScalar, float>) {
-    #pragma unroll
-    for (int i = 0; i < VectorSize; ++i) {
-      dot = __fmaf_rn(target[i], codebook[VectorSize * state + i], dot);
+    if constexpr (VectorSize == 2) {
+      // One aligned 8-byte load supplies both FP32 coordinates; the FP32
+      // operation sequence below is unchanged from the scalar version.
+      const float2 code2 = *reinterpret_cast<const float2*>(codebook + 2 * state);
+      dot = __fmaf_rn(target[0], code2.x, dot);
+      dot = __fmaf_rn(target[1], code2.y, dot);
+    } else {
+      #pragma unroll
+      for (int i = 0; i < VectorSize; ++i) {
+        dot = __fmaf_rn(target[i], codebook[VectorSize * state + i], dot);
+      }
     }
     norm = codebook_norm[state];
   } else {
@@ -494,17 +502,28 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
       const int h0 = thread >> (16 - shift);
       float best = CUDART_INF_F;
       int best_h = h0;
-      for (int k = 0; k < 64; ++k) {
-        const int h = h0 + k * threads_per_suffix;
-        const int s = (h << (16 - shift)) | x;
-        float value = emission<VectorSize, CodebookScalar>(
-            target, codebook, codebook_norm, s, step_weight, target_norm);
-        if (constrain_init && (s >> shift) != required_overlap) {
-          value = CUDART_INF_F;
+      // Batched-ILP form; see the main step loop for the bit-exactness note.
+      constexpr int kChunk = 8;
+      for (int k0 = 0; k0 < 64; k0 += kChunk) {
+        float values[kChunk];
+        int h_values[kChunk];
+        _Pragma("unroll")
+        for (int j = 0; j < kChunk; ++j) {
+          const int h = h0 + (k0 + j) * threads_per_suffix;
+          const int s = (h << (16 - shift)) | x;
+          h_values[j] = h;
+          values[j] = emission<VectorSize, CodebookScalar>(
+              target, codebook, codebook_norm, s, step_weight, target_norm);
+          if (constrain_init && (s >> shift) != required_overlap) {
+            values[j] = CUDART_INF_F;
+          }
         }
-        if (lower_pair(value, h, best, best_h)) {
-          best = value;
-          best_h = h;
+        _Pragma("unroll")
+        for (int j = 0; j < kChunk; ++j) {
+          if (lower_pair(values[j], h_values[j], best, best_h)) {
+            best = values[j];
+            best_h = h_values[j];
+          }
         }
       }
       partial_val[thread] = best;
@@ -614,15 +633,32 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
       const int h0 = thread >> (16 - shift);
       float best = CUDART_INF_F;
       int best_h = h0;
-      for (int k = 0; k < 64; ++k) {
-        const int h = h0 + k * threads_per_suffix;
-        const int s = (h << (16 - shift)) | x;
-        const float value =
-          G_prev[s >> shift] + emission<VectorSize, CodebookScalar>(
+      // Batched-ILP form: all loads/FMAs of a chunk are issued before any
+      // min-fold consumes them, hiding L2 latency that serialized the naive
+      // loop. Min/argmin over a fixed set is fold-order invariant, so results
+      // are bit-identical.
+      constexpr int kChunk = 8;
+      const int h_step = threads_per_suffix * kChunk;
+      for (int k0 = 0; k0 < 64; k0 += kChunk) {
+        float values[kChunk];
+        float g_values[kChunk];
+        int h_values[kChunk];
+        #pragma unroll
+        for (int j = 0; j < kChunk; ++j) {
+          const int h = h0 + (k0 + j) * threads_per_suffix;
+          const int s = (h << (16 - shift)) | x;
+          h_values[j] = h;
+          g_values[j] = G_prev[s >> shift];
+          values[j] = emission<VectorSize, CodebookScalar>(
               target, codebook, codebook_norm, s, step_weight, target_norm);
-        if (lower_pair(value, h, best, best_h)) {
-          best = value;
-          best_h = h;
+        }
+        _Pragma("unroll")
+        for (int j = 0; j < kChunk; ++j) {
+          const float value = g_values[j] + values[j];
+          if (lower_pair(value, h_values[j], best, best_h)) {
+            best = value;
+            best_h = h_values[j];
+          }
         }
       }
       partial_val[thread] = best;
@@ -735,24 +771,34 @@ __global__ __launch_bounds__(kThreads) void qvq_viterbi_kernel(
     int suffix_best_h = 0;
     if (!constrain_final || x == required_overlap) {
       const int h0 = thread >> (16 - shift);
-      for (int k = 0; k < 64; ++k) {
-        const int h = h0 + k * threads_per_suffix;
-        const int s = (h << (16 - shift)) | x;
-        float value;
-        if (steps == 1) {
-        value = emission<VectorSize, CodebookScalar>(
-            target, codebook, codebook_norm, s, step_weight, target_norm);
-        } else {
-          value = G_prev[s >> shift] + emission<VectorSize, CodebookScalar>(
+      // Batched-ILP form; see the main step loop for the bit-exactness note.
+      constexpr int kChunk = 8;
+      for (int k0 = 0; k0 < 64; k0 += kChunk) {
+        float values[kChunk];
+        float g_values[kChunk];
+        int h_values[kChunk];
+        int s_values[kChunk];
+        _Pragma("unroll")
+        for (int j = 0; j < kChunk; ++j) {
+          const int h = h0 + (k0 + j) * threads_per_suffix;
+          const int s = (h << (16 - shift)) | x;
+          h_values[j] = h;
+          s_values[j] = s;
+          g_values[j] = steps == 1 ? 0.0f : G_prev[s >> shift];
+          values[j] = emission<VectorSize, CodebookScalar>(
               target, codebook, codebook_norm, s, step_weight, target_norm);
         }
-        if (lower_pair(value, h, suffix_best, suffix_best_h)) {
-          suffix_best = value;
-          suffix_best_h = h;
-        }
-        if (lower_pair(value, s, best, best_state)) {
-          best = value;
-          best_state = s;
+        _Pragma("unroll")
+        for (int j = 0; j < kChunk; ++j) {
+          const float value = g_values[j] + values[j];
+          if (lower_pair(value, h_values[j], suffix_best, suffix_best_h)) {
+            suffix_best = value;
+            suffix_best_h = h_values[j];
+          }
+          if (lower_pair(value, s_values[j], best, best_state)) {
+            best = value;
+            best_state = s_values[j];
+          }
         }
       }
     }

@@ -368,12 +368,35 @@ void qvq_yaqa_feedback_update_cuda(
 
 }  // namespace
 
+
+
+namespace {
+
+// torch rejects duplicate def() calls even for byte-identical schemas, and
+// cross-bundle schema lookups are unreliable during JIT-plugin static init.
+// The CPU and CUDA QVQ extensions intentionally share these op schemas, so
+// each def runs at most once per process: a duplicate registration throws
+// c10::Error before mutating dispatcher state and is swallowed here.
+template <typename DefFn>
+void qvq_def_shared_schema(DefFn&& def_fn) {
+  try {
+    def_fn();
+  } catch (const std::exception&) {
+  }
+}
+
+}  // namespace
+
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
-  m.def("yaqa_feedback(Tensor source, Tensor left, Tensor right, Tensor output_feedback, "
+  qvq_def_shared_schema([&] {
+    m.def("yaqa_feedback(Tensor source, Tensor left, Tensor right, Tensor output_feedback, "
         "int first_input_block, int first_output_block, int count, Tensor? bias) -> Tensor");
-  m.def("yaqa_feedback_update_(Tensor(a!) left, Tensor(b!) right, Tensor input_feedback, "
+});
+  qvq_def_shared_schema([&] {
+    m.def("yaqa_feedback_update_(Tensor(a!) left, Tensor(b!) right, Tensor input_feedback, "
         "Tensor output_feedback, Tensor reconstructed, int first_input_block, "
         "int first_output_block, int count) -> ()");
+});
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
