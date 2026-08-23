@@ -150,16 +150,39 @@ same box, same env, captured 2026-08-23):
 
 | metric (2 layers, Llama-3.2-1B, W2 v2b2_p32 YAQA) | round-1 fused | round-2 | change |
 |---|---:|---:|---:|
-| family-grid range kernel avg / call | 4.499 ms | RANGE_MS | SPEEDUP |
-| family-grid range kernel time | 57.53 s | RANGE_S | |
-| family-grid range share of GPU kernel time | 37.4 % | RANGE_SHARE | |
-| kernel launches inside the range | 53,024 | RANGE_LAUNCH | |
-| total CUDA kernel time | 153.70 s | TOTAL_S | |
-| `qvq_quantize.main` wall | 181.6 s | WALL_S | |
+| family-grid range kernel avg / call | 4.499 ms | **3.727 ms** | **1.21x** (2.59x vs the pre-round-1 9.639 ms) |
+| family-grid range kernel time | 57.53 s | 47.67 s | |
+| family-grid range share of GPU kernel time | 37.4 % | 33.4 % | |
+| kernel launches inside the range | 53,024 (4.15 / call) | 53,024 (4.15 / call, unchanged) | |
+| `viterbi_v2_segment_tail_trusted` avg / call | 2.590 ms | 2.394 ms | 1.08x |
+| total CUDA kernel time | 153.70 s | 142.87 s | |
+| `qvq_quantize.main` wall | 181.6 s | **171.7 s** | **-5.5 %** |
 
 ## Per-module quantization loss (2-layer real run, old vs new kernel)
 
-LOSS_TABLE
+| module | round-1 loss | round-2 loss | rel change |
+|---|---:|---:|---:|
+| layers.0.mlp.down_proj | 2.0022759438 | 1.9972181320 | -2.53e-03 |
+| layers.0.mlp.gate_proj | 2.1463098526 | 2.1462106705 | -4.62e-05 |
+| layers.0.mlp.up_proj | 2.2820501328 | 2.2820501328 | +0.00e+00 |
+| layers.0.self_attn.k_proj | 0.2115077376 | 0.2115077376 | +0.00e+00 |
+| layers.0.self_attn.o_proj | 0.8297442198 | 0.8297442198 | +0.00e+00 |
+| layers.0.self_attn.q_proj | 0.1270044148 | 0.1287282705 | +1.36e-02 |
+| layers.0.self_attn.v_proj | 0.8172291517 | 0.8172291517 | +0.00e+00 |
+| layers.1.mlp.down_proj | 5.6535043716 | 5.5530796051 | -1.78e-02 |
+| layers.1.mlp.gate_proj | 2.0141808987 | 2.0125288963 | -8.20e-04 |
+| layers.1.mlp.up_proj | 2.3970038891 | 2.3990876675 | +8.69e-04 |
+| layers.1.self_attn.k_proj | 0.4231991768 | 0.4231991768 | +0.00e+00 |
+| layers.1.self_attn.o_proj | 0.6808187366 | 0.6808187366 | +0.00e+00 |
+| layers.1.self_attn.q_proj | 0.4412775040 | 0.4412775040 | +0.00e+00 |
+| layers.1.self_attn.v_proj | 0.4954676628 | 0.4954676628 | +0.00e+00 |
+
+8 of 14 modules have bit-identical loss; the six that differ moved through discrete YAQA
+family/code re-selections triggered by near-tie flips.  Aggregate loss over the 14 modules:
+22.5216 -> 22.4181 (**-0.46 %, better**); worst single-module regression +1.4 %
+(`layers.0.self_attn.q_proj`), best improvement -1.8 % (`layers.1.mlp.down_proj`).
+Runs: `/root/qvq_prof/r2_quality_base.log` (round-1 worktree @ ab2d34f3, warm JIT,
+prepare_and_quantize 169.9 s) vs `/root/qvq_prof/r2_quality_new.log` (this branch).
 
 ## Round-2 dead ends (implemented, measured, reverted — do not retry as-is)
 
@@ -169,7 +192,11 @@ LOSS_TABLE
 | per-step emission tables `w*(t_c - level)^2` in smem (256 levels/component, 32x lane-replicated, packed u16 rank codebook halves the codebook smem) | 3.976 | conflict-free (replication works, 165K conflicts / 277M wavefronts) but 2 LDS + PRMT extraction + address math per emission costs more issue slots than the 2 conversions + 2 subtracts it removes; LSU 41 %, instructions grew 51.2G -> 60.6G per call |
 | `fminf` value-select + predicated index-select (exact, aimed at ALU-pipe rebalance) | 5.03 | breaks ptxas' predication of the compare/select pair; ~45 % slower |
 
-## Why round 2 plateaus at ~1.25x (ncu evidence, 3x128 shape)
+## Why round 2 plateaus at ~1.2x (ncu evidence, 3x128 shape)
+
+Measured: 1.25x on the weighted micro-benchmark, 1.21x on the real NVTX range (the range also
+contains the unchanged detect/traceback launches and inter-launch gaps).  The >=1.5x round-2
+target was **not reached**; the evidence below is why.
 
 The shipped kernel executes ~51.2G thread-instructions per call: per (h, jj) candidate pair
 (one shared emission + two bank candidates) that is 2 fp16->fp32 conversions (HADD2.F32),
