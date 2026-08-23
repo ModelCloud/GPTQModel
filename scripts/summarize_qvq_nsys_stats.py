@@ -88,7 +88,7 @@ def main() -> int:
     for r in nvtx_kern:
         name = r["NVTX Range"].lstrip(":")
         ns = float(r["Total Time (ns)"])
-        inst = int(r["Instances"])
+        inst = int(r["Kern Inst"])
         range_kernel_ns[name] += ns
         range_kernel_inst[name] += inst
         range_kernels[name].append((short_kernel(r["Kernel Name"]), ns, inst))
