@@ -375,3 +375,75 @@ under `gptqmodel_ext/qvq/` and no `qvq.py` quant/qlinear change since. Nothing t
 Tip `60aa95d2` matches `origin/agent/qvq-dual-v4` (pull --rebase: already up to date); tree clean. Newest GPU-side
 commits are still `05f5152d` and `6b66f16f`, both already recorded as not CPU-portable; no MLX/MPS kernel exists
 under `gptqmodel_ext/qvq/` and no `qvq.py` quant/qlinear change since. Nothing to port.
+
+## 2026-08-23 CPU sync: compile-time decode specialization and batched GEMV panels
+
+Ported CPU-relevant mechanics from CUDA commits `299795ba` (compile-time TransitionBits specialization and per-tile
+decode reuse), `682ab5e9` (large-batch GEMV), `049e0a94` (double-buffered staging), and `a4f74f63` (large-row staging
+gate).
+
+- File changed: `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp`. No Python wrapper change was needed.
+- AVX-512 unpack, decode, and accumulation helpers are specialized for `E=2..8` and selected by a host-side
+  switch. The existing runtime-generic AVX-512 path remains the default for `E>=9`, and the scalar path remains
+  reachable on CPUs without AVX-512.
+- M>1 now uses a four-row register-resident panel, four-output-tile blocking, and 1/2/3-tile tails. Each decoded
+  tile is reused across active panel rows while `__m512` accumulators remain live across the input-tile loop.
+  The M=1 single-tile tail is dispatched through the same E-specialized helpers; no specialized accumulation helper
+  is left unused.
+- A software-prefetch experiment for the next tile's trellis words and bank byte was rejected. Using the same
+  generated inputs, `OMP_NUM_THREADS=8`, warmup 1, and 5 timed iterations, prefetch was slower in 23/30 cases
+  (mean prefetch/no-prefetch ratio 1.242x); timings were noisy and there was no stable win. The prefetch code was
+  removed.
+
+Before/after benchmark matrix (same generated inputs, `OMP_NUM_THREADS=8`, warmup 3, 10 timed iterations; native
+cache disabled with `QVQ_CPU_GEMV_DENSE_CACHE=0`):
+
+```text
+shape  bits/E  M  before_ms after_ms speedup fallback_ms dense_ms max_abs mean_abs rel_l2
+2048  2.0/4   1     0.3789   0.2925   1.295    107.8967   0.0547 1.983643e-04 2.815373e-05 8.374410e-07
+2048  2.0/4   4     0.4381   0.5144   0.852    113.6270   0.0969 2.288818e-04 2.638850e-05 8.258501e-07
+2048  2.0/4   8     0.5142   1.2332   0.417    125.6121   0.1200 3.662109e-04 2.706542e-05 8.485807e-07
+2048  2.0/4  16     0.6437   2.1473   0.300    127.8544   0.2127 2.899170e-04 2.715579e-05 8.498584e-07
+2048  2.0/4  32     0.8858   4.3331   0.204    123.6179   0.3467 2.822876e-04 2.692133e-05 8.483215e-07
+2048  3.5/7   1     0.6238   0.5083   1.227    122.6366   0.0554 2.746582e-04 2.677591e-05 8.364130e-07
+2048  3.5/7   4     0.7150   0.5448   1.312    120.9331   0.1015 2.593994e-04 2.730524e-05 8.340151e-07
+2048  3.5/7   8     0.5715   1.0684   0.535    128.2008   0.1415 2.975464e-04 2.715777e-05 8.382312e-07
+2048  3.5/7  16     1.2641   2.1455   0.589    133.4214   0.2183 3.204346e-04 2.677210e-05 8.384485e-07
+2048  3.5/7  32     1.0826   4.2471   0.255    126.8544   0.3362 4.119873e-04 2.723680e-05 8.458420e-07
+2048  5.0/10   1     0.3489   0.6752   0.517    123.5511   0.0602 2.975464e-04 2.688648e-05 8.493782e-07
+2048  5.0/10   4     0.6288   0.8111   0.775    106.4912   0.1045 2.746582e-04 2.708281e-05 8.522954e-07
+2048  5.0/10   8     0.7791   1.2065   0.646    101.5774   0.1024 2.746582e-04 2.702863e-05 8.455462e-07
+2048  5.0/10  16     0.5904   1.8974   0.311    110.3753   0.2456 3.051758e-04 2.712607e-05 8.531118e-07
+2048  5.0/10  32     0.9438   3.8276   0.247    123.6177   0.2727 3.585815e-04 2.716054e-05 8.481605e-07
+4096  2.0/4   1     2.7157   1.3730   1.978    495.2257   0.3562 4.730225e-04 5.271901e-05 1.198250e-06
+4096  2.0/4   4     2.0724   1.3820   1.500    506.9257   0.5823 5.950928e-04 5.297381e-05 1.192989e-06
+4096  2.0/4   8     3.1731   5.3063   0.598    488.4990   0.7963 6.713867e-04 5.323759e-05 1.181818e-06
+4096  2.0/4  16     3.7583   5.5431   0.678    502.1492   1.0433 5.798340e-04 5.342880e-05 1.185504e-06
+4096  2.0/4  32     7.2714  12.7508   0.570    501.1231   1.3320 8.697510e-04 5.436152e-05 1.192706e-06
+4096  3.5/7   1     2.0064   2.1162   0.948    552.7051   0.3518 5.035400e-04 5.303171e-05 1.191142e-06
+4096  3.5/7   4     2.3179   1.3073   1.773    532.0345   0.6957 5.645752e-04 5.409462e-05 1.188045e-06
+4096  3.5/7   8     3.2185   2.6214   1.228    544.6705   0.6818 5.798340e-04 5.337541e-05 1.190042e-06
+4096  3.5/7  16     4.3085   5.2554   0.820    527.2081   0.8638 7.324219e-04 5.415780e-05 1.190389e-06
+4096  3.5/7  32     7.7199  11.8492   0.652    531.4359   1.2461 7.019043e-04 5.357194e-05 1.186637e-06
+4096  5.0/10   1     2.4136   1.6578   1.456    520.1604   0.3724 4.730225e-04 5.285863e-05 1.149504e-06
+4096  5.0/10   4     2.8771   2.8562   1.007    504.6780   0.6054 5.493164e-04 5.505025e-05 1.200765e-06
+4096  5.0/10   8     2.4948   4.0198   0.621    573.7360   0.6639 5.798340e-04 5.340867e-05 1.184227e-06
+4096  5.0/10  16     2.3740   7.8420   0.303    506.7728   0.9771 6.713867e-04 5.345992e-05 1.178163e-06
+4096  5.0/10  32     6.8339  22.4651   0.304    512.3156   1.3577 7.171631e-04 5.359608e-05 1.188666e-06
+```
+
+The native-vs-dense accuracy gate passed for every row (`max_abs <= 8.697510e-04`, `mean_abs <= 5.436152e-05`,
+`relative-L2 <= 1.200765e-06`); Python fallback outputs were exact against the same dense references. The
+pre-change inner-weight artifact comparison remained bit-identical (`torch.equal`) for all 39 unbanked and banked
+cases, and the wider GEMV sweep remained at `max_abs=7.62939453e-06` before the final tail-dispatch edit.
+
+Verification:
+
+- `pytest -q tests/test_qvq.py tests/test_qvq_v2b2_p32.py tests/test_qvq_v2b4_p64.py tests/test_qvq_output_alignment.py`:
+  764 passed, 263 skipped, 9 failed. Eight configuration failures reproduced on a clean
+  `origin/agent/qvq-dual-v4` worktree; the remaining bitshift case passed when isolated and is order-sensitive.
+- `ruff check`: no changed Python files.
+- `git diff --check`: clean.
+- JIT build time increased from approximately 16 seconds before specialization to approximately 22 seconds after it
+  (individual rebuilds varied up to 26 seconds under test load).
+- No CUDA, MLX, or MPS tests ran on this CPU-only host.
