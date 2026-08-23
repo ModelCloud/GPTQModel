@@ -9,16 +9,18 @@ import torch
 from torch import nn
 
 from gptqmodel.quantization import FORMAT
+from scripts.qvq_evaluate import _model_logits, validate_evaluation_is_held_out
 from scripts.qvq_evaluate import build_parser as build_evaluate_parser
-from scripts.qvq_evaluate import _model_logits
-from scripts.qvq_evaluate import validate_evaluation_is_held_out
 from scripts.qvq_quantize import (
     DatasetSlice,
     _automatic_bank_count,
     aggregate_qvq_process_telemetry,
-    build_parser as build_quantize_parser,
     build_quantize_config,
+    dataset_slice_evidence,
     validate_disjoint_slices,
+)
+from scripts.qvq_quantize import (
+    build_parser as build_quantize_parser,
 )
 
 
@@ -145,6 +147,20 @@ def test_qvq_quantize_accepts_disjoint_and_different_dataset_slices():
             "replay": DatasetSlice("other-dataset", None, "train", 0, 512),
         }
     )
+
+
+def test_qvq_quantize_binds_local_dataset_and_manifest_hashes(tmp_path):
+    source = tmp_path / "calibration.jsonl"
+    manifest = tmp_path / "calibration.manifest.json"
+    source.write_text('{"content":"sample"}\n', encoding="utf-8")
+    manifest.write_text('{"schema_version":1}\n', encoding="utf-8")
+
+    evidence = dataset_slice_evidence(DatasetSlice(str(source), None, "train", 0, 1))
+
+    assert evidence["source"] == str(source.resolve())
+    assert len(evidence["content_sha256"]) == 64
+    assert evidence["identity_manifest"] == str(manifest.resolve())
+    assert len(evidence["identity_manifest_sha256"]) == 64
 
 
 def test_qvq_evaluate_rejects_overlap_with_recorded_preparation(tmp_path):

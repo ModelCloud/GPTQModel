@@ -1,0 +1,25 @@
+{
+  "bits": 2.0,
+  "format": "qvq_v2b2_p32",
+  "group_size": -1,
+  "method": "qvq",
+  "offload_to_disk": false,
+  "rounding": "yaqa",
+  "sym": true,
+  "pack_dtype": "int32",
+  "bank_count": 2,
+  "incoherence": "rht",
+  "tile_rows": 16,
+  "tile_cols": 16,
+  "trellis_window": 16,
+  "vector_size": 2,
+  "yaqa": {
+    "batch_size": 8,
+    "minimum_sequences": 512,
+    "regularization": 0.05,
+    "sample_strategy": "full",
+    "seed": 0,
+    "sequence_sort": "desc",
+    "v2b2_family_mode": "reselect"
+  }
+}
