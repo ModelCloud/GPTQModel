@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -400,29 +401,40 @@ def validate_disjoint_slices(named_slices: dict[str, DatasetSlice | None]) -> No
                 )
 
 
-def _open_snapshot_physical_path(path: str) -> int:
-    """Open an absolute path one component at a time without following any symlink."""
-
+def _open_snapshot_parent(path: str, resources: ExitStack) -> tuple[int, str]:
     parts = Path(path).parts
     if not parts or parts[0] != "/" or len(parts) < 2:
         raise RuntimeError("controller dataset snapshot path is not canonical and absolute")
     directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    resources.callback(os.close, directory)
+    for component in parts[1:-1]:
+        directory = os.open(
+            component,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory,
+        )
+        resources.callback(os.close, directory)
+        identity = os.fstat(directory)
+        mode = stat.S_IMODE(identity.st_mode)
+        sticky_root = bool(mode & stat.S_ISVTX) and identity.st_uid == 0
+        if (
+            not stat.S_ISDIR(identity.st_mode)
+            or identity.st_uid not in {0, os.geteuid()}
+            or (mode & 0o022 and not sticky_root)
+        ):
+            raise RuntimeError("controller dataset snapshot has an unsafe physical parent directory")
+    return directory, parts[-1]
+
+
+def _open_snapshot_entry(parent_fd: int, name: str, resources: ExitStack) -> int:
     try:
-        for component in parts[1:-1]:
-            next_directory = os.open(
-                component,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=directory,
-            )
-            os.close(directory)
-            directory = next_directory
-        return os.open(
-            parts[-1], os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd
         )
     except OSError as error:
         raise RuntimeError("controller dataset snapshot physical path cannot be opened safely") from error
-    finally:
-        os.close(directory)
+    resources.callback(os.close, descriptor)
+    return descriptor
 
 
 def _descriptor_identity_value(identity: os.stat_result) -> dict[str, int]:
@@ -467,6 +479,15 @@ def _stable_exact_descriptor_read(descriptor: int, resource: str) -> tuple[bytes
 def _validated_snapshot_candidate(
     role: str, expected_manifest_split: str, item: Any, evidence_keys: set[str]
 ) -> dict[str, Any]:
+    with ExitStack() as resources:
+        return _validated_snapshot_candidate_owned(
+            role, expected_manifest_split, item, evidence_keys, resources
+        )
+
+
+def _validated_snapshot_candidate_owned(
+    role: str, expected_manifest_split: str, item: Any, evidence_keys: set[str], resources: ExitStack
+) -> dict[str, Any]:
     """Build one complete role-local resource pair without consulting global uniqueness state."""
 
     item_keys = {
@@ -508,6 +529,8 @@ def _validated_snapshot_candidate(
         or set(evidence) != evidence_keys
     ):
         raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+    source_parent_fd, source_name = _open_snapshot_parent(source, resources)
+    manifest_parent_fd, manifest_name = _open_snapshot_parent(manifest_path, resources)
     source_raw, source_before = _stable_exact_descriptor_read(source_fd, "retained source")
     source_snapshot_raw, _source_snapshot = _stable_exact_descriptor_read(
         source_snapshot_fd, "sealed source snapshot"
@@ -516,16 +539,12 @@ def _validated_snapshot_candidate(
     manifest_snapshot_raw, _manifest_snapshot = _stable_exact_descriptor_read(
         manifest_snapshot_fd, "sealed manifest snapshot"
     )
-    source_path_fd = _open_snapshot_physical_path(source)
-    manifest_path_fd = _open_snapshot_physical_path(manifest_path)
-    try:
-        source_path_raw, source_path_before = _stable_exact_descriptor_read(source_path_fd, "physical source path")
-        manifest_path_raw, manifest_path_before = _stable_exact_descriptor_read(
-            manifest_path_fd, "physical manifest path"
-        )
-    finally:
-        os.close(source_path_fd)
-        os.close(manifest_path_fd)
+    source_path_fd = _open_snapshot_entry(source_parent_fd, source_name, resources)
+    manifest_path_fd = _open_snapshot_entry(manifest_parent_fd, manifest_name, resources)
+    source_path_raw, source_path_before = _stable_exact_descriptor_read(source_path_fd, "physical source path")
+    manifest_path_raw, manifest_path_before = _stable_exact_descriptor_read(
+        manifest_path_fd, "physical manifest path"
+    )
     expected_source_identity = _descriptor_identity_value(source_before)
     expected_manifest_identity = _descriptor_identity_value(manifest_before)
     if source_identity != expected_source_identity or manifest_identity != expected_manifest_identity:
@@ -603,20 +622,16 @@ def _validated_snapshot_candidate(
         raise RuntimeError("controller dataset identity manifest contains duplicate rows")
     # This is deliberately the final local operation: re-open both pathnames and
     # fully bracket their identity/content immediately before uniqueness sees the candidate.
-    source_final_fd = _open_snapshot_physical_path(source)
-    manifest_final_fd = _open_snapshot_physical_path(manifest_path)
-    try:
-        source_final_raw, source_final_identity = _stable_exact_descriptor_read(
-            source_final_fd, "final physical source path"
-        )
-        manifest_final_raw, manifest_final_identity = _stable_exact_descriptor_read(
-            manifest_final_fd, "final physical manifest path"
-        )
-        source_after_both_final_reads = os.fstat(source_final_fd)
-        manifest_after_both_final_reads = os.fstat(manifest_final_fd)
-    finally:
-        os.close(source_final_fd)
-        os.close(manifest_final_fd)
+    source_final_fd = _open_snapshot_entry(source_parent_fd, source_name, resources)
+    manifest_final_fd = _open_snapshot_entry(manifest_parent_fd, manifest_name, resources)
+    source_final_raw, source_final_identity = _stable_exact_descriptor_read(
+        source_final_fd, "final physical source path"
+    )
+    manifest_final_raw, manifest_final_identity = _stable_exact_descriptor_read(
+        manifest_final_fd, "final physical manifest path"
+    )
+    source_after_both_final_reads = os.fstat(source_final_fd)
+    manifest_after_both_final_reads = os.fstat(manifest_final_fd)
     if (
         _descriptor_identity_value(source_final_identity) != source_identity
         or _descriptor_identity_value(source_after_both_final_reads) != source_identity
@@ -631,6 +646,29 @@ def _validated_snapshot_candidate(
         or hashlib.sha256(manifest_final_raw).hexdigest() != evidence["identity_manifest_sha256"]
     ):
         raise RuntimeError("controller dataset snapshot final manifest path identity/content changed")
+    # Minimal paired directory-entry check immediately before candidate success.
+    source_entry_fd = _open_snapshot_entry(source_parent_fd, source_name, resources)
+    manifest_entry_fd = _open_snapshot_entry(manifest_parent_fd, manifest_name, resources)
+    source_entry_raw, source_entry_identity = _stable_exact_descriptor_read(
+        source_entry_fd, "final source directory entry"
+    )
+    manifest_entry_raw, manifest_entry_identity = _stable_exact_descriptor_read(
+        manifest_entry_fd, "final manifest directory entry"
+    )
+    if (
+        _descriptor_identity_value(source_entry_identity) != source_identity
+        or _descriptor_identity_value(source_entry_identity) != _descriptor_identity_value(source_final_identity)
+        or source_entry_raw != source_final_raw
+        or hashlib.sha256(source_entry_raw).hexdigest() != evidence["content_sha256"]
+    ):
+        raise RuntimeError("controller dataset snapshot final source directory entry changed")
+    if (
+        _descriptor_identity_value(manifest_entry_identity) != manifest_identity
+        or _descriptor_identity_value(manifest_entry_identity) != _descriptor_identity_value(manifest_final_identity)
+        or manifest_entry_raw != manifest_final_raw
+        or hashlib.sha256(manifest_entry_raw).hexdigest() != evidence["identity_manifest_sha256"]
+    ):
+        raise RuntimeError("controller dataset snapshot final manifest directory entry changed")
     return {
         "item": item, "paths": (source, manifest_path), "fds": (source_fd, manifest_fd),
         "snapshot_fds": (source_snapshot_fd, manifest_snapshot_fd),

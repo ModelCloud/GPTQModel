@@ -1241,7 +1241,7 @@ def test_snapshot_authority_missing_fd_and_evidence_fail_closed(monkeypatch):
     os.close(authority["sources"]["calibration"]["source_fd"])
     monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
     spec = quantize_script.DatasetSlice(str(root / "calibration.jsonl"), None, "train", 0, 1)
-    with pytest.raises(RuntimeError, match="descriptor content|cannot be read exactly"):
+    with pytest.raises(RuntimeError, match="descriptor content|cannot be read exactly|not a regular file"):
         quantize_script.load_dataset_slice(spec)
     for descriptor in descriptors:
         try:
@@ -1462,26 +1462,26 @@ def test_snapshot_candidate_rejects_physical_path_descriptor_mismatch(tmp_path, 
             os.close(descriptor)
 
 
-def test_snapshot_candidate_rejects_path_replacement_during_validation(tmp_path, monkeypatch):
+def test_snapshot_candidate_rejects_path_replacement_during_validation(monkeypatch):
     authority, descriptors = _snapshot_authority()
     source = Path(authority["sources"]["calibration"]["source"])
-    replacement = tmp_path / "replacement.jsonl"
+    replacement = source.with_name(f".{source.name}.replacement")
     replacement.write_bytes(source.read_bytes())
-    original_path = tmp_path / "original.jsonl"
-    original_open = quantize_script._open_snapshot_physical_path
+    original_path = source.with_name(f".{source.name}.original")
+    original_open = quantize_script._open_snapshot_entry
     source_opens = 0
 
-    def replace_between_opens(path):
+    def replace_between_opens(parent_fd, name, resources):
         nonlocal source_opens
-        descriptor = original_open(path)
-        if path == str(source):
+        descriptor = original_open(parent_fd, name, resources)
+        if name == source.name:
             source_opens += 1
             if source_opens == 1:
                 source.replace(original_path)
                 replacement.replace(source)
         return descriptor
 
-    monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", replace_between_opens)
+    monkeypatch.setattr(quantize_script, "_open_snapshot_entry", replace_between_opens)
     try:
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
         with pytest.raises(RuntimeError, match="physical identity is unstable|correspondence|identity/content changed"):
@@ -1491,6 +1491,8 @@ def test_snapshot_candidate_rejects_path_replacement_during_validation(tmp_path,
             source.unlink()
         if original_path.exists():
             original_path.replace(source)
+        if replacement.exists():
+            replacement.unlink()
         for descriptor in descriptors:
             os.close(descriptor)
 
@@ -1504,13 +1506,13 @@ def test_snapshot_candidate_exact_read_handles_eintr_and_short_pread(monkeypatch
         "physical_path": set(),
         "sealed_snapshot": {source["source_snapshot_fd"]},
     }[resource]
-    original_open = quantize_script._open_snapshot_physical_path
+    original_open = quantize_script._open_snapshot_entry
     original_pread = os.pread
     interrupted: set[int] = set()
 
-    def record_physical(path):
-        descriptor = original_open(path)
-        if resource == "physical_path" and path == source["source"]:
+    def record_physical(parent_fd, name, resources):
+        descriptor = original_open(parent_fd, name, resources)
+        if resource == "physical_path" and name == Path(source["source"]).name:
             target_fds.add(descriptor)
         return descriptor
 
@@ -1522,7 +1524,7 @@ def test_snapshot_candidate_exact_read_handles_eintr_and_short_pread(monkeypatch
             size = max(1, size // 3)
         return original_pread(descriptor, size, offset)
 
-    monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", record_physical)
+    monkeypatch.setattr(quantize_script, "_open_snapshot_entry", record_physical)
     monkeypatch.setattr(os, "pread", short_pread)
     try:
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
@@ -1570,16 +1572,16 @@ def test_snapshot_candidate_rejects_mutation_during_final_exact_read(monkeypatch
     source = Path(authority["sources"]["calibration"]["source"])
     original_bytes = source.read_bytes()
     original_stat = source.stat()
-    original_open = quantize_script._open_snapshot_physical_path
+    original_open = quantize_script._open_snapshot_entry
     original_pread = os.pread
     source_opens = 0
     final_fd = None
     mutated = False
 
-    def identify_final(path):
+    def identify_final(parent_fd, name, resources):
         nonlocal source_opens, final_fd
-        descriptor = original_open(path)
-        if path == str(source):
+        descriptor = original_open(parent_fd, name, resources)
+        if name == source.name:
             source_opens += 1
             if source_opens == 2:
                 final_fd = descriptor
@@ -1597,7 +1599,7 @@ def test_snapshot_candidate_rejects_mutation_during_final_exact_read(monkeypatch
                 os.fsync(handle.fileno())
         return chunk
 
-    monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", identify_final)
+    monkeypatch.setattr(quantize_script, "_open_snapshot_entry", identify_final)
     monkeypatch.setattr(os, "pread", mutate_during_read)
     try:
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
@@ -1608,6 +1610,69 @@ def test_snapshot_candidate_rejects_mutation_during_final_exact_read(monkeypatch
         os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         for descriptor in descriptors:
             os.close(descriptor)
+
+
+@pytest.mark.parametrize("replaced", ["source", "manifest"])
+def test_snapshot_candidate_rejects_entry_replacement_after_final_open(monkeypatch, replaced):
+    authority, descriptors = _snapshot_authority()
+    item = authority["sources"]["calibration"]
+    target = Path(item["source"] if replaced == "source" else item["identity_manifest"])
+    replacement = target.with_name(f".{target.name}.replacement")
+    backup = target.with_name(f".{target.name}.original")
+    replacement.write_bytes(target.read_bytes())
+    original_open = quantize_script._open_snapshot_entry
+    target_opens = 0
+
+    def replace_after_final_open(parent_fd, name, resources):
+        nonlocal target_opens
+        descriptor = original_open(parent_fd, name, resources)
+        if name == target.name:
+            target_opens += 1
+            if target_opens == 2:
+                target.replace(backup)
+                replacement.replace(target)
+        return descriptor
+
+    monkeypatch.setattr(quantize_script, "_open_snapshot_entry", replace_after_final_open)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="identity|directory entry|changed"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        if target.exists():
+            target.unlink()
+        if backup.exists():
+            backup.replace(target)
+        if replacement.exists():
+            replacement.unlink()
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize("failure_call", [2, 4])
+def test_snapshot_candidate_second_open_failure_closes_every_acquired_fd(monkeypatch, failure_call):
+    original_open = quantize_script._open_snapshot_entry
+    process_baseline = _open_fd_count()
+    for _iteration in range(3):
+        authority, descriptors = _snapshot_authority()
+        calls = 0
+
+        def fail_selected_second_open(parent_fd, name, resources):
+            nonlocal calls
+            calls += 1
+            if calls == failure_call:
+                raise RuntimeError("injected second-open failure")
+            return original_open(parent_fd, name, resources)
+
+        monkeypatch.setattr(quantize_script, "_open_snapshot_entry", fail_selected_second_open)
+        try:
+            monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+            with pytest.raises(RuntimeError, match="injected second-open failure"):
+                quantize_script._controller_snapshot_authority()
+        finally:
+            for descriptor in descriptors:
+                os.close(descriptor)
+        assert _open_fd_count() == process_baseline
 
 
 def test_live_producer_ipc_keeps_reader_open_until_validation_and_ack(monkeypatch):

@@ -509,6 +509,38 @@ Implementation gates for schema v5, from parent `752b9adffe6ea5f8538eb7a0525eff3
   `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers, seven authoritative artifact hashes, and seven local
   Hub content identities.
 
+## Rejected unretained final pathname window and transactional descriptor correction (2026-08-23)
+
+Independent verification rejected commit `0157b3b5`: its complete final-file reads still released pathname authority
+to a later lookup after opening each final descriptor. A source or manifest directory entry could therefore be
+replaced during processing of the other member of the pair. Descriptor acquisition also lacked one transactional
+owner from the first successful open, so a failure opening the second member could leak earlier descriptors. These
+findings are recorded as failures without changing any earlier gate result.
+
+Each candidate now retains safely traversed parent-directory descriptors for both resources. All opened directory
+and file descriptors enter one `ExitStack` immediately upon acquisition. After both final file descriptors have been
+opened, exactly read, and stability-bracketed, a minimal paired section reopens both entries with `O_NOFOLLOW` through
+the retained parents. It exactly rereads and brackets each entry and compares regular-file type, device, inode, size,
+mtime, ctime, bytes, and digest with both the controller-issued identity and the already-open final descriptor before
+the candidate can reach uniqueness. Parent traversal rejects unsafe ownership or rename-capable modes.
+
+Regressions replace each entry after its final open while the pair is processed and require rejection. Repeated
+injected failures at the initial and final second-entry opens prove aggregate FD counts return to baseline. All
+replacement backups live beside their target for same-filesystem rename-safe restoration. Mutation fixtures restore
+bytes and mtime only; ctime is deliberately neither restored nor claimed. No real metrics are claimed.
+
+Implementation gates for this correction, from parent `0157b3b5358fd26298164a30f12f0acc108e0e0b`:
+
+- `HOME=/root pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py` passed all 159 tests
+  with 14 upstream `torch.jit` warnings; the identical collect-only command found exactly 159 tests.
+- Ruff, `compileall`, `git diff --check`, and the acceptance root, `gate`, `controlled-run`, `payload-hashes`,
+  evaluation, and quantizer CLI help smokes passed.
+- External descriptor-owned schema-v7 trust/signing passed with verifier fingerprint
+  `4bf5f6f6dbd4153e7afca1ce7f4397586d3f5b43df5eb1c4aa559ab2f05af017`; the repository private-key scan was empty.
+- Pinned `/monster/data/model/Qwen3-8B` identity/integrity passed at revision
+  `b968826d9c46dd6066d109eabc6255188de91218`, with all 36 layers, seven authoritative artifact hashes, and seven
+  local Hub content identities.
+
 ## Rejected pre-coherence uniqueness ordering and local-candidate correction (2026-08-23)
 
 Independent verification rejected commit `b9de5c74`: despite its green tests, it consulted and mutated the global
@@ -551,8 +583,8 @@ issued identity, exact bytes, and digest. Both final descriptors remain open thr
 together, so mutation of either resource anywhere in the final window fails before uniqueness.
 
 Regressions separately inject short `pread` plus `EINTR` for retained, physical-path, and sealed-snapshot FDs; mutate
-an inode after the first bracket; mutate during the final read; and restore replaced pathnames and original bytes and
-timestamps in `finally`. No real metrics are claimed.
+an inode after the first bracket; mutate during the final read; and restore replaced pathnames, original bytes, and
+mtime in `finally`. They do not claim that ctime can be restored. No real metrics are claimed.
 
 Implementation gates for this correction, from parent `e5e983c4a751172f306da76a2fb7ebe6de55f1a1`:
 
