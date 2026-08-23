@@ -256,8 +256,29 @@ at::Tensor qvq_hadamard_cuda(
 
 }  // namespace
 
+
+
+namespace {
+
+// torch rejects duplicate def() calls even for byte-identical schemas, and
+// cross-bundle schema lookups are unreliable during JIT-plugin static init.
+// The CPU and CUDA QVQ extensions intentionally share these op schemas, so
+// each def runs at most once per process: a duplicate registration throws
+// c10::Error before mutating dispatcher state and is swallowed here.
+template <typename DefFn>
+void qvq_def_shared_schema(DefFn&& def_fn) {
+  try {
+    def_fn();
+  } catch (const std::exception&) {
+  }
+}
+
+}  // namespace
+
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
-  m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
+  qvq_def_shared_schema([&] {
+    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
+});
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {

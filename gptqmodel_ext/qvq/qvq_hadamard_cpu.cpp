@@ -18,6 +18,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <string>
 #include <cstring>
 #include <limits>
 
@@ -190,9 +192,9 @@ void apply_post_epilogue_scalar(
 
 at::Tensor qvq_hadamard_cpu(
     const at::Tensor& input,
-    c10::optional<at::Tensor> pre_scale,
-    c10::optional<at::Tensor> post_scale,
-    c10::optional<at::Tensor> bias,
+    const c10::optional<at::Tensor>& pre_scale,
+    const c10::optional<at::Tensor>& post_scale,
+    const c10::optional<at::Tensor>& bias,
     int64_t scale_mode) {
   TORCH_CHECK(input.device().is_cpu(), "qvq_hadamard_cpu: input must be a CPU tensor");
   TORCH_CHECK(input.dim() >= 1, "qvq_hadamard_cpu: input must be at least rank one");
@@ -262,8 +264,29 @@ at::Tensor qvq_hadamard_cpu(
 
 }  // namespace qvq_cpu
 
+
+
+namespace {
+
+// torch rejects duplicate def() calls even for byte-identical schemas, and
+// cross-bundle schema lookups are unreliable during JIT-plugin static init.
+// The CPU and CUDA QVQ extensions intentionally share these op schemas, so
+// each def runs at most once per process: a duplicate registration throws
+// c10::Error before mutating dispatcher state and is swallowed here.
+template <typename DefFn>
+void qvq_def_shared_schema(DefFn&& def_fn) {
+  try {
+    def_fn();
+  } catch (const std::exception&) {
+  }
+}
+
+}  // namespace
+
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
-  m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
+  qvq_def_shared_schema([&] {
+    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
+});
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CPU, m) {
