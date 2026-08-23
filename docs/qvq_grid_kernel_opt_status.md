@@ -1,5 +1,9 @@
 # QVQ `<4,2,16,fused>` family-grid kernel optimisation — working status
 
+The pipeline-level follow-up plan is in
+[`qvq_quantization_4x_roadmap.md`](qvq_quantization_4x_roadmap.md). It treats the merged
+kernel work and the rejected ILP trial as the starting point rather than repeating them.
+
 Branch `perf/qvq-grid-kernel-opt` (base `perf/qvq-nsys-profile` @ acd959ed). Target: the
 `viterbi_v2_segment_family_grid_trusted` op (61 % of GPU kernel time on Llama-3.2-1B, see
 `docs/qvq_nsys_profile_llama32_1b.md`). Device: NVIDIA PG506-230 (sm_80, 124 SMs).
@@ -128,6 +132,21 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=GPU-cb9e7784-cf50-203d-4f0d-5c
 
 Why 4x is out of reach for this formulation: ~10.7 thread-instructions per state-step (FP32 op order pinned by
 bit-exactness), issue-bound at 76 % with 50 % occupancy (64 regs x 1024 threads; 160 KB smem per CTA blocks a second CTA).
+
+## Phase 1 pipeline audit: no exact call reuse
+
+The follow-up pipeline audit instrumented all three family-grid call sites. It
+found no input-identical repeated solve: Block-LDLQ updates errors between
+blocks, YAQA updates feedback between disjoint anti-diagonals, and sampled
+selection runs once. A result cache would therefore have a 0% hit rate.
+
+Only state 63 from each provisional 128-state path is consumed. A fused
+midpoint-output specialization proved that this output sparsity does not imply
+half the recurrence work: state 63 must be recovered from the globally optimal
+terminal traceback. The exact storage-only specialization improved a paired
+3x128 microbenchmark by just 1.008x (4.915 -> 4.875 ms) and was reverted. The
+retained telemetry records this workload shape without changing results; see
+[`qvq_quantization_4x_roadmap.md`](qvq_quantization_4x_roadmap.md).
 
 ## Environment gotcha
 
