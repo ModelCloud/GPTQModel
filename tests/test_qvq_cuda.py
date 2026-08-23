@@ -880,15 +880,47 @@ def _fused_family_grid_dispatch_count() -> int:
     return int(torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count())
 
 
+# Round-2 relaxed contract for the fused W2 family-grid kernel: floating-point
+# op order is no longer bit-identical to the reference path (squared-difference
+# emission, weight folded into an FMA, packed 16-ulp-bucket argmin keys), so
+# the fused path is held to *decision equivalence* instead of bit-exactness:
+# discrete outputs match the reference except for provably score-equal
+# near-tie flips, and the per-sequence squared error matches within float
+# rounding tolerance.
+_FUSED_MAX_FLIP_FRACTION = 1e-3
+_FUSED_LOSS_RTOL = 2e-4
+_FUSED_LOSS_ATOL = 1e-6
+
+
+def _assert_family_grid_decision_equivalent(
+    expected, actual, context, max_flip_fraction=_FUSED_MAX_FLIP_FRACTION
+):
+    """expected/actual: (states, squared_error, segment_bank_ids) triples."""
+
+    states_e, loss_e, banks_e = expected
+    states_a, loss_a, banks_a = actual
+    flip_fraction = (states_e != states_a).float().mean().item()
+    assert flip_fraction <= max_flip_fraction, (context, flip_fraction)
+    bank_flip_fraction = (banks_e != banks_a).float().mean().item()
+    assert bank_flip_fraction <= max(max_flip_fraction * 16, 16 / banks_e.numel()), (
+        context,
+        bank_flip_fraction,
+    )
+    torch.testing.assert_close(
+        loss_a, loss_e, rtol=_FUSED_LOSS_RTOL, atol=_FUSED_LOSS_ATOL, msg=lambda m: f"{context}: {m}"
+    )
+
+
 # The fused path is gated on the *flattened* batch (families x batch >= 40): per-family
 # batches 1, 2, 3 and 7 (3, 6, 9, 21 sequences) take the reference path, 33+ (99+) the fused kernel.
 @pytest.mark.parametrize("batch", (1, 2, 3, 7, 33, 128, 131))
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
 @pytest.mark.parametrize("scale", (1.0, 0.05, 4.0))
-def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch, constrained, weighted, scale):
+def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(batch, constrained, weighted, scale):
     """The W2 <4,2,16,fused> family op runs the fused persistent kernel; the per-family
-    ``viterbi_v2_segment_grid_trusted`` op still runs the reference segmented grid kernels."""
+    ``viterbi_v2_segment_grid_trusted`` op still runs the reference segmented grid kernels.
+    Small batches take the (bit-exact) reference path; fused batches are decision-equivalent."""
 
     bits = 2.0
     generator = torch.Generator(device="cuda").manual_seed(20260823 + batch * 7 + int(constrained) + 2 * int(weighted))
@@ -929,13 +961,20 @@ def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch
             None if overlap is None else overlap[family],
             None if step_weights is None else step_weights[family],
         )
-        for index in range(3):
-            assert torch.equal(expected[index], actual[index][family]), (family, index)
+        if expected_fused_dispatches == 0:
+            for index in range(3):
+                assert torch.equal(expected[index], actual[index][family]), (family, index)
+        else:
+            _assert_family_grid_decision_equivalent(
+                expected,
+                tuple(tensor[family] for tensor in actual),
+                (batch, constrained, weighted, scale, family),
+            )
 
 
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
-def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(constrained, weighted):
+def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_decision_equivalent(constrained, weighted):
     """Bank 1 that is not an XOR-permutation of bank 0 must take the in-kernel general path
     (fused_step_general); batch >= 40 per family keeps the fused kernel dispatched."""
 
@@ -971,8 +1010,11 @@ def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(co
             None if overlap is None else overlap[family],
             None if step_weights is None else step_weights[family],
         )
-        for index in range(3):
-            assert torch.equal(expected[index], actual[index][family]), (family, index)
+        _assert_family_grid_decision_equivalent(
+            expected,
+            tuple(tensor[family] for tensor in actual),
+            (constrained, weighted, family),
+        )
 
 
 @pytest.mark.parametrize("batch", (40, 67, 128))
@@ -1009,7 +1051,113 @@ def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(batch, weight
     actual = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(sequences, codebooks, transition_bits, 16, step_weights)
     # Provisional (rotated) pass + constrained pass, both on the fused kernel.
     assert _fused_family_grid_dispatch_count() - dispatches_before == 2
-    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+    # Decision equivalence, sequence-wise: a near-tie flip in the provisional
+    # pass changes the derived overlap and legitimately diverges that whole
+    # sequence, so diverged sequences are held to equal-or-better final loss
+    # instead of state equality.
+    states_e, loss_e, banks_e = expected
+    states_a, loss_a, banks_a = actual
+    diverged = (states_e != states_a).any(dim=1)
+    assert diverged.float().mean().item() <= 0.05, diverged.sum().item()
+    matched = ~diverged
+    torch.testing.assert_close(
+        loss_a[matched], loss_e[matched], rtol=_FUSED_LOSS_RTOL, atol=_FUSED_LOSS_ATOL
+    )
+    assert torch.equal(banks_e[matched], banks_a[matched])
+    if bool(diverged.any()):
+        assert bool(
+            (loss_a[diverged] <= loss_e[diverged] * (1 + _FUSED_LOSS_RTOL) + _FUSED_LOSS_ATOL).all()
+        ), (loss_a[diverged], loss_e[diverged])
+
+
+def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
+    """Round-2 relaxed-contract stress test: >= 10k random sequences through the
+    family-grid op, spanning the batch gate boundary, weighted/unweighted,
+    constrained/unconstrained, XOR-related and arbitrary bank pairs, plus
+    adversarial near-tie cases (targets drawn from the codebook itself).  The
+    fused path must be decision-equivalent to the reference path: state flips
+    only at provably score-equal near-ties (per-sequence squared error within
+    float tolerance), with the flip rate reported in the assertion bound."""
+
+    fam = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    ref = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    families = 3
+    total_states = 0
+    total_flips = 0
+    total_sequences = 0
+    max_loss_rel = 0.0
+    generator = torch.Generator(device="cuda").manual_seed(20260901)
+
+    def bank_pair(family, xor_related, adversarial_dup):
+        bank0 = pgc16_codebook_v2_bank(0, bits=2.0, dtype=torch.float32)
+        if xor_related:
+            bank1 = pgc16_codebook_v2_bank(family + 1, bits=2.0, dtype=torch.float32)
+        else:
+            bank1 = torch.randn((1 << 16, 2), generator=generator, device="cuda").cpu()
+        pair = torch.stack((bank0, bank1)).to(device="cuda", dtype=torch.float16)
+        if adversarial_dup:
+            # Duplicate a block of codes so exact score ties are guaranteed.
+            pair[:, 1024:2048] = pair[:, 0:1024]
+        return pair
+
+    cases = []
+    for call in range(24):  # 24 x (3 x 128) = 9216 sequences on the fused path
+        cases.append((128, call % 2 == 0, call % 3 == 0, True, call % 4 == 0, False))
+    for batch in (13, 14, 33, 40, 41, 67):  # around/above the flattened gate (>= 40)
+        cases.append((batch, True, True, True, False, False))
+        cases.append((batch, False, False, False, False, False))
+    for _ in range(4):  # adversarial: targets snapped to codebook entries
+        cases.append((64, True, False, True, False, True))
+
+    for batch, weighted, constrained, xor_related, adversarial_dup, adversarial_snap in cases:
+        codebooks = torch.stack(
+            tuple(bank_pair(f, xor_related, adversarial_dup) for f in range(families))
+        ).contiguous()
+        sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+        if adversarial_snap:
+            picks = torch.randint(0, 1 << 16, (families, batch, 128), generator=generator, device="cuda")
+            for f in range(families):
+                sequences[f] = codebooks[f, 0].float()[picks[f]]
+        overlap = (
+            torch.randint(0, 1 << 12, (families, batch), generator=generator, device="cuda", dtype=torch.int64)
+            if constrained
+            else None
+        )
+        step_weights = (
+            (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
+        )
+        dispatches_before = _fused_family_grid_dispatch_count()
+        actual = fam(sequences, codebooks, 4, 16, overlap, step_weights)
+        expected_fused = 1 if families * batch >= 40 else 0
+        assert _fused_family_grid_dispatch_count() - dispatches_before == expected_fused, batch
+        for f in range(families):
+            expected = ref(
+                sequences[f],
+                codebooks[f],
+                4,
+                16,
+                None if overlap is None else overlap[f],
+                None if step_weights is None else step_weights[f],
+            )
+            states_e, loss_e, banks_e = expected
+            states_a, loss_a, banks_a = (tensor[f] for tensor in actual)
+            if expected_fused == 0:
+                assert torch.equal(states_e, states_a) and torch.equal(loss_e, loss_a)
+                assert torch.equal(banks_e, banks_a)
+                continue
+            total_states += states_e.numel()
+            total_flips += int((states_e != states_a).sum().item())
+            total_sequences += batch
+            rel = ((loss_a - loss_e).abs() / loss_e.abs().clamp_min(1e-9)).max().item()
+            max_loss_rel = max(max_loss_rel, rel)
+            # Score equality is the proof that any flip is a genuine near-tie:
+            # a wrong (not merely tied) decision would move that sequence's
+            # accumulated squared error far beyond float rounding noise.
+            assert rel <= _FUSED_LOSS_RTOL, (batch, weighted, constrained, xor_related, f, rel)
+
+    assert total_sequences >= 10_000, total_sequences
+    flip_rate = total_flips / max(total_states, 1)
+    assert flip_rate <= 1e-3, (flip_rate, total_flips, total_states)
 
 
 def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch):
