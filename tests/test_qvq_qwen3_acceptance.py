@@ -15,6 +15,7 @@ import scripts.accept_qwen3_8b_qvq as acceptance_script
 from gptqmodel.utils.qvq_acceptance import (
     MANIFEST_SPLITS,
     PROJECTION_BOUNDARY,
+    QWEN3_DENSE_ARTIFACT_SHA256,
     QWEN3_DENSE_CONFIG_SHA256,
     QWEN3_MODEL_CONFIG,
     QWEN3_PINNED_REVISION,
@@ -23,25 +24,30 @@ from gptqmodel.utils.qvq_acceptance import (
     account_serialized_checkpoint,
     account_serialized_state,
     expected_cells,
+    expected_projection_dimensions,
     expected_projection_name,
     expected_projection_names,
+    hash_qvq_module_payloads,
     materialize_manifest,
+    select_diverse_32,
     validate_acceptance_report,
     validate_manifest_disjointness,
     validate_qwen3_model_artifact,
 )
 from scripts.accept_qwen3_8b_qvq import build_parser as build_acceptance_parser
 
+FROZEN_SPLITS = Path(__file__).parent / "data" / "qwen3_8b_qvq_acceptance"
+
 
 class _Packed(nn.Module):
-    def __init__(self, bits=2.0):
+    def __init__(self, bits=2.0, in_features=16, out_features=16):
         super().__init__()
         self.bits = bits
         self.bank_count = 2
         self.v2b2_p32 = True
         self._bank_ids_loaded = True
-        self.in_features = 16
-        self.out_features = 16
+        self.in_features = in_features
+        self.out_features = out_features
         self.register_buffer("trellis", torch.zeros(1, dtype=torch.int32))
         self.register_buffer("SU", torch.zeros(1))
         self.register_buffer("SV", torch.zeros(1))
@@ -58,9 +64,23 @@ def _census_model(module_factory):
         block.self_attn = nn.Module()
         block.mlp = nn.Module()
         for role in ("q_proj", "k_proj", "v_proj", "o_proj"):
-            setattr(block.self_attn, role, module_factory())
+            setattr(
+                block.self_attn,
+                role,
+                module_factory(
+                    in_features=expected_projection_dimensions(role)[0],
+                    out_features=expected_projection_dimensions(role)[1],
+                ),
+            )
         for role in ("gate_proj", "up_proj", "down_proj"):
-            setattr(block.mlp, role, module_factory())
+            setattr(
+                block.mlp,
+                role,
+                module_factory(
+                    in_features=expected_projection_dimensions(role)[0],
+                    out_features=expected_projection_dimensions(role)[1],
+                ),
+            )
         model.model.layers.append(block)
     return model
 
@@ -84,7 +104,9 @@ def test_census_rejects_dense_fallback(monkeypatch):
 def test_census_rejects_higher_precision_fallback(monkeypatch):
     monkeypatch.setattr(acceptance, "QVQLinear", _Packed)
     model = _census_model(_Packed)
-    model.model.layers[3].self_attn.q_proj = _Packed(bits=2.5)
+    model.model.layers[3].self_attn.q_proj = _Packed(
+        bits=2.5, in_features=4096, out_features=4096
+    )
     with pytest.raises(AcceptanceError, match="higher-precision"):
         acceptance.census_reloaded_model(model)
 
@@ -99,20 +121,31 @@ def test_census_separates_wrapper_runtime_name_from_serialized_identity(monkeypa
     assert cells[0].runtime_name == "model.model.layers.0.self_attn.q_proj"
 
 
+def test_census_rejects_role_dimension_drift(monkeypatch):
+    monkeypatch.setattr(acceptance, "QVQLinear", _Packed)
+    model = _census_model(_Packed)
+    model.model.layers[7].self_attn.k_proj.out_features = 4096
+    with pytest.raises(AcceptanceError, match="dimension mismatch"):
+        acceptance.census_reloaded_model(model)
+
+
 def _manifests(tmp_path):
     result = {}
-    for index, split in enumerate(("calibration", "yaqa_tuning", "validation", "held_out_diagnostics", "diverse_32")):
-        count = 32 if split == "diverse_32" else 1
-        records = [{"identity": f"{split}:{row}", "content": f"content-{index}-{row}"} for row in range(count)]
+    for index, split in enumerate(MANIFEST_SPLITS):
+        count = {"diverse_pool_512": 512, "diverse_32": 32}.get(split, 1)
+        records = [
+            {"identity": f"{split}:{row}", "content": f"content-{index}-{row}"}
+            for row in range(count)
+        ]
         result[split] = materialize_manifest(split, records, tmp_path / f"{split}.json")
     return result
 
 
 def test_manifest_rejects_content_leakage_even_with_distinct_identity(tmp_path):
     manifests = _manifests(tmp_path)
-    manifests["validation"]["samples"][0]["content_sha256"] = manifests["calibration"]["samples"][0][
-        "content_sha256"
-    ]
+    manifests["validation"]["samples"][0]["content_sha256"] = manifests["calibration"][
+        "samples"
+    ][0]["content_sha256"]
     with pytest.raises(AcceptanceError, match="sample leakage"):
         validate_manifest_disjointness(manifests)
 
@@ -120,8 +153,43 @@ def test_manifest_rejects_content_leakage_even_with_distinct_identity(tmp_path):
 def test_diverse_manifest_requires_exactly_32(tmp_path):
     with pytest.raises(AcceptanceError, match="exactly 32"):
         materialize_manifest(
-            "diverse_32", [{"identity": "one", "content": "one"}], tmp_path / "manifest.json"
+            "diverse_32",
+            [{"identity": "one", "content": "one"}],
+            tmp_path / "manifest.json",
         )
+
+
+def test_diverse_pool_selection_is_deterministic_and_content_bound():
+    pool = [
+        {"identity": f"pool:{index:03d}", "content": "x" * (512 - index)}
+        for index in range(512)
+    ]
+    selected = select_diverse_32(pool)
+    assert selected == select_diverse_32(list(reversed(pool)))
+    assert len(selected) == 32
+    drifted = list(selected)
+    drifted[0] = pool[0]
+    with pytest.raises(AcceptanceError, match="not the deterministic"):
+        acceptance.validate_diverse_selection(pool, drifted)
+
+
+def test_committed_frozen_pool_and_selection_are_content_bound_and_disjoint():
+    acceptance_script._verify_all_manifest_sources(FROZEN_SPLITS)
+    evidence = acceptance_script._check_manifests(FROZEN_SPLITS)
+    assert evidence["counts"]["diverse_pool_512"] == 512
+    assert evidence["counts"]["diverse_32"] == 32
+    assert evidence["diverse_selection"]["verified"] is True
+    assert len(evidence["comparisons"]) == 14
+
+
+def test_payload_hashes_measure_tensor_bytes_and_fail_on_drift():
+    module = _Packed()
+    before = hash_qvq_module_payloads([("module", module)])
+    assert before == hash_qvq_module_payloads([("module", module)])
+    module.trellis[0] = 1
+    after = hash_qvq_module_payloads([("module", module)])
+    assert before["module_sha256"]["module"] != after["module_sha256"]["module"]
+    assert before["aggregate_sha256"] != after["aggregate_sha256"]
 
 
 def test_accounting_includes_every_projection_auxiliary_tensor_and_bias():
@@ -138,7 +206,9 @@ def test_accounting_includes_every_projection_auxiliary_tensor_and_bias():
     report = account_serialized_state(state, [cell], maximum_bpw=100)
     assert report["requested_projection_tensor_bytes"] == 19
     assert report["dense_non_target_tensor_bytes"] == 6
-    assert set(report["per_module"][cell.name]["tensors"]) == set(state) - {"model.embed_tokens.weight"}
+    assert set(report["per_module"][cell.name]["tensors"]) == set(state) - {
+        "model.embed_tokens.weight"
+    }
 
 
 def test_accounting_rejects_bpw_above_limit():
@@ -156,7 +226,12 @@ def test_accounting_rejects_bpw_above_limit():
 
 def test_accounting_reads_exact_saved_safetensors_extents(tmp_path):
     cells = [
-        ProjectionCell(layer, role, expected_projection_name(layer, role), 16, 16)
+        ProjectionCell(
+            layer,
+            role,
+            expected_projection_name(layer, role),
+            *expected_projection_dimensions(role),
+        )
         for layer, role in expected_cells()
     ]
     tensors = {"model.embed_tokens.weight": torch.zeros(8, dtype=torch.float16)}
@@ -173,7 +248,10 @@ def test_accounting_reads_exact_saved_safetensors_extents(tmp_path):
 
 def test_accounting_rejects_shards_without_authoritative_index(tmp_path):
     cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
-    save_file({f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32)}, tmp_path / "model-00001.safetensors")
+    save_file(
+        {f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32)},
+        tmp_path / "model-00001.safetensors",
+    )
     save_file(
         {
             f"{cell.name}.SU": torch.zeros(1),
@@ -213,13 +291,20 @@ def _complete_report(score=0.85, kl=0.1):
             f"{module_name}.bank_alt_id": {"bytes": 1},
         }
         target_tensors.update({key: value["bytes"] for key, value in tensors.items()})
-        per_module[module_name] = {"bytes": 14, "dense_weight_count": 256, "tensors": tensors}
+        role = module_name.rsplit(".", 1)[-1]
+        in_features, out_features = expected_projection_dimensions(role)
+        per_module[module_name] = {
+            "bytes": 14,
+            "dense_weight_count": in_features * out_features,
+            "tensors": tensors,
+        }
     target_bytes = 14 * 252
-    dense_weights = 256 * 252
+    dense_weights = sum(record["dense_weight_count"] for record in per_module.values())
     comparisons = [
         {"left": left, "right": right, "identity_overlap": [], "content_overlap": []}
         for left_index, left in enumerate(MANIFEST_SPLITS)
         for right in MANIFEST_SPLITS[left_index + 1 :]
+        if (left, right) != ("diverse_pool_512", "diverse_32")
     ]
     manifest_hashes = {split: "d" * 64 for split in MANIFEST_SPLITS}
     content_hashes = {split: "e" * 64 for split in MANIFEST_SPLITS}
@@ -236,8 +321,15 @@ def _complete_report(score=0.85, kl=0.1):
         )
     }
     checkpoint_config_sha256 = "c" * 64
+    payload_hashes = {
+        "scheme": acceptance.QVQ_PAYLOAD_HASH_SCHEME,
+        "module_count": 252,
+        "module_sha256": {name: "f" * 64 for name in expected_projection_names()},
+        "module_tensor_counts": {name: 5 for name in expected_projection_names()},
+        "aggregate_sha256": "a" * 64,
+    }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact": {
             "fresh_reload_verified": True,
             "checkpoint_sha256": {
@@ -253,12 +345,19 @@ def _complete_report(score=0.85, kl=0.1):
                 "config_sha256": QWEN3_DENSE_CONFIG_SHA256,
                 "decoder_layers": list(range(36)),
                 "revision": QWEN3_PINNED_REVISION,
+                "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
             },
             "checkpoint_model_identity": {
                 "config": dict(QWEN3_MODEL_CONFIG),
                 "config_sha256": checkpoint_config_sha256,
                 "decoder_layers": list(range(36)),
                 "revision": None,
+            },
+            "packed_payload_parity": {
+                "verified": True,
+                "pre_save": payload_hashes,
+                "fresh_process": payload_hashes,
+                "evaluation_reload": payload_hashes,
             },
         },
         "census": {"expected": 252, "actual": 252, "complete": True},
@@ -280,14 +379,27 @@ def _complete_report(score=0.85, kl=0.1):
                 "yaqa_tuning": 512,
                 "validation": 512,
                 "held_out_diagnostics": 512,
+                "diverse_pool_512": 512,
                 "diverse_32": 32,
             },
             "comparisons": comparisons,
+            "diverse_selection": {
+                "verified": True,
+                "scheme": acceptance.DIVERSE_SELECTION_SCHEME,
+                "pool_count": 512,
+                "selected_count": 32,
+                "selected_identities": [f"pool:{index}" for index in range(32)],
+                "selected_content_sha256": [f"{index:064x}" for index in range(32)],
+            },
             "manifest_sha256": manifest_hashes,
             "content_jsonl_sha256": content_hashes,
             "quantization_streams": quantization_streams,
         },
-        "thresholds": {"top1_agreement_min": 0.85, "diverse_32_min": 0.85, "final_kl_max_nats": 0.2},
+        "thresholds": {
+            "top1_agreement_min": 0.85,
+            "diverse_32_min": 0.85,
+            "final_kl_max_nats": 0.2,
+        },
         "global": dict(metric),
         "cells": [
             {
@@ -311,8 +423,34 @@ def test_report_rejects_missing_layer_role_cell():
 def test_report_rejects_noncanonical_or_inconsistent_accounting():
     report = _complete_report()
     first_name = expected_projection_names()[0]
-    report["accounting"]["per_module"]["not.canonical"] = report["accounting"]["per_module"].pop(first_name)
+    report["accounting"]["per_module"]["not.canonical"] = report["accounting"][
+        "per_module"
+    ].pop(first_name)
     with pytest.raises(AcceptanceError, match="exact canonical 252"):
+        validate_acceptance_report(report)
+
+    report = _complete_report()
+    first_name = expected_projection_names()[0]
+    report["accounting"]["per_module"][first_name]["dense_weight_count"] += 1
+    report["accounting"]["requested_projection_dense_weight_count"] += 1
+    with pytest.raises(AcceptanceError, match="denominator is not pinned"):
+        validate_acceptance_report(report)
+
+
+def test_report_rejects_asserted_or_drifted_payload_parity():
+    report = _complete_report()
+    report["artifact"]["packed_payload_parity"] = {"verified": True}
+    with pytest.raises(AcceptanceError, match="incomplete"):
+        validate_acceptance_report(report)
+
+    report = _complete_report()
+    report["artifact"]["packed_payload_parity"]["fresh_process"] = dict(
+        report["artifact"]["packed_payload_parity"]["fresh_process"]
+    )
+    report["artifact"]["packed_payload_parity"]["fresh_process"]["aggregate_sha256"] = (
+        "0" * 64
+    )
+    with pytest.raises(AcceptanceError, match="drifted"):
         validate_acceptance_report(report)
 
     report = _complete_report()
@@ -344,13 +482,15 @@ def test_report_rejects_final_kl_as_percentage_semantics():
     report = _complete_report()
     report["thresholds"].pop("final_kl_max_nats")
     report["thresholds"]["final_kl_min"] = 0.85
-    with pytest.raises(AcceptanceError, match="explicit finite nonnegative KL threshold"):
+    with pytest.raises(
+        AcceptanceError, match="explicit finite nonnegative KL threshold"
+    ):
         validate_acceptance_report(report)
 
 
 def test_report_rejects_incomplete_coverage_and_schema():
     report = _complete_report()
-    report["schema_version"] = 2
+    report["schema_version"] = 3
     with pytest.raises(AcceptanceError, match="schema"):
         validate_acceptance_report(report)
     report = _complete_report()
@@ -370,7 +510,7 @@ def test_materialized_manifest_is_stable(tmp_path):
 def test_report_rejects_duplicate_or_wrong_manifest_pair():
     report = _complete_report()
     report["manifests"]["comparisons"][9] = dict(report["manifests"]["comparisons"][0])
-    with pytest.raises(AcceptanceError, match="exact ten unique canonical split pairs"):
+    with pytest.raises(AcceptanceError, match="exact unique canonical split pairs"):
         validate_acceptance_report(report)
 
 
@@ -397,7 +537,9 @@ def test_gate_recomputes_and_content_binds_submitted_report(tmp_path, monkeypatc
     changed = _complete_report()
     changed["global"]["final_kl_nats"] = 0.11
     report_path.write_text(json.dumps(changed), encoding="utf-8")
-    with pytest.raises(AcceptanceError, match="does not exactly match artifact-recomputed"):
+    with pytest.raises(
+        AcceptanceError, match="does not exactly match artifact-recomputed"
+    ):
         acceptance_script._gate(SimpleNamespace(report=report_path))
 
 
@@ -409,7 +551,11 @@ def test_quantization_stream_verification_rejects_content_mutation(tmp_path):
     manifests.mkdir()
     dense.mkdir()
     datasets = {}
-    for quant_name, file_stem in (("calibration", "calibration"), ("yaqa", "yaqa_tuning"), ("validation", "validation")):
+    for quant_name, file_stem in (
+        ("calibration", "calibration"),
+        ("yaqa", "yaqa_tuning"),
+        ("validation", "validation"),
+    ):
         source = manifests / f"{file_stem}.jsonl"
         manifest = manifests / f"{file_stem}.manifest.json"
         source.write_text('{"identity":"x","content":"sample"}\n', encoding="utf-8")
@@ -435,21 +581,47 @@ def test_quantization_stream_verification_rejects_content_mutation(tmp_path):
             "bank_count": 2,
         },
         "datasets": datasets,
+        "packed_payload_parity": {
+            "verified": True,
+            "pre_save": {"aggregate_sha256": "a" * 64},
+            "fresh_process": {"aggregate_sha256": "a" * 64},
+        },
     }
     (checkpoint / "qvq_quantize_run.json").write_text(json.dumps(run), encoding="utf-8")
     acceptance_script._verify_quantization_streams(checkpoint, manifests, dense)
 
-    (manifests / "calibration.jsonl").write_text('{"content":"changed"}\n', encoding="utf-8")
+    (manifests / "calibration.jsonl").write_text(
+        '{"content":"changed"}\n', encoding="utf-8"
+    )
     with pytest.raises(RuntimeError, match="content hash"):
         acceptance_script._verify_quantization_streams(checkpoint, manifests, dense)
 
 
 def test_local_qwen3_target_has_exact_pinned_identity():
-    evidence = validate_qwen3_model_artifact(Path("/monster/data/model/Qwen3-8B"), require_pinned_dense=True)
+    evidence = validate_qwen3_model_artifact(
+        Path("/monster/data/model/Qwen3-8B"), require_pinned_dense=True
+    )
     assert evidence["revision"] == QWEN3_PINNED_REVISION
     assert evidence["decoder_layers"] == list(range(36))
     assert evidence["config"]["architectures"] == ["Qwen3ForCausalLM"]
+    assert evidence["artifact_sha256"] == QWEN3_DENSE_ARTIFACT_SHA256
     assert "not Qwen3-8B-Instruct" in evidence["instruction_identity"]
+
+
+@pytest.mark.parametrize("failure", ["missing", "extra", "mismatch"])
+def test_pinned_dense_hash_authority_fails_closed(failure):
+    hashes = dict(QWEN3_DENSE_ARTIFACT_SHA256)
+    if failure == "missing":
+        hashes.pop("model-00005-of-00005.safetensors")
+        message = "file set mismatch"
+    elif failure == "extra":
+        hashes["model-00006-of-00006.safetensors"] = "0" * 64
+        message = "file set mismatch"
+    else:
+        hashes["model-00003-of-00005.safetensors"] = "0" * 64
+        message = "SHA-256 mismatch"
+    with pytest.raises(AcceptanceError, match=message):
+        acceptance._validate_pinned_dense_hashes(hashes)
 
 
 def test_model_identity_contextualizes_malformed_config_json(tmp_path):

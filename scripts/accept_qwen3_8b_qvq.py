@@ -45,8 +45,11 @@ from gptqmodel.utils.qvq_acceptance import (
     AcceptanceError,
     account_serialized_checkpoint,
     census_reloaded_model,
+    hash_canonical_qwen3_payloads,
     materialize_manifest,
+    select_diverse_32,
     validate_acceptance_report,
+    validate_diverse_selection,
     validate_manifest_disjointness,
     validate_qwen3_model_artifact,
 )
@@ -69,11 +72,17 @@ def _write_new(path: Path, payload: Mapping[str, Any]) -> None:
     if path.exists():
         raise FileExistsError(f"refusing to overwrite {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _artifact_hashes(directory: Path) -> dict[str, str]:
-    files = sorted(path for path in directory.iterdir() if path.is_file() and path.suffix in {".json", ".safetensors"})
+    files = sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix in {".json", ".safetensors"}
+    )
     if not files or not any(path.suffix == ".safetensors" for path in files):
         raise RuntimeError(f"artifact has no serialized safetensors files: {directory}")
     result = {}
@@ -105,22 +114,33 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
 
 
 def _manifest(args: argparse.Namespace) -> int:
-    materialize_manifest(args.split, _read_jsonl(args.input), args.output, expected_count=args.count)
+    materialize_manifest(
+        args.split, _read_jsonl(args.input), args.output, expected_count=args.count
+    )
     return 0
 
 
 def _dataset_content(row: Mapping[str, Any]) -> Any:
     for key in ("text", "prompt", "content", "messages"):
         value = row.get(key)
-        if (isinstance(value, str) and value.strip()) or (isinstance(value, list) and value):
+        if (isinstance(value, str) and value.strip()) or (
+            isinstance(value, list) and value
+        ):
             return value
-    raise ValueError("dataset row has no nonempty text, prompt, content, or messages field")
+    raise ValueError(
+        "dataset row has no nonempty text, prompt, content, or messages field"
+    )
 
 
 def _export_frozen_splits(args: argparse.Namespace) -> int:
     """Export stable JSONL inputs and manifests from one pinned dataset revision."""
 
-    dataset = load_dataset(args.dataset, args.dataset_config, split=args.dataset_split, revision=args.dataset_revision)
+    dataset = load_dataset(
+        args.dataset,
+        args.dataset_config,
+        split=args.dataset_split,
+        revision=args.dataset_revision,
+    )
     ranges = {
         "calibration": (0, 512),
         "yaqa_tuning": (512, 512),
@@ -128,7 +148,9 @@ def _export_frozen_splits(args: argparse.Namespace) -> int:
         "held_out_diagnostics": (1536, 512),
     }
     if len(dataset) < 2560:
-        raise ValueError(f"frozen split plan requires at least 2560 rows, dataset has {len(dataset)}")
+        raise ValueError(
+            f"frozen split plan requires at least 2560 rows, dataset has {len(dataset)}"
+        )
     args.output_dir.mkdir(parents=True, exist_ok=False)
     for split, (start, count) in ranges.items():
         records = [
@@ -139,37 +161,66 @@ def _export_frozen_splits(args: argparse.Namespace) -> int:
             for row in range(start, start + count)
         ]
         jsonl = args.output_dir / f"{split}.jsonl"
-        jsonl.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
-        materialize_manifest(split, records, args.output_dir / f"{split}.manifest.json", expected_count=count)
+        jsonl.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        materialize_manifest(
+            split,
+            records,
+            args.output_dir / f"{split}.manifest.json",
+            expected_count=count,
+        )
 
-    # Diverse-32 is deterministic length-stratified coverage of a separate
-    # 512-row pool. Sort by canonical UTF-8 content length then stable row ID,
-    # partition into 32 bins of 16, and take each bin midpoint (rank 8).
-    pool = [(len(json.dumps(_dataset_content(dict(dataset[row])), sort_keys=True).encode()), row) for row in range(2048, 2560)]
-    pool.sort()
-    selected = [pool[bin_index * 16 + 8][1] for bin_index in range(32)]
-    records = [
+    pool_records = [
         {
             "identity": f"hf:{args.dataset}@{args.dataset_revision}:{args.dataset_config}:{args.dataset_split}:{row}",
             "content": _dataset_content(dict(dataset[row])),
         }
-        for row in selected
+        for row in range(2048, 2560)
     ]
+    pool_jsonl = args.output_dir / "diverse_pool_512.jsonl"
+    pool_jsonl.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in pool_records),
+        encoding="utf-8",
+    )
+    materialize_manifest(
+        "diverse_pool_512",
+        pool_records,
+        args.output_dir / "diverse_pool_512.manifest.json",
+        expected_count=512,
+    )
+    records = select_diverse_32(pool_records)
     jsonl = args.output_dir / "diverse_32.jsonl"
-    jsonl.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
-    materialize_manifest("diverse_32", records, args.output_dir / "diverse_32.manifest.json", expected_count=32)
+    jsonl.write_text(
+        "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    materialize_manifest(
+        "diverse_32",
+        records,
+        args.output_dir / "diverse_32.manifest.json",
+        expected_count=32,
+    )
     _check_manifests(args.output_dir)
     return 0
 
 
 def _check_manifests(directory: Path) -> dict[str, Any]:
     manifests = {
-        split: _read_json_object(directory / f"{split}.manifest.json", f"{split} identity manifest")
+        split: _read_json_object(
+            directory / f"{split}.manifest.json", f"{split} identity manifest"
+        )
         for split in MANIFEST_SPLITS
     }
     evidence = validate_manifest_disjointness(manifests)
+    evidence["diverse_selection"] = validate_diverse_selection(
+        _read_jsonl(directory / "diverse_pool_512.jsonl"),
+        _read_jsonl(directory / "diverse_32.jsonl"),
+    )
     evidence["manifest_sha256"] = {
-        split: _sha256_file(directory / f"{split}.manifest.json") for split in MANIFEST_SPLITS
+        split: _sha256_file(directory / f"{split}.manifest.json")
+        for split in MANIFEST_SPLITS
     }
     evidence["content_jsonl_sha256"] = {
         split: _sha256_file(directory / f"{split}.jsonl") for split in MANIFEST_SPLITS
@@ -179,26 +230,38 @@ def _check_manifests(directory: Path) -> dict[str, Any]:
 
 def _verify_all_manifest_sources(directory: Path) -> None:
     for split in MANIFEST_SPLITS:
-        _verify_records_against_manifest(split, _read_jsonl(directory / f"{split}.jsonl"), directory)
+        _verify_records_against_manifest(
+            split, _read_jsonl(directory / f"{split}.jsonl"), directory
+        )
 
 
-def _verify_records_against_manifest(split: str, records: list[dict[str, Any]], directory: Path) -> None:
-    expected = _read_json_object(directory / f"{split}.manifest.json", f"{split} identity manifest")
+def _verify_records_against_manifest(
+    split: str, records: list[dict[str, Any]], directory: Path
+) -> None:
+    expected = _read_json_object(
+        directory / f"{split}.manifest.json", f"{split} identity manifest"
+    )
 
     with TemporaryDirectory() as temporary:
         actual = materialize_manifest(split, records, Path(temporary) / "manifest.json")
     if actual != expected:
-        raise RuntimeError(f"{split} evaluation JSONL does not match its accepted identity/content manifest")
+        raise RuntimeError(
+            f"{split} evaluation JSONL does not match its accepted identity/content manifest"
+        )
 
 
-def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_model: Path) -> dict[str, Any]:
+def _verify_quantization_streams(
+    checkpoint: Path, manifest_dir: Path, dense_model: Path
+) -> dict[str, Any]:
     path = checkpoint / "qvq_quantize_run.json"
     if not path.is_file():
         raise RuntimeError("checkpoint is missing qvq_quantize_run.json")
     payload = _read_json_object(path, "qvq_quantize_run.json")
     recorded_model = Path(str(payload.get("model", ""))).expanduser().resolve()
     if recorded_model != dense_model.resolve():
-        raise RuntimeError("quantization report dense-model path does not match the acceptance reference")
+        raise RuntimeError(
+            "quantization report dense-model path does not match the acceptance reference"
+        )
     quantize_config = payload.get("quantize_config")
     if not isinstance(quantize_config, dict):
         raise TypeError("quantization report lacks a resolved quantize_config")
@@ -217,7 +280,9 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_mod
         if quantize_config.get(key) != expected
     }
     if mismatches:
-        raise RuntimeError(f"quantization report does not match the frozen W2 config: {mismatches}")
+        raise RuntimeError(
+            f"quantization report does not match the frozen W2 config: {mismatches}"
+        )
     expected_files = {
         "calibration": manifest_dir / "calibration.jsonl",
         "yaqa": manifest_dir / "yaqa_tuning.jsonl",
@@ -229,17 +294,32 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_mod
         if not isinstance(raw, dict):
             raise TypeError(f"quantization report lacks explicit {split} stream")
         actual_path = Path(str(raw.get("source", ""))).expanduser().resolve()
-        if actual_path != expected_path.resolve() or raw.get("row_start") != 0 or raw.get("rows") != 512:
-            raise RuntimeError(f"quantization {split} stream does not match the frozen manifest JSONL")
+        if (
+            actual_path != expected_path.resolve()
+            or raw.get("row_start") != 0
+            or raw.get("rows") != 512
+        ):
+            raise RuntimeError(
+                f"quantization {split} stream does not match the frozen manifest JSONL"
+            )
         manifest_path = expected_path.with_suffix(".manifest.json")
         current_content_hash = _sha256_file(actual_path)
         current_manifest_hash = _sha256_file(manifest_path)
         if raw.get("content_sha256") != current_content_hash:
-            raise RuntimeError(f"quantization {split} content hash does not match the frozen JSONL")
-        if Path(str(raw.get("identity_manifest", ""))).expanduser().resolve() != manifest_path.resolve():
-            raise RuntimeError(f"quantization {split} identity-manifest path is not authoritative")
+            raise RuntimeError(
+                f"quantization {split} content hash does not match the frozen JSONL"
+            )
+        if (
+            Path(str(raw.get("identity_manifest", ""))).expanduser().resolve()
+            != manifest_path.resolve()
+        ):
+            raise RuntimeError(
+                f"quantization {split} identity-manifest path is not authoritative"
+            )
         if raw.get("identity_manifest_sha256") != current_manifest_hash:
-            raise RuntimeError(f"quantization {split} identity-manifest hash does not match")
+            raise RuntimeError(
+                f"quantization {split} identity-manifest hash does not match"
+            )
         evidence[split] = {
             "source": str(actual_path),
             "rows": 512,
@@ -250,8 +330,33 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_mod
         }
     if payload.get("layer_scope") != "all":
         raise RuntimeError("quantization report did not request all decoder layers")
+    parity = payload.get("packed_payload_parity")
+    if (
+        not isinstance(parity, dict)
+        or parity.get("verified") is not True
+        or parity.get("pre_save") != parity.get("fresh_process")
+    ):
+        raise RuntimeError(
+            "quantization report lacks measured pre-save/fresh-process packed payload parity"
+        )
+    evidence["packed_payload_parity"] = parity
     evidence["quantize_config"] = expected_config
     return evidence
+
+
+@torch.inference_mode()
+def _payload_hashes(args: argparse.Namespace) -> int:
+    model = GPTQModel.load(
+        str(args.checkpoint.resolve()),
+        backend=BACKEND.QVQ,
+        dtype=torch.float16,
+        device_map={"": args.device},
+        attn_implementation="eager",
+        local_files_only=True,
+    ).eval()
+    payload = hash_canonical_qwen3_payloads(model, census_reloaded_model(model))
+    _write_new(args.output, payload)
+    return 0
 
 
 def _gate(args: argparse.Namespace) -> int:
@@ -261,11 +366,20 @@ def _gate(args: argparse.Namespace) -> int:
         recompute_args = argparse.Namespace(**vars(args))
         recompute_args.output = recomputed_path
         _evaluate(recompute_args)
-        recomputed = _read_json_object(recomputed_path, "recomputed acceptance evidence")
+        recomputed = _read_json_object(
+            recomputed_path, "recomputed acceptance evidence"
+        )
     if submitted != recomputed:
-        raise AcceptanceError("submitted report does not exactly match artifact-recomputed acceptance evidence")
+        raise AcceptanceError(
+            "submitted report does not exactly match artifact-recomputed acceptance evidence"
+        )
     validate_acceptance_report(recomputed)
-    print(json.dumps({"accepted": True, "report": str(args.report), "artifact_recomputed": True}, sort_keys=True))
+    print(
+        json.dumps(
+            {"accepted": True, "report": str(args.report), "artifact_recomputed": True},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -280,12 +394,19 @@ def _extract_logits(output: Any) -> torch.Tensor:
 
 def _encode(tokenizer, content: Any, device: str) -> dict[str, torch.Tensor]:
     if isinstance(content, list):
-        text = tokenizer.apply_chat_template(content, tokenize=False, add_generation_prompt=False)
+        text = tokenizer.apply_chat_template(
+            content, tokenize=False, add_generation_prompt=False
+        )
     elif isinstance(content, str) and content.strip():
         text = content
     else:
-        raise ValueError("evaluation content must be nonempty text or a chat-message list")
-    return {key: value.to(device) for key, value in tokenizer(text, return_tensors="pt").items()}
+        raise ValueError(
+            "evaluation content must be nonempty text or a chat-message list"
+        )
+    return {
+        key: value.to(device)
+        for key, value in tokenizer(text, return_tensors="pt").items()
+    }
 
 
 def _last_logits(model, encoded: Mapping[str, torch.Tensor]) -> torch.Tensor:
@@ -296,14 +417,34 @@ def _last_logits(model, encoded: Mapping[str, torch.Tensor]) -> torch.Tensor:
 
 
 def _metric_accumulator() -> dict[str, float]:
-    return {"top1": 0.0, "kl": 0.0, "count": 0.0, "diverse_matches": 0.0, "diverse_count": 0.0}
+    return {
+        "top1": 0.0,
+        "kl": 0.0,
+        "count": 0.0,
+        "diverse_matches": 0.0,
+        "diverse_count": 0.0,
+    }
 
 
-def _add_metric(acc: dict[str, float], dense: torch.Tensor, candidate: torch.Tensor, *, diverse: bool) -> None:
-    if dense.shape != candidate.shape or not torch.isfinite(dense).all() or not torch.isfinite(candidate).all():
-        raise RuntimeError("dense/candidate final logits are non-finite or shape-incompatible")
+def _add_metric(
+    acc: dict[str, float],
+    dense: torch.Tensor,
+    candidate: torch.Tensor,
+    *,
+    diverse: bool,
+) -> None:
+    if (
+        dense.shape != candidate.shape
+        or not torch.isfinite(dense).all()
+        or not torch.isfinite(candidate).all()
+    ):
+        raise RuntimeError(
+            "dense/candidate final logits are non-finite or shape-incompatible"
+        )
     acc["top1"] += float(dense.argmax() == candidate.argmax())
-    acc["kl"] += float(F.kl_div(candidate.log_softmax(-1), dense.softmax(-1), reduction="sum").item())
+    acc["kl"] += float(
+        F.kl_div(candidate.log_softmax(-1), dense.softmax(-1), reduction="sum").item()
+    )
     acc["count"] += 1
     if diverse:
         acc["diverse_matches"] += float(dense.argmax() == candidate.argmax())
@@ -324,7 +465,9 @@ def _finish(acc: Mapping[str, float]) -> dict[str, Any]:
 
 
 @contextmanager
-def _projection_intervention(dense_module: torch.nn.Module, quant_module: torch.nn.Module) -> Iterator[None]:
+def _projection_intervention(
+    dense_module: torch.nn.Module, quant_module: torch.nn.Module
+) -> Iterator[None]:
     def replace(_module, inputs, _output):
         if len(inputs) != 1 or not isinstance(inputs[0], torch.Tensor):
             raise RuntimeError("projection hook requires exactly one tensor input")
@@ -338,15 +481,22 @@ def _projection_intervention(dense_module: torch.nn.Module, quant_module: torch.
 
 
 def _resolve_runtime_module(
-    modules: Mapping[str, torch.nn.Module], canonical_name: str, *, preferred_name: str | None = None
+    modules: Mapping[str, torch.nn.Module],
+    canonical_name: str,
+    *,
+    preferred_name: str | None = None,
 ) -> torch.nn.Module:
     if preferred_name is not None and preferred_name in modules:
         return modules[preferred_name]
     matches = [
-        module for name, module in modules.items() if name == canonical_name or name.endswith("." + canonical_name)
+        module
+        for name, module in modules.items()
+        if name == canonical_name or name.endswith("." + canonical_name)
     ]
     if len(matches) != 1:
-        raise RuntimeError(f"expected exactly one runtime module for {canonical_name!r}, found {len(matches)}")
+        raise RuntimeError(
+            f"expected exactly one runtime module for {canonical_name!r}, found {len(matches)}"
+        )
     return matches[0]
 
 
@@ -354,32 +504,57 @@ def _resolve_runtime_module(
 def _evaluate(args: argparse.Namespace) -> int:
     if args.output.exists():
         raise FileExistsError(f"refusing to overwrite {args.output}")
-    if not math.isfinite(args.maximum_bpw) or args.maximum_bpw <= 0 or args.maximum_bpw > 2.1:
-        raise ValueError("maximum BPW must be finite, positive, and no greater than 2.1")
+    if (
+        not math.isfinite(args.maximum_bpw)
+        or args.maximum_bpw <= 0
+        or args.maximum_bpw > 2.1
+    ):
+        raise ValueError(
+            "maximum BPW must be finite, positive, and no greater than 2.1"
+        )
     if not math.isfinite(args.score_min) or not 0.85 <= args.score_min <= 1:
         raise ValueError("score minimum must be a finite fraction in [0.85, 1]")
     if not math.isfinite(args.final_kl_max_nats) or args.final_kl_max_nats < 0:
-        raise ValueError("final KL maximum must be finite, nonnegative, and expressed in nats")
+        raise ValueError(
+            "final KL maximum must be finite, nonnegative, and expressed in nats"
+        )
     if args.revision != QWEN3_PINNED_REVISION:
-        raise ValueError(f"Qwen3 acceptance revision must be exactly {QWEN3_PINNED_REVISION}")
+        raise ValueError(
+            f"Qwen3 acceptance revision must be exactly {QWEN3_PINNED_REVISION}"
+        )
     disjointness = _check_manifests(args.manifest_dir)
     _verify_all_manifest_sources(args.manifest_dir)
     validation = _read_jsonl(args.validation_jsonl)
     held_out = _read_jsonl(args.held_out_diagnostics_jsonl)
     diverse = _read_jsonl(args.diverse_jsonl)
     if len(validation) != 512 or len(held_out) != 512 or len(diverse) != 32:
-        raise ValueError("evaluation requires exactly 512 validation, 512 held-out diagnostic, and 32 diverse records")
+        raise ValueError(
+            "evaluation requires exactly 512 validation, 512 held-out diagnostic, and 32 diverse records"
+        )
     _verify_records_against_manifest("validation", validation, args.manifest_dir)
-    _verify_records_against_manifest("held_out_diagnostics", held_out, args.manifest_dir)
+    _verify_records_against_manifest(
+        "held_out_diagnostics", held_out, args.manifest_dir
+    )
     _verify_records_against_manifest("diverse_32", diverse, args.manifest_dir)
     dense_model_path = Path(args.dense_model).expanduser().resolve()
     if not dense_model_path.is_dir():
-        raise FileNotFoundError(f"pinned dense model directory does not exist: {dense_model_path}")
-    dense_identity = validate_qwen3_model_artifact(dense_model_path, require_pinned_dense=True)
-    checkpoint_identity = validate_qwen3_model_artifact(args.checkpoint, require_pinned_dense=False)
-    quantization_streams = _verify_quantization_streams(args.checkpoint, args.manifest_dir, dense_model_path)
+        raise FileNotFoundError(
+            f"pinned dense model directory does not exist: {dense_model_path}"
+        )
+    dense_identity = validate_qwen3_model_artifact(
+        dense_model_path, require_pinned_dense=True
+    )
+    checkpoint_identity = validate_qwen3_model_artifact(
+        args.checkpoint, require_pinned_dense=False
+    )
+    quantization_streams = _verify_quantization_streams(
+        args.checkpoint, args.manifest_dir, dense_model_path
+    )
+    recorded_parity = quantization_streams.pop("packed_payload_parity")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.dense_model, revision=args.revision, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.dense_model, revision=args.revision, local_files_only=True
+    )
     dense = AutoModelForCausalLM.from_pretrained(
         args.dense_model,
         revision=args.revision,
@@ -398,23 +573,51 @@ def _evaluate(args: argparse.Namespace) -> int:
         local_files_only=True,
     ).eval()
     cells = census_reloaded_model(quantized)
-    accounting = account_serialized_checkpoint(args.checkpoint, cells, maximum_bpw=args.maximum_bpw)
+    evaluation_payload = hash_canonical_qwen3_payloads(quantized, cells)
+    if evaluation_payload != recorded_parity["fresh_process"]:
+        raise AcceptanceError(
+            "evaluation reload packed payload differs from fresh-process post-save payload"
+        )
+    packed_payload_parity = {
+        **recorded_parity,
+        "evaluation_reload": evaluation_payload,
+        "verified": True,
+    }
+    accounting = account_serialized_checkpoint(
+        args.checkpoint, cells, maximum_bpw=args.maximum_bpw
+    )
     dense_modules = dict(dense.named_modules())
     quant_modules = dict(quantized.named_modules())
     global_acc = _metric_accumulator()
     cell_acc = {(cell.layer, cell.role): _metric_accumulator() for cell in cells}
 
-    for is_diverse, records in ((False, validation), (False, held_out), (True, diverse)):
+    for is_diverse, records in (
+        (False, validation),
+        (False, held_out),
+        (True, diverse),
+    ):
         for record in records:
             encoded = _encode(tokenizer, record["content"], args.device)
             dense_logits = _last_logits(dense, encoded)
-            _add_metric(global_acc, dense_logits, _last_logits(quantized, encoded), diverse=is_diverse)
+            _add_metric(
+                global_acc,
+                dense_logits,
+                _last_logits(quantized, encoded),
+                diverse=is_diverse,
+            )
             for cell in cells:
                 dense_module = _resolve_runtime_module(dense_modules, cell.name)
-                quant_module = _resolve_runtime_module(quant_modules, cell.name, preferred_name=cell.runtime_name)
+                quant_module = _resolve_runtime_module(
+                    quant_modules, cell.name, preferred_name=cell.runtime_name
+                )
                 with _projection_intervention(dense_module, quant_module):
                     intervened_logits = _last_logits(dense, encoded)
-                _add_metric(cell_acc[(cell.layer, cell.role)], dense_logits, intervened_logits, diverse=is_diverse)
+                _add_metric(
+                    cell_acc[(cell.layer, cell.role)],
+                    dense_logits,
+                    intervened_logits,
+                    diverse=is_diverse,
+                )
 
     thresholds = {
         "top1_agreement_min": args.score_min,
@@ -432,6 +635,7 @@ def _evaluate(args: argparse.Namespace) -> int:
             "dense_model_sha256": _artifact_hashes(dense_model_path),
             "dense_model_identity": dense_identity,
             "checkpoint_model_identity": checkpoint_identity,
+            "packed_payload_parity": packed_payload_parity,
         },
         "census": {"expected": 252, "actual": len(cells), "complete": True},
         "accounting": accounting,
@@ -445,7 +649,12 @@ def _evaluate(args: argparse.Namespace) -> int:
         "thresholds": thresholds,
         "global": _finish(global_acc),
         "cells": [
-            {"layer": cell.layer, "role": cell.role, "module": cell.name, **_finish(cell_acc[(cell.layer, cell.role)])}
+            {
+                "layer": cell.layer,
+                "role": cell.role,
+                "module": cell.name,
+                **_finish(cell_acc[(cell.layer, cell.role)]),
+            }
             for cell in cells
         ],
     }
@@ -470,6 +679,14 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--dataset-revision", required=True)
     export.add_argument("--output-dir", type=Path, required=True)
     export.set_defaults(handler=_export_frozen_splits)
+    payload_hashes = commands.add_parser(
+        "payload-hashes", help="Fresh-load and hash canonical Qwen3 QVQ payloads."
+    )
+    payload_hashes.add_argument("--checkpoint", type=Path, required=True)
+    payload_hashes.add_argument("--device", default="cuda:0")
+    payload_hashes.add_argument("--output", type=Path, required=True)
+    payload_hashes.set_defaults(handler=_payload_hashes)
+
     def add_artifact_arguments(command: argparse.ArgumentParser) -> None:
         command.add_argument("--dense-model", required=True)
         command.add_argument("--revision", required=True)
@@ -483,7 +700,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--score-min", type=float, default=0.85)
         command.add_argument("--final-kl-max-nats", type=float, required=True)
 
-    gate = commands.add_parser("gate", help="Recompute artifacts/evaluation and compare the submitted report.")
+    gate = commands.add_parser(
+        "gate", help="Recompute artifacts/evaluation and compare the submitted report."
+    )
     add_artifact_arguments(gate)
     gate.add_argument("--report", type=Path, required=True)
     gate.set_defaults(handler=_gate)

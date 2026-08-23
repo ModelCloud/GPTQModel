@@ -91,7 +91,8 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<verified-idle-GPU-UUIDs> pyth
   --quant-config configs/qwen3_8b_qvq_w2_acceptance.json \
   --calibration-dataset artifacts/qwen3_8b_qvq_w2/splits/calibration.jsonl --calibration-rows 512 \
   --yaqa-dataset artifacts/qwen3_8b_qvq_w2/splits/yaqa_tuning.jsonl --yaqa-rows 512 \
-  --validation-dataset artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl --validation-rows 512
+  --validation-dataset artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl --validation-rows 512 \
+  --verify-qwen3-acceptance-payload-parity
 
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<same-verified-idle-GPU-UUIDs> \
 python scripts/accept_qwen3_8b_qvq.py evaluate \
@@ -122,6 +123,17 @@ selectors/bank metadata, FP32 SU/SV, bias, explicit outliers, and future auxilia
 tensors are separate. Global and per-cell metrics cover all 512 validation, 512 held-out diagnostic, and 32 diverse
 records. Per-cell final-KL is direct evidence: one dense projection output is replaced with the reloaded QVQ module
 output on the identical dense input before observing final logits.
+
+The committed fixture directory `tests/data/qwen3_8b_qvq_acceptance` is the content authority produced by the export
+command: it includes `diverse_pool_512.jsonl` and its manifest in addition to the selected `diverse_32` files. The
+selection is recomputed from canonical UTF-8 content length and stable identity (32 bins of 16, rank 8), and the gate
+proves that the full pool is identity/content-disjoint from calibration, tuning, validation, and held-out diagnostics.
+
+For every canonical projection, dimensions are fixed by role: q/o 4096x4096, k/v 4096x1024, gate/up 4096x12288,
+and down 12288x4096 (`in_features x out_features`). Runtime drift is rejected before the fixed denominator is used.
+The dense authority is the exact five-shard/index SHA-256 set, not Hub metadata alone. Quantization hashes the actual
+direct parameter/buffer bytes before save, frees the producer model, launches a fresh process and fresh checkpoint
+load, and requires canonical per-module and aggregate hashes to match. Evaluation hashes its independent reload again.
 
 Focused tests cover leakage, diverse cardinality, missing modules, dense/higher-precision fallback, auxiliary/BPW
 accounting, thresholds, missing cells, coverage, and report schema. The implementation gate passed 31 focused and

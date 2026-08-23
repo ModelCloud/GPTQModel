@@ -13,6 +13,7 @@ Post-quantization quality measurement belongs in ``qvq_evaluate.py``.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +43,10 @@ from gptqmodel.quantization import (
     YaqaConfig,
 )
 from gptqmodel.quantization.config import ChatTemplateConfig
+from gptqmodel.utils.qvq_acceptance import (
+    census_reloaded_model,
+    hash_canonical_qwen3_payloads,
+)
 
 QVQ_FORMATS = tuple(
     item.value
@@ -74,7 +80,9 @@ class DatasetSlice:
         return source, self.config, self.split
 
 
-def _add_dataset_args(parser: argparse.ArgumentParser, prefix: str, *, required: bool = False) -> None:
+def _add_dataset_args(
+    parser: argparse.ArgumentParser, prefix: str, *, required: bool = False
+) -> None:
     option = prefix.replace("_", "-")
     parser.add_argument(f"--{option}-dataset", required=required)
     parser.add_argument(f"--{option}-dataset-config")
@@ -85,26 +93,62 @@ def _add_dataset_args(parser: argparse.ArgumentParser, prefix: str, *, required:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True, help="Dense source checkpoint or Hub model ID.")
-    parser.add_argument("--output", type=Path, required=True, help="New quantized checkpoint directory.")
-    parser.add_argument("--report", type=Path, help="Run manifest; defaults inside the output directory.")
-    parser.add_argument("--quant-config", type=Path, help="Complete QVQConfig JSON; convenience flags are ignored.")
+    parser.add_argument(
+        "--model", required=True, help="Dense source checkpoint or Hub model ID."
+    )
+    parser.add_argument(
+        "--output", type=Path, required=True, help="New quantized checkpoint directory."
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Run manifest; defaults inside the output directory.",
+    )
+    parser.add_argument(
+        "--quant-config",
+        type=Path,
+        help="Complete QVQConfig JSON; convenience flags are ignored.",
+    )
     parser.add_argument("--bits", type=float, default=2.0)
     parser.add_argument("--format", choices=QVQ_FORMATS, default=FORMAT.QVQ.value)
     parser.add_argument("--bank-count", type=int, choices=(1, 2, 4))
     parser.add_argument("--rounding", choices=("block_ldlq", "yaqa"), default="yaqa")
-    parser.add_argument("--device", default="cuda:0", help="QVQ execution owner; visible extra GPUs are automatic.")
-    parser.add_argument("--layers", type=int, help="Quantize only the first N decoder layers; omitted means all.")
+    parser.add_argument(
+        "--device",
+        default="cuda:0",
+        help="QVQ execution owner; visible extra GPUs are automatic.",
+    )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        help="Quantize only the first N decoder layers; omitted means all.",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--concat-size", type=int, default=0, help="0 preserves natural calibration rows.")
-    parser.add_argument("--calibration-sort", choices=("none", "asc", "desc"), default="desc")
+    parser.add_argument(
+        "--concat-size",
+        type=int,
+        default=0,
+        help="0 preserves natural calibration rows.",
+    )
+    parser.add_argument(
+        "--calibration-sort", choices=("none", "asc", "desc"), default="desc"
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--propagated-bank-selection", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--propagated-bank-selection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument(
         "--qvq-telemetry",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Record nested process-quant CUDA/host phases and shape counters in the run manifest.",
+    )
+    parser.add_argument(
+        "--verify-qwen3-acceptance-payload-parity",
+        action="store_true",
+        help="Hash all 252 Qwen3 payloads before save and in a fresh load process; fail on any drift.",
     )
 
     _add_dataset_args(parser, "calibration", required=True)
@@ -125,9 +169,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--yaqa-minimum-sequences", type=int, default=512)
     parser.add_argument("--yaqa-batch-size", type=int, default=8)
-    parser.add_argument("--yaqa-sequence-sort", choices=("none", "asc", "desc"), default="desc")
+    parser.add_argument(
+        "--yaqa-sequence-sort", choices=("none", "asc", "desc"), default="desc"
+    )
     parser.add_argument("--yaqa-sample-strategy", default="full")
-    parser.add_argument("--yaqa-v2b2-family-mode", choices=("fixed_block_ldlq", "reselect"), default="reselect")
+    parser.add_argument(
+        "--yaqa-v2b2-family-mode",
+        choices=("fixed_block_ldlq", "reselect"),
+        default="reselect",
+    )
     parser.add_argument("--yaqa-no-activation-checkpointing", action="store_true")
     parser.add_argument("--yaqa-max-factor-bytes-per-pass", type=int)
     parser.add_argument("--yaqa-chat-template-weighting", action="store_true")
@@ -138,15 +188,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-alignment-epochs", type=int, default=1)
     parser.add_argument("--output-alignment-train-batches", type=int, default=32)
     parser.add_argument("--output-alignment-validation-batches", type=int, default=16)
-    parser.add_argument("--output-alignment-validation-fraction", type=float, default=0.2)
-    parser.add_argument("--output-alignment-minimum-improvement", type=float, default=0.0)
+    parser.add_argument(
+        "--output-alignment-validation-fraction", type=float, default=0.2
+    )
+    parser.add_argument(
+        "--output-alignment-minimum-improvement", type=float, default=0.0
+    )
 
     parser.add_argument("--module-granular-replay", action="store_true")
     parser.add_argument(
         "--module-replay-subsets",
         nargs="+",
         default=("attention_qkvo",),
-        choices=("attention_qk", "attention_vo", "attention_qkvo", "mlp_gate_up", "mlp_down", "mlp_gate_up_down"),
+        choices=(
+            "attention_qk",
+            "attention_vo",
+            "attention_qkvo",
+            "mlp_gate_up",
+            "mlp_down",
+            "mlp_gate_up_down",
+        ),
     )
     return parser
 
@@ -175,7 +236,12 @@ def aggregate_qvq_process_telemetry(
         shape_key = f"{output_features}x{input_features}"
         shape = shapes.setdefault(
             shape_key,
-            {"modules": 0, "process_quant_seconds": 0.0, "phases": {}, "counters": Counter()},
+            {
+                "modules": 0,
+                "process_quant_seconds": 0.0,
+                "phases": {},
+                "counters": Counter(),
+            },
         )
         shape["modules"] += 1
         shape["process_quant_seconds"] += float(row.get("time", 0.0))
@@ -214,7 +280,9 @@ def aggregate_qvq_process_telemetry(
         shape["counters"] = dict(shape["counters"])
     return {
         "timing_semantics": "inclusive; nested phase totals must not be added together",
-        "process_quant_seconds": sum(float(module["process_quant_seconds"]) for module in modules),
+        "process_quant_seconds": sum(
+            float(module["process_quant_seconds"]) for module in modules
+        ),
         "phases": phases,
         "counters": dict(counters),
         "shapes": shapes,
@@ -283,7 +351,9 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
     )
 
 
-def _slice_from_args(args: argparse.Namespace, prefix: str, *, fallback: DatasetSlice | None = None) -> DatasetSlice | None:
+def _slice_from_args(
+    args: argparse.Namespace, prefix: str, *, fallback: DatasetSlice | None = None
+) -> DatasetSlice | None:
     source = getattr(args, f"{prefix}_dataset")
     rows = getattr(args, f"{prefix}_rows")
     if source is None and rows is None:
@@ -293,12 +363,16 @@ def _slice_from_args(args: argparse.Namespace, prefix: str, *, fallback: Dataset
             raise ValueError(f"--{prefix.replace('_', '-')}-rows requires a dataset")
         source = fallback.source
     if rows is None:
-        raise ValueError(f"--{prefix.replace('_', '-')}-dataset requires --{prefix.replace('_', '-')}-rows")
+        raise ValueError(
+            f"--{prefix.replace('_', '-')}-dataset requires --{prefix.replace('_', '-')}-rows"
+        )
     config = getattr(args, f"{prefix}_dataset_config")
     split = getattr(args, f"{prefix}_dataset_split")
     start = getattr(args, f"{prefix}_row_start")
     if start < 0 or rows < 1:
-        raise ValueError(f"{prefix} row start must be nonnegative and rows must be positive")
+        raise ValueError(
+            f"{prefix} row start must be nonnegative and rows must be positive"
+        )
     return DatasetSlice(str(source), config, split, start, rows)
 
 
@@ -308,7 +382,9 @@ def validate_disjoint_slices(named_slices: dict[str, DatasetSlice | None]) -> No
         for right_name, right in present[index + 1 :]:
             if left.identity != right.identity:
                 continue
-            if max(left.row_start, right.row_start) < min(left.row_stop, right.row_stop):
+            if max(left.row_start, right.row_start) < min(
+                left.row_stop, right.row_stop
+            ):
                 raise ValueError(
                     f"Dataset slices `{left_name}` [{left.row_start}, {left.row_stop}) and `{right_name}` "
                     f"[{right.row_start}, {right.row_stop}) overlap"
@@ -321,7 +397,9 @@ def load_dataset_slice(spec: DatasetSlice):
     if path.is_file():
         suffix = path.suffix.lower()
         if suffix == ".parquet":
-            dataset = load_dataset("parquet", data_files={spec.split: str(path)}, **kwargs)
+            dataset = load_dataset(
+                "parquet", data_files={spec.split: str(path)}, **kwargs
+            )
         elif suffix in {".json", ".jsonl"}:
             dataset = load_dataset("json", data_files={spec.split: str(path)}, **kwargs)
         else:
@@ -339,7 +417,9 @@ def load_dataset_slice(spec: DatasetSlice):
 
 def _git_commit() -> str | None:
     try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+        ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
 
@@ -367,14 +447,18 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
     evidence["source"] = str(resolved)
     evidence["content_sha256"] = _sha256_file(resolved)
     evidence["identity_manifest"] = str(manifest) if manifest.is_file() else None
-    evidence["identity_manifest_sha256"] = _sha256_file(manifest) if manifest.is_file() else None
+    evidence["identity_manifest_sha256"] = (
+        _sha256_file(manifest) if manifest.is_file() else None
+    )
     return evidence
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.batch_size < 1 or args.concat_size < 0:
-        raise ValueError("batch size must be positive and concat size must be nonnegative")
+        raise ValueError(
+            "batch size must be positive and concat size must be nonnegative"
+        )
     if args.layers is not None and args.layers < 1:
         raise ValueError("--layers must be positive")
     output = args.output.expanduser().resolve()
@@ -390,8 +474,12 @@ def main(argv: list[str] | None = None) -> int:
     config = build_quantize_config(args)
     if config.rounding == "yaqa" and yaqa_spec is None:
         yaqa_spec = calibration_spec
-    if config.module_granular_replay is not None and (replay_search_spec is None or replay_confirmation_spec is None):
-        raise ValueError("Module-granular replay requires explicit search and confirmation dataset slices")
+    if config.module_granular_replay is not None and (
+        replay_search_spec is None or replay_confirmation_spec is None
+    ):
+        raise ValueError(
+            "Module-granular replay requires explicit search and confirmation dataset slices"
+        )
     validate_disjoint_slices(
         {
             "calibration": calibration_spec,
@@ -404,11 +492,19 @@ def main(argv: list[str] | None = None) -> int:
 
     streams = {
         "calibration": load_dataset_slice(calibration_spec),
-        "yaqa": None if yaqa_spec is None or yaqa_spec == calibration_spec else load_dataset_slice(yaqa_spec),
-        "validation": None if validation_spec is None else load_dataset_slice(validation_spec),
-        "replay_search": None if replay_search_spec is None else load_dataset_slice(replay_search_spec),
+        "yaqa": None
+        if yaqa_spec is None or yaqa_spec == calibration_spec
+        else load_dataset_slice(yaqa_spec),
+        "validation": None
+        if validation_spec is None
+        else load_dataset_slice(validation_spec),
+        "replay_search": None
+        if replay_search_spec is None
+        else load_dataset_slice(replay_search_spec),
         "replay_confirmation": (
-            None if replay_confirmation_spec is None else load_dataset_slice(replay_confirmation_spec)
+            None
+            if replay_confirmation_spec is None
+            else load_dataset_slice(replay_confirmation_spec)
         ),
     }
     if config.rounding == "yaqa" and streams["yaqa"] is None:
@@ -434,7 +530,9 @@ def main(argv: list[str] | None = None) -> int:
         quant_log = model.quantize(
             streams["calibration"],
             calibration_concat_size=args.concat_size or None,
-            calibration_sort=None if args.calibration_sort == "none" else args.calibration_sort,
+            calibration_sort=None
+            if args.calibration_sort == "none"
+            else args.calibration_sort,
             batch_size=args.batch_size,
             backend=BACKEND.QVQ,
             validation_calibration=streams["validation"],
@@ -449,11 +547,55 @@ def main(argv: list[str] | None = None) -> int:
         else:
             os.environ[telemetry_environment] = previous_telemetry
     quant_seconds = time.perf_counter() - quant_started
+    packed_payload_parity = None
+    if args.verify_qwen3_acceptance_payload_parity:
+        packed_payload_parity = {
+            "pre_save": hash_canonical_qwen3_payloads(
+                model, census_reloaded_model(model)
+            ),
+        }
+    lifecycle_telemetry = {
+        "aggregate": model.quant_region_timer.snapshot(),
+        "layers": model.quant_region_timer.period_snapshots(),
+    }
     save_started = time.perf_counter()
     model.save(str(output))
     save_seconds = time.perf_counter() - save_started
+    if packed_payload_parity is not None:
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        with TemporaryDirectory(prefix="qvq-payload-reload-") as temporary:
+            fresh_path = Path(temporary) / "fresh-process.json"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "accept_qwen3_8b_qvq.py"),
+                    "payload-hashes",
+                    "--checkpoint",
+                    str(output),
+                    "--device",
+                    args.device,
+                    "--output",
+                    str(fresh_path),
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+            )
+            fresh_process = json.loads(fresh_path.read_text(encoding="utf-8"))
+        packed_payload_parity["fresh_process"] = fresh_process
+        if packed_payload_parity["pre_save"] != fresh_process:
+            raise RuntimeError(
+                "packed QVQ module payloads drifted between pre-save state and fresh-process reload"
+            )
+        packed_payload_parity["verified"] = True
 
-    report_path = args.report.expanduser().resolve() if args.report else output / "qvq_quantize_run.json"
+    report_path = (
+        args.report.expanduser().resolve()
+        if args.report
+        else output / "qvq_quantize_run.json"
+    )
     payload = {
         "model": args.model,
         "output": str(output),
@@ -462,7 +604,9 @@ def main(argv: list[str] | None = None) -> int:
         "python_gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
         "torch": torch.__version__,
         "device": args.device,
-        "device_name": torch.cuda.get_device_name(torch.device(args.device)) if torch.device(args.device).type == "cuda" else None,
+        "device_name": torch.cuda.get_device_name(torch.device(args.device))
+        if torch.device(args.device).type == "cuda"
+        else None,
         "quantize_config": config.to_dict(),
         "datasets": {
             name: None if spec is None else dataset_slice_evidence(spec)
@@ -475,14 +619,16 @@ def main(argv: list[str] | None = None) -> int:
             }.items()
         },
         "layer_scope": "all" if args.layers is None else {"first_layers": args.layers},
-        "seconds": {"load": load_seconds, "prepare_and_quantize": quant_seconds, "save": save_seconds},
+        "packed_payload_parity": packed_payload_parity,
+        "seconds": {
+            "load": load_seconds,
+            "prepare_and_quantize": quant_seconds,
+            "save": save_seconds,
+        },
         "quant_log_rows": len(_quant_log_rows(quant_log)),
         "telemetry": {
             "qvq_process_quant": aggregate_qvq_process_telemetry(quant_log),
-            "lifecycle": {
-                "aggregate": model.quant_region_timer.snapshot(),
-                "layers": model.quant_region_timer.period_snapshots(),
-            },
+            "lifecycle": lifecycle_telemetry,
             "yaqa_sketch_b": next(
                 (
                     row["yaqa_sketch_b_telemetry"]
@@ -494,7 +640,9 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
     return 0
 
