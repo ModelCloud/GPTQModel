@@ -1241,7 +1241,7 @@ def test_snapshot_authority_missing_fd_and_evidence_fail_closed(monkeypatch):
     os.close(authority["sources"]["calibration"]["source_fd"])
     monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
     spec = quantize_script.DatasetSlice(str(root / "calibration.jsonl"), None, "train", 0, 1)
-    with pytest.raises(RuntimeError, match="descriptor content"):
+    with pytest.raises(RuntimeError, match="descriptor content|cannot be read exactly"):
         quantize_script.load_dataset_slice(spec)
     for descriptor in descriptors:
         try:
@@ -1467,6 +1467,7 @@ def test_snapshot_candidate_rejects_path_replacement_during_validation(tmp_path,
     source = Path(authority["sources"]["calibration"]["source"])
     replacement = tmp_path / "replacement.jsonl"
     replacement.write_bytes(source.read_bytes())
+    original_path = tmp_path / "original.jsonl"
     original_open = quantize_script._open_snapshot_physical_path
     source_opens = 0
 
@@ -1476,15 +1477,135 @@ def test_snapshot_candidate_rejects_path_replacement_during_validation(tmp_path,
         if path == str(source):
             source_opens += 1
             if source_opens == 1:
+                source.replace(original_path)
                 replacement.replace(source)
         return descriptor
 
     monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", replace_between_opens)
     try:
         monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
-        with pytest.raises(RuntimeError, match="physical identity is unstable|correspondence"):
+        with pytest.raises(RuntimeError, match="physical identity is unstable|correspondence|identity/content changed"):
             quantize_script._controller_snapshot_authority()
     finally:
+        if source.exists():
+            source.unlink()
+        if original_path.exists():
+            original_path.replace(source)
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize("resource", ["retained", "physical_path", "sealed_snapshot"])
+def test_snapshot_candidate_exact_read_handles_eintr_and_short_pread(monkeypatch, resource):
+    authority, descriptors = _snapshot_authority()
+    source = authority["sources"]["calibration"]
+    target_fds = {
+        "retained": {source["source_fd"]},
+        "physical_path": set(),
+        "sealed_snapshot": {source["source_snapshot_fd"]},
+    }[resource]
+    original_open = quantize_script._open_snapshot_physical_path
+    original_pread = os.pread
+    interrupted: set[int] = set()
+
+    def record_physical(path):
+        descriptor = original_open(path)
+        if resource == "physical_path" and path == source["source"]:
+            target_fds.add(descriptor)
+        return descriptor
+
+    def short_pread(descriptor, size, offset):
+        if descriptor in target_fds and descriptor not in interrupted:
+            interrupted.add(descriptor)
+            raise InterruptedError
+        if descriptor in target_fds and size > 1:
+            size = max(1, size // 3)
+        return original_pread(descriptor, size, offset)
+
+    monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", record_physical)
+    monkeypatch.setattr(os, "pread", short_pread)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        assert quantize_script._controller_snapshot_authority()["schema"] == authority["schema"]
+        assert interrupted
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def test_snapshot_candidate_rejects_same_inode_mutation_after_first_bracket(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    source = Path(authority["sources"]["calibration"]["source"])
+    original_bytes = source.read_bytes()
+    original_stat = source.stat()
+    original_read = quantize_script._stable_exact_descriptor_read
+    mutated = False
+
+    def mutate_after_retained(descriptor, resource):
+        nonlocal mutated
+        result = original_read(descriptor, resource)
+        if resource == "retained source" and not mutated:
+            mutated = True
+            with source.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"X")
+                handle.flush()
+                os.fsync(handle.fileno())
+        return result
+
+    monkeypatch.setattr(quantize_script, "_stable_exact_descriptor_read", mutate_after_retained)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="identity|differs|correspondence"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        source.write_bytes(original_bytes)
+        os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def test_snapshot_candidate_rejects_mutation_during_final_exact_read(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    source = Path(authority["sources"]["calibration"]["source"])
+    original_bytes = source.read_bytes()
+    original_stat = source.stat()
+    original_open = quantize_script._open_snapshot_physical_path
+    original_pread = os.pread
+    source_opens = 0
+    final_fd = None
+    mutated = False
+
+    def identify_final(path):
+        nonlocal source_opens, final_fd
+        descriptor = original_open(path)
+        if path == str(source):
+            source_opens += 1
+            if source_opens == 2:
+                final_fd = descriptor
+        return descriptor
+
+    def mutate_during_read(descriptor, size, offset):
+        nonlocal mutated
+        chunk = original_pread(descriptor, size, offset)
+        if descriptor == final_fd and offset == 0 and not mutated:
+            mutated = True
+            with source.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"Y")
+                handle.flush()
+                os.fsync(handle.fileno())
+        return chunk
+
+    monkeypatch.setattr(quantize_script, "_open_snapshot_physical_path", identify_final)
+    monkeypatch.setattr(os, "pread", mutate_during_read)
+    try:
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="physical identity is unstable|identity/content changed"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        source.write_bytes(original_bytes)
+        os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
         for descriptor in descriptors:
             os.close(descriptor)
 

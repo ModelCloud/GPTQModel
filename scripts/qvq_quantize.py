@@ -425,6 +425,45 @@ def _open_snapshot_physical_path(path: str) -> int:
         os.close(directory)
 
 
+def _descriptor_identity_value(identity: os.stat_result) -> dict[str, int]:
+    return {
+        "device": identity.st_dev, "inode": identity.st_ino, "size": identity.st_size,
+        "mtime_ns": identity.st_mtime_ns, "ctime_ns": identity.st_ctime_ns,
+    }
+
+
+def _stable_exact_descriptor_read(descriptor: int, resource: str) -> tuple[bytes, os.stat_result]:
+    """Read exactly one stable regular-file identity, tolerating EINTR and short pread results."""
+
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(f"controller dataset snapshot {resource} is not a regular file")
+        chunks: list[bytes] = []
+        offset = 0
+        while offset < before.st_size:
+            try:
+                chunk = os.pread(descriptor, before.st_size - offset, offset)
+            except InterruptedError:
+                continue
+            if not chunk:
+                raise RuntimeError(f"controller dataset snapshot {resource} ended before its issued size")
+            chunks.append(chunk)
+            offset += len(chunk)
+        while True:
+            try:
+                extra = os.pread(descriptor, 1, before.st_size)
+                break
+            except InterruptedError:
+                continue
+        after = os.fstat(descriptor)
+    except OSError as error:
+        raise RuntimeError(f"controller dataset snapshot {resource} cannot be read exactly") from error
+    if extra or _descriptor_identity_value(before) != _descriptor_identity_value(after):
+        raise RuntimeError(f"controller dataset snapshot {resource} physical identity is unstable")
+    return b"".join(chunks), before
+
+
 def _validated_snapshot_candidate(
     role: str, expected_manifest_split: str, item: Any, evidence_keys: set[str]
 ) -> dict[str, Any]:
@@ -469,76 +508,36 @@ def _validated_snapshot_candidate(
         or set(evidence) != evidence_keys
     ):
         raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
-    try:
-        source_before = os.fstat(source_fd)
-        source_snapshot_before = os.fstat(source_snapshot_fd)
-        manifest_before = os.fstat(manifest_fd)
-        manifest_snapshot_before = os.fstat(manifest_snapshot_fd)
-        source_path_fd = _open_snapshot_physical_path(source)
-        manifest_path_fd = _open_snapshot_physical_path(manifest_path)
-        source_path_before = os.fstat(source_path_fd)
-        manifest_path_before = os.fstat(manifest_path_fd)
-        source_raw = os.pread(source_fd, source_before.st_size, 0)
-        source_path_raw = os.pread(source_path_fd, source_path_before.st_size, 0)
-        source_snapshot_raw = os.pread(source_snapshot_fd, source_snapshot_before.st_size, 0)
-        manifest_raw = os.pread(manifest_fd, manifest_before.st_size, 0)
-        manifest_path_raw = os.pread(manifest_path_fd, manifest_path_before.st_size, 0)
-        manifest_snapshot_raw = os.pread(manifest_snapshot_fd, manifest_snapshot_before.st_size, 0)
-        source_after = os.fstat(source_fd)
-        source_path_after = os.fstat(source_path_fd)
-        source_snapshot_after = os.fstat(source_snapshot_fd)
-        manifest_after = os.fstat(manifest_fd)
-        manifest_path_after = os.fstat(manifest_path_fd)
-        manifest_snapshot_after = os.fstat(manifest_snapshot_fd)
-        source_path_recheck_fd = _open_snapshot_physical_path(source)
-        manifest_path_recheck_fd = _open_snapshot_physical_path(manifest_path)
-        source_path_recheck = os.fstat(source_path_recheck_fd)
-        manifest_path_recheck = os.fstat(manifest_path_recheck_fd)
-    except OSError as error:
-        raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
-    finally:
-        for descriptor_name in (
-            "source_path_fd", "manifest_path_fd", "source_path_recheck_fd", "manifest_path_recheck_fd",
-        ):
-            descriptor = locals().get(descriptor_name)
-            if isinstance(descriptor, int):
-                os.close(descriptor)
-    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-    stable_pairs = (
-        (source_before, source_after), (source_path_before, source_path_after),
-        (source_snapshot_before, source_snapshot_after), (manifest_before, manifest_after),
-        (manifest_path_before, manifest_path_after), (manifest_snapshot_before, manifest_snapshot_after),
+    source_raw, source_before = _stable_exact_descriptor_read(source_fd, "retained source")
+    source_snapshot_raw, _source_snapshot = _stable_exact_descriptor_read(
+        source_snapshot_fd, "sealed source snapshot"
     )
-    if (
-        any(not stat.S_ISREG(before.st_mode) for before, _after in stable_pairs)
-        or any(
-            any(getattr(before, field) != getattr(after, field) for field in identity_fields)
-            for before, after in stable_pairs
+    manifest_raw, manifest_before = _stable_exact_descriptor_read(manifest_fd, "retained manifest")
+    manifest_snapshot_raw, _manifest_snapshot = _stable_exact_descriptor_read(
+        manifest_snapshot_fd, "sealed manifest snapshot"
+    )
+    source_path_fd = _open_snapshot_physical_path(source)
+    manifest_path_fd = _open_snapshot_physical_path(manifest_path)
+    try:
+        source_path_raw, source_path_before = _stable_exact_descriptor_read(source_path_fd, "physical source path")
+        manifest_path_raw, manifest_path_before = _stable_exact_descriptor_read(
+            manifest_path_fd, "physical manifest path"
         )
-    ):
-        raise RuntimeError("controller dataset snapshot descriptor physical identity is unstable")
-    expected_source_identity = {
-        "device": source_before.st_dev, "inode": source_before.st_ino, "size": source_before.st_size,
-        "mtime_ns": source_before.st_mtime_ns, "ctime_ns": source_before.st_ctime_ns,
-    }
-    expected_manifest_identity = {
-        "device": manifest_before.st_dev, "inode": manifest_before.st_ino, "size": manifest_before.st_size,
-        "mtime_ns": manifest_before.st_mtime_ns, "ctime_ns": manifest_before.st_ctime_ns,
-    }
+    finally:
+        os.close(source_path_fd)
+        os.close(manifest_path_fd)
+    expected_source_identity = _descriptor_identity_value(source_before)
+    expected_manifest_identity = _descriptor_identity_value(manifest_before)
     if source_identity != expected_source_identity or manifest_identity != expected_manifest_identity:
         raise RuntimeError("controller dataset snapshot retained descriptor identity does not match authority")
     if (
         (source_before.st_dev, source_before.st_ino) != (source_path_before.st_dev, source_path_before.st_ino)
-        or (source_path_before.st_dev, source_path_before.st_ino)
-        != (source_path_recheck.st_dev, source_path_recheck.st_ino)
         or source_raw != source_path_raw
     ):
         raise RuntimeError("controller dataset snapshot source path/descriptor correspondence is invalid")
     if (
         (manifest_before.st_dev, manifest_before.st_ino)
         != (manifest_path_before.st_dev, manifest_path_before.st_ino)
-        or (manifest_path_before.st_dev, manifest_path_before.st_ino)
-        != (manifest_path_recheck.st_dev, manifest_path_recheck.st_ino)
         or manifest_raw != manifest_path_raw
     ):
         raise RuntimeError("controller dataset snapshot manifest path/descriptor correspondence is invalid")
@@ -602,6 +601,36 @@ def _validated_snapshot_candidate(
         content_hashes.add(content_hash)
     if len(identities) != 512 or len(content_hashes) != 512:
         raise RuntimeError("controller dataset identity manifest contains duplicate rows")
+    # This is deliberately the final local operation: re-open both pathnames and
+    # fully bracket their identity/content immediately before uniqueness sees the candidate.
+    source_final_fd = _open_snapshot_physical_path(source)
+    manifest_final_fd = _open_snapshot_physical_path(manifest_path)
+    try:
+        source_final_raw, source_final_identity = _stable_exact_descriptor_read(
+            source_final_fd, "final physical source path"
+        )
+        manifest_final_raw, manifest_final_identity = _stable_exact_descriptor_read(
+            manifest_final_fd, "final physical manifest path"
+        )
+        source_after_both_final_reads = os.fstat(source_final_fd)
+        manifest_after_both_final_reads = os.fstat(manifest_final_fd)
+    finally:
+        os.close(source_final_fd)
+        os.close(manifest_final_fd)
+    if (
+        _descriptor_identity_value(source_final_identity) != source_identity
+        or _descriptor_identity_value(source_after_both_final_reads) != source_identity
+        or source_final_raw != source_raw
+        or hashlib.sha256(source_final_raw).hexdigest() != evidence["content_sha256"]
+    ):
+        raise RuntimeError("controller dataset snapshot final source path identity/content changed")
+    if (
+        _descriptor_identity_value(manifest_final_identity) != manifest_identity
+        or _descriptor_identity_value(manifest_after_both_final_reads) != manifest_identity
+        or manifest_final_raw != manifest_raw
+        or hashlib.sha256(manifest_final_raw).hexdigest() != evidence["identity_manifest_sha256"]
+    ):
+        raise RuntimeError("controller dataset snapshot final manifest path identity/content changed")
     return {
         "item": item, "paths": (source, manifest_path), "fds": (source_fd, manifest_fd),
         "snapshot_fds": (source_snapshot_fd, manifest_snapshot_fd),

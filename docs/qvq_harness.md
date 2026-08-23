@@ -536,6 +536,33 @@ Implementation gates for this ordering correction, from parent `b9de5c74d0a990de
 - Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
   seven authoritative artifact hashes, and seven local Hub identities.
 
+## Rejected partial final recheck and exact-read correction (2026-08-23)
+
+Independent verification rejected commit `e5e983c4`: its final pathname reopen compared only device/inode and did
+not perform an exact content read with a complete final identity bracket. It also used one `pread(fd, st_size, 0)`
+for identity-critical reads, which is not guaranteed to return the requested byte count. Same-inode mutation late in
+validation or a short read could therefore invalidate the claimed path/FD proof despite the green tests.
+
+All retained-original, safely opened physical-path, and sealed-snapshot reads now use one exact-read primitive. It
+requires a regular file, brackets device/inode/size/mtime/ctime, retries `EINTR`, accumulates arbitrary short reads,
+fails on premature EOF, checks for an extra byte at the issued boundary, and rejects any identity change. Immediately
+before candidate success, source and manifest paths are reopened safely, exactly reread, and compared by complete
+issued identity, exact bytes, and digest. Both final descriptors remain open through both reads and are rechecked
+together, so mutation of either resource anywhere in the final window fails before uniqueness.
+
+Regressions separately inject short `pread` plus `EINTR` for retained, physical-path, and sealed-snapshot FDs; mutate
+an inode after the first bracket; mutate during the final read; and restore replaced pathnames and original bytes and
+timestamps in `finally`. No real metrics are claimed.
+
+Implementation gates for this correction, from parent `e5e983c4a751172f306da76a2fb7ebe6de55f1a1`:
+
+- The exact focused-plus-unified pytest invocation passed all 155 tests with 14 upstream `torch.jit` warnings; the
+  identical collect-only invocation found exactly 155 tests.
+- Ruff, `compileall`, `git diff --check`, six CLI help smokes, external schema-v7 trust/signing validation, and the
+  repository private-key scan passed.
+- Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
+  seven authoritative artifact hashes, and seven local Hub identities.
+
 ## Rejected content-only path labels and physical path/FD correction (2026-08-23)
 
 Independent verification rejected commit `2098f9b5`: the local candidate checked descriptor stability and evidence
