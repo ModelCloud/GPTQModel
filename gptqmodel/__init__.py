@@ -302,6 +302,8 @@ from .quantization import (
     GPTAQConfig,
     GPTQConfig,
     QuantizeConfig,
+    QuantizeEmbed,
+    QuantizeEmbedConfig,
     RTNConfig,
     WeightOnlyConfig,
 )

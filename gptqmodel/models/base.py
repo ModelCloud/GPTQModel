@@ -50,6 +50,8 @@ from ..quantization.config import (
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
     GcMode,
+    QuantizeEmbed,
+    QuantizeEmbedConfig,
     VramStrategy,
     dynamic_get,
     resolve_quant_format,
@@ -76,6 +78,7 @@ from ..utils.model import (
     find_modules,
     get_module,
     get_module_by_name_prefix,
+    get_module_name,
     move_to,
 )
 from ..utils.model_dequant import infer_block_shape
@@ -816,11 +819,18 @@ class BaseQModel(nn.Module):
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        embed_quant_config = self._normalize_embed_quant_config(
+            embed_quant_config=embed_quant_config,
+            embed_quant_mode=embed_quant_mode,
+        )
+
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
-        if self.quantized:
+        if self.quantized and embed_quant_config is None:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1021,6 +1031,7 @@ class BaseQModel(nn.Module):
                 batch_size=batch_size,
                 backend=backend,
                 calibration_concat_separator=calibration_concat_separator,
+                embed_quant_config=embed_quant_config,
             )
         else:
             if calibration is None:
@@ -1043,6 +1054,60 @@ class BaseQModel(nn.Module):
 
         _setup_rotation_online_had(self.model, self.quantize_config.rotation)
         return result
+
+    @staticmethod
+    def _normalize_embed_quant_config(
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]],
+        embed_quant_mode: Optional[QuantizeEmbed],
+    ) -> Optional[QuantizeEmbedConfig]:
+        """Normalize the embedding quantization API and its compatibility argument."""
+        if embed_quant_config is not None and embed_quant_mode is not None:
+            raise ValueError("Pass only one of `embed_quant_config` or `embed_quant_mode`.")
+        if isinstance(embed_quant_config, QuantizeEmbed):
+            return QuantizeEmbedConfig(embed_quant_mode=embed_quant_config)
+        if embed_quant_config is not None:
+            if not isinstance(embed_quant_config, QuantizeEmbedConfig):
+                raise TypeError("`embed_quant_config` must be a `QuantizeEmbedConfig` or `QuantizeEmbed` instance.")
+            return embed_quant_config
+        if embed_quant_mode is not None:
+            if not isinstance(embed_quant_mode, QuantizeEmbed):
+                raise TypeError("`embed_quant_mode` must be a `QuantizeEmbed` instance.")
+            return QuantizeEmbedConfig(embed_quant_mode=embed_quant_mode)
+        return None
+
+    def requantize(
+        self,
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = "desc",
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        if not self.quantized:
+            raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
+        embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
+        if embed_quant_config is None:
+            raise ValueError("`requantize()` requires `embed_quant_config` or `embed_quant_mode`.")
+        return self.quantize(
+            calibration=calibration,
+            calibration_concat_size=calibration_concat_size,
+            calibration_sort=calibration_sort,
+            batch_size=batch_size,
+            tokenizer=tokenizer,
+            backend=backend,
+            adapter=adapter,
+            adapter_calibration_dataset=adapter_calibration_dataset,
+            calibration_data_min_length=calibration_data_min_length,
+            calibration_concat_separator=calibration_concat_separator,
+            embed_quant_config=embed_quant_config,
+        )
 
     def _quantize_with_calibration(
         self,
@@ -1202,6 +1267,7 @@ class BaseQModel(nn.Module):
         batch_size: int,
         backend: Optional[BACKEND],
         calibration_concat_separator: Optional[str],
+        embed_quant_config: Optional[QuantizeEmbedConfig],
     ):
         del calibration_concat_size, calibration_sort, batch_size, calibration_concat_separator
 
@@ -1231,7 +1297,7 @@ class BaseQModel(nn.Module):
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
-        module_looper = WeightOnlyLooper(model=self, processor=processor)
+        module_looper = WeightOnlyLooper(model=self, processor=processor, embed_quant_config=embed_quant_config)
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
@@ -1535,13 +1601,21 @@ class BaseQModel(nn.Module):
                 # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
                 #untie_weights(self.model)
 
-                self.save_quantized(
-                    save_dir=save_dir,
-                    safetensors_metadata=safetensors_metadata,
-                    max_shard_size=max_shard_size,
-                    meta_quantizer=meta_quantizer,
-                    eora_path=eora_path,
-                    split_by=split_by)
+                if getattr(self, "_model_free_weight_only_embeddings_only", False):
+                    self.save_quantized_embeddings(
+                        save_dir=save_dir,
+                        safetensors_metadata=safetensors_metadata,
+                        max_shard_size=max_shard_size,
+                        meta_quantizer=meta_quantizer,
+                    )
+                else:
+                    self.save_quantized(
+                        save_dir=save_dir,
+                        safetensors_metadata=safetensors_metadata,
+                        max_shard_size=max_shard_size,
+                        meta_quantizer=meta_quantizer,
+                        eora_path=eora_path,
+                        split_by=split_by)
 
                 # overwrite quant_override_files
                 for name, value in self.quant_override_files.items():
@@ -3108,6 +3182,22 @@ class BaseQModel(nn.Module):
 
     def tied_word_embedding(self) -> bool:
         return getattr(self.model.config, "tie_word_embeddings", False)
+
+    def get_input_embeddings(self) -> Optional[nn.Module]:
+        getter = getattr(self.model, "get_input_embeddings", None)
+        return getter() if callable(getter) else None
+
+    def get_input_embeddings_name(self) -> Optional[str]:
+        module = self.get_input_embeddings()
+        return get_module_name(self.model, module) if module is not None else None
+
+    def get_output_embeddings(self) -> Optional[nn.Module]:
+        getter = getattr(self.model, "get_output_embeddings", None)
+        return getter() if callable(getter) else None
+
+    def get_output_embeddings_name(self) -> Optional[str]:
+        module = self.get_output_embeddings()
+        return get_module_name(self.model, module) if module is not None else None
 
     def __getattr__(self, item):
         try:

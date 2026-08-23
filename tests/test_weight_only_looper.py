@@ -6,13 +6,14 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 
 import torch
+import pytest
 from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.weight_only_looper import WeightOnlyLooper
 from gptqmodel.looper.weight_only_processor import WeightOnlyProcessor
-from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization.config import RTNConfig, VramStrategy
+from gptqmodel.quantization.config import QuantizeEmbed, QuantizeEmbedConfig, RTNConfig, VramStrategy
 
 
 class _FakeProgress:
@@ -131,6 +132,8 @@ class _TinyModel(nn.Module):
             tie_word_embeddings=False,
         )
         self.layers = nn.ModuleList([_TinyLayer(), _TinyLayer()])
+        self.embed_tokens = nn.Embedding(8, 4)
+        self.lm_head = nn.Linear(4, 8, bias=False)
 
 
 class _FakeQModel:
@@ -156,6 +159,18 @@ class _FakeQModel:
 
     def post_quantize(self, module):
         return module
+
+    def get_input_embeddings_name(self):
+        return "embed_tokens"
+
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
+
+    def get_output_embeddings_name(self):
+        return "lm_head"
+
+    def get_output_embeddings(self):
+        return self.model.lm_head
 
 
 class _FakeProcessor:
@@ -240,6 +255,169 @@ def test_weight_only_looper_reports_logbar_progress(monkeypatch):
     ]
     assert fake_logger.progresses[1].closed is True
     assert fake_logger.progresses[2].closed is True
+
+
+def test_weight_only_looper_quantizes_input_and_lm_head_embeddings_only(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=True, device="cpu")
+    qcfg.lm_head = False
+    fake_logger = _FakeLogger()
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+    )
+    total_log = looper.loop()
+
+    assert total_log == {"fake_weight_only": []}
+    assert processor.quantized == ["embed_tokens", "lm_head"]
+    assert processor.memory_calls == []
+    assert model._embedding_replacement_prefixes == {"embed_tokens", "lm_head"}
+    assert model._model_free_weight_only_embeddings_only is True
+    assert qcfg.offload_to_disk is False
+    assert qcfg.dynamic["embed_tokens"] == {"bits": 8, "group_size": 32}
+    assert qcfg.dynamic["lm_head"] == {"bits": 8, "group_size": 32}
+
+
+@pytest.mark.parametrize(
+    "embed_quant_config",
+    [
+        QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+        QuantizeEmbedConfig(),
+    ],
+)
+def test_weight_only_looper_rejects_tied_embedding_parameters_before_quantization(
+    monkeypatch,
+    embed_quant_config,
+):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.lm_head.weight = model.model.embed_tokens.weight
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+
+    looper = WeightOnlyLooper(model=model, processor=processor, embed_quant_config=embed_quant_config)
+    with pytest.raises(NotImplementedError, match="shared weight parameter"):
+        looper.loop()
+
+    assert processor.quantized == []
+    assert processor.finalize_called is False
+    assert not hasattr(model, "_embedding_replacement_prefixes")
+    assert not hasattr(model, "_model_free_weight_only_embeddings_only")
+    assert qcfg.dynamic is None
+
+
+def test_weight_only_looper_deduplicates_same_embedding_parameter(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.get_output_embeddings_name = model.get_input_embeddings_name
+    model.get_output_embeddings = model.get_input_embeddings
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+    )
+    looper.loop()
+
+    assert processor.quantized == ["embed_tokens"]
+    assert model._embedding_replacement_prefixes == {"embed_tokens"}
+
+
+@pytest.mark.parametrize(
+    ("embed_quant_mode", "expected_quantized", "expected_progress"),
+    [
+        (
+            QuantizeEmbed.OUTPUT,
+            ["lm_head", "layers.0.linear", "layers.1.linear"],
+            [0, 1, 2],
+        ),
+        (
+            QuantizeEmbed.BOTH,
+            ["embed_tokens", "lm_head", "layers.0.linear", "layers.1.linear"],
+            [0, 1, 2, 3],
+        ),
+    ],
+)
+def test_weight_only_looper_does_not_requantize_lm_head_embedding_in_layer_loop(
+    monkeypatch,
+    embed_quant_mode,
+    expected_quantized,
+    expected_progress,
+):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = True
+    fake_logger = _FakeLogger()
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.lm_head = model.model.lm_head
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=embed_quant_mode, embed_only=False),
+    )
+    looper.loop()
+
+    assert processor.quantized == expected_quantized
+    assert processor.quantized.count("lm_head") == 1
+    assert processor.memory_calls == [0, 1]
+    assert processor.finalize_called is True
+    assert fake_logger.iterable == expected_progress
+    assert all("quantizing lm_head" not in title for title in fake_logger.progress.titles)
+
+
+def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    fake_logger = _FakeLogger()
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.INPUT, embed_only=False),
+    )
+    looper.loop()
+
+    assert processor.quantized == ["embed_tokens", "layers.0.linear", "layers.1.linear"]
+    assert model._embedding_replacement_prefixes == {"embed_tokens"}
+    assert model._model_free_weight_only_embeddings_only is False
 
 
 def test_weight_only_processor_reports_dynamic_exclusions():
