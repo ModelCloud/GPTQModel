@@ -376,11 +376,15 @@ Tip `60aa95d2` matches `origin/agent/qvq-dual-v4` (pull --rebase: already up to 
 commits are still `05f5152d` and `6b66f16f`, both already recorded as not CPU-portable; no MLX/MPS kernel exists
 under `gptqmodel_ext/qvq/` and no `qvq.py` quant/qlinear change since. Nothing to port.
 
-## 2026-08-23 CPU sync: compile-time decode specialization and batched GEMV panels
+## 2026-08-23 CPU sync: compile-time decode specialization and batched GEMV panels (superseded)
 
 Ported CPU-relevant mechanics from CUDA commits `299795ba` (compile-time TransitionBits specialization and per-tile
 decode reuse), `682ab5e9` (large-batch GEMV), `049e0a94` (double-buffered staging), and `a4f74f63` (large-row staging
 gate).
+
+> The benchmark and M>1 panel mechanics in this original entry were invalid: the panel loop surrounded the tile
+> decode and multiplied decode work by `ceil(M/4)`. The corrected decode-once implementation and measurements are
+> recorded in the follow-up section below.
 
 - File changed: `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp`. No Python wrapper change was needed.
 - AVX-512 unpack, decode, and accumulation helpers are specialized for `E=2..8` and selected by a host-side
@@ -447,3 +451,69 @@ Verification:
 - JIT build time increased from approximately 16 seconds before specialization to approximately 22 seconds after it
   (individual rebuilds varied up to 26 seconds under test load).
 - No CUDA, MLX, or MPS tests ran on this CPU-only host.
+
+## 2026-08-23 CPU sync follow-up: decode-once M>1 GEMV blocking
+
+This follow-up fixes the M>1 regression documented in the superseded entry above. The source CUDA lessons were
+`299795ba` (compile-time TransitionBits specialization and per-tile decode reuse), `682ab5e9` (large-batch reuse),
+`049e0a94` (double-buffered staging), and `a4f74f63` (large-row staging gate).
+
+- File changed: `gptqmodel_ext/qvq/qvq_gemv_cpu.cpp`; no Python wrapper change was needed.
+- AVX-512 unpack, decode, and M=1 accumulation helpers are specialized for `E=2..8`; host switches select those
+  helpers, with runtime-generic AVX-512 for `E>=9` and the scalar fallback retained.
+- The corrected M>1 path keeps the four-output-tile block outermost. For each input tile and output tile in the
+  block it decodes once, then walks all M rows in four-row panels. A 64-byte-aligned `float` buffer sized
+  `M*B*16` is allocated once per `at::parallel_for` task and accumulators are loaded/stored once per row/tile/input
+  tile, with the 16 FMAs chained in registers. M tails and 1/2/3-tile output tails remain supported.
+- The earlier panel-outside-decode structure was rejected because every four-row panel re-decoded all input tiles,
+  multiplying decode work by `ceil(M/4)` and causing the measured M>1 regression. The corrected dataflow fixes the
+  cause rather than masking the symptom.
+- Software prefetch of the next trellis words and bank byte was also rejected: it was slower in 23/30 cases
+  (mean prefetch/no-prefetch ratio 1.242x) with no stable win.
+
+Benchmark protocol: same generated inputs, `OMP_NUM_THREADS=8`, `QVQ_CPU_GEMV_DENSE_CACHE=0`, five warmups, and
+30 native timings. Python fallback and dense columns use five warmups and five timings. `speed` is before median /
+after median; `speed_min` is before minimum / after minimum. Before is the original pre-specialization kernel.
+
+```text
+shape bits/E M before_med before_min after_med after_min speed speed_min python dense max_abs mean_abs rel_l2
+2048 2.0/4  1 0.4364 0.3224 0.2430 0.2380 1.796 1.355 99.1 0.059 1.983643e-04 2.815373e-05 8.374410e-07
+2048 2.0/4  4 0.4393 0.4270 0.3322 0.2986 1.323 1.430 98.4 0.089 2.288818e-04 2.638850e-05 8.258501e-07
+2048 2.0/4  8 0.5180 0.4892 0.3074 0.3033 1.685 1.613 96.7 0.100 3.662109e-04 2.706542e-05 8.485807e-07
+2048 2.0/4 16 0.5313 0.5197 0.3739 0.3672 1.421 1.416 99.0 0.149 2.899170e-04 2.715579e-05 8.498584e-07
+2048 2.0/4 32 1.3265 1.3165 0.4968 0.4886 2.670 2.694 100.4 0.253 2.822876e-04 2.692133e-05 8.483215e-07
+2048 3.5/7  1 0.4559 0.3911 0.2657 0.2605 1.716 1.501 97.7 0.048 2.746582e-04 2.677591e-05 8.364130e-07
+2048 3.5/7  4 0.5133 0.4795 0.3611 0.3155 1.421 1.520 98.0 0.094 2.593994e-04 2.730524e-05 8.340151e-07
+2048 3.5/7  8 0.5790 0.5368 0.3235 0.3178 1.790 1.689 100.4 0.100 2.975464e-04 2.715777e-05 8.382312e-07
+2048 3.5/7 16 0.6291 0.6020 0.3867 0.3825 1.627 1.574 95.2 0.153 3.204346e-04 2.677210e-05 8.384485e-07
+2048 3.5/7 32 1.1933 1.1653 0.5068 0.5008 2.354 2.327 102.1 0.292 4.119873e-04 2.723680e-05 8.458420e-07
+2048 5.0/10 1 0.3520 0.3447 0.5694 0.5529 0.618 0.623 120.1 0.054 2.975464e-04 2.688648e-05 8.493782e-07
+2048 5.0/10 4 0.4618 0.4561 0.7825 0.6840 0.590 0.667 108.6 0.103 2.746582e-04 2.708281e-05 8.522954e-07
+2048 5.0/10 8 0.5348 0.5089 0.7809 0.5528 0.685 0.921 97.5 0.100 2.746582e-04 2.702863e-05 8.455462e-07
+2048 5.0/10 16 0.5907 0.5625 0.5407 0.5339 1.093 1.053 94.6 0.146 3.051758e-04 2.712607e-05 8.531118e-07
+2048 5.0/10 32 1.3710 1.3265 1.1542 1.1485 1.188 1.155 100.3 0.260 3.585815e-04 2.716054e-05 8.481605e-07
+4096 2.0/4  1 1.5822 1.3553 1.0751 1.0589 1.472 1.280 436.1 0.359 4.730225e-04 5.271901e-05 1.198250e-06
+4096 2.0/4  4 1.8556 1.8084 1.2726 1.2624 1.458 1.433 497.1 0.486 5.950928e-04 5.297381e-05 1.192989e-06
+4096 2.0/4  8 2.1814 2.1185 1.3279 1.3114 1.643 1.615 445.4 0.524 6.713867e-04 5.323759e-05 1.181818e-06
+4096 2.0/4 16 2.6279 2.2381 1.6212 1.5761 1.621 1.420 442.3 0.663 5.798340e-04 5.342880e-05 1.185504e-06
+4096 2.0/4 32 5.3761 5.2780 2.1317 2.1254 2.522 2.483 455.0 0.950 8.697510e-04 5.436152e-05 1.192706e-06
+4096 3.5/7  1 1.7320 1.5288 1.0269 1.0217 1.687 1.496 477.0 0.355 5.035400e-04 5.303171e-05 1.191142e-06
+4096 3.5/7  4 1.9632 1.9012 1.1450 1.1317 1.714 1.680 473.2 0.486 5.645752e-04 5.409462e-05 1.188045e-06
+4096 3.5/7  8 2.2019 2.1452 1.2694 1.2543 1.735 1.710 481.3 0.535 5.798340e-04 5.337541e-05 1.190042e-06
+4096 3.5/7 16 2.5056 2.3924 1.5233 1.5123 1.645 1.582 483.3 0.672 7.324219e-04 5.415780e-05 1.190389e-06
+4096 3.5/7 32 5.5433 5.4956 2.0510 2.0295 2.703 2.708 475.2 0.948 7.019043e-04 5.357194e-05 1.186637e-06
+4096 5.0/10 1 1.4091 1.3945 1.3866 1.3766 1.016 1.013 479.2 0.375 4.730225e-04 5.285863e-05 1.149504e-06
+4096 5.0/10 4 1.8918 1.8538 1.7079 1.6905 1.108 1.097 536.2 0.618 5.493164e-04 5.505025e-05 1.200765e-06
+4096 5.0/10 8 2.1775 2.1170 3.0985 3.0280 0.703 0.699 510.2 0.779 5.798340e-04 5.340867e-05 1.184227e-06
+4096 5.0/10 16 2.4314 2.3204 2.3288 2.2341 1.044 1.039 457.7 0.670 6.713631e-04 5.345992e-05 1.178163e-06
+4096 5.0/10 32 5.4548 5.4158 5.5539 4.9851 0.982 1.086 472.5 0.949 7.171631e-04 5.359608e-05 1.188666e-06
+```
+
+For E=2/4 and E=3.5/7, every required M>1 case beats the pristine baseline by median. E=5.0/10 remains on
+the generic fallback; its near-neutral and negative deltas are not attributed to the specialized panel. The
+maximum native-vs-dense errors are `max_abs=8.697510e-04`, `mean_abs=5.436152e-05`, and `relative-L2=1.200765e-06`.
+
+The requested test command reported `764 passed, 263 skipped, 9 failed`; eight failures reproduce on clean origin.
+The bitshift case was run isolated and in the full selected set on clean origin and passed in both modes, so it is
+not order-sensitive on origin. No Python files changed (Ruff not applicable), and `git diff --check` was clean.
+The JIT build increased from approximately 16 seconds before specialization to approximately 22 seconds after it.
