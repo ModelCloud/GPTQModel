@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,17 +11,26 @@ from safetensors.torch import save_file
 from torch import nn
 
 import gptqmodel.utils.qvq_acceptance as acceptance
+import scripts.accept_qwen3_8b_qvq as acceptance_script
 from gptqmodel.utils.qvq_acceptance import (
+    MANIFEST_SPLITS,
     PROJECTION_BOUNDARY,
+    QWEN3_DENSE_CONFIG_SHA256,
+    QWEN3_MODEL_CONFIG,
+    QWEN3_PINNED_REVISION,
     AcceptanceError,
     ProjectionCell,
     account_serialized_checkpoint,
     account_serialized_state,
     expected_cells,
+    expected_projection_name,
+    expected_projection_names,
     materialize_manifest,
     validate_acceptance_report,
     validate_manifest_disjointness,
+    validate_qwen3_model_artifact,
 )
+from scripts.accept_qwen3_8b_qvq import build_parser as build_acceptance_parser
 
 
 class _Packed(nn.Module):
@@ -144,18 +155,18 @@ def test_accounting_rejects_bpw_above_limit():
 
 
 def test_accounting_reads_exact_saved_safetensors_extents(tmp_path):
-    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
-    save_file(
-        {
-            f"{cell.name}.trellis": torch.zeros(16, dtype=torch.int32),
-            f"{cell.name}.SU": torch.zeros(16, dtype=torch.float32),
-            f"{cell.name}.SV": torch.zeros(16, dtype=torch.float32),
-            "model.embed_tokens.weight": torch.zeros(8, dtype=torch.float16),
-        },
-        tmp_path / "model.safetensors",
-    )
-    report = account_serialized_checkpoint(tmp_path, [cell], maximum_bpw=100)
-    assert report["requested_projection_tensor_bytes"] == 192
+    cells = [
+        ProjectionCell(layer, role, expected_projection_name(layer, role), 16, 16)
+        for layer, role in expected_cells()
+    ]
+    tensors = {"model.embed_tokens.weight": torch.zeros(8, dtype=torch.float16)}
+    for cell in cells:
+        tensors[f"{cell.name}.trellis"] = torch.zeros(1, dtype=torch.int32)
+        tensors[f"{cell.name}.SU"] = torch.zeros(1, dtype=torch.float32)
+        tensors[f"{cell.name}.SV"] = torch.zeros(1, dtype=torch.float32)
+    save_file(tensors, tmp_path / "model.safetensors")
+    report = account_serialized_checkpoint(tmp_path, cells, maximum_bpw=100)
+    assert report["requested_projection_tensor_bytes"] == 12 * 252
     assert report["dense_non_target_tensor_bytes"] == 16
     assert report["container_header_and_padding_bytes"] > 0
 
@@ -174,6 +185,14 @@ def test_accounting_rejects_shards_without_authoritative_index(tmp_path):
         account_serialized_checkpoint(tmp_path, [cell], maximum_bpw=100)
 
 
+def test_accounting_contextualizes_malformed_shard_index(tmp_path):
+    save_file({"tensor": torch.zeros(1)}, tmp_path / "model-00001.safetensors")
+    save_file({"other": torch.zeros(1)}, tmp_path / "model-00002.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text("{bad", encoding="utf-8")
+    with pytest.raises(AcceptanceError, match="failed to parse safetensors index"):
+        account_serialized_checkpoint(tmp_path, [], maximum_bpw=100)
+
+
 def _complete_report(score=0.85, kl=0.1):
     metric = {
         "coverage_complete": True,
@@ -183,19 +202,76 @@ def _complete_report(score=0.85, kl=0.1):
         "final_kl_nats": kl,
         "diverse_32": score,
     }
+    target_tensors = {}
+    per_module = {}
+    for module_name in expected_projection_names():
+        tensors = {
+            f"{module_name}.trellis": {"bytes": 4},
+            f"{module_name}.SU": {"bytes": 4},
+            f"{module_name}.SV": {"bytes": 4},
+            f"{module_name}.bank_ids": {"bytes": 1},
+            f"{module_name}.bank_alt_id": {"bytes": 1},
+        }
+        target_tensors.update({key: value["bytes"] for key, value in tensors.items()})
+        per_module[module_name] = {"bytes": 14, "dense_weight_count": 256, "tensors": tensors}
+    target_bytes = 14 * 252
+    dense_weights = 256 * 252
+    comparisons = [
+        {"left": left, "right": right, "identity_overlap": [], "content_overlap": []}
+        for left_index, left in enumerate(MANIFEST_SPLITS)
+        for right in MANIFEST_SPLITS[left_index + 1 :]
+    ]
+    manifest_hashes = {split: "d" * 64 for split in MANIFEST_SPLITS}
+    content_hashes = {split: "e" * 64 for split in MANIFEST_SPLITS}
+    quantization_streams = {
+        quant_name: {
+            "manifest_verified": True,
+            "content_sha256": content_hashes[manifest_name],
+            "identity_manifest_sha256": manifest_hashes[manifest_name],
+        }
+        for quant_name, manifest_name in (
+            ("calibration", "calibration"),
+            ("yaqa", "yaqa_tuning"),
+            ("validation", "validation"),
+        )
+    }
+    checkpoint_config_sha256 = "c" * 64
     return {
         "schema_version": 1,
         "artifact": {
             "fresh_reload_verified": True,
-            "checkpoint_sha256": {"model.safetensors": "a" * 64},
-            "dense_model_sha256": {"model.safetensors": "b" * 64},
+            "checkpoint_sha256": {
+                "config.json": checkpoint_config_sha256,
+                "model.safetensors": "a" * 64,
+            },
+            "dense_model_sha256": {
+                "config.json": QWEN3_DENSE_CONFIG_SHA256,
+                "model.safetensors": "b" * 64,
+            },
+            "dense_model_identity": {
+                "config": dict(QWEN3_MODEL_CONFIG),
+                "config_sha256": QWEN3_DENSE_CONFIG_SHA256,
+                "decoder_layers": list(range(36)),
+                "revision": QWEN3_PINNED_REVISION,
+            },
+            "checkpoint_model_identity": {
+                "config": dict(QWEN3_MODEL_CONFIG),
+                "config_sha256": checkpoint_config_sha256,
+                "decoder_layers": list(range(36)),
+                "revision": None,
+            },
         },
         "census": {"expected": 252, "actual": 252, "complete": True},
         "accounting": {
             "boundary": PROJECTION_BOUNDARY,
-            "effective_bpw": 2.05,
+            "effective_bpw": 8 * target_bytes / dense_weights,
             "maximum_bpw": 2.1,
-            "per_module": {f"module-{index}": {} for index in range(252)},
+            "requested_projection_tensor_bytes": target_bytes,
+            "requested_projection_dense_weight_count": dense_weights,
+            "target_tensors": target_tensors,
+            "dense_non_target_tensors": {"model.embed_tokens.weight": 16},
+            "dense_non_target_tensor_bytes": 16,
+            "per_module": per_module,
         },
         "manifests": {
             "pairwise_disjoint": True,
@@ -206,10 +282,10 @@ def _complete_report(score=0.85, kl=0.1):
                 "held_out_diagnostics": 512,
                 "diverse_32": 32,
             },
-            "comparisons": [
-                {"identity_overlap": [], "content_overlap": []}
-                for _ in range(10)
-            ],
+            "comparisons": comparisons,
+            "manifest_sha256": manifest_hashes,
+            "content_jsonl_sha256": content_hashes,
+            "quantization_streams": quantization_streams,
         },
         "thresholds": {"top1_agreement_min": 0.85, "diverse_32_min": 0.85, "final_kl_max_nats": 0.2},
         "global": dict(metric),
@@ -217,7 +293,7 @@ def _complete_report(score=0.85, kl=0.1):
             {
                 "layer": layer,
                 "role": role,
-                "module": acceptance.expected_projection_name(layer, role),
+                "module": expected_projection_name(layer, role),
                 **metric,
             }
             for layer, role in expected_cells()
@@ -232,11 +308,35 @@ def test_report_rejects_missing_layer_role_cell():
         validate_acceptance_report(report)
 
 
-@pytest.mark.parametrize(("field", "value"), [("top1_agreement", 0.849), ("diverse_32", 0.849)])
-def test_report_rejects_score_threshold_failure(field, value):
+def test_report_rejects_noncanonical_or_inconsistent_accounting():
     report = _complete_report()
-    report["cells"][100][field] = value
-    with pytest.raises(AcceptanceError, match="below threshold"):
+    first_name = expected_projection_names()[0]
+    report["accounting"]["per_module"]["not.canonical"] = report["accounting"]["per_module"].pop(first_name)
+    with pytest.raises(AcceptanceError, match="exact canonical 252"):
+        validate_acceptance_report(report)
+
+    report = _complete_report()
+    first_name = expected_projection_names()[0]
+    report["accounting"]["per_module"][first_name]["bytes"] += 1
+    with pytest.raises(AcceptanceError, match="byte subtotal disagrees"):
+        validate_acceptance_report(report)
+
+
+@pytest.mark.parametrize(("top1", "diverse"), [(0.85, 0.1), (0.1, 0.85)])
+def test_report_accepts_either_score_alternative(top1, diverse):
+    report = _complete_report()
+    report["global"]["top1_agreement"] = top1
+    report["global"]["diverse_32"] = diverse
+    report["cells"][100]["top1_agreement"] = top1
+    report["cells"][100]["diverse_32"] = diverse
+    validate_acceptance_report(report)
+
+
+def test_report_rejects_when_both_score_alternatives_fail():
+    report = _complete_report()
+    report["cells"][100]["top1_agreement"] = 0.849
+    report["cells"][100]["diverse_32"] = 0.849
+    with pytest.raises(AcceptanceError, match="fails both score alternatives"):
         validate_acceptance_report(report)
 
 
@@ -265,3 +365,94 @@ def test_materialized_manifest_is_stable(tmp_path):
     second = materialize_manifest("validation", records, tmp_path / "second.json")
     assert first == second
     assert json.loads((tmp_path / "first.json").read_text()) == first
+
+
+def test_report_rejects_duplicate_or_wrong_manifest_pair():
+    report = _complete_report()
+    report["manifests"]["comparisons"][9] = dict(report["manifests"]["comparisons"][0])
+    with pytest.raises(AcceptanceError, match="exact ten unique canonical split pairs"):
+        validate_acceptance_report(report)
+
+
+def test_gate_parser_has_no_report_only_acceptance_mode():
+    with pytest.raises(SystemExit):
+        build_acceptance_parser().parse_args(["gate", "--report", "report.json"])
+
+
+def test_gate_recomputes_and_content_binds_submitted_report(tmp_path, monkeypatch):
+    report = _complete_report()
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    calls = []
+
+    def fake_evaluate(args):
+        calls.append(args)
+        args.output.write_text(json.dumps(report), encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(acceptance_script, "_evaluate", fake_evaluate)
+    assert acceptance_script._gate(SimpleNamespace(report=report_path)) == 0
+    assert len(calls) == 1
+
+    changed = _complete_report()
+    changed["global"]["final_kl_nats"] = 0.11
+    report_path.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(AcceptanceError, match="does not exactly match artifact-recomputed"):
+        acceptance_script._gate(SimpleNamespace(report=report_path))
+
+
+def test_quantization_stream_verification_rejects_content_mutation(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    manifests = tmp_path / "splits"
+    dense = tmp_path / "dense"
+    checkpoint.mkdir()
+    manifests.mkdir()
+    dense.mkdir()
+    datasets = {}
+    for quant_name, file_stem in (("calibration", "calibration"), ("yaqa", "yaqa_tuning"), ("validation", "validation")):
+        source = manifests / f"{file_stem}.jsonl"
+        manifest = manifests / f"{file_stem}.manifest.json"
+        source.write_text('{"identity":"x","content":"sample"}\n', encoding="utf-8")
+        manifest.write_text('{"schema_version":1}\n', encoding="utf-8")
+        datasets[quant_name] = {
+            "source": str(source.resolve()),
+            "row_start": 0,
+            "rows": 512,
+            "content_sha256": acceptance_script._sha256_file(source),
+            "identity_manifest": str(manifest.resolve()),
+            "identity_manifest_sha256": acceptance_script._sha256_file(manifest),
+        }
+    run = {
+        "model": str(dense.resolve()),
+        "layer_scope": "all",
+        "quantize_config": {
+            "bits": 2,
+            "format": "qvq_v2b2_p32",
+            "group_size": -1,
+            "rounding": "yaqa",
+            "sym": True,
+            "pack_dtype": "int32",
+            "bank_count": 2,
+        },
+        "datasets": datasets,
+    }
+    (checkpoint / "qvq_quantize_run.json").write_text(json.dumps(run), encoding="utf-8")
+    acceptance_script._verify_quantization_streams(checkpoint, manifests, dense)
+
+    (manifests / "calibration.jsonl").write_text('{"content":"changed"}\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="content hash"):
+        acceptance_script._verify_quantization_streams(checkpoint, manifests, dense)
+
+
+def test_local_qwen3_target_has_exact_pinned_identity():
+    evidence = validate_qwen3_model_artifact(Path("/monster/data/model/Qwen3-8B"), require_pinned_dense=True)
+    assert evidence["revision"] == QWEN3_PINNED_REVISION
+    assert evidence["decoder_layers"] == list(range(36))
+    assert evidence["config"]["architectures"] == ["Qwen3ForCausalLM"]
+    assert "not Qwen3-8B-Instruct" in evidence["instruction_identity"]
+
+
+def test_model_identity_contextualizes_malformed_config_json(tmp_path):
+    (tmp_path / "config.json").write_text("{bad json", encoding="utf-8")
+    with pytest.raises(AcceptanceError, match=r"failed to parse Qwen3 config\.json"):
+        validate_qwen3_model_artifact(tmp_path, require_pinned_dense=False)

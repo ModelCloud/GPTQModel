@@ -38,6 +38,30 @@ QWEN3_EXPECTED_MODULE_COUNT = QWEN3_8B_LAYER_COUNT * len(QWEN3_PROJECTION_ROLES)
 MANIFEST_SPLITS = ("calibration", "yaqa_tuning", "validation", "held_out_diagnostics", "diverse_32")
 REPORT_SCHEMA_VERSION = 1
 QWEN3_REQUESTED_BITS = 2.0
+QWEN3_PINNED_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
+QWEN3_LOCAL_TARGET = Path("/monster/data/model/Qwen3-8B")
+QWEN3_DENSE_CONFIG_SHA256 = "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30"
+QWEN3_HUB_CONTENT_IDENTITIES = {
+    "config.json": "d46195ac87f837ad233d02b2f80f148bf7c005e0",
+    "model-00001-of-00005.safetensors": "31d6a825ae35f11fb85b195b4c42c146c051e446433125a215336abdf95cbf5f",
+    "model-00002-of-00005.safetensors": "5991236cea6fe21f3d43cab0f0e84448734fbbe0789816202989f2ddc9d18282",
+    "model-00003-of-00005.safetensors": "c5185c4794be2d8a9784d5753c9922db38df478ce11f9ed0b415b7304d896836",
+    "model-00004-of-00005.safetensors": "b5ee7de71fbf17db3d5704e0c8f2bc7d005ca9e1d7ca2aeb19827b0cfcaa917a",
+    "model-00005-of-00005.safetensors": "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff",
+    "model.safetensors.index.json": "2b85c00f1b118961cd7a477e2bba0fe197a4ce1a",
+}
+QWEN3_MODEL_CONFIG = {
+    "model_type": "qwen3",
+    "architectures": ["Qwen3ForCausalLM"],
+    "hidden_size": 4096,
+    "intermediate_size": 12288,
+    "num_hidden_layers": 36,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "vocab_size": 151936,
+    "tie_word_embeddings": False,
+}
 PROJECTION_BOUNDARY = (
     "All serialized tensors whose state-dict key is the exact requested decoder projection prefix or a child of "
     "that prefix. The denominator is the sum of dense in_features*out_features for the 252 requested projections. "
@@ -75,6 +99,131 @@ def expected_projection_name(layer: int, role: str) -> str:
 
 def expected_cells() -> tuple[tuple[int, str], ...]:
     return tuple((layer, role) for layer in range(QWEN3_8B_LAYER_COUNT) for role in QWEN3_PROJECTION_ROLES)
+
+
+def expected_projection_names() -> tuple[str, ...]:
+    return tuple(expected_projection_name(layer, role) for layer, role in expected_cells())
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise AcceptanceError(f"required {label} does not exist: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AcceptanceError(f"failed to parse {label} at {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise AcceptanceError(f"{label} must contain one JSON object: {path}")
+    return payload
+
+
+def validate_qwen3_model_artifact(model_dir: Path, *, require_pinned_dense: bool) -> dict[str, Any]:
+    """Validate exact Qwen3-8B architecture and local revision/content authority."""
+
+    model_dir = model_dir.expanduser().resolve()
+    if require_pinned_dense and model_dir != QWEN3_LOCAL_TARGET.resolve():
+        raise AcceptanceError(f"dense Qwen3 target must be exactly {QWEN3_LOCAL_TARGET}, got {model_dir}")
+    if not model_dir.is_dir():
+        raise AcceptanceError(f"Qwen3 model artifact directory does not exist: {model_dir}")
+    config_path = model_dir / "config.json"
+    config = _load_json_object(config_path, label="Qwen3 config.json")
+    mismatches = {
+        key: {"expected": expected, "actual": config.get(key)}
+        for key, expected in QWEN3_MODEL_CONFIG.items()
+        if config.get(key) != expected
+    }
+    if mismatches:
+        raise AcceptanceError(f"Qwen3-8B config identity mismatch: {mismatches}")
+    config_sha256 = _sha256_file(config_path)
+    if require_pinned_dense and config_sha256 != QWEN3_DENSE_CONFIG_SHA256:
+        raise AcceptanceError(
+            f"dense Qwen3 config hash mismatch: expected {QWEN3_DENSE_CONFIG_SHA256}, got {config_sha256}"
+        )
+
+    shards = sorted(model_dir.glob("*.safetensors"))
+    if not shards:
+        raise AcceptanceError(f"Qwen3 model artifact has no safetensors files: {model_dir}")
+    index_path = model_dir / "model.safetensors.index.json"
+    if len(shards) > 1 and not index_path.is_file():
+        raise AcceptanceError("sharded Qwen3 model artifact lacks model.safetensors.index.json")
+    layer_ids: set[int] = set()
+    index_sha256 = None
+    if index_path.is_file():
+        index = _load_json_object(index_path, label="Qwen3 model.safetensors.index.json")
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise AcceptanceError("Qwen3 shard index lacks a nonempty weight_map")
+        shard_names = {path.name for path in shards}
+        if set(weight_map.values()) != shard_names:
+            raise AcceptanceError("Qwen3 shard index does not reference exactly the local safetensors shards")
+        for key in weight_map:
+            parts = key.split(".")
+            if len(parts) > 2 and parts[0] == "model" and parts[1] == "layers":
+                try:
+                    layer_ids.add(int(parts[2]))
+                except ValueError as error:
+                    raise AcceptanceError(f"Qwen3 shard index has malformed decoder layer key {key!r}") from error
+        index_sha256 = _sha256_file(index_path)
+    else:
+        metadata, _containers = _serialized_tensor_metadata(model_dir)
+        for key in metadata:
+            parts = key.split(".")
+            if len(parts) > 2 and parts[0] == "model" and parts[1] == "layers":
+                try:
+                    layer_ids.add(int(parts[2]))
+                except ValueError as error:
+                    raise AcceptanceError(f"Qwen3 checkpoint has malformed decoder layer key {key!r}") from error
+    if layer_ids != set(range(QWEN3_8B_LAYER_COUNT)):
+        raise AcceptanceError(
+            f"Qwen3 artifact must contain exactly decoder layers 0..35 with no extras; found {sorted(layer_ids)}"
+        )
+
+    revision = None
+    metadata_identities: dict[str, str] = {}
+    if require_pinned_dense:
+        metadata_root = model_dir / ".cache" / "huggingface" / "download"
+        critical = [config_path, *shards]
+        if index_path.is_file():
+            critical.append(index_path)
+        for artifact_path in critical:
+            metadata_path = metadata_root / f"{artifact_path.name}.metadata"
+            if not metadata_path.is_file():
+                raise AcceptanceError(f"pinned Qwen3 artifact lacks local Hub metadata for {artifact_path.name}")
+            try:
+                lines = metadata_path.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError) as error:
+                raise AcceptanceError(f"failed to read Hub metadata for {artifact_path.name}: {error}") from error
+            expected_content_identity = QWEN3_HUB_CONTENT_IDENTITIES.get(artifact_path.name)
+            if (
+                len(lines) < 2
+                or lines[0] != QWEN3_PINNED_REVISION
+                or lines[1] != expected_content_identity
+            ):
+                raise AcceptanceError(f"Hub metadata for {artifact_path.name} is not pinned to {QWEN3_PINNED_REVISION}")
+            metadata_identities[artifact_path.name] = lines[1]
+        revision = QWEN3_PINNED_REVISION
+    return {
+        "path": str(model_dir),
+        "model_name": "Qwen3-8B",
+        "instruction_identity": (
+            "Post-trained Qwen3-8B with instruction-following and switchable thinking; local/model-card name is "
+            "Qwen3-8B, not Qwen3-8B-Instruct"
+        ),
+        "revision": revision,
+        "config_sha256": config_sha256,
+        "index_sha256": index_sha256,
+        "config": {key: config[key] for key in QWEN3_MODEL_CONFIG},
+        "decoder_layers": sorted(layer_ids),
+        "hub_content_identities": metadata_identities,
+    }
 
 
 def census_reloaded_model(model: torch.nn.Module) -> list[ProjectionCell]:
@@ -225,7 +374,10 @@ def _serialized_tensor_metadata(checkpoint: Path) -> tuple[dict[str, dict[str, A
     if len(files) > 1 and not index_path.is_file():
         raise AcceptanceError("sharded checkpoint lacks model.safetensors.index.json")
     if index_path.is_file():
-        index = json.loads(index_path.read_text(encoding="utf-8"))
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AcceptanceError(f"failed to parse safetensors index at {index_path}: {error}") from error
         weight_map = index.get("weight_map")
         if not isinstance(weight_map, dict) or set(weight_map) != set(tensors):
             raise AcceptanceError("safetensors index weight_map does not exactly match serialized tensor keys")
@@ -241,7 +393,7 @@ def account_serialized_checkpoint(
     """Account exact tensor data extents from saved safetensors shards."""
 
     metadata, containers = _serialized_tensor_metadata(checkpoint)
-    report = _account_serialized_metadata(metadata, cells, maximum_bpw=maximum_bpw)
+    report = _account_serialized_metadata(metadata, cells, maximum_bpw=maximum_bpw, require_complete=True)
     tensor_bytes = sum(item["bytes"] for item in metadata.values())
     report["container_files"] = containers
     report["container_total_bytes"] = sum(containers.values())
@@ -250,10 +402,23 @@ def account_serialized_checkpoint(
 
 
 def _account_serialized_metadata(
-    metadata: Mapping[str, Mapping[str, Any]], cells: Sequence[ProjectionCell], *, maximum_bpw: float
+    metadata: Mapping[str, Mapping[str, Any]],
+    cells: Sequence[ProjectionCell],
+    *,
+    maximum_bpw: float,
+    require_complete: bool,
 ) -> dict[str, Any]:
     if not math.isfinite(maximum_bpw) or maximum_bpw <= 0:
         raise ValueError("maximum_bpw must be finite and positive")
+    if require_complete and len(cells) != QWEN3_EXPECTED_MODULE_COUNT:
+        raise AcceptanceError(f"accounting requires exactly {QWEN3_EXPECTED_MODULE_COUNT} projection cells")
+    cell_names = [cell.name for cell in cells]
+    if len(set(cell_names)) != len(cell_names) or (
+        require_complete and set(cell_names) != set(expected_projection_names())
+    ):
+        raise AcceptanceError("accounting projection cells are not the exact canonical Qwen3 layer-role set")
+    if any(cell.in_features <= 0 or cell.out_features <= 0 or cell.dense_weight_count <= 0 for cell in cells):
+        raise AcceptanceError("accounting projection dimensions and denominators must be positive")
     prefixes = sorted((cell.name, cell) for cell in cells)
     target: dict[str, int] = {}
     non_target: dict[str, int] = {}
@@ -284,6 +449,8 @@ def _account_serialized_metadata(
         if missing:
             raise AcceptanceError(f"requested projection {cell.name!r} lacks serialized payload tensors: {missing}")
     dense_weight_count = sum(cell.dense_weight_count for cell in cells)
+    if dense_weight_count <= 0:
+        raise AcceptanceError("accounting projection denominator must be positive")
     target_bytes = sum(target.values())
     effective_bpw = (8 * target_bytes) / dense_weight_count
     report = {
@@ -318,7 +485,7 @@ def account_serialized_state(
         if not isinstance(tensor, torch.Tensor):
             raise AcceptanceError(f"state entry {key!r} is not a tensor")
         metadata[key] = {"bytes": _tensor_nbytes(tensor), "dtype": str(tensor.dtype), "shape": list(tensor.shape)}
-    return _account_serialized_metadata(metadata, cells, maximum_bpw=maximum_bpw)
+    return _account_serialized_metadata(metadata, cells, maximum_bpw=maximum_bpw, require_complete=False)
 
 
 def canonical_content(value: Any) -> bytes:
@@ -429,6 +596,21 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
         for value in dense_hashes.values()
     ):
         raise AcceptanceError("artifact requires SHA-256 identities for the pinned dense model files")
+    dense_identity = artifact.get("dense_model_identity")
+    checkpoint_identity = artifact.get("checkpoint_model_identity")
+    for label, identity in (("dense", dense_identity), ("checkpoint", checkpoint_identity)):
+        if not isinstance(identity, dict) or identity.get("config") != QWEN3_MODEL_CONFIG:
+            raise AcceptanceError(f"artifact lacks exact {label} Qwen3-8B config identity")
+        if identity.get("decoder_layers") != list(range(QWEN3_8B_LAYER_COUNT)):
+            raise AcceptanceError(f"artifact lacks exact {label} decoder-layer identity")
+        config_hash = identity.get("config_sha256")
+        source_hashes = dense_hashes if label == "dense" else hashes
+        if config_hash != source_hashes.get("config.json"):
+            raise AcceptanceError(f"artifact {label} config hash is not content-bound")
+    if dense_identity.get("revision") != QWEN3_PINNED_REVISION:
+        raise AcceptanceError("dense artifact revision identity is not pinned")
+    if dense_identity.get("config_sha256") != QWEN3_DENSE_CONFIG_SHA256:
+        raise AcceptanceError("dense artifact config identity is not the known local target")
     census = report["census"]
     if census != {"expected": QWEN3_EXPECTED_MODULE_COUNT, "actual": QWEN3_EXPECTED_MODULE_COUNT, "complete": True}:
         raise AcceptanceError("checkpoint census is not exactly 252 complete projection modules")
@@ -444,12 +626,72 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
     per_module = accounting.get("per_module")
     if not isinstance(per_module, dict) or len(per_module) != QWEN3_EXPECTED_MODULE_COUNT:
         raise AcceptanceError("serialized accounting lacks all 252 per-module records")
+    if set(per_module) != set(expected_projection_names()):
+        raise AcceptanceError("serialized accounting module keys are not the exact canonical 252 projections")
+    target_tensors = accounting.get("target_tensors")
+    non_target_tensors = accounting.get("dense_non_target_tensors")
+    if not isinstance(target_tensors, dict) or not isinstance(non_target_tensors, dict):
+        raise AcceptanceError("serialized accounting tensor maps are absent")
+    module_tensor_keys: set[str] = set()
+    module_bytes = 0
+    module_dense_weights = 0
+    for module_name, module_record in per_module.items():
+        if not isinstance(module_record, dict) or not isinstance(module_record.get("tensors"), dict):
+            raise AcceptanceError(f"serialized accounting record is malformed for {module_name}")
+        tensors = module_record["tensors"]
+        required = {f"{module_name}.{name}" for name in ("trellis", "SU", "SV", "bank_ids", "bank_alt_id")}
+        if not required.issubset(tensors):
+            raise AcceptanceError(f"serialized accounting record lacks required packed tensors for {module_name}")
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("bytes"), int)
+            or isinstance(item.get("bytes"), bool)
+            or item["bytes"] < 0
+            for item in tensors.values()
+        ):
+            raise AcceptanceError(f"serialized accounting tensor metadata is malformed for {module_name}")
+        tensor_bytes = sum(item["bytes"] for item in tensors.values())
+        if module_record.get("bytes") != tensor_bytes:
+            raise AcceptanceError(f"serialized accounting byte subtotal disagrees for {module_name}")
+        dense_count = module_record.get("dense_weight_count")
+        if not isinstance(dense_count, int) or isinstance(dense_count, bool) or dense_count <= 0:
+            raise AcceptanceError(f"serialized accounting dense denominator is invalid for {module_name}")
+        module_tensor_keys.update(tensors)
+        module_bytes += tensor_bytes
+        module_dense_weights += dense_count
+    if module_tensor_keys != set(target_tensors):
+        raise AcceptanceError("serialized accounting target tensor union is inconsistent")
+    for module_record in per_module.values():
+        for key, item in module_record["tensors"].items():
+            if target_tensors[key] != item["bytes"]:
+                raise AcceptanceError(f"serialized accounting target byte map disagrees for {key}")
+    if module_bytes != accounting.get("requested_projection_tensor_bytes"):
+        raise AcceptanceError("serialized accounting global target bytes are inconsistent")
+    if module_dense_weights != accounting.get("requested_projection_dense_weight_count"):
+        raise AcceptanceError("serialized accounting global dense denominator is inconsistent")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in non_target_tensors.values()
+    ):
+        raise AcceptanceError("serialized accounting non-target tensor byte map is malformed")
+    if sum(non_target_tensors.values()) != accounting.get("dense_non_target_tensor_bytes"):
+        raise AcceptanceError("serialized accounting non-target byte total is inconsistent")
+    recomputed_bpw = 8 * module_bytes / module_dense_weights
+    if not math.isclose(recomputed_bpw, bpw, rel_tol=0, abs_tol=1e-12):
+        raise AcceptanceError("serialized accounting effective BPW is inconsistent")
     manifests = report["manifests"]
     comparisons = manifests.get("comparisons")
     if manifests.get("pairwise_disjoint") is not True or not isinstance(comparisons, list) or len(comparisons) != 10:
         raise AcceptanceError("manifest pairwise-disjoint evidence is incomplete")
     if any(item.get("identity_overlap") or item.get("content_overlap") for item in comparisons):
         raise AcceptanceError("manifest report contains sample leakage")
+    expected_pairs = [
+        (left, right)
+        for left_index, left in enumerate(MANIFEST_SPLITS)
+        for right in MANIFEST_SPLITS[left_index + 1 :]
+    ]
+    actual_pairs = [(item.get("left"), item.get("right")) for item in comparisons if isinstance(item, dict)]
+    if actual_pairs != expected_pairs or len(set(actual_pairs)) != 10:
+        raise AcceptanceError("manifest evidence is not the exact ten unique canonical split pairs")
     expected_counts = {
         "calibration": 512,
         "yaqa_tuning": 512,
@@ -459,6 +701,28 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
     }
     if manifests.get("counts") != expected_counts:
         raise AcceptanceError("manifest sample counts do not match the frozen acceptance plan")
+    manifest_hashes = manifests.get("manifest_sha256")
+    content_hashes = manifests.get("content_jsonl_sha256")
+    for label, hash_map in (("manifest", manifest_hashes), ("content JSONL", content_hashes)):
+        if not isinstance(hash_map, dict) or set(hash_map) != set(MANIFEST_SPLITS) or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in hash_map.values()
+        ):
+            raise AcceptanceError(f"{label} SHA-256 evidence is incomplete or malformed")
+    quantization_streams = manifests.get("quantization_streams")
+    split_mapping = {"calibration": "calibration", "yaqa": "yaqa_tuning", "validation": "validation"}
+    if not isinstance(quantization_streams, dict):
+        raise AcceptanceError("quantization stream content authority is absent")
+    for quant_name, manifest_name in split_mapping.items():
+        stream = quantization_streams.get(quant_name)
+        if not isinstance(stream, dict) or stream.get("manifest_verified") is not True:
+            raise AcceptanceError(f"quantization stream authority is absent for {quant_name}")
+        if stream.get("content_sha256") != content_hashes[manifest_name]:
+            raise AcceptanceError(f"quantization stream content hash is unbound for {quant_name}")
+        if stream.get("identity_manifest_sha256") != manifest_hashes[manifest_name]:
+            raise AcceptanceError(f"quantization stream manifest hash is unbound for {quant_name}")
     thresholds = report["thresholds"]
     for key in ("top1_agreement_min", "diverse_32_min"):
         value = thresholds.get(key)
@@ -499,10 +763,10 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
             raise AcceptanceError(f"{scope} has absent or non-finite metrics: {values}")
         if evidence.get("sample_count") != 1056 or evidence.get("diverse_32_sample_count") != 32:
             raise AcceptanceError(f"{scope} metric sample coverage does not match 512 validation + 512 held-out + 32 diverse")
-        if top1 < thresholds["top1_agreement_min"]:
-            raise AcceptanceError(f"{scope} top-1 agreement {top1} is below threshold")
-        if diverse < thresholds["diverse_32_min"]:
-            raise AcceptanceError(f"{scope} diverse-32 score {diverse} is below threshold")
+        if top1 < thresholds["top1_agreement_min"] and diverse < thresholds["diverse_32_min"]:
+            raise AcceptanceError(
+                f"{scope} fails both score alternatives: top-1={top1}, diverse-32={diverse}"
+            )
         if final_kl > kl_max:
             raise AcceptanceError(f"{scope} final KL {final_kl} nats exceeds threshold {kl_max}")
 
@@ -511,13 +775,18 @@ __all__ = [
     "MANIFEST_SPLITS",
     "PROJECTION_BOUNDARY",
     "QWEN3_EXPECTED_MODULE_COUNT",
+    "QWEN3_LOCAL_TARGET",
+    "QWEN3_MODEL_CONFIG",
+    "QWEN3_PINNED_REVISION",
     "AcceptanceError",
     "ProjectionCell",
     "account_serialized_checkpoint",
     "account_serialized_state",
     "census_reloaded_model",
     "expected_cells",
+    "expected_projection_names",
     "materialize_manifest",
     "validate_acceptance_report",
     "validate_manifest_disjointness",
+    "validate_qwen3_model_artifact",
 ]

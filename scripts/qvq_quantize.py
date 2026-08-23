@@ -13,6 +13,7 @@ Post-quantization quality measurement belongs in ``qvq_evaluate.py``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -28,19 +29,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import torch  # noqa: E402
-from datasets import load_dataset  # noqa: E402
+import torch
+from datasets import load_dataset
 
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import (  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import (
     FORMAT,
     ModuleGranularReplayConfig,
     OutputAlignConfig,
     QVQConfig,
     YaqaConfig,
 )
-from gptqmodel.quantization.config import ChatTemplateConfig  # noqa: E402
-
+from gptqmodel.quantization.config import ChatTemplateConfig
 
 QVQ_FORMATS = tuple(
     item.value
@@ -344,6 +344,33 @@ def _git_commit() -> str | None:
         return None
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
+    """Serialize slice identity and content authority for local frozen inputs."""
+
+    evidence = asdict(spec)
+    path = Path(spec.source).expanduser()
+    if not path.is_file():
+        evidence["content_sha256"] = None
+        evidence["identity_manifest"] = None
+        evidence["identity_manifest_sha256"] = None
+        return evidence
+    resolved = path.resolve()
+    manifest = resolved.with_suffix(".manifest.json")
+    evidence["source"] = str(resolved)
+    evidence["content_sha256"] = _sha256_file(resolved)
+    evidence["identity_manifest"] = str(manifest) if manifest.is_file() else None
+    evidence["identity_manifest_sha256"] = _sha256_file(manifest) if manifest.is_file() else None
+    return evidence
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.batch_size < 1 or args.concat_size < 0:
@@ -438,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
         "device_name": torch.cuda.get_device_name(torch.device(args.device)) if torch.device(args.device).type == "cuda" else None,
         "quantize_config": config.to_dict(),
         "datasets": {
-            name: None if spec is None else asdict(spec)
+            name: None if spec is None else dataset_slice_evidence(spec)
             for name, spec in {
                 "calibration": calibration_spec,
                 "yaqa": yaqa_spec,

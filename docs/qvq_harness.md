@@ -86,12 +86,8 @@ python scripts/accept_qwen3_8b_qvq.py export-frozen-splits \
   --dataset-revision fb6bc2f8c66543876fb31613f5872b9030220e15 \
   --output-dir artifacts/qwen3_8b_qvq_w2/splits
 
-huggingface-cli download Qwen/Qwen3-8B \
-  --revision b968826d9c46dd6066d109eabc6255188de91218 \
-  --local-dir artifacts/qwen3_8b_qvq_w2/dense-model
-
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<verified-idle-GPU-UUIDs> python scripts/qvq_quantize.py \
-  --model artifacts/qwen3_8b_qvq_w2/dense-model --output artifacts/qwen3_8b_qvq_w2/checkpoint \
+  --model /monster/data/model/Qwen3-8B --output artifacts/qwen3_8b_qvq_w2/checkpoint \
   --quant-config configs/qwen3_8b_qvq_w2_acceptance.json \
   --calibration-dataset artifacts/qwen3_8b_qvq_w2/splits/calibration.jsonl --calibration-rows 512 \
   --yaqa-dataset artifacts/qwen3_8b_qvq_w2/splits/yaqa_tuning.jsonl --yaqa-rows 512 \
@@ -99,7 +95,7 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<verified-idle-GPU-UUIDs> pyth
 
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<same-verified-idle-GPU-UUIDs> \
 python scripts/accept_qwen3_8b_qvq.py evaluate \
-  --dense-model artifacts/qwen3_8b_qvq_w2/dense-model \
+  --dense-model /monster/data/model/Qwen3-8B \
   --revision b968826d9c46dd6066d109eabc6255188de91218 \
   --checkpoint artifacts/qwen3_8b_qvq_w2/checkpoint --manifest-dir artifacts/qwen3_8b_qvq_w2/splits \
   --validation-jsonl artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl \
@@ -108,7 +104,15 @@ python scripts/accept_qwen3_8b_qvq.py evaluate \
   --maximum-bpw 2.1 --score-min 0.85 --final-kl-max-nats 0.10 \
   --output artifacts/qwen3_8b_qvq_w2/acceptance.json
 
-python scripts/accept_qwen3_8b_qvq.py gate --report artifacts/qwen3_8b_qvq_w2/acceptance.json
+python scripts/accept_qwen3_8b_qvq.py gate \
+  --dense-model /monster/data/model/Qwen3-8B \
+  --revision b968826d9c46dd6066d109eabc6255188de91218 \
+  --checkpoint artifacts/qwen3_8b_qvq_w2/checkpoint --manifest-dir artifacts/qwen3_8b_qvq_w2/splits \
+  --validation-jsonl artifacts/qwen3_8b_qvq_w2/splits/validation.jsonl \
+  --held-out-diagnostics-jsonl artifacts/qwen3_8b_qvq_w2/splits/held_out_diagnostics.jsonl \
+  --diverse-jsonl artifacts/qwen3_8b_qvq_w2/splits/diverse_32.jsonl \
+  --maximum-bpw 2.1 --score-min 0.85 --final-kl-max-nats 0.10 \
+  --report artifacts/qwen3_8b_qvq_w2/acceptance.json
 sha256sum artifacts/qwen3_8b_qvq_w2/acceptance.json artifacts/qwen3_8b_qvq_w2/checkpoint/*.safetensors
 ```
 
@@ -133,3 +137,58 @@ result exists. The host exposes one idle NVIDIA PG506-232 (`GPU-20f7fde4-d88c-d6
 `00000000:2B:00.0`, 98,304 MiB, 0 MiB used and 0% utilization at inspection), but the pinned 8B model snapshot is not
 materialized. Still required are model download, the full quantize/save/reload run, BPW <=2.1, all 252 interventions,
 global metrics, and artifact hashes. Missing evidence is a hard rejection and is not represented as a passing score.
+
+## Rejected review and blocking fixes (2026-08-23)
+
+Review rejected commits `3793fa9d` and `297197bf` for eight blocking issues: AND instead of OR score semantics;
+report-only acceptance trusting caller booleans/hashes/counts; weak `config.json` and shard-index authority; no exact
+local model identity; quantization inputs bound only to paths; incomplete canonical accounting consistency; weak
+pairwise-manifest schema validation; and missing explicit unified-harness regression coverage.
+
+This follow-up corrects the score contract at every global and layer-role scope to `(top1 >= 0.85) OR
+(diverse_32 >= 0.85)`. Final KL remains a separate mandatory maximum in nats. Regression cases cover top-1-only pass,
+diverse-32-only pass, and both-fail rejection. The standalone `gate` command no longer has a report-only invocation:
+it reloads the model, reparses configs and safetensors, rehashes dense/checkpoint files and every manifest/JSONL,
+revalidates the quantization-run content bindings, reruns global and all 252 direct intervention scopes, and requires
+the submitted report to exactly equal that artifact-recomputed evidence.
+
+The exact local target is `/monster/data/model/Qwen3-8B`; no model download was performed or added to the workflow.
+Its local Hugging Face metadata pins revision `b968826d9c46dd6066d109eabc6255188de91218`. Its known `config.json` SHA-256
+is `f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30`; its shard-index SHA-256 is
+`f9fdbcb91c23971c13ec5d5f2573d2349e8f61f2f049371ec699281748fdb1bc`. The validated identity is
+`model_type=qwen3`, architecture `Qwen3ForCausalLM`, hidden/intermediate 4096/12288, 36 layers exactly, 32 query and
+8 KV heads, head dimension 128, vocab 151936, and untied embeddings. The index contains exactly layers 0--35 and no
+extra decoder layer. The model card names this post-trained, instruction-following, switchable-thinking model
+**Qwen3-8B**, not **Qwen3-8B-Instruct**; the acceptance objective's “Instruct” label refers to its post-trained
+instruction behavior rather than a distinct local repository name.
+
+The earlier 2026-08-22 statement that the snapshot was not materialized was incorrect: inspection on 2026-08-23
+confirmed the complete five-shard 16,381,470,720-byte indexed snapshot was already local. This correction preserves
+the earlier entry while superseding that blocker. No quantization or accuracy run has been performed, and no >=85%
+result is claimed. The actual model-run evidence remains unresolved until the frozen quantize/save/reload and complete
+artifact-aware gate commands finish.
+
+Implementation-gate ledger for this rejected-review repair (run from
+`/root/qvq/.worktrees/qwen3-acceptance` on branch `polly/qwen3-acceptance`; parent commit
+`297197bfd3bad4bc71ecf446ae011b0d8c3dfd13`):
+
+- `pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: 41 passed, 14 upstream
+  `torch.jit` deprecation warnings.
+- `pytest --collect-only -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: exactly 41 tests
+  collected, matching the executed focused-plus-unified files.
+- `ruff check gptqmodel/utils/qvq_acceptance.py scripts/accept_qwen3_8b_qvq.py scripts/qvq_quantize.py
+  tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: all checks passed.
+- `python -m compileall -q gptqmodel/utils/qvq_acceptance.py scripts/accept_qwen3_8b_qvq.py
+  scripts/qvq_quantize.py tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: passed.
+- `python scripts/accept_qwen3_8b_qvq.py --help`, `python scripts/accept_qwen3_8b_qvq.py gate --help`, and
+  `python scripts/qvq_quantize.py --help`: passed; the gate help requires all authoritative artifact/evaluation
+  inputs and exposes no accepting report-only path.
+- `validate_qwen3_model_artifact(Path('/monster/data/model/Qwen3-8B'), require_pinned_dense=True)`: passed with the
+  pinned revision and config/index hashes recorded above, exact layers 0--35, and all seven critical local Hub
+  content identities.
+- `git diff --check`: passed. Worktree cleanliness is checked again after the repair commit. The resulting commit is
+  identified by `git rev-parse HEAD`; artifact identity remains the hashes above until a real quantized checkpoint
+  exists.
+
+The implementation gates validate fail-closed behavior and schemas only. Effective BPW and all score/KL gates still
+have no real Qwen3-8B quantized artifact to measure, so they remain unresolved rather than recorded as successes.

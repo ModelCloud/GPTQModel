@@ -25,6 +25,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -39,12 +40,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.utils.qvq_acceptance import (
     MANIFEST_SPLITS,
+    QWEN3_PINNED_REVISION,
     REPORT_SCHEMA_VERSION,
+    AcceptanceError,
     account_serialized_checkpoint,
     census_reloaded_model,
     materialize_manifest,
     validate_acceptance_report,
     validate_manifest_disjointness,
+    validate_qwen3_model_artifact,
 )
 
 
@@ -80,6 +84,24 @@ def _artifact_hashes(directory: Path) -> dict[str, str]:
                 digest.update(chunk)
         result[path.name] = digest.hexdigest()
     return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AcceptanceError(f"failed to parse {label} at {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise AcceptanceError(f"{label} must contain one JSON object: {path}")
+    return payload
 
 
 def _manifest(args: argparse.Namespace) -> int:
@@ -142,10 +164,17 @@ def _export_frozen_splits(args: argparse.Namespace) -> int:
 
 def _check_manifests(directory: Path) -> dict[str, Any]:
     manifests = {
-        split: json.loads((directory / f"{split}.manifest.json").read_text(encoding="utf-8"))
+        split: _read_json_object(directory / f"{split}.manifest.json", f"{split} identity manifest")
         for split in MANIFEST_SPLITS
     }
-    return validate_manifest_disjointness(manifests)
+    evidence = validate_manifest_disjointness(manifests)
+    evidence["manifest_sha256"] = {
+        split: _sha256_file(directory / f"{split}.manifest.json") for split in MANIFEST_SPLITS
+    }
+    evidence["content_jsonl_sha256"] = {
+        split: _sha256_file(directory / f"{split}.jsonl") for split in MANIFEST_SPLITS
+    }
+    return evidence
 
 
 def _verify_all_manifest_sources(directory: Path) -> None:
@@ -154,8 +183,7 @@ def _verify_all_manifest_sources(directory: Path) -> None:
 
 
 def _verify_records_against_manifest(split: str, records: list[dict[str, Any]], directory: Path) -> None:
-    expected = json.loads((directory / f"{split}.manifest.json").read_text(encoding="utf-8"))
-    from tempfile import TemporaryDirectory
+    expected = _read_json_object(directory / f"{split}.manifest.json", f"{split} identity manifest")
 
     with TemporaryDirectory() as temporary:
         actual = materialize_manifest(split, records, Path(temporary) / "manifest.json")
@@ -167,7 +195,7 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_mod
     path = checkpoint / "qvq_quantize_run.json"
     if not path.is_file():
         raise RuntimeError("checkpoint is missing qvq_quantize_run.json")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _read_json_object(path, "qvq_quantize_run.json")
     recorded_model = Path(str(payload.get("model", ""))).expanduser().resolve()
     if recorded_model != dense_model.resolve():
         raise RuntimeError("quantization report dense-model path does not match the acceptance reference")
@@ -203,7 +231,23 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_mod
         actual_path = Path(str(raw.get("source", ""))).expanduser().resolve()
         if actual_path != expected_path.resolve() or raw.get("row_start") != 0 or raw.get("rows") != 512:
             raise RuntimeError(f"quantization {split} stream does not match the frozen manifest JSONL")
-        evidence[split] = {"source": str(actual_path), "rows": 512, "manifest_verified": True}
+        manifest_path = expected_path.with_suffix(".manifest.json")
+        current_content_hash = _sha256_file(actual_path)
+        current_manifest_hash = _sha256_file(manifest_path)
+        if raw.get("content_sha256") != current_content_hash:
+            raise RuntimeError(f"quantization {split} content hash does not match the frozen JSONL")
+        if Path(str(raw.get("identity_manifest", ""))).expanduser().resolve() != manifest_path.resolve():
+            raise RuntimeError(f"quantization {split} identity-manifest path is not authoritative")
+        if raw.get("identity_manifest_sha256") != current_manifest_hash:
+            raise RuntimeError(f"quantization {split} identity-manifest hash does not match")
+        evidence[split] = {
+            "source": str(actual_path),
+            "rows": 512,
+            "content_sha256": current_content_hash,
+            "identity_manifest": str(manifest_path.resolve()),
+            "identity_manifest_sha256": current_manifest_hash,
+            "manifest_verified": True,
+        }
     if payload.get("layer_scope") != "all":
         raise RuntimeError("quantization report did not request all decoder layers")
     evidence["quantize_config"] = expected_config
@@ -211,9 +255,17 @@ def _verify_quantization_streams(checkpoint: Path, manifest_dir: Path, dense_mod
 
 
 def _gate(args: argparse.Namespace) -> int:
-    report = json.loads(args.report.read_text(encoding="utf-8"))
-    validate_acceptance_report(report)
-    print(json.dumps({"accepted": True, "report": str(args.report)}, sort_keys=True))
+    submitted = _read_json_object(args.report, "submitted acceptance report")
+    with TemporaryDirectory(prefix="qwen3-qvq-gate-") as temporary:
+        recomputed_path = Path(temporary) / "recomputed.json"
+        recompute_args = argparse.Namespace(**vars(args))
+        recompute_args.output = recomputed_path
+        _evaluate(recompute_args)
+        recomputed = _read_json_object(recomputed_path, "recomputed acceptance evidence")
+    if submitted != recomputed:
+        raise AcceptanceError("submitted report does not exactly match artifact-recomputed acceptance evidence")
+    validate_acceptance_report(recomputed)
+    print(json.dumps({"accepted": True, "report": str(args.report), "artifact_recomputed": True}, sort_keys=True))
     return 0
 
 
@@ -308,6 +360,8 @@ def _evaluate(args: argparse.Namespace) -> int:
         raise ValueError("score minimum must be a finite fraction in [0.85, 1]")
     if not math.isfinite(args.final_kl_max_nats) or args.final_kl_max_nats < 0:
         raise ValueError("final KL maximum must be finite, nonnegative, and expressed in nats")
+    if args.revision != QWEN3_PINNED_REVISION:
+        raise ValueError(f"Qwen3 acceptance revision must be exactly {QWEN3_PINNED_REVISION}")
     disjointness = _check_manifests(args.manifest_dir)
     _verify_all_manifest_sources(args.manifest_dir)
     validation = _read_jsonl(args.validation_jsonl)
@@ -321,6 +375,8 @@ def _evaluate(args: argparse.Namespace) -> int:
     dense_model_path = Path(args.dense_model).expanduser().resolve()
     if not dense_model_path.is_dir():
         raise FileNotFoundError(f"pinned dense model directory does not exist: {dense_model_path}")
+    dense_identity = validate_qwen3_model_artifact(dense_model_path, require_pinned_dense=True)
+    checkpoint_identity = validate_qwen3_model_artifact(args.checkpoint, require_pinned_dense=False)
     quantization_streams = _verify_quantization_streams(args.checkpoint, args.manifest_dir, dense_model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(args.dense_model, revision=args.revision, local_files_only=True)
@@ -374,6 +430,8 @@ def _evaluate(args: argparse.Namespace) -> int:
             "fresh_reload_verified": True,
             "checkpoint_sha256": _artifact_hashes(args.checkpoint),
             "dense_model_sha256": _artifact_hashes(dense_model_path),
+            "dense_model_identity": dense_identity,
+            "checkpoint_model_identity": checkpoint_identity,
         },
         "census": {"expected": 252, "actual": len(cells), "complete": True},
         "accounting": accounting,
@@ -412,21 +470,25 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--dataset-revision", required=True)
     export.add_argument("--output-dir", type=Path, required=True)
     export.set_defaults(handler=_export_frozen_splits)
-    gate = commands.add_parser("gate")
+    def add_artifact_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--dense-model", required=True)
+        command.add_argument("--revision", required=True)
+        command.add_argument("--checkpoint", type=Path, required=True)
+        command.add_argument("--manifest-dir", type=Path, required=True)
+        command.add_argument("--validation-jsonl", type=Path, required=True)
+        command.add_argument("--held-out-diagnostics-jsonl", type=Path, required=True)
+        command.add_argument("--diverse-jsonl", type=Path, required=True)
+        command.add_argument("--device", default="cuda:0")
+        command.add_argument("--maximum-bpw", type=float, default=2.1)
+        command.add_argument("--score-min", type=float, default=0.85)
+        command.add_argument("--final-kl-max-nats", type=float, required=True)
+
+    gate = commands.add_parser("gate", help="Recompute artifacts/evaluation and compare the submitted report.")
+    add_artifact_arguments(gate)
     gate.add_argument("--report", type=Path, required=True)
     gate.set_defaults(handler=_gate)
     evaluate = commands.add_parser("evaluate")
-    evaluate.add_argument("--dense-model", required=True)
-    evaluate.add_argument("--revision", required=True)
-    evaluate.add_argument("--checkpoint", type=Path, required=True)
-    evaluate.add_argument("--manifest-dir", type=Path, required=True)
-    evaluate.add_argument("--validation-jsonl", type=Path, required=True)
-    evaluate.add_argument("--held-out-diagnostics-jsonl", type=Path, required=True)
-    evaluate.add_argument("--diverse-jsonl", type=Path, required=True)
-    evaluate.add_argument("--device", default="cuda:0")
-    evaluate.add_argument("--maximum-bpw", type=float, default=2.1)
-    evaluate.add_argument("--score-min", type=float, default=0.85)
-    evaluate.add_argument("--final-kl-max-nats", type=float, required=True)
+    add_artifact_arguments(evaluate)
     evaluate.add_argument("--output", type=Path, required=True)
     evaluate.set_defaults(handler=_evaluate)
     return parser
