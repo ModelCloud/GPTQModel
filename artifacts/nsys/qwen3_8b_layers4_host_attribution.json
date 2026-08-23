@@ -1,0 +1,147 @@
+{
+  "wall_seconds_qvq_quantize_main": 1519.7690752716735,
+  "instrumented": [
+    "qvq_cuda._qvq_cuda_hadamard_op",
+    "qvq_cuda._qvq_cuda_op",
+    "qvq_cuda._qvq_cuda_viterbi_banked_op",
+    "qvq_cuda._qvq_cuda_viterbi_op",
+    "qvq_cuda._qvq_cuda_viterbi_tail_trusted_op",
+    "qvq_cuda._qvq_cuda_viterbi_trusted_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_banked_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_family_grid_trusted_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_g_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_grid_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_grid_trusted_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_midpoint_trusted_op",
+    "qvq_cuda._qvq_cuda_viterbi_v2_segment_tail_trusted_op",
+    "qvq_cuda._qvq_cuda_viterbi_v4_op",
+    "qvq_cuda._qvq_cuda_yaqa_feedback_op",
+    "qvq_cuda._qvq_cuda_yaqa_feedback_update_op",
+    "qvq_cpu._qvq_cpu_hadamard_op",
+    "qvq_cpu._qvq_cpu_inner_weight_op",
+    "qvq_cpu._qvq_cpu_op",
+    "qvq_cpu._qvq_cpu_viterbi_banked_op",
+    "qvq_cpu._qvq_cpu_viterbi_op",
+    "qvq_cpu._qvq_cpu_yaqa_feedback_op",
+    "qvq_cpu._qvq_cpu_yaqa_feedback_update_op",
+    "qvq_cuda.qvq_cuda_gemv",
+    "qvq_cuda.qvq_cuda_hadamard",
+    "qvq_cuda.qvq_cuda_viterbi",
+    "qvq_cuda.qvq_cuda_viterbi_banked",
+    "qvq_cuda.qvq_cuda_viterbi_v2_segment_banked",
+    "qvq_cuda._qvq_cuda_viterbi_trusted",
+    "qvq_cpu.qvq_cpu_viterbi",
+    "qvq_cpu.qvq_cpu_viterbi_banked",
+    "QVQProcessor.prepare_yaqa",
+    "QVQProcessor.prepare_module_granular_replay",
+    "QVQProcessor.preprocess",
+    "QVQProcessor.process",
+    "QVQProcessor.submodule_finalize",
+    "QVQProcessor.finalize"
+  ],
+  "forwarded_args": [
+    "--model",
+    "/monster/data/model/Qwen3-8B",
+    "--output",
+    "/root/qvq_prof/qwen3_8b_l4",
+    "--format",
+    "qvq_v2b2_p32",
+    "--bits",
+    "2",
+    "--rounding",
+    "yaqa",
+    "--bank-count",
+    "2",
+    "--calibration-dataset",
+    "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "--calibration-row-start",
+    "0",
+    "--calibration-rows",
+    "128",
+    "--yaqa-dataset",
+    "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "--yaqa-row-start",
+    "512",
+    "--yaqa-rows",
+    "128",
+    "--yaqa-minimum-sequences",
+    "128",
+    "--layers",
+    "4"
+  ],
+  "ranges": {
+    "stage.process": {
+      "calls": 28,
+      "host_seconds_total": 1292.1260809032246,
+      "host_seconds_avg": 46.14736003225802,
+      "host_seconds_max": 87.49544247612357
+    },
+    "qvq_cuda.viterbi_v2_segment_family_grid_trusted": {
+      "calls": 60360,
+      "host_seconds_total": 343.06867013312876,
+      "host_seconds_avg": 0.005683708915393121,
+      "host_seconds_max": 0.7546070190146565
+    },
+    "stage.prepare_yaqa": {
+      "calls": 1,
+      "host_seconds_total": 175.4370236452669,
+      "host_seconds_avg": 175.4370236452669,
+      "host_seconds_max": 175.4370236452669
+    },
+    "qvq_cuda.yaqa_feedback_update": {
+      "calls": 37832,
+      "host_seconds_total": 32.44628354161978,
+      "host_seconds_avg": 0.0008576412439633056,
+      "host_seconds_max": 0.016049571335315704
+    },
+    "qvq_api.qvq_cuda_viterbi": {
+      "calls": 22528,
+      "host_seconds_total": 25.953799968585372,
+      "host_seconds_avg": 0.0011520685355373478,
+      "host_seconds_max": 0.20909147057682276
+    },
+    "qvq_cuda.viterbi": {
+      "calls": 22528,
+      "host_seconds_total": 12.13555003888905,
+      "host_seconds_avg": 0.0005386874129478449,
+      "host_seconds_max": 0.07165991421788931
+    },
+    "qvq_cuda.yaqa_feedback": {
+      "calls": 37832,
+      "host_seconds_total": 6.925325410440564,
+      "host_seconds_avg": 0.00018305470000107223,
+      "host_seconds_max": 0.05620882287621498
+    },
+    "stage.submodule_finalize": {
+      "calls": 28,
+      "host_seconds_total": 6.806431292556226,
+      "host_seconds_avg": 0.24308683187700808,
+      "host_seconds_max": 0.41171081084758043
+    },
+    "qvq_cuda.viterbi_tail_trusted": {
+      "calls": 18916,
+      "host_seconds_total": 3.631648593582213,
+      "host_seconds_avg": 0.00019198818955287655,
+      "host_seconds_max": 0.009840521030128002
+    },
+    "stage.preprocess": {
+      "calls": 28,
+      "host_seconds_total": 0.08612314332276583,
+      "host_seconds_avg": 0.003075826547241637,
+      "host_seconds_max": 0.03147460240870714
+    },
+    "stage.finalize": {
+      "calls": 1,
+      "host_seconds_total": 0.001321747899055481,
+      "host_seconds_avg": 0.001321747899055481,
+      "host_seconds_max": 0.001321747899055481
+    },
+    "stage.prepare_module_granular_replay": {
+      "calls": 1,
+      "host_seconds_total": 9.959563612937927e-06,
+      "host_seconds_avg": 9.959563612937927e-06,
+      "host_seconds_max": 9.959563612937927e-06
+    }
+  },
+  "pid": 1830235
+}

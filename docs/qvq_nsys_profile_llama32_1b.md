@@ -240,6 +240,49 @@ Registered `qvq_cuda` ops never invoked by this workload: `viterbi_trusted`, `vi
   ~25 min for the 906 MB report; the quantization itself ran at the same per-layer speed as un-profiled
   (111–117 s/layer vs 112 s in the un-profiled smoke run), so profiler overhead on the measured numbers is negligible.
 
-## Qwen3-8B (first 4 layers)
+## Qwen3-8B (first 4 layers) — comparison
 
-See the section appended below if present; otherwise the run did not fit in the time budget (see PR body).
+Same config and datasets, `--max-layers 4` (`/monster/data/model/Qwen3-8B`, 4 × 7 = 28 modules; 36 decoder layers
+in total). Captured with `scripts/profile_qvq_quantize_nsys.sh qwen3_8b_layers4 --max-layers 4 ...`; stats in
+`artifacts/nsys/qwen3_8b_layers4_*.csv`, report at `artifacts/nsys/reps/qwen3_8b_layers4.nsys-rep` (359 MB, untracked).
+
+| metric | Llama-3.2-1B (16/16 layers) | Qwen3-8B (4/36 layers) |
+|---|---:|---:|
+| `qvq_quantize.main` wall | 1938.9 s | 1519.8 s |
+| `stage.prepare_yaqa` (Sketch-B, full model) | 135.6 s | 175.4 s |
+| per decoder layer | 111–117 s | 325–328 s (→ ≈ 3.3 h for all 36) |
+| GPU busy % of wall | 99.8 % | 99.4 % |
+| `qvq_v2_segment_grid_kernel<4,2,16,fused>` | 1083.4 s, 61.2 % GPU, 55.9 % wall | 802.7 s, 58.0 % GPU, 52.8 % wall |
+| `viterbi_v2_segment_family_grid_trusted` op | 102,304 calls, 987.6 s, 9.65 ms/call | 60,360 calls, 827.9 s, 13.7 ms/call |
+| `qvq_viterbi_kernel<4,2>` | 313.5 s, 17.7 % | 198.1 s, 14.3 % |
+| YAQA feedback GEMMs (`yaqa_feedback` + `_update`) | 146.3 s, 8.3 % | 169.1 s, 12.2 % |
+| memcpy + memset | 21.65 s (1.1 %) | 21.64 s (1.4 %) |
+
+| NVTX range (variant) | calls | kernel time (s) | % GPU kernel time | kernel avg / call (ms) | kernel launches | host avg (ms) | host max (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `qvq_cuda.viterbi_v2_segment_family_grid_trusted` | 60360 | 827.87 | 59.9 | 13.716 | 603600 | 5.684 | 754.6 |
+| `qvq_cuda.yaqa_feedback` | 37832 | 108.17 | 7.8 | 2.859 | 113496 | 0.183 | 56.2 |
+| `qvq_cuda.viterbi_tail_trusted` | 18916 | 103.59 | 7.5 | 5.476 | 113496 | 0.192 | 9.8 |
+| `qvq_api.qvq_cuda_viterbi` | 22528 | 97.65 | 7.1 | 4.335 | 811008 | 1.152 | 209.1 |
+| `qvq_cuda.viterbi` | 22528 | 96.19 | 7.0 | 4.270 | 405504 | 0.539 | 71.7 |
+| `qvq_cuda.yaqa_feedback_update` | 37832 | 60.92 | 4.4 | 1.610 | 113496 | 0.858 | 16.0 |
+
+| # | kernel | total (s) | % | instances | avg (ms) | max (ms) |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | `qvq_v2_segment_grid_kernel<(int)4, (int)2, (int)16, (bool)1, (bool)0, __half, unsigned char>` | 802.71 | 58.0 | 482880 | 1.662 | 4.390 |
+| 2 | `qvq_viterbi_kernel<(int)4, (int)2, __half, unsigned char>` | 198.12 | 14.3 | 60360 | 3.282 | 7.294 |
+| 3 | `cutlass::Kernel2<cutlass_80_simt_sgemm_grouped_128x128_8x4_align1>` | 107.93 | 7.8 | 37832 | 2.853 | 15.504 |
+| 4 | `ampere_sgemm_128x128_nt` | 90.17 | 6.5 | 38752 | 2.327 | 454.492 |
+| 5 | `ampere_sgemm_128x128_tn` | 76.92 | 5.6 | 456 | 168.694 | 471.608 |
+| 6 | `gemmSN_NN_kernel<float, (int)128, (int)2, (int)4, (int)8, (int)4, (int)4, (bool)0, cublasGemvTensorBatched<con` | 31.65 | 2.3 | 37688 | 0.840 | 3.078 |
+| 7 | `qvq_v2_segment_grid_finalize_kernel<(int)4, (int)2, (int)16, (bool)0, __half, unsigned char>` | 24.89 | 1.8 | 60360 | 0.412 | 0.958 |
+| 8 | `ampere_sgemm_128x128_nn` | 5.16 | 0.4 | 168 | 30.718 | 60.764 |
+| 9 | `ampere_sgemm_128x64_nt` | 4.21 | 0.3 | 3560 | 1.182 | 11.166 |
+| 10 | `ampere_sgemm_128x64_nn` | 2.58 | 0.2 | 232 | 11.115 | 21.286 |
+
+Differences worth noting: on the wider Qwen3 modules (4096×12288 MLP, 4096×8192 QKV) each family-grid op call carries
+more tiles (13.7 vs 9.65 ms/call) so the kernel is an even more dominant share of `stage.process`; the
+`viterbi_v2_segment_tail_trusted` path was not taken at all for Qwen3's shapes; the plain fp32 cuBLAS share
+(`ampere_sgemm_128x128_{nt,tn}`, 167 s = 12 %) grows with hidden size. The ranked conclusion is unchanged:
+**optimise `qvq_v2_segment_grid_kernel<4,2,16,fused-boundary>` first (52.8–55.9 % of end-to-end wall on both models),
+then `qvq_viterbi_kernel` (14–18 %).**
