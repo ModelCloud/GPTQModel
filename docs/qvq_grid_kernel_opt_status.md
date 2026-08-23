@@ -1,5 +1,8 @@
 # QVQ `<4,2,16,fused>` family-grid kernel optimisation — working status
 
+Round 2 (branch `perf/qvq-grid-kernel-opt-r2`, base `agent/qvq-dual-v4` @ 351f5dba) is documented at the
+end of this file; the sections below it are the round-1 record, kept verbatim.
+
 Branch `perf/qvq-grid-kernel-opt` (base `perf/qvq-nsys-profile` @ acd959ed). Target: the
 `viterbi_v2_segment_family_grid_trusted` op (61 % of GPU kernel time on Llama-3.2-1B, see
 `docs/qvq_nsys_profile_llama32_1b.md`). Device: NVIDIA PG506-230 (sm_80, 124 SMs).
@@ -99,3 +102,88 @@ in the extension dir on which the next run sleeps forever; delete the dir.
 `QVQ_DISABLE_FUSED_FAMILY_GRID=1` forces the reference path; the variable is read once on first use and cached for
 the process lifetime, so it cannot be toggled mid-process. `torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count()`
 returns the number of fused dispatches so far (used by the tests to assert which path ran).
+
+---
+
+# Round 2 — relaxed rounding, decision-equivalent (branch `perf/qvq-grid-kernel-opt-r2`)
+
+Base `agent/qvq-dual-v4` @ 351f5dba (contains the merged PR #7 profiler and PR #8 fused kernel).
+The round-1 bit-exactness requirement was replaced by **decision equivalence**: floating-point op
+order inside the fused kernel is free, discrete outputs must match the reference path except for
+quantified, provably score-equal near-tie flips, and the real-workload per-module quantization error
+must be equal within noise.
+
+## What shipped
+
+1. **Squared-difference emission** — `emission = (t0-c0)^2 + (t1-c1)^2` (2 FADD + FMUL + FFMA after
+   the two fp16→fp32 conversions) replaces the reference `max(tn + cn − 2·dot, 0)` form
+   (norm 3 ops + dot 2 + expand 2 + clip 1). The sum-of-squares form is `>= +0` by construction, so
+   the clip is free and the per-step `target_norm` disappears.
+2. **Weight folded into one FMA** — `candidate = fma(emission, weight, predecessor)` replaces
+   `clipped*weight` + separate add.
+
+Micro-benchmark (`scripts/benchmark_qvq_family_grid.py`, committed; 3 families x 128 sequences, W2):
+
+| variant | 3x128 weighted ms/call | 3x128 unweighted ms/call |
+|---|---:|---:|
+| round-1 fused kernel (351f5dba) | 4.336 | 4.167 |
+| round-2 emission + weight fold (**shipped**) | **3.479** | **3.452** |
+
+## Verification (relaxed contract)
+
+* **Decision equivalence**: across the round-1 comparison grid (36 configs x 3 families, 1.35M
+  states) the shipped kernel flips **11 states out of 1,345,536** (8.2e-6), all in one
+  scale-4.0 unweighted config, with per-sequence squared error matching the reference within
+  2.1e-7 relative — genuine near-ties.  Max per-sequence squared-error deviation over the grid:
+  1.2e-6 relative.
+* **Stress test** (`test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence`,
+  committed): >= 10k random sequences spanning the batch gate boundary, weighted/unweighted,
+  constrained/unconstrained, XOR-related, arbitrary and duplicated-code bank pairs, plus
+  codebook-snapped adversarial targets; per-sequence loss rtol 2e-4, overall flip bound 1e-3.
+* **Reference-path cases stay bit-exact** (small batches, disabled-flag subprocess test).
+* **Quality equivalence**: see the per-module loss table below.
+
+## Real-workload 2-layer nsys numbers (round 2)
+
+Baseline is the committed round-1 after-capture (`artifacts/nsys/llama32_1b_layers2_fused_*`,
+same box, same env, captured 2026-08-23):
+
+| metric (2 layers, Llama-3.2-1B, W2 v2b2_p32 YAQA) | round-1 fused | round-2 | change |
+|---|---:|---:|---:|
+| family-grid range kernel avg / call | 4.499 ms | RANGE_MS | SPEEDUP |
+| family-grid range kernel time | 57.53 s | RANGE_S | |
+| family-grid range share of GPU kernel time | 37.4 % | RANGE_SHARE | |
+| kernel launches inside the range | 53,024 | RANGE_LAUNCH | |
+| total CUDA kernel time | 153.70 s | TOTAL_S | |
+| `qvq_quantize.main` wall | 181.6 s | WALL_S | |
+
+## Per-module quantization loss (2-layer real run, old vs new kernel)
+
+LOSS_TABLE
+
+## Round-2 dead ends (implemented, measured, reverted — do not retry as-is)
+
+| attempt | 3x128 weighted ms/call | why it lost |
+|---|---:|---|
+| packed `(cost<<4 \| prefix)` int keys, LOP3+IMNMX argmin | 3.385 | 16-ulp tie buckets **and** masked frontier costs: the truncated winner is stored back into `g`, drift cascades and near-tie flips explode from 8e-6 to 1.4e-2 of states at input scale 4; 3 % was not worth it |
+| per-step emission tables `w*(t_c - level)^2` in smem (256 levels/component, 32x lane-replicated, packed u16 rank codebook halves the codebook smem) | 3.976 | conflict-free (replication works, 165K conflicts / 277M wavefronts) but 2 LDS + PRMT extraction + address math per emission costs more issue slots than the 2 conversions + 2 subtracts it removes; LSU 41 %, instructions grew 51.2G -> 60.6G per call |
+| `fminf` value-select + predicated index-select (exact, aimed at ALU-pipe rebalance) | 5.03 | breaks ptxas' predication of the compare/select pair; ~45 % slower |
+
+## Why round 2 plateaus at ~1.25x (ncu evidence, 3x128 shape)
+
+The shipped kernel executes ~51.2G thread-instructions per call: per (h, jj) candidate pair
+(one shared emission + two bank candidates) that is 2 fp16->fp32 conversions (HADD2.F32),
+2 FADD subtracts, FMUL+FFMA for the square, 2 candidate FFMA/FADD, ~6 compare/select ops and
+~2 addressing/loop ops.  Issue slots are 75.7 % busy, FMA pipe 55 %, ALU 64 %,
+`stall_math_pipe_throttle` ~3.2 per issue — the kernel is issue/math-pipe-bound with occupancy
+already fixed at 50 % (64 regs x 1024 threads, 160 KB smem, 1 CTA/SM; 2048 threads/SM would cap
+registers at 32 and spill).  The remaining big-ticket items are the conversions+subtracts
+(killable only by an 8-byte float2 codebook — the round-1 v4 L2-traffic dead end) and the
+compare/select chain (killable only by tie-widening keys — the round-2 masked-frontier dead end).
+Getting beyond ~1.3x needs a different algorithm or hardware (DPX/Hopper min-plus instructions).
+
+## Runtime flags (unchanged)
+
+Gates and fallbacks are identical to round 1: fused path at flattened batch >= 40, sm >= 8.0,
+163 KB opt-in smem, `QVQ_DISABLE_FUSED_FAMILY_GRID=1` escape hatch (now covered by a subprocess
+test), dispatch counter op unchanged.

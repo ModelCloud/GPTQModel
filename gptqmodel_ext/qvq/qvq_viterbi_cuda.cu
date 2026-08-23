@@ -2193,11 +2193,17 @@ void launch_qvq_v2_segment_w25_cooperative(
 //  * the step-127 argmin is fused; the serial traceback runs in a tiny follow-up
 //    kernel so the SM is released as soon as the forward pass ends.
 //
-// Arithmetic is identical to emission<2, half>() and the reference recurrence:
-// same FP32 operation sequence, same lowest-prefix tie precedence (bank-1
-// candidates are visited in ascending bank-1 prefix order inside each block of
-// four prefixes and the block winners are merged with lower_pair()), same
-// bank-0-first boundary merge and bank-major / state-major terminal argmin.
+// Round 2: arithmetic is DECISION-EQUIVALENT to emission<2, half>() and the
+// reference recurrence, not bit-identical — the emission is evaluated as
+// (t0-c0)^2 + (t1-c1)^2 with the step weight folded into one FMA (see
+// fused_emission/fused_candidate), so accumulated costs can differ from the
+// reference in the last ulps and genuine near-ties may resolve differently
+// (measured ~1e-5 of states, score-equal; see
+// docs/qvq_grid_kernel_opt_status.md).  Tie precedence and visit order are
+// unchanged: lowest prefix on equal candidates (bank-1 candidates visited in
+// ascending bank-1 prefix order inside each block of four prefixes, block
+// winners merged with lower_pair()), bank-0-first boundary merge and
+// bank-major / state-major terminal argmin.
 // ---------------------------------------------------------------------------
 
 constexpr int kFusedThreads = 1024;
