@@ -873,6 +873,15 @@ def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(bits,
         assert all(torch.equal(expected[family][index], actual[index][family]) for index in range(3))
 
 
+def _fused_family_grid_dispatch_count() -> int:
+    """Process-wide count of fused W2 family-grid kernel dispatches (see qvq_viterbi_cuda.cu)."""
+
+    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()  # ensure the extension is loaded
+    return int(torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count())
+
+
+# The fused path is gated on the *flattened* batch (families x batch >= 40): per-family
+# batches 1, 2, 3 and 7 (3, 6, 9, 21 sequences) take the reference path, 33+ (99+) the fused kernel.
 @pytest.mark.parametrize("batch", (1, 2, 3, 7, 33, 128, 131))
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
@@ -905,9 +914,12 @@ def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch
     )
     step_weights = (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
 
+    dispatches_before = _fused_family_grid_dispatch_count()
     actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
         sequences, codebooks, transition_bits, 16, overlap, step_weights
     )
+    expected_fused_dispatches = 1 if families * batch >= 40 else 0
+    assert _fused_family_grid_dispatch_count() - dispatches_before == expected_fused_dispatches
     for family in range(families):
         expected = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
             sequences[family],
@@ -922,12 +934,14 @@ def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch
 
 
 @pytest.mark.parametrize("constrained", (False, True))
-def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(constrained):
-    """Bank 1 that is not an XOR-permutation of bank 0 must take the in-kernel general path."""
+@pytest.mark.parametrize("weighted", (False, True))
+def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(constrained, weighted):
+    """Bank 1 that is not an XOR-permutation of bank 0 must take the in-kernel general path
+    (fused_step_general); batch >= 40 per family keeps the fused kernel dispatched."""
 
     bits = 2.0
-    generator = torch.Generator(device="cuda").manual_seed(20260824 + int(constrained))
-    families, batch = 3, 5
+    generator = torch.Generator(device="cuda").manual_seed(20260824 + int(constrained) + 2 * int(weighted))
+    families, batch = 3, 41
     sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
     bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
     codebooks = torch.stack(
@@ -942,13 +956,60 @@ def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(co
         if constrained
         else None
     )
-    actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(sequences, codebooks, transition_bits, 16, overlap, None)
+    step_weights = (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
+    dispatches_before = _fused_family_grid_dispatch_count()
+    actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+        sequences, codebooks, transition_bits, 16, overlap, step_weights
+    )
+    assert _fused_family_grid_dispatch_count() - dispatches_before == 1
     for family in range(families):
         expected = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
-            sequences[family], codebooks[family], transition_bits, 16, None if overlap is None else overlap[family], None
+            sequences[family],
+            codebooks[family],
+            transition_bits,
+            16,
+            None if overlap is None else overlap[family],
+            None if step_weights is None else step_weights[family],
         )
         for index in range(3):
             assert torch.equal(expected[index], actual[index][family]), (family, index)
+
+
+@pytest.mark.parametrize("batch", (40, 67, 128))
+@pytest.mark.parametrize("weighted", (False, True))
+@pytest.mark.parametrize("xor_related_banks", (True, False))
+def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(batch, weighted, xor_related_banks):
+    """viterbi_v2_segment_tail_trusted at W2 with >= 40 sequences runs both passes on the fused
+    family-grid kernel; it must be bit-exact against the reference two-pass construction built
+    from the (never fused) viterbi_v2_segment_grid_trusted op."""
+
+    bits = 2.0
+    generator = torch.Generator(device="cuda").manual_seed(20260826 + batch * 10 + int(weighted) + 2 * int(xor_related_banks))
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
+    bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
+    bank1 = (
+        pgc16_codebook_v2_bank(2, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
+        if xor_related_banks
+        else torch.randn((1 << 16, 2), generator=generator, device="cuda").to(torch.float16)
+    )
+    codebooks = torch.stack((bank0, bank1)).contiguous()
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    assert transition_bits == 4
+    step_weights = (
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+    rotated = torch.roll(sequences, 64, dims=1).contiguous()
+    rotated_weights = None if step_weights is None else torch.roll(step_weights, 64, dims=1).contiguous()
+    reference = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    provisional = reference(rotated, codebooks, transition_bits, 16, None, rotated_weights)
+    overlap = (provisional[0][:, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
+    expected = reference(sequences, codebooks, transition_bits, 16, overlap, step_weights)
+
+    dispatches_before = _fused_family_grid_dispatch_count()
+    actual = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(sequences, codebooks, transition_bits, 16, step_weights)
+    # Provisional (rotated) pass + constrained pass, both on the fused kernel.
+    assert _fused_family_grid_dispatch_count() - dispatches_before == 2
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
 def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch):

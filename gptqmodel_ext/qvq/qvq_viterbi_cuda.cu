@@ -30,6 +30,7 @@
 #include <torch/types.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <type_traits>
@@ -2702,6 +2703,16 @@ __global__ void qvq_fused_w2_traceback_kernel(
   }
 }
 
+// Number of times the fused W2 family-grid kernel was dispatched in this
+// process; exposed as gptqmodel_qvq.fused_family_grid_dispatch_count() so tests
+// can assert that the fused path (not the reference path) produced a result.
+std::atomic<int64_t> g_fused_w2_family_grid_dispatches{0};
+
+int64_t qvq_fused_family_grid_dispatch_count() {
+  return g_fused_w2_family_grid_dispatches.load();
+}
+
+// Read once on first use (cached for the process lifetime).
 bool fused_w2_family_grid_disabled() {
   static const bool disabled = [] {
     const char* value = std::getenv("QVQ_DISABLE_FUSED_FAMILY_GRID");
@@ -2765,6 +2776,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_fused_w2_family_grid_launch(
 
   const int total_units = batch * kFusedSegmentCount;
   const int grid = std::min(properties.multiProcessorCount, total_units);
+  g_fused_w2_family_grid_dispatches.fetch_add(1);
   if (weighted) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(
         qvq_fused_w2_family_grid_kernel<true>,
@@ -3314,6 +3326,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "int segment_steps, Tensor? step_weights=None) -> Tensor");
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+  // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
+  m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
