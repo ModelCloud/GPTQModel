@@ -2915,9 +2915,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   TORCH_CHECK(!cooperative || (!midpoint_only && transition_bits == 5 && bank_count == 2 && segment_steps == 16),
               "cooperative segmented V2 currently supports only full W2.5 B2-P32 recurrence");
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
-  if (grid_parallel && !midpoint_only && family_batch > 0 && transition_bits == 4 && bank_count == 2 &&
-      segment_steps == 16 && codebooks.scalar_type() == at::kHalf &&
-      fused_w2_family_grid_supported(properties)) {
+  // Below ~40 sequences both paths are bound by the serial 127-step chain of a
+  // single sequence and the reference layout (one CTA per bank) has twice the
+  // per-sequence parallelism; measured crossover on the 124-SM sm_80 device.
+  constexpr int fused_minimum_batch = 40;
+  if (grid_parallel && !midpoint_only && family_batch > 0 && batch >= fused_minimum_batch &&
+      transition_bits == 4 && bank_count == 2 && segment_steps == 16 &&
+      codebooks.scalar_type() == at::kHalf && fused_w2_family_grid_supported(properties)) {
     return qvq_fused_w2_family_grid_launch(
         sequences, codebooks, constrained ? overlap : c10::nullopt, weighted ? step_weights : c10::nullopt,
         family_batch, properties, stream);
@@ -3195,6 +3199,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trust
   if (step_weights.has_value()) {
     rotated_weights = at::roll(*step_weights, {midpoint}, {1}).contiguous();
   }
+  // A single two-bank codebook stack is one family whose batch is the whole
+  // batch; that lets the W2 two-pass tail share the fused family-grid kernel.
+  const int single_family_batch =
+      (codebooks.dim() == 3 && codebooks.size(0) == 2) ? static_cast<int>(sequences.size(0)) : 0;
   auto provisional = qvq_viterbi_v2_segment_banked_cuda_impl(
       rotated_sequences,
       codebooks,
@@ -3203,11 +3211,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trust
       c10::nullopt,
       rotated_weights,
       2,
-      false);
+      false,
+      single_family_batch);
   const int64_t overlap_mask = (int64_t{1} << (16 - transition_bits)) - 1;
   auto overlap = std::get<0>(provisional).select(1, midpoint - 1).bitwise_and(overlap_mask).contiguous();
   return qvq_viterbi_v2_segment_banked_cuda_impl(
-      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false,
+      single_family_batch);
 }
 
 at::Tensor qvq_viterbi_v2_segment_midpoint_trusted_cuda(
