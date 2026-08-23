@@ -29,6 +29,9 @@ from gptqmodel.utils.qvq_acceptance_controller import (
     CONTROLLER_SCHEMA,
     CONTROLLER_STAGES,
     controller_authority_receipt,
+    controller_dataset_evidence,
+    load_trust_config,
+    validate_required_command,
     verify_controller_signature,
 )
 
@@ -107,7 +110,7 @@ QWEN3_PROJECTION_DENSE_WEIGHT_COUNT = QWEN3_8B_LAYER_COUNT * sum(
     in_features * out_features
     for in_features, out_features in QWEN3_PROJECTION_DIMENSIONS.values()
 )
-QVQ_PAYLOAD_HASH_SCHEME = "qvq-module-payload-sha256-v1"
+QVQ_PAYLOAD_HASH_SCHEME = "qvq-module-payload-sha256-v2"
 QVQ_OBSERVATION_HASH_SCHEME = "qvq-acceptance-observation-sha256-v1"
 DIVERSE_SELECTION_SCHEME = "canonical-content-utf8-length/identity-utf8/32-bins-of-16/midpoint-rank-8-v1"
 PROJECTION_BOUNDARY = (
@@ -220,6 +223,16 @@ def _valid_sha256(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
+def qwen3_payload_aggregate(module_hashes: Mapping[str, str], tensor_counts: Mapping[str, int]) -> str:
+    digest = hashlib.sha256()
+    _hash_frame(digest, QVQ_PAYLOAD_HASH_SCHEME.encode("utf-8"))
+    for module_name in sorted(module_hashes, key=lambda value: value.encode("utf-8")):
+        _hash_frame(digest, module_name.encode("utf-8"))
+        _hash_frame(digest, bytes.fromhex(module_hashes[module_name]))
+        _hash_frame(digest, struct.pack("<Q", tensor_counts[module_name]))
+    return digest.hexdigest()
+
+
 def valid_qwen3_payload_hashes(payload: Any) -> bool:
     """Validate the complete canonical 252-module live/reloaded payload census."""
 
@@ -227,7 +240,7 @@ def valid_qwen3_payload_hashes(payload: Any) -> bool:
         return False
     module_hashes = payload.get("module_sha256")
     tensor_counts = payload.get("module_tensor_counts")
-    return (
+    structurally_valid = (
         payload.get("scheme") == QVQ_PAYLOAD_HASH_SCHEME
         and payload.get("module_count") == QWEN3_EXPECTED_MODULE_COUNT
         and isinstance(module_hashes, dict)
@@ -238,9 +251,14 @@ def valid_qwen3_payload_hashes(payload: Any) -> bool:
         and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in tensor_counts.values())
         and _valid_sha256(payload.get("aggregate_sha256"))
     )
+    if not structurally_valid:
+        return False
+    return payload["aggregate_sha256"] == qwen3_payload_aggregate(module_hashes, tensor_counts)
 
 
-def validate_producer_pre_save_measurement(measurement: Any, *, event: Mapping[str, Any]) -> None:
+def validate_producer_pre_save_measurement(
+    measurement: Any, *, event: Mapping[str, Any], controller_datasets: Mapping[str, Any] | None = None
+) -> None:
     """Fail closed before save unless the producer supplied the entire pinned live evidence."""
 
     if not isinstance(measurement, dict):
@@ -261,7 +279,12 @@ def validate_producer_pre_save_measurement(measurement: Any, *, event: Mapping[s
     ):
         raise AcceptanceError("producer config/scope is not the canonical all-layer Qwen3 acceptance run")
     datasets = measurement.get("datasets")
-    if not isinstance(datasets, dict) or set(datasets) != {"calibration", "yaqa", "validation"}:
+    if (
+        not isinstance(datasets, dict)
+        or set(datasets) != {"calibration", "yaqa", "validation"}
+        or controller_datasets is None
+        or datasets != controller_datasets
+    ):
         raise AcceptanceError("producer calibration/evaluation manifest evidence is incomplete")
     for evidence in datasets.values():
         if (
@@ -312,6 +335,14 @@ def validate_controller_transcript(
     ):
         raise AcceptanceError("acceptance controller identities are not unpredictable 256-bit values")
     records = transcript.get("processes")
+    if transcript.get("trust_config_sha256") != hashlib.sha256(canonical_content(load_trust_config())).hexdigest():
+        raise AcceptanceError("controller transcript is not bound to the external operator trust configuration")
+    if (
+        not isinstance(records, list)
+        or not records
+        or transcript.get("controller_datasets") != records[0].get("controller_datasets")
+    ):
+        raise AcceptanceError("controller manifest observations are absent or split")
     controller_pid = transcript.get("controller_pid")
     controller_parent_pid = transcript.get("controller_parent_pid")
     if not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in (controller_pid, controller_parent_pid)):
@@ -372,16 +403,31 @@ def validate_controller_transcript(
         argv_digest = hashlib.sha256(b"\0".join(os.fsencode(item) for item in argv)).hexdigest()
         if record.get("argv_sha256") != argv_digest:
             raise AcceptanceError(f"controller {stage} argv digest is invalid")
-        script = argv[1] if len(argv) > 1 else ""
-        tail = argv[2:]
-        if stage == CONTROLLER_STAGES[0]:
-            canonical = script.endswith("/scripts/qvq_quantize.py") and "--verify-qwen3-acceptance-payload-parity" in tail
-        elif stage == CONTROLLER_STAGES[1]:
-            canonical = script.endswith("/scripts/accept_qwen3_8b_qvq.py") and tail[:1] == ["payload-hashes"]
-        else:
-            canonical = script.endswith("/scripts/accept_qwen3_8b_qvq.py") and tail[:1] == ["evaluate"]
-        if not canonical:
+        try:
+            command_values = validate_required_command(stage, argv)
+        except (RuntimeError, ValueError) as error:
+            raise AcceptanceError(f"controller {stage} command is not the canonical required command") from error
+        os_process = record.get("os_process")
+        trust = load_trust_config()
+        expected_cmdline = b"\0".join(os.fsencode(item) for item in argv) + b"\0"
+        if (
+            not isinstance(os_process, dict)
+            or os_process.get("pid") != record.get("pid")
+            or os_process.get("ppid") != controller_pid
+            or not isinstance(os_process.get("start_time_ticks"), int)
+            or os_process.get("start_time_ticks") <= 0
+            or os_process.get("executable") != str(Path(trust["python_executable"]).resolve())
+            or os_process.get("executable_sha256") != trust["python_executable_sha256"]
+            or os_process.get("cmdline_sha256") != hashlib.sha256(expected_cmdline).hexdigest()
+        ):
             raise AcceptanceError(f"controller {stage} command is not the canonical required command")
+        if stage == CONTROLLER_STAGES[0]:
+            try:
+                observed_datasets = controller_dataset_evidence(command_values)
+            except RuntimeError as error:
+                raise AcceptanceError("controller cannot reproduce trusted producer manifests") from error
+            if observed_datasets != transcript.get("controller_datasets"):
+                raise AcceptanceError("signed controller manifest observations mismatch trusted pre-run inputs")
         acknowledgement = record.get("acknowledgement")
         if not isinstance(acknowledgement, dict) or acknowledgement.get("acknowledged_event_sha256") != record.get("event_sha256"):
             raise AcceptanceError(f"controller {stage} acknowledgement is absent or unbound")
@@ -399,8 +445,6 @@ def validate_controller_transcript(
             or event.get("stage") != stage
             or event.get("stage_nonce") != stage_nonce
             or event.get("process_instance_id") != instance
-            or event.get("child_pid") != record.get("pid")
-            or event.get("child_parent_pid") != controller_pid
             or record.get("event_sha256") != hashlib.sha256(canonical_content(event)).hexdigest()
         ):
             raise AcceptanceError(f"controller {stage} event is not bound to its spawned process instance")
@@ -413,6 +457,8 @@ def validate_controller_transcript(
         raise AcceptanceError("controller stage measurements are absent")
     if producer_measurement.get("dense_source_binding") != dense_binding:
         raise AcceptanceError("dense source binding was not emitted by the controller-spawned producer")
+    if producer_measurement.get("datasets") != transcript.get("controller_datasets"):
+        raise AcceptanceError("producer manifest assertions do not match controller-opened trusted inputs")
     expected_parity = {
         "verified": True,
         "controller_run_nonce": transcript["run_nonce"],
@@ -764,17 +810,12 @@ def hash_qvq_module_payloads(
             _hash_frame(digest, raw)
         module_hashes[module_name] = digest.hexdigest()
         tensor_counts[module_name] = len(tensors)
-    aggregate = hashlib.sha256()
-    _hash_frame(aggregate, QVQ_PAYLOAD_HASH_SCHEME.encode("utf-8"))
-    for module_name, module_hash in module_hashes.items():
-        _hash_frame(aggregate, module_name.encode("utf-8"))
-        _hash_frame(aggregate, bytes.fromhex(module_hash))
     return {
         "scheme": QVQ_PAYLOAD_HASH_SCHEME,
         "module_count": len(module_hashes),
         "module_sha256": module_hashes,
         "module_tensor_counts": tensor_counts,
-        "aggregate_sha256": aggregate.hexdigest(),
+        "aggregate_sha256": qwen3_payload_aggregate(module_hashes, tensor_counts),
     }
 
 

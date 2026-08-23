@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -57,8 +58,42 @@ def _trusted_test_verifier(tmp_path, monkeypatch):
     subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(private)], check=True)
     subprocess.run(["openssl", "pkey", "-in", str(private), "-pubout", "-out", str(public)], check=True)
     private.chmod(0o600)
-    monkeypatch.setattr(controller_module, "PINNED_VERIFIER_PUBLIC_KEY", public)
+    python = Path(sys.executable).resolve()
+    openssl = Path(subprocess.check_output(["which", "openssl"], text=True).strip()).resolve()
+    scripts = {
+        "quantization_producer": Path.cwd() / "scripts" / "qvq_quantize.py",
+        "fresh_process_reload": Path.cwd() / "scripts" / "accept_qwen3_8b_qvq.py",
+        "acceptance_evaluation": Path.cwd() / "scripts" / "accept_qwen3_8b_qvq.py",
+    }
+    trust = tmp_path / "trust.json"
+    trust.write_text(json.dumps({
+        "schema": "qvq-acceptance-trust-v1",
+        "verifier_public_key": str(public),
+        "verifier_public_key_sha256": acceptance_script._sha256_file(public),
+        "python_executable": str(python),
+        "python_executable_sha256": acceptance_script._sha256_file(python),
+        "openssl_executable": str(openssl),
+        "openssl_executable_sha256": acceptance_script._sha256_file(openssl),
+        "stage_scripts": {
+            stage: {"path": str(path), "sha256": acceptance_script._sha256_file(path)}
+            for stage, path in scripts.items()
+        },
+    }), encoding="utf-8")
+    trust.chmod(0o600)
     monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(private))
+    monkeypatch.setenv(controller_module.TRUST_CONFIG_ENV, str(trust))
+    input_root = tmp_path / "inputs"
+    input_root.mkdir()
+    for split, stem in (("calibration", "calibration"), ("yaqa_tuning", "yaqa_tuning"),
+                        ("validation", "validation")):
+        records = [
+            {"identity": f"{split}:{index}", "content": {"split": split, "index": index}}
+            for index in range(512)
+        ]
+        source = input_root / f"{stem}.jsonl"
+        source.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in records), encoding="utf-8")
+        acceptance.materialize_manifest(split, records, input_root / f"{stem}.manifest.json", expected_count=512)
+    monkeypatch.setenv("GPTQMODEL_QVQ_TEST_INPUT_ROOT", str(input_root))
 
 
 def validate_acceptance_report(report):
@@ -66,6 +101,25 @@ def validate_acceptance_report(report):
         report,
         controller_authority=report.get("_test_controller_authority"),
     )
+
+
+def _resign_controller_report(report):
+    transcript = report["artifact"]["acceptance_controller"]
+    previous = None
+    for record in transcript["processes"]:
+        record["event_sha256"] = hashlib.sha256(acceptance.canonical_content(record["event"])).hexdigest()
+        record["acknowledgement"]["acknowledged_event_sha256"] = record["event_sha256"]
+        record["previous_record_sha256"] = previous
+        unsigned = dict(record)
+        unsigned.pop("record_sha256", None)
+        record["record_sha256"] = hashlib.sha256(acceptance.canonical_content(unsigned)).hexdigest()
+        previous = record["record_sha256"]
+    transcript.pop("controller_signature_ed25519", None)
+    private = Path(os.environ[controller_module.VERIFIER_PRIVATE_KEY_ENV]).read_bytes()
+    transcript["controller_signature_ed25519"] = controller_module._sign(
+        private, acceptance.canonical_content(transcript)
+    )
+    report["_test_controller_authority"] = controller_authority_receipt(transcript)
 
 
 class _Packed(nn.Module):
@@ -383,8 +437,11 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
         "module_count": 252,
         "module_sha256": {name: "f" * 64 for name in expected_projection_names()},
         "module_tensor_counts": {name: 5 for name in expected_projection_names()},
-        "aggregate_sha256": "a" * 64,
+        "aggregate_sha256": "",
     }
+    payload_hashes["aggregate_sha256"] = acceptance.qwen3_payload_aggregate(
+        payload_hashes["module_sha256"], payload_hashes["module_tensor_counts"]
+    )
     controller = AcceptanceController()
     producer_instance, reload_instance, evaluation_instance = (secrets.token_hex(32) for _ in range(3))
     producer_nonce, reload_nonce, evaluation_nonce = (secrets.token_hex(32) for _ in range(3))
@@ -414,25 +471,51 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
         "start": start,
         "end": end,
     }
+    test_root = Path(os.environ["GPTQMODEL_QVQ_TEST_INPUT_ROOT"]).resolve()
+    producer_datasets = controller_module.controller_dataset_evidence({
+        "--calibration-dataset": str(test_root / "calibration.jsonl"),
+        "--yaqa-dataset": str(test_root / "yaqa_tuning.jsonl"),
+        "--validation-dataset": str(test_root / "validation.jsonl"),
+    })
     measurements = (
         {"dense_source_binding": dense_binding, "pre_save": {"dense_source_end_sha256": end["observation_sha256"], "payload": payload_hashes},
          "quantize_config": {"bits": 2, "format": "qvq_v2b2_p32", "group_size": -1, "rounding": "yaqa", "sym": True, "pack_dtype": "int32", "bank_count": 2},
          "quant_config_authority_sha256": acceptance._sha256_file(Path.cwd() / "configs" / "qwen3_8b_qvq_w2_acceptance.json"),
-         "layer_scope": "all", "datasets": {name: {"rows": 512, "content_sha256": "1" * 64, "identity_manifest_sha256": "2" * 64, "manifest_verified": True} for name in ("calibration", "yaqa", "validation")}},
+         "layer_scope": "all", "datasets": producer_datasets},
         {"payload": payload_hashes},
         {"payload": payload_hashes},
     )
     instances = (producer_instance, reload_instance, evaluation_instance)
     nonces = (producer_nonce, reload_nonce, evaluation_nonce)
     stages = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
+    producer_datasets = measurements[0]["datasets"]
     records = []
     for index, (stage, instance, nonce, measurement) in enumerate(zip(stages, instances, nonces, measurements)):
-        command = [
-            sys.executable,
-            str(Path.cwd() / "scripts" / ("qvq_quantize.py" if index == 0 else "accept_qwen3_8b_qvq.py")),
-            *([] if index == 0 else ["payload-hashes" if index == 1 else "evaluate"]),
-            *(["--verify-qwen3-acceptance-payload-parity"] if index == 0 else []),
-        ]
+        python = controller_module.trusted_python_executable()
+        accept_script = str(Path.cwd() / "scripts" / "accept_qwen3_8b_qvq.py")
+        if index == 0:
+            command = [
+                python, str(Path.cwd() / "scripts" / "qvq_quantize.py"),
+                "--model", "/monster/data/model/Qwen3-8B", "--output", str(test_root / "checkpoint"),
+                "--quant-config", str(Path.cwd() / "configs" / "qwen3_8b_qvq_w2_acceptance.json"),
+                "--calibration-dataset", str(test_root / "calibration.jsonl"), "--calibration-rows", "512",
+                "--yaqa-dataset", str(test_root / "yaqa_tuning.jsonl"), "--yaqa-rows", "512",
+                "--validation-dataset", str(test_root / "validation.jsonl"), "--validation-rows", "512",
+                "--device", "cuda:0", "--verify-qwen3-acceptance-payload-parity",
+            ]
+        elif index == 1:
+            command = [python, accept_script, "payload-hashes", "--checkpoint", str(test_root / "checkpoint"),
+                       "--device", "cuda:0", "--output", str(test_root / "reload.json")]
+        else:
+            command = [
+                python, accept_script, "evaluate", "--dense-model", "/monster/data/model/Qwen3-8B",
+                "--revision", QWEN3_PINNED_REVISION, "--checkpoint", str(test_root / "checkpoint"),
+                "--manifest-dir", str(test_root), "--validation-jsonl", str(test_root / "validation.jsonl"),
+                "--held-out-diagnostics-jsonl", str(test_root / "held_out_diagnostics.jsonl"),
+                "--diverse-jsonl", str(test_root / "diverse_32.jsonl"), "--device", "cuda:0",
+                "--maximum-bpw", "2.1", "--score-min", "0.85", "--final-kl-max-nats", "0.2",
+                "--output", str(test_root / "draft.json"),
+            ]
         event = {
             "run_nonce": controller.run_nonce,
             "controller_instance_id": controller.controller_instance_id,
@@ -440,8 +523,6 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
             "stage": stage,
             "stage_nonce": nonce,
             "process_instance_id": instance,
-            "child_pid": (700, 700, 701)[index],
-            "child_parent_pid": controller.controller_pid,
             "measurement": measurement,
         }
         record = {
@@ -450,6 +531,13 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
             "process_instance_id": instance,
             "pid": (700, 700, 701)[index],
             "parent_pid": controller.controller_pid,
+            "os_process": {
+                "pid": (700, 700, 701)[index], "ppid": controller.controller_pid,
+                "start_time_ticks": 1000 + index,
+                "executable": controller_module.trusted_python_executable(),
+                "executable_sha256": controller_module.load_trust_config()["python_executable_sha256"],
+                "cmdline_sha256": hashlib.sha256(b"\0".join(item.encode() for item in command) + b"\0").hexdigest(),
+            },
             "argv": command,
             "argv_sha256": hashlib.sha256(b"\0".join(item.encode() for item in command)).hexdigest(),
             "spawned_monotonic_ns": index * 10 + 1,
@@ -460,6 +548,7 @@ def _complete_report(score=0.85, kl=0.1, diverse_score=None):
             "event": event,
             "event_sha256": hashlib.sha256(acceptance.canonical_content(event)).hexdigest(),
             "previous_record_sha256": records[-1]["record_sha256"] if records else None,
+            "controller_datasets": producer_datasets if index == 0 else None,
         }
         record["acknowledgement"] = {
             "acknowledged_event_sha256": record["event_sha256"],
@@ -619,7 +708,7 @@ def test_report_rejects_asserted_or_drifted_payload_parity():
 
     report = _complete_report()
     report["artifact"]["packed_payload_parity"]["fresh_process"]["payload"]["aggregate_sha256"] = "0" * 64
-    with pytest.raises(AcceptanceError, match="authority|controller-bound|signature"):
+    with pytest.raises(AcceptanceError, match="authority|controller-bound|signature|noncanonical"):
         validate_acceptance_report(report)
 
     report = _complete_report()
@@ -652,6 +741,14 @@ def test_controller_provenance_accepts_pid_reuse_with_distinct_process_instances
     validate_acceptance_report(report)
 
 
+def test_controller_observes_process_facts_from_linux_proc():
+    observed = controller_module._observe_linux_process(os.getpid())
+    assert observed["pid"] == os.getpid()
+    assert observed["ppid"] == os.getppid()
+    assert observed["start_time_ticks"] > 0
+    assert observed["executable_sha256"] == acceptance_script._sha256_file(Path(observed["executable"]))
+
+
 def test_controller_issues_unpredictable_run_stage_and_process_instance_identities(tmp_path):
     first = AcceptanceController()
     second = AcceptanceController()
@@ -672,12 +769,106 @@ def test_controller_fails_closed_without_or_with_mismatched_trust_root(tmp_path,
         AcceptanceController()
 
 
+@pytest.mark.parametrize("mode", [0o700, 0o644])
+def test_controller_rejects_nonexact_private_key_modes(mode):
+    private = Path(os.environ[controller_module.VERIFIER_PRIVATE_KEY_ENV])
+    private.chmod(mode)
+    with pytest.raises(RuntimeError, match="mode must be exactly 0600"):
+        AcceptanceController()
+
+
+def test_controller_rejects_private_key_symlink_and_path_replacement(tmp_path, monkeypatch):
+    private = Path(os.environ[controller_module.VERIFIER_PRIVATE_KEY_ENV])
+    link = tmp_path / "private-link.pem"
+    link.symlink_to(private)
+    monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(link))
+    with pytest.raises(RuntimeError, match="opened safely"):
+        AcceptanceController()
+    monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(private))
+    controller = AcceptanceController()
+    replacement = tmp_path / "replacement.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(replacement)], check=True)
+    replacement.chmod(0o600)
+    private.unlink()
+    replacement.rename(private)
+    with pytest.raises(RuntimeError, match="path changed"):
+        controller.signed_transcript(require_complete=False)
+
+
+def test_external_trust_fingerprint_mismatch_and_repo_key_replacement(tmp_path, monkeypatch):
+    trust_path = Path(os.environ[controller_module.TRUST_CONFIG_ENV])
+    trust = json.loads(trust_path.read_text())
+    trust["verifier_public_key_sha256"] = "0" * 64
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+    with pytest.raises(RuntimeError, match="identity is absent or mismatched"):
+        AcceptanceController()
+    repo_key = Path.cwd() / "configs" / "attacker-verifier-public.pem"
+    repo_key.write_text(Path(trust["verifier_public_key"]).read_text(), encoding="ascii")
+    try:
+        trust["verifier_public_key"] = str(repo_key)
+        trust["verifier_public_key_sha256"] = acceptance_script._sha256_file(repo_key)
+        trust_path.write_text(json.dumps(trust), encoding="utf-8")
+        trust_path.chmod(0o600)
+        with pytest.raises(RuntimeError, match="outside the candidate repository"):
+            AcceptanceController()
+    finally:
+        repo_key.unlink()
+
+
 def test_controller_production_api_rejects_command_substitution():
     controller = AcceptanceController()
-    with pytest.raises(ValueError, match="substituted the required executable"):
+    with pytest.raises(ValueError, match="trusted interpreter|required executable"):
         controller.spawn_stage(
             "fresh_process_reload", [sys.executable, "-c", "raise SystemExit(0)"], cwd=Path.cwd()
         )
+
+
+@pytest.mark.parametrize("attack", ["argv0", "extra_flag", "duplicate_flag"])
+def test_controller_rejects_resigned_noncanonical_producer_argv(attack):
+    report = _complete_report()
+    record = report["artifact"]["acceptance_controller"]["processes"][0]
+    if attack == "argv0":
+        record["argv"][0] = "/bin/true"
+        record["os_process"]["executable"] = "/bin/true"
+        record["os_process"]["executable_sha256"] = acceptance_script._sha256_file(Path("/bin/true"))
+    elif attack == "extra_flag":
+        record["argv"].append("--attacker-extra")
+    else:
+        record["argv"][4:4] = ["--model", "/monster/data/model/Qwen3-8B"]
+    record["argv_sha256"] = hashlib.sha256(b"\0".join(item.encode() for item in record["argv"])).hexdigest()
+    record["os_process"]["cmdline_sha256"] = hashlib.sha256(
+        b"\0".join(item.encode() for item in record["argv"]) + b"\0"
+    ).hexdigest()
+    _resign_controller_report(report)
+    with pytest.raises(AcceptanceError, match="canonical required command"):
+        validate_acceptance_report(report)
+
+
+def test_controller_rejects_well_formed_fake_manifest_hashes():
+    report = _complete_report()
+    transcript = report["artifact"]["acceptance_controller"]
+    fake = json.loads(json.dumps(transcript["controller_datasets"]))
+    fake["calibration"]["content_sha256"] = "9" * 64
+    transcript["controller_datasets"] = fake
+    transcript["processes"][0]["controller_datasets"] = fake
+    transcript["processes"][0]["event"]["measurement"]["datasets"] = fake
+    _resign_controller_report(report)
+    with pytest.raises(AcceptanceError, match="manifest observations mismatch"):
+        validate_acceptance_report(report)
+
+
+@pytest.mark.parametrize("field", ["aggregate", "module"])
+def test_controller_rejects_internally_inconsistent_payload_aggregate(field):
+    report = _complete_report()
+    payload = report["artifact"]["packed_payload_parity"]["pre_save"]["payload"]
+    if field == "aggregate":
+        payload["aggregate_sha256"] = "0" * 64
+    else:
+        payload["module_sha256"][expected_projection_names()[0]] = "0" * 64
+    _resign_controller_report(report)
+    with pytest.raises(AcceptanceError, match="noncanonical hash scheme"):
+        validate_acceptance_report(report)
 
 
 def test_gate_rejects_complete_attacker_key_final_checkpoint_fabrication(tmp_path):
@@ -695,7 +886,7 @@ def test_gate_rejects_complete_attacker_key_final_checkpoint_fabrication(tmp_pat
     )
     report["artifact"]["acceptance_controller"] = transcript
     attacker_receipt = {
-        "schema": "qvq-acceptance-controller-trust-root-v2",
+        "schema": "qvq-acceptance-controller-trust-root-v3",
         "controller_instance_id": transcript["controller_instance_id"],
         "run_nonce": transcript["run_nonce"],
         "verifier_public_key_sha256": hashlib.sha256(attacker_public_bytes).hexdigest(),
@@ -705,21 +896,28 @@ def test_gate_rejects_complete_attacker_key_final_checkpoint_fabrication(tmp_pat
         _validate_acceptance_report(report, controller_authority=attacker_receipt)
 
 
-@pytest.mark.parametrize("attack", ["command", "parent", "child", "injected", "split_identity"])
+@pytest.mark.parametrize("attack", ["command", "parent", "os_parent", "injected", "split_identity"])
 def test_controller_rejects_signed_record_fact_substitution(attack):
     report = _complete_report()
     transcript = report["artifact"]["acceptance_controller"]
     records = transcript["processes"]
     if attack == "command":
         records[1]["argv"][2] = "evaluate"
+        records[1]["argv_sha256"] = hashlib.sha256(
+            b"\0".join(item.encode() for item in records[1]["argv"])
+        ).hexdigest()
+        records[1]["os_process"]["cmdline_sha256"] = hashlib.sha256(
+            b"\0".join(item.encode() for item in records[1]["argv"]) + b"\0"
+        ).hexdigest()
     elif attack == "parent":
         records[0]["parent_pid"] += 1
-    elif attack == "child":
-        records[0]["event"]["child_pid"] += 1
+    elif attack == "os_parent":
+        records[0]["os_process"]["ppid"] += 1
     elif attack == "injected":
         records.append(dict(records[-1]))
     else:
         report["artifact"]["dense_source_binding"]["producer_stage_nonce"] = records[1]["stage_nonce"]
+    _resign_controller_report(report)
     with pytest.raises(AcceptanceError):
         validate_acceptance_report(report)
 
@@ -729,7 +927,9 @@ def test_invalid_producer_payload_is_rejected_before_acknowledgement():
     event = report["artifact"]["acceptance_controller"]["processes"][0]["event"]
     event["measurement"]["pre_save"]["payload"]["module_sha256"].pop(expected_projection_names()[0])
     with pytest.raises(AcceptanceError, match="pre-save controller validation"):
-        acceptance.validate_producer_pre_save_measurement(event["measurement"], event=event)
+        acceptance.validate_producer_pre_save_measurement(
+            event["measurement"], event=event, controller_datasets=event["measurement"]["datasets"]
+        )
 
 
 def test_controller_rejects_fabricated_final_checkpoint_only_report():

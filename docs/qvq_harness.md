@@ -330,3 +330,83 @@ Implementation gates for this trust-root correction, from parent `49074531c681e4
   `5a16757e0eea7aa47b93b1ffa7e0b6000390cd61264e35ea960681e0dace0930`.
 - Pinned dense identity/integrity revalidation passed for all seven authoritative files, all 36 layers, and revision
   `b968826d9c46dd6066d109eabc6255188de91218`.
+
+## Rejected repository-key/process-assertion design and external deployment authority (2026-08-23)
+
+Independent review rejected commit `c66ceb45` despite its improvement over the transcript-selected key. A public key
+committed in the candidate repository was still candidate-controlled deployment state; stage validation accepted an
+untrusted `argv[0]`, open option sets, child-asserted PID facts, well-formed but unrecomputed manifest/payload hashes,
+and a private-key path that could change between checks. The schema-v2 design above is preserved as rejected history,
+not current authority. In particular, `configs/qwen3_8b_acceptance_verifier_public.pem` is removed.
+
+Schema v3 has two operator inputs, both outside the candidate checkout:
+
+- `GPTQMODEL_QVQ_TRUST_CONFIG` names an absolute, root/operator-owned, regular JSON file with exact mode `0600`.
+  Its closed schema pins the external verifier public-key path and SHA-256, the normalized absolute Python interpreter
+  path and content SHA-256, the OpenSSL executable path/content SHA-256, and the normalized absolute path/content
+  SHA-256 for each producer/reload/evaluation script. The gate reads this deployment authority independently; no
+  transcript or receipt selects a key or executable.
+- `GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY` names an absolute external regular file owned by the effective operator and
+  having exactly mode `0600`. It is opened once with `O_NOFOLLOW|O_CLOEXEC`; data and identity come from the same
+  descriptor and stable `fstat` observations. Symlinks, mode `0700`, mode `0644`, ownership mismatch, in-read changes,
+  and path/inode replacement before signing fail closed. Signing uses only the bytes captured from that stable open.
+
+Provision after installing the reviewed code and interpreter, before exposing any candidate output:
+
+```json
+{
+  "schema": "qvq-acceptance-trust-v1",
+  "verifier_public_key": "/secure/qvq/verifier-public.pem",
+  "verifier_public_key_sha256": "<sha256sum of external verifier-public.pem>",
+  "python_executable": "/absolute/resolved/operator/python",
+  "python_executable_sha256": "<sha256sum of that interpreter>",
+  "openssl_executable": "/absolute/resolved/operator/openssl",
+  "openssl_executable_sha256": "<sha256sum of that OpenSSL executable>",
+  "stage_scripts": {
+    "quantization_producer": {"path": "/reviewed/repo/scripts/qvq_quantize.py", "sha256": "<sha256>"},
+    "fresh_process_reload": {"path": "/reviewed/repo/scripts/accept_qwen3_8b_qvq.py", "sha256": "<sha256>"},
+    "acceptance_evaluation": {"path": "/reviewed/repo/scripts/accept_qwen3_8b_qvq.py", "sha256": "<sha256>"}
+  }
+}
+```
+
+```bash
+chmod 0600 /secure/qvq/trust.json /secure/qvq/verifier-private.pem
+export GPTQMODEL_QVQ_TRUST_CONFIG=/secure/qvq/trust.json
+export GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY=/secure/qvq/verifier-private.pem
+/absolute/resolved/operator/python scripts/accept_qwen3_8b_qvq.py controlled-run ...
+```
+
+Every stage now has one exact ordered argv grammar. The controller and gate require the operator-pinned `argv[0]`,
+exact script path/content identity, unique required options, normalized absolute paths, and no unknown, duplicate, or
+extra flags. After spawn, Linux `/proc/<pid>/{stat,exe,cmdline}` supplies PID, PPID, process start ticks, executable
+identity, and cmdline digest independently of child messages. PID reuse is distinguished by start ticks plus the
+controller-issued process-instance identity.
+
+Before producer spawn, the controller opens all three 512-row JSONL streams and manifests, recomputes file hashes and
+every canonical content hash, verifies ordinal/identity/count agreement, uniqueness, and pairwise identity/content
+disjointness, and retains that evidence in the signed transcript. The producer must return that exact controller-owned
+evidence. Payload hash scheme v2 recomputes the aggregate over the canonical ordered 252 `(module name, module hash,
+tensor count)` records. The producer's live in-memory payload travels on the controller-owned socket and the exact
+event digest is acknowledged only after these checks; the independently spawned reload must subsequently match it.
+
+Adversarial tests re-sign and reseal malicious records so rejection is not an incidental signature/digest failure:
+malicious `argv[0]`, extra/duplicate flags, well-formed fake manifest hashes, inconsistent aggregate/module hashes,
+false OS parent facts, external fingerprint mismatch, attempted repository key substitution, unsafe private modes,
+symlinks, and path replacement all fail closed. This remains implementation evidence only; no real BPW, Top-1,
+Diverse-32, or final-KL metric is claimed.
+
+Implementation gates for the schema-v3 correction, from parent
+`c66ceb45afa321ade50a4dfb4424f1b1c21a8bc3`:
+
+- `HOME=/root pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py`: 83 passed with
+  14 upstream `torch.jit` deprecation warnings.
+- The identical two-file `pytest --collect-only -q` command collected exactly 83 tests.
+- Ruff and `compileall` on both acceptance utilities, both CLIs, and both focused test files passed; `git diff
+  --check` passed.
+- Acceptance root, `gate`, `controlled-run`, `payload-hashes`, `evaluate`, and quantizer help smokes passed.
+- The external trust JSON and private key were root-owned regular files with exact mode `0600`; externally pinned
+  interpreter and stage-script hashes validated; schema-v3 signing/verification passed; repository scanning found no
+  private key material.
+- Pinned dense identity/integrity passed for seven files, layers 0--35, and revision
+  `b968826d9c46dd6066d109eabc6255188de91218`.

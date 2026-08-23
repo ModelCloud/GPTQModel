@@ -455,6 +455,7 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
     evidence["identity_manifest_sha256"] = (
         _sha256_file(manifest) if manifest.is_file() else None
     )
+    evidence["manifest_verified"] = manifest.is_file()
     return evidence
 
 

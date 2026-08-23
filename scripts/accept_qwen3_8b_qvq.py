@@ -65,6 +65,7 @@ from gptqmodel.utils.qvq_acceptance_controller import (
     controller_authority_receipt,
     controller_environment,
     emit_controller_measurement,
+    trusted_python_executable,
     verify_controller_signature,
 )
 
@@ -444,10 +445,11 @@ def _controlled_run(args: argparse.Namespace) -> int:
     if args.output.exists() or args.controller_authority_output.exists():
         raise FileExistsError("refusing to overwrite acceptance report or controller authority receipt")
     controller = AcceptanceController()
+    trusted_python = trusted_python_executable()
     checkpoint = args.checkpoint.expanduser().resolve()
     manifest_dir = args.manifest_dir.expanduser().resolve()
     producer_command = [
-        sys.executable,
+        trusted_python,
         str(REPO_ROOT / "scripts" / "qvq_quantize.py"),
         "--model",
         args.dense_model,
@@ -478,7 +480,7 @@ def _controlled_run(args: argparse.Namespace) -> int:
         temporary_path = Path(temporary)
         reload_output = temporary_path / "reload.json"
         reload_command = [
-            sys.executable,
+            trusted_python,
             str(REPO_ROOT / "scripts" / "accept_qwen3_8b_qvq.py"),
             "payload-hashes",
             "--checkpoint",
@@ -503,7 +505,7 @@ def _controlled_run(args: argparse.Namespace) -> int:
 
         draft_output = temporary_path / "acceptance-draft.json"
         evaluation_command = [
-            sys.executable,
+            trusted_python,
             str(REPO_ROOT / "scripts" / "accept_qwen3_8b_qvq.py"),
             "evaluate",
             "--dense-model",
@@ -515,11 +517,11 @@ def _controlled_run(args: argparse.Namespace) -> int:
             "--manifest-dir",
             str(manifest_dir),
             "--validation-jsonl",
-            str(args.validation_jsonl),
+            str(args.validation_jsonl.expanduser().resolve()),
             "--held-out-diagnostics-jsonl",
-            str(args.held_out_diagnostics_jsonl),
+            str(args.held_out_diagnostics_jsonl.expanduser().resolve()),
             "--diverse-jsonl",
-            str(args.diverse_jsonl),
+            str(args.diverse_jsonl.expanduser().resolve()),
             "--device",
             args.device,
             "--maximum-bpw",
