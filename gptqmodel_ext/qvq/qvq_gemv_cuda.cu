@@ -359,19 +359,19 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
   // Keep the high-unroll path for the small-row kernels where it hides
   // global-load latency without inflating the register/shared-memory image
   // of the wide-row specializations.
-  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 16 : 16);
+  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 16 : 12);
   constexpr int kMaxWords = VectorSize == 2 ? 64 : 32;
-  __shared__ __align__(16) uint32_t packed_words[kUnroll][kMaxWords];
-  __shared__ uint8_t packed_bank_ids[kUnroll];
-  __shared__ __align__(16) Scalar input_tile[kUnroll][ROWS * kTileRows];
+  constexpr int kBatches = 2;
+  __shared__ __align__(16) uint32_t packed_words[kBatches][kUnroll][kMaxWords];
+  __shared__ uint8_t packed_bank_ids[kBatches][kUnroll];
+  __shared__ __align__(16) Scalar input_tile[kBatches][kUnroll][ROWS * kTileRows];
 
-  for (int kb = 0; kb < k_tiles; kb += kUnroll) {
-    const int tiles_here = min(kUnroll, k_tiles - kb);
-    const int words_per_tile = (VectorSize == 2 ? 4 : 2) * transition_bits;
+  const int words_per_tile = (VectorSize == 2 ? 4 : 2) * transition_bits;
+  auto stage_batch = [&](int kb, int tiles_here, int dst) {
     if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
       const int words_per_vec = words_per_tile >> 2;
       const int vec_total = tiles_here * words_per_vec;
-      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0]);
+      uint4* words4 = reinterpret_cast<uint4*>(packed_words[dst][0]);
       const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / words_per_vec;
@@ -386,17 +386,17 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
         const int w = index % words_per_tile;
         const int tile_index = (kb + u) * n_tiles + n_tile;
         const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * words_per_tile;
-        packed_words[u][w] = static_cast<uint32_t>(tile[w]);
+        packed_words[dst][u][w] = static_cast<uint32_t>(tile[w]);
       }
     }
     if (thread < tiles_here) {
       const int tile_index = (kb + thread) * n_tiles + n_tile;
-      packed_bank_ids[thread] = bank_ids == nullptr ? 0 : bank_ids[tile_index];
+      packed_bank_ids[dst][thread] = bank_ids == nullptr ? 0 : bank_ids[tile_index];
     }
     if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
       constexpr int row_vecs = kTileRows * static_cast<int>(sizeof(Scalar)) / static_cast<int>(sizeof(uint4));
       const int vec_total = tiles_here * ROWS * row_vecs;
-      uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
+      uint4* input4 = reinterpret_cast<uint4*>(input_tile[dst][0]);
       const uint4* input4_base = reinterpret_cast<const uint4*>(input);
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / (ROWS * row_vecs);
@@ -415,12 +415,24 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
         const int cell = index % (ROWS * kTileRows);
         const int row = cell / kTileRows;
         const int k_local = cell % kTileRows;
-        input_tile[u][cell] = row < block_rows
+        input_tile[dst][u][cell] = row < block_rows
             ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows + k_local]
             : ScalarTraits<Scalar>::from_float(0.0f);
       }
     }
-    __syncthreads();
+  };
+
+  // Software-pipelined main loop: while one shared buffer is consumed by the
+  // FMA/decode phase, the next batch streams into the other buffer, so global
+  // load latency overlaps compute and one barrier per iteration suffices.
+  stage_batch(0, min(kUnroll, k_tiles), 0);
+  __syncthreads();
+  int parity = 0;
+  for (int kb = 0; kb < k_tiles; kb += kUnroll) {
+    const int tiles_here = min(kUnroll, k_tiles - kb);
+    if (kb + kUnroll < k_tiles) {
+      stage_batch(kb + kUnroll, min(kUnroll, k_tiles - kb - kUnroll), parity ^ 1);
+    }
 
 #pragma unroll 4
     for (int u = 0; u < kUnroll; ++u) {
@@ -430,22 +442,23 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
         float weight;
         if constexpr (TransitionBits != 0) {
           weight = qvq_decode_weight_fast<TransitionBits, VectorSize>(
-              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local,
+              packed_words[parity][u], bank_ids == nullptr ? 0 : packed_bank_ids[parity][u], cached_levels, local,
               bank_mode, bank_alt_id);
         } else {
           weight = qvq_decode_weight<VectorSize>(
-              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
-              bank_mode, bank_alt_id);
+              packed_words[parity][u], bank_ids == nullptr ? 0 : packed_bank_ids[parity][u], cached_levels, local,
+              transition_bits, bank_mode, bank_alt_id);
         }
 
 #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
           accumulator[r] = fmaf(
-              ScalarTraits<Scalar>::to_float(input_tile[u][r * kTileRows + k_slot]), weight, accumulator[r]);
+              ScalarTraits<Scalar>::to_float(input_tile[parity][u][r * kTileRows + k_slot]), weight, accumulator[r]);
         }
       }
     }
     __syncthreads();
+    parity ^= 1;
   }
 
   // Deterministic k-slot reduction: each warp sums its 2 k-slots via shuffles,
@@ -519,19 +532,19 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
     accumulator[r] = 0.0f;
   }
 
-  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 16 : 16);
+  constexpr int kUnroll = ROWS <= 8 ? 24 : (ROWS == 16 ? 16 : 12);
   constexpr int kMaxWords = VectorSize == 2 ? 64 : 32;
-  __shared__ __align__(16) uint32_t packed_words[kUnroll][kMaxWords];
-  __shared__ uint8_t packed_bank_ids[kUnroll];
-  __shared__ __align__(16) Scalar input_tile[kUnroll][ROWS * kTileRows];
+  constexpr int kBatches = 2;
+  __shared__ __align__(16) uint32_t packed_words[kBatches][kUnroll][kMaxWords];
+  __shared__ uint8_t packed_bank_ids[kBatches][kUnroll];
+  __shared__ __align__(16) Scalar input_tile[kBatches][kUnroll][ROWS * kTileRows];
 
-  for (int kb = k_tile_begin; kb < k_tile_end; kb += kUnroll) {
-    const int tiles_here = min(kUnroll, k_tile_end - kb);
-    const int words_per_tile = (VectorSize == 2 ? 4 : 2) * transition_bits;
+  const int words_per_tile = (VectorSize == 2 ? 4 : 2) * transition_bits;
+  auto stage_batch = [&](int kb, int tiles_here, int dst) {
     if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
       const int words_per_vec = words_per_tile >> 2;
       const int vec_total = tiles_here * words_per_vec;
-      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0]);
+      uint4* words4 = reinterpret_cast<uint4*>(packed_words[dst][0]);
       const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / words_per_vec;
@@ -545,17 +558,17 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
         const int w = index % words_per_tile;
         const int tile_index = (kb + u) * n_tiles + n_tile;
         const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * words_per_tile;
-        packed_words[u][w] = static_cast<uint32_t>(tile[w]);
+        packed_words[dst][u][w] = static_cast<uint32_t>(tile[w]);
       }
     }
     if (thread < tiles_here) {
       const int tile_index = (kb + thread) * n_tiles + n_tile;
-      packed_bank_ids[thread] = bank_ids == nullptr ? 0 : bank_ids[tile_index];
+      packed_bank_ids[dst][thread] = bank_ids == nullptr ? 0 : bank_ids[tile_index];
     }
     if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
       constexpr int row_vecs = kTileRows * static_cast<int>(sizeof(Scalar)) / static_cast<int>(sizeof(uint4));
       const int vec_total = tiles_here * ROWS * row_vecs;
-      uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
+      uint4* input4 = reinterpret_cast<uint4*>(input_tile[dst][0]);
       const uint4* input4_base = reinterpret_cast<const uint4*>(input);
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / (ROWS * row_vecs);
@@ -574,12 +587,23 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
         const int cell = index % (ROWS * kTileRows);
         const int row = cell / kTileRows;
         const int k_local = cell % kTileRows;
-        input_tile[u][cell] = row < block_rows
+        input_tile[dst][u][cell] = row < block_rows
             ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows + k_local]
             : ScalarTraits<Scalar>::from_float(0.0f);
       }
     }
-    __syncthreads();
+  };
+
+  // Software-pipelined split-K loop: same double-buffer scheme as the plain
+  // GEMV kernel (one barrier per iteration, loads overlap the decode/FMA phase).
+  stage_batch(k_tile_begin, min(kUnroll, k_tile_end - k_tile_begin), 0);
+  __syncthreads();
+  int parity = 0;
+  for (int kb = k_tile_begin; kb < k_tile_end; kb += kUnroll) {
+    const int tiles_here = min(kUnroll, k_tile_end - kb);
+    if (kb + kUnroll < k_tile_end) {
+      stage_batch(kb + kUnroll, min(kUnroll, k_tile_end - kb - kUnroll), parity ^ 1);
+    }
 
 #pragma unroll 4
     for (int u = 0; u < kUnroll; ++u) {
@@ -588,22 +612,23 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
         float weight;
         if constexpr (TransitionBits != 0) {
           weight = qvq_decode_weight_fast<TransitionBits, VectorSize>(
-              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local,
+              packed_words[parity][u], bank_ids == nullptr ? 0 : packed_bank_ids[parity][u], cached_levels, local,
               bank_mode, bank_alt_id);
         } else {
           weight = qvq_decode_weight<VectorSize>(
-              packed_words[u], bank_ids == nullptr ? 0 : packed_bank_ids[u], cached_levels, local, transition_bits,
-              bank_mode, bank_alt_id);
+              packed_words[parity][u], bank_ids == nullptr ? 0 : packed_bank_ids[parity][u], cached_levels, local,
+              transition_bits, bank_mode, bank_alt_id);
         }
 
 #pragma unroll
         for (int r = 0; r < ROWS; ++r) {
           accumulator[r] = fmaf(
-              ScalarTraits<Scalar>::to_float(input_tile[u][r * kTileRows + k_slot]), weight, accumulator[r]);
+              ScalarTraits<Scalar>::to_float(input_tile[parity][u][r * kTileRows + k_slot]), weight, accumulator[r]);
         }
       }
     }
     __syncthreads();
+    parity ^= 1;
   }
 
   for (int r = 0; r < block_rows; ++r) {
@@ -1087,7 +1112,9 @@ at::Tensor qvq_gemv_cuda_impl(
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  const int64_t base_blocks = (out_features / kTileColumns) * ((size_m + kRowsPerBlock - 1) / kRowsPerBlock);
+  const int64_t n_tiles = out_features / kTileColumns;
+  const int64_t m_stripes = (size_m + kRowsPerBlock - 1) / kRowsPerBlock;
+  const int64_t base_blocks = n_tiles * m_stripes;
   const int64_t target_blocks = static_cast<int64_t>(properties.multiProcessorCount) * 6;
   const int64_t k_tiles = size_k / kTileRows;
   const int split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
