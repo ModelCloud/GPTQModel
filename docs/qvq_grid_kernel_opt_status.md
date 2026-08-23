@@ -84,6 +84,48 @@ by simulation only; cross-family emission sharing was ruled out by inspection of
 | exact candidate pruning (sorted predecessor G) | simulation only, not implemented | mean 9.2/16 candidates but warp-max 14.95/16: SIMT divergence |
 | share emissions across the 3 families | not applicable, not implemented | only the sampled-selection call site shares sequences; the dominant block-LDLQ site does not |
 
+## Rejected follow-up: eight-prefix ILP in the reference segment-grid recurrence
+
+On 2026-08-23, after PR #8 was merged into `main` at `351f5dba`, the remaining non-`Shift == 7`
+recurrence immediately before `g_scratch[x] = best` was tested with eight-prefix chunks.  Each chunk issued all
+predecessor loads and emissions before folding candidates through `lower_pair` in ascending `h` order; `__fadd_rn`,
+the fused-boundary branch, backpointers, and barriers were unchanged.  A scalar compile-time remainder handled prefix
+counts not divisible by eight.  A second form kept predecessor costs and emissions in separate register arrays and
+performed `__fadd_rn` during the ordered fold.  Both forms compiled and passed the complete focused CUDA subset
+bit-exactly (`170 passed`, command below), but neither improved the target operation, so the kernel change was reverted.
+
+Environment: physical GPU 0, PCI `00000000:25:00.0`, UUID
+`GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2`, NVIDIA PG506-230, `sm_80`, 124 SMs, 96 GiB;
+Python 3.14.7 free-threaded, PyTorch 2.13.0+cu130, CUDA 13.0, `TORCH_CUDA_ARCH_LIST=8.0`.
+The idle gate observed 0 MiB and 0% utilization for three consecutive samples.  CUDA-event timings use 20 warmups
+and 100 samples with identical seeded FP16 PGC16 codebooks, constrained overlaps, and step weights.
+
+| W2 / transition-W4 batch | `main` grid-op median ms | chunked candidate ms | separate-array candidate ms |
+|---:|---:|---:|---:|
+| 8 | 1.222656 | 1.227776 | 1.228800 |
+| 16 | 1.241088 | 1.245184 | 1.247232 |
+| 32 | 1.273856 | 1.274880 | 1.275904 |
+| 64 | 2.309120 | 2.322432 | 2.317824 |
+| 128 | 3.698688 | 3.694592 | 3.694592 |
+
+The repository tail-biting Viterbi benchmark likewise regressed slightly at every covered batch: baseline/candidate
+medians were 5.773/5.782, 5.765/5.788, 5.757/5.800, 5.795/5.852, and 9.800/9.849 ms for batches
+8/16/32/64/128.  Paths were exact and loss deltas were `0.000e+00` throughout.  Because the predeclared gate required
+the target kernel to improve before the real-model run, the Llama-3.2-1B quantization profile was not run and no
+performance PR was opened.
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2 \
+  PYTHONPATH=. PYTHON_GIL=0 TORCH_CUDA_ARCH_LIST=8.0 MAX_JOBS=8 NINJAFLAGS=-j8 \
+  CMAKE_BUILD_PARALLEL_LEVEL=8 NVCC_THREADS=2 GPTQMODEL_QVQ_NVCC_THREADS=2 \
+  pytest -q tests/test_qvq_cuda.py -k 'v2_segment or grid'
+
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2 \
+  PYTHONPATH=. PYTHON_GIL=0 TORCH_CUDA_ARCH_LIST=8.0 GPTQMODEL_QVQ_NVCC_THREADS=2 \
+  python scripts/benchmark_qvq_viterbi.py --physical-gpu 0 --bits 2 \
+  --batch-sizes 8 16 32 64 128 --warmup 20 --iterations 100
+```
+
 Why 4x is out of reach for this formulation: ~10.7 thread-instructions per state-step (FP32 op order pinned by
 bit-exactness), issue-bound at 76 % with 50 % occupancy (64 regs x 1024 threads; 160 KB smem per CTA blocks a second CTA).
 
