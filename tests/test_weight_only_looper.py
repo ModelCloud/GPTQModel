@@ -6,6 +6,7 @@ from concurrent.futures import Future
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
@@ -598,6 +599,112 @@ def test_weight_only_looper_quantizes_embeddings_only(monkeypatch):
         "Weight-only quantizing input embeddings",
         "Weight-only quantizing output embeddings",
     ]
+
+
+@pytest.mark.parametrize(
+    "embed_quant_config",
+    [
+        QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+        QuantizeEmbedConfig(),
+    ],
+)
+def test_weight_only_looper_rejects_tied_embedding_parameters_before_quantization(
+    monkeypatch,
+    embed_quant_config,
+):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.model.lm_head.weight = model.model.embed_tokens.weight
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+
+    looper = WeightOnlyLooper(model=model, processor=processor, embed_quant_config=embed_quant_config)
+    with pytest.raises(NotImplementedError, match="shared weight parameter"):
+        looper.loop()
+
+    assert processor.quantized == []
+    assert processor.finalize_called is False
+    assert not hasattr(model, "_embedding_replacement_prefixes")
+    assert not hasattr(model, "_model_free_weight_only_embeddings_only")
+    assert qcfg.dynamic is None
+
+
+def test_weight_only_looper_deduplicates_same_embedding_parameter(monkeypatch):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = False
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.get_output_embeddings_name = model.get_input_embeddings_name
+    model.get_output_embeddings = model.get_input_embeddings
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.BOTH),
+    )
+    looper.loop()
+
+    assert processor.quantized == ["embed_tokens"]
+    assert model._embedding_replacement_prefixes == {"embed_tokens"}
+
+
+@pytest.mark.parametrize(
+    ("embed_quant_mode", "expected_quantized", "expected_progress"),
+    [
+        (
+            QuantizeEmbed.OUTPUT,
+            ["lm_head", "layers.0.linear", "layers.1.linear"],
+            [0, 1, 2],
+        ),
+        (
+            QuantizeEmbed.BOTH,
+            ["embed_tokens", "lm_head", "layers.0.linear", "layers.1.linear"],
+            [0, 1, 2, 3],
+        ),
+    ],
+)
+def test_weight_only_looper_does_not_requantize_lm_head_embedding_in_layer_loop(
+    monkeypatch,
+    embed_quant_mode,
+    expected_quantized,
+    expected_progress,
+):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    qcfg.lm_head = True
+    fake_logger = _FakeLogger()
+    processor = _FakeProcessor(qcfg)
+    model = _FakeQModel(qcfg)
+    model.lm_head = model.model.lm_head
+
+    monkeypatch.setattr(weight_only_looper_module, "log", fake_logger)
+    monkeypatch.setattr(
+        weight_only_looper_module,
+        "get_layers_with_prefixes",
+        lambda _model, _nodes: (list(model.model.layers), ["layers.0", "layers.1"]),
+    )
+
+    looper = WeightOnlyLooper(
+        model=model,
+        processor=processor,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=embed_quant_mode, embed_only=False),
+    )
+    looper.loop()
+
+    assert processor.quantized == expected_quantized
+    assert processor.quantized.count("lm_head") == 1
+    assert processor.memory_calls == [0, 1]
+    assert processor.finalize_called is True
+    assert fake_logger.iterable == expected_progress
+    assert all("quantizing lm_head" not in title for title in fake_logger.progress.titles)
 
 
 def test_weight_only_looper_quantizes_embeddings_and_regular_modules(monkeypatch):
