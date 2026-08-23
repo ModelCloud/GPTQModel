@@ -223,6 +223,57 @@ def test_fused_qkv_marlin_matches_unfused(hidden_size: int, q_out: int, kv_out: 
 
 
 @marlin_skip
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible CUDA devices")
+def test_fused_qkv_marlin_runs_after_cross_cuda_move() -> None:
+    """A fused Marlin group must remain numerically valid after moving to another CUDA device."""
+
+    source = torch.device("cuda:0")
+    target = torch.device("cuda:1")
+    if torch.cuda.get_device_capability(target)[0] < 8:
+        pytest.skip("target device requires Ampere or newer CUDA")
+
+    class Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = _make_marlin_linear(128, 128)
+            self.k_proj = _make_marlin_linear(128, 64)
+            self.v_proj = _make_marlin_linear(128, 64)
+
+    with torch.cuda.device(source):
+        model = Attn().eval()
+        assert install_fused_qkv(model) == 1
+        x = torch.randn(2, 4, 128, device=source, dtype=torch.bfloat16)
+        with torch.inference_mode():
+            expected = torch.cat(
+                [model.q_proj(x), model.k_proj(x), model.v_proj(x)],
+                dim=-1,
+            )
+        torch.cuda.synchronize(source)
+
+    group = model.q_proj._gptqmodel_fused_group
+    source_workspace = group.kernel.workspace
+
+    qmodel = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(qmodel)
+    qmodel.model = model
+    qmodel.to(target)
+
+    assert group.kernel.workspace is not source_workspace
+    assert group.kernel.workspace.device == target
+    assert torch.count_nonzero(group.kernel.workspace).item() == 0
+
+    x_target = x.to(target)
+    with torch.inference_mode():
+        actual = torch.cat(
+            [qmodel.model.q_proj(x_target), qmodel.model.k_proj(x_target), qmodel.model.v_proj(x_target)],
+            dim=-1,
+        )
+
+    assert actual.device == target
+    torch.testing.assert_close(actual, expected.to(target), atol=2.0, rtol=0.05)
+
+
+@marlin_skip
 @pytest.mark.parametrize(
     "hidden_size,intermediate_size",
     [

@@ -294,6 +294,9 @@ class BaseQModel(nn.Module):
     # list modules where they must match the shape of previous module in execution to consider for scaling optimization
     awq_scale_optimize_shape_dependent_modules: List[str] = None
 
+    # Preserve adapter-supplied position_embeddings during AWQ replay instead of rebuilding them from the root rotary.
+    awq_preserve_explicit_position_embeddings = False
+
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
 
@@ -2113,12 +2116,26 @@ class BaseQModel(nn.Module):
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
 
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        model = self.__dict__.get("model")
+        if model is None:
+            model = self._modules.get("model")
+        if callable(getattr(model, "modules", None)):
+            from ..nn_modules.fused_quant_linear import apply_fused_quant_modules
+
+            apply_fused_quant_modules(model, fn)
+        return result
+
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
             self.model = self.model.to(device)
+            if callable(getattr(self.model, "modules", None)):
+                from ..nn_modules.fused_quant_linear import move_fused_quant_modules
+
+                move_fused_quant_modules(self.model, device)
             return self
-        else:
-            raise f"{self.model.__class__.__name__} does not support the to() method"
+        raise NotImplementedError(f"{self.model.__class__.__name__} does not support the to() method")
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)

@@ -259,10 +259,12 @@ def _pack_routed_module_subgroups(
 def routed_module_templates_from_model_definition(model_cls: type) -> List[str]:
     """Return routed projection templates declared explicitly by ``module_tree``."""
     from ..models.base import MODULE_TREE_FLAG_ROUTED
+    from .structure import LazyTurtle
 
     model_cls.build_layer_modules(model_cls.module_tree)
     metadata = model_cls._module_tree_metadata_cache.get(model_cls, {})
-    return sorted(path for path, item in metadata.items() if MODULE_TREE_FLAG_ROUTED in item.flags)
+    runtime_templates = sorted(path for path, item in metadata.items() if MODULE_TREE_FLAG_ROUTED in item.flags)
+    return list(LazyTurtle.routed_module_template_aliases(model_cls.module_tree, runtime_templates))
 
 
 def _match_module_template(relative_name: str, template: str) -> Optional[str]:
@@ -431,7 +433,18 @@ def reshard(
 
     src_real = os.path.realpath(source_path)
     tgt_real = os.path.realpath(target_path)
-    if src_real == tgt_real or os.path.commonpath([src_real, tgt_real]) == tgt_real:
+    try:
+        target_contains_source = os.path.commonpath([src_real, tgt_real]) == tgt_real
+    except ValueError:
+        # Windows raises for paths on different drives. Only suppress that
+        # documented case; an unexpected commonpath failure on one drive must
+        # still reach the caller.
+        src_drive = os.path.normcase(os.path.splitdrive(src_real)[0])
+        tgt_drive = os.path.normcase(os.path.splitdrive(tgt_real)[0])
+        if not src_drive or not tgt_drive or src_drive == tgt_drive:
+            raise
+        target_contains_source = False
+    if src_real == tgt_real or target_contains_source:
         raise ValueError(
             f"Target path {target_path!r} cannot be the same as or a parent of source path {source_path!r}."
         )

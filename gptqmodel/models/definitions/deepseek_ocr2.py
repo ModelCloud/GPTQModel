@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import copy
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import torch
@@ -11,14 +13,78 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMi
 from ...utils.calibration import batched
 from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
+from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
+def _checkpoint_renaming(source_pattern: str, target_pattern: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        source_patterns=[source_pattern],
+        target_patterns=[target_pattern],
+        operations=[],
+    )
+
+
+# Transformers 5.10 added these DeepSeek-OCR2 checkpoint conversions, while
+# GPT-QModel's supported Transformers floor is still 5.4. Keep an adapter-owned
+# copy of the upstream one-to-one rules so LazyTurtle can materialize an older
+# checkpoint even when that registry entry is absent. Tensor converters remain
+# owned by Transformers and are preserved whenever its registry is available.
+_HF_CHECKPOINT_CONVERSION_MAP = (
+    _checkpoint_renaming(
+        r"sam_model\.blocks\.(\d+)\.norm1\.",
+        r"vision_tower.sam_encoder.layers.\1.layer_norm1.",
+    ),
+    _checkpoint_renaming(
+        r"sam_model\.blocks\.(\d+)\.norm2\.",
+        r"vision_tower.sam_encoder.layers.\1.layer_norm2.",
+    ),
+    _checkpoint_renaming(
+        r"sam_model\.blocks\.(\d+)\.attn\.",
+        r"vision_tower.sam_encoder.layers.\1.attn.",
+    ),
+    _checkpoint_renaming(
+        r"sam_model\.blocks\.(\d+)\.mlp\.",
+        r"vision_tower.sam_encoder.layers.\1.mlp.",
+    ),
+    _checkpoint_renaming(
+        r"sam_model\.patch_embed\.proj\.",
+        "vision_tower.sam_encoder.patch_embed.projection.",
+    ),
+    _checkpoint_renaming(r"sam_model\.pos_embed", "vision_tower.sam_encoder.pos_embed"),
+    _checkpoint_renaming(r"sam_model\.neck\.0\.", "vision_tower.sam_encoder.neck.conv1."),
+    _checkpoint_renaming(r"sam_model\.neck\.1\.", "vision_tower.sam_encoder.neck.layer_norm1."),
+    _checkpoint_renaming(r"sam_model\.neck\.2\.", "vision_tower.sam_encoder.neck.conv2."),
+    _checkpoint_renaming(r"sam_model\.neck\.3\.", "vision_tower.sam_encoder.neck.layer_norm2."),
+    _checkpoint_renaming(r"sam_model\.net_2\.", "vision_tower.sam_encoder.proj.conv1."),
+    _checkpoint_renaming(r"sam_model\.net_3\.", "vision_tower.sam_encoder.proj.conv2."),
+    _checkpoint_renaming(
+        r"qwen2_model\.model\.model\.layers\.",
+        "vision_tower.vision_encoder.layers.",
+    ),
+    _checkpoint_renaming(
+        r"qwen2_model\.model\.model\.norm\.",
+        "vision_tower.vision_encoder.norm.",
+    ),
+    _checkpoint_renaming(r"qwen2_model\.query_768\.", "vision_tower.query_768_resolution."),
+    _checkpoint_renaming(r"qwen2_model\.query_1024\.", "vision_tower.query_1024_resolution."),
+    _checkpoint_renaming(r"projector\.layers\.", "multi_modal_projector."),
+    _checkpoint_renaming(r"view_seperator", "view_separator"),
+    _checkpoint_renaming(r"(^|model\.)embed_tokens\.", r"\1language_model.embed_tokens."),
+    _checkpoint_renaming(r"(^|model\.)layers\.", r"\1language_model.layers."),
+    _checkpoint_renaming(r"(^|model\.)norm\.", r"\1language_model.norm."),
+)
+
+
 class DeepSeekOCR2QModel(BaseQModel):
     loader = AutoModelForImageTextToText
     modules_with_direct_meta_tensors = ["model"]
+
+    HF_CONVERSION_MAP_REVERSED = tuple(
+        LazyTurtle.reverse_hf_conversion_map(_HF_CHECKPOINT_CONVERSION_MAP) or ()
+    )
 
     require_load_processor = True
     support_batch_quantize = False
@@ -51,6 +117,33 @@ class DeepSeekOCR2QModel(BaseQModel):
             },
         },
     ]
+
+    @classmethod
+    def resolve_hf_conversion_map_reversed(cls, target_model=None):
+        """Merge adapter fallbacks behind any Transformers-owned conversions."""
+
+        upstream_map = LazyTurtle.infer_hf_conversion_map_reversed(target_model=target_model)
+        fallback_map = copy.deepcopy(cls.HF_CONVERSION_MAP_REVERSED)
+        if upstream_map is None:
+            return fallback_map
+
+        merged_map = copy.deepcopy(list(upstream_map))
+        upstream_sources = {
+            source
+            for entry in merged_map
+            for source in LazyTurtle._coerce_patterns(
+                getattr(entry, "_original_source_patterns", getattr(entry, "source_patterns", None))
+            )
+        }
+        for entry in fallback_map:
+            entry_sources = LazyTurtle._coerce_patterns(
+                getattr(entry, "_original_source_patterns", getattr(entry, "source_patterns", None))
+            )
+            if any(source in upstream_sources for source in entry_sources):
+                continue
+            merged_map.append(entry)
+            upstream_sources.update(entry_sources)
+        return merged_map
 
     @classmethod
     def get_base_modules(cls, model):

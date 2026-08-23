@@ -10,11 +10,13 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from gptqmodel import ShardStrategy, reshard
+from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.utils.reshard import (
     _group_per_layer_names,
     _match_module_template,
     _pack_routed_module_subgroups,
     _routed_module_identity,
+    routed_module_templates_from_model_definition,
 )
 
 
@@ -280,6 +282,32 @@ def test_per_layer_moe_planner_uses_explicit_templates_and_keeps_shared_dense():
     assert group_is_layer["non_layer"] is False
 
 
+def test_per_layer_moe_planner_expands_runtime_and_checkpoint_aliases_from_module_tree():
+    templates = routed_module_templates_from_model_definition(MixtralQModel)
+    assert "mlp.experts.{expert_index}.gate_proj" in templates
+    assert "block_sparse_moe.experts.{expert_index}.w1" in templates
+
+    runtime_name = "model.layers.0.mlp.experts.0.gate_proj.weight"
+    checkpoint_alias = "model.layers.0.block_sparse_moe.experts.0.w1.weight"
+    groups, group_is_layer = _group_per_layer_names(
+        {
+            "model.layers.0.self_attn.q_proj.weight",
+            runtime_name,
+            checkpoint_alias,
+            "model.embed_tokens.weight",
+        },
+        layer_prefixes=["model.layers"],
+        strategy=ShardStrategy.PER_LAYER_MOE,
+        routed_module_templates=templates,
+    )
+
+    assert groups["model.layers.0"] == ["model.layers.0.self_attn.q_proj.weight"]
+    assert groups["model.layers.0.routed.0000"] == [checkpoint_alias, runtime_name]
+    assert group_is_layer["model.layers.0.routed.0000"] is True
+    assert groups["non_layer"] == ["model.embed_tokens.weight"]
+    assert group_is_layer["non_layer"] is False
+
+
 def test_per_layer_moe_planner_rejects_missing_tags_and_invalid_bound():
     names = ["model.layers.0.mlp.experts.0.gate_proj.weight"]
     with pytest.raises(ValueError, match="module_tree"):
@@ -398,6 +426,50 @@ def test_reshard_per_layer_moe_preserves_values_and_original(monkeypatch):
         )
 
 
+def test_reshard_per_layer_moe_routes_checkpoint_aliases(monkeypatch):
+    from gptqmodel.models import auto
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "source")
+        dst = os.path.join(tmp, "per-layer-moe")
+        os.makedirs(src)
+        dense_name = "model.layers.0.self_attn.q_proj.weight"
+        routed_prefix = "model.layers.0.block_sparse_moe.experts.0.w1"
+        non_layer_name = "model.embed_tokens.weight"
+        tensors = {
+            dense_name: torch.randn(2, 2),
+            f"{routed_prefix}.qweight": torch.randint(0, 16, (2, 2), dtype=torch.int32),
+            f"{routed_prefix}.scales": torch.randn(2, 1),
+            non_layer_name: torch.randn(4, 2),
+        }
+        save_file(tensors, os.path.join(src, "model.safetensors"))
+        with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fp:
+            json.dump({"model_type": "mixtral"}, fp)
+        monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: MixtralQModel)
+
+        result = reshard(
+            src,
+            dst,
+            strategy=ShardStrategy.PER_LAYER_MOE,
+            progress=False,
+        )
+
+        assert result["num_shards"] == 3
+        with open(os.path.join(dst, "model.safetensors.index.json"), encoding="utf-8") as fp:
+            weight_map = json.load(fp)["weight_map"]
+        assert weight_map[f"{routed_prefix}.qweight"] == weight_map[f"{routed_prefix}.scales"]
+        assert weight_map[f"{routed_prefix}.qweight"] != weight_map[dense_name]
+        assert weight_map[non_layer_name] not in {
+            weight_map[dense_name],
+            weight_map[f"{routed_prefix}.qweight"],
+        }
+
+        restored = _load_source_state_dict(dst)
+        assert set(restored) == set(tensors)
+        for name, original in tensors.items():
+            assert torch.equal(restored[name], original)
+
+
 def test_reshard_per_layer_moe_max_size_keeps_module_state_atomic(monkeypatch):
     from gptqmodel.models import auto
     from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
@@ -459,6 +531,62 @@ def test_reshard_rejects_source_target_collision():
             assert False, "expected ValueError for target parent of source"
         except ValueError as exc:
             assert "same as or a parent of" in str(exc)
+
+
+def test_reshard_allows_source_and_target_on_different_windows_drives(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _build_source_dir(tmp)
+        dst = os.path.join(tmp, "per-layer")
+        src_real = os.path.realpath(src)
+        dst_real = os.path.realpath(dst)
+        real_commonpath = os.path.commonpath
+        real_splitdrive = os.path.splitdrive
+
+        def cross_drive_commonpath(paths):
+            if list(paths) == [src_real, dst_real]:
+                raise ValueError("Paths don't have the same drive")
+            return real_commonpath(paths)
+
+        def cross_drive_splitdrive(path):
+            if path == src_real:
+                return "C:", path
+            if path == dst_real:
+                return "D:", path
+            return real_splitdrive(path)
+
+        monkeypatch.setattr(os.path, "commonpath", cross_drive_commonpath)
+        monkeypatch.setattr(os.path, "splitdrive", cross_drive_splitdrive)
+
+        result = reshard(src, dst, strategy=ShardStrategy.PER_LAYER, progress=False)
+
+        assert result["num_tensors"] > 0
+        assert os.path.isfile(os.path.join(dst, "model.safetensors.index.json"))
+
+
+def test_reshard_propagates_unexpected_commonpath_value_error_on_same_drive(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _build_source_dir(tmp)
+        dst = os.path.join(tmp, "per-layer")
+        src_real = os.path.realpath(src)
+        dst_real = os.path.realpath(dst)
+        real_commonpath = os.path.commonpath
+        real_splitdrive = os.path.splitdrive
+
+        def failing_commonpath(paths):
+            if list(paths) == [src_real, dst_real]:
+                raise ValueError("simulated same-drive commonpath failure")
+            return real_commonpath(paths)
+
+        def same_drive_splitdrive(path):
+            if path in {src_real, dst_real}:
+                return "C:", path
+            return real_splitdrive(path)
+
+        monkeypatch.setattr(os.path, "commonpath", failing_commonpath)
+        monkeypatch.setattr(os.path, "splitdrive", same_drive_splitdrive)
+
+        with pytest.raises(ValueError, match="simulated same-drive commonpath failure"):
+            reshard(src, dst, strategy=ShardStrategy.PER_LAYER, progress=False)
 
 
 def test_reshard_preserves_safetensors_metadata():

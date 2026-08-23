@@ -14,6 +14,7 @@ from .brumby import BrumbyQModel
 from .chatglm import ChatGLMQModel
 from .codegen import CodeGenQModel
 from .cohere2_moe import Cohere2MoeQModel
+from .cohere_compass import CohereCompassQModel
 from .dbrx import DbrxQModel
 from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
@@ -57,6 +58,7 @@ from .intern_s2_preview import InternS2PreviewQModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel
 from .lfm2_vl import LFM2VLQModel
+from .mage_vl import MageVLQModel
 from .llama4 import Llama4QModel, Llama4TextQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
@@ -72,8 +74,10 @@ from .mllama import MLlamaQModel, MLlamaTextQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
+from .muse_glimmer import MuseGlimmerQModel
 from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
+from .olmo3 import Olmo3QModel
 from .opt import OptQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel

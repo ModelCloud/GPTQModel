@@ -829,22 +829,51 @@ class TorchOpsJitExtension:
         visit(Path(source))
         return payload
 
-    def _cache_fingerprint(self) -> str:
+    def _cache_fingerprint(
+        self,
+        *,
+        resolved_sources: Optional[Sequence[str]] = None,
+        resolved_extra_cflags: Optional[Sequence[str]] = None,
+        resolved_extra_cuda_cflags: Optional[Sequence[str]] = None,
+        resolved_extra_include_paths: Optional[Sequence[str]] = None,
+        resolved_extra_ldflags: Optional[Sequence[str]] = None,
+    ) -> str:
         """Hash the effective op surface and source metadata to avoid stale cache reuse."""
 
+        # Reuse the caller's resolved snapshot so this key matches the exact inputs sent to the compiler.
+        sources = list(resolved_sources) if resolved_sources is not None else self._resolve_sequence(self.sources)
+        extra_cflags = (
+            list(resolved_extra_cflags)
+            if resolved_extra_cflags is not None
+            else self._resolve_sequence(self.extra_cflags)
+        )
+        extra_cuda_cflags = (
+            list(resolved_extra_cuda_cflags)
+            if resolved_extra_cuda_cflags is not None
+            else self._resolved_extra_cuda_cflags()
+        )
+        include_paths = (
+            list(resolved_extra_include_paths)
+            if resolved_extra_include_paths is not None
+            else self._resolved_extra_include_paths()
+        )
+        extra_ldflags = (
+            list(resolved_extra_ldflags)
+            if resolved_extra_ldflags is not None
+            else self._resolve_sequence(self.extra_ldflags)
+        )
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
         payload.append(f"python={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
         payload.append(f"torch={torch.__version__}")
         payload.append(f"torch_cuda={torch.version.cuda or 'none'}")
         payload.extend(self._cuda_cache_fingerprint_payload())
-        include_paths = self._resolved_extra_include_paths()
-        for source in self._resolve_sequence(self.sources):
+        for source in sources:
             payload.extend(self._source_cache_fingerprint_payload(source, include_paths))
 
-        payload.extend(self._resolve_sequence(self.extra_cflags))
-        payload.extend(self._resolved_extra_cuda_cflags())
+        payload.extend(extra_cflags)
+        payload.extend(extra_cuda_cflags)
         payload.extend(include_paths)
-        payload.extend(self._resolve_sequence(self.extra_ldflags))
+        payload.extend(extra_ldflags)
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
 
@@ -1016,8 +1045,19 @@ class TorchOpsJitExtension:
                 return True
             if self._load_attempted and not force_rebuild:
                 return self._load_result
-            build_root = self.build_root()
+            resolved_sources = self._resolve_sequence(self.sources)
+            extra_cflags = self._resolve_sequence(self.extra_cflags)
+            extra_cuda_cflags = self._resolved_extra_cuda_cflags()
+            extra_include_paths = self._resolved_extra_include_paths()
+            extra_ldflags = self._resolve_sequence(self.extra_ldflags)
             base_build_root = self.base_build_root()
+            build_root = base_build_root / self._cache_fingerprint(
+                resolved_sources=resolved_sources,
+                resolved_extra_cflags=extra_cflags,
+                resolved_extra_cuda_cflags=extra_cuda_cflags,
+                resolved_extra_include_paths=extra_include_paths,
+                resolved_extra_ldflags=extra_ldflags,
+            )
 
             if force_rebuild and base_build_root.exists():
                 setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")
@@ -1045,8 +1085,6 @@ class TorchOpsJitExtension:
             started = time.perf_counter()
             build_invocation_succeeded = False
             try:
-                resolved_sources = self._resolve_sequence(self.sources)
-                extra_include_paths = self._resolved_extra_include_paths()
                 kwargs = {
                     "name": self.name,
                     "sources": resolved_sources,
@@ -1054,15 +1092,12 @@ class TorchOpsJitExtension:
                     "is_python_module": False,
                     "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
                 }
-                extra_cflags = self._resolve_sequence(self.extra_cflags)
                 if extra_cflags:
                     kwargs["extra_cflags"] = extra_cflags
-                extra_cuda_cflags = self._resolved_extra_cuda_cflags()
                 if extra_cuda_cflags:
                     kwargs["extra_cuda_cflags"] = extra_cuda_cflags
                 if extra_include_paths:
                     kwargs["extra_include_paths"] = extra_include_paths
-                extra_ldflags = self._resolve_sequence(self.extra_ldflags)
                 if extra_ldflags:
                     kwargs["extra_ldflags"] = extra_ldflags
                 _ensure_ninja_on_path()
