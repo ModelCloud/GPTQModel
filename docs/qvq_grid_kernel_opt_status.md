@@ -62,7 +62,7 @@ After (this branch @ final commit, `artifacts/nsys/llama32_1b_layers2_fused_*`):
 | family-grid range kernel avg / call | 9.639 ms | **4.499 ms** | **2.14x** |
 | family-grid range kernel time | 123.26 s | 57.53 s | |
 | family-grid range share of GPU kernel time | 55.0 % | 37.4 % | |
-| kernel launches inside the range | 127,880 | 53,024 | 10 -> 4 per call |
+| kernel launches inside the range | 127,880 (10 / call) | 53,024 (4.15 / call = 12,476 fused calls x 4 + 312 gated reference calls x 10) | |
 | `viterbi_v2_segment_tail_trusted` avg / call | 3.361 ms | 2.590 ms | 1.30x |
 | total CUDA kernel time | 224.05 s | 153.70 s | |
 | `qvq_quantize.main` wall | 252.4 s | **181.6 s** | **-28.0 %** |
@@ -71,15 +71,18 @@ After (this branch @ final commit, `artifacts/nsys/llama32_1b_layers2_fused_*`):
 Other live ops unchanged (kernel time inside range): `viterbi_tail_trusted` 22.05 -> 21.96 s, `viterbi` 17.53 -> 17.48 s,
 `yaqa_feedback` 12.64 -> 12.25 s, `yaqa_feedback_update` 5.64 -> 5.48 s.
 
-## Dead ends (all bit-exact, all reverted)
+## Dead ends
+
+Three variants were implemented, verified bit-exact, measured and reverted (v2-v4); candidate pruning was evaluated
+by simulation only; cross-family emission sharing was ruled out by inspection of the call sites.
 
 | attempt | 3x128 ms/call | why it lost |
 |---|---:|---|
 | v2: 64-bit (cost, prefix) keys reduced with fmin(double) | 6.28 | DSETP.MIN is not one DMNMX on sm_80: +30 % instructions |
 | v3: ping-pong frontiers, one barrier/step | 4.22 | barrier stalls were 7 % of stall cycles; spills + extra L2 traffic cancel it |
 | v4: 8-byte packed code+norm records for the L2 half | 6.15 | doubles L2 bytes there; L1TEX scoreboard stalls return |
-| exact candidate pruning (sorted predecessor G) | simulated | mean 9.2/16 candidates but warp-max 14.95/16: SIMT divergence |
-| share emissions across the 3 families | n/a | only the sampled-selection call site shares sequences; the dominant block-LDLQ site does not |
+| exact candidate pruning (sorted predecessor G) | simulation only, not implemented | mean 9.2/16 candidates but warp-max 14.95/16: SIMT divergence |
+| share emissions across the 3 families | not applicable, not implemented | only the sampled-selection call site shares sequences; the dominant block-LDLQ site does not |
 
 Why 4x is out of reach for this formulation: ~10.7 thread-instructions per state-step (FP32 op order pinned by
 bit-exactness), issue-bound at 76 % with 50 % occupancy (64 regs x 1024 threads; 160 KB smem per CTA blocks a second CTA).
@@ -90,3 +93,9 @@ nvcc segfaults (code 139, even on untouched `qvq_hadamard_cuda.cu`) when the JIT
 `nsys profile --trace=osrt`; and the harness build hash includes `--threads N`, so warm the build with the same
 `GPTQMODEL_QVQ_NVCC_THREADS` value in an un-profiled run before capturing. A segfaulted build leaves a stale `lock`
 in the extension dir on which the next run sleeps forever; delete the dir.
+
+## Runtime flags
+
+`QVQ_DISABLE_FUSED_FAMILY_GRID=1` forces the reference path; the variable is read once on first use and cached for
+the process lifetime, so it cannot be toggled mid-process. `torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count()`
+returns the number of fused dispatches so far (used by the tests to assert which path ran).
