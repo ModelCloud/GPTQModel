@@ -27,12 +27,18 @@ all attribution comes from NVTX ranges injected at the Python op-resolver bounda
    each `qvq_v2_segment_grid_kernel` executes (the host runs far ahead and blocks in `cudaLaunchKernel`, avg 108 µs
    over 9.19 M launches — that is back-pressure from a full launch queue, not launch overhead). There is no CPU
    Viterbi fallback: zero `qvq_cpu.*` ranges were recorded.
-5. Variants that exist in `qvq_cuda.py:97-108` but are **never invoked by the real W2 v2b2 YAQA workload** (they are only
-   exercised by `scripts/benchmark_qvq_viterbi.py` / unit tests): `viterbi_trusted`, `viterbi_v4`, `viterbi_banked`,
+5. **6 of the 17 `required_ops` registered in `qvq_cuda.py:97-108` are invoked by this W2 v2b2 YAQA workload**
+   (`viterbi_v2_segment_family_grid_trusted`, `viterbi_tail_trusted`, `viterbi`, `viterbi_v2_segment_tail_trusted`,
+   `yaqa_feedback`, `yaqa_feedback_update_`); **11 are not**: `viterbi_trusted`, `viterbi_v4`, `viterbi_banked`,
    `viterbi_v2_segment_banked`, `viterbi_v2_segment_g`, `viterbi_v2_segment_grid`, `viterbi_v2_segment_grid_trusted`,
-   `viterbi_v2_segment_midpoint_trusted`, plus `gemv`, `gemv_v4`, `hadamard` (inference/codec paths, not touched by
-   quantization; the RHT is done with torch ops inside `rht_*` telemetry phases). Optimising any of them would not move
-   this workload.
+   `viterbi_v2_segment_midpoint_trusted`, `gemv`, `gemv_v4`, `hadamard`. All 17 carry an NVTX range in the capture
+   that produced this verdict (see "How it was captured"; `gemv_v4` is verified in the 2-layer re-capture below), so
+   "not invoked" means "no range instance recorded", not "not instrumented". Source-wise this is expected: the
+   `gemv*`/`hadamard` ops are only referenced from `gptqmodel/nn_modules/qlinear/qvq.py` (inference), the RHT during
+   quantization is torch ops inside the `rht_*` telemetry phases, `viterbi_v4`/`viterbi_banked`/`segment_banked` are
+   reached from the `vector_size=4` / `block_ldlq` / bank-count branches of `qvq.py` which this YAQA v2b2 config does
+   not take, and the remaining `segment_*` variants are gated behind conditions (`shift`, `segment_steps`, midpoint
+   mode) that the v2b2_p32 path does not select. Optimising any of the 11 would not move this workload.
 
 Target for the next kernel task: the `<4,2,16,fused-boundary>` instantiation of `qvq_v2_segment_grid_kernel` in
 `gptqmodel_ext/qvq/qvq_viterbi_cuda.cu:1301`, with `qvq_v2_segment_grid_finalize_kernel` (37.7 s, 2.1 %) as the
@@ -83,7 +89,16 @@ The `.nsys-rep` is **906 MB** (+ 419 MB `.sqlite`) and is gitignored; it lives a
 NVTX ranges (all injected by monkeypatching module attributes, nothing in `gptqmodel/` changed):
 
 * `qvq_cuda.<op>` — around the `torch.ops` callable returned by every `gptqmodel.utils.qvq_cuda._qvq_cuda_<op>_op()`
-  resolver (the 17 `required_ops`), so each kernel-variant launch site is attributed individually.
+  resolver (16 of the 17 `required_ops`; the resolver for `yaqa_feedback_update_` yields the range name
+  `qvq_cuda.yaqa_feedback_update`). The one op with no resolver, `gemv_v4`, is called directly as
+  `torch.ops.gptqmodel_qvq.gemv_v4` from `qvq_cuda_gemv()` (`qvq_cuda.py:737`) and is wrapped at the `torch.ops`
+  namespace instead (lazily, once the extension is loaded), so each of the 17 registered ops has its own range. The
+  wrapper records which ops were resolver-wrapped / namespace-wrapped in `*_host_attribution.json`
+  (`resolver_wrapped_ops`, `direct_ops_patched`) and `summarize_qvq_nsys_stats.py` derives "invoked / not invoked"
+  only for ops that were actually instrumented, listing any uninstrumented op separately.
+  *Caveat for the full-model capture below:* it was taken with the earlier wrapper revision that wrapped resolvers
+  only, so a `qvq_cuda.gemv_v4` range could not have appeared in it; the `gemv_v4` verdict comes from the 2-layer
+  re-capture in the last section, which uses the same code path and config.
 * `qvq_api.<fn>` — around `qvq_cuda_viterbi`, `qvq_cuda_viterbi_banked`, `qvq_cuda_viterbi_v2_segment_banked`,
   `_qvq_cuda_viterbi_trusted`, `qvq_cuda_gemv`, `qvq_cuda_hadamard` (these nest the `qvq_cuda.*` range plus the Python
   validation/reductions around it; `qvq_api.qvq_cuda_viterbi` ⊃ `qvq_cuda.viterbi`, do not add them).
@@ -115,7 +130,7 @@ Kernel time is the sum of CUDA kernels that executed inside the variant's NVTX r
 | `qvq_cuda.yaqa_feedback` | 61344 | 101.19 | 5.7 | 1.650 | 184032 | 0.130 | 25.0 |
 | `qvq_cuda.yaqa_feedback_update` | 61344 | 45.16 | 2.6 | 0.736 | 184032 | 0.602 | 29.9 |
 
-Registered `qvq_cuda` ops never invoked by this workload: `viterbi_trusted`, `viterbi_v4`, `viterbi_banked`, `viterbi_v2_segment_banked`, `viterbi_v2_segment_g`, `viterbi_v2_segment_grid`, `viterbi_v2_segment_grid_trusted`, `viterbi_v2_segment_midpoint_trusted`, `gemv`, `gemv_v4`, `hadamard`
+Instrumented ops with no range instance in this capture (resolver-wrapped, 16 of 17): `viterbi_trusted`, `viterbi_v4`, `viterbi_banked`, `viterbi_v2_segment_banked`, `viterbi_v2_segment_g`, `viterbi_v2_segment_grid`, `viterbi_v2_segment_grid_trusted`, `viterbi_v2_segment_midpoint_trusted`, `gemv`, `hadamard`. Not instrumented in this capture: `gemv_v4` (see the 2-layer re-capture for its verdict).
 
 ### Kernels inside each variant range
 
@@ -286,3 +301,31 @@ more tiles (13.7 vs 9.65 ms/call) so the kernel is an even more dominant share o
 (`ampere_sgemm_128x128_{nt,tn}`, 167 s = 12 %) grows with hidden size. The ranked conclusion is unchanged:
 **optimise `qvq_v2_segment_grid_kernel<4,2,16,fused-boundary>` first (52.8–55.9 % of end-to-end wall on both models),
 then `qvq_viterbi_kernel` (14–18 %).**
+
+## Re-capture with all 17 ops instrumented — Llama-3.2-1B, first 2 layers (`gemv_v4` verdict)
+
+The full-model capture above wrapped only resolver-dispatched ops, so it could not have recorded `gemv_v4`. After
+adding the `torch.ops.gptqmodel_qvq.gemv_v4` namespace wrap, the same config was re-run with `--max-layers 2`
+(`scripts/profile_qvq_quantize_nsys.sh llama32_1b_layers2 --max-layers 2 ...`; wall 273.8 s; stats in
+`artifacts/nsys/llama32_1b_layers2_*.csv`, host JSON reports `direct_ops_patched: ["gemv_v4"]`):
+
+| NVTX range (variant) | calls | kernel time (s) | % GPU kernel time | kernel avg / call (ms) | kernel launches | host avg (ms) | host max (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `qvq_cuda.viterbi_v2_segment_family_grid_trusted` | 12788 | 121.88 | 54.8 | 9.531 | 127880 | 3.670 | 35.0 |
+| `qvq_cuda.viterbi_tail_trusted` | 5490 | 22.02 | 9.9 | 4.011 | 32940 | 0.882 | 2449.0 |
+| `qvq_api.qvq_cuda_viterbi` | 5120 | 17.77 | 8.0 | 3.472 | 184320 | 1.174 | 218.0 |
+| `qvq_cuda.viterbi` | 5120 | 17.47 | 7.9 | 3.412 | 92160 | 0.545 | 78.0 |
+| `qvq_cuda.viterbi_v2_segment_tail_trusted` | 4968 | 16.63 | 7.5 | 3.348 | 109296 | 2.081 | 20.2 |
+| `qvq_cuda.yaqa_feedback` | 7668 | 12.53 | 5.6 | 1.634 | 23004 | 0.236 | 20.7 |
+| `qvq_cuda.yaqa_feedback_update` | 7668 | 5.60 | 2.5 | 0.730 | 23004 | 0.646 | 8.1 |
+
+`required_ops` registered in `qvq_cuda.py`: 17; instrumented with an NVTX range: 17; invoked by this workload: 6 (`viterbi`, `viterbi_tail_trusted`, `viterbi_v2_segment_tail_trusted`, `viterbi_v2_segment_family_grid_trusted`, `yaqa_feedback`, `yaqa_feedback_update_`).
+
+Instrumented but never invoked (no `qvq_cuda.<op>` range in the capture): `gemv`, `gemv_v4`, `viterbi_trusted`, `viterbi_v4`, `viterbi_banked`, `viterbi_v2_segment_banked`, `viterbi_v2_segment_g`, `viterbi_v2_segment_grid`, `viterbi_v2_segment_grid_trusted`, `viterbi_v2_segment_midpoint_trusted`, `hadamard`
+
+Not instrumented (no range could have been recorded; no claim is made about them): none
+
+**`gemv_v4` verdict: instrumented and genuinely absent** — 0 range instances in `nvtx_pushpop_sum`, consistent with
+`qvq_cuda_gemv()` being referenced only from the inference `QVQ` qlinear (`gptqmodel/nn_modules/qlinear/qvq.py`),
+not from the quantization lifecycle. The per-variant shares match the full run (54.8 % vs 55.8 % for the family-grid
+op, 9.9 % vs 10.0 % for `viterbi_tail_trusted`, …), so the 2-layer capture is representative.

@@ -9,8 +9,9 @@ It does not modify any kernel or quantization code.  Before delegating to ``qvq_
 monkeypatches, at the Python module boundary only:
 
 * every ``gptqmodel.utils.qvq_cuda._qvq_cuda_*_op`` resolver so the returned ``torch.ops`` callable is
-  wrapped in an NVTX range named ``qvq_cuda.<op>`` (one range per kernel-variant launch site; the
-  variants are the ``required_ops`` tuple in ``qvq_cuda.py``),
+  wrapped in an NVTX range named ``qvq_cuda.<op>``; any op in ``required_ops`` that has no resolver and is
+  dispatched directly (today: ``gemv_v4`` via ``torch.ops.gptqmodel_qvq.gemv_v4``) is wrapped at the
+  ``torch.ops`` namespace instead, so every registered op gets its own ``qvq_cuda.<op>`` range,
 * the public ``qvq_cuda_gemv`` / ``qvq_cuda_hadamard`` / ``qvq_cuda_viterbi*`` wrappers
   (``qvq_api.<name>``) so codec/GEMV paths are attributable even when the op is reached through them,
 * the ``gptqmodel.utils.qvq_cpu`` viterbi/hadamard/yaqa resolvers (``qvq_cpu.<op>``) so CPU fallbacks
@@ -30,8 +31,10 @@ from __future__ import annotations
 
 import argparse
 import functools
+import inspect
 import json
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -71,6 +74,7 @@ class _Stats:
 
 
 STATS = _Stats()
+INSTRUMENTATION: dict = {}
 
 
 def _ranged(name: str, fn):
@@ -78,6 +82,9 @@ def _ranged(name: str, fn):
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        patch = INSTRUMENTATION.get("direct_ops_patch")
+        if patch is not None:
+            patch()
         _nvtx.range_push(name)
         start = time.perf_counter()
         try:
@@ -118,15 +125,59 @@ def _wrap_resolver(module, attr: str, prefix: str) -> None:
     setattr(module, attr, patched)
 
 
+_DIRECT_OPS_PATCHED: set[str] = set()
+
+
+def _patch_direct_torch_ops(namespace: str, ops: tuple[str, ...], installed: list[str]) -> None:
+    """NVTX-wrap ``torch.ops.<namespace>.<op>`` for ops that are dispatched directly (no resolver).
+
+    ``qvq_cuda_gemv`` calls ``torch.ops.gptqmodel_qvq.gemv_v4`` directly instead of going through a
+    ``_qvq_cuda_*_op`` resolver, so wrapping resolvers alone can never produce a ``qvq_cuda.gemv_v4``
+    range.  The namespace only exposes the op once the JIT extension is loaded, so this is retried
+    lazily from every instrumented entry point until each op has been wrapped once.
+    """
+
+    pending = [op for op in ops if op not in _DIRECT_OPS_PATCHED]
+    if not pending:
+        return
+    ns = getattr(torch.ops, namespace)
+    for op_name in pending:
+        try:
+            packet = getattr(ns, op_name)
+        except (AttributeError, RuntimeError):
+            continue  # extension not loaded yet; retry on the next call
+        setattr(ns, op_name, _ranged(f"qvq_cuda.{op_name}", packet))
+        _DIRECT_OPS_PATCHED.add(op_name)
+        installed.append(f"torch.ops.{namespace}.{op_name}")
+
+
 def install_instrumentation() -> list[str]:
     from gptqmodel.looper import qvq_processor as qvq_processor_module
     from gptqmodel.utils import qvq_cpu, qvq_cuda
 
     installed: list[str] = []
+    resolver_ops: set[str] = set()
     for attr in dir(qvq_cuda):
         if attr.startswith("_qvq_cuda_") and attr.endswith("_op") and callable(getattr(qvq_cuda, attr)):
+            # The registered op name is the string literal the resolver passes to `.op("qvq_cuda", ...)`
+            # (e.g. `yaqa_feedback_update_` keeps its trailing underscore).
+            source = inspect.getsource(getattr(qvq_cuda, attr))
+            match = re.search(r'op\(\s*"qvq_cuda",\s*"([^"]+)"', source)
+            resolver_ops.add(match.group(1) if match else (attr[len("_qvq_cuda_"):-len("_op")] or "gemv"))
             _wrap_resolver(qvq_cuda, attr, "qvq_cuda")
             installed.append(f"qvq_cuda.{attr}")
+    # Audit: every registered op must end up with a range.  Ops without a resolver are wrapped at the
+    # torch.ops namespace (lazily, once the extension is loaded).
+    required_ops = tuple(qvq_cuda._QVQ_CUDA_TORCH_OPS_EXTENSION.required_ops)
+    direct_ops = tuple(op for op in required_ops if op not in resolver_ops)
+    namespace = qvq_cuda._QVQ_CUDA_NAMESPACE
+    print(f"[profile_qvq_quantize_nsys] required_ops={len(required_ops)} resolver-wrapped={len(resolver_ops)} "
+          f"direct (namespace-wrapped): {list(direct_ops)}", flush=True)
+    _patch_direct_torch_ops(namespace, direct_ops, installed)
+    INSTRUMENTATION["required_ops"] = list(required_ops)
+    INSTRUMENTATION["resolver_ops"] = sorted(resolver_ops)
+    INSTRUMENTATION["direct_ops"] = list(direct_ops)
+    INSTRUMENTATION["direct_ops_patch"] = lambda: _patch_direct_torch_ops(namespace, direct_ops, installed)
     for attr in dir(qvq_cpu):
         if attr.startswith("_qvq_cpu_") and attr.endswith("_op") and callable(getattr(qvq_cpu, attr)):
             _wrap_resolver(qvq_cpu, attr, "qvq_cpu")
@@ -227,6 +278,10 @@ def main() -> int:
     payload = {
         "wall_seconds_qvq_quantize_main": wall,
         "instrumented": installed,
+        "required_ops": INSTRUMENTATION.get("required_ops", []),
+        "resolver_wrapped_ops": INSTRUMENTATION.get("resolver_ops", []),
+        "direct_ops": INSTRUMENTATION.get("direct_ops", []),
+        "direct_ops_patched": sorted(_DIRECT_OPS_PATCHED),
         "forwarded_args": forwarded,
         "ranges": STATS.to_dict(),
         "pid": os.getpid(),

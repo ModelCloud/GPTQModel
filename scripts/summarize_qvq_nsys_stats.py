@@ -113,14 +113,27 @@ def main() -> int:
           f"{(kns / calls / 1e6) if calls else 0:.3f} | {range_kernel_inst.get(name, 0)} | "
           f"{hr.get('host_seconds_avg', 0) * 1e3:.3f} | {hr.get('host_seconds_max', 0) * 1e3:.1f} |")
     w("")
-    all_variants = ["viterbi", "viterbi_trusted", "viterbi_tail_trusted", "viterbi_v4", "viterbi_banked",
-                    "viterbi_v2_segment_banked", "viterbi_v2_segment_g", "viterbi_v2_segment_grid",
-                    "viterbi_v2_segment_grid_trusted", "viterbi_v2_segment_tail_trusted",
-                    "viterbi_v2_segment_midpoint_trusted", "viterbi_v2_segment_family_grid_trusted",
-                    "gemv", "gemv_v4", "hadamard", "yaqa_feedback", "yaqa_feedback_update"]
-    invoked = {n[len("qvq_cuda."):] for n in ranges if n.startswith("qvq_cuda.")}
-    w("Registered `qvq_cuda` ops never invoked by this workload: " +
-      ", ".join(f"`{v}`" for v in all_variants if v not in invoked) + "\n")
+    # Invoked / not-invoked is derived from the ranges present in the capture, restricted to ops the
+    # wrapper actually instrumented (resolver-wrapped or namespace-wrapped, recorded in the host JSON).
+    required_ops = host.get("required_ops") or []
+    instrumented_ops = set(host.get("resolver_wrapped_ops") or []) | set(host.get("direct_ops_patched") or [])
+    # Range names come from the resolver attribute (`yaqa_feedback_update`), the registered op keeps its
+    # trailing underscore (`yaqa_feedback_update_`); compare with the underscore stripped.
+    invoked_ranges = {n[len("qvq_cuda."):].rstrip("_") for n in ranges if n.startswith("qvq_cuda.")}
+    invoked = {op for op in required_ops if op.rstrip("_") in invoked_ranges} or invoked_ranges
+    if required_ops:
+        not_invoked = [op for op in required_ops if op in instrumented_ops and op not in invoked]
+        uninstrumented = [op for op in required_ops if op not in instrumented_ops]
+        w(f"`required_ops` registered in `qvq_cuda.py`: {len(required_ops)}; instrumented with an NVTX range: "
+          f"{len(instrumented_ops & set(required_ops))}; invoked by this workload: {len(invoked & set(required_ops))} "
+          f"({', '.join(f'`{op}`' for op in required_ops if op in invoked)}).\n")
+        w("Instrumented but never invoked (no `qvq_cuda.<op>` range in the capture): " +
+          (", ".join(f"`{op}`" for op in not_invoked) or "none") + "\n")
+        w("Not instrumented (no range could have been recorded; no claim is made about them): " +
+          (", ".join(f"`{op}`" for op in uninstrumented) or "none") + "\n")
+    else:
+        w("Host attribution JSON carries no `required_ops` list (older wrapper); invoked ops: " +
+          ", ".join(f"`{op}`" for op in sorted(invoked)) + "\n")
 
     w("### Kernels inside each variant range\n")
     for name in ranges:
