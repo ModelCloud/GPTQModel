@@ -34,10 +34,23 @@ L2 throughput 74 %, 32 regs, 47 % of stall cycles on L1TEX scoreboard (the 8 B p
 | old path (8 grid + finalize + norm-pack launches) | 9.05 | 2.40 | ref |
 | fused v1: persistent CTA, XOR-mask bank sharing, 128 KB smem codebook half, fp16 pairs | **4.17** | 1.38 | yes (0 mismatches over 168 configs) |
 | v2: 64-bit (cost,prefix) keys on the FP64 min pipe | 6.28 | 2.06 | yes — **slower** (DSETP.MIN expands to 416 DSETP + IMAD.MOV pairs, +30 % instructions); reverted |
+| v3: ping-pong frontier pairs (1 barrier/step instead of 2; 6 smem prefixes + 64 KB frontiers = 160 KB) | 4.22 | 1.38 | yes — **no gain** (barrier stalls were 7 % of stall cycles; +spills, +L2 codebook traffic cancel it); reverted |
 
 v1 ncu: FMA pipe 67 % utilised, issue slots 76 % busy, 50 % occupancy (64 regs x 1024 thr), L2 27 %:
 the kernel is now FP32-issue-bound, not memory-bound.
 
 ## Real-workload 2-layer nsys numbers
 
-Filled in below as captures complete (`artifacts/nsys/llama32_1b_layers2_{base,fused}_*.csv`).
+Captured with `scripts/profile_qvq_quantize_nsys.sh <run> --max-layers 2 ...` (PR #7 recipe, same datasets/config).
+Baseline run from the untouched `perf/qvq-nsys-profile` worktree @ acd959ed (`artifacts/nsys/llama32_1b_layers2_base_*`):
+
+| metric (2 layers, Llama-3.2-1B, W2 v2b2_p32 YAQA) | baseline |
+|---|---:|
+| `qvq_cuda.viterbi_v2_segment_family_grid_trusted` calls | 12,788 |
+| range kernel time | 123.26 s |
+| range kernel avg / call | **9.639 ms** |
+| range share of GPU kernel time | 55.0 % |
+| kernel launches inside the range | 127,880 (10 / call) |
+| `qvq_v2_segment_grid_kernel<4,2,16,fused>` total (all call sites) | 135.15 s (60.3 %) |
+| `qvq_quantize.main` wall | 252.4 s |
+| total CUDA kernel time | 224.05 s |
