@@ -29,6 +29,7 @@ from gptqmodel.utils.qvq_acceptance import (
     expected_projection_names,
     hash_qvq_module_payloads,
     materialize_manifest,
+    seal_acceptance_observation,
     select_diverse_32,
     validate_acceptance_report,
     validate_manifest_disjointness,
@@ -193,18 +194,19 @@ def test_payload_hashes_measure_tensor_bytes_and_fail_on_drift():
 
 
 def test_accounting_includes_every_projection_auxiliary_tensor_and_bias():
-    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 4, 4)
+    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
     state = {
-        f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32),
-        f"{cell.name}.SU": torch.zeros(1, dtype=torch.float32),
-        f"{cell.name}.SV": torch.zeros(1, dtype=torch.float32),
+        f"{cell.name}.trellis": torch.zeros((1, 16), dtype=torch.int32),
+        f"{cell.name}.SU": torch.zeros(16, dtype=torch.float32),
+        f"{cell.name}.SV": torch.zeros(16, dtype=torch.float32),
         f"{cell.name}.bank_ids": torch.zeros(1, dtype=torch.uint8),
+        f"{cell.name}.bank_alt_id": torch.zeros(1, dtype=torch.uint8),
         f"{cell.name}.bias": torch.zeros(1, dtype=torch.float16),
         f"{cell.name}.future_outliers": torch.zeros(1, dtype=torch.float32),
         "model.embed_tokens.weight": torch.zeros(3, dtype=torch.float16),
     }
     report = account_serialized_state(state, [cell], maximum_bpw=100)
-    assert report["requested_projection_tensor_bytes"] == 19
+    assert report["requested_projection_tensor_bytes"] == 200
     assert report["dense_non_target_tensor_bytes"] == 6
     assert set(report["per_module"][cell.name]["tensors"]) == set(state) - {
         "model.embed_tokens.weight"
@@ -212,19 +214,36 @@ def test_accounting_includes_every_projection_auxiliary_tensor_and_bias():
 
 
 def test_accounting_rejects_bpw_above_limit():
-    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 1, 1)
+    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
     with pytest.raises(AcceptanceError, match="exceeds"):
         account_serialized_state(
             {
-                f"{cell.name}.trellis": torch.zeros(1, dtype=torch.int32),
-                f"{cell.name}.SU": torch.zeros(0),
-                f"{cell.name}.SV": torch.zeros(0),
+                f"{cell.name}.trellis": torch.zeros((1, 16), dtype=torch.int32),
+                f"{cell.name}.SU": torch.zeros(16),
+                f"{cell.name}.SV": torch.zeros(16),
+                f"{cell.name}.bank_ids": torch.zeros(1, dtype=torch.uint8),
+                f"{cell.name}.bank_alt_id": torch.zeros(1, dtype=torch.uint8),
             },
             [cell],
+            maximum_bpw=1,
         )
 
 
-def test_accounting_reads_exact_saved_safetensors_extents(tmp_path):
+@pytest.mark.parametrize(("shape", "dtype"), [((2, 16), torch.int32), ((1, 16), torch.int64)])
+def test_accounting_rejects_wrong_required_packed_tensor_shape_or_dtype(shape, dtype):
+    cell = ProjectionCell(0, "q_proj", "model.layers.0.self_attn.q_proj", 16, 16)
+    state = {
+        f"{cell.name}.trellis": torch.zeros(shape, dtype=dtype),
+        f"{cell.name}.SU": torch.zeros(16, dtype=torch.float32),
+        f"{cell.name}.SV": torch.zeros(16, dtype=torch.float32),
+        f"{cell.name}.bank_ids": torch.zeros(1, dtype=torch.uint8),
+        f"{cell.name}.bank_alt_id": torch.ones(1, dtype=torch.uint8),
+    }
+    with pytest.raises(AcceptanceError, match="packed tensor metadata mismatch"):
+        account_serialized_state(state, [cell], maximum_bpw=100)
+
+
+def test_accounting_reads_exact_saved_safetensors_extents(tmp_path, monkeypatch):
     cells = [
         ProjectionCell(
             layer,
@@ -234,14 +253,21 @@ def test_accounting_reads_exact_saved_safetensors_extents(tmp_path):
         )
         for layer, role in expected_cells()
     ]
-    tensors = {"model.embed_tokens.weight": torch.zeros(8, dtype=torch.float16)}
+    metadata = {"model.embed_tokens.weight": {"bytes": 16, "dtype": "F16", "shape": [8]}}
     for cell in cells:
-        tensors[f"{cell.name}.trellis"] = torch.zeros(1, dtype=torch.int32)
-        tensors[f"{cell.name}.SU"] = torch.zeros(1, dtype=torch.float32)
-        tensors[f"{cell.name}.SV"] = torch.zeros(1, dtype=torch.float32)
-    save_file(tensors, tmp_path / "model.safetensors")
+        tile_count = (cell.in_features // 16) * (cell.out_features // 16)
+        for suffix, shape, dtype, size in (
+            ("trellis", [tile_count, 16], "I32", tile_count * 64),
+            ("SU", [cell.in_features], "F32", cell.in_features * 4),
+            ("SV", [cell.out_features], "F32", cell.out_features * 4),
+            ("bank_ids", [tile_count], "U8", tile_count),
+            ("bank_alt_id", [1], "U8", 1),
+        ):
+            metadata[f"{cell.name}.{suffix}"] = {"bytes": size, "dtype": dtype, "shape": shape}
+    tensor_bytes = sum(item["bytes"] for item in metadata.values())
+    monkeypatch.setattr(acceptance, "_serialized_tensor_metadata", lambda _path: (metadata, {"model.safetensors": tensor_bytes + 8}))
     report = account_serialized_checkpoint(tmp_path, cells, maximum_bpw=100)
-    assert report["requested_projection_tensor_bytes"] == 12 * 252
+    assert report["requested_projection_tensor_bytes"] == tensor_bytes - 16
     assert report["dense_non_target_tensor_bytes"] == 16
     assert report["container_header_and_padding_bytes"] > 0
 
@@ -283,22 +309,24 @@ def _complete_report(score=0.85, kl=0.1):
     target_tensors = {}
     per_module = {}
     for module_name in expected_projection_names():
-        tensors = {
-            f"{module_name}.trellis": {"bytes": 4},
-            f"{module_name}.SU": {"bytes": 4},
-            f"{module_name}.SV": {"bytes": 4},
-            f"{module_name}.bank_ids": {"bytes": 1},
-            f"{module_name}.bank_alt_id": {"bytes": 1},
-        }
-        target_tensors.update({key: value["bytes"] for key, value in tensors.items()})
         role = module_name.rsplit(".", 1)[-1]
         in_features, out_features = expected_projection_dimensions(role)
+        tile_count = (in_features // 16) * (out_features // 16)
+        tensors = {
+            f"{module_name}.trellis": {"bytes": tile_count * 64, "shape": [tile_count, 16], "dtype": "I32"},
+            f"{module_name}.SU": {"bytes": in_features * 4, "shape": [in_features], "dtype": "F32"},
+            f"{module_name}.SV": {"bytes": out_features * 4, "shape": [out_features], "dtype": "F32"},
+            f"{module_name}.bank_ids": {"bytes": tile_count, "shape": [tile_count], "dtype": "U8"},
+            f"{module_name}.bank_alt_id": {"bytes": 1, "shape": [1], "dtype": "U8"},
+        }
+        target_tensors.update({key: value["bytes"] for key, value in tensors.items()})
+        module_bytes = sum(item["bytes"] for item in tensors.values())
         per_module[module_name] = {
-            "bytes": 14,
+            "bytes": module_bytes,
             "dense_weight_count": in_features * out_features,
             "tensors": tensors,
         }
-    target_bytes = 14 * 252
+    target_bytes = sum(record["bytes"] for record in per_module.values())
     dense_weights = sum(record["dense_weight_count"] for record in per_module.values())
     comparisons = [
         {"left": left, "right": right, "identity_overlap": [], "content_overlap": []}
@@ -328,18 +356,61 @@ def _complete_report(score=0.85, kl=0.1):
         "module_tensor_counts": {name: 5 for name in expected_projection_names()},
         "aggregate_sha256": "a" * 64,
     }
+    run_id = "run-acceptance-test"
+    producer_process_id = "process-quantizer"
+    start = seal_acceptance_observation(
+        {
+            "stage": "quantization_start",
+            "run_id": run_id,
+            "process_id": producer_process_id,
+            "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
+        }
+    )
+    end = seal_acceptance_observation(
+        {
+            "stage": "quantization_end",
+            "run_id": run_id,
+            "process_id": producer_process_id,
+            "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
+            "previous_observation_sha256": start["observation_sha256"],
+        }
+    )
+    pre_save = seal_acceptance_observation(
+        {
+            "stage": "pre_save_in_memory",
+            "run_id": run_id,
+            "process_id": producer_process_id,
+            "dense_source_end_sha256": end["observation_sha256"],
+            "payload": payload_hashes,
+        }
+    )
+    fresh_process = seal_acceptance_observation(
+        {
+            "stage": "fresh_process_reload",
+            "run_id": run_id,
+            "process_id": "process-fresh",
+            "previous_observation_sha256": pre_save["observation_sha256"],
+            "payload": payload_hashes,
+        }
+    )
+    evaluation_reload = seal_acceptance_observation(
+        {
+            "stage": "acceptance_evaluation_reload",
+            "run_id": run_id,
+            "process_id": "process-evaluation",
+            "previous_observation_sha256": fresh_process["observation_sha256"],
+            "payload": payload_hashes,
+        }
+    )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "artifact": {
             "fresh_reload_verified": True,
             "checkpoint_sha256": {
                 "config.json": checkpoint_config_sha256,
                 "model.safetensors": "a" * 64,
             },
-            "dense_model_sha256": {
-                "config.json": QWEN3_DENSE_CONFIG_SHA256,
-                "model.safetensors": "b" * 64,
-            },
+            "dense_model_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
             "dense_model_identity": {
                 "config": dict(QWEN3_MODEL_CONFIG),
                 "config_sha256": QWEN3_DENSE_CONFIG_SHA256,
@@ -355,9 +426,15 @@ def _complete_report(score=0.85, kl=0.1):
             },
             "packed_payload_parity": {
                 "verified": True,
-                "pre_save": payload_hashes,
-                "fresh_process": payload_hashes,
-                "evaluation_reload": payload_hashes,
+                "pre_save": pre_save,
+                "fresh_process": fresh_process,
+                "evaluation_reload": evaluation_reload,
+            },
+            "dense_source_binding": {
+                "run_id": run_id,
+                "producer_process_id": producer_process_id,
+                "start": start,
+                "end": end,
             },
         },
         "census": {"expected": 252, "actual": 252, "complete": True},
@@ -437,26 +514,61 @@ def test_report_rejects_noncanonical_or_inconsistent_accounting():
         validate_acceptance_report(report)
 
 
+@pytest.mark.parametrize(("field", "value"), [("shape", [1, 16]), ("dtype", "I64")])
+def test_report_rejects_wrong_canonical_packed_tensor_shape_or_dtype(field, value):
+    report = _complete_report()
+    module_name = expected_projection_names()[0]
+    report["accounting"]["per_module"][module_name]["tensors"][f"{module_name}.trellis"][field] = value
+    with pytest.raises(AcceptanceError, match="packed tensor metadata mismatch"):
+        validate_acceptance_report(report)
+
+
 def test_report_rejects_asserted_or_drifted_payload_parity():
     report = _complete_report()
     report["artifact"]["packed_payload_parity"] = {"verified": True}
-    with pytest.raises(AcceptanceError, match="incomplete"):
+    with pytest.raises(AcceptanceError, match="missing|structurally sealed"):
         validate_acceptance_report(report)
 
     report = _complete_report()
-    report["artifact"]["packed_payload_parity"]["fresh_process"] = dict(
-        report["artifact"]["packed_payload_parity"]["fresh_process"]
-    )
-    report["artifact"]["packed_payload_parity"]["fresh_process"]["aggregate_sha256"] = (
-        "0" * 64
-    )
-    with pytest.raises(AcceptanceError, match="drifted"):
+    report["artifact"]["packed_payload_parity"]["fresh_process"]["payload"]["aggregate_sha256"] = "0" * 64
+    with pytest.raises(AcceptanceError, match="structurally sealed"):
         validate_acceptance_report(report)
 
     report = _complete_report()
     first_name = expected_projection_names()[0]
     report["accounting"]["per_module"][first_name]["bytes"] += 1
     with pytest.raises(AcceptanceError, match="byte subtotal disagrees"):
+        validate_acceptance_report(report)
+
+
+@pytest.mark.parametrize("failure", ["missing", "digest_mismatch"])
+def test_report_rejects_missing_or_mismatched_quantization_dense_source_binding(failure):
+    report = _complete_report()
+    if failure == "missing":
+        report["artifact"].pop("dense_source_binding")
+        message = "lacks quantization-start/end"
+    else:
+        end = report["artifact"]["dense_source_binding"]["end"]
+        end["artifact_sha256"] = {**QWEN3_DENSE_ARTIFACT_SHA256, "config.json": "0" * 64}
+        end.update(seal_acceptance_observation(end))
+        message = "mismatched, or unpinned"
+    with pytest.raises(AcceptanceError, match=message):
+        validate_acceptance_report(report)
+
+
+@pytest.mark.parametrize("failure", ["same_process", "broken_chain"])
+def test_report_rejects_unindependent_or_unchained_reload_parity(failure):
+    report = _complete_report()
+    parity = report["artifact"]["packed_payload_parity"]
+    fresh = parity["fresh_process"]
+    if failure == "same_process":
+        fresh["process_id"] = parity["pre_save"]["process_id"]
+        message = "independently measured"
+    else:
+        fresh["previous_observation_sha256"] = "0" * 64
+        message = "observation chain"
+    parity["fresh_process"] = seal_acceptance_observation(fresh)
+    with pytest.raises(AcceptanceError, match=message):
         validate_acceptance_report(report)
 
 
@@ -490,7 +602,7 @@ def test_report_rejects_final_kl_as_percentage_semantics():
 
 def test_report_rejects_incomplete_coverage_and_schema():
     report = _complete_report()
-    report["schema_version"] = 3
+    report["schema_version"] = 4
     with pytest.raises(AcceptanceError, match="schema"):
         validate_acceptance_report(report)
     report = _complete_report()
@@ -586,6 +698,52 @@ def test_quantization_stream_verification_rejects_content_mutation(tmp_path):
             "pre_save": {"aggregate_sha256": "a" * 64},
             "fresh_process": {"aggregate_sha256": "a" * 64},
         },
+    }
+    start = seal_acceptance_observation(
+        {
+            "stage": "quantization_start",
+            "run_id": "run",
+            "process_id": "producer",
+            "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
+        }
+    )
+    end = seal_acceptance_observation(
+        {
+            "stage": "quantization_end",
+            "run_id": "run",
+            "process_id": "producer",
+            "artifact_sha256": dict(QWEN3_DENSE_ARTIFACT_SHA256),
+            "previous_observation_sha256": start["observation_sha256"],
+        }
+    )
+    run["dense_source_binding"] = {
+        "run_id": "run",
+        "producer_process_id": "producer",
+        "start": start,
+        "end": end,
+    }
+    pre_save = seal_acceptance_observation(
+        {
+            "stage": "pre_save_in_memory",
+            "run_id": "run",
+            "process_id": "producer",
+            "dense_source_end_sha256": end["observation_sha256"],
+            "payload": {"aggregate_sha256": "a" * 64},
+        }
+    )
+    fresh_process = seal_acceptance_observation(
+        {
+            "stage": "fresh_process_reload",
+            "run_id": "run",
+            "process_id": "fresh",
+            "previous_observation_sha256": pre_save["observation_sha256"],
+            "payload": {"aggregate_sha256": "a" * 64},
+        }
+    )
+    run["packed_payload_parity"] = {
+        "verified": True,
+        "pre_save": pre_save,
+        "fresh_process": fresh_process,
     }
     (checkpoint / "qvq_quantize_run.json").write_text(json.dumps(run), encoding="utf-8")
     acceptance_script._verify_quantization_streams(checkpoint, manifests, dense)

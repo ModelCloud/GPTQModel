@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -40,13 +41,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.utils.qvq_acceptance import (
     MANIFEST_SPLITS,
+    QWEN3_DENSE_ARTIFACT_SHA256,
     QWEN3_PINNED_REVISION,
     REPORT_SCHEMA_VERSION,
     AcceptanceError,
+    acceptance_observation_digest,
     account_serialized_checkpoint,
     census_reloaded_model,
     hash_canonical_qwen3_payloads,
     materialize_manifest,
+    seal_acceptance_observation,
     select_diverse_32,
     validate_acceptance_report,
     validate_diverse_selection,
@@ -330,16 +334,51 @@ def _verify_quantization_streams(
         }
     if payload.get("layer_scope") != "all":
         raise RuntimeError("quantization report did not request all decoder layers")
+    binding = payload.get("dense_source_binding")
+    if not isinstance(binding, dict):
+        raise TypeError("quantization report lacks dense source start/end binding")
+    start, end = binding.get("start"), binding.get("end")
+    if (
+        not isinstance(start, dict)
+        or not isinstance(end, dict)
+        or start.get("stage") != "quantization_start"
+        or end.get("stage") != "quantization_end"
+        or start.get("run_id") != binding.get("run_id")
+        or end.get("run_id") != binding.get("run_id")
+        or start.get("process_id") != binding.get("producer_process_id")
+        or end.get("process_id") != binding.get("producer_process_id")
+        or start.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
+        or end.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
+        or start.get("observation_sha256") != acceptance_observation_digest(start)
+        or end.get("observation_sha256") != acceptance_observation_digest(end)
+        or end.get("previous_observation_sha256") != start.get("observation_sha256")
+    ):
+        raise RuntimeError("quantization report dense source binding is mismatched, missing, or unpinned")
     parity = payload.get("packed_payload_parity")
+    pre_save = parity.get("pre_save") if isinstance(parity, dict) else None
+    fresh_process = parity.get("fresh_process") if isinstance(parity, dict) else None
     if (
         not isinstance(parity, dict)
         or parity.get("verified") is not True
-        or parity.get("pre_save") != parity.get("fresh_process")
+        or not isinstance(pre_save, dict)
+        or not isinstance(fresh_process, dict)
+        or pre_save.get("observation_sha256") != acceptance_observation_digest(pre_save)
+        or fresh_process.get("observation_sha256") != acceptance_observation_digest(fresh_process)
+        or pre_save.get("stage") != "pre_save_in_memory"
+        or fresh_process.get("stage") != "fresh_process_reload"
+        or pre_save.get("run_id") != binding.get("run_id")
+        or fresh_process.get("run_id") != binding.get("run_id")
+        or pre_save.get("process_id") != binding.get("producer_process_id")
+        or fresh_process.get("process_id") == binding.get("producer_process_id")
+        or pre_save.get("dense_source_end_sha256") != end.get("observation_sha256")
+        or fresh_process.get("previous_observation_sha256") != pre_save.get("observation_sha256")
+        or pre_save.get("payload") != fresh_process.get("payload")
     ):
         raise RuntimeError(
             "quantization report lacks measured pre-save/fresh-process packed payload parity"
         )
     evidence["packed_payload_parity"] = parity
+    evidence["dense_source_binding"] = binding
     evidence["quantize_config"] = expected_config
     return evidence
 
@@ -354,8 +393,19 @@ def _payload_hashes(args: argparse.Namespace) -> int:
         attn_implementation="eager",
         local_files_only=True,
     ).eval()
-    payload = hash_canonical_qwen3_payloads(model, census_reloaded_model(model))
-    _write_new(args.output, payload)
+    process_id = f"pid:{os.getpid()}"
+    if process_id == args.producer_process_id:
+        raise RuntimeError("fresh payload reload did not run in an independent process")
+    observation = seal_acceptance_observation(
+        {
+            "stage": "fresh_process_reload",
+            "run_id": args.run_id,
+            "process_id": process_id,
+            "previous_observation_sha256": args.parent_observation_sha256,
+            "payload": hash_canonical_qwen3_payloads(model, census_reloaded_model(model)),
+        }
+    )
+    _write_new(args.output, observation)
     return 0
 
 
@@ -551,6 +601,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         args.checkpoint, args.manifest_dir, dense_model_path
     )
     recorded_parity = quantization_streams.pop("packed_payload_parity")
+    dense_source_binding = quantization_streams.pop("dense_source_binding")
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.dense_model, revision=args.revision, local_files_only=True
@@ -574,13 +625,21 @@ def _evaluate(args: argparse.Namespace) -> int:
     ).eval()
     cells = census_reloaded_model(quantized)
     evaluation_payload = hash_canonical_qwen3_payloads(quantized, cells)
-    if evaluation_payload != recorded_parity["fresh_process"]:
+    if evaluation_payload != recorded_parity["fresh_process"]["payload"]:
         raise AcceptanceError(
             "evaluation reload packed payload differs from fresh-process post-save payload"
         )
     packed_payload_parity = {
         **recorded_parity,
-        "evaluation_reload": evaluation_payload,
+        "evaluation_reload": seal_acceptance_observation(
+            {
+                "stage": "acceptance_evaluation_reload",
+                "run_id": dense_source_binding["run_id"],
+                "process_id": f"pid:{os.getpid()}",
+                "previous_observation_sha256": recorded_parity["fresh_process"]["observation_sha256"],
+                "payload": evaluation_payload,
+            }
+        ),
         "verified": True,
     }
     accounting = account_serialized_checkpoint(
@@ -632,10 +691,11 @@ def _evaluate(args: argparse.Namespace) -> int:
             "revision": args.revision,
             "fresh_reload_verified": True,
             "checkpoint_sha256": _artifact_hashes(args.checkpoint),
-            "dense_model_sha256": _artifact_hashes(dense_model_path),
+            "dense_model_sha256": dense_identity["artifact_sha256"],
             "dense_model_identity": dense_identity,
             "checkpoint_model_identity": checkpoint_identity,
             "packed_payload_parity": packed_payload_parity,
+            "dense_source_binding": dense_source_binding,
         },
         "census": {"expected": 252, "actual": len(cells), "complete": True},
         "accounting": accounting,
@@ -685,6 +745,9 @@ def build_parser() -> argparse.ArgumentParser:
     payload_hashes.add_argument("--checkpoint", type=Path, required=True)
     payload_hashes.add_argument("--device", default="cuda:0")
     payload_hashes.add_argument("--output", type=Path, required=True)
+    payload_hashes.add_argument("--run-id", required=True)
+    payload_hashes.add_argument("--parent-observation-sha256", required=True)
+    payload_hashes.add_argument("--producer-process-id", required=True)
     payload_hashes.set_defaults(handler=_payload_hashes)
 
     def add_artifact_arguments(command: argparse.ArgumentParser) -> None:

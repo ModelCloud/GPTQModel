@@ -21,6 +21,7 @@ import platform
 import subprocess
 import sys
 import time
+import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -44,8 +45,11 @@ from gptqmodel.quantization import (
 )
 from gptqmodel.quantization.config import ChatTemplateConfig
 from gptqmodel.utils.qvq_acceptance import (
+    QWEN3_DENSE_ARTIFACT_SHA256,
     census_reloaded_model,
     hash_canonical_qwen3_payloads,
+    seal_acceptance_observation,
+    validate_qwen3_model_artifact,
 )
 
 QVQ_FORMATS = tuple(
@@ -472,6 +476,21 @@ def main(argv: list[str] | None = None) -> int:
     replay_search_spec = _slice_from_args(args, "replay_search")
     replay_confirmation_spec = _slice_from_args(args, "replay_confirmation")
     config = build_quantize_config(args)
+    run_id = uuid.uuid4().hex
+    process_id = f"pid:{os.getpid()}"
+    dense_source_binding = None
+    if args.verify_qwen3_acceptance_payload_parity:
+        start_identity = validate_qwen3_model_artifact(
+            Path(args.model), require_pinned_dense=True
+        )
+        start_observation = seal_acceptance_observation(
+            {
+                "stage": "quantization_start",
+                "run_id": run_id,
+                "process_id": process_id,
+                "artifact_sha256": start_identity["artifact_sha256"],
+            }
+        )
     if config.rounding == "yaqa" and yaqa_spec is None:
         yaqa_spec = calibration_spec
     if config.module_granular_replay is not None and (
@@ -547,11 +566,42 @@ def main(argv: list[str] | None = None) -> int:
         else:
             os.environ[telemetry_environment] = previous_telemetry
     quant_seconds = time.perf_counter() - quant_started
+    if args.verify_qwen3_acceptance_payload_parity:
+        end_identity = validate_qwen3_model_artifact(
+            Path(args.model), require_pinned_dense=True
+        )
+        end_observation = seal_acceptance_observation(
+            {
+                "stage": "quantization_end",
+                "run_id": run_id,
+                "process_id": process_id,
+                "artifact_sha256": end_identity["artifact_sha256"],
+                "previous_observation_sha256": start_observation["observation_sha256"],
+            }
+        )
+        if start_identity["artifact_sha256"] != QWEN3_DENSE_ARTIFACT_SHA256 or end_identity[
+            "artifact_sha256"
+        ] != QWEN3_DENSE_ARTIFACT_SHA256:
+            raise RuntimeError("pinned dense source digest map changed during quantization")
+        dense_source_binding = {
+            "run_id": run_id,
+            "producer_process_id": process_id,
+            "start": start_observation,
+            "end": end_observation,
+        }
     packed_payload_parity = None
     if args.verify_qwen3_acceptance_payload_parity:
         packed_payload_parity = {
-            "pre_save": hash_canonical_qwen3_payloads(
-                model, census_reloaded_model(model)
+            "pre_save": seal_acceptance_observation(
+                {
+                    "stage": "pre_save_in_memory",
+                    "run_id": run_id,
+                    "process_id": process_id,
+                    "dense_source_end_sha256": end_observation["observation_sha256"],
+                    "payload": hash_canonical_qwen3_payloads(
+                        model, census_reloaded_model(model)
+                    ),
+                }
             ),
         }
     lifecycle_telemetry = {
@@ -579,13 +629,19 @@ def main(argv: list[str] | None = None) -> int:
                     args.device,
                     "--output",
                     str(fresh_path),
+                    "--run-id",
+                    run_id,
+                    "--parent-observation-sha256",
+                    packed_payload_parity["pre_save"]["observation_sha256"],
+                    "--producer-process-id",
+                    process_id,
                 ],
                 cwd=REPO_ROOT,
                 check=True,
             )
             fresh_process = json.loads(fresh_path.read_text(encoding="utf-8"))
         packed_payload_parity["fresh_process"] = fresh_process
-        if packed_payload_parity["pre_save"] != fresh_process:
+        if packed_payload_parity["pre_save"]["payload"] != fresh_process.get("payload"):
             raise RuntimeError(
                 "packed QVQ module payloads drifted between pre-save state and fresh-process reload"
             )
@@ -620,6 +676,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "layer_scope": "all" if args.layers is None else {"first_layers": args.layers},
         "packed_payload_parity": packed_payload_parity,
+        "dense_source_binding": dense_source_binding,
         "seconds": {
             "load": load_seconds,
             "prepare_and_quantize": quant_seconds,

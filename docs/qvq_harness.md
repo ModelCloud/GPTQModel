@@ -78,7 +78,8 @@ changing the general harness. The target is Qwen/Qwen3-8B revision
 The split plan is calibration rows 0--511, YAQA/tuning 512--1023, validation 1024--1535, held-out diagnostics
 1536--2047, and a disjoint diverse pool 2048--2559. Diverse-32 sorts the pool by canonical UTF-8 content length and
 stable row identity, partitions it into 32 bins of 16, and selects rank 8 per bin. Manifests contain source identities
-and SHA-256 content hashes; all ten pairwise comparisons must be empty.
+and SHA-256 content hashes; all fourteen required pairwise comparisons must be empty (the selected Diverse-32 subset
+is intentionally derived from, and therefore not disjoint from, its Diverse-512 source pool).
 
 ```bash
 python scripts/accept_qwen3_8b_qvq.py export-frozen-splits \
@@ -136,9 +137,9 @@ direct parameter/buffer bytes before save, frees the producer model, launches a 
 load, and requires canonical per-module and aggregate hashes to match. Evaluation hashes its independent reload again.
 
 Focused tests cover leakage, diverse cardinality, missing modules, dense/higher-precision fallback, auxiliary/BPW
-accounting, thresholds, missing cells, coverage, and report schema. The implementation gate passed 31 focused and
-existing unified-harness tests, Ruff on all changed Python paths, `compileall`, config construction, CLI imports, and
-`git diff --check`. After safely installing missing declared dependencies (`accelerate`, `threadpoolctl`, `device-smi`,
+accounting, thresholds, missing cells, coverage, and report schema. At the initial implementation commit, the gate
+passed 31 then-current focused and unified-harness tests, Ruff on all changed Python paths, `compileall`, config
+construction, CLI imports, and `git diff --check`. After safely installing missing declared dependencies (`accelerate`, `threadpoolctl`, `device-smi`,
 `defuser`, and `pillow`), the exact `export-frozen-splits` command above succeeded against the pinned real dataset:
 four 512-row manifests and one 32-row manifest were emitted and all pairwise identity/content checks passed.
 `pyright` was not installed in this worktree environment, so no static-typecheck result is claimed; Python bytecode
@@ -204,3 +205,22 @@ Implementation-gate ledger for this rejected-review repair (run from
 
 The implementation gates validate fail-closed behavior and schemas only. Effective BPW and all score/KL gates still
 have no real Qwen3-8B quantized artifact to measure, so they remain unresolved rather than recorded as successes.
+
+## Trust-boundary repair for PR #1 (2026-08-23)
+
+This repair preserves every historical success and failure above while superseding three insufficient evidence
+schemas. Required V2B2-P32 tensors now have one exact serialized contract per canonical projection: `trellis` is I32
+with shape `[in/16*out/16, 16]`, `SU` and `SV` are F32 vectors of the exact input/output dimensions, `bank_ids` is a
+U8 vector with one byte per tile, and `bank_alt_id` is one U8 value. Missing names, aliases, wrong shapes, and wrong
+dtypes all fail closed in both checkpoint accounting and report validation.
+
+An acceptance quantization run now hashes and validates the complete pinned seven-file dense digest map at explicit
+`quantization_start` and `quantization_end` stages. The observations carry a run ID, the real producer PID, sealed
+record digests, and a start-to-end link; both maps must equal the pinned authority. Pre-save payload evidence is made
+from the live in-memory producer model and links to that end observation. A subprocess reload and the later acceptance
+evaluation reload have distinct real PIDs, canonical stages, and predecessor links. Consequently, hashing the final
+checkpoint repeatedly cannot satisfy the required pre-save stage or the three-process provenance chain.
+
+These are implementation and integrity gates, not a retroactive model-quality claim. The earlier successful fixture,
+identity, manifest, lint, compilation, and CLI checks remain valid historical results; the earlier absence of a full
+quantized artifact, measured BPW, Top-1/Diverse-32 scores, and final KL remains an explicitly preserved failure state.

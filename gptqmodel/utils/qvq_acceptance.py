@@ -50,7 +50,7 @@ MANIFEST_DISJOINT_PAIRS = tuple(
     for right in MANIFEST_SPLITS[left_index + 1 :]
     if (left, right) != ("diverse_pool_512", "diverse_32")
 )
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 QWEN3_REQUESTED_BITS = 2.0
 QWEN3_PINNED_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
 QWEN3_LOCAL_TARGET = Path("/monster/data/model/Qwen3-8B")
@@ -101,6 +101,7 @@ QWEN3_PROJECTION_DENSE_WEIGHT_COUNT = QWEN3_8B_LAYER_COUNT * sum(
     for in_features, out_features in QWEN3_PROJECTION_DIMENSIONS.values()
 )
 QVQ_PAYLOAD_HASH_SCHEME = "qvq-module-payload-sha256-v1"
+QVQ_OBSERVATION_HASH_SCHEME = "qvq-acceptance-observation-sha256-v1"
 DIVERSE_SELECTION_SCHEME = "canonical-content-utf8-length/identity-utf8/32-bins-of-16/midpoint-rank-8-v1"
 PROJECTION_BOUNDARY = (
     "All serialized tensors whose state-dict key is the exact requested decoder projection prefix or a child of "
@@ -160,6 +161,44 @@ def expected_projection_dimensions(role: str) -> tuple[int, int]:
         return QWEN3_PROJECTION_DIMENSIONS[role]
     except KeyError as error:
         raise ValueError(f"unknown Qwen3 projection role {role!r}") from error
+
+
+def expected_packed_tensor_metadata(cell: ProjectionCell) -> dict[str, dict[str, Any]]:
+    """Return the one canonical serialized V2B2-P32 W2 payload for a projection."""
+
+    tile_count = (cell.in_features // 16) * (cell.out_features // 16)
+    return {
+        f"{cell.name}.trellis": {"shape": [tile_count, 16], "dtype": "I32"},
+        f"{cell.name}.SU": {"shape": [cell.in_features], "dtype": "F32"},
+        f"{cell.name}.SV": {"shape": [cell.out_features], "dtype": "F32"},
+        f"{cell.name}.bank_ids": {"shape": [tile_count], "dtype": "U8"},
+        f"{cell.name}.bank_alt_id": {"shape": [1], "dtype": "U8"},
+    }
+
+
+def acceptance_observation_digest(observation: Mapping[str, Any]) -> str:
+    """Hash an evidence record excluding its self-authenticating digest field."""
+
+    payload = dict(observation)
+    payload.pop("observation_sha256", None)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256()
+    _hash_frame(digest, QVQ_OBSERVATION_HASH_SCHEME.encode("ascii"))
+    _hash_frame(digest, encoded)
+    return digest.hexdigest()
+
+
+def seal_acceptance_observation(observation: Mapping[str, Any]) -> dict[str, Any]:
+    sealed = dict(observation)
+    sealed["observation_sha256"] = acceptance_observation_digest(sealed)
+    return sealed
+
+
+def _valid_sealed_observation(observation: Any) -> bool:
+    return (
+        isinstance(observation, dict)
+        and observation.get("observation_sha256") == acceptance_observation_digest(observation)
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -535,6 +574,18 @@ _SAFETENSORS_DTYPE_BYTES = {
     "U64": 8,
     "F64": 8,
 }
+_TORCH_TO_SAFETENSORS_DTYPE = {
+    torch.bool: "BOOL",
+    torch.uint8: "U8",
+    torch.int8: "I8",
+    torch.int16: "I16",
+    torch.float16: "F16",
+    torch.bfloat16: "BF16",
+    torch.int32: "I32",
+    torch.float32: "F32",
+    torch.int64: "I64",
+    torch.float64: "F64",
+}
 
 
 def _serialized_tensor_metadata(
@@ -744,14 +795,25 @@ def _account_serialized_metadata(
         )
     for cell in cells:
         serialized = per_module[cell.name]["tensors"]
-        missing = [
-            name
-            for name in cell.required_tensors
-            if f"{cell.name}.{name}" not in serialized
-        ]
+        expected_metadata = expected_packed_tensor_metadata(cell)
+        missing = sorted(set(expected_metadata) - set(serialized))
         if missing:
             raise AcceptanceError(
                 f"requested projection {cell.name!r} lacks serialized payload tensors: {missing}"
+            )
+        mismatches = {}
+        for name, expected in expected_metadata.items():
+            actual = serialized[name]
+            actual_shape = actual.get("shape")
+            actual_dtype = actual.get("dtype")
+            if actual_shape != expected["shape"] or actual_dtype != expected["dtype"]:
+                mismatches[name] = {
+                    "expected": expected,
+                    "actual": {"shape": actual_shape, "dtype": actual_dtype},
+                }
+        if mismatches:
+            raise AcceptanceError(
+                f"requested projection {cell.name!r} packed tensor metadata mismatch: {mismatches}"
             )
     dense_weight_count = sum(cell.dense_weight_count for cell in cells)
     if dense_weight_count <= 0:
@@ -800,7 +862,7 @@ def account_serialized_state(
             raise AcceptanceError(f"state entry {key!r} is not a tensor")
         metadata[key] = {
             "bytes": _tensor_nbytes(tensor),
-            "dtype": str(tensor.dtype),
+            "dtype": _TORCH_TO_SAFETENSORS_DTYPE.get(tensor.dtype, str(tensor.dtype)),
             "shape": list(tensor.shape),
         }
     return _account_serialized_metadata(
@@ -1039,6 +1101,8 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
         raise AcceptanceError(
             "artifact requires SHA-256 identities for the pinned dense model files"
         )
+    if dense_hashes != QWEN3_DENSE_ARTIFACT_SHA256:
+        raise AcceptanceError("artifact dense model hashes are not the exact pinned digest map")
     dense_identity = artifact.get("dense_model_identity")
     checkpoint_identity = artifact.get("checkpoint_model_identity")
     for label, identity in (
@@ -1070,14 +1134,37 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
         raise AcceptanceError(
             "dense artifact shard/index SHA-256 identity is not the pinned local target"
         )
+    dense_binding = artifact.get("dense_source_binding")
+    if not isinstance(dense_binding, dict):
+        raise AcceptanceError("artifact lacks quantization-start/end dense source binding")
+    start = dense_binding.get("start")
+    end = dense_binding.get("end")
+    run_id = dense_binding.get("run_id")
+    producer_process_id = dense_binding.get("producer_process_id")
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(producer_process_id, str)
+        or not producer_process_id
+        or not _valid_sealed_observation(start)
+        or not _valid_sealed_observation(end)
+        or start.get("stage") != "quantization_start"
+        or end.get("stage") != "quantization_end"
+        or start.get("run_id") != run_id
+        or end.get("run_id") != run_id
+        or start.get("process_id") != producer_process_id
+        or end.get("process_id") != producer_process_id
+        or start.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
+        or end.get("artifact_sha256") != QWEN3_DENSE_ARTIFACT_SHA256
+        or end.get("previous_observation_sha256") != start.get("observation_sha256")
+    ):
+        raise AcceptanceError("quantization dense source binding is incomplete, mismatched, or unpinned")
     parity = artifact.get("packed_payload_parity")
     if not isinstance(parity, dict) or parity.get("verified") is not True:
         raise AcceptanceError(
             "artifact lacks measured pre-save/fresh-process packed payload parity"
         )
-    payloads = [
-        parity.get(name) for name in ("pre_save", "fresh_process", "evaluation_reload")
-    ]
+    observations = [parity.get(name) for name in ("pre_save", "fresh_process", "evaluation_reload")]
 
     def valid_sha256(value: Any) -> bool:
         return (
@@ -1103,10 +1190,28 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
             and all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in tensor_counts.values())
             and valid_sha256(aggregate)
         )
-    if any(
-        not valid_payload_hashes(payload)
-        for payload in payloads
+    stages = ("pre_save_in_memory", "fresh_process_reload", "acceptance_evaluation_reload")
+    if any(not _valid_sealed_observation(item) for item in observations):
+        raise AcceptanceError("packed payload parity observations are missing or not structurally sealed")
+    if any(item.get("stage") != stage for item, stage in zip(observations, stages)):
+        raise AcceptanceError("packed payload parity stages are not canonical")
+    if any(item.get("run_id") != run_id for item in observations):
+        raise AcceptanceError("packed payload parity run provenance is inconsistent")
+    process_ids = [item.get("process_id") for item in observations]
+    if (
+        any(not isinstance(value, str) or not value for value in process_ids)
+        or process_ids[0] != producer_process_id
+        or len(set(process_ids)) != len(process_ids)
     ):
+        raise AcceptanceError("packed payload parity was not independently measured in three processes")
+    if (
+        observations[0].get("dense_source_end_sha256") != end.get("observation_sha256")
+        or observations[1].get("previous_observation_sha256") != observations[0].get("observation_sha256")
+        or observations[2].get("previous_observation_sha256") != observations[1].get("observation_sha256")
+    ):
+        raise AcceptanceError("packed payload parity observation chain is broken")
+    payloads = [item.get("payload") for item in observations]
+    if any(not valid_payload_hashes(payload) for payload in payloads):
         raise AcceptanceError(
             "packed payload parity evidence is incomplete or uses a noncanonical hash scheme"
         )
@@ -1165,6 +1270,28 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
             raise AcceptanceError(
                 f"serialized accounting record lacks required packed tensors for {module_name}"
             )
+        layer = int(module_name.split(".")[2])
+        role = module_name.rsplit(".", 1)[-1]
+        expected_in, expected_out = expected_projection_dimensions(role)
+        expected_metadata = expected_packed_tensor_metadata(
+            ProjectionCell(layer, role, module_name, expected_in, expected_out)
+        )
+        metadata_mismatches = {
+            name: {
+                "expected": expected,
+                "actual": {
+                    "shape": tensors[name].get("shape"),
+                    "dtype": tensors[name].get("dtype"),
+                },
+            }
+            for name, expected in expected_metadata.items()
+            if tensors[name].get("shape") != expected["shape"]
+            or tensors[name].get("dtype") != expected["dtype"]
+        }
+        if metadata_mismatches:
+            raise AcceptanceError(
+                f"serialized accounting packed tensor metadata mismatch for {module_name}: {metadata_mismatches}"
+            )
         if any(
             not isinstance(item, dict)
             or not isinstance(item.get("bytes"), int)
@@ -1189,8 +1316,6 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
             raise AcceptanceError(
                 f"serialized accounting dense denominator is invalid for {module_name}"
             )
-        role = module_name.rsplit(".", 1)[-1]
-        expected_in, expected_out = expected_projection_dimensions(role)
         if dense_count != expected_in * expected_out:
             raise AcceptanceError(
                 f"serialized accounting dense denominator is not pinned for {module_name}"
@@ -1411,6 +1536,7 @@ def validate_acceptance_report(report: Mapping[str, Any]) -> None:
 __all__ = [
     "MANIFEST_SPLITS",
     "PROJECTION_BOUNDARY",
+    "QVQ_OBSERVATION_HASH_SCHEME",
     "QVQ_PAYLOAD_HASH_SCHEME",
     "QWEN3_DENSE_ARTIFACT_SHA256",
     "QWEN3_EXPECTED_MODULE_COUNT",
@@ -1421,15 +1547,18 @@ __all__ = [
     "QWEN3_PROJECTION_DIMENSIONS",
     "AcceptanceError",
     "ProjectionCell",
+    "acceptance_observation_digest",
     "account_serialized_checkpoint",
     "account_serialized_state",
     "census_reloaded_model",
     "expected_cells",
+    "expected_packed_tensor_metadata",
     "expected_projection_dimensions",
     "expected_projection_names",
     "hash_canonical_qwen3_payloads",
     "hash_qvq_module_payloads",
     "materialize_manifest",
+    "seal_acceptance_observation",
     "select_diverse_32",
     "validate_acceptance_report",
     "validate_diverse_selection",
