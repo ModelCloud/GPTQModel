@@ -739,16 +739,20 @@ template <typename Scalar, typename OutputScalar, int TransitionBits>
 __global__ __launch_bounds__(kThreads) void qvq_gemm_wmma_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
-    const Scalar* __restrict__ levels,
+    // PGC16 canonical levels are always float16 bit patterns regardless of the
+    // compute dtype; decoding through float keeps exactly one rounding step.
+    const half* __restrict__ levels,
     float* __restrict__ partial_output,
     OutputScalar* __restrict__ output,
     int size_m,
     int size_k,
     int size_n,
     int split_count) {
-  __shared__ uint32_t packed_words[4 * TransitionBits];
+  constexpr int kBatches = 2;
+  constexpr int kWordsPerTile = 4 * TransitionBits;
+  __shared__ __align__(16) uint32_t packed_words[kBatches][kWordsPerTile];
   __shared__ Scalar decoded_weight[kTileValues];
-  __shared__ Scalar input_tile[kRowsPerBlock * kTileRows];
+  __shared__ __align__(16) Scalar input_tile[kBatches][kRowsPerBlock * kTileRows];
   __shared__ Scalar cached_levels[kPgc16LevelCount];
   __shared__ float output_tile[kRowsPerBlock * kTileColumns];
 
@@ -765,31 +769,59 @@ __global__ __launch_bounds__(kThreads) void qvq_gemm_wmma_kernel(
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const int active_warps = (block_rows + 15) / 16;
 
-  cached_levels[thread] = levels[thread];
+  cached_levels[thread] =
+      ScalarTraits<Scalar>::from_float(ScalarTraits<half>::to_float(levels[thread]));
 
   wmma::fragment<wmma::matrix_a, 16, 16, 16, Scalar, wmma::row_major> input_fragment;
   wmma::fragment<wmma::matrix_b, 16, 16, 16, Scalar, wmma::row_major> weight_fragment;
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
   wmma::fill_fragment(accumulator, 0.0f);
-  __syncthreads();
 
+  // Async double-buffered staging: while tile i is decoded and multiplied,
+  // tile i+1 streams into the other buffer through cp.async.
+  auto stage_batch = [&](int k_tile, int dst) {
+    const int64_t tile_index = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+    const uint4* words4_src =
+        reinterpret_cast<const uint4*>(trellis + tile_index * kWordsPerTile);
+    uint4* words4_dst = reinterpret_cast<uint4*>(packed_words[dst]);
+    for (int index = thread; index < kWordsPerTile / 4; index += kThreads) {
+      __pipeline_memcpy_async(words4_dst + index, words4_src + index, 16);
+    }
+    uint4* input4 = reinterpret_cast<uint4*>(input_tile[dst]);
+    const uint4* input4_base = reinterpret_cast<const uint4*>(input);
+    for (int index = thread; index < kRowsPerBlock * kTileRows / 8; index += kThreads) {
+      const int row = index / (kTileRows / 8);
+      const int vec = index - row * (kTileRows / 8);
+      if (row < block_rows) {
+        __pipeline_memcpy_async(
+            input4 + index,
+            input4_base +
+                ((static_cast<int64_t>(m0 + row) * size_k + k_tile * kTileRows) *
+                     static_cast<int>(sizeof(Scalar)) / 16 +
+                 vec),
+            16);
+      } else {
+        input4[index] = make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+    __pipeline_commit();
+  };
+
+  stage_batch(k_tile_begin, 0);
+
+  int parity = 0;
   for (int k_tile = k_tile_begin; k_tile < k_tile_end; ++k_tile) {
-    const int tile_index = k_tile * n_tiles + n_tile;
-    const int32_t* tile = trellis + static_cast<int64_t>(tile_index) * 4 * TransitionBits;
-    for (int index = thread; index < 4 * TransitionBits; index += kThreads) {
-      packed_words[index] = static_cast<uint32_t>(tile[index]);
+    const bool has_next = k_tile + 1 < k_tile_end;
+    if (has_next) {
+      stage_batch(k_tile + 1, parity ^ 1);
     }
-    for (int index = thread; index < kRowsPerBlock * kTileRows; index += kThreads) {
-      const int row = index / kTileRows;
-      const int k_local = index % kTileRows;
-      input_tile[index] = row < block_rows
-          ? input[static_cast<int64_t>(m0 + row) * size_k + k_tile * kTileRows + k_local]
-          : ScalarTraits<Scalar>::from_float(0.0f);
-    }
+    // cp.async completion is per-thread; this barrier publishes every lane's
+    // copies block-wide before the decode phase reads them.
+    __pipeline_wait_prior(has_next ? 1 : 0);
     __syncthreads();
 
     const int local = thread;
-    const uint32_t state = qvq_state<TransitionBits>(packed_words, local >> 1);
+    const uint32_t state = qvq_state<TransitionBits>(packed_words[parity], local >> 1);
     const uint32_t mixed = pgc16_mix(state);
     const uint32_t level_index = (local & 1) == 0 ? mixed >> 8 : mixed & 0xffu;
     const float value = ScalarTraits<Scalar>::to_float(cached_levels[level_index]);
@@ -797,11 +829,11 @@ __global__ __launch_bounds__(kThreads) void qvq_gemm_wmma_kernel(
     __syncthreads();
 
     if (warp < active_warps) {
-      wmma::load_matrix_sync(input_fragment, input_tile + warp * 16 * kTileRows, kTileRows);
+      wmma::load_matrix_sync(input_fragment, input_tile[parity] + warp * 16 * kTileRows, kTileRows);
       wmma::load_matrix_sync(weight_fragment, decoded_weight, kTileColumns);
       wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
     }
-    __syncthreads();
+    parity ^= 1;
   }
 
   if (warp < active_warps) {
@@ -1019,7 +1051,7 @@ void launch_qvq_gemm_wmma(
       static_cast<unsigned int>((output.size(0) + kRowsPerBlock - 1) / kRowsPerBlock),
       1);
   const Scalar* input_ptr = reinterpret_cast<const Scalar*>(input.const_data_ptr());
-  const Scalar* levels_ptr = reinterpret_cast<const Scalar*>(levels.const_data_ptr());
+  const half* levels_ptr = reinterpret_cast<const half*>(levels.const_data_ptr());
   OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
 #define QVQ_WMMA_LAUNCH(BITS)                                                                                     \
@@ -1062,7 +1094,7 @@ void launch_qvq_gemm_wmma_splitk(
       static_cast<unsigned int>((output.size(0) + kRowsPerBlock - 1) / kRowsPerBlock),
       static_cast<unsigned int>(split_count));
   const Scalar* input_ptr = reinterpret_cast<const Scalar*>(input.const_data_ptr());
-  const Scalar* levels_ptr = reinterpret_cast<const Scalar*>(levels.const_data_ptr());
+  const half* levels_ptr = reinterpret_cast<const half*>(levels.const_data_ptr());
   OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
 #define QVQ_WMMA_SPLITK_LAUNCH(BITS)                                                                               \
@@ -1176,6 +1208,31 @@ at::Tensor qvq_gemv_cuda_impl(
   const int64_t k_tiles = size_k / kTileRows;
   const int split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
       std::min((target_blocks + base_blocks - 1) / base_blocks, k_tiles), static_cast<int64_t>(64)));
+  // Large-batch, selector-free V2 calls reuse each decoded weight tile across
+  // 32 input rows through Ampere tensor cores. The FP32 WMMA accumulator
+  // keeps the scalar path's numerical contract; only the reduction order
+  // within a 16-wide k step differs.
+  // FP16 only: WMMA requires matching A/B operand dtypes, which would force
+  // the canonically-fp16 PGC16 levels through an extra bf16 rounding step on
+  // the bf16 path; bf16 keeps the scalar kernels.
+  const bool wmma_eligible = input.scalar_type() == at::kHalf && bank_mode == 0 &&
+      !bank_ids.has_value() && size_m > 16 && transition_bits >= 2 && transition_bits <= 16 &&
+      qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
+  if (wmma_eligible) {
+#define QVQ_WMMA_DISPATCH(SCALAR_T, OUT_T)                                                                            if (split_count > 1) {                                                                                              at::Tensor partial_output =                                                                                           at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));                            launch_qvq_gemm_wmma_splitk<SCALAR_T, OUT_T>(                                                                         input, trellis, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);     } else {                                                                                                            launch_qvq_gemm_wmma<SCALAR_T, OUT_T>(                                                                                input, trellis, levels, output, static_cast<int>(transition_bits), stream);                                 }
+    if (input.scalar_type() == at::kHalf && output_fp32) {
+      QVQ_WMMA_DISPATCH(half, float);
+    } else if (input.scalar_type() == at::kHalf) {
+      QVQ_WMMA_DISPATCH(half, half);
+    } else if (output_fp32) {
+      QVQ_WMMA_DISPATCH(nv_bfloat16, float);
+    } else {
+      QVQ_WMMA_DISPATCH(nv_bfloat16, nv_bfloat16);
+    }
+#undef QVQ_WMMA_DISPATCH
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+  }
   if (split_count > 1) {
     at::Tensor partial_output =
         at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
