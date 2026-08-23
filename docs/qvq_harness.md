@@ -543,3 +543,38 @@ Implementation gates for schema v6, from parent `32e4a2437f94d0248d3ca21b7258bbb
   repository private-key scan passed.
 - Pinned Qwen3 identity/integrity passed for revision `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers,
   seven authoritative artifact hashes, and seven local Hub identities.
+
+## Rejected shallow snapshot semantics and process-image schema v7 (2026-08-23)
+
+Review rejected commit `29550316`: schema v6 checked the snapshot authority's closed keys but did not semantically
+revalidate every evidence value against the retained bytes, inferred a dataset role from a filename/stem, observed
+only one executable descriptor around a cmdline read, and leaked retained descriptors when controller construction
+failed after resource acquisition. These findings remain failures in the ledger; the earlier schema-v6 successes are
+preserved above.
+
+Schema v7 replaces filename inference with a closed controller-issued mapping for exactly `calibration`, `yaqa`, and
+`validation`. Each role explicitly binds its canonical physical source and manifest paths, sealed source and manifest
+FDs, canonical manifest split, and evidence object. The producer independently reads the retained descriptors and
+requires exact hashes, 512 JSONL and manifest records, row identities and content identities, exact manifest schema,
+`row_start=0`, `rows=512`, `manifest_verified=true`, and cross-split identity/content disjointness. Falsey or merely
+well-shaped evidence, non-lowercase hashes, missing descriptors, aliases, duplicate paths/FDs, and ambiguous role
+mappings fail closed.
+
+Linux observation now brackets the process image with two independently opened and fully hashed `/proc/<pid>/exe`
+descriptors, two identical cmdline reads, and three identical PID/PPID/start-time stat samples. Later observations
+also bind executable-content and cmdline hashes, so a same-PID/start-tick `execve` handoff is rejected. A runtime
+regression drives a real child through `execve` between observation reads. Controller initialization is transactional:
+any exception closes the signing authority, private-key descriptor, and every partially acquired trusted resource;
+FD-count regressions cover both key mismatch and OpenSSL failure. No real BPW, Top-1, Diverse-32, or final-KL result
+is claimed.
+
+Implementation gates for schema v7, from parent `2955031625e1cb556b5d582af4dd8e77538f1bb7`:
+
+- `HOME=/root pytest -q tests/test_qvq_qwen3_acceptance.py tests/test_qvq_unified_harness.py` passed all 132
+  tests with 14 upstream `torch.jit` deprecation warnings; the identical collect-only invocation found exactly 132.
+- Ruff, `compileall`, `git diff --check`, and six CLI help smokes passed. External descriptor-owned trust loading,
+  private/public Ed25519 matching and signing passed for controller schema v7; the repository private-key scan was
+  empty.
+- Pinned `/monster/data/model/Qwen3-8B` identity/integrity passed for revision
+  `b968826d9c46dd6066d109eabc6255188de91218`, all 36 layers, seven authoritative artifact hashes, and seven local
+  Hub content identities.

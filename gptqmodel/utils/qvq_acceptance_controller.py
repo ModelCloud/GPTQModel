@@ -23,7 +23,7 @@ from tempfile import TemporaryDirectory
 from types import TracebackType
 from typing import Any, Self
 
-CONTROLLER_SCHEMA = "qvq-acceptance-controller-v6"
+CONTROLLER_SCHEMA = "qvq-acceptance-controller-v7"
 CONTROLLER_STAGES = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
 _ENV_PREFIX = "GPTQMODEL_QVQ_CONTROLLER_"
 VERIFIER_PRIVATE_KEY_ENV = "GPTQMODEL_QVQ_VERIFIER_PRIVATE_KEY"
@@ -419,13 +419,28 @@ def _observe_linux_process(pid: int, *, expected: Mapping[str, Any] | None = Non
             digest = hashlib.sha256()
             while chunk := os.read(descriptor, 1024 * 1024):
                 digest.update(chunk)
+            cmdline = (proc / "cmdline").read_bytes()
+            middle = _parse_linux_proc_stat((proc / "stat").read_text(encoding="ascii"))
+            second_descriptor = os.open(proc / "exe", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+            try:
+                second_identity = os.fstat(second_descriptor)
+                second_digest = hashlib.sha256()
+                while chunk := os.read(second_descriptor, 1024 * 1024):
+                    second_digest.update(chunk)
+                second_cmdline = (proc / "cmdline").read_bytes()
+                final = _parse_linux_proc_stat((proc / "stat").read_text(encoding="ascii"))
+            finally:
+                os.close(second_descriptor)
         finally:
             os.close(descriptor)
-        cmdline = (proc / "cmdline").read_bytes()
-        final = _parse_linux_proc_stat((proc / "stat").read_text(encoding="ascii"))
     except OSError as error:
         raise RuntimeError(f"controller cannot independently inspect child PID {pid}") from error
-    if first != final:
+    if (
+        first != middle or middle != final
+        or (executable_identity.st_dev, executable_identity.st_ino) != (second_identity.st_dev, second_identity.st_ino)
+        or digest.digest() != second_digest.digest()
+        or cmdline != second_cmdline
+    ):
         raise RuntimeError(f"controller observed mixed or reused process identity for PID {pid}")
     if not cmdline.endswith(b"\0"):
         raise RuntimeError(f"controller observed malformed cmdline for child PID {pid}")
@@ -435,7 +450,10 @@ def _observe_linux_process(pid: int, *, expected: Mapping[str, Any] | None = Non
         "executable_device": executable_identity.st_dev, "executable_inode": executable_identity.st_ino,
         "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
     }
-    stable_fields = ("pid", "ppid", "start_time_ticks", "executable_device", "executable_inode")
+    stable_fields = (
+        "pid", "ppid", "start_time_ticks", "executable_device", "executable_inode",
+        "executable_sha256", "cmdline_sha256",
+    )
     if expected is not None and any(observation[key] != expected[key] for key in stable_fields):
         raise RuntimeError(f"controller observed process handoff, mixed facts, or PID reuse for PID {pid}")
     return observation
@@ -903,19 +921,26 @@ class AcceptanceController:
 
     def __init__(self) -> None:
         self._resources = _TrustedResources()
-        self.run_nonce = _new_identity()
-        self.controller_instance_id = _new_identity()
-        self._signing_authority = _load_trusted_signing_key(self._resources)
-        self._private_key = self._signing_authority.private_key
-        self._private_key_path = self._signing_authority.path
-        self._private_key_identity = self._signing_authority.identity
-        self._private_key_digest = self._signing_authority.digest
-        self._private_key_file = self._signing_authority.private_file
-        self._public_key_sha256 = hashlib.sha256(self._signing_authority.public_key).hexdigest()
-        self.controller_pid = os.getpid()
-        self.controller_parent_pid = os.getppid()
-        self._records: list[dict[str, Any]] = []
-        self._run_contract: dict[str, str] | None = None
+        self._signing_authority: _TrustedSigningAuthority | None = None
+        try:
+            self.run_nonce = _new_identity()
+            self.controller_instance_id = _new_identity()
+            self._signing_authority = _load_trusted_signing_key(self._resources)
+            self._private_key = self._signing_authority.private_key
+            self._private_key_path = self._signing_authority.path
+            self._private_key_identity = self._signing_authority.identity
+            self._private_key_digest = self._signing_authority.digest
+            self._private_key_file = self._signing_authority.private_file
+            self._public_key_sha256 = hashlib.sha256(self._signing_authority.public_key).hexdigest()
+            self.controller_pid = os.getpid()
+            self.controller_parent_pid = os.getppid()
+            self._records: list[dict[str, Any]] = []
+            self._run_contract: dict[str, str] | None = None
+        except BaseException:
+            if self._signing_authority is not None:
+                self._signing_authority.close()
+            self._resources.close()
+            raise
 
     def spawn_stage(
         self,
@@ -969,9 +994,19 @@ class AcceptanceController:
                 _ENV_PREFIX + "PROCESS_INSTANCE_ID": process_instance_id,
                 _ENV_PREFIX + "EVENT_FD": str(child_channel.fileno()),
                 _ENV_PREFIX + "DATASET_SNAPSHOTS": json.dumps({
-                    "schema": "qvq-controller-dataset-snapshots-v1",
-                    "fds": snapshot_mapping,
-                    "evidence": controller_datasets,
+                    "schema": "qvq-controller-dataset-snapshots-v2",
+                    "sources": {
+                        name: {
+                            "role": name,
+                            "source": evidence["source"],
+                            "source_fd": snapshot_mapping[evidence["source"]],
+                            "identity_manifest": evidence["identity_manifest"],
+                            "identity_manifest_fd": snapshot_mapping[evidence["identity_manifest"]],
+                            "manifest_split": "yaqa_tuning" if name == "yaqa" else name,
+                            "evidence": evidence,
+                        }
+                        for name, evidence in (controller_datasets or {}).items()
+                    },
                 }, sort_keys=True),
             }
         )

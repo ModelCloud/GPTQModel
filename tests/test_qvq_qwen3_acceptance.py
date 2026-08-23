@@ -11,6 +11,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -832,6 +833,26 @@ def test_standalone_signing_key_mismatch_closes_every_owned_descriptor(tmp_path,
     assert _open_fd_count() == before
 
 
+@pytest.mark.parametrize("failure", ["key_mismatch", "openssl_failure"])
+def test_failed_controller_constructor_closes_all_partially_owned_descriptors(tmp_path, monkeypatch, failure):
+    if failure == "key_mismatch":
+        attacker = tmp_path / "attacker.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(attacker)], check=True)
+        attacker.chmod(0o600)
+        monkeypatch.setenv(controller_module.VERIFIER_PRIVATE_KEY_ENV, str(attacker))
+        match = "does not match"
+    else:
+        monkeypatch.setattr(
+            controller_module, "_openssl",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected OpenSSL failure")),
+        )
+        match = "injected OpenSSL failure"
+    before = _open_fd_count()
+    with pytest.raises(RuntimeError, match=match):
+        AcceptanceController()
+    assert _open_fd_count() == before
+
+
 def test_standalone_signing_key_context_owns_live_descriptors():
     with controller_module._load_trusted_signing_key() as authority:
         private_fd = authority.private_file.descriptor
@@ -1153,26 +1174,82 @@ def test_present_malformed_snapshot_authority_never_falls_back(monkeypatch, valu
         quantize_script._controller_snapshot_authority()
 
 
-def test_snapshot_authority_missing_fd_and_evidence_fail_closed(monkeypatch):
+def _snapshot_authority():
     root = Path(os.environ["GPTQMODEL_QVQ_TEST_INPUT_ROOT"])
-    evidence = controller_module.controller_dataset_evidence({
+    values = {
         "--calibration-dataset": str(root / "calibration.jsonl"),
         "--yaqa-dataset": str(root / "yaqa_tuning.jsonl"),
         "--validation-dataset": str(root / "validation.jsonl"),
-    })
-    authority = {
-        "schema": "qvq-controller-dataset-snapshots-v1",
-        "fds": {str(root / "yaqa_tuning.jsonl"): 99},
-        "evidence": evidence,
     }
+    evidence, snapshots = controller_module._controller_dataset_bundle(values)
+    mapping, descriptors = controller_module._sealed_snapshot_descriptors(snapshots)
+    authority = {
+        "schema": "qvq-controller-dataset-snapshots-v2",
+        "sources": {
+            role: {
+                "role": role,
+                "source": item["source"],
+                "source_fd": mapping[item["source"]],
+                "identity_manifest": item["identity_manifest"],
+                "identity_manifest_fd": mapping[item["identity_manifest"]],
+                "manifest_split": "yaqa_tuning" if role == "yaqa" else role,
+                "evidence": item,
+            }
+            for role, item in evidence.items()
+        },
+    }
+    return authority, descriptors
+
+
+def test_snapshot_authority_missing_fd_and_evidence_fail_closed(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    root = Path(os.environ["GPTQMODEL_QVQ_TEST_INPUT_ROOT"])
+    os.close(authority["sources"]["calibration"]["source_fd"])
     monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
     spec = quantize_script.DatasetSlice(str(root / "calibration.jsonl"), None, "train", 0, 1)
-    with pytest.raises(RuntimeError, match="snapshot is absent"):
+    with pytest.raises(RuntimeError, match="descriptor content"):
         quantize_script.load_dataset_slice(spec)
-    with pytest.raises(RuntimeError, match="evidence is absent"):
-        quantize_script.dataset_slice_evidence(
-            quantize_script.DatasetSlice(str(root / "unknown.jsonl"), None, "train", 0, 1)
-        )
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source", "/wrong/calibration.jsonl"), ("config", "wrong"), ("split", "validation"),
+        ("row_start", False), ("rows", 511), ("manifest_verified", False),
+        ("content_sha256", "A" * 64), ("identity_manifest_sha256", "0" * 64),
+        ("identity_manifest", "/wrong/calibration.manifest.json"),
+    ],
+)
+def test_snapshot_authority_rejects_semantically_false_evidence(monkeypatch, field, value):
+    authority, descriptors = _snapshot_authority()
+    try:
+        authority["sources"]["calibration"]["evidence"][field] = value
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="snapshot authority|snapshot evidence|source mapping"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def test_snapshot_authority_uses_explicit_mapping_and_rejects_ambiguity(monkeypatch):
+    authority, descriptors = _snapshot_authority()
+    try:
+        calibration = authority["sources"]["calibration"]
+        yaqa = authority["sources"]["yaqa"]
+        for key in ("source", "source_fd", "identity_manifest", "identity_manifest_fd", "evidence"):
+            yaqa[key] = calibration[key]
+        monkeypatch.setenv("GPTQMODEL_QVQ_CONTROLLER_DATASET_SNAPSHOTS", json.dumps(authority))
+        with pytest.raises(RuntimeError, match="ambiguous"):
+            quantize_script._controller_snapshot_authority()
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
 
 
 def test_live_producer_ipc_keeps_reader_open_until_validation_and_ack(monkeypatch):
@@ -1288,6 +1365,42 @@ def test_process_observation_hashes_unlinked_executable_descriptor(tmp_path):
         assert observed["pid"] == process.pid
         assert observed["executable_sha256"] == expected_digest
         assert "executable" not in observed
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_process_observation_rejects_execve_between_executable_and_cmdline_reads(tmp_path, monkeypatch):
+    trigger = tmp_path / "exec-now"
+    program = (
+        "import os,time; p=" + repr(str(trigger)) + "; "
+        "\nwhile not os.path.exists(p): time.sleep(.001)\n"
+        "os.execv('/bin/sleep',['sleep','30'])"
+    )
+    process = subprocess.Popen([sys.executable, "-c", program])
+    original = Path.read_bytes
+    triggered = False
+
+    def trigger_exec(path):
+        nonlocal triggered
+        value = original(path)
+        if path == Path(f"/proc/{process.pid}/cmdline") and not triggered:
+            triggered = True
+            old_inode = os.stat(f"/proc/{process.pid}/exe").st_ino
+            trigger.touch()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if os.stat(f"/proc/{process.pid}/exe").st_ino != old_inode:
+                    break
+                time.sleep(0.001)
+            else:
+                raise AssertionError("adversarial child did not exec")
+        return value
+
+    monkeypatch.setattr(Path, "read_bytes", trigger_exec)
+    try:
+        with pytest.raises(RuntimeError, match="mixed or reused"):
+            controller_module._observe_linux_process(process.pid)
     finally:
         process.kill()
         process.wait()

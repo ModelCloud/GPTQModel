@@ -407,40 +407,142 @@ def _controller_snapshot_authority() -> dict[str, Any] | None:
         payload = json.loads(os.environ[name])
     except (TypeError, json.JSONDecodeError) as error:
         raise RuntimeError("controller dataset snapshot authority is malformed") from error
-    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    sources = payload.get("sources") if isinstance(payload, dict) else None
     evidence_keys = {
         "source", "config", "split", "row_start", "rows", "content_sha256", "identity_manifest",
         "identity_manifest_sha256", "manifest_verified",
     }
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"schema", "fds", "evidence"}
-        or payload.get("schema") != "qvq-controller-dataset-snapshots-v1"
-        or not isinstance(payload.get("fds"), dict)
-        or not payload["fds"]
-        or not isinstance(payload.get("evidence"), dict)
-        or set(payload["evidence"]) != {"calibration", "yaqa", "validation"}
-        or any(
-            not isinstance(path, str)
-            or path != os.path.realpath(path)
-            or not isinstance(fd, int)
-            or isinstance(fd, bool)
-            or fd < 0
-            for path, fd in payload["fds"].items()
-        )
-        or any(not isinstance(item, dict) or set(item) != evidence_keys for item in evidence.values())
+        or set(payload) != {"schema", "sources"}
+        or payload.get("schema") != "qvq-controller-dataset-snapshots-v2"
+        or not isinstance(sources, dict)
+        or set(sources) != {"calibration", "yaqa", "validation"}
     ):
         raise RuntimeError("controller dataset snapshot authority has an invalid closed schema")
+    expected_manifest_splits = {
+        "calibration": "calibration", "yaqa": "yaqa_tuning", "validation": "validation",
+    }
+    source_paths: set[str] = set()
+    manifest_paths: set[str] = set()
+    descriptors: set[int] = set()
+    identity_sets: dict[str, set[str]] = {}
+    content_sets: dict[str, set[str]] = {}
+    for role, expected_manifest_split in expected_manifest_splits.items():
+        item = sources[role]
+        item_keys = {
+            "role", "source", "source_fd", "identity_manifest", "identity_manifest_fd",
+            "manifest_split", "evidence",
+        }
+        if not isinstance(item, dict) or set(item) != item_keys:
+            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+        source = item["source"]
+        manifest_path = item["identity_manifest"]
+        source_fd = item["source_fd"]
+        manifest_fd = item["identity_manifest_fd"]
+        evidence = item["evidence"]
+        if (
+            item["role"] != role
+            or item["manifest_split"] != expected_manifest_split
+            or not isinstance(source, str)
+            or source != os.path.realpath(source)
+            or source != os.path.normpath(source)
+            or not isinstance(manifest_path, str)
+            or manifest_path != os.path.realpath(manifest_path)
+            or manifest_path != os.path.normpath(manifest_path)
+            or manifest_path != str(Path(source).with_suffix(".manifest.json"))
+            or any(not isinstance(fd, int) or isinstance(fd, bool) or fd < 0 for fd in (source_fd, manifest_fd))
+            or not isinstance(evidence, dict)
+            or set(evidence) != evidence_keys
+        ):
+            raise RuntimeError("controller dataset snapshot authority has an invalid source mapping")
+        if source in source_paths or manifest_path in manifest_paths or source_fd in descriptors or manifest_fd in descriptors:
+            raise RuntimeError("controller dataset snapshot authority is ambiguous")
+        source_paths.add(source)
+        manifest_paths.add(manifest_path)
+        descriptors.update((source_fd, manifest_fd))
+        try:
+            source_stat = os.fstat(source_fd)
+            manifest_stat = os.fstat(manifest_fd)
+            source_raw = os.pread(source_fd, source_stat.st_size, 0)
+            manifest_raw = os.pread(manifest_fd, manifest_stat.st_size, 0)
+            lines = source_raw.decode("utf-8").splitlines()
+            manifest = json.loads(manifest_raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("controller dataset snapshot descriptor content is invalid") from error
+        source_sha256 = hashlib.sha256(source_raw).hexdigest()
+        manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
+        if (
+            evidence["source"] != source
+            or evidence["config"] is not None
+            or evidence["split"] != "train"
+            or evidence["row_start"] != 0
+            or isinstance(evidence["row_start"], bool)
+            or evidence["rows"] != 512
+            or isinstance(evidence["rows"], bool)
+            or evidence["manifest_verified"] is not True
+            or evidence["identity_manifest"] != manifest_path
+            or evidence["content_sha256"] != source_sha256
+            or evidence["identity_manifest_sha256"] != manifest_sha256
+            or any(
+                not isinstance(value, str) or len(value) != 64 or value.lower() != value
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in (evidence["content_sha256"], evidence["identity_manifest_sha256"])
+            )
+        ):
+            raise RuntimeError("controller dataset snapshot evidence does not match retained descriptors")
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"schema_version", "split", "count", "samples"}
+            or manifest["schema_version"] != 1
+            or isinstance(manifest["schema_version"], bool)
+            or manifest["split"] != expected_manifest_split
+            or manifest["count"] != 512
+            or isinstance(manifest["count"], bool)
+            or not isinstance(manifest["samples"], list)
+            or len(manifest["samples"]) != 512
+            or len(lines) != 512
+        ):
+            raise RuntimeError("controller dataset identity manifest is not canonical")
+        identities: set[str] = set()
+        content_hashes: set[str] = set()
+        for ordinal, (line, sample) in enumerate(zip(lines, manifest["samples"])):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("controller dataset JSONL row is invalid") from error
+            identity = row.get("identity") if isinstance(row, dict) else None
+            if not isinstance(identity, str) or not identity:
+                raise RuntimeError("controller dataset JSONL identity is invalid")
+            content_hash = hashlib.sha256(
+                json.dumps(row.get("content"), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if sample != {"ordinal": ordinal, "identity": identity, "content_sha256": content_hash}:
+                raise RuntimeError("controller dataset identity manifest record does not match JSONL")
+            identities.add(identity)
+            content_hashes.add(content_hash)
+        if len(identities) != 512 or len(content_hashes) != 512:
+            raise RuntimeError("controller dataset identity manifest contains duplicate rows")
+        identity_sets[role] = identities
+        content_sets[role] = content_hashes
+    roles = tuple(expected_manifest_splits)
+    for index, left in enumerate(roles):
+        for right in roles[index + 1:]:
+            if identity_sets[left] & identity_sets[right] or content_sets[left] & content_sets[right]:
+                raise RuntimeError("controller dataset snapshot splits are not content-disjoint")
     return payload
 
 
 def load_dataset_slice(spec: DatasetSlice):
     path = Path(spec.source).expanduser()
     snapshot_payload = _controller_snapshot_authority()
-    snapshot_fds = snapshot_payload["fds"] if snapshot_payload is not None else {}
     canonical_source = str(path.resolve())
-    snapshot_fd = snapshot_fds.get(canonical_source)
-    if snapshot_payload is not None and not isinstance(snapshot_fd, int):
+    matches = (
+        [item for item in snapshot_payload["sources"].values() if item["source"] == canonical_source]
+        if snapshot_payload is not None else []
+    )
+    snapshot_fd = matches[0]["source_fd"] if len(matches) == 1 else None
+    if snapshot_payload is not None and len(matches) != 1:
         raise RuntimeError(f"controller dataset snapshot is absent for canonical source: {canonical_source}")
     read_path = Path(f"/proc/self/fd/{snapshot_fd}") if isinstance(snapshot_fd, int) else path
     kwargs: dict[str, Any] = {"split": spec.split}
@@ -488,10 +590,13 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
     evidence = asdict(spec)
     path = Path(spec.source).expanduser()
     snapshot_payload = _controller_snapshot_authority()
-    snapshot_evidence = snapshot_payload["evidence"] if snapshot_payload is not None else {}
-    evidence_name = "yaqa" if path.name == "yaqa_tuning.jsonl" else path.stem
-    if evidence_name in snapshot_evidence:
-        return dict(snapshot_evidence[evidence_name])
+    canonical_source = str(path.resolve())
+    matches = (
+        [item for item in snapshot_payload["sources"].values() if item["source"] == canonical_source]
+        if snapshot_payload is not None else []
+    )
+    if len(matches) == 1:
+        return dict(matches[0]["evidence"])
     if snapshot_payload is not None:
         raise RuntimeError(f"controller dataset evidence is absent for canonical source: {path.resolve()}")
     if not path.is_file():
