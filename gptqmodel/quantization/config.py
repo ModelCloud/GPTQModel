@@ -148,6 +148,18 @@ class VramStrategy(str, Enum):
     BALANCED = "balanced"
 
 
+class QuantizeEmbed(str, Enum):
+    INPUT = "input"
+    OUTPUT = "output"
+    BOTH = "both"
+
+
+@dataclass
+class QuantizeEmbedConfig:
+    embed_quant_mode: QuantizeEmbed = QuantizeEmbed.OUTPUT
+    embed_only: bool = True
+
+
 class FallbackStrategy(str, Enum):
     """
     +-----------+----------------------+---------------------------+------------------------------+

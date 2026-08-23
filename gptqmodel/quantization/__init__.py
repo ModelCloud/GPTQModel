@@ -32,6 +32,8 @@ from .config import (
                      PreProcessorConfig,
                      QuantBits,
                      QuantizeConfig,
+                     QuantizeEmbed,
+                     QuantizeEmbedConfig,
                      RTNConfig,
                      SmootherConfig,
                      SmoothLog,

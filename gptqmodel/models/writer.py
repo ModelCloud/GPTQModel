@@ -201,6 +201,129 @@ def _materialize_meta_layers_from_turtle(model: torch.nn.Module, turtle_model) -
     return materialized
 
 
+def _checkpoint_prefixes_for_replacement(prefix: str, turtle_model) -> set[str]:
+    prefixes = {prefix}
+    resolver = getattr(turtle_model, "_resolve_checkpoint_module_path", None)
+    if callable(resolver):
+        resolved = resolver(prefix)
+        if resolved:
+            prefixes.add(resolved)
+    tensor_resolver = getattr(turtle_model, "_resolve_checkpoint_tensor_source", None)
+    if callable(tensor_resolver):
+        for leaf in ("weight", "bias"):
+            try:
+                checkpoint_name, _expert_index, _split_index, _split_dim = tensor_resolver(prefix, leaf)
+            except Exception:
+                checkpoint_name = None
+            if checkpoint_name:
+                prefixes.add(checkpoint_name[: -(len(leaf) + 1)] if checkpoint_name.endswith(f".{leaf}") else checkpoint_name)
+    return prefixes
+
+
+def _tensor_matches_prefixes(tensor_name: str, prefixes: set[str]) -> bool:
+    return tensor_name in prefixes or any(tensor_name.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def _save_embedding_replacement_safetensors(
+    model,
+    turtle_model,
+    embedding_prefixes: List[str],
+    *,
+    save_dir: str,
+    metadata: Dict[str, str],
+) -> tuple[List[str], Dict[str, str], int, List[str]]:
+    """Rewrite only checkpoint shards containing replaced embedding modules."""
+    if turtle_model is None or not hasattr(turtle_model, "_weight_map") or not hasattr(turtle_model, "model_local_path"):
+        raise ValueError("Embedding replacement save requires a LazyTurtle checkpoint source.")
+    prefixes = sorted({prefix for prefix in embedding_prefixes if isinstance(prefix, str) and prefix})
+    if not prefixes:
+        raise ValueError("Embedding replacement save requires at least one embedding prefix.")
+
+    index_path = os.path.join(save_dir, "model.safetensors.index.json")
+    existing_weight_map = {}
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as handle:
+            existing_weight_map = json.load(handle).get("weight_map", {})
+
+    drop_by_shard: Dict[str, set[str]] = {}
+    replacements_by_shard: Dict[str, Dict[str, torch.Tensor]] = {}
+    removed_tensor_names: List[str] = []
+    for prefix in prefixes:
+        checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
+        matched_shards = []
+        for tensor_name, shard_name in turtle_model._weight_map.items():
+            if _tensor_matches_prefixes(tensor_name, checkpoint_prefixes):
+                drop_by_shard.setdefault(shard_name, set()).add(tensor_name)
+                if tensor_name not in removed_tensor_names:
+                    removed_tensor_names.append(tensor_name)
+                if shard_name not in matched_shards:
+                    matched_shards.append(shard_name)
+        for leaf in ("weight", "bias"):
+            runtime_name = f"{prefix}.{leaf}"
+            runtime_shard = existing_weight_map.get(runtime_name)
+            if runtime_shard:
+                drop_by_shard.setdefault(runtime_shard, set()).add(runtime_name)
+                if runtime_name not in removed_tensor_names:
+                    removed_tensor_names.append(runtime_name)
+                if runtime_shard not in matched_shards:
+                    matched_shards.append(runtime_shard)
+        if not matched_shards:
+            raise ValueError(f"Could not find checkpoint tensor for embedding module `{prefix}`.")
+        try:
+            module = model.get_submodule(prefix)
+        except AttributeError as exc:
+            raise ValueError(f"Embedding replacement module `{prefix}` is not present in the model tree.") from exc
+        replacements = replacements_by_shard.setdefault(matched_shards[0], {})
+        for relative_name, tensor in module.state_dict().items():
+            replacements[f"{prefix}.{relative_name}" if relative_name else prefix] = tensor.detach().cpu()
+
+    rewritten_files = []
+    tensor_to_filename = {}
+    total_size_bytes = 0
+    for shard_name, dropped_names in drop_by_shard.items():
+        if not shard_name.endswith(".safetensors"):
+            raise NotImplementedError("Embedding-only replacement save currently supports safetensors checkpoints only.")
+        source_path = os.path.join(turtle_model.model_local_path, shard_name)
+        target_path = os.path.join(save_dir, shard_name)
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        read_path = target_path if os.path.exists(target_path) else source_path
+        tensors = {}
+        with safe_open(read_path, framework="pt", device="cpu") as handler:
+            for tensor_name in handler.keys():
+                if tensor_name not in dropped_names:
+                    tensors[tensor_name] = handler.get_tensor(tensor_name)
+                    tensor_to_filename[tensor_name] = shard_name
+        for tensor_name, tensor in replacements_by_shard.get(shard_name, {}).items():
+            tensors[tensor_name] = tensor
+            tensor_to_filename[tensor_name] = shard_name
+        save_file(tensors, target_path, metadata=metadata)
+        rewritten_files.append(shard_name)
+        total_size_bytes += os.path.getsize(target_path)
+    return rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names
+
+
+def _copy_missing_checkpoint_files(source_dir: str, save_dir: str) -> List[str]:
+    source_root = os.path.realpath(source_dir)
+    save_root = os.path.realpath(save_dir)
+    if source_root == save_root:
+        return []
+    if os.path.commonpath([source_root, save_root]) == source_root:
+        raise ValueError("Embedding-only save destination must not be nested inside its checkpoint source.")
+    copied = []
+    for root, dirnames, filenames in os.walk(source_root):
+        dirnames.sort()
+        relative_root = os.path.relpath(root, source_root)
+        target_root = save_root if relative_root == "." else os.path.join(save_root, relative_root)
+        for filename in sorted(filenames):
+            target_path = os.path.join(target_root, filename)
+            if os.path.exists(target_path):
+                continue
+            os.makedirs(target_root, exist_ok=True)
+            shutil.copy2(os.path.join(root, filename), target_path)
+            copied.append(os.path.relpath(target_path, save_root))
+    return copied
+
+
 def _cleanup_saved_weight_files(
     save_dir: str,
     expected_files: List[str],
@@ -554,6 +677,87 @@ def ModelWriter(cls):
             del self.lora_results  # TODO REFRACTOR
 
     cls.eora_save = _eora_save
+
+    def save_quantized_embeddings(
+            self,
+            save_dir: str,
+            safetensors_metadata: Optional[Dict[str, str]] = None,
+            max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
+            meta_quantizer: Optional[str] = None,
+    ):
+        """Save an embedding-only quantized model as a complete checkpoint."""
+        del max_shard_size
+        if not self.quantized:
+            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+        prefixes = sorted({
+            prefix for prefix in getattr(self, "_embedding_replacement_prefixes", set())
+            if isinstance(prefix, str) and prefix
+        })
+        if not prefixes:
+            raise ValueError("Embedding-only save requires quantized embedding replacement prefixes.")
+        checkpoint_source = self.turtle_model or getattr(self, "_embedding_replacement_source", None)
+        if checkpoint_source is None or not hasattr(checkpoint_source, "_weight_map") or not hasattr(checkpoint_source, "model_local_path"):
+            raise ValueError("Embedding-only save requires a LazyTurtle checkpoint source.")
+
+        os.makedirs(save_dir, exist_ok=True)
+        _copy_missing_checkpoint_files(checkpoint_source.model_local_path, save_dir)
+
+        quantizers = [f"{META_QUANTIZER_GPTQMODEL}:{__version__}"]
+        if meta_quantizer:
+            if len(meta_quantizer.split(":")) == 2:
+                quantizers.append(meta_quantizer.replace(" ", ""))
+            else:
+                log.warn(f"meta_quantizer: '{meta_quantizer}' format is invalid, expected: 'quantizer_name:version'")
+        self.quantize_config.meta_set_versionable(key=META_FIELD_QUANTIZER, value=quantizers)
+        self.quantize_config.meta_set(key=META_FIELD_URI, value=META_VALUE_URI)
+
+        metadata = {} if safetensors_metadata is None else {str(k): str(v) for k, v in safetensors_metadata.items()}
+        metadata["format"] = "pt"
+        rewritten_files, tensor_to_filename, _total_size, removed_names = _save_embedding_replacement_safetensors(
+            self.model,
+            checkpoint_source,
+            prefixes,
+            save_dir=save_dir,
+            metadata=metadata,
+        )
+        index_path = join(save_dir, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as handle:
+                index = json.load(handle)
+            weight_map = index.setdefault("weight_map", {})
+            for tensor_name in removed_names:
+                weight_map.pop(tensor_name, None)
+            weight_map.update(tensor_to_filename)
+            index.setdefault("metadata", {})["total_size"] = sum(
+                os.path.getsize(os.path.join(save_dir, filename))
+                for filename in set(weight_map.values())
+                if os.path.exists(os.path.join(save_dir, filename))
+            )
+            with open(index_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(index, indent=2, sort_keys=True) + "\n")
+        elif len(rewritten_files) > 1:
+            log.warn("Embedding save: no safetensors index found in `%s`; updated shards only.", save_dir)
+
+        serialized_config = copy.deepcopy(self.quantize_config)
+        serialized_config.save_pretrained(save_dir)
+        quant_config_path = os.path.join(save_dir, "quantize_config.json")
+        with open(quant_config_path, "r", encoding="utf-8") as handle:
+            quantization_config = json.load(handle)
+        config_path = os.path.join(save_dir, "config.json")
+        with open(config_path, "r", encoding="utf-8") as handle:
+            model_config = json.load(handle)
+        model_config["quantization_config"] = quantization_config
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(model_config, indent=2, sort_keys=True) + "\n")
+
+        if self.trust_remote_code:
+            copy_py_files(save_dir, model_id_or_path=self.model_local_path)
+        if self.tokenizer:
+            self.tokenizer.save_pretrained(save_dir)
+        if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
+            self.processor.save_pretrained(save_dir)
+
+    cls.save_quantized_embeddings = save_quantized_embeddings
 
     def save_quantized(
             self,
