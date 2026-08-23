@@ -1212,22 +1212,29 @@ at::Tensor qvq_gemv_cuda_impl(
   // 32 input rows through Ampere tensor cores. The FP32 WMMA accumulator
   // keeps the scalar path's numerical contract; only the reduction order
   // within a 16-wide k step differs.
-  // FP16 only: WMMA requires matching A/B operand dtypes, which would force
-  // the canonically-fp16 PGC16 levels through an extra bf16 rounding step on
-  // the bf16 path; bf16 keeps the scalar kernels.
-  const bool wmma_eligible = input.scalar_type() == at::kHalf && bank_mode == 0 &&
+  const bool wmma_dtype_ok = (input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16);
+  const bool wmma_eligible_base = wmma_dtype_ok && bank_mode == 0 &&
       !bank_ids.has_value() && size_m > 16 && transition_bits >= 2 && transition_bits <= 16 &&
       qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
+  at::Tensor wmma_input;
+  const bool wmma_eligible = wmma_eligible_base && [&]() {
+    if (input.scalar_type() == at::kHalf) {
+      wmma_input = input;
+      return true;
+    }
+    // Async saturating cast: exact within fp16 range, clamped beyond (a
+    // host-side amax check would force a device sync every call).
+    wmma_input = input.clamp(-65000.0, 65000.0).to(at::kHalf);
+    return true;
+  }();
   if (wmma_eligible) {
-#define QVQ_WMMA_DISPATCH(SCALAR_T, OUT_T)                                                                            if (split_count > 1) {                                                                                              at::Tensor partial_output =                                                                                           at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));                            launch_qvq_gemm_wmma_splitk<SCALAR_T, OUT_T>(                                                                         input, trellis, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);     } else {                                                                                                            launch_qvq_gemm_wmma<SCALAR_T, OUT_T>(                                                                                input, trellis, levels, output, static_cast<int>(transition_bits), stream);                                 }
-    if (input.scalar_type() == at::kHalf && output_fp32) {
+#define QVQ_WMMA_DISPATCH(SCALAR_T, OUT_T)                                                                            if (split_count > 1) {                                                                                              at::Tensor partial_output =                                                                                           at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));                            launch_qvq_gemm_wmma_splitk<SCALAR_T, OUT_T>(                                                                         wmma_input, trellis, levels, partial_output, output, static_cast<int>(transition_bits), split_count, stream);     } else {                                                                                                            launch_qvq_gemm_wmma<SCALAR_T, OUT_T>(                                                                                wmma_input, trellis, levels, output, static_cast<int>(transition_bits), stream);                                 }
+    if (output_fp32) {
       QVQ_WMMA_DISPATCH(half, float);
-    } else if (input.scalar_type() == at::kHalf) {
-      QVQ_WMMA_DISPATCH(half, half);
-    } else if (output_fp32) {
-      QVQ_WMMA_DISPATCH(nv_bfloat16, float);
+    } else if (input.scalar_type() == at::kBFloat16) {
+      QVQ_WMMA_DISPATCH(half, nv_bfloat16);
     } else {
-      QVQ_WMMA_DISPATCH(nv_bfloat16, nv_bfloat16);
+      QVQ_WMMA_DISPATCH(half, half);
     }
 #undef QVQ_WMMA_DISPATCH
     C10_CUDA_KERNEL_LAUNCH_CHECK();
