@@ -202,3 +202,7 @@ AGENTs.md
 .codex
 temp
 tmp
+.venv-qvq-profile/
+*.nsys-rep
+*.sqlite
+!artifacts/nsys/*.csv
