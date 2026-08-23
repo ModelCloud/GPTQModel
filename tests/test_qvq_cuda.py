@@ -1070,6 +1070,54 @@ def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(batch, weight
         ), (loss_a[diverged], loss_e[diverged])
 
 
+def test_qvq_cuda_fused_w2_family_grid_disable_env_forces_reference_path():
+    """QVQ_DISABLE_FUSED_FAMILY_GRID=1 must route a fused-eligible batch through
+    the reference path (0 fused dispatches, bit-exact outputs).  The flag is
+    read once per process, so this runs in a subprocess."""
+
+    import os
+    import subprocess
+    import sys
+
+    script = r"""
+import torch
+from gptqmodel.quantization.qvq_codecs.pgc16 import pgc16_codebook_v2_bank
+from gptqmodel.utils.qvq_cuda import (
+    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
+)
+fam = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+ref = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+generator = torch.Generator(device="cuda").manual_seed(20260902)
+families, batch = 3, 41
+sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+codebooks = torch.stack(
+    tuple(
+        torch.stack(
+            (
+                pgc16_codebook_v2_bank(0, bits=2.0, dtype=torch.float32),
+                pgc16_codebook_v2_bank(f + 1, bits=2.0, dtype=torch.float32),
+            )
+        )
+        for f in range(families)
+    )
+).to(device="cuda", dtype=torch.float16)
+actual = fam(sequences, codebooks, 4, 16, None, None)
+assert int(torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count()) == 0
+for f in range(families):
+    expected = ref(sequences[f], codebooks[f], 4, 16, None, None)
+    for index in range(3):
+        assert torch.equal(expected[index], actual[index][f]), (f, index)
+print("DISABLED-PATH-OK")
+"""
+    env = dict(os.environ, QVQ_DISABLE_FUSED_FAMILY_GRID="1")
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=600
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "DISABLED-PATH-OK" in result.stdout
+
+
 def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
     """Round-2 relaxed-contract stress test: >= 10k random sequences through the
     family-grid op, spanning the batch gate boundary, weighted/unweighted,
