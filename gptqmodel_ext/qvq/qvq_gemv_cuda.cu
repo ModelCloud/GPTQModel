@@ -6,6 +6,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <torch/library.h>
@@ -376,8 +377,14 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / words_per_vec;
         const int w4 = index - u * words_per_vec;
-        words4[u * (kMaxWords / 4) + w4] =
-            trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+        if constexpr (ROWS >= 16) {
+          __pipeline_memcpy_async(
+              words4 + u * (kMaxWords / 4) + w4,
+              trellis4 + (static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4, 16);
+        } else {
+          words4[u * (kMaxWords / 4) + w4] =
+              trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+        }
       }
       static_assert(kMaxWords % 4 == 0, "vectorized trellis staging requires padded rows");
     } else {
@@ -403,11 +410,24 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
         const int cell = index - u * (ROWS * row_vecs);
         const int row = cell / row_vecs;
         const int vec = cell - row * row_vecs;
-        input4[index] = row < block_rows
-            ? input4_base[(static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
-                      static_cast<int>(sizeof(Scalar)) / 16 +
-                  vec]
-            : make_uint4(0u, 0u, 0u, 0u);
+        if (row < block_rows) {
+          if constexpr (ROWS >= 16) {
+            __pipeline_memcpy_async(
+                input4 + index,
+                input4_base +
+                    ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
+                         static_cast<int>(sizeof(Scalar)) / 16 +
+                     vec),
+                16);
+          } else {
+            input4[index] =
+                input4_base[(static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
+                            static_cast<int>(sizeof(Scalar)) / 16 +
+                        vec];
+          }
+        } else {
+          input4[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
       }
     } else {
       for (int index = thread; index < tiles_here * ROWS * kTileRows; index += kThreads) {
@@ -420,19 +440,28 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
             : ScalarTraits<Scalar>::from_float(0.0f);
       }
     }
+    if constexpr (ROWS >= 16) {
+      __pipeline_commit();
+    }
   };
 
   // Software-pipelined main loop: while one shared buffer is consumed by the
   // FMA/decode phase, the next batch streams into the other buffer, so global
   // load latency overlaps compute and one barrier per iteration suffices.
   stage_batch(0, min(kUnroll, k_tiles), 0);
-  __syncthreads();
   int parity = 0;
   for (int kb = 0; kb < k_tiles; kb += kUnroll) {
     const int tiles_here = min(kUnroll, k_tiles - kb);
-    if (kb + kUnroll < k_tiles) {
+    const bool has_next = kb + kUnroll < k_tiles;
+    if (has_next) {
       stage_batch(kb + kUnroll, min(kUnroll, k_tiles - kb - kUnroll), parity ^ 1);
     }
+    if constexpr (ROWS >= 16) {
+      // cp.async completion is per-thread; the barrier publishes every lane's
+      // copies block-wide before the compute phase reads them.
+      __pipeline_wait_prior(has_next ? 1 : 0);
+    }
+    __syncthreads();
 
 #pragma unroll 4
     for (int u = 0; u < kUnroll; ++u) {
@@ -549,8 +578,14 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / words_per_vec;
         const int w4 = index - u * words_per_vec;
-        words4[u * (kMaxWords / 4) + w4] =
-            trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+        if constexpr (ROWS >= 16) {
+          __pipeline_memcpy_async(
+              words4 + u * (kMaxWords / 4) + w4,
+              trellis4 + (static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4, 16);
+        } else {
+          words4[u * (kMaxWords / 4) + w4] =
+              trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+        }
       }
     } else {
       for (int index = thread; index < tiles_here * words_per_tile; index += kThreads) {
@@ -575,11 +610,24 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
         const int cell = index - u * (ROWS * row_vecs);
         const int row = cell / row_vecs;
         const int vec = cell - row * row_vecs;
-        input4[index] = row < block_rows
-            ? input4_base[(static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
-                      static_cast<int>(sizeof(Scalar)) / 16 +
-                  vec]
-            : make_uint4(0u, 0u, 0u, 0u);
+        if (row < block_rows) {
+          if constexpr (ROWS >= 16) {
+            __pipeline_memcpy_async(
+                input4 + index,
+                input4_base +
+                    ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
+                         static_cast<int>(sizeof(Scalar)) / 16 +
+                     vec),
+                16);
+          } else {
+            input4[index] =
+                input4_base[(static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kTileRows) *
+                            static_cast<int>(sizeof(Scalar)) / 16 +
+                        vec];
+          }
+        } else {
+          input4[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
       }
     } else {
       for (int index = thread; index < tiles_here * ROWS * kTileRows; index += kThreads) {
@@ -592,18 +640,27 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
             : ScalarTraits<Scalar>::from_float(0.0f);
       }
     }
+    if constexpr (ROWS >= 16) {
+      __pipeline_commit();
+    }
   };
 
   // Software-pipelined split-K loop: same double-buffer scheme as the plain
   // GEMV kernel (one barrier per iteration, loads overlap the decode/FMA phase).
   stage_batch(k_tile_begin, min(kUnroll, k_tile_end - k_tile_begin), 0);
-  __syncthreads();
   int parity = 0;
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kUnroll) {
     const int tiles_here = min(kUnroll, k_tile_end - kb);
-    if (kb + kUnroll < k_tile_end) {
+    const bool has_next = kb + kUnroll < k_tile_end;
+    if (has_next) {
       stage_batch(kb + kUnroll, min(kUnroll, k_tile_end - kb - kUnroll), parity ^ 1);
     }
+    if constexpr (ROWS >= 16) {
+      // cp.async completion is per-thread; the barrier publishes every lane's
+      // copies block-wide before the compute phase reads them.
+      __pipeline_wait_prior(has_next ? 1 : 0);
+    }
+    __syncthreads();
 
 #pragma unroll 4
     for (int u = 0; u < kUnroll; ++u) {
