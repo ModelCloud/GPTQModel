@@ -2260,27 +2260,6 @@ __device__ __forceinline__ float fused_candidate(float emission, float weight, f
   }
 }
 
-// Round-2 argmin representation: every candidate cost is >= +0 (sum of squares
-// plus a >= +0 predecessor), so the IEEE-754 bit pattern is order-preserving as
-// a signed int.  The 4-bit predecessor prefix h is packed into the low mantissa
-// bits and the (cost, h) argmin becomes a single integer min: one LOP3 + one
-// IMNMX per candidate instead of FSETP + FSEL + SEL.  Ties widen from exact
-// cost equality to equality of the masked cost (a 16-ulp bucket); the lowest h
-// still wins inside a bucket, matching the reference tie rule's direction.
-constexpr uint32_t kFusedKeyMask = ~0xFu;
-
-__device__ __forceinline__ int fused_key(float candidate, int h) {
-  return static_cast<int>((__float_as_uint(candidate) & kFusedKeyMask) | static_cast<uint32_t>(h));
-}
-
-__device__ __forceinline__ float fused_key_cost(int key) {
-  return __uint_as_float(static_cast<uint32_t>(key) & kFusedKeyMask);
-}
-
-__device__ __forceinline__ int fused_key_h(int key) {
-  return key & 0xF;
-}
-
 struct FusedThreadMap {
   int row;        // suffix >> 4 of the thread's four base suffixes
   int base;       // first base suffix (row * 16 + group * 4)
@@ -2326,14 +2305,17 @@ __device__ __forceinline__ void fused_step_shared(
     const float* __restrict__ g0,
     const float* __restrict__ g1,
     float t0, float t1, float weight,
-    int (&best_key0)[4], int (&best_key1)[4]) {
+    float (&best0)[4], int (&best_h0)[4],
+    float (&best1)[4], int (&best_h1)[4]) {
   constexpr int mask_h = Mask >> 12;
   constexpr int mask_h_block = mask_h >> 2;
   constexpr int mask_h_inner = mask_h & 3;
   #pragma unroll
   for (int jj = 0; jj < 4; ++jj) {
-    best_key0[jj] = INT_MAX;
-    best_key1[jj] = INT_MAX;
+    best0[jj] = CUDART_INF_F;
+    best_h0[jj] = 0;
+    best1[jj] = CUDART_INF_F;
+    best_h1[jj] = 0;
   }
   #pragma unroll
   for (int block = 0; block < kFusedPrefixCount / 4; ++block) {
@@ -2350,9 +2332,7 @@ __device__ __forceinline__ void fused_step_shared(
         emissions[i][jj] = fused_emission(t0, t1, fused_code_at(codes[i], jj));
       }
     }
-    // Bank 0: the packed (masked cost, h) key makes the integer min pick the
-    // lowest masked cost and the lowest prefix inside a tie bucket, in any
-    // visit order.
+    // Bank 0: ascending prefix order, strict '<' keeps the lowest prefix on ties.
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
       const int h = block * 4 + i;
@@ -2360,13 +2340,23 @@ __device__ __forceinline__ void fused_step_shared(
       #pragma unroll
       for (int jj = 0; jj < 4; ++jj) {
         const float candidate = fused_candidate<Weighted>(emissions[i][jj], weight, predecessor);
-        best_key0[jj] = min(best_key0[jj], fused_key(candidate, h));
+        if (candidate < best0[jj]) {
+          best0[jj] = candidate;
+          best_h0[jj] = h;
+        }
       }
     }
-    // Bank 1: partner state (h', base ^ mask_x) uses e_0(h' ^ mask_h, base);
-    // the key ordering resolves ties to the lowest h' without the reference's
-    // ordered block merge.
+    // Bank 1: partner state (h', base ^ mask_x) uses e_0(h' ^ mask_h, base).
+    // Visit h' ascending inside the block (h' = 4*(block ^ mask_h_block) + i'),
+    // then merge block winners with the reference tie precedence.
     const int block1 = block ^ mask_h_block;
+    float block_best[4];
+    int block_best_h[4];
+    #pragma unroll
+    for (int jj = 0; jj < 4; ++jj) {
+      block_best[jj] = CUDART_INF_F;
+      block_best_h[jj] = 0;
+    }
     #pragma unroll
     for (int ip = 0; ip < 4; ++ip) {
       const int i = ip ^ mask_h_inner;
@@ -2375,7 +2365,25 @@ __device__ __forceinline__ void fused_step_shared(
       #pragma unroll
       for (int jj = 0; jj < 4; ++jj) {
         const float candidate = fused_candidate<Weighted>(emissions[i][jj], weight, predecessor);
-        best_key1[jj] = min(best_key1[jj], fused_key(candidate, hp));
+        if (candidate < block_best[jj]) {
+          block_best[jj] = candidate;
+          block_best_h[jj] = hp;
+        }
+      }
+    }
+    #pragma unroll
+    for (int jj = 0; jj < 4; ++jj) {
+      if constexpr (mask_h_block == 0) {
+        // Blocks arrive in ascending h' order: strict '<' already keeps the lowest prefix.
+        if (block_best[jj] < best1[jj]) {
+          best1[jj] = block_best[jj];
+          best_h1[jj] = block_best_h[jj];
+        }
+      } else {
+        if (lower_pair(block_best[jj], block_best_h[jj], best1[jj], best_h1[jj])) {
+          best1[jj] = block_best[jj];
+          best_h1[jj] = block_best_h[jj];
+        }
       }
     }
   }
@@ -2392,11 +2400,14 @@ __device__ __forceinline__ void fused_step_general(
     const float* __restrict__ g0,
     const float* __restrict__ g1,
     float t0, float t1, float weight,
-    int (&best_key0)[4], int (&best_key1)[4]) {
+    float (&best0)[4], int (&best_h0)[4],
+    float (&best1)[4], int (&best_h1)[4]) {
   #pragma unroll
   for (int jj = 0; jj < 4; ++jj) {
-    best_key0[jj] = INT_MAX;
-    best_key1[jj] = INT_MAX;
+    best0[jj] = CUDART_INF_F;
+    best_h0[jj] = 0;
+    best1[jj] = CUDART_INF_F;
+    best_h1[jj] = 0;
   }
   #pragma unroll 4
   for (int h = 0; h < kFusedPrefixCount; ++h) {
@@ -2409,10 +2420,16 @@ __device__ __forceinline__ void fused_step_general(
     for (int jj = 0; jj < 4; ++jj) {
       const float candidate0 = fused_candidate<Weighted>(
           fused_emission(t0, t1, fused_code_at(codes0, jj)), weight, predecessor0);
-      best_key0[jj] = min(best_key0[jj], fused_key(candidate0, h));
+      if (candidate0 < best0[jj]) {
+        best0[jj] = candidate0;
+        best_h0[jj] = h;
+      }
       const float candidate1 = fused_candidate<Weighted>(
           fused_emission(t0, t1, fused_code_at(codes1, jj)), weight, predecessor1);
-      best_key1[jj] = min(best_key1[jj], fused_key(candidate1, h));
+      if (candidate1 < best1[jj]) {
+        best1[jj] = candidate1;
+        best_h1[jj] = h;
+      }
     }
   }
 }
@@ -2487,46 +2504,41 @@ __device__ __forceinline__ void fused_run_segment(
     const float t0 = sequence_targets[step * 2];
     const float t1 = sequence_targets[step * 2 + 1];
     const float weight = Weighted ? sequence_weights[step] : 1.0f;
-    int best_key0[4], best_key1[4];
+    float best0[4], best1[4];
+    int best_h0[4], best_h1[4];
     if constexpr (Shared) {
       fused_step_shared<Mask, Weighted>(
           map, shared_codes, global_codes0, g0, g1, t0, t1, weight,
-          best_key0, best_key1);
+          best0, best_h0, best1, best_h1);
     } else {
       fused_step_general<Weighted>(
           map, shared_codes, global_codes0, global_codes1, g0, g1, t0, t1, weight,
-          best_key0, best_key1);
+          best0, best_h0, best1, best_h1);
     }
     __syncthreads();
-    // The frontier stores the masked winning cost (low mantissa bits zeroed by
-    // the packed key; <= 15 ulp below the unmasked sum).
-    *reinterpret_cast<float4*>(g0 + map.base) = make_float4(
-        fused_key_cost(best_key0[0]), fused_key_cost(best_key0[1]),
-        fused_key_cost(best_key0[2]), fused_key_cost(best_key0[3]));
+    *reinterpret_cast<float4*>(g0 + map.base) = make_float4(best0[0], best0[1], best0[2], best0[3]);
     uint8_t* step_pointers = sequence_backpointers + static_cast<int64_t>(step) * 2 * kFusedSuffixCount;
     *reinterpret_cast<uint32_t*>(step_pointers + map.base) =
-        static_cast<uint32_t>(fused_key_h(best_key0[0])) | (static_cast<uint32_t>(fused_key_h(best_key0[1])) << 8) |
-        (static_cast<uint32_t>(fused_key_h(best_key0[2])) << 16) | (static_cast<uint32_t>(fused_key_h(best_key0[3])) << 24);
+        static_cast<uint32_t>(best_h0[0]) | (static_cast<uint32_t>(best_h0[1]) << 8) |
+        (static_cast<uint32_t>(best_h0[2]) << 16) | (static_cast<uint32_t>(best_h0[3]) << 24);
     if constexpr (Shared) {
       // Partner suffix of base jj sits at position jj ^ mask_x_inner of the partner group.
-      int out_key1[4];
+      float out1[4];
+      int out_h1[4];
       #pragma unroll
       for (int jj = 0; jj < 4; ++jj) {
-        out_key1[jj ^ mask_x_inner] = best_key1[jj];
+        out1[jj ^ mask_x_inner] = best1[jj];
+        out_h1[jj ^ mask_x_inner] = best_h1[jj];
       }
-      *reinterpret_cast<float4*>(g1 + map.pbase) = make_float4(
-          fused_key_cost(out_key1[0]), fused_key_cost(out_key1[1]),
-          fused_key_cost(out_key1[2]), fused_key_cost(out_key1[3]));
+      *reinterpret_cast<float4*>(g1 + map.pbase) = make_float4(out1[0], out1[1], out1[2], out1[3]);
       *reinterpret_cast<uint32_t*>(step_pointers + kFusedSuffixCount + map.pbase) =
-          static_cast<uint32_t>(fused_key_h(out_key1[0])) | (static_cast<uint32_t>(fused_key_h(out_key1[1])) << 8) |
-          (static_cast<uint32_t>(fused_key_h(out_key1[2])) << 16) | (static_cast<uint32_t>(fused_key_h(out_key1[3])) << 24);
+          static_cast<uint32_t>(out_h1[0]) | (static_cast<uint32_t>(out_h1[1]) << 8) |
+          (static_cast<uint32_t>(out_h1[2]) << 16) | (static_cast<uint32_t>(out_h1[3]) << 24);
     } else {
-      *reinterpret_cast<float4*>(g1 + map.base) = make_float4(
-          fused_key_cost(best_key1[0]), fused_key_cost(best_key1[1]),
-          fused_key_cost(best_key1[2]), fused_key_cost(best_key1[3]));
+      *reinterpret_cast<float4*>(g1 + map.base) = make_float4(best1[0], best1[1], best1[2], best1[3]);
       *reinterpret_cast<uint32_t*>(step_pointers + kFusedSuffixCount + map.base) =
-          static_cast<uint32_t>(fused_key_h(best_key1[0])) | (static_cast<uint32_t>(fused_key_h(best_key1[1])) << 8) |
-          (static_cast<uint32_t>(fused_key_h(best_key1[2])) << 16) | (static_cast<uint32_t>(fused_key_h(best_key1[3])) << 24);
+          static_cast<uint32_t>(best_h1[0]) | (static_cast<uint32_t>(best_h1[1]) << 8) |
+          (static_cast<uint32_t>(best_h1[2]) << 16) | (static_cast<uint32_t>(best_h1[3]) << 24);
     }
     __syncthreads();
   }
