@@ -671,3 +671,24 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
   `/proc/self/task/*/status` proved all 32 singleton worker affinities before timing. Runs were exclusive, sequential,
   and blocking. `scripts/benchmark_qvq_viterbi_banked_cpu.py` drove the banked artifact check; the repository's
   `scripts/benchmark_qvq_viterbi.py` is CUDA-only, so raw CPU timing called the registered op directly.
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+## 2026-08-24 — QVQ direct GEMV small-output team sizing
+
+- **Change:** when the AVX-512 direct GEMV has at most four four-output blocks, run the unchanged block kernels in
+  an explicit team with one worker per block. N=256 therefore uses four workers instead of a 32-worker
+  `at::parallel_for`. Larger shapes keep the existing scheduling. Dispatch, FP32 arithmetic, decode, FMA, and
+  per-output accumulation order are unchanged.
+- **Accepted result:** across W2/W3.5/W4 and M=1/8/32, N=256 improved 1.063-1.171x (mean 1.129x). M1 changed from
+  0.1229/0.1305/0.1216 ms to 0.1080/0.1114/0.1075 ms. The remaining direct/dense ratio is 2.05-2.13x, so this is
+  not dense parity. Large-shape direct medians remained effectively unchanged.
+- **Accuracy:** all 36 before/after max-absolute-error cells were identical. Worst remained 1.739501953e-3 at
+  8192x2048 W2 M32, within the 2e-3 contract.
+- **Rejected:** a fully serial N=256 path measured 0.4075/0.4204/0.4040 ms for W2/W3.5/W4 M1 and
+  0.7851/0.8128/0.7966 ms at M32, roughly 3.2-3.4x slower than baseline. The four output blocks need four workers.
+- **Protocol:** 10 warmups, 50 timings, exclusive runs, explicit singleton `OMP_PLACES` over CPUs
+  24,27,28,42-45,54-55,65,90,94,96,104,113-114,118,123,135,139,143,150,156,161,164,169,172-173,175-176,179,183.
+  Affinity was asserted once immediately before each timed series; N=256 direct proved `{24},{27},{28},{42}`.
+  Raw matrices are `/home/ubuntu/work/qvq-findings/gemv_smalln_before.csv` and `gemv_smalln_after.csv`; full tables
+  and test baselines are in `RESULTS.md`.

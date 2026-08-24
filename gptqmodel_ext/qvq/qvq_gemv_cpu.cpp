@@ -1234,7 +1234,7 @@ torch::Tensor qvq_gemv_cpu(
 
   if (M == 1 && cpu_has_avx512()) {
     int64_t grain = std::max<int64_t>(kTileBlock, O / num_threads);
-    at::parallel_for(0, O, grain, [&](int64_t begin, int64_t end) {
+    auto run_output_tiles = [&](int64_t begin, int64_t end) {
       int tc = static_cast<int>(begin);
       while (tc + kTileBlock <= static_cast<int>(end)) {
         accumulate_block_m1_dispatch(
@@ -1270,12 +1270,28 @@ torch::Tensor qvq_gemv_cpu(
             out_ptr);
         ++tc;
       }
-    });
+    };
+    const int64_t output_blocks = (O + kTileBlock - 1) / kTileBlock;
+    // A full OpenMP team costs more than these few output blocks justify.
+    if (output_blocks <= 4) {
+#if defined(_OPENMP)
+      const int small_team = static_cast<int>(std::min<int64_t>(output_blocks, num_threads));
+#pragma omp parallel for num_threads(small_team) schedule(static)
+      for (int64_t block = 0; block < output_blocks; ++block) {
+        const int64_t begin = block * kTileBlock;
+        run_output_tiles(begin, std::min<int64_t>(begin + kTileBlock, O));
+      }
+#else
+      run_output_tiles(0, O);
+#endif
+    } else {
+      at::parallel_for(0, O, grain, run_output_tiles);
+    }
   } else if (cpu_has_avx512()) {
     constexpr int kTileBlock = 4;
     const int64_t output_blocks = (O + kTileBlock - 1) / kTileBlock;
     const int64_t grain = std::max<int64_t>(1, output_blocks / num_threads);
-    at::parallel_for(0, output_blocks, grain, [&](int64_t begin, int64_t end) {
+    auto run_output_blocks = [&](int64_t begin, int64_t end) {
       AlignedFloatBuffer acc_buffer(static_cast<size_t>(M) * kTileBlock * 16);
       for (int64_t block = begin; block < end; ++block) {
         const int tc = static_cast<int>(block * kTileBlock);
@@ -1299,7 +1315,44 @@ torch::Tensor qvq_gemv_cpu(
             acc_buffer.data,
             out_ptr);
       }
-    });
+    };
+    // Match the worker count to independent output blocks for small N.
+    if (output_blocks <= 4) {
+#if defined(_OPENMP)
+      const int small_team = static_cast<int>(std::min<int64_t>(output_blocks, num_threads));
+#pragma omp parallel num_threads(small_team)
+      {
+        AlignedFloatBuffer acc_buffer(static_cast<size_t>(M) * kTileBlock * 16);
+#pragma omp for schedule(static)
+        for (int64_t block = 0; block < output_blocks; ++block) {
+          const int tc = static_cast<int>(block * kTileBlock);
+          const int block_width = std::min(kTileBlock, O - tc);
+          accumulate_mn_block_dispatch(
+              M,
+              tc,
+              block_width,
+              I,
+              O,
+              x_ptr,
+              static_cast<int>(K),
+              static_cast<int>(N),
+              trellis_ptr,
+              E,
+              bank_ptr,
+              segments_per_tile,
+              states_per_segment,
+              v2b2_p32,
+              static_cast<int>(bank_alt_id),
+              acc_buffer.data,
+              out_ptr);
+        }
+      }
+#else
+      run_output_blocks(0, output_blocks);
+#endif
+    } else {
+      at::parallel_for(0, output_blocks, grain, run_output_blocks);
+    }
   } else {
     int64_t grain = std::max<int64_t>(1, O / num_threads);
     at::parallel_for(0, O, grain, [&](int64_t begin, int64_t end) {
