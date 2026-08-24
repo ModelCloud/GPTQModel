@@ -228,7 +228,7 @@ def test_qvq_config_round_trip_preserves_trellis_contract():
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5, 4))
 def test_qvq_v4_toggle_round_trips_and_reconstructs(bits):
-    cfg = QVQConfig(bits=bits, format="qvq_v4", offload_to_disk=False)
+    cfg = QVQConfig(bits=bits, format="qvq_v4", rounding="block_ldlq", offload_to_disk=False)
     assert cfg.vector_size == 4
     payload = cfg.to_dict()
     reloaded = QuantizeConfig.from_quant_config(payload)
@@ -719,7 +719,7 @@ def test_qvq_dynamic_bits_allow_only_supported_rates():
 
 @pytest.mark.parametrize("bits", QVQ_HALF_STEP_BITS)
 def test_qvq_config_accepts_every_planar_rate(bits):
-    cfg = QVQConfig(bits=bits, offload_to_disk=False)
+    cfg = QVQConfig(bits=bits, rounding="block_ldlq", offload_to_disk=False)
 
     assert cfg.bits == bits
     assert cfg.format == FORMAT.QVQ
@@ -5599,7 +5599,7 @@ def test_qvq_generic_replacement_preserves_fractional_rate(bits):
             super().__init__()
             self.proj = torch.nn.Linear(16, 16, bias=False, dtype=torch.float16)
 
-    cfg = QVQConfig(bits=bits, offload_to_disk=False)
+    cfg = QVQConfig(bits=bits, rounding="block_ldlq", offload_to_disk=False)
     model = TinyModel()
 
     selected = make_quant(

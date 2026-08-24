@@ -1971,7 +1971,12 @@ def test_qvq_v2b2_p32_native_mlx_conversion_preserves_selector_payload():
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_v2b2_p32_config_round_trip(bits):
-    config = QVQConfig(bits=bits, format=FORMAT.QVQ_V2B2_P32, offload_to_disk=False)
+    config = QVQConfig(
+        bits=bits,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="block_ldlq",
+        offload_to_disk=False,
+    )
     assert config.vector_size == 2
     assert config.trellis_window == 16
     assert config.bank_count == 2

@@ -36,7 +36,7 @@ def _quantized_bf16_named_module(seed: int):
     named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=0)
     processor = QVQProcessor(
         tokenizer=None,
-        qcfg=QVQConfig(bits=2, device="cpu", offload_to_disk=False),
+        qcfg=QVQConfig(bits=2, rounding="block_ldlq", device="cpu", offload_to_disk=False),
         calibration=[
             {
                 "input_ids": torch.tensor([[1, 2, 3, 4]]),

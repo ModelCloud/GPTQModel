@@ -34,7 +34,14 @@ def _processor(*, bits=2, dynamic=None, qcfg=None):
     ]
     return QVQProcessor(
         tokenizer=None,
-        qcfg=qcfg or QVQConfig(bits=bits, dynamic=dynamic, device="cpu", offload_to_disk=False),
+        qcfg=qcfg
+        or QVQConfig(
+            bits=bits,
+            rounding="block_ldlq",
+            dynamic=dynamic,
+            device="cpu",
+            offload_to_disk=False,
+        ),
         calibration=calibration,
         prepare_dataset_func=_prepared_calibration,
         calibration_concat_size=None,
@@ -118,6 +125,7 @@ def test_qvq_yaqa_default_mps_factor_budget_bounds_gram_working_set():
 def test_qvq_dynamic_clone_preserves_fractional_rate_and_skip_contract():
     cfg = QVQConfig(
         bits=2,
+        rounding="block_ldlq",
         dynamic={"+:model.layers.0.*": {"bits": 2.5}, "-:model.layers.1.*": {}},
         offload_to_disk=False,
     )
@@ -135,6 +143,7 @@ def test_qvq_propagated_bank_selection_builds_a_heldout_gate_from_dense_hook():
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             format="qvq_v4",
             vector_size=4,
             bank_count=4,
@@ -168,6 +177,7 @@ def test_qvq_propagated_bank_selection_false_disables_automatic_gate():
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             format="qvq_v4",
             vector_size=4,
             bank_count=4,
@@ -187,6 +197,7 @@ def test_qvq_automatic_propagation_allows_the_reduced_hessian_count():
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             format="qvq_v4",
             vector_size=4,
             bank_count=4,
@@ -225,7 +236,15 @@ def test_qvq_lifecycle_excludes_padding_quantizes_replays_and_installs_runtime_m
     root = torch.nn.Module()
     root.proj = torch.nn.Linear(16, 16, bias=True, dtype=torch.float32)
     named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=0)
-    processor = _processor(qcfg=QVQConfig(bits=2, format=format_value, device="cpu", offload_to_disk=False))
+    processor = _processor(
+        qcfg=QVQConfig(
+            bits=2,
+            rounding="block_ldlq",
+            format=format_value,
+            device="cpu",
+            offload_to_disk=False,
+        )
+    )
     processor.preprocess(named)
 
     source = torch.randn((1, 4, 16), dtype=torch.float32)
@@ -310,7 +329,13 @@ def test_qvq_output_alignment_is_disabled_by_default_and_explicitly_enablable():
     assert processor.receive_clean_layer_inputs(layer_index=0, layer_inputs=inputs) is None
 
     enabled = _processor(
-        qcfg=QVQConfig(bits=2, output_alignment=OutputAlignConfig(), device="cpu", offload_to_disk=False)
+        qcfg=QVQConfig(
+            bits=2,
+            rounding="block_ldlq",
+            output_alignment=OutputAlignConfig(),
+            device="cpu",
+            offload_to_disk=False,
+        )
     )
     assert enabled._output_alignment is not None
 
@@ -319,6 +344,7 @@ def test_qvq_output_alignment_delegates_pristine_stream_ownership_to_attachment(
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(),
             device="cpu",
             offload_to_disk=False,
@@ -342,6 +368,7 @@ def test_qvq_pristine_hessian_capture_is_exact_masked_and_ignores_later_noisy_re
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(pristine_hessian=True),
             device="cpu",
             offload_to_disk=False,
@@ -387,6 +414,7 @@ def test_qvq_pristine_hessian_capture_failure_restores_hooks_and_discards_partia
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(pristine_hessian=True),
             device="cpu",
             offload_to_disk=False,
@@ -423,6 +451,7 @@ def test_qvq_pristine_hessian_capture_restores_native_hook_registration():
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(pristine_hessian=True),
             device="cpu",
             offload_to_disk=False,
@@ -451,6 +480,7 @@ def test_qvq_pristine_hessian_capture_rejects_overlap_and_tolerates_old_capture_
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(pristine_hessian=True),
             device="cpu",
             offload_to_disk=False,
@@ -482,14 +512,20 @@ def test_qvq_pristine_hessian_empty_capture_failure_cleans_context():
     processor = _processor(
         qcfg=QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(pristine_hessian=True),
             device="cpu",
             offload_to_disk=False,
         )
     )
+    root = torch.nn.Module()
+    root.proj = HookedLinear.from_linear(torch.nn.Linear(16, 16, bias=False, dtype=torch.float32))
+    named = NamedModule(root.proj, name="proj", full_name="model.layers.0.proj", layer_index=0)
+    processor.preprocess(named)
 
     with pytest.raises(RuntimeError, match="empty replay failed"):
         with processor.pristine_quant_input_capture(layer_index=0):
+            assert set(processor._active_pristine_hessian_captures) == {"proj"}
             raise RuntimeError("empty replay failed")
 
     assert processor._active_pristine_hessian_captures == {}
@@ -500,6 +536,7 @@ def test_qvq_pristine_hessian_empty_capture_failure_cleans_context():
     [
         QVQConfig(
             bits=2,
+            rounding="block_ldlq",
             output_alignment=OutputAlignConfig(pristine_hessian=False),
             device="cpu",
             offload_to_disk=False,
@@ -530,6 +567,7 @@ def test_qvq_pristine_hessian_capture_is_inert_when_disabled_or_yaqa(qcfg):
 def test_qvq_output_alignment_uses_existing_threadx_cuda_owner_lane():
     qcfg = QVQConfig(
         bits=2,
+        rounding="block_ldlq",
         output_alignment=OutputAlignConfig(),
         device="cpu",
         offload_to_disk=False,
@@ -561,6 +599,7 @@ def test_qvq_output_alignment_uses_existing_threadx_cuda_owner_lane():
 def test_qvq_output_alignment_finally_cleanup_discards_incomplete_layer_without_masking_failure():
     qcfg = QVQConfig(
         bits=2,
+        rounding="block_ldlq",
         output_alignment=OutputAlignConfig(),
         device="cpu",
         offload_to_disk=False,
@@ -585,6 +624,7 @@ def test_qvq_output_alignment_finally_cleanup_discards_incomplete_layer_without_
 def test_qvq_output_alignment_refines_groups_and_runs_after_every_projection_subset():
     qcfg = QVQConfig(
         bits=2,
+        rounding="block_ldlq",
         output_alignment=OutputAlignConfig(),
         device="cpu",
         offload_to_disk=False,
@@ -629,6 +669,7 @@ def test_qvq_output_alignment_refines_groups_and_runs_after_every_projection_sub
 def test_qvq_output_alignment_rejects_moe_from_explicit_module_tree_tags_before_capture():
     qcfg = QVQConfig(
         bits=2,
+        rounding="block_ldlq",
         output_alignment=OutputAlignConfig(),
         device="cpu",
         offload_to_disk=False,
@@ -731,7 +772,7 @@ def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quanti
     qcfg = QVQConfig(
         bits=bits,
         rounding="yaqa",
-        yaqa={"seed": 787, "minimum_sequences": 2},
+        yaqa={"seed": 787, "regularization": 1e-4, "minimum_sequences": 2},
         output_alignment=None,
         device="cpu",
         offload_to_disk=False,

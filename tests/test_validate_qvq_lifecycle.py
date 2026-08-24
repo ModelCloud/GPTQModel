@@ -31,7 +31,7 @@ class _TinyLlamaTree(nn.Module):
 
 
 def _semantic_model(*, dynamic=None, flags=LlamaQModel.get_module_tree_flags):
-    qcfg = QVQConfig(bits=1.5, dynamic=dynamic, offload_to_disk=False)
+    qcfg = QVQConfig(bits=1.5, rounding="block_ldlq", dynamic=dynamic, offload_to_disk=False)
     return SimpleNamespace(
         model=_TinyLlamaTree(),
         quantize_config=qcfg,
