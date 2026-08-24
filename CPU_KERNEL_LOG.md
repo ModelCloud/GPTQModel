@@ -674,6 +674,68 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
 
+## 2026-08-24 CORRECTION: scope of the non-banked G-only bit-exactness claim
+
+**This entry corrects the entry "2026-08-24 non-banked G-only Viterbi recurrence" above.**
+
+That entry stated that saved pre-change states **and squared error** compared
+bit-exactly, alongside a list of coverage (eager-oracle, ties, weighted, overlap,
+tail-biting, W1-W8, planar packing). **The squared-error half of that claim was
+overstated.** It was verified for the specific saved/hashed benchmark inputs used by
+that PR, but the wording implied general preservation, and that broader claim is
+false.
+
+### Measured
+
+Driving the production `gptqmodel_qvq.viterbi_cpu` op with identical deterministic
+inputs on `ede2695e` (pre-change) and `2f4bea8a` (post-change), across the 17 valid
+configurations exercised by `tests/test_qvq_viterbi_cpu_opt.py`:
+
+| Property | Result |
+|---|---|
+| Complete selected-state paths | **identical in all 17 configurations** |
+| Tie winners, traceback paths, bank IDs | **identical** |
+| FP32 squared-error bit pattern | **changed in 6 of 17 configurations (12 of 44 batch outputs)** |
+
+Deltas are last-bit FP32 differences, roughly `1e-7` to `2e-6` absolute.
+
+### Cause
+
+Removing the full-state frontier changes *when* a rounded FP32 minimum is stored and
+reused, even though the emission instruction order was deliberately retained. These
+are ordinary non-associative FP32 recurrence-order differences, not a different
+discrete minimum -- every selected path matched. The independently written
+`qvq_viterbi_cpu_opt` kernel reproduces the pre-change baseline bit-for-bit in all 17
+configurations, which corroborates that the change in encoding came from the G-only
+schedule.
+
+Notably, no single FP32 encoding is universally "correct" here: across the 12 changed
+outputs the eager Torch oracle matched the pre-change baseline 3 times, the
+post-change baseline 4 times, and neither 5 times.
+
+### Consequence, and what remains guaranteed
+
+- **Load-bearing and still exact:** selected states, tie winners, bank IDs and packed
+  words. Ordinary reconstruction and packing consume `states`/`values`, not the cost
+  (`qvq.py:2723-2731`, `:3333-3349`, `:4305-4320`, `:7588-7601`).
+- **Conditionally load-bearing:** `squared_error` ranks candidates when
+  `tail_biting_candidates > 1` (`qvq.py:2217-2235` flattened/argmin,
+  `:2237-2258` serial `candidate.squared_error < best.squared_error`). A last-bit
+  perturbation can only change packed output if it crosses or flips a candidate
+  comparison, i.e. at an exact or near tie. **This is a small but real risk and is not
+  currently covered by a test.**
+- Everywhere else -- including the zero-overlap/full-shift path (`qvq.py:2121-2131`)
+  and the default single-candidate flow -- the terminal cost is reporting metadata
+  after states are selected.
+
+### Guidance for future entries
+
+**Do not claim bit-exactness more broadly than you measured.** State the exact
+configuration set that was compared. Bitwise equality of a derived FP32 cost between
+two independently scheduled implementations is a stronger contract than this
+algorithm requires, and it is not durable across legitimate re-orderings; assert exact
+discrete outputs plus a numerical tolerance on cost instead.
+
 ## 2026-08-24 — QVQ direct GEMV small-output team sizing
 
 - **Change:** when the AVX-512 direct GEMV has at most four four-output blocks, run the unchanged block kernels in
