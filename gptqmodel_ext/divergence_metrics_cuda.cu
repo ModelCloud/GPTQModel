@@ -94,8 +94,8 @@ __global__ void argmax_kernel(
     warp_argmax(quantized_best, quantized_index);
   }
   if (threadIdx.x == 0) {
-    indices[static_cast<int64_t>(token) * 2] = dense_indices[0];
-    indices[static_cast<int64_t>(token) * 2 + 1] = quantized_indices[0];
+    indices[static_cast<int64_t>(token) * 2] = dense_index;
+    indices[static_cast<int64_t>(token) * 2 + 1] = quantized_index;
   }
 }
 

@@ -724,6 +724,7 @@ def test_qvq_all_linear_streamed_metrics_use_generic_schema():
             layer_count=1,
             progress_label="test",
             module_scope="all-linear",
+            divergence_rows=0,
         )
 
     assert "local_modules" in metrics
@@ -992,6 +993,7 @@ def test_qvq_two_stream_diagnostics_match_serial_pipeline():
                 diagnostic_detail="primary",
                 diagnostic_streams=diagnostic_streams,
                 collect_telemetry=True,
+                divergence_rows=0,
             )
         )
 

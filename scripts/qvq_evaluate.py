@@ -28,6 +28,7 @@ import torch.nn.functional as F  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.utils.diagnostic_metrics import greedy_trajectory_metrics  # noqa: E402
 
 if __package__:
     from scripts.qvq_quantize import DatasetSlice, load_dataset_slice
@@ -137,7 +138,7 @@ def _row_text(row: dict[str, Any], tokenizer, text_column: str | None) -> str:
     if isinstance(value, str) and value.strip():
         return value
     if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-        return tokenizer.apply_chat_template(value, tokenize=False, add_generation_prompt=False)
+        return tokenizer.apply_chat_template(value, tokenize=False, add_generation_prompt=True)
     raise ValueError("Every evaluation row must provide nonempty text or a supported messages list")
 
 
@@ -153,6 +154,29 @@ def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
     if not isinstance(logits, torch.Tensor):
         raise TypeError(f"Model forward did not return tensor logits (output type: {type(output).__name__})")
     return logits
+
+
+@torch.inference_mode()
+def _greedy_rollout(model, encoded: dict[str, torch.Tensor], *, token_count: int, pad_token_id: int) -> torch.Tensor:
+    """Generate one independent fixed-horizon greedy continuation."""
+
+    input_ids = encoded["input_ids"]
+    if input_ids.shape[0] != 1:
+        raise ValueError("Divergence-300 diagnostics require evaluation batch size 1")
+    generated = model.generate(
+        **encoded,
+        do_sample=False,
+        max_new_tokens=token_count,
+        min_new_tokens=token_count,
+        pad_token_id=pad_token_id,
+        use_cache=True,
+    )
+    continuation = generated[:, input_ids.shape[1] :]
+    if continuation.shape != (1, token_count):
+        raise RuntimeError(
+            f"greedy decoder returned {continuation.shape[1]} new tokens; expected exactly {token_count}"
+        )
+    return continuation[0]
 
 
 @torch.inference_mode()
@@ -218,9 +242,8 @@ def _diagnostics(args: argparse.Namespace) -> int:
     top10_sum = torch.zeros((), dtype=torch.float64, device=args.device)
     token_total = 0
     divergence_sequences = 0
-    divergence_matching_tokens = 0
-    divergence_total_tokens = 0
-    divergence_exact_sequences = 0
+    divergence_aligned_token_sum = 0.0
+    divergence_survival_sum = 0.0
     divergence_first_sum = 0.0
     dense_forward_seconds = 0.0
     quantized_forward_seconds = 0.0
@@ -246,6 +269,29 @@ def _diagnostics(args: argparse.Namespace) -> int:
             torch.cuda.synchronize(args.device)
         quantized_forward_seconds += time.perf_counter() - started
 
+        if row_index < args.divergence_rows:
+            dense_trajectory = _greedy_rollout(
+                dense,
+                encoded,
+                token_count=args.divergence_tokens,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            quantized_trajectory = _greedy_rollout(
+                quantized,
+                encoded,
+                token_count=args.divergence_tokens,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+            trajectory = greedy_trajectory_metrics(
+                dense_trajectory,
+                quantized_trajectory,
+                token_count=args.divergence_tokens,
+            )
+            divergence_sequences += 1
+            divergence_aligned_token_sum += float(trajectory["aligned_token_agreement"].item())
+            divergence_survival_sum += float(trajectory["trajectory_survival"].item())
+            divergence_first_sum += float(trajectory["first_divergence_token"].item())
+
         keep = attention_mask.to(dtype=torch.bool)
         dense_rows = dense_logits[keep].float()
         quantized_rows = quantized_logits[keep].float()
@@ -266,16 +312,6 @@ def _diagnostics(args: argparse.Namespace) -> int:
                 accumulator += overlap.sum()
         token_total += dense_rows.shape[0]
 
-        if row_index < args.divergence_rows and dense_rows.shape[0] >= args.divergence_tokens:
-            matches = dense_top1[: args.divergence_tokens].eq(quantized_top1[: args.divergence_tokens])
-            mismatch = (~matches).nonzero(as_tuple=False).flatten()
-            first = int(mismatch[0]) + 1 if mismatch.numel() else args.divergence_tokens + 1
-            divergence_sequences += 1
-            divergence_matching_tokens += int(matches.sum())
-            divergence_total_tokens += args.divergence_tokens
-            divergence_exact_sequences += int(bool(matches.all()))
-            divergence_first_sum += first
-
         if row_index == 0 or (row_index + 1) % 16 == 0 or row_index + 1 == len(dataset):
             print(f"[diagnostics] rows={row_index + 1}/{len(dataset)} valid_tokens={token_total}", flush=True)
 
@@ -293,11 +329,13 @@ def _diagnostics(args: argparse.Namespace) -> int:
             "requested_sequences": min(args.divergence_rows, len(dataset)),
             "valid_sequences": divergence_sequences,
             "token_horizon": args.divergence_tokens,
-            "token_top1_agreement": (
-                divergence_matching_tokens / divergence_total_tokens if divergence_total_tokens else None
-            ),
+            "protocol": "independent_greedy_rollout",
+            "trajectory_survival": divergence_survival_sum / divergence_sequences if divergence_sequences else None,
             "exact_sequence_agreement": (
-                divergence_exact_sequences / divergence_sequences if divergence_sequences else None
+                divergence_survival_sum / divergence_sequences if divergence_sequences else None
+            ),
+            "aligned_token_agreement": (
+                divergence_aligned_token_sum / divergence_sequences if divergence_sequences else None
             ),
             "first_divergence_token": (
                 divergence_first_sum / divergence_sequences if divergence_sequences else None

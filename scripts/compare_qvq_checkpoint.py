@@ -22,11 +22,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from gptqmodel import BACKEND, GPTQModel
 
 if __package__:
-    from scripts.analyze_gptq_low_bit_grid import capture_forward, load_nm_evaluation_batch, tensor_metrics
-    from scripts.compare_qvq_codecs_llama_qkvo import _divergence_metrics
+    from scripts.analyze_gptq_low_bit_grid import (
+        capture_forward,
+        load_nm_evaluation_batch,
+        tensor_metrics,
+    )
+    from scripts.compare_qvq_codecs_llama_qkvo import (
+        _independent_greedy_divergence_metrics,
+    )
 else:
-    from analyze_gptq_low_bit_grid import capture_forward, load_nm_evaluation_batch, tensor_metrics
-    from compare_qvq_codecs_llama_qkvo import _divergence_metrics
+    from analyze_gptq_low_bit_grid import (
+        capture_forward,
+        load_nm_evaluation_batch,
+        tensor_metrics,
+    )
+    from compare_qvq_codecs_llama_qkvo import _independent_greedy_divergence_metrics
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -140,11 +150,13 @@ def main() -> None:
                 rows=token_count,
             )
         if row_index < args.divergence_rows:
-            metric = _divergence_metrics(
-                dense_row_logits, quantized_row_logits, token_count=args.divergence_tokens
+            metric = _independent_greedy_divergence_metrics(
+                dense,
+                quantized,
+                row,
+                token_count=args.divergence_tokens,
             )
-            if metric is not None:
-                divergence_values.append({name: float(value.item()) for name, value in metric.items()})
+            divergence_values.append({name: float(value.item()) for name, value in metric.items()})
         del row, dense_row_logits, quantized_row_logits, dense_row_outputs, quantized_row_outputs
         if row_index == 0 or (row_index + 1) % 16 == 0 or row_index + 1 == row_count:
             print(
@@ -166,6 +178,7 @@ def main() -> None:
             "requested_sequences": min(args.divergence_rows, row_count),
             "valid_sequences": len(divergence_values),
             "token_horizon": args.divergence_tokens,
+            "protocol": "independent_greedy_rollout",
         }
     )
     logits_metrics = logit_accumulator.result()
