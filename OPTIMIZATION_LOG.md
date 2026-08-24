@@ -965,3 +965,85 @@ The block kernel itself exceeds the 4x target by a wide margin, but the real
 five-layer run does not yet reach 4x end-to-end. Further work should profile and
 reduce routed-expert finalization/packing, materialization, and Hessian time;
 changing the now bit-exact CUDA block math cannot deliver the remaining gain.
+
+## Round: QVQ V2 segment-grid Viterbi speedup investigation (bound pruning)
+
+**Date:** 2026-08-24
+**Repository:** `/root/qvq`
+**Hardware:** 1 x NVIDIA PG506-230 (A100-class, sm_80, 96 GiB, 124 SMs)
+**Software:** Python 3.14.6, PyTorch 2.15.0.dev20260817+cu130, CUDA 13.3, Triton 3.8.0
+**Scope:** `gptqmodel_ext/qvq/qvq_viterbi_cuda.cu` — `viterbi_v2_segment_grid_trusted`
+(YAQA quantization's dominant kernel), all rates W2/W2.5/W3, half codebooks.
+
+### Baseline characterization
+
+Added `scripts/benchmark_qvq_v2_segment_grid.py` (CUDA-event benchmark plus a
+bit-exactness oracle gate against the eager recurrence; 12 rate x config combos).
+Measured regimes:
+
+- batch <= ~16 (grid underfilled): flat ~1.2-1.3 ms; chain-latency / issue bound.
+- batch >= 32 (grid full): linear scaling; W3.0/b4: 2.2 ms (b32) -> 11.7 ms (b256).
+
+nsight-compute evidence (both regimes): schedulers 86-87% busy (issue bound),
+L2 hit rate 99.6%, memory utilization 14-18% (NOT bandwidth bound).
+SASS: ptxas fully unrolls the 64-prefix candidate chain into a ~1254-instruction
+straight-line block with all loads hoisted; this static pipeline is the kernel's
+performance backbone.
+
+### Attempt 1: reduced-precision distance math (fp16/bf16/TC-equivalent)
+
+Rationale: replace FP32 dot/distance with half2 products. On A100, an MMA with
+K=2 (padded to k8) has the same effective ceiling as HFMA2 SIMT (~78 TFLOP/s
+class), so a half2-SIMT probe bounds the tensor-core outcome.
+
+Result (probe at `/tmp/opencode/probe_fp16.py`, real PGC16 codebooks, full
+coupled-bank trellis, FP64 re-scored paths):
+
+| variant | speed | path agreement | true SE inflation (max) |
+|---|---|---|---|
+| fp16 dot  | 0.99-1.04x | 97.7-100% | <= 1.00042 |
+| fp16 dot+norm | 0.96-0.98x | 97.7-100% | <= 1.00042 |
+| bf16 dot  | 0.79-0.88x | 67.6-100% | <= 1.040 |
+
+Verdict: precision was never the bottleneck; relaxation buys no speed here.
+
+### Attempt 2: exact Cauchy-Schwarz bound pruning
+
+`dist(s) >= (sqrt(tn) - sqrt(norm_s))^2` gives a valid per-candidate lower
+bound; skipping candidates whose bound exceeds the running best preserves the
+argmin exactly (ties included), so `torch.equal` still holds. A round-down
+intrinsic chain (`__fadd_rd/__fmul_rd`, `qhat = -2*__fsqrt_ru(norm)`,
+per-step `rho = __fsqrt_ru(tn)`) makes the bound a provable FP32 lower bound
+with no heuristic margins.
+
+Prune-rate validation (`scripts/benchmark_qvq_v2_prune_rate.py`, real
+Qwen3-0.6B weight tiles through production-style [tiles,128,2] sequences):
+92.0% (shift 6) / 86.5% (shift 5) of candidates provably skippable.
+
+Three CUDA implementations (per-candidate `continue`, rolled, and
+`#pragma unroll`-forced) all REGRESSED vs baseline: 1.7-2.3x slower.
+Root cause (SASS): any data-dependent branch in the h-loop prevents full
+unrolling and load hoisting; the loop compiles to ~174 instructions with 37
+branches and loses the static pipeline. The ~9-instruction arithmetic saving
+cannot compensate. Kernel code reverted; the experiment is fully reproducible
+from this log.
+
+### Follow-up design (not yet implemented): octet-grouped bounds
+
+The remaining sound path keeps branches COARSE (per 8 candidates) and bodies
+straight-line:
+
+- Precompute per-8-consecutive-states {min_norm, max_p=2*sqrt(norm)} tables
+  (target-independent, cached per codebook; 64 KiB/bank).
+- Re-map threads to own 8 consecutive x values (an octet). For shift >= 3,
+  `state >> shift` is constant within an octet, so the whole octet shares one
+  predecessor lookup.
+- Per (h, octet): one 8-byte table load + FFMA/FADD(rd) + one branch; the
+  surviving branch evaluates 8 records straight-line (unrollable, loads
+  hoistable across octets).
+- Budget at 80% octet prune: ~0.6 + 0.2*14 ~= 3.4 instr/candidate -> up to
+  ~2x; at 60% octet prune ~2.4x. Exactness argument unchanged from Attempt 2.
+
+Also unresolved from this round: bound-pruning is gated off for
+constrained/weighted launches (the all-INF tail-biting edge case needs the
+constraint check folded into the bound before pruning can apply there).
