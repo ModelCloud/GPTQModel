@@ -2193,11 +2193,17 @@ void launch_qvq_v2_segment_w25_cooperative(
 //  * the step-127 argmin is fused; the serial traceback runs in a tiny follow-up
 //    kernel so the SM is released as soon as the forward pass ends.
 //
-// Arithmetic is identical to emission<2, half>() and the reference recurrence:
-// same FP32 operation sequence, same lowest-prefix tie precedence (bank-1
-// candidates are visited in ascending bank-1 prefix order inside each block of
-// four prefixes and the block winners are merged with lower_pair()), same
-// bank-0-first boundary merge and bank-major / state-major terminal argmin.
+// Round 2: arithmetic is DECISION-EQUIVALENT to emission<2, half>() and the
+// reference recurrence, not bit-identical — the emission is evaluated as
+// (t0-c0)^2 + (t1-c1)^2 with the step weight folded into one FMA (see
+// fused_emission/fused_candidate), so accumulated costs can differ from the
+// reference in the last ulps and genuine near-ties may resolve differently
+// (measured ~1e-5 of states, score-equal; see
+// docs/qvq_grid_kernel_opt_status.md).  Tie precedence and visit order are
+// unchanged: lowest prefix on equal candidates (bank-1 candidates visited in
+// ascending bank-1 prefix order inside each block of four prefixes, block
+// winners merged with lower_pair()), bank-0-first boundary merge and
+// bank-major / state-major terminal argmin.
 // ---------------------------------------------------------------------------
 
 constexpr int kFusedThreads = 1024;
@@ -2236,23 +2242,27 @@ __global__ __launch_bounds__(kFusedThreads) void qvq_fused_detect_family_mask_ke
   }
 }
 
-// Bit-identical to emission<2, half>() with the norm recomputed from the fp16
-// pair: codebook_norm_value() is fadd(fadd(0, c0*c0), c1*c1) and fadd(0, v) == v
-// for v = c0*c0 >= +0.  fsub(a, fmul(2, d)) == fma(-2, d, a) because 2*d is exact.
-template <bool Weighted>
-__device__ __forceinline__ float fused_emission(
-    float t0, float t1, float target_norm, uint32_t code_bits, float weight) {
+// Round-2 relaxed emission (decision-equivalent, NOT bit-identical to the
+// reference emission<2, half>()): the squared distance is evaluated directly as
+// (t0-c0)^2 + (t1-c1)^2 in four FP32 ops instead of the reference's
+// norm/dot/expand form (~9 ops incl. the clip).  The sum-of-squares form is
+// >= +0 by construction, so the reference's fmaxf(distance, 0) clip is free.
+__device__ __forceinline__ float fused_emission(float t0, float t1, uint32_t code_bits) {
   const half2 code2_half = *reinterpret_cast<const half2*>(&code_bits);
   const float2 code2 = __half22float2(code2_half);
-  const float norm = __fadd_rn(__fmul_rn(code2.x, code2.x), __fmul_rn(code2.y, code2.y));
-  float dot = __fmaf_rn(t0, code2.x, 0.0f);
-  dot = __fmaf_rn(t1, code2.y, dot);
-  const float distance = __fmaf_rn(-2.0f, dot, __fadd_rn(target_norm, norm));
-  const float clipped = fmaxf(distance, 0.0f);
+  const float d0 = __fadd_rn(t0, -code2.x);
+  const float d1 = __fadd_rn(t1, -code2.y);
+  return __fmaf_rn(d1, d1, __fmul_rn(d0, d0));
+}
+
+// Candidate cost: the step weight is folded into a single FMA instead of the
+// reference's separate multiply + add (same relaxation as above).
+template <bool Weighted>
+__device__ __forceinline__ float fused_candidate(float emission, float weight, float predecessor) {
   if constexpr (Weighted) {
-    return __fmul_rn(clipped, weight);
+    return __fmaf_rn(emission, weight, predecessor);
   } else {
-    return clipped;
+    return __fadd_rn(predecessor, emission);
   }
 }
 
@@ -2300,7 +2310,7 @@ __device__ __forceinline__ void fused_step_shared(
     const uint32_t* __restrict__ global_codes,
     const float* __restrict__ g0,
     const float* __restrict__ g1,
-    float t0, float t1, float target_norm, float weight,
+    float t0, float t1, float weight,
     float (&best0)[4], int (&best_h0)[4],
     float (&best1)[4], int (&best_h1)[4]) {
   constexpr int mask_h = Mask >> 12;
@@ -2325,8 +2335,7 @@ __device__ __forceinline__ void fused_step_shared(
     for (int i = 0; i < 4; ++i) {
       #pragma unroll
       for (int jj = 0; jj < 4; ++jj) {
-        emissions[i][jj] = fused_emission<Weighted>(
-            t0, t1, target_norm, fused_code_at(codes[i], jj), weight);
+        emissions[i][jj] = fused_emission(t0, t1, fused_code_at(codes[i], jj));
       }
     }
     // Bank 0: ascending prefix order, strict '<' keeps the lowest prefix on ties.
@@ -2336,7 +2345,7 @@ __device__ __forceinline__ void fused_step_shared(
       const float predecessor = g0[h * 256 + map.row];
       #pragma unroll
       for (int jj = 0; jj < 4; ++jj) {
-        const float candidate = __fadd_rn(predecessor, emissions[i][jj]);
+        const float candidate = fused_candidate<Weighted>(emissions[i][jj], weight, predecessor);
         if (candidate < best0[jj]) {
           best0[jj] = candidate;
           best_h0[jj] = h;
@@ -2361,7 +2370,7 @@ __device__ __forceinline__ void fused_step_shared(
       const float predecessor = g1[hp * 256 + map.prow];
       #pragma unroll
       for (int jj = 0; jj < 4; ++jj) {
-        const float candidate = __fadd_rn(predecessor, emissions[i][jj]);
+        const float candidate = fused_candidate<Weighted>(emissions[i][jj], weight, predecessor);
         if (candidate < block_best[jj]) {
           block_best[jj] = candidate;
           block_best_h[jj] = hp;
@@ -2396,7 +2405,7 @@ __device__ __forceinline__ void fused_step_general(
     const uint32_t* __restrict__ global_codes1,
     const float* __restrict__ g0,
     const float* __restrict__ g1,
-    float t0, float t1, float target_norm, float weight,
+    float t0, float t1, float weight,
     float (&best0)[4], int (&best_h0)[4],
     float (&best1)[4], int (&best_h1)[4]) {
   #pragma unroll
@@ -2415,16 +2424,14 @@ __device__ __forceinline__ void fused_step_general(
     const float predecessor1 = g1[h * 256 + map.row];
     #pragma unroll
     for (int jj = 0; jj < 4; ++jj) {
-      const float candidate0 = __fadd_rn(
-          predecessor0,
-          fused_emission<Weighted>(t0, t1, target_norm, fused_code_at(codes0, jj), weight));
+      const float candidate0 = fused_candidate<Weighted>(
+          fused_emission(t0, t1, fused_code_at(codes0, jj)), weight, predecessor0);
       if (candidate0 < best0[jj]) {
         best0[jj] = candidate0;
         best_h0[jj] = h;
       }
-      const float candidate1 = __fadd_rn(
-          predecessor1,
-          fused_emission<Weighted>(t0, t1, target_norm, fused_code_at(codes1, jj), weight));
+      const float candidate1 = fused_candidate<Weighted>(
+          fused_emission(t0, t1, fused_code_at(codes1, jj)), weight, predecessor1);
       if (candidate1 < best1[jj]) {
         best1[jj] = candidate1;
         best_h1[jj] = h;
@@ -2502,17 +2509,16 @@ __device__ __forceinline__ void fused_run_segment(
   for (int step = first_step; step < end_step; ++step) {
     const float t0 = sequence_targets[step * 2];
     const float t1 = sequence_targets[step * 2 + 1];
-    const float target_norm = __fadd_rn(__fmul_rn(t0, t0), __fmul_rn(t1, t1));
     const float weight = Weighted ? sequence_weights[step] : 1.0f;
     float best0[4], best1[4];
     int best_h0[4], best_h1[4];
     if constexpr (Shared) {
       fused_step_shared<Mask, Weighted>(
-          map, shared_codes, global_codes0, g0, g1, t0, t1, target_norm, weight,
+          map, shared_codes, global_codes0, g0, g1, t0, t1, weight,
           best0, best_h0, best1, best_h1);
     } else {
       fused_step_general<Weighted>(
-          map, shared_codes, global_codes0, global_codes1, g0, g1, t0, t1, target_norm, weight,
+          map, shared_codes, global_codes0, global_codes1, g0, g1, t0, t1, weight,
           best0, best_h0, best1, best_h1);
     }
     __syncthreads();
@@ -2564,7 +2570,6 @@ __device__ __forceinline__ void fused_run_segment(
     const int required_overlap = args.constrained ? static_cast<int>(args.overlap[sequence]) : 0;
     const float t0 = sequence_targets[127 * 2];
     const float t1 = sequence_targets[127 * 2 + 1];
-    const float target_norm = __fadd_rn(__fmul_rn(t0, t0), __fmul_rn(t1, t1));
     const float weight = Weighted ? sequence_weights[127] : 1.0f;
     float best = CUDART_INF_F;
     int best_flat = 2 * kStateCount;
@@ -2573,9 +2578,8 @@ __device__ __forceinline__ void fused_run_segment(
       const int state = flat & (kStateCount - 1);
       const uint32_t code = bank == 0 ? __ldg(global_codes0 + state) : __ldg(global_codes1 + state);
       const float* g = bank == 0 ? g0 : g1;
-      float candidate = __fadd_rn(
-          g[state >> kFusedShift],
-          fused_emission<Weighted>(t0, t1, target_norm, code, weight));
+      float candidate = fused_candidate<Weighted>(
+          fused_emission(t0, t1, code), weight, g[state >> kFusedShift]);
       if (args.constrained && (state & (kFusedSuffixCount - 1)) != required_overlap) {
         candidate = CUDART_INF_F;
       }

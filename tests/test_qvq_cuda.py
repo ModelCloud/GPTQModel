@@ -881,15 +881,67 @@ def _fused_family_grid_dispatch_count() -> int:
     return int(torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count())
 
 
+# Round-2 relaxed contract for the fused W2 family-grid kernel: floating-point
+# op order is no longer bit-identical to the reference path (squared-difference
+# emission, weight folded into an FMA), so the fused path is held to *decision
+# equivalence* instead of bit-exactness: discrete outputs match the reference
+# except for quantified, score-equal near-tie flips, and the accumulated
+# squared error matches within FP32 accumulation error.
+#
+# Tolerance derivation.  A per-sequence objective is a sum of 128 non-negative
+# terms, each built from <= ~10 FP32 ops; with u = 2^-24 and effective op depth
+# n ~ 138, the standard forward-error bound gives
+# |fl(S) - S| <= gamma_n * sum|terms| = gamma_n * S (all terms >= 0), with
+# gamma_138 = 138u / (1 - 138u) ~= 8.2e-6.  Two independently accumulated
+# scores (reference vs fused op order) can therefore disagree by up to
+# ~2*gamma ~= 1.6e-5 relative while the true objectives are equal or closer:
+_FUSED_ACCUMULATION_RTOL = 2e-5
+# The reference emission is the expanded form max(tn + cn - 2*dot, 0), which
+# cancels catastrophically when a step distance is ~0 (its absolute error per
+# step is ~u * (tn + cn), not relative); over 128 steps with |t|,|c| = O(1)
+# that is an absolute slack of ~128 * 6e-8 * O(4) ~= 3e-5, relevant for the
+# adversarial codebook-snapped cases where the true objective itself is ~0:
+_FUSED_ACCUMULATION_ATOL = 1e-4
+# Fixed-seed comparison-grid tests: measured worst per-family state-flip
+# fraction is 6.6e-4 (an 11-state near-tie cluster at input scale 4.0,
+# unweighted, batch 131); bound = measured worst + ~50 % margin:
+_FUSED_MAX_FLIP_FRACTION = 1e-3
+# Kernel-reported loss vs reference-reported loss for the fixed-seed tests
+# (both FP32-accumulated under different op orders): the 2*gamma relative
+# bound above, doubled for headroom on the weighted per-term multiply:
+_FUSED_LOSS_RTOL = 4e-5
+_FUSED_LOSS_ATOL = 1e-4
+
+
+def _assert_family_grid_decision_equivalent(
+    expected, actual, context, max_flip_fraction=_FUSED_MAX_FLIP_FRACTION
+):
+    """expected/actual: (states, squared_error, segment_bank_ids) triples."""
+
+    states_e, loss_e, banks_e = expected
+    states_a, loss_a, banks_a = actual
+    flip_fraction = (states_e != states_a).float().mean().item()
+    assert flip_fraction <= max_flip_fraction, (context, flip_fraction)
+    bank_flip_fraction = (banks_e != banks_a).float().mean().item()
+    assert bank_flip_fraction <= max(max_flip_fraction * 16, 16 / banks_e.numel()), (
+        context,
+        bank_flip_fraction,
+    )
+    torch.testing.assert_close(
+        loss_a, loss_e, rtol=_FUSED_LOSS_RTOL, atol=_FUSED_LOSS_ATOL, msg=lambda m: f"{context}: {m}"
+    )
+
+
 # The fused path is gated on the *flattened* batch (families x batch >= 40): per-family
 # batches 1, 2, 3 and 7 (3, 6, 9, 21 sequences) take the reference path, 33+ (99+) the fused kernel.
 @pytest.mark.parametrize("batch", (1, 2, 3, 7, 33, 128, 131))
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
 @pytest.mark.parametrize("scale", (1.0, 0.05, 4.0))
-def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch, constrained, weighted, scale):
+def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(batch, constrained, weighted, scale):
     """The W2 <4,2,16,fused> family op runs the fused persistent kernel; the per-family
-    ``viterbi_v2_segment_grid_trusted`` op still runs the reference segmented grid kernels."""
+    ``viterbi_v2_segment_grid_trusted`` op still runs the reference segmented grid kernels.
+    Small batches take the (bit-exact) reference path; fused batches are decision-equivalent."""
 
     bits = 2.0
     generator = torch.Generator(device="cuda").manual_seed(20260823 + batch * 7 + int(constrained) + 2 * int(weighted))
@@ -930,13 +982,20 @@ def test_qvq_cuda_fused_w2_family_grid_is_bit_exact_against_reference_grid(batch
             None if overlap is None else overlap[family],
             None if step_weights is None else step_weights[family],
         )
-        for index in range(3):
-            assert torch.equal(expected[index], actual[index][family]), (family, index)
+        if expected_fused_dispatches == 0:
+            for index in range(3):
+                assert torch.equal(expected[index], actual[index][family]), (family, index)
+        else:
+            _assert_family_grid_decision_equivalent(
+                expected,
+                tuple(tensor[family] for tensor in actual),
+                (batch, constrained, weighted, scale, family),
+            )
 
 
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
-def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(constrained, weighted):
+def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_decision_equivalent(constrained, weighted):
     """Bank 1 that is not an XOR-permutation of bank 0 must take the in-kernel general path
     (fused_step_general); batch >= 40 per family keeps the fused kernel dispatched."""
 
@@ -972,8 +1031,11 @@ def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(co
             None if overlap is None else overlap[family],
             None if step_weights is None else step_weights[family],
         )
-        for index in range(3):
-            assert torch.equal(expected[index], actual[index][family]), (family, index)
+        _assert_family_grid_decision_equivalent(
+            expected,
+            tuple(tensor[family] for tensor in actual),
+            (constrained, weighted, family),
+        )
 
 
 @pytest.mark.parametrize("batch", (40, 67, 128))
@@ -981,8 +1043,9 @@ def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_bit_exact(co
 @pytest.mark.parametrize("xor_related_banks", (True, False))
 def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(batch, weighted, xor_related_banks):
     """viterbi_v2_segment_tail_trusted at W2 with >= 40 sequences runs both passes on the fused
-    family-grid kernel; it must be bit-exact against the reference two-pass construction built
-    from the (never fused) viterbi_v2_segment_grid_trusted op."""
+    family-grid kernel; under the round-2 relaxed contract it must be decision-equivalent
+    (sequence-wise, see below) to the reference two-pass construction built from the
+    (never fused) viterbi_v2_segment_grid_trusted op."""
 
     bits = 2.0
     generator = torch.Generator(device="cuda").manual_seed(20260826 + batch * 10 + int(weighted) + 2 * int(xor_related_banks))
@@ -1010,7 +1073,245 @@ def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(batch, weight
     actual = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(sequences, codebooks, transition_bits, 16, step_weights)
     # Provisional (rotated) pass + constrained pass, both on the fused kernel.
     assert _fused_family_grid_dispatch_count() - dispatches_before == 2
-    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+    # Decision equivalence, sequence-wise: a near-tie flip in the provisional
+    # pass changes the derived overlap and legitimately diverges that whole
+    # sequence, so diverged sequences are held to equal-or-better final loss
+    # instead of state equality.
+    states_e, loss_e, banks_e = expected
+    states_a, loss_a, banks_a = actual
+    diverged = (states_e != states_a).any(dim=1)
+    assert diverged.float().mean().item() <= 0.05, diverged.sum().item()
+    matched = ~diverged
+    torch.testing.assert_close(
+        loss_a[matched], loss_e[matched], rtol=_FUSED_LOSS_RTOL, atol=_FUSED_LOSS_ATOL
+    )
+    assert torch.equal(banks_e[matched], banks_a[matched])
+    if bool(diverged.any()):
+        assert bool(
+            (loss_a[diverged] <= loss_e[diverged] * (1 + _FUSED_LOSS_RTOL) + _FUSED_LOSS_ATOL).all()
+        ), (loss_a[diverged], loss_e[diverged])
+
+
+def test_qvq_cuda_fused_w2_family_grid_disable_env_forces_reference_path():
+    """QVQ_DISABLE_FUSED_FAMILY_GRID=1 must route a fused-eligible batch through
+    the reference path (0 fused dispatches, bit-exact outputs).  The flag is
+    read once per process, so this runs in a subprocess."""
+
+    import os
+    import subprocess
+    import sys
+
+    script = r"""
+import torch
+from gptqmodel.quantization.qvq_codecs.pgc16 import pgc16_codebook_v2_bank
+from gptqmodel.utils.qvq_cuda import (
+    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
+)
+fam = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+ref = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+generator = torch.Generator(device="cuda").manual_seed(20260902)
+families, batch = 3, 41
+sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+codebooks = torch.stack(
+    tuple(
+        torch.stack(
+            (
+                pgc16_codebook_v2_bank(0, bits=2.0, dtype=torch.float32),
+                pgc16_codebook_v2_bank(f + 1, bits=2.0, dtype=torch.float32),
+            )
+        )
+        for f in range(families)
+    )
+).to(device="cuda", dtype=torch.float16)
+actual = fam(sequences, codebooks, 4, 16, None, None)
+assert int(torch.ops.gptqmodel_qvq.fused_family_grid_dispatch_count()) == 0
+for f in range(families):
+    expected = ref(sequences[f], codebooks[f], 4, 16, None, None)
+    for index in range(3):
+        assert torch.equal(expected[index], actual[index][f]), (f, index)
+print("DISABLED-PATH-OK")
+"""
+    env = dict(os.environ, QVQ_DISABLE_FUSED_FAMILY_GRID="1")
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=600
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "DISABLED-PATH-OK" in result.stdout
+
+
+def _rescore_family_grid_paths_fp64(sequences, codebooks, states, bank_ids, step_weights):
+    """Independent re-scoring of a returned discrete path under ONE common
+    reference objective: sum_s w_s * ||t_s - codebook[bank(s), state_s]||^2,
+    evaluated in fp64 (the clip is a no-op for a sum of squares).  Both
+    kernels' paths go through this identical arithmetic, so comparing rescored
+    values proves score equality of the *decisions* independently of either
+    kernel's own FP32 accumulation."""
+
+    steps = states.shape[1]
+    banks = bank_ids.to(torch.long).repeat_interleave(steps // bank_ids.shape[1], dim=1)
+    codes = codebooks.to(torch.float64)[banks, states]
+    diff = sequences.to(torch.float64) - codes
+    emission = (diff * diff).sum(dim=-1)
+    if step_weights is not None:
+        emission = emission * step_weights.to(torch.float64)
+    return emission.sum(dim=1)
+
+
+def _assert_valid_trellis_paths(states):
+    """Consecutive states must chain through the 12-bit suffix window."""
+
+    assert bool(((states[:, :-1] & 0xFFF) == (states[:, 1:] >> 4)).all())
+
+
+def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
+    """Round-2 relaxed-contract stress test: >= 10k fused-path random sequences
+    through the family-grid op, spanning the batch gate boundary,
+    weighted/unweighted, constrained/unconstrained, XOR-related and arbitrary
+    bank pairs, plus adversarial near-tie cases (duplicated codes,
+    codebook-snapped targets).  Both kernels' returned discrete paths are
+    independently RESCORED under one common fp64 objective
+    (_rescore_family_grid_paths_fp64): sequences without flips must rescore
+    bitwise-identically, sequences with flips must rescore within the FP32
+    accumulation bound (the proof that every flip is a genuine near-tie), and
+    each kernel's own reported loss must match its own path's rescore (a
+    traceback/reporting consistency check)."""
+
+    fam = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    ref = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    families = 3
+    fused_sequences = 0
+    fused_states = 0
+    flip_deltas = []
+    per_category_stats = {}
+    generator = torch.Generator(device="cuda").manual_seed(20260901)
+
+    def bank_pair(family, xor_related, adversarial_dup):
+        bank0 = pgc16_codebook_v2_bank(0, bits=2.0, dtype=torch.float32)
+        if xor_related:
+            bank1 = pgc16_codebook_v2_bank(family + 1, bits=2.0, dtype=torch.float32)
+        else:
+            bank1 = torch.randn((1 << 16, 2), generator=generator, device="cuda").cpu()
+        pair = torch.stack((bank0, bank1)).to(device="cuda", dtype=torch.float16)
+        if adversarial_dup:
+            # Duplicate a block of codes so exact score ties are guaranteed.
+            pair[:, 1024:2048] = pair[:, 0:1024]
+        return pair
+
+    cases = []
+    for call in range(24):  # 24 x (3 x 128) = 9216 sequences on the fused path
+        cases.append((128, call % 2 == 0, call % 3 == 0, True, call % 4 == 0, False))
+    for batch in (13, 14, 33, 40, 41, 67):  # around/above the flattened gate (>= 40)
+        cases.append((batch, True, True, True, False, False))
+        cases.append((batch, False, False, False, False, False))
+    for _ in range(4):  # adversarial: targets snapped to codebook entries
+        cases.append((64, True, False, True, False, True))
+
+    for batch, weighted, constrained, xor_related, adversarial_dup, adversarial_snap in cases:
+        codebooks = torch.stack(
+            tuple(bank_pair(f, xor_related, adversarial_dup) for f in range(families))
+        ).contiguous()
+        sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+        if adversarial_snap:
+            picks = torch.randint(0, 1 << 16, (families, batch, 128), generator=generator, device="cuda")
+            for f in range(families):
+                sequences[f] = codebooks[f, 0].float()[picks[f]]
+        overlap = (
+            torch.randint(0, 1 << 12, (families, batch), generator=generator, device="cuda", dtype=torch.int64)
+            if constrained
+            else None
+        )
+        step_weights = (
+            (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
+        )
+        dispatches_before = _fused_family_grid_dispatch_count()
+        actual = fam(sequences, codebooks, 4, 16, overlap, step_weights)
+        expected_fused = 1 if families * batch >= 40 else 0
+        assert _fused_family_grid_dispatch_count() - dispatches_before == expected_fused, batch
+        case_key = (
+            ("xor" if xor_related else "arbitrary")
+            + ("+dup" if adversarial_dup else "")
+            + ("+snap" if adversarial_snap else "")
+            + ("+w" if weighted else "")
+            + ("+c" if constrained else "")
+        )
+        for f in range(families):
+            expected = ref(
+                sequences[f],
+                codebooks[f],
+                4,
+                16,
+                None if overlap is None else overlap[f],
+                None if step_weights is None else step_weights[f],
+            )
+            states_e, loss_e, banks_e = expected
+            states_a, loss_a, banks_a = (tensor[f] for tensor in actual)
+            if expected_fused == 0:
+                assert torch.equal(states_e, states_a) and torch.equal(loss_e, loss_a)
+                assert torch.equal(banks_e, banks_a)
+                continue
+            context = (batch, case_key, f)
+            _assert_valid_trellis_paths(states_e)
+            _assert_valid_trellis_paths(states_a)
+            weights_f = None if step_weights is None else step_weights[f]
+            rescore_e = _rescore_family_grid_paths_fp64(
+                sequences[f], codebooks[f], states_e, banks_e, weights_f)
+            rescore_a = _rescore_family_grid_paths_fp64(
+                sequences[f], codebooks[f], states_a, banks_a, weights_f)
+            # Each kernel's own reported FP32 loss must match its own path's
+            # fp64 rescore within the accumulation bound (catches traceback or
+            # loss-reporting bugs independently of any flips).
+            for own_loss, own_rescore, which in (
+                (loss_e, rescore_e, "reference"), (loss_a, rescore_a, "fused")):
+                own_delta = (own_loss.to(torch.float64) - own_rescore).abs()
+                own_bound = _FUSED_ACCUMULATION_ATOL + _FUSED_ACCUMULATION_RTOL * own_rescore.abs()
+                assert bool((own_delta <= own_bound).all()), (
+                    context, which, float(own_delta.max()), float(own_rescore.max()))
+            flipped = ((states_e != states_a).any(dim=1)) | ((banks_e != banks_a).any(dim=1))
+            # Identical discrete paths must rescore bitwise-identically.
+            assert torch.equal(rescore_e[~flipped], rescore_a[~flipped]), context
+            # Flipped paths are score-equal iff their fp64 rescores agree
+            # within the FP32 accumulation bound derived above: two candidates
+            # can only swap order when their FP32-accumulated costs are inside
+            # each other's rounding envelopes.
+            if bool(flipped.any()):
+                delta = (rescore_a[flipped] - rescore_e[flipped]).abs()
+                bound = _FUSED_ACCUMULATION_ATOL + _FUSED_ACCUMULATION_RTOL * rescore_e[flipped].abs()
+                assert bool((delta <= bound).all()), (
+                    context, float(delta.max()), float(rescore_e[flipped].min()))
+                flip_deltas.extend(
+                    (delta / rescore_e[flipped].abs().clamp_min(1e-9)).tolist())
+            fused_sequences += batch
+            fused_states += states_e.numel()
+            stats = per_category_stats.setdefault(
+                case_key, {"sequences": 0, "states": 0, "flip_sequences": 0, "flip_states": 0})
+            stats["sequences"] += batch
+            stats["states"] += states_e.numel()
+            stats["flip_sequences"] += int(flipped.sum())
+            stats["flip_states"] += int((states_e != states_a).sum())
+
+    # Deterministic totals of the fused-path comparison, derived from `cases`:
+    # only calls with families * batch >= 40 dispatch the fused kernel.
+    expected_sequences = sum(families * b for (b, *_rest) in cases if families * b >= 40)
+    assert fused_sequences == expected_sequences == 11_154, (fused_sequences, expected_sequences)
+    assert fused_states == expected_sequences * 128 == 1_427_712, fused_states
+    flip_sequences = sum(s["flip_sequences"] for s in per_category_stats.values())
+    flip_states = sum(s["flip_states"] for s in per_category_stats.values())
+    report = {
+        "fused_sequences": fused_sequences,
+        "fused_states": fused_states,
+        "flip_sequences": flip_sequences,
+        "flip_states": flip_states,
+        "max_flip_rescore_rel": max(flip_deltas, default=0.0),
+        "per_case_category": per_category_stats,
+    }
+    print("fused family-grid stress report:", report)
+    # Flip-rate bound: measured-distribution-plus-margin (see the report print
+    # for the measured values; historically ~1e-5 of states, ~1e-3 of
+    # sequences).  An order of magnitude above measured still sits far below
+    # any rate that could move real-workload quality.
+    assert flip_states / fused_states <= 1e-4, report
+    assert flip_sequences / fused_sequences <= 1e-2, report
 
 
 def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch):
