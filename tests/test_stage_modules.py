@@ -231,7 +231,7 @@ def test_qvq_execution_contract_carries_reconstructed_error_between_subsets():
     class ReplayProcessor:
         execution_config = QVQProcessor(
             tokenizer=None,
-            qcfg=QVQConfig(bits=2, device="cpu", offload_to_disk=False),
+            qcfg=QVQConfig(bits=2, rounding="block_ldlq", device="cpu", offload_to_disk=False),
             calibration=[{"input_ids": torch.tensor([[1]]), "attention_mask": torch.tensor([[1]])}],
             prepare_dataset_func=lambda **kwargs: kwargs["calibration_dataset"],
             calibration_concat_size=None,
@@ -242,7 +242,7 @@ def test_qvq_execution_contract_carries_reconstructed_error_between_subsets():
         def __init__(self):
             self.tasks = {"first": object(), "second": object()}
             self.captured = {}
-            self.qcfg = QVQConfig(bits=2, device="cpu", offload_to_disk=False)
+            self.qcfg = QVQConfig(bits=2, rounding="block_ldlq", device="cpu", offload_to_disk=False)
 
         def prepare_subset(self, *_args, **_kwargs):
             return None
@@ -273,7 +273,12 @@ def test_qvq_execution_contract_carries_reconstructed_error_between_subsets():
 
     class DummyQModel:
         def __init__(self):
-            self.quantize_config = QVQConfig(bits=2, device="cpu", offload_to_disk=False)
+            self.quantize_config = QVQConfig(
+                bits=2,
+                rounding="block_ldlq",
+                device="cpu",
+                offload_to_disk=False,
+            )
             self.quant_region_timer = None
             self.moe_lifecycle_hooks = None
 

@@ -865,6 +865,51 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AM
   Cost checks now use a matrix-calibrated, non-universal `atol=1.25e-5, rtol=0`; discrete checks remain exact.
 - **MEASURED by inspection:** this defect record contains no timing or speed claim.
 
+## 2026-08-24 segmented banked G-only Viterbi recurrence
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- **MEASURED by inspection:** replaced three banked full-state float frontiers with two per-bank suffix-G buffers;
+  fused emission, predecessor-G addition, strict prefix argmin, and backpointer generation into one suffix pass.
+  Segment-boundary reduction remains bank-major with strict `<` and carries the winning bank's prefix.
+- **MEASURED:** pristine `d9d37181` artifacts matched exactly for states and segment bank IDs across 17 V2/V4
+  configurations spanning batches 1/8/16/32/64/128, transition bits 1/5/15/16, short/full windows, 1/2/4 banks,
+  weights, overlap, and segment switches. Full-window V2 overlap artifacts also matched packed trellis words and
+  packed bank selectors exactly. Maximum observed FP32 loss delta was 1.39e-6; the target case delta was zero.
+- **MEASURED:** an adversarial regression covers step counts 1/2, `-1` sentinel collision, `INT64_MIN/MAX`, exact
+  range boundaries, a `2**32` alias, mixed valid/invalid rows, zero segment length, a forced bank switch, fixed-exit
+  traceback, and transition-15 combined bank/prefix overflow. The unchanged test failed on pristine and passes now.
+- **MEASURED:** with the cgroup 99.314%/99.317% idle before accepted series, 32 explicit singleton affinities,
+  10 warmups, 51 samples, and exclusive sequential runs, batch 16 / 128 steps / V2 / 65,536 states / two banks /
+  transition bits 5 / segment 16 improved from 110.0 ms to 6.7 ms median: **16.49x**.
+- **MEASURED:** final gates were 657 passed/248 skipped (`test_qvq.py`), 120/12 (`test_qvq_v2b2_p32.py`), and
+  18 passed/1 xfailed (`test_qvq_viterbi_cpu_opt.py`). Lifecycle retained the identical pre-existing 12 failures
+  (18 passed/2 skipped); the CPU-only CUDA banked/segment subset skipped all 312 selected cases.
+- **MEASURED:** the explicit placement was
+  `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
+  `OMP_PLACES=cores` was never used; the benchmark asserts the placement once before timing.
+
+## 2026-08-24 segmented banked Viterbi review correction
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- **MEASURED:** corrected the V=2 AVX-512 reduction to scalar-reference order and kept non-aligned suffix chunks
+  scalar so predecessor broadcasts cannot cross a boundary. The 16-vs-24-thread regression failed at `612b15e6`
+  with 31 states, one segment bank ID, and seven packed words changed; it passes afterward.
+- **CLARIFICATION (added by a later independent re-verification; see the wording-correction entry at the end of
+  this log):** the bullet above describes a regression that was introduced by *this branch's own* fused rewrite at
+  `612b15e6` and repaired by its follow-up commit. It is **not** evidence that pristine `main` diverged by thread
+  count. Independently re-measured with a fresh per-commit `GPTQMODEL_QVQ_CPU_BUILD_ROOT`, the same test **passes**
+  on pristine `d9d37181`, **fails** at `612b15e6`, and **passes** at `1c567c00`.
+- **MEASURED:** replaced the former 16.49x headline. In the self-consistent t5 row-parallel regime, accepted
+  batch-32/64/128 speedups are 1.26x/1.47x/1.23x. Batch 16 is reported separately at 15.76x as repair of the
+  pristine three-barrier small-batch pathology.
+- **MEASURED:** a 16-cell t15/t16, segment-16/32 sweep showed t15 G-only is 0.27-0.28x for batches 32-128; it remains
+  enabled because pristine t15 overflows combined bank/prefix int16 backpointers and emits negative states. T16
+  unconstrained two-bank cases retain the pristine recurrence and measure 0.98-1.09x with exact outputs and costs.
+- **MEASURED:** every timing cell used 3 warmups and 15 samples and reports median, minimum, and max-minus-min spread
+  in `RESULTS.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
+  placements recorded above; runs were exclusive and `OMP_PLACES=cores` was never used.
 ## 2026-08-24 — METHODOLOGY CORRECTION: `uptime` load average is not a valid idle check on this host
 
 Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, no AMX) | host `zen5-cpu-6` | 32-CPU cgroup carved from a
@@ -919,3 +964,53 @@ Validate a baseline by **self-consistency of implied throughput across problem s
 with a previously recorded absolute number. On a multi-tenant host that is the only sound test. A baseline
 whose implied GFLOP/s is flat across a wide range of N is trustworthy; one that scatters is contended,
 regardless of what any load average reported at the time.
+
+
+## 2026-08-24 — METHODOLOGY CORRECTION 2: a stale JIT extension cache can silently answer for the wrong commit
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, no AMX) | host `zen5-cpu-6` | 32-CPU cgroup | torch 2.13.0+cpu
+
+This entry contains no timing or speed claim. It records a second way a measurement on this repository can be
+wrong while looking correct, and it corrects one specific claim already recorded above.
+
+### The trap
+
+**MEASURED.** QVQ builds its CPU extensions lazily through `TorchOpsJitExtension`. The build root is
+`~/.cache/gptqmodel/torch_extensions/<subdir>/<source-fingerprint>/` (`gptqmodel/utils/cpp.py:371-377`,
+`:924-927`), and it is **not** controlled by `TORCH_EXTENSIONS_DIR` — the per-extension override for the CPU
+Viterbi/GEMV ops is `GPTQMODEL_QVQ_CPU_BUILD_ROOT` (`gptqmodel/utils/qvq_cpu.py:69`).
+
+Consequently, checking out an older commit and running pytest does **not** guarantee that commit's kernel was
+executed. If a fingerprint collides with, or is reused from, another worktree's build, the test silently loads a
+**different commit's `.so`** and reports a result about code that is not on disk.
+
+### Required practice for any before/after or fail-first claim
+
+- Export a **distinct, empty** `GPTQMODEL_QVQ_CPU_BUILD_ROOT` for every commit under test.
+- Confirm a real compile occurred: a first-run wall time on the order of ~30 s. An instant load means a cached
+  binary answered, and the result is void.
+- Never compare a "before" and an "after" that shared a build root.
+
+### The claim this corrects
+
+**MEASURED.** The segmented-Viterbi review-correction entry above originally read as though the 16-vs-24-thread
+divergence (31 states, one segment bank ID, seven packed words) demonstrated a defect in merged production code.
+Re-verified here with clean per-commit build roots, running one identical test file at three commits:
+
+| kernel commit | `..._v2_is_thread_count_invariant` |
+|---|---|
+| `d9d37181` (pristine `main`) | **PASSES** |
+| `612b15e6` (this branch's fused rewrite, pre-fix) | **FAILS** — 31 states differ |
+| `1c567c00` (after its follow-up fix) | **PASSES** |
+
+The divergence was therefore **introduced and repaired inside one branch**, not inherited from `main`. That entry
+has been annotated in place. The separately reported V=2 reduction-order finding in the *non-banked*
+`qvq_viterbi_cpu.cpp` is a different file and remains open on its own evidence; its severity should be recorded as
+**latent unless and until a thread sweep on that file demonstrates a differing selected state**.
+
+### What was genuinely pre-existing
+
+**MEASURED.** In the same three-commit re-verification, the branch's new adjacent-step/invalid-sentinel test does
+not merely fail on pristine `d9d37181` — it terminates the interpreter with `Fatal Python error: Floating-point
+exception` (SIGFPE), reachable from the public banked Viterbi op. The same test passes at `1c567c00`. That crash,
+not the speedup, is the strongest justification for that change.

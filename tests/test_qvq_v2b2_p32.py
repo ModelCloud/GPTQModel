@@ -1971,7 +1971,12 @@ def test_qvq_v2b2_p32_native_mlx_conversion_preserves_selector_payload():
 
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_v2b2_p32_config_round_trip(bits):
-    config = QVQConfig(bits=bits, format=FORMAT.QVQ_V2B2_P32, offload_to_disk=False)
+    config = QVQConfig(
+        bits=bits,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="block_ldlq",
+        offload_to_disk=False,
+    )
     assert config.vector_size == 2
     assert config.trellis_window == 16
     assert config.bank_count == 2
@@ -2220,7 +2225,10 @@ def test_qvq_v2b2_p32_identical_banks_reproduce_canonical_v2_path():
     )
     assert torch.equal(v2b2.states, v2.states)
     assert torch.equal(v2b2.values, v2.values)
-    assert torch.equal(v2b2.squared_error, v2.squared_error)
+    # The banked V=2 kernel now uses the scalar-reference reduction order in
+    # every AVX-512 lane. The sibling kernel's equivalent correction is tracked
+    # separately, so its reported FP32 cost can differ by a final ulp here.
+    torch.testing.assert_close(v2b2.squared_error, v2.squared_error, rtol=0, atol=1e-6)
     assert torch.count_nonzero(v2b2.segment_bank_ids) == 0
 
 
