@@ -864,3 +864,58 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AM
 - **MEASURED:** the previously documented exact-discrete-equivalence contract is false and has been withdrawn.
   Cost checks now use a matrix-calibrated, non-universal `atol=1.25e-5, rtol=0`; discrete checks remain exact.
 - **MEASURED by inspection:** this defect record contains no timing or speed claim.
+
+## 2026-08-24 — METHODOLOGY CORRECTION: `uptime` load average is not a valid idle check on this host
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, no AMX) | host `zen5-cpu-6` | 32-CPU cgroup carved from a
+          192-CPU physical host | torch 2.13.0+cpu
+
+This entry corrects a measurement practice used by several earlier entries in this log. It contains no
+timing or speed claim of its own.
+
+### The defect
+
+**MEASURED.** Several 2026-08-24 entries state that the machine was verified quiet before timing, using
+`uptime` / `/proc/loadavg`. That signal is **host-wide**, not cgroup-scoped. Sampled simultaneously:
+
+```
+/proc/loadavg                     ->  55.34 51.94 35.55   67/7476 tasks
+getconf _NPROCESSORS_CONF         ->  192          (physical host)
+nproc                             ->  32           (our cgroup)
+/sys/fs/cgroup/cpu.stat delta     ->  0.23 CPU-seconds used of 96 possible over 3s  = 0.24%
+sum of our processes' %CPU        ->  9.2%
+```
+
+A load average of 55 was observed while this container was **99.8% idle**. The number is dominated by
+roughly 7,400 tasks belonging to other tenants of the same physical host.
+
+### Correct idle check
+
+Use a cgroup-scoped delta, not a host-global average:
+
+```bash
+A=$(awk '/usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat); sleep 3
+B=$(awk '/usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat)
+# busy fraction = (B-A) / (3e6 * nproc)
+```
+
+### Consequences for numbers already recorded in this log
+
+- **INFERRED (high):** the practical effect was agents *waiting* on a signal that was never theirs. It did
+  not create false confidence in a busy cgroup, so no recorded number is invalidated by this alone.
+- **INFERRED (high):** this host is **multi-tenant**. Other tenants share its L3 and memory bandwidth with
+  our pinned CPUs. Absolute millisecond figures in this log should therefore be read as *"on a shared
+  host,"* and are not reproducible to better than tens of percent.
+- **INFERRED (high):** this is the most likely explanation for the previously recorded 11–34% discrepancy
+  between hosts `zen5-cpu-1` and `zen5-cpu-6` on identical work, which was originally attributed to
+  per-instance CCD allocation. Neighbour load is the simpler explanation.
+- **Ratios remain sound.** Every speedup recorded here compares two arms measured back-to-back within
+  seconds on the same box. Neighbour noise affects both arms alike, so A/B ratios are far more robust than
+  the absolute timings. The 2.39x Viterbi and 1.93x GEMV ratios are not called into question by this entry.
+
+### Standing rule this reinforces
+
+Validate a baseline by **self-consistency of implied throughput across problem sizes**, not by agreement
+with a previously recorded absolute number. On a multi-tenant host that is the only sound test. A baseline
+whose implied GFLOP/s is flat across a wide range of N is trustworthy; one that scatters is contended,
+regardless of what any load average reported at the time.
