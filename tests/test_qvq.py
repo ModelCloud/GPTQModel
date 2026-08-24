@@ -1997,6 +1997,50 @@ def test_wide_tail_biting_candidates_strictly_improve_a_w2_regression_case():
     assert torch.equal(widened.states[:, :1] >> 4, widened.states[:, -1:] & 15)
 
 
+def test_tail_biting_candidate_cost_ties_keep_first_candidate_and_packed_words(monkeypatch):
+    sequences = torch.zeros((2, 32, 2), dtype=torch.float32)
+    codebook = torch.arange(1 << 16, dtype=torch.float32).unsqueeze(1).repeat(1, 2)
+    first_states = torch.full((2, 32), 0x1111, dtype=torch.int64)
+    second_states = torch.zeros((2, 32), dtype=torch.int64)
+    one_ulp_above = torch.nextafter(torch.tensor(1.0), torch.tensor(torch.inf))
+    two_ulps_above = torch.nextafter(one_ulp_above, torch.tensor(torch.inf))
+    calls = []
+
+    def fake_viterbi(sequence, candidate_codebook, *, overlap=None, **kwargs):
+        calls.append(None if overlap is None else overlap.clone())
+        if overlap is None:
+            states = first_states
+            squared_error = torch.zeros(2)
+        elif torch.equal(overlap, torch.full((2,), 0x111, dtype=torch.int64)):
+            states = first_states
+            squared_error = torch.ones(2)
+        else:
+            states = second_states
+            # Batch 0 is an exact tie; batch 1 is only two FP32 ULPs worse.
+            squared_error = torch.tensor([1.0, two_ulps_above.item()])
+        return qvq_module.TrellisQuantizationResult(
+            states=states,
+            values=candidate_codebook[states],
+            squared_error=squared_error,
+        )
+
+    monkeypatch.setattr(qvq_module, "batched_viterbi_quantize", fake_viterbi)
+    monkeypatch.setattr(
+        qvq_module,
+        "_tail_biting_overlap_scores",
+        lambda *args, **kwargs: torch.zeros((2, 1 << 12)),
+    )
+
+    expected_packed = pack_trellis_states(first_states, bits=2)
+    for _ in range(3):
+        actual = qvq_module.tail_biting_viterbi_quantize(sequences, codebook, bits=2, candidate_count=2)
+        assert torch.equal(actual.states, first_states)
+        assert torch.equal(pack_trellis_states(actual.states, bits=2), expected_packed)
+        assert torch.equal(actual.squared_error, torch.ones(2))
+
+    assert len(calls) == 9
+
+
 @pytest.mark.parametrize("candidate_count", (0, -1, True, 1.5))
 def test_tail_biting_rejects_invalid_candidate_counts(candidate_count):
     with pytest.raises(ValueError, match="candidate count"):
