@@ -4988,6 +4988,66 @@ def test_native_viterbi_single_step_overlap_applies_only_initial_constraint():
                 assert torch.equal(actual_error, expected_error)
 
 
+def test_native_viterbi_two_step_overlap_applies_final_constraint():
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
+
+    if not qvq_cpu_supported():
+        pytest.skip("native QVQ CPU kernel unavailable")
+
+    codebook = torch.full((16, 2), 100.0, dtype=torch.float32)
+    codebook[6] = torch.tensor([0.0, 0.0])
+    codebook[9] = torch.tensor([3.0, 3.0])
+    codebook[10] = torch.tensor([1.0, 1.0])
+    sequences = torch.tensor([[[0.0, 0.0], [1.0, 1.0]]])
+
+    states, squared_error = qvq_cpu_viterbi(
+        sequences,
+        codebook,
+        transition_bits=2,
+        overlap=torch.tensor([1], dtype=torch.int64),
+    )
+    unconstrained_states, _ = qvq_cpu_viterbi(sequences, codebook, transition_bits=2)
+
+    # The unconstrained unique optimum ends at state 10 (suffix 2). The final
+    # overlap mask must instead choose state 9 (suffix 1), tracing back to 6.
+    assert unconstrained_states.tolist() == [[6, 10]]
+    assert states.tolist() == [[6, 9]]
+    assert squared_error.tolist() == [8.0]
+
+
+@pytest.mark.parametrize("step_count", [1, 3])
+def test_native_viterbi_invalid_overlap_is_all_infinity(step_count):
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
+
+    if not qvq_cpu_supported():
+        pytest.skip("native QVQ CPU kernel unavailable")
+
+    generator = torch.Generator().manual_seed(20260825 + step_count)
+    codebook = torch.randn((64, 2), generator=generator)
+    sequences = torch.randn((3, step_count, 2), generator=generator)
+    overlaps = torch.tensor([2, -1, (1 << 32) + 1], dtype=torch.int64)
+
+    states, squared_error = qvq_cpu_viterbi(
+        sequences,
+        codebook,
+        transition_bits=2,
+        overlap=overlaps,
+    )
+    valid_states, valid_error = qvq_cpu_viterbi(
+        sequences[:1],
+        codebook,
+        transition_bits=2,
+        overlap=overlaps[:1],
+    )
+
+    # A mixed batch must preserve the valid row while both kinds of invalid
+    # overlap deterministically produce the native op's documented sentinel.
+    assert torch.equal(states[:1], valid_states)
+    assert torch.equal(squared_error[:1], valid_error)
+    assert states[1:].tolist() == [[0] * step_count, [0] * step_count]
+    assert torch.isinf(squared_error[1:]).all()
+
+
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
     generator = torch.Generator().manual_seed(seed)
     shift = qvq_transition_bits(bits)

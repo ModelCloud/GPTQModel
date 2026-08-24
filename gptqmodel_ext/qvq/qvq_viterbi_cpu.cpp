@@ -62,6 +62,7 @@ static void fused_g_argmin_avx512(
     int64_t transition_bits,
     int64_t prefix_count,
     int64_t suffix_count,
+    bool constrain_initial,
     int64_t required_initial_overlap,
     float* __restrict__ next_g,
     int32_t* __restrict__ best_prefix,
@@ -81,6 +82,12 @@ static void fused_g_argmin_avx512(
   const __m512 zero = _mm512_setzero_ps();
   const __m512 inf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
   const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+  const bool initial_overlap_valid =
+      !constrain_initial ||
+      (required_initial_overlap >= 0 && required_initial_overlap < suffix_count);
+  const __m512i required_initial_overlap_v = initial_overlap_valid
+      ? _mm512_set1_epi32(static_cast<int>(required_initial_overlap))
+      : _mm512_setzero_epi32();
 
   int64_t x = suffix_begin;
   for (; x + 16 <= suffix_end; x += 16) {
@@ -109,11 +116,12 @@ static void fused_g_argmin_avx512(
       if (previous_g != nullptr) {
         const __m512i predecessors = _mm512_srli_epi32(states, static_cast<unsigned>(transition_bits));
         value = _mm512_add_ps(value, _mm512_i32gather_ps(predecessors, previous_g, 4));
-      } else if (required_initial_overlap >= 0) {
+      } else if (constrain_initial && initial_overlap_valid) {
         const __m512i predecessors = _mm512_srli_epi32(states, static_cast<unsigned>(transition_bits));
-        const __mmask16 valid = _mm512_cmpeq_epi32_mask(
-            predecessors, _mm512_set1_epi32(static_cast<int>(required_initial_overlap)));
+        const __mmask16 valid = _mm512_cmpeq_epi32_mask(predecessors, required_initial_overlap_v);
         value = _mm512_mask_mov_ps(inf, valid, value);
+      } else if (constrain_initial) {
+        value = inf;
       }
       const __mmask16 lower = _mm512_cmp_ps_mask(value, best, _CMP_LT_OQ);
       best = _mm512_mask_mov_ps(best, lower, value);
@@ -130,8 +138,8 @@ static void fused_g_argmin_avx512(
       float value = fused_candidate_scalar(
           state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
           weight, previous_g, state, transition_bits);
-      if (previous_g == nullptr && required_initial_overlap >= 0 &&
-          (state >> transition_bits) != required_initial_overlap) {
+      if (previous_g == nullptr && constrain_initial &&
+          (!initial_overlap_valid || (state >> transition_bits) != required_initial_overlap)) {
         value = std::numeric_limits<float>::infinity();
       }
       if (value < best) {
@@ -157,6 +165,7 @@ static void fused_g_argmin(
     int64_t transition_bits,
     int64_t prefix_count,
     int64_t suffix_count,
+    bool constrain_initial,
     int64_t required_initial_overlap,
     float* next_g,
     int32_t* best_prefix,
@@ -167,10 +176,13 @@ static void fused_g_argmin(
     fused_g_argmin_avx512(
         state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
         weight, previous_g, transition_bits, prefix_count, suffix_count,
-        required_initial_overlap, next_g, best_prefix, suffix_begin, suffix_end);
+        constrain_initial, required_initial_overlap, next_g, best_prefix, suffix_begin, suffix_end);
     return;
   }
 #endif
+  const bool initial_overlap_valid =
+      !constrain_initial ||
+      (required_initial_overlap >= 0 && required_initial_overlap < suffix_count);
   for (int64_t x = suffix_begin; x < suffix_end; ++x) {
     float best = std::numeric_limits<float>::infinity();
     int32_t best_h = 0;
@@ -179,8 +191,8 @@ static void fused_g_argmin(
       float value = fused_candidate_scalar(
           state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
           weight, previous_g, state, transition_bits);
-      if (previous_g == nullptr && required_initial_overlap >= 0 &&
-          (state >> transition_bits) != required_initial_overlap) {
+      if (previous_g == nullptr && constrain_initial &&
+          (!initial_overlap_valid || (state >> transition_bits) != required_initial_overlap)) {
         value = std::numeric_limits<float>::infinity();
       }
       if (value < best) {
@@ -314,11 +326,12 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
         float target_norm = target_norms[b * step_count + step];
         float w = has_step_weights ? step_weights_ptr[b * step_count + step] : 1.0f;
         const float* previous_g_b = step == 0 ? nullptr : previous_g + b * suffix_count;
-        int64_t required_initial_overlap = step == 0 && has_overlap ? overlap_ptr[b] : -1;
+        const bool constrain_initial = step == 0 && has_overlap;
+        const int64_t required_initial_overlap = constrain_initial ? overlap_ptr[b] : 0;
         fused_g_argmin(
             state_count, vector_size, codebook_t_ptr, codebook_norm.data(), target,
             target_norm, w, previous_g_b, transition_bits, prefix_count, suffix_count,
-            required_initial_overlap, next_g + b * suffix_count,
+            constrain_initial, required_initial_overlap, next_g + b * suffix_count,
             best_prefix_a + b * suffix_count, start_suffix, end_suffix);
       }
     });

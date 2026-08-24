@@ -11,12 +11,12 @@ former full-state `costs`, `next_costs`, and `emission_buf` frontiers and three 
 
 ## Correctness and tests
 
-The local baseline was measured at pristine `origin/main` commit `ede2695e` before editing. The after counts match
-it exactly:
+The local baseline was measured at pristine `origin/main` commit `ede2695e` before editing. Production coverage
+remains at baseline; the focused total increases only by four added regression cases:
 
 | Command | Before | After |
 |---|---:|---:|
-| `pytest tests/test_qvq.py -k "viterbi or tail_biting" -q` | 90 passed, 112 skipped, 653 deselected | 91 passed, 112 skipped, 653 deselected |
+| `pytest tests/test_qvq.py -k "viterbi or tail_biting" -q` | 90 passed, 112 skipped, 653 deselected | 94 passed, 112 skipped, 653 deselected |
 | `pytest tests/test_qvq_v2b2_p32.py -q` | 119 passed, 12 skipped, 1 failed | 119 passed, 12 skipped, 1 failed |
 
 The V2B2 failure is the same pre-existing configuration failure before and after:
@@ -44,6 +44,25 @@ The adjacent-step audit found no second defect. At one step, only emission, the 
 global final selection apply; there is no backpointer or final low-bit mask. At two steps, `G0` supplies backpointer
 zero, the second fused pass computes `G1`, and the final low-bit constraint applies exactly where the old step-1
 branch applied it. No-overlap behavior and all longer paths are unchanged.
+
+### Adversarial-review correction: invalid overlap values
+
+A second review found two real native-boundary defects. First, `-1` was overloaded as both "no initial
+constraint" and a real negative overlap, so negative inputs ran an unconstrained first pass. Second, AVX-512
+narrowed an int64 overlap before proving it was in range; `2**32 + 1` could therefore become predecessor 1. Tests
+were added before the fix. In a mixed batch they observed states 59 and 6 for those invalid values at one step,
+and tracebacks `[12, 48, 0]` and `[4, 16, 0]` at three steps, rather than zero paths with infinite error.
+
+The high-level `batched_viterbi_quantize` path rejects negative and out-of-range overlaps (and normalizes them to
+zero when overlap bits are zero), so ordinary quantization calls cannot reach the defects. The Python
+`qvq_cpu_viterbi` wrapper does not range-check, however, and the public torch op is directly callable. The native
+policy is now explicit: a separate boolean distinguishes absence of a constraint, int64 values are checked against
+`[0, suffix_count)` before AVX narrowing, and invalid values create an all-infinity first frontier. AVX-512 and
+scalar paths therefore return an all-zero path with infinite error for every step count, including mixed batches.
+
+Coverage includes negative and truncating-large overlaps in mixed batches for one and three steps, asserting both
+states and squared errors. A deterministic two-step fixture also guarantees the final mask is exercised: the
+unconstrained unique final state is 10 (suffix 2), while overlap 1 produces `[6, 9]` with error 8.
 
 The saved raw-op artifact comparison reported `torch.equal == True` for both selected states and FP32 squared
 error. The focused tests cover deterministic ties, weighted and constrained paths, V2/V4, W1 through W8,
@@ -86,12 +105,12 @@ window, with 10 warmups and 51 samples each:
 
 | Revision | Median | Minimum | Maximum | Exact vs before |
 |---|---:|---:|---:|---:|
-| pristine `ede2695e` | 5.896012 ms | 5.721410 ms | 10.465439 ms | reference |
-| fixed fused G-only | 2.514544 ms | 2.484028 ms | 5.662962 ms | states yes; squared error yes |
+| pristine `ede2695e` | 5.893175 ms | 5.618564 ms | 28.181893 ms | reference |
+| final fixed fused G-only | 2.465951 ms | 2.403298 ms | 10.674923 ms | states yes; squared error yes |
 
-Post-fix median speedup: **2.34x**. The initial pre-review measurement was 5.980552 -> 2.438298 ms (2.45x), but an
-intermediate post-fix run was noisy and did not reproduce it. The paired 51-sample result above is the authoritative
-completion number.
+Post-second-review median speedup: **2.39x**. The output tensors have the same combined SHA-256 digest,
+`5be22fad56a88fff21c3b510ebcf9c982b7fd298e36247a5fa391ba4f563f86e`. The initial pre-review measurement was
+5.980552 -> 2.438298 ms (2.45x); the paired 51-sample result above is authoritative.
 
 The repository's `scripts/benchmark_qvq_viterbi.py` is CUDA-only (it requires `--physical-gpu`, an idle NVIDIA
 GPU, and CUDA events), so it cannot measure the requested CPU raw op. The raw op was therefore called directly
