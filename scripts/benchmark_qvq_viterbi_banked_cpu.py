@@ -24,6 +24,7 @@ from pathlib import Path
 
 import torch
 
+from gptqmodel.quantization.qvq import pack_qvq_bank_ids, pack_trellis_states
 from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi_banked
 
 
@@ -40,6 +41,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260821)
     parser.add_argument("--threads", type=int, default=0, help="0 keeps torch defaults")
+    parser.add_argument(
+        "--assert-affinity-count",
+        type=int,
+        default=0,
+        help="fail unless this many distinct singleton thread affinities exist before timing",
+    )
     parser.add_argument("--step-weights", action="store_true", help="pass per-step weights")
     parser.add_argument("--overlap", action="store_true", help="pass tail-biting overlap constraints")
     parser.add_argument("--save-baseline", type=Path)
@@ -91,6 +98,23 @@ def _run(args: argparse.Namespace, tensors: dict[str, torch.Tensor | None]):
     )
 
 
+def _assert_affinity(expected_count: int) -> None:
+    singleton_cpus: set[int] = set()
+    for status in Path("/proc/self/task").glob("*/status"):
+        for line in status.read_text().splitlines():
+            if line.startswith("Cpus_allowed_list:"):
+                allowed = line.split(":", 1)[1].strip()
+                if allowed.isdigit():
+                    singleton_cpus.add(int(allowed))
+                break
+    if len(singleton_cpus) != expected_count:
+        raise RuntimeError(
+            f"expected {expected_count} distinct singleton worker affinities, found "
+            f"{len(singleton_cpus)}: {sorted(singleton_cpus)}"
+        )
+    print(f"affinity: {expected_count} distinct singleton worker CPUs verified once before timing")
+
+
 def main() -> int:
     args = _parser().parse_args()
     if not qvq_cpu_supported():
@@ -105,11 +129,15 @@ def main() -> int:
     artifact: dict[str, dict[str, object]] = {}
     rows: list[tuple[str, ...]] = []
     exactness_failures: list[str] = []
+    affinity_checked = False
 
     for batch in args.batch_sizes:
         tensors = _inputs(args, batch)
         for _ in range(args.warmup):
             _run(args, tensors)
+        if args.assert_affinity_count and not affinity_checked:
+            _assert_affinity(args.assert_affinity_count)
+            affinity_checked = True
         timings: list[float] = []
         states = squared_error = segment_bank_ids = None
         for _ in range(args.repeats):
@@ -127,9 +155,18 @@ def main() -> int:
             "min_ms": min(timings),
             "max_ms": max(timings),
         }
+        if args.vector_size == 2 and args.state_count == 65536 and args.steps % 32 == 0:
+            try:
+                artifact[key]["packed_words"] = pack_trellis_states(
+                    states, bits=args.transition_bits / 2, vector_size=2
+                )
+            except ValueError:
+                pass
+            artifact[key]["packed_bank_ids"] = pack_qvq_bank_ids(segment_bank_ids.reshape(-1))
 
         speedup = "-"
         exact = "-"
+        error_delta = "-"
         if baseline is not None:
             reference = baseline.get(key)
             if reference is None:
@@ -139,12 +176,14 @@ def main() -> int:
                     name
                     for name, value in (
                         ("states", states),
-                        ("squared_error", squared_error),
                         ("segment_bank_ids", segment_bank_ids),
+                        ("packed_words", artifact[key].get("packed_words")),
+                        ("packed_bank_ids", artifact[key].get("packed_bank_ids")),
                     )
-                    if not torch.equal(value, reference[name])
+                    if value is not None and name in reference and not torch.equal(value, reference[name])
                 ]
                 exact = "yes" if not mismatches else "NO:" + ",".join(mismatches)
+                error_delta = f"{(squared_error - reference['squared_error']).abs().max().item():.3g}"
                 if mismatches:
                     exactness_failures.append(f"{key} -> {','.join(mismatches)}")
                 speedup = f"{reference['median_ms'] / median_ms:.2f}x"
@@ -161,6 +200,7 @@ def main() -> int:
                 f"{median_ms / batch:.3f}",
                 speedup,
                 exact,
+                error_delta,
             )
         )
 
@@ -174,7 +214,8 @@ def main() -> int:
         "max_ms",
         "ms/row",
         "speedup",
-        "bit-exact",
+        "discrete-exact",
+        "loss-max-abs",
     )
     widths = [max(len(header[i]), *(len(row[i]) for row in rows)) for i in range(len(header))]
     line = "  ".join(name.ljust(widths[i]) for i, name in enumerate(header))

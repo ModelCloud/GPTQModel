@@ -864,3 +864,27 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AM
 - **MEASURED:** the previously documented exact-discrete-equivalence contract is false and has been withdrawn.
   Cost checks now use a matrix-calibrated, non-universal `atol=1.25e-5, rtol=0`; discrete checks remain exact.
 - **MEASURED by inspection:** this defect record contains no timing or speed claim.
+
+## 2026-08-24 segmented banked G-only Viterbi recurrence
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- **MEASURED by inspection:** replaced three banked full-state float frontiers with two per-bank suffix-G buffers;
+  fused emission, predecessor-G addition, strict prefix argmin, and backpointer generation into one suffix pass.
+  Segment-boundary reduction remains bank-major with strict `<` and carries the winning bank's prefix.
+- **MEASURED:** pristine `d9d37181` artifacts matched exactly for states and segment bank IDs across 17 V2/V4
+  configurations spanning batches 1/8/16/32/64/128, transition bits 1/5/15/16, short/full windows, 1/2/4 banks,
+  weights, overlap, and segment switches. Full-window V2 overlap artifacts also matched packed trellis words and
+  packed bank selectors exactly. Maximum observed FP32 loss delta was 1.39e-6; the target case delta was zero.
+- **MEASURED:** an adversarial regression covers step counts 1/2, `-1` sentinel collision, `INT64_MIN/MAX`, exact
+  range boundaries, a `2**32` alias, mixed valid/invalid rows, zero segment length, a forced bank switch, fixed-exit
+  traceback, and transition-15 combined bank/prefix overflow. The unchanged test failed on pristine and passes now.
+- **MEASURED:** with the cgroup 99.314%/99.317% idle before accepted series, 32 explicit singleton affinities,
+  10 warmups, 51 samples, and exclusive sequential runs, batch 16 / 128 steps / V2 / 65,536 states / two banks /
+  transition bits 5 / segment 16 improved from 110.0 ms to 6.7 ms median: **16.49x**.
+- **MEASURED:** final gates were 657 passed/248 skipped (`test_qvq.py`), 120/12 (`test_qvq_v2b2_p32.py`), and
+  18 passed/1 xfailed (`test_qvq_viterbi_cpu_opt.py`). Lifecycle retained the identical pre-existing 12 failures
+  (18 passed/2 skipped); the CPU-only CUDA banked/segment subset skipped all 312 selected cases.
+- **MEASURED:** the explicit placement was
+  `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
+  `OMP_PLACES=cores` was never used; the benchmark asserts the placement once before timing.

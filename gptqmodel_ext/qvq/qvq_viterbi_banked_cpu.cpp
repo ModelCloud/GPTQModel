@@ -28,6 +28,201 @@ inline int log2_state_count(int64_t state_count) {
   return l;
 }
 
+inline float fused_candidate_scalar(
+    int64_t state_count,
+    int64_t vector_size,
+    const float* codebook_t,
+    const float* codebook_norm,
+    const float* target,
+    float target_norm,
+    float weight,
+    const float* previous_g,
+    int64_t state,
+    int64_t transition_bits) {
+  float dot = 0.0f;
+  for (int64_t v = 0; v < vector_size; ++v) {
+    dot += target[v] * codebook_t[v * state_count + state];
+  }
+  float distance = target_norm + codebook_norm[state] - 2.0f * dot;
+  if (distance < 0.0f) distance = 0.0f;
+  distance *= weight;
+  return distance + (previous_g == nullptr ? 0.0f : previous_g[state >> transition_bits]);
+}
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,fma")))
+static void fused_g_argmin_avx512(
+    int64_t state_count,
+    int64_t vector_size,
+    const float* __restrict__ codebook_t,
+    const float* __restrict__ codebook_norm,
+    const float* __restrict__ target,
+    float target_norm,
+    float weight,
+    const float* __restrict__ previous_g,
+    int64_t transition_bits,
+    int64_t prefix_count,
+    int64_t suffix_count,
+    bool constrain_initial,
+    int64_t required_initial_overlap,
+    bool constrain_final,
+    int64_t required_final_state,
+    float* __restrict__ next_g,
+    int32_t* __restrict__ best_prefix,
+    int64_t suffix_begin,
+    int64_t suffix_end) {
+  const float* c0 = codebook_t;
+  const float* c1 = codebook_t + state_count;
+  const float* c2 = vector_size == 4 ? codebook_t + 2 * state_count : nullptr;
+  const float* c3 = vector_size == 4 ? codebook_t + 3 * state_count : nullptr;
+  const __m512 t0 = _mm512_set1_ps(target[0]);
+  const __m512 t1 = _mm512_set1_ps(target[1]);
+  const __m512 t2 = vector_size == 4 ? _mm512_set1_ps(target[2]) : _mm512_setzero_ps();
+  const __m512 t3 = vector_size == 4 ? _mm512_set1_ps(target[3]) : _mm512_setzero_ps();
+  const __m512 tn = _mm512_set1_ps(target_norm);
+  const __m512 w = _mm512_set1_ps(weight);
+  const __m512 two = _mm512_set1_ps(2.0f);
+  const __m512 zero = _mm512_setzero_ps();
+  const __m512 inf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+  const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+  const bool initial_valid =
+      !constrain_initial || (required_initial_overlap >= 0 && required_initial_overlap < suffix_count);
+  const __m512i required_v = initial_valid
+      ? _mm512_set1_epi32(static_cast<int>(required_initial_overlap))
+      : _mm512_setzero_epi32();
+
+  int64_t x = suffix_begin;
+  for (; x + 16 <= suffix_end; x += 16) {
+    __m512 best = inf;
+    __m512i best_h = _mm512_setzero_epi32();
+    for (int64_t h = 0; h < prefix_count; ++h) {
+      const int64_t state = h * suffix_count + x;
+      __m512 dot;
+      if (vector_size == 2) {
+        dot = _mm512_mul_ps(_mm512_loadu_ps(c1 + state), t1);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + state), t0, dot);
+      } else {
+        dot = _mm512_setzero_ps();
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + state), t0, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c1 + state), t1, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c2 + state), t2, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c3 + state), t3, dot);
+      }
+      __m512 value = _mm512_fnmadd_ps(
+          dot, two, _mm512_add_ps(tn, _mm512_loadu_ps(codebook_norm + state)));
+      value = _mm512_max_ps(value, zero);
+      if (weight != 1.0f) value = _mm512_mul_ps(value, w);
+      const __m512i states = _mm512_add_epi32(_mm512_set1_epi32(static_cast<int>(state)), lanes);
+      if (previous_g != nullptr) {
+        if (transition_bits >= 4) {
+          value = _mm512_add_ps(
+              value, _mm512_set1_ps(previous_g[state >> transition_bits]));
+        } else {
+          const __m512i predecessors = _mm512_srli_epi32(states, static_cast<unsigned>(transition_bits));
+          value = _mm512_add_ps(value, _mm512_i32gather_ps(predecessors, previous_g, 4));
+        }
+      } else if (constrain_initial && initial_valid) {
+        const __m512i predecessors = _mm512_srli_epi32(states, static_cast<unsigned>(transition_bits));
+        const __mmask16 valid = _mm512_cmpeq_epi32_mask(predecessors, required_v);
+        value = _mm512_mask_mov_ps(inf, valid, value);
+      } else if (constrain_initial) {
+        value = inf;
+      }
+      if (constrain_final) {
+        const __mmask16 valid = _mm512_cmpeq_epi32_mask(
+            states, _mm512_set1_epi32(static_cast<int>(required_final_state)));
+        value = _mm512_mask_mov_ps(inf, valid, value);
+      }
+      const __mmask16 lower = _mm512_cmp_ps_mask(value, best, _CMP_LT_OQ);
+      best = _mm512_mask_mov_ps(best, lower, value);
+      best_h = _mm512_mask_mov_epi32(best_h, lower, _mm512_set1_epi32(static_cast<int>(h)));
+    }
+    _mm512_storeu_ps(next_g + x, best);
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(best_prefix + x), best_h);
+  }
+  for (; x < suffix_end; ++x) {
+    float best = std::numeric_limits<float>::infinity();
+    int32_t best_h = 0;
+    for (int64_t h = 0; h < prefix_count; ++h) {
+      const int64_t state = h * suffix_count + x;
+      float value = fused_candidate_scalar(
+          state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
+          weight, previous_g, state, transition_bits);
+      if (previous_g == nullptr && constrain_initial &&
+          (!initial_valid || (state >> transition_bits) != required_initial_overlap)) {
+        value = std::numeric_limits<float>::infinity();
+      }
+      if (constrain_final && state != required_final_state) {
+        value = std::numeric_limits<float>::infinity();
+      }
+      if (value < best) {
+        best = value;
+        best_h = static_cast<int32_t>(h);
+      }
+    }
+    next_g[x] = best;
+    best_prefix[x] = best_h;
+  }
+}
+#endif
+
+static void fused_g_argmin(
+    int64_t state_count,
+    int64_t vector_size,
+    const float* codebook_t,
+    const float* codebook_norm,
+    const float* target,
+    float target_norm,
+    float weight,
+    const float* previous_g,
+    int64_t transition_bits,
+    int64_t prefix_count,
+    int64_t suffix_count,
+    bool constrain_initial,
+    int64_t required_initial_overlap,
+    bool constrain_final,
+    int64_t required_final_state,
+    float* next_g,
+    int32_t* best_prefix,
+    int64_t suffix_begin,
+    int64_t suffix_end) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+  if (cpu_has_avx512()) {
+    fused_g_argmin_avx512(
+        state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
+        weight, previous_g, transition_bits, prefix_count, suffix_count,
+        constrain_initial, required_initial_overlap, constrain_final, required_final_state,
+        next_g, best_prefix, suffix_begin, suffix_end);
+    return;
+  }
+#endif
+  const bool initial_valid =
+      !constrain_initial || (required_initial_overlap >= 0 && required_initial_overlap < suffix_count);
+  for (int64_t x = suffix_begin; x < suffix_end; ++x) {
+    float best = std::numeric_limits<float>::infinity();
+    int32_t best_h = 0;
+    for (int64_t h = 0; h < prefix_count; ++h) {
+      const int64_t state = h * suffix_count + x;
+      float value = fused_candidate_scalar(
+          state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
+          weight, previous_g, state, transition_bits);
+      if (previous_g == nullptr && constrain_initial &&
+          (!initial_valid || (state >> transition_bits) != required_initial_overlap)) {
+        value = std::numeric_limits<float>::infinity();
+      }
+      if (constrain_final && state != required_final_state) {
+        value = std::numeric_limits<float>::infinity();
+      }
+      if (value < best) {
+        best = value;
+        best_h = static_cast<int32_t>(h);
+      }
+    }
+    next_g[x] = best;
+    best_prefix[x] = best_h;
+  }
+}
+
 }  // namespace
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
@@ -58,7 +253,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   TORCH_CHECK(vector_size == 2 || vector_size == 4, "qvq_viterbi_banked_cpu: only V=2 or 4 supported");
   TORCH_CHECK(bank_count >= 1 && bank_count <= 4, "qvq_viterbi_banked_cpu: bank_count must be 1..4");
   TORCH_CHECK(state_count > 0 && (state_count & (state_count - 1)) == 0, "qvq_viterbi_banked_cpu: state_count must be power of two");
-  TORCH_CHECK(step_count > 0 && step_count % segment_steps == 0, "qvq_viterbi_banked_cpu: step_count must be divisible by segment_steps");
+  TORCH_CHECK(
+      step_count > 0 && segment_steps > 0 && step_count % segment_steps == 0,
+      "qvq_viterbi_banked_cpu: positive segment_steps must divide step_count");
 
   int l = log2_state_count(state_count);
   TORCH_CHECK(transition_bits >= 1 && transition_bits <= l, "qvq_viterbi_banked_cpu: transition_bits out of range");
@@ -138,7 +335,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   }
 
   // Backpointers.
-  const bool use_int16 = transition_bits <= 15;
+  const bool use_int16 = bank_count * prefix_count - 1 <= std::numeric_limits<int16_t>::max();
   torch::Tensor prefix_backpointers;
   torch::Tensor boundary_backpointers;
   void* prefix_bp_ptr = nullptr;
@@ -178,202 +375,115 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
 
   auto run_tile = [&](int64_t tile_start, int64_t tile_end, bool parallel_inner) {
     int64_t tile_batch = tile_end - tile_start;
-    std::vector<float> costs(static_cast<size_t>(tile_batch) * bank_count * state_count, 0.0f);
-    std::vector<float> next_costs(static_cast<size_t>(tile_batch) * bank_count * state_count, 0.0f);
-    std::vector<float> emission_buf(static_cast<size_t>(tile_batch) * bank_count * state_count, 0.0f);
-    std::vector<float> best_cost(static_cast<size_t>(tile_batch) * bank_count * suffix_count, 0.0f);
+    std::vector<float> g_a(static_cast<size_t>(tile_batch) * bank_count * suffix_count, 0.0f);
+    std::vector<float> g_b(static_cast<size_t>(tile_batch) * bank_count * suffix_count, 0.0f);
     std::vector<int32_t> best_prefix(static_cast<size_t>(tile_batch) * bank_count * suffix_count, 0);
-    std::vector<float> best_cost_boundary(static_cast<size_t>(tile_batch) * suffix_count, 0.0f);
-    std::vector<int32_t> best_arg_boundary(static_cast<size_t>(tile_batch) * suffix_count, 0);
+    std::vector<float> boundary_g(static_cast<size_t>(tile_batch) * suffix_count, 0.0f);
 
-    auto* costs_a = costs.data();
-    auto* next_costs_a = next_costs.data();
-    auto* emission_a = emission_buf.data();
-    auto* best_cost_a = best_cost.data();
+    auto* previous_g = g_a.data();
+    auto* next_g = g_b.data();
     auto* best_prefix_a = best_prefix.data();
-    auto* best_cost_boundary_a = best_cost_boundary.data();
-    auto* best_arg_boundary_a = best_arg_boundary.data();
 
     for (int64_t step = 0; step < step_count; ++step) {
       bool is_boundary = (step > 0) && (step % segment_steps == 0);
-      int64_t grain = std::max<int64_t>(256, state_count / (at::get_num_threads() * 4));
-      auto run_emission = [&](int64_t start_state, int64_t end_state) {
+      if (step > 0) {
+        for (int64_t tb = 0; tb < tile_batch; ++tb) {
+          int64_t b = tile_start + tb;
+          int64_t bp_step = step - 1;
+          if (is_boundary) {
+            float* reduced = boundary_g.data() + tb * suffix_count;
+            if (use_int16) {
+              int16_t* bp = static_cast<int16_t*>(boundary_bp_ptr) +
+                  (bp_step * batch_size + b) * suffix_count;
+              for (int64_t x = 0; x < suffix_count; ++x) {
+                float best = inf;
+                int32_t arg = 0;
+                for (int64_t bank = 0; bank < bank_count; ++bank) {
+                  float value = previous_g[(tb * bank_count + bank) * suffix_count + x];
+                  if (value < best) {
+                    best = value;
+                    arg = static_cast<int32_t>(bank * prefix_count) +
+                        best_prefix_a[(tb * bank_count + bank) * suffix_count + x];
+                  }
+                }
+                reduced[x] = best;
+                bp[x] = static_cast<int16_t>(arg);
+              }
+            } else {
+              int32_t* bp = static_cast<int32_t*>(boundary_bp_ptr) +
+                  (bp_step * batch_size + b) * suffix_count;
+              for (int64_t x = 0; x < suffix_count; ++x) {
+                float best = inf;
+                int32_t arg = 0;
+                for (int64_t bank = 0; bank < bank_count; ++bank) {
+                  float value = previous_g[(tb * bank_count + bank) * suffix_count + x];
+                  if (value < best) {
+                    best = value;
+                    arg = static_cast<int32_t>(bank * prefix_count) +
+                        best_prefix_a[(tb * bank_count + bank) * suffix_count + x];
+                  }
+                }
+                reduced[x] = best;
+                bp[x] = arg;
+              }
+            }
+          } else {
+            for (int64_t bank = 0; bank < bank_count; ++bank) {
+              const int32_t* source = best_prefix_a + (tb * bank_count + bank) * suffix_count;
+              if (use_int16) {
+                int16_t* bp = static_cast<int16_t*>(prefix_bp_ptr) +
+                    ((bp_step * batch_size + b) * bank_count + bank) * suffix_count;
+                for (int64_t x = 0; x < suffix_count; ++x) bp[x] = static_cast<int16_t>(source[x]);
+              } else {
+                int32_t* bp = static_cast<int32_t*>(prefix_bp_ptr) +
+                    ((bp_step * batch_size + b) * bank_count + bank) * suffix_count;
+                std::memcpy(bp, source, static_cast<size_t>(suffix_count) * sizeof(int32_t));
+              }
+            }
+          }
+        }
+      }
+
+      int64_t suffix_grain = std::max<int64_t>(16, suffix_count / (at::get_num_threads() * 4));
+      auto run_fused = [&](int64_t start_suffix, int64_t end_suffix) {
         for (int64_t tb = 0; tb < tile_batch; ++tb) {
           int64_t b = tile_start + tb;
           const float* target = seq_ptr + (b * step_count + step) * vector_size;
           float target_norm = target_norms[b * step_count + step];
           float w = has_step_weights ? step_weights_ptr[b * step_count + step] : 1.0f;
+          bool constrain_initial = step == 0 && (has_entry || has_overlap);
+          int64_t required_initial = has_entry ? (entry_ptr[b] & overlap_mask) :
+              (has_overlap ? overlap_ptr[b] : 0);
+          bool constrain_final = step_count > 1 && step == step_count - 1 && has_exit;
+          int64_t required_final = constrain_final ? exit_ptr[b] : 0;
+          if (constrain_final && (required_final < 0 || required_final >= state_count)) {
+            constrain_final = false;
+            required_final = state_count;
+          }
           for (int64_t bank = 0; bank < bank_count; ++bank) {
-            float* emission_b = emission_a + (tb * bank_count + bank) * state_count;
-            const float* bank_codebook_t = codebooks_t_ptr + bank * (vector_size * state_count);
-            const float* bank_norm = codebook_norm.data() + bank * state_count;
-            emit_distance(
-                state_count,
-                vector_size,
-                bank_codebook_t,
-                bank_norm,
-                target,
-                target_norm,
-                w,
-                emission_b,
-                start_state,
-                end_state);
+            const float* prior = nullptr;
+            if (step > 0) {
+              prior = is_boundary ? boundary_g.data() + tb * suffix_count :
+                  previous_g + (tb * bank_count + bank) * suffix_count;
+            }
+            fused_g_argmin(
+                state_count, vector_size,
+                codebooks_t_ptr + bank * vector_size * state_count,
+                codebook_norm.data() + bank * state_count,
+                target, target_norm, w, prior, transition_bits, prefix_count, suffix_count,
+                constrain_initial, required_initial, constrain_final, required_final,
+                next_g + (tb * bank_count + bank) * suffix_count,
+                best_prefix_a + (tb * bank_count + bank) * suffix_count,
+                start_suffix, end_suffix);
           }
         }
       };
       if (parallel_inner) {
-        at::parallel_for(0, state_count, grain, run_emission);
+        at::parallel_for(0, suffix_count, suffix_grain, run_fused);
       } else {
-        run_emission(0, state_count);
+        run_fused(0, suffix_count);
       }
-
-      if (step == 0) {
-        for (int64_t tb = 0; tb < tile_batch; ++tb) {
-          int64_t b = tile_start + tb;
-          int64_t required = -1;
-          if (has_entry) {
-            required = entry_ptr[b] & overlap_mask;
-          } else if (has_overlap) {
-            required = overlap_ptr[b];
-          }
-          for (int64_t bank = 0; bank < bank_count; ++bank) {
-            float* costs_b = costs_a + (tb * bank_count + bank) * state_count;
-            const float* emission_b = emission_a + (tb * bank_count + bank) * state_count;
-            std::memcpy(costs_b, emission_b, static_cast<size_t>(state_count) * sizeof(float));
-            if (required >= 0) {
-              for (int64_t s = 0; s < state_count; ++s) {
-                if ((s >> transition_bits) != required) {
-                  costs_b[s] = inf;
-                }
-              }
-            }
-          }
-        }
-        continue;
-      }
-
-      int64_t suffix_grain = std::max<int64_t>(16, suffix_count / (at::get_num_threads() * 4));
-      auto run_column_argmin = [&](int64_t start_suffix, int64_t end_suffix) {
-        for (int64_t tb = 0; tb < tile_batch; ++tb) {
-          if (is_boundary) {
-            column_argmin(
-                costs_a + tb * bank_count * state_count,
-                bank_count * prefix_count,
-                suffix_count,
-                best_cost_boundary_a + tb * suffix_count,
-                best_arg_boundary_a + tb * suffix_count,
-                start_suffix,
-                end_suffix);
-          } else {
-            for (int64_t bank = 0; bank < bank_count; ++bank) {
-              column_argmin(
-                  costs_a + (tb * bank_count + bank) * state_count,
-                  prefix_count,
-                  suffix_count,
-                  best_cost_a + (tb * bank_count + bank) * suffix_count,
-                  best_prefix_a + (tb * bank_count + bank) * suffix_count,
-                  start_suffix,
-                  end_suffix);
-            }
-          }
-        }
-      };
-      if (parallel_inner) {
-        at::parallel_for(0, suffix_count, suffix_grain, run_column_argmin);
-      } else {
-        run_column_argmin(0, suffix_count);
-      }
-
-      int64_t prefix_grain = std::max<int64_t>(prefix_count, state_count / (at::get_num_threads() * 4));
-      prefix_grain = ((prefix_grain + prefix_count - 1) / prefix_count) * prefix_count;
-      auto run_broadcast_add = [&](int64_t start_state, int64_t end_state) {
-        for (int64_t tb = 0; tb < tile_batch; ++tb) {
-          if (is_boundary) {
-            const float* best_cost_b = best_cost_boundary_a + tb * suffix_count;
-            for (int64_t bank = 0; bank < bank_count; ++bank) {
-              broadcast_add(
-                  emission_a + (tb * bank_count + bank) * state_count,
-                  best_cost_b,
-                  prefix_count,
-                  suffix_count,
-                  next_costs_a + (tb * bank_count + bank) * state_count,
-                  start_state,
-                  end_state);
-            }
-          } else {
-            for (int64_t bank = 0; bank < bank_count; ++bank) {
-              broadcast_add(
-                  emission_a + (tb * bank_count + bank) * state_count,
-                  best_cost_a + (tb * bank_count + bank) * suffix_count,
-                  prefix_count,
-                  suffix_count,
-                  next_costs_a + (tb * bank_count + bank) * state_count,
-                  start_state,
-                  end_state);
-            }
-          }
-        }
-      };
-      if (parallel_inner) {
-        at::parallel_for(0, state_count, prefix_grain, run_broadcast_add);
-      } else {
-        run_broadcast_add(0, state_count);
-      }
-
-      if (step == step_count - 1) {
-        for (int64_t tb = 0; tb < tile_batch; ++tb) {
-          int64_t b = tile_start + tb;
-          for (int64_t bank = 0; bank < bank_count; ++bank) {
-            float* next_b = next_costs_a + (tb * bank_count + bank) * state_count;
-            if (has_exit) {
-              int64_t required = exit_ptr[b];
-              for (int64_t s = 0; s < state_count; ++s) {
-                if (s != required) next_b[s] = inf;
-              }
-            } else if (has_overlap) {
-              int64_t required = overlap_ptr[b];
-              for (int64_t s = 0; s < state_count; ++s) {
-                if ((s & overlap_mask) != required) next_b[s] = inf;
-              }
-            }
-          }
-        }
-      }
-
-      for (int64_t tb = 0; tb < tile_batch; ++tb) {
-        int64_t b = tile_start + tb;
-        int64_t bp_step = step - 1;
-        if (is_boundary) {
-          if (use_int16) {
-            int16_t* bp = static_cast<int16_t*>(boundary_bp_ptr) + (bp_step * batch_size + b) * suffix_count;
-            const int32_t* bp_src = best_arg_boundary_a + tb * suffix_count;
-            for (int64_t col = 0; col < suffix_count; ++col) {
-              bp[col] = static_cast<int16_t>(bp_src[col]);
-            }
-          } else {
-            int32_t* bp = static_cast<int32_t*>(boundary_bp_ptr) + (bp_step * batch_size + b) * suffix_count;
-            const int32_t* bp_src = best_arg_boundary_a + tb * suffix_count;
-            std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
-          }
-        } else {
-          for (int64_t bank = 0; bank < bank_count; ++bank) {
-            const int32_t* bp_src = best_prefix_a + (tb * bank_count + bank) * suffix_count;
-            if (use_int16) {
-              int16_t* bp = static_cast<int16_t*>(prefix_bp_ptr) +
-                  ((bp_step * batch_size + b) * bank_count + bank) * suffix_count;
-              for (int64_t col = 0; col < suffix_count; ++col) {
-                bp[col] = static_cast<int16_t>(bp_src[col]);
-              }
-            } else {
-              int32_t* bp = static_cast<int32_t*>(prefix_bp_ptr) +
-                  ((bp_step * batch_size + b) * bank_count + bank) * suffix_count;
-              std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
-            }
-          }
-        }
-      }
-
-      std::swap(costs_a, next_costs_a);
+      std::swap(previous_g, next_g);
     }
 
     for (int64_t tb = 0; tb < tile_batch; ++tb) {
@@ -382,13 +492,36 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
       int64_t best_bank = 0;
       int64_t end_state = 0;
       for (int64_t bank = 0; bank < bank_count; ++bank) {
-        const float* costs_b = costs_a + (tb * bank_count + bank) * state_count;
-        for (int64_t s = 0; s < state_count; ++s) {
-          float c = costs_b[s];
-          if (c < best_final) {
+        const float* final_g = previous_g + (tb * bank_count + bank) * suffix_count;
+        const int32_t* final_prefix = best_prefix_a + (tb * bank_count + bank) * suffix_count;
+        int64_t suffix_begin = 0;
+        int64_t suffix_end = suffix_count;
+        if (step_count > 1 && has_exit) {
+          int64_t required = exit_ptr[b];
+          if (required < 0 || required >= state_count) {
+            suffix_end = 0;
+          } else {
+            suffix_begin = required & overlap_mask;
+            suffix_end = suffix_begin + 1;
+          }
+        } else if (step_count > 1 && has_overlap) {
+          int64_t required = overlap_ptr[b];
+          if (required < 0 || required >= suffix_count) {
+            suffix_end = 0;
+          } else {
+            suffix_begin = required;
+            suffix_end = required + 1;
+          }
+        }
+        for (int64_t x = suffix_begin; x < suffix_end; ++x) {
+          int64_t candidate_state = static_cast<int64_t>(final_prefix[x]) * suffix_count + x;
+          if (step_count > 1 && has_exit && candidate_state != exit_ptr[b]) continue;
+          float c = final_g[x];
+          if (c < best_final ||
+              (c == best_final && bank == best_bank && candidate_state < end_state)) {
             best_final = c;
             best_bank = bank;
-            end_state = s;
+            end_state = candidate_state;
           }
         }
       }
@@ -398,7 +531,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
     }
   };
 
-  if (batch_size >= at::get_num_threads()) {
+  if (batch_size >= std::min<int64_t>(8, at::get_num_threads())) {
     at::parallel_for(0, batch_size, 1, [&](int64_t start_batch, int64_t end_batch) {
       for (int64_t b = start_batch; b < end_batch; ++b) {
         run_tile(b, b + 1, false);
@@ -406,7 +539,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
     });
   } else {
     constexpr int64_t cache_budget_bytes = 4 * 1024 * 1024;
-    int64_t row_footprint_bytes = 3 * bank_count * state_count * static_cast<int64_t>(sizeof(float));
+    int64_t row_footprint_bytes =
+        (2 * bank_count + 1) * suffix_count * static_cast<int64_t>(sizeof(float));
     int64_t tile_size = std::max<int64_t>(1, cache_budget_bytes / std::max<int64_t>(1, row_footprint_bytes));
     for (int64_t tile_start = 0; tile_start < batch_size; tile_start += tile_size) {
       int64_t tile_end = std::min(batch_size, tile_start + tile_size);

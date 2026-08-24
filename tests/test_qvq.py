@@ -5106,6 +5106,42 @@ def test_native_viterbi_invalid_overlap_is_all_infinity(step_count):
     assert torch.isinf(squared_error[1:]).all()
 
 
+def test_native_banked_viterbi_adjacent_steps_invalid_sentinels_and_boundary_traceback():
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    codebooks = torch.full((2, 4, 2), 100.0, dtype=torch.float32)
+    codebooks[0, 1] = 0.0
+    codebooks[1, 2] = 10.0
+
+    with pytest.raises(RuntimeError, match="positive segment_steps"):
+        qvq_cpu_viterbi_banked(torch.zeros((1, 1, 2)), codebooks, 1, 0)
+
+    one_step = torch.zeros((5, 1, 2), dtype=torch.float32)
+    invalid = torch.tensor(
+        [-1, 2, torch.iinfo(torch.int64).max, torch.iinfo(torch.int64).min, 2**32], dtype=torch.int64
+    )
+    states, squared_error, bank_ids = qvq_cpu_viterbi_banked(one_step, codebooks, 1, 1, overlap=invalid)
+    assert torch.equal(states, torch.zeros_like(states))
+    assert torch.isinf(squared_error).all()
+    assert torch.equal(bank_ids, torch.zeros_like(bank_ids))
+
+    two_steps = torch.tensor([[[0.0, 0.0], [10.0, 10.0]]], dtype=torch.float32)
+    states, squared_error, bank_ids = qvq_cpu_viterbi_banked(two_steps, codebooks, 1, 1)
+    assert torch.equal(states, torch.tensor([[1, 2]], dtype=torch.int64))
+    assert torch.equal(bank_ids, torch.tensor([[0, 1]], dtype=torch.uint8))
+    assert torch.equal(squared_error, torch.zeros_like(squared_error))
+
+    wide_codebooks = torch.full((4, 65536, 2), 100.0, dtype=torch.float32)
+    wide_codebooks[3, 65535] = 0.0
+    wide_codebooks[0, 32768] = 10.0
+    states, squared_error, bank_ids = qvq_cpu_viterbi_banked(
+        two_steps, wide_codebooks, transition_bits=15, segment_steps=1
+    )
+    assert torch.equal(states, torch.tensor([[65535, 32768]], dtype=torch.int64))
+    assert torch.equal(bank_ids, torch.tensor([[3, 0]], dtype=torch.uint8))
+    assert torch.equal(squared_error, torch.zeros_like(squared_error))
+
+
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
     generator = torch.Generator().manual_seed(seed)
     shift = qvq_transition_bits(bits)
