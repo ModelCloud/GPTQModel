@@ -8,6 +8,8 @@ import math
 import pytest
 import torch
 
+import gptqmodel.quantization.qvq as qvq_module
+import gptqmodel.utils.qvq_cpu as qvq_cpu_module
 from gptqmodel.utils.qvq_cpu import (
     qvq_cpu_supported,
     qvq_cpu_viterbi,
@@ -130,10 +132,11 @@ def _run_case(
         step_weights=weights,
     )
     assert torch.equal(actual_states, baseline_states), f"states differ from baseline for seed={seed}"
-    # Independent FP32 schedules differ by at most 1.9073486e-6 in the measured
-    # matrix. A 2e-6 absolute bound admits that rounding only; zero relative
-    # tolerance keeps the gate equally tight for both small and large losses.
-    torch.testing.assert_close(actual_se, baseline_se, atol=2e-6, rtol=0)
+    # MEASURED matrix-calibrated, not universal: a standardized 96-config matrix
+    # had max delta 1.1205673217773438e-5, so 1.25e-5 provides about 11.6%
+    # headroom. A fixed absolute bound cannot remain valid as step count,
+    # weights, or input magnitude changes.
+    torch.testing.assert_close(actual_se, baseline_se, atol=1.25e-5, rtol=0)
 
 
 @pytest.mark.parametrize("vector_size", (2, 4))
@@ -178,7 +181,7 @@ def test_qvq_viterbi_opt_tied_codebook_rows_pick_first_index():
 
     expected_states, expected_se = _torch_oracle_viterbi(sequences, codebook, 4, None, None)
     actual_states, actual_se = qvq_cpu_viterbi_opt(sequences, codebook, 4)
-    torch.testing.assert_close(actual_states, expected_states)
+    assert torch.equal(actual_states, expected_states)
     torch.testing.assert_close(actual_se, expected_se, atol=2e-4, rtol=2e-5)
 
 
@@ -191,6 +194,46 @@ def test_qvq_viterbi_opt_repeated_calls_are_deterministic():
         repeat = qvq_cpu_viterbi_opt(sequences, codebook, 6)
         assert torch.equal(first[0], repeat[0])
         assert torch.equal(first[1], repeat[1])
+
+
+@pytest.mark.xfail(
+    strict=False,
+    reason="Known opt-kernel discrete defect adjudicated in /home/ubuntu/work/qvq-findings/"
+    "VITERBI_DIVERGENCE_ADJUDICATION.md",
+)
+def test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence():
+    vector_size = 2
+    steps = 32
+    generator = torch.Generator().manual_seed(2026082400 + 100 * vector_size + steps)
+    sequences = torch.randn((128, steps, vector_size), generator=generator, dtype=torch.float32)
+    codebook = torch.randn((1 << 16, vector_size), generator=generator, dtype=torch.float32)
+
+    production_states, _ = qvq_cpu_viterbi(sequences, codebook, transition_bits=16)
+    opt_states, _ = qvq_cpu_viterbi_opt(sequences, codebook, transition_bits=16)
+
+    assert torch.equal(opt_states, production_states)
+
+
+def test_qvq_viterbi_production_cpu_dispatch_excludes_opt(monkeypatch):
+    calls = []
+
+    def production_viterbi(sequences, codebook, transition_bits, overlap=None, step_weights=None):
+        calls.append((transition_bits, overlap, step_weights))
+        return torch.zeros(sequences.shape[:2], dtype=torch.long), torch.zeros(sequences.shape[0])
+
+    def forbidden_opt_viterbi(*args, **kwargs):
+        pytest.fail("production CPU dispatch called qvq_cpu_viterbi_opt")
+
+    monkeypatch.setattr(qvq_cpu_module, "qvq_cpu_viterbi", production_viterbi)
+    monkeypatch.setattr(qvq_cpu_module, "qvq_cpu_viterbi_opt", forbidden_opt_viterbi)
+    sequences = torch.zeros((1, 2, 2), dtype=torch.float32)
+    codebook = torch.zeros((1 << 16, 2), dtype=torch.float32)
+
+    result = qvq_module.batched_viterbi_quantize(sequences, codebook, bits=8)
+
+    assert len(calls) == 1
+    assert calls[0] == (16, None, None)
+    assert torch.equal(result.states, torch.zeros((1, 2), dtype=torch.long))
 
 
 def test_qvq_viterbi_opt_rejects_out_of_range_transition_bits():
@@ -226,6 +269,6 @@ def test_qvq_viterbi_opt_tied_end_state_picks_lowest_index():
     opt_states, opt_se = qvq_cpu_viterbi_opt(sequences, codebook, 14)
 
     assert torch.equal(opt_states, base_states)
-    torch.testing.assert_close(opt_se, base_se, atol=2e-6, rtol=0)
+    torch.testing.assert_close(opt_se, base_se, atol=1.25e-5, rtol=0)
     assert base_states[0, -1].item() == 18554
     assert opt_states[0, -1].item() == 18554

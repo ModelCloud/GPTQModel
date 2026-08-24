@@ -845,3 +845,22 @@ W4    1   0.0512    0.1072 2.094
 - Measurement placement was
   `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
   Runs were exclusive, sequential, and blocking. `OMP_PLACES=cores` was never used.
+
+## 2026-08-24 — opt-in Viterbi discrete-divergence defect record (not a performance entry)
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 1 logical core used,
+          OMP_NUM_THREADS=1 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- **MEASURED** at `de25f203b7d405f0e9bc3f910785d102f9225aef`: production `qvq_cpu_viterbi` matched the eager
+  Torch oracle exactly for complete states, planar packed words, and squared error in all five divergent
+  configurations. The opt-in/benchmark-only `qvq_cpu_viterbi_opt` differed from both on states and packed words.
+  **INFERRED directly from those measurements:** this is an opt-kernel defect, not a production correctness bug.
+- **MEASURED affected configurations** `(V, transition_bits, steps, batch)`:
+  `(2, 8, 32, 128)`, `(2, 7, 128, 32)`, `(2, 7, 128, 128)`, `(2, 8, 128, 32)`, and
+  `(2, 8, 128, 128)`.
+- **MEASURED** across the standardized 96-configuration matrix: 17 cases exceeded the former `atol=2e-6` cost
+  gate; the maximum absolute production/opt cost delta was `1.1205673217773438e-5`. The distribution was 73 exact
+  zeros, 4 in `(0, 1e-6]`, 2 in `(1e-6, 2e-6]`, 6 in `(2e-6, 5e-6]`, 10 in `(5e-6, 1e-5]`, and 1 above `1e-5`.
+- **MEASURED:** the previously documented exact-discrete-equivalence contract is false and has been withdrawn.
+  Cost checks now use a matrix-calibrated, non-universal `atol=1.25e-5, rtol=0`; discrete checks remain exact.
+- **MEASURED by inspection:** this defect record contains no timing or speed claim.

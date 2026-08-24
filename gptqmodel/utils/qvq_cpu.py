@@ -361,12 +361,14 @@ def qvq_cpu_viterbi_opt(
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused AVX-512 CPU batched Viterbi trellis quantization.
+    """Opt-in, benchmark-only fused AVX-512 CPU Viterbi implementation.
 
-    Matches :func:`qvq_cpu_viterbi` exactly for discrete outputs, including
-    selected states, tie winners, bank IDs, and packed words. Its independently
-    scheduled FP32 recurrence returns a numerically equivalent squared error
-    within the documented cross-implementation tolerance.
+    MEASURED: production does not dispatch to this function. It has a known
+    discrete divergence from :func:`qvq_cpu_viterbi` and the eager oracle for
+    V=2, transition widths 7-8, and large batches. INFERRED from the measured
+    near ties and the implementation schedule: its emission-then-add FP32
+    schedule can select a different path. MEASURED: its squared error remains
+    numerically close in the standardized matrix, but is not bit-identical.
 
     Args:
         sequences: [batch, steps, V] float tensor on CPU.
