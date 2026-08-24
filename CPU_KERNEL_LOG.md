@@ -894,8 +894,13 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
 
 - **MEASURED:** corrected the V=2 AVX-512 reduction to scalar-reference order and kept non-aligned suffix chunks
-  scalar so predecessor broadcasts cannot cross a boundary. The 16-vs-24-thread regression failed before the fix
+  scalar so predecessor broadcasts cannot cross a boundary. The 16-vs-24-thread regression failed at `612b15e6`
   with 31 states, one segment bank ID, and seven packed words changed; it passes afterward.
+- **CLARIFICATION (added by a later independent re-verification; see the wording-correction entry at the end of
+  this log):** the bullet above describes a regression that was introduced by *this branch's own* fused rewrite at
+  `612b15e6` and repaired by its follow-up commit. It is **not** evidence that pristine `main` diverged by thread
+  count. Independently re-measured with a fresh per-commit `GPTQMODEL_QVQ_CPU_BUILD_ROOT`, the same test **passes**
+  on pristine `d9d37181`, **fails** at `612b15e6`, and **passes** at `1c567c00`.
 - **MEASURED:** replaced the former 16.49x headline. In the self-consistent t5 row-parallel regime, accepted
   batch-32/64/128 speedups are 1.26x/1.47x/1.23x. Batch 16 is reported separately at 15.76x as repair of the
   pristine three-barrier small-batch pathology.
@@ -905,3 +910,107 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
 - **MEASURED:** every timing cell used 3 warmups and 15 samples and reports median, minimum, and max-minus-min spread
   in `RESULTS.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
   placements recorded above; runs were exclusive and `OMP_PLACES=cores` was never used.
+## 2026-08-24 — METHODOLOGY CORRECTION: `uptime` load average is not a valid idle check on this host
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, no AMX) | host `zen5-cpu-6` | 32-CPU cgroup carved from a
+          192-CPU physical host | torch 2.13.0+cpu
+
+This entry corrects a measurement practice used by several earlier entries in this log. It contains no
+timing or speed claim of its own.
+
+### The defect
+
+**MEASURED.** Several 2026-08-24 entries state that the machine was verified quiet before timing, using
+`uptime` / `/proc/loadavg`. That signal is **host-wide**, not cgroup-scoped. Sampled simultaneously:
+
+```
+/proc/loadavg                     ->  55.34 51.94 35.55   67/7476 tasks
+getconf _NPROCESSORS_CONF         ->  192          (physical host)
+nproc                             ->  32           (our cgroup)
+/sys/fs/cgroup/cpu.stat delta     ->  0.23 CPU-seconds used of 96 possible over 3s  = 0.24%
+sum of our processes' %CPU        ->  9.2%
+```
+
+A load average of 55 was observed while this container was **99.8% idle**. The number is dominated by
+roughly 7,400 tasks belonging to other tenants of the same physical host.
+
+### Correct idle check
+
+Use a cgroup-scoped delta, not a host-global average:
+
+```bash
+A=$(awk '/usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat); sleep 3
+B=$(awk '/usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat)
+# busy fraction = (B-A) / (3e6 * nproc)
+```
+
+### Consequences for numbers already recorded in this log
+
+- **INFERRED (high):** the practical effect was agents *waiting* on a signal that was never theirs. It did
+  not create false confidence in a busy cgroup, so no recorded number is invalidated by this alone.
+- **INFERRED (high):** this host is **multi-tenant**. Other tenants share its L3 and memory bandwidth with
+  our pinned CPUs. Absolute millisecond figures in this log should therefore be read as *"on a shared
+  host,"* and are not reproducible to better than tens of percent.
+- **INFERRED (high):** this is the most likely explanation for the previously recorded 11–34% discrepancy
+  between hosts `zen5-cpu-1` and `zen5-cpu-6` on identical work, which was originally attributed to
+  per-instance CCD allocation. Neighbour load is the simpler explanation.
+- **Ratios remain sound.** Every speedup recorded here compares two arms measured back-to-back within
+  seconds on the same box. Neighbour noise affects both arms alike, so A/B ratios are far more robust than
+  the absolute timings. The 2.39x Viterbi and 1.93x GEMV ratios are not called into question by this entry.
+
+### Standing rule this reinforces
+
+Validate a baseline by **self-consistency of implied throughput across problem sizes**, not by agreement
+with a previously recorded absolute number. On a multi-tenant host that is the only sound test. A baseline
+whose implied GFLOP/s is flat across a wide range of N is trustworthy; one that scatters is contended,
+regardless of what any load average reported at the time.
+
+
+## 2026-08-24 — METHODOLOGY CORRECTION 2: a stale JIT extension cache can silently answer for the wrong commit
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, no AMX) | host `zen5-cpu-6` | 32-CPU cgroup | torch 2.13.0+cpu
+
+This entry contains no timing or speed claim. It records a second way a measurement on this repository can be
+wrong while looking correct, and it corrects one specific claim already recorded above.
+
+### The trap
+
+**MEASURED.** QVQ builds its CPU extensions lazily through `TorchOpsJitExtension`. The build root is
+`~/.cache/gptqmodel/torch_extensions/<subdir>/<source-fingerprint>/` (`gptqmodel/utils/cpp.py:371-377`,
+`:924-927`), and it is **not** controlled by `TORCH_EXTENSIONS_DIR` — the per-extension override for the CPU
+Viterbi/GEMV ops is `GPTQMODEL_QVQ_CPU_BUILD_ROOT` (`gptqmodel/utils/qvq_cpu.py:69`).
+
+Consequently, checking out an older commit and running pytest does **not** guarantee that commit's kernel was
+executed. If a fingerprint collides with, or is reused from, another worktree's build, the test silently loads a
+**different commit's `.so`** and reports a result about code that is not on disk.
+
+### Required practice for any before/after or fail-first claim
+
+- Export a **distinct, empty** `GPTQMODEL_QVQ_CPU_BUILD_ROOT` for every commit under test.
+- Confirm a real compile occurred: a first-run wall time on the order of ~30 s. An instant load means a cached
+  binary answered, and the result is void.
+- Never compare a "before" and an "after" that shared a build root.
+
+### The claim this corrects
+
+**MEASURED.** The segmented-Viterbi review-correction entry above originally read as though the 16-vs-24-thread
+divergence (31 states, one segment bank ID, seven packed words) demonstrated a defect in merged production code.
+Re-verified here with clean per-commit build roots, running one identical test file at three commits:
+
+| kernel commit | `..._v2_is_thread_count_invariant` |
+|---|---|
+| `d9d37181` (pristine `main`) | **PASSES** |
+| `612b15e6` (this branch's fused rewrite, pre-fix) | **FAILS** — 31 states differ |
+| `1c567c00` (after its follow-up fix) | **PASSES** |
+
+The divergence was therefore **introduced and repaired inside one branch**, not inherited from `main`. That entry
+has been annotated in place. The separately reported V=2 reduction-order finding in the *non-banked*
+`qvq_viterbi_cpu.cpp` is a different file and remains open on its own evidence; its severity should be recorded as
+**latent unless and until a thread sweep on that file demonstrates a differing selected state**.
+
+### What was genuinely pre-existing
+
+**MEASURED.** In the same three-commit re-verification, the branch's new adjacent-step/invalid-sentinel test does
+not merely fail on pristine `d9d37181` — it terminates the interpreter with `Fatal Python error: Floating-point
+exception` (SIGFPE), reachable from the public banked Viterbi op. The same test passes at `1c567c00`. That crash,
+not the speedup, is the strongest justification for that change.
