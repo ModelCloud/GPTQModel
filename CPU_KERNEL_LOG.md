@@ -8,6 +8,91 @@ Accuracy targets:
 - Quantization kernels: max abs error <= 1e-6 vs reference
 - Inference kernels: max abs error <= 2e-3 vs dense reference
 
+## Hardware provenance (READ BEFORE COMPARING ANY NUMBERS IN THIS LOG)
+
+Benchmark numbers in this log are **not comparable across entries unless they name
+the same host**. Kernel timings, speedup ratios and thread-scaling conclusions are
+all properties of a specific CPU, core count and thread budget -- not of the kernel
+alone.
+
+**Every entry that reports timings MUST begin with a `Hardware:` block.** Entries
+without one predate this convention and are annotated below.
+
+### Host A -- Intel Xeon Platinum 8559C (all entries before 2026-08-24)
+
+Every performance number recorded in this log prior to 2026-08-24 was measured on:
+
+```text
+CPU:      Intel Xeon Platinum 8559C (Emerald Rapids)
+ISA:      AVX-512 (full-width 512-bit datapath), AMX available
+Threads:  8 logical cores (benchmarks used OMP_NUM_THREADS=8)
+torch:    2.13.0+cpu
+```
+
+Carry-over caveats when comparing Host A numbers to any other machine:
+- **8 logical cores.** Any speedup that came from `at::parallel_for` scaling will
+  land differently on a host with a different core count. Absolute times are not
+  transferable at all.
+- **Full-width AVX-512.** Intel executes 512-bit ops on a 512-bit datapath. AMD
+  Zen 4 double-pumps them through 256 bits, so AVX-512 register-width wins are
+  smaller there even though the ISA is nominally identical.
+- **AMX present.** Emerald Rapids has AMX, which also silently changes behaviour
+  inside libraries: oneDNN and torch select different code paths when
+  `dnnl::get_effective_cpu_isa() >= avx512_core_amx`. A kernel that appeared fast
+  on Host A may have been benefiting from an AMX-gated library fast path that does
+  not exist on non-AMX hardware.
+
+### Host B -- AMD EPYC 9V33X (entries from 2026-08-24)
+
+```text
+CPU:        AMD EPYC 9V33X (Zen 4 "Genoa-X", 3D V-Cache)
+CPUID:      family 25, model 17, stepping 1
+-march:     znver4
+ISA:        avx512f, avx512_vnni, avx512_bf16.  NO AMX
+            (CPUID.(EAX=7,ECX=0).EDX = 0x10000010; amx_tile/amx_bf16/amx_int8 absent)
+Topology:   96 physical cores / 192 threads present, but cgroup-capped to
+            32 logical CPUs (nproc=32). Threads are scattered across CCDs.
+Cache:      32 KiB L1D and 1 MiB L2 per core; 96 MiB L3 per CCD (1.1 GiB total)
+Clock:      3716 MHz max
+Kernel:     7.0.12-xing-7.0.12-epyc9v33x-native
+Toolchain:  gcc 15.2.0, torch 2.13.0+cpu
+```
+
+Notes specific to Host B:
+- **The hostname is misleading.** These machines are named `zen5-cpu-N` but report
+  Zen 4 (`family 25, model 17`, `gcc -march=native` -> `znver4`). Trust CPUID, not
+  the hostname.
+- **Instances are not interchangeable.** Two hosts of this same model
+  (`zen5-cpu-1` and `zen5-cpu-6`) produced torch SDPA medians differing by
+  11-34% for identical work, due to differing cpuset allocation, CCD placement and
+  tenancy. Re-baseline on the machine you are actually using; do not reuse a
+  number from a sibling instance.
+- **The large CCD-local L3 favours larger packed panels** than a typical x86
+  target, so tile sizes tuned on Host A are not automatically optimal here.
+
+### Required block for new entries
+
+```text
+Hardware: <CPU model> | <ISA flags that matter> | <N logical cores used,
+          OMP_NUM_THREADS=N> | torch <version> | host <hostname>
+```
+
+### Measurement hygiene (learned the hard way on Host B)
+
+- Do **not** use `OMP_PLACES=cores` under a cgroup cpuset. libgomp enumerates the
+  full 192-CPU topology and pins the master thread to the lowest allowed CPU,
+  ignoring `numactl --physcpubind`. This produced a **4.1x phantom slowdown**.
+  Emit an explicit place list instead: `OMP_PLACES='{c1},{c2},...'`.
+- Assert real affinity before timing. Read `/proc/self/status` `Cpus_allowed_list`
+  and per-thread masks from `/proc/self/task/*/status`, and abort if the process
+  does not actually hold the expected CPUs. A prior run measured a nominally
+  32-thread baseline while confined to a single CPU, inflating it **2.26x**.
+- Run benchmarks **exclusively**. Two concurrent timing jobs on the same 32-CPU
+  cpuset inflated results **10-68%**.
+- Sanity-check a baseline by **self-consistency of implied throughput across
+  problem sizes**, not by agreement with a previously recorded number from a
+  different host.
+
 Done:
 - Generated `gptqmodel_ext/qvq/pgc16_cpu_tables.h` from the canonical 256-entry `_PGC16_LEVEL_BITS` table.
 
