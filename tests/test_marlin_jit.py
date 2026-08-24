@@ -556,7 +556,7 @@ def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
 @pytest.mark.parametrize(
     ("input_shape", "output_shape", "expected_rows", "expected_packed_prefill"),
     [
-        ((256,), (64,), 1, True),
+        ((256,), (64,), 1, False),
         ((2, 256), (2, 64), 2, True),
         ((1, 2, 256), (1, 2, 64), 2, True),
         ((1, 1, 256), (1, 1, 64), 1, False),
@@ -642,6 +642,7 @@ def test_marlin_quant_linear_uses_one_integrated_lora_dispatch(
     module.post_init()
     module.packed_prefill = True
     module.packed_prefill_min_rows = 1
+    module.packed_prefill_config = 1
     module.adapter.apply = lambda **kwargs: pytest.fail("adapter fallback should not run")
 
     out = module(torch.randn(input_shape, dtype=torch.float16))

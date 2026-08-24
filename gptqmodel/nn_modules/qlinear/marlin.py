@@ -16,7 +16,10 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
+from collections import Counter
+from dataclasses import dataclass
 import os
+import threading
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -59,27 +62,206 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-# Sample process-level routing policy once when each MarlinLinear is created;
-# the native dispatcher still makes the final hardware/shape decision per call.
+# Sample process-level policy once when each MarlinLinear is created. Automatic
+# shape selection happens here so route statistics are observable; the native
+# dispatcher still validates the quantization contract and launch geometry.
 _PACKED_PREFILL_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL"
 _PACKED_PREFILL_MIN_ROWS_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_MIN_ROWS"
 _LORA_MEGA_KERNEL_WORKSPACE_BLOCKS = 192
 _LORA_MEGA_KERNEL_WORKSPACE_BLOCKS_BY_RANK = {192: 224, 256: 256}
 _PACKED_PREFILL_CONFIG_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_CONFIG"
+_PACKED_PREFILL_STATS_ENV = "GPTQMODEL_MARLIN_PACKED_PREFILL_STATS"
 _PACKED_PREFILL_MIN_ROWS_DEFAULT = 1024
+_PACKED_PREFILL_PROFILED_HARDWARE = (8, 0, 124)
+
+
+@dataclass(frozen=True, slots=True)
+class _PackedPrefillRoute:
+    dtype: str
+    size_k: int
+    size_n: int
+    min_m: int
+    max_m: int
+    config: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PackedPrefillDecision:
+    config: int
+    reason: str
+
+
+# Reuse common fast-path decisions instead of allocating per layer.
+_PACKED_PREFILL_DISABLED = _PackedPrefillDecision(0, "disabled")
+_PACKED_PREFILL_DECODE = _PackedPrefillDecision(0, "decode")
+
+
+# Offline-tuned on 124-SM sm_80 boards. New promotion requires repeated results
+# from multiple physical GPUs: either the one-sided 95% confidence lower bound
+# is at least 1.05x ordinary Marlin or every GPU clears a raw 1.07x margin.
+# K/N are the unpadded logical projection sizes; padded tails intentionally stay
+# on ordinary Marlin in automatic mode.
+_PACKED_PREFILL_ROUTES = (
+    # Retained promoted Llama-3.2-1B exact points.
+    _PackedPrefillRoute("fp16", 2048, 8192, 1024, 1024, 1),
+    _PackedPrefillRoute("fp16", 2048, 8192, 2048, 2048, 2),
+    _PackedPrefillRoute("bf16", 2048, 8192, 1024, 1024, 1),
+    _PackedPrefillRoute("bf16", 2048, 8192, 2048, 2048, 2),
+    # Llama 8B and Qwen3 8B.
+    _PackedPrefillRoute("fp16", 4096, 4096, 4097, 8192, 2),
+    _PackedPrefillRoute("fp16", 4096, 12288, 1025, 8192, 2),
+    _PackedPrefillRoute("fp16", 4096, 14336, 1025, 8192, 2),
+    _PackedPrefillRoute("fp16", 12288, 4096, 8000, 8192, 2),
+    _PackedPrefillRoute("fp16", 14336, 4096, 6144, 8192, 2),
+    _PackedPrefillRoute("bf16", 4096, 4096, 2049, 4096, 1),
+    _PackedPrefillRoute("bf16", 4096, 4096, 4097, 8192, 2),
+    _PackedPrefillRoute("bf16", 4096, 12288, 1025, 8192, 2),
+    _PackedPrefillRoute("bf16", 4096, 14336, 1025, 8192, 2),
+    _PackedPrefillRoute("bf16", 12288, 4096, 6144, 8192, 2),
+    _PackedPrefillRoute("bf16", 14336, 4096, 6144, 8192, 2),
+    # Qwen3 32B.
+    _PackedPrefillRoute("fp16", 5120, 8192, 2049, 8192, 2),
+    _PackedPrefillRoute("fp16", 5120, 25600, 1024, 8192, 2),
+    _PackedPrefillRoute("fp16", 8192, 5120, 4096, 8192, 2),
+    _PackedPrefillRoute("fp16", 25600, 5120, 4097, 8192, 2),
+    _PackedPrefillRoute("bf16", 5120, 8192, 2049, 8192, 2),
+    _PackedPrefillRoute("bf16", 5120, 25600, 1024, 8192, 2),
+    _PackedPrefillRoute("bf16", 8192, 5120, 2049, 4096, 1),
+    _PackedPrefillRoute("bf16", 8192, 5120, 4097, 8192, 2),
+    _PackedPrefillRoute("bf16", 25600, 5120, 4097, 8192, 2),
+    # Llama 70B.
+    _PackedPrefillRoute("fp16", 8192, 8192, 3072, 8192, 2),
+    _PackedPrefillRoute("fp16", 28672, 8192, 3072, 8192, 2),
+    _PackedPrefillRoute("bf16", 8192, 8192, 2049, 8192, 2),
+    _PackedPrefillRoute("bf16", 28672, 8192, 2049, 8192, 2),
+)
+
+# Most models repeat a few projection shapes across every layer.
+_PACKED_PREFILL_ROUTES_BY_SHAPE = {
+    key: tuple(
+        route
+        for route in _PACKED_PREFILL_ROUTES
+        if (route.dtype, route.size_k, route.size_n) == key
+    )
+    for key in {
+        (route.dtype, route.size_k, route.size_n)
+        for route in _PACKED_PREFILL_ROUTES
+    }
+}
+
+_PACKED_PREFILL_ROUTE_STATS: Counter[tuple] = Counter()
+_PACKED_PREFILL_ROUTE_STATS_LOCK = threading.Lock()
+
+
+def _packed_prefill_dtype_name(dtype: torch.dtype) -> str | None:
+    if dtype == torch.float16:
+        return "fp16"
+    if dtype == torch.bfloat16:
+        return "bf16"
+    return None
+
+
+def _select_packed_prefill_config(
+    *,
+    major: int,
+    minor: int,
+    sms: int,
+    dtype: torch.dtype,
+    rows: int,
+    size_k: int,
+    size_n: int,
+) -> tuple[int, str]:
+    """Return the offline-tuned config and a stable miss reason."""
+    dtype_name = _packed_prefill_dtype_name(dtype)
+    if dtype_name is None:
+        return 0, "dtype_miss"
+    if (major, minor, sms) != _PACKED_PREFILL_PROFILED_HARDWARE:
+        return 0, "hardware_miss"
+
+    routes = _PACKED_PREFILL_ROUTES_BY_SHAPE.get((dtype_name, size_k, size_n))
+    if routes is None:
+        return 0, "shape_miss"
+    for route in routes:
+        if route.min_m <= rows <= route.max_m:
+            return route.config, "hit"
+    return 0, "m_miss"
+
+
+def _record_packed_prefill_route(
+    *,
+    decision: _PackedPrefillDecision,
+    hardware: tuple[int, int, int] | None,
+    dtype: torch.dtype,
+    rows: int,
+    size_k: int,
+    size_n: int,
+) -> None:
+    major, minor, sms = hardware or (-1, -1, -1)
+    key = (
+        decision.reason,
+        major,
+        minor,
+        sms,
+        _packed_prefill_dtype_name(dtype) or str(dtype),
+        rows,
+        size_k,
+        size_n,
+        decision.config,
+    )
+    with _PACKED_PREFILL_ROUTE_STATS_LOCK:
+        _PACKED_PREFILL_ROUTE_STATS[key] += 1
+
+
+def reset_marlin_packed_prefill_route_stats() -> None:
+    """Reset opt-in process-level packed-prefill route counters."""
+    with _PACKED_PREFILL_ROUTE_STATS_LOCK:
+        _PACKED_PREFILL_ROUTE_STATS.clear()
+
+
+def get_marlin_packed_prefill_route_stats(*, reset: bool = False) -> dict:
+    """Snapshot opt-in route counters in a JSON-serializable form."""
+    with _PACKED_PREFILL_ROUTE_STATS_LOCK:
+        snapshot = _PACKED_PREFILL_ROUTE_STATS.copy()
+        if reset:
+            _PACKED_PREFILL_ROUTE_STATS.clear()
+
+    routes = []
+    reasons: Counter[str] = Counter()
+    for key, count in sorted(snapshot.items()):
+        reason, major, minor, sms, dtype, rows, size_k, size_n, config = key
+        reasons[reason] += count
+        routes.append(
+            {
+                "reason": reason,
+                "compute_capability": f"{major}.{minor}" if major >= 0 else None,
+                "multiprocessor_count": sms if sms >= 0 else None,
+                "dtype": dtype,
+                "m": rows,
+                "k": size_k,
+                "n": size_n,
+                "config": config,
+                "count": count,
+            }
+        )
+    auto_hits = reasons["hit"]
+    auto_misses = sum(
+        count for reason, count in reasons.items() if reason not in ("hit", "manual_config")
+    )
+    auto_total = auto_hits + auto_misses
+    return {
+        "total": sum(snapshot.values()),
+        "auto_hits": auto_hits,
+        "auto_misses": auto_misses,
+        "auto_hit_rate": auto_hits / auto_total if auto_total else 0.0,
+        "manual_attempts": reasons["manual_config"],
+        "by_reason": dict(sorted(reasons.items())),
+        "routes": routes,
+    }
 
 
 def _packed_prefill_enabled() -> bool:
     """Enable conservative automatic packed-prefill routing by default."""
     return env_flag(_PACKED_PREFILL_ENV, default=True)
-
-
-def _should_use_packed_prefill(x: torch.Tensor, min_rows: int) -> bool:
-    """Route only genuine multi-token work to the packed prefill kernel."""
-    if x.ndim >= 3 and x.shape[-2] == 1:
-        return False
-    rows = x.numel() // x.shape[-1]
-    return rows >= min_rows
 
 
 class MarlinLinear(GPTQQuantLinear):
@@ -207,6 +389,8 @@ class MarlinLinear(GPTQQuantLinear):
         self.compute_dtype = kwargs.get("dtype") or torch.float16
         self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
         self.packed_prefill = _packed_prefill_enabled()
+        self.packed_prefill_stats = env_flag(_PACKED_PREFILL_STATS_ENV, default=False)
+        self._packed_prefill_hardware: tuple[int, int, int] | None = None
         try:
             self.packed_prefill_min_rows = int(
                 os.environ.get(
@@ -374,6 +558,14 @@ class MarlinLinear(GPTQQuantLinear):
     def post_init(self):
         device = self.qweight.device
 
+        if device.type == "cuda":
+            properties = torch.cuda.get_device_properties(device)
+            self._packed_prefill_hardware = (
+                properties.major,
+                properties.minor,
+                properties.multi_processor_count,
+            )
+
         if not marlin_runtime_available(self.compute_dtype):
             raise ModuleNotFoundError(
                 "Marlin torch.ops kernels are not properly installed. Error: "
@@ -493,6 +685,53 @@ class MarlinLinear(GPTQQuantLinear):
                 buf.append(lora_workspace)
         return buf
 
+    def _packed_prefill_contract_supported(self) -> bool:
+        qzeros = getattr(self, "qzeros", None)
+        return (
+            self.weight_type == scalar_types.uint4b8
+            and self.group_size == 128
+            and not self.desc_act
+            and self.is_k_full
+            and qzeros is not None
+            and qzeros.numel() == 0
+            and self.padded_in_features == self.in_features
+            and self.padded_out_features == self.out_features
+        )
+
+    def _packed_prefill_decision(self, x: torch.Tensor, *, rows: int) -> _PackedPrefillDecision:
+        if not self.packed_prefill:
+            return _PACKED_PREFILL_DISABLED
+        if rows == 1 or (x.ndim >= 3 and x.shape[-2] == 1):
+            return _PACKED_PREFILL_DECODE
+        if rows < self.packed_prefill_min_rows:
+            return _PackedPrefillDecision(0, "below_min_rows")
+        if self.packed_prefill_config != 0:
+            return _PackedPrefillDecision(self.packed_prefill_config, "manual_config")
+        if not self._packed_prefill_contract_supported():
+            return _PackedPrefillDecision(0, "contract_miss")
+
+        hardware = self._packed_prefill_hardware
+        if hardware is None:
+            if x.device.type != "cuda":
+                return _PackedPrefillDecision(0, "hardware_miss")
+            properties = torch.cuda.get_device_properties(x.device)
+            hardware = (
+                properties.major,
+                properties.minor,
+                properties.multi_processor_count,
+            )
+            self._packed_prefill_hardware = hardware
+        config, reason = _select_packed_prefill_config(
+            major=hardware[0],
+            minor=hardware[1],
+            sms=hardware[2],
+            dtype=x.dtype,
+            rows=rows,
+            size_k=self.in_features,
+            size_n=self.out_features,
+        )
+        return _PackedPrefillDecision(config, reason)
+
     @torch.inference_mode()
     def dequantize_weight(
         self,
@@ -577,11 +816,24 @@ class MarlinLinear(GPTQQuantLinear):
                 value=0.0,
             )
 
+        input_is_2d = x.dim() == 2
+        rows = x.shape[0] if input_is_2d else x.numel() // x.shape[-1]
+        packed_prefill_decision = self._packed_prefill_decision(x, rows=rows)
+        packed_prefill_config = packed_prefill_decision.config
+        use_packed_prefill = packed_prefill_config != 0
+        if self.packed_prefill_stats:
+            _record_packed_prefill_route(
+                decision=packed_prefill_decision,
+                hardware=self._packed_prefill_hardware,
+                dtype=x.dtype,
+                rows=rows,
+                size_k=self.in_features,
+                size_n=self.out_features,
+            )
+
         cooperative_state = getattr(self, "lora_cooperative_state", None) if self.adapter else None
         if cooperative_state is not None:
             op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin = cooperative_state
-            input_is_2d = x.dim() == 2
-            rows = x.shape[0] if input_is_2d else x.numel() // x.shape[-1]
             marlin_input = x if input_is_2d or prepared_marlin else x.reshape(rows, x.shape[-1])
             if (
                 0 < rows <= max_rows
@@ -600,11 +852,6 @@ class MarlinLinear(GPTQQuantLinear):
                     )
                     cooperative_state = op, lora_a, lora_b, lora_workspace, max_rows, prepared_marlin
                     self.lora_cooperative_state = cooperative_state
-                use_packed_prefill = (
-                    self.packed_prefill
-                    and rows >= self.packed_prefill_min_rows
-                    and (input_is_2d or x.dim() < 3 or x.shape[-2] != 1)
-                )
                 try:
                     if prepared_marlin:
                         out = op(
@@ -615,7 +862,7 @@ class MarlinLinear(GPTQQuantLinear):
                             lora_a,
                             lora_b,
                             use_packed_prefill,
-                            self.packed_prefill_config,
+                            packed_prefill_config,
                         )
                     else:
                         out = op(
@@ -641,7 +888,7 @@ class MarlinLinear(GPTQQuantLinear):
                             self.fp32,
                             False,
                             use_packed_prefill,
-                            self.packed_prefill_config,
+                            packed_prefill_config,
                         )
                     if input_is_2d or prepared_marlin:
                         return out
@@ -664,12 +911,6 @@ class MarlinLinear(GPTQQuantLinear):
         if self.bias is not None and self.bias.dtype != x.dtype:
             self.bias.data = self.bias.data.to(dtype=x.dtype)
 
-        use_packed_prefill = self.packed_prefill and _should_use_packed_prefill(
-            x,
-            self.packed_prefill_min_rows,
-        )
-        input_is_2d = x.dim() == 2
-        rows = x.numel() // x.shape[-1]
         x_2d = x if input_is_2d else x.reshape(rows, x.shape[-1])
         marlin_input = x_2d.contiguous() if self.is_lm_head else x_2d
         out_shape = x.shape[:-1] + (self.out_features,)
@@ -706,7 +947,7 @@ class MarlinLinear(GPTQQuantLinear):
                             lora_a,
                             lora_b,
                             use_packed_prefill,
-                            self.packed_prefill_config,
+                            packed_prefill_config,
                         )
                     else:
                         out = op(
@@ -732,7 +973,7 @@ class MarlinLinear(GPTQQuantLinear):
                             self.fp32,
                             False,
                             use_packed_prefill,
-                            self.packed_prefill_config,
+                            packed_prefill_config,
                         )
                     adapter_applied = True
                 except Exception as exc:
@@ -759,7 +1000,7 @@ class MarlinLinear(GPTQQuantLinear):
                 use_fp32_reduce=self.fp32,
                 use_atomics=False, # reduces accuracy with slightly faster performance
                 use_packed_prefill=use_packed_prefill,
-                packed_prefill_config=self.packed_prefill_config,
+                packed_prefill_config=packed_prefill_config,
             )
 
         if self.padded_out_features != self.out_features:
