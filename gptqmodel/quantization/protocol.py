@@ -457,6 +457,11 @@ def _compile_qvq_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec,
     bits = quantize.args.get("bits")
     if bits is None:
         raise ValueError("QVQ weight target requires `weight.quantize.bits`.")
+    if "rounding" not in quantize.args:
+        raise ValueError(
+            "QVQ weight target requires explicit `weight.quantize.rounding` "
+            "(`block_ldlq` or `yaqa`); implicit defaults are not schema-stable."
+        )
 
     export = weight.export
     if export is not None:

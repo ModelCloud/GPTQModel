@@ -13,7 +13,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.qvq_processor import QVQProcessor, clone_qvq_config_for_module
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization import OutputAlignConfig, QVQConfig
+from gptqmodel.quantization import OutputAlignConfig, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import quantize_qvq_linear
 
 
@@ -134,6 +134,27 @@ def test_qvq_dynamic_clone_preserves_fractional_rate_and_skip_contract():
 
     assert overridden.bits == 2.5
     assert clone_qvq_config_for_module(cfg, "model.layers.1.self_attn.q_proj") is None
+
+
+def test_qvq_dynamic_clone_materializes_yaqa_rate_regularization():
+    cfg = QVQConfig(
+        bits=2,
+        rounding="yaqa",
+        yaqa=YaqaConfig(
+            regularization=0.05,
+            regularization_by_rate=((2.0, 0.1), (2.5, 0.2)),
+        ),
+        dynamic={"+:model.layers.0.*": {"bits": 2.5}},
+        offload_to_disk=False,
+    )
+
+    base = clone_qvq_config_for_module(cfg, "model.layers.1.self_attn.q_proj")
+    overridden = clone_qvq_config_for_module(cfg, "model.layers.0.self_attn.q_proj")
+
+    assert base.bits == 2
+    assert base.yaqa.regularization == pytest.approx(0.1)
+    assert overridden.bits == 2.5
+    assert overridden.yaqa.regularization == pytest.approx(0.2)
 
 
 def test_qvq_propagated_bank_selection_builds_a_heldout_gate_from_dense_hook():

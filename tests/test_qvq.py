@@ -760,6 +760,29 @@ def test_qvq_protocol_compiles_to_qvq_config():
     assert cfg.format == FORMAT.QVQ
 
 
+def test_qvq_protocol_requires_explicit_rounding():
+    payload = {
+        "version": 2,
+        "stages": [
+            {
+                "name": "qvq_ptq",
+                "rules": [
+                    {
+                        "match": "*",
+                        "weight": {
+                            "quantize": {"method": "qvq", "bits": 2},
+                            "export": {"format": "qvq"},
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="explicit.*rounding"):
+        compile_protocol_to_quantize_config(payload)
+
+
 def test_qvq_accuracy_upgrade_controls_round_trip_through_config_and_protocol():
     payload = {
         "version": 2,

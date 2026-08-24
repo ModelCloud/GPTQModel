@@ -313,6 +313,11 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise TypeError("--quant-config must contain one JSON object")
+        if "rounding" not in payload:
+            raise ValueError(
+                "--quant-config requires explicit `rounding` (`block_ldlq` or `yaqa`); "
+                "implicit defaults are not schema-stable"
+            )
         return QVQConfig(**payload)
 
     yaqa = YaqaConfig(

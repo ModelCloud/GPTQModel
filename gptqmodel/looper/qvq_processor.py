@@ -77,6 +77,14 @@ def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optio
     qcfg_clone = copy.deepcopy(qcfg)
     if dynamic_overrides:
         qcfg_clone.bits = dynamic_overrides.get("bits", qcfg_clone.bits)
+    if qcfg_clone.rounding == "yaqa":
+        # Materialize the effective rate-specific damping on the per-module
+        # clone consumed by ``process``.  Keeping this only in
+        # ``regularization_by_rate`` made every solve use the global fallback
+        # and caused nominal W2 damping sweeps to produce identical payloads.
+        qcfg_clone.yaqa.regularization = qcfg_clone.yaqa.regularization_for_rate(
+            qcfg_clone.bits
+        )
     qcfg_clone.__post_init__()
     return qcfg_clone
 

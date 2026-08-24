@@ -67,6 +67,26 @@ def test_qvq_quantize_parser_can_disable_nested_telemetry():
     assert args.qvq_telemetry is False
 
 
+def test_qvq_quantize_json_requires_explicit_rounding(tmp_path):
+    config_path = tmp_path / "legacy.json"
+    config_path.write_text('{"bits": 2, "format": "qvq"}', encoding="utf-8")
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--quant-config",
+            str(config_path),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="explicit.*rounding"):
+        build_quantize_config(args)
+
+
 def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
     quant_log = {
         "qvq": [
