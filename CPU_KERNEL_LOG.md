@@ -692,3 +692,94 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
   Affinity was asserted once immediately before each timed series; N=256 direct proved `{24},{27},{28},{42}`.
   Raw matrices are `/home/ubuntu/work/qvq-findings/gemv_smalln_before.csv` and `gemv_smalln_after.csv`; full tables
   and test baselines are in `RESULTS.md`.
+## 2026-08-24 direct packed GEMV production dispatch and dense-cache deletion
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 32 logical cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- Deleted `QVQLinear._qvq_cpu_dense_inner` and its persistent `_qvq_cpu_dense_inner_cache`, including the dead
+  pickle handling. Optimized CPU inference now explicitly passes `use_dense_cache=False` to `qvq_cpu_gemv`, so the
+  native packed-trellis op is selected even when the standalone wrapper's dense-cache environment policy is enabled.
+- `_reference_inner_forward` is unchanged. Training and unsupported configurations still reconstruct locally and
+  remain covered by the full suites. A hostile-environment regression sets `QVQ_CPU_GEMV_DENSE_CACHE=1`, replaces
+  dense materialization with an assertion failure, runs production forward successfully, and proves the module has
+  no dense-cache attribute.
+- Timing used the repository `scripts/benchmark_qvq_gemv_cpu.py`, 10 warmups and 50 measured iterations for each
+  uninterrupted direct and dense series. `ratio` is direct/dense, so values over 1 are direct regressions. The
+  script asserted the explicit singleton placements once immediately after warmup and before every timed series.
+
+```text
+KxN        rate M  dense_ms direct_ms ratio
+2048x2048  W2    1   0.2801    0.1732 0.618
+                   8   0.1810    0.2215 1.224
+                  32   0.3129    0.4144 1.324
+           W3.5  1   0.3800    0.1824 0.480
+                   8   0.1801    0.2335 1.297
+                  32   0.3167    0.4132 1.305
+           W4    1   0.2807    0.1766 0.629
+                   8   0.1785    0.2269 1.271
+                  32   0.3048    0.3992 1.310
+2048x8192  W2    1   1.1937    0.6626 0.555
+                   8   0.6525    0.8272 1.268
+                  32   1.1524    1.3672 1.186
+           W3.5  1   1.2419    0.6973 0.561
+                   8   0.6632    0.8485 1.279
+                  32   1.1707    1.3978 1.194
+           W4    1   1.1994    0.6731 0.561
+                   8   0.6633    0.8368 1.262
+                  32   1.1732    1.3745 1.172
+8192x2048  W2    1   1.2133    0.6509 0.536
+                   8   0.6621    0.8073 1.219
+                  32   1.1670    1.4240 1.220
+           W3.5  1   1.2539    0.6919 0.552
+                   8   0.6457    0.8365 1.295
+                  32   1.1709    1.4160 1.209
+           W4    1   1.5449    0.6647 0.430
+                   8   0.6593    0.8215 1.246
+                  32   1.1528    1.4496 1.258
+2048x256   W2    1   0.0509    0.1238 2.432
+                   8   0.0339    0.1502 4.431
+                  32   0.0551    0.2508 4.552
+           W3.5  1   0.0500    0.1310 2.620
+                   8   0.0351    0.1555 4.430
+                  32   0.0535    0.2499 4.671
+           W4    1   0.0512    0.1228 2.398
+                   8   0.0333    0.1479 4.441
+                  32   0.0538    0.2541 4.723
+```
+
+- The regression is explicit: at M=8/32, direct is 1.17-1.32x slower for the large shapes and 4.43-4.72x slower
+  for N=256. At M=1, N=256 is 2.40-2.62x slower. These measurements preceded PR #18. While this work was in
+  progress, PR #18 merged into `main`; the branch inherited it only when rebased onto the new PR target afterward.
+- The current post-rebase N=256 medians below include inherited PR #18. Its four-worker direct team and the active
+  dense team were each asserted immediately before their series. The real regression remains 2.09-2.17x at M=1,
+  3.73-3.99x at M=8, and 4.01-4.25x at M=32.
+
+```text
+rate M  dense_ms direct_ms ratio
+W2    1   0.0502    0.1088 2.167
+      8   0.0350    0.1305 3.729
+     32   0.0557    0.2233 4.009
+W3.5  1   0.0519    0.1115 2.149
+      8   0.0345    0.1378 3.994
+     32   0.0547    0.2304 4.212
+W4    1   0.0512    0.1072 2.094
+      8   0.0345    0.1329 3.852
+     32   0.0547    0.2323 4.247
+```
+- All 36 accuracy cases passed at `rtol=0`, `max_abs <= 2e-3`. The measured worst case was
+  `1.739502e-3` at 8192x2048 W2 M32. No tolerance was loosened.
+- Seven-layer fresh-process RSS (two 2048x2048, two 2048x8192, one 8192x2048, two 2048x256): W2 direct added
+  0.65 MiB and dense retention added 205.0 MiB more; W3.5 direct added 0.81 MiB and dense added 203.9 MiB more;
+  W4 direct added 0.65 MiB and dense added 223.0 MiB more. RSS came from `/proc/self/smaps_rollup` after packed
+  construction, after one direct call per layer, and after one retained-dense call per layer.
+- A two-iteration affinity probe was rejected before measurement because torch initialized its team size from the
+  master thread's singleton binding. The benchmark now restores the explicit requested team with
+  `torch.set_num_threads(32)` and verifies the complete placement set. The rejected probe is not used for any
+  performance conclusion.
+- Local before baseline: `tests/test_qvq.py` 613 passed / 247 skipped;
+  `tests/test_qvq_v2b2_p32.py` 119 passed / 12 skipped / one pre-existing configuration failure. After:
+  655 passed / 248 skipped and 119 passed / 12 skipped / the same one failure, respectively. The primary suite's
+  final count includes the oracle tests merged upstream while this branch was in progress.
+- Measurement placement was
+  `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
+  Runs were exclusive, sequential, and blocking. `OMP_PLACES=cores` was never used.

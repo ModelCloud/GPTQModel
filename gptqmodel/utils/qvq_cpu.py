@@ -171,6 +171,7 @@ def qvq_cpu_gemv(
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
     bank_alt_id: int = 0,
+    use_dense_cache: bool | None = None,
 ) -> torch.Tensor:
     """Compute x @ W for QVQ V2/V2B2-P64/V2B2-P32 on CPU.
 
@@ -184,6 +185,8 @@ def qvq_cpu_gemv(
         v2b4_p64: use V2B4-P64 segment banking.
         v2b2_p32: use V2B2-P32 segment banking.
         bank_alt_id: 1..3 for V2B2-P32, ignored otherwise.
+        use_dense_cache: Override the standalone dense-cache environment policy.
+            Production inference passes ``False`` to select the native packed op.
     """
 
     if not qvq_cpu_supported():
@@ -204,7 +207,11 @@ def qvq_cpu_gemv(
     if bank_ids is not None:
         bank_ids = bank_ids.to(torch.uint8).contiguous()
 
-    dense_cache = os.environ.get("QVQ_CPU_GEMV_DENSE_CACHE", "1").lower() not in ("0", "false", "off", "")
+    dense_cache = (
+        os.environ.get("QVQ_CPU_GEMV_DENSE_CACHE", "1").lower() not in ("0", "false", "off", "")
+        if use_dense_cache is None
+        else use_dense_cache
+    )
     if dense_cache:
         option_key = _qvq_cpu_cache_key(
             bits, out_features, bank_ids, bank_alt_id, v2b4_p64, v2b2_p32

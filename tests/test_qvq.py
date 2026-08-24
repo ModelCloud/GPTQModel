@@ -5686,6 +5686,57 @@ def _qvq_inner_gemv_case(
     return x, trellis, reference
 
 
+def test_qvq_cpu_production_forward_never_creates_dense_cache(monkeypatch):
+    import gptqmodel.utils.qvq_cpu as qvq_cpu_module
+
+    monkeypatch.setenv("QVQ_CPU_GEMV_DENSE_CACHE", "1")
+
+    def fail_dense_materialization():
+        raise AssertionError("production CPU inference must call the native packed GEMV")
+
+    monkeypatch.setattr(qvq_cpu_module, "_qvq_cpu_inner_weight_op", fail_dense_materialization)
+    x, trellis, _ = _qvq_inner_gemv_case(2, m=8, k=32, n=32)
+    layer = QVQLinear(
+        bits=2,
+        in_features=32,
+        out_features=32,
+        tensors={"trellis": trellis, "SU": torch.ones(32), "SV": torch.ones(32)},
+    )
+    layer.train()
+    reference = layer(x.float())
+    layer.eval()
+
+    actual = layer(x.float())
+
+    torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
+    assert not hasattr(layer, "_qvq_cpu_dense_inner_cache")
+
+
+@pytest.mark.parametrize(("k", "n"), ((2048, 2048), (2048, 8192), (8192, 2048), (2048, 256)))
+@pytest.mark.parametrize("bits", (2, 3.5, 4))
+@pytest.mark.parametrize("m", (1, 8, 32))
+def test_qvq_cpu_native_packed_gemv_accuracy_matrix(k, n, bits, m):
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_gemv
+
+    transition_bits = qvq_transition_bits(bits)
+    generator = torch.Generator().manual_seed(20260824 + transition_bits * 100 + m + n)
+    edges = torch.randint(
+        0,
+        1 << transition_bits,
+        (128, (k // 16) * (n // 16)),
+        generator=generator,
+        dtype=torch.int32,
+    )
+    trellis = planar_pack_rows(edges, transition_bits).T.contiguous()
+    x = torch.randn((m, k), generator=generator)
+    inner = reconstruct_qvq_inner_weight(trellis, bits=bits, in_features=k, out_features=n)
+    reference = x @ inner
+
+    actual = qvq_cpu_gemv(x, trellis, bits, out_features=n, use_dense_cache=False)
+
+    torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
+
+
 
 
 def _assert_qvq_logit_metrics(reference: torch.Tensor, actual: torch.Tensor) -> None:
