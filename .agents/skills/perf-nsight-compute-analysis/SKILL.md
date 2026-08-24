@@ -390,3 +390,7 @@ If Tiers 1-2 don't answer:
 
 WebFetch or WebSearch these URLs for the latest content. Consider distilling
 new findings back into `references/`.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for kernel profiling and roofline analysis from wafer-ai's performance engineering index.

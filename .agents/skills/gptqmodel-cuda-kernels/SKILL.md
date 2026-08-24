@@ -147,3 +147,7 @@ Implications for GPT-QModel kernels:
 - Treat `__syncwarp()` and block/cluster fences as part of the handoff contract when one warp produces data another consumes.
 - Architect kernels so one warp can initiate an asynchronous copy or MMA while others continue independent work; do not block the whole warp waiting for the asynchronous unit.
 - Keep fallback paths that do not assume per-thread scheduling details (pre-Volta behavior differs from Volta+).
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list from wafer-ai's performance engineering index.

@@ -197,3 +197,4 @@ For NVTX domains, categories, payloads, and legacy API details, see [references/
 - [references/benchmarking-patterns.md](references/benchmarking-patterns.md) — CUDA Graph, CuTe DSL, Triton, Raw CUDA templates; warmup guidance; GPU hardware properties; reporting format
 - [references/nvtx-api.md](references/nvtx-api.md) — Domains, categories, payloads, legacy push/pop API
 - [references/pytorch-profiler-api.md](references/pytorch-profiler-api.md) — PyTorch 2.0+ profiler API changes (`device_time` vs deprecated `cuda_time`)
+- [references/wafer-gpu-perf-resources.md](references/wafer-gpu-perf-resources.md) — Curated external GPU performance engineering reading list from wafer-ai's performance engineering index

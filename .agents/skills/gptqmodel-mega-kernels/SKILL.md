@@ -177,3 +177,7 @@ Cover:
 
 Log the environment, commands, baseline, retained deltas, rejected candidates,
 profiler artifact paths, JIT fingerprints, errors, resources, and fallback status.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list from wafer-ai's performance engineering index.

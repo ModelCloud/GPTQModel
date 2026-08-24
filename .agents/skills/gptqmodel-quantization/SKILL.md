@@ -80,3 +80,7 @@ Hadamard rotation is a pre-quantization orthogonal transform that mixes values s
   - Rotations are not a substitute for calibration-aware scale/zero search; they are a pre-conditioning step that changes the quantization problem geometry.
 
 Source: Jessie Dong, *one strange way to make 4-bit inference more accurate is to mix the model’s values together before rounding them*, 2026-08-20, https://x.com/jessiedong_/status/2090308407123402875?s=20.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for quantization and low precision from wafer-ai's performance engineering index.

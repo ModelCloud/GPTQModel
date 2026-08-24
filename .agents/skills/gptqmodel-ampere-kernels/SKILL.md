@@ -41,3 +41,7 @@ Use existing A100-oriented scripts such as `scripts/benchmark_marlin_a100.py` an
 ## Hidden Ampere/CUDA performance cliffs
 
 Review the bullet list in [references/ampere-notes.md](references/ampere-notes.md) for shape/bank/occupancy/launch/spill/coalescing facts that are not visible in source code or compiler warnings but regularly dominate kernel performance.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list from wafer-ai's performance engineering index.
