@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 08/24/2026 7.4.0 `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
 * 08/20/2026 7.4.0 `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2 model support
 * 08/19/2026 7.4.0 `main`: ✨ Added `muse_glimmer` / Muse Glimmer multimodal model support.
 * 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl` / Mage-VL model support
@@ -285,7 +286,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE                | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview             | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open / Open 2                    | ✅ | North Micro Vision | ✅ |
-| Mage-VL                       | ✅ |                                 |    |                            |    |                                 |    |                        |    |
+| Mage-VL                       | ✅ | Unlimited-OCR                   | ✅ |                            |    |                                 |    |                        |    |
 | Muse Glimmer                  | ✅ |                                 |    |                            |    |                                 |    |                        |    |
 | SmolLM3                       | ✅ |                                 |    |                            |    |                                 |    |                        |    |
 

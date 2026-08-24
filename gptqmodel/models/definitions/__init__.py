@@ -100,6 +100,7 @@ from .solar_open import SolarOpenQModel
 from .solar_open2 import SolarOpen2QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
+from .unlimited_ocr import UnlimitedOCRQModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel

@@ -176,6 +176,7 @@ class ModelTest(unittest.TestCase):
     LOAD_BACKEND = BACKEND.MARLIN
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
+    LOAD_PROCESSOR = True
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 512
@@ -1612,9 +1613,11 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
         self._loaded_model_was_prequantized = bool(is_quantized)
 
-        # ovis cannot load processor
+        # Some image-to-text checkpoints do not provide an AutoProcessor implementation.
         is_ovis_model = model.config.model_type == "ovis"
-        need_create_processor = is_image_to_text_model and not is_ovis_model
+        need_create_processor = (
+            is_image_to_text_model and not is_ovis_model and self.LOAD_PROCESSOR
+        )
 
         if not is_quantized:
             temp_dir_context = None
