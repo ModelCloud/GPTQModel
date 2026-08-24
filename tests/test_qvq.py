@@ -97,6 +97,7 @@ from gptqmodel.quantization.qvq_rates import (
 )
 from gptqmodel.quantization.qvq_yaqa import (
     YAQA_PAPER_MINIMUM_SEQUENCES,
+    YAQA_DEFAULT_REGULARIZATION,
     YAQA_PAPER_REGULARIZATION,
 )
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
@@ -769,6 +770,7 @@ def test_qvq_accuracy_upgrade_controls_round_trip_through_config_and_protocol():
                             "quantize": {
                                 "method": "qvq",
                                 "bits": 2,
+                                "rounding": "block_ldlq",
                                 "module_scale_search": True,
                                 "output_channel_scale_optimization": True,
                                 "viterbi_objective": "hessian_diagonal",
@@ -886,7 +888,7 @@ def test_yaqa_config_supports_exact_rate_regularization_overrides():
     assert config.regularization_by_rate == ((1.0, 0.01), (2.5, 0.0005))
     assert config.regularization_for_rate(1.0) == pytest.approx(0.01)
     assert config.regularization_for_rate(2.5) == pytest.approx(0.0005)
-    assert config.regularization_for_rate(2.0) == pytest.approx(YAQA_PAPER_REGULARIZATION)
+    assert config.regularization_for_rate(2.0) == pytest.approx(YAQA_DEFAULT_REGULARIZATION)
 
 
 def test_yaqa_rate_regularization_overrides_round_trip_through_qvq_config():
@@ -972,7 +974,7 @@ def test_yaqa_config_rejects_invalid_lifecycle_controls(kwargs, exception, messa
         (torch.bfloat16, "cpu", torch.float32),
         (torch.float16, "cuda", torch.float16),
         (torch.bfloat16, "cuda", torch.float16),
-        (torch.float32, "cuda", torch.float16),
+        (torch.float32, "cuda", torch.float32),
         (torch.float16, "mps", torch.float16),
     ),
 )
@@ -3289,7 +3291,7 @@ def test_qvq_v4_four_bank_quantization_persists_rate_keyed_selectors():
 
 
 def test_qvq_v4_four_bank_module_rejects_missing_selectors():
-    with pytest.raises(ValueError, match="requires serialized bank_ids"):
+    with pytest.raises(ValueError, match="require serialized bank_ids"):
         QVQLinear(
             bits=2,
             in_features=16,
@@ -3541,7 +3543,7 @@ def test_qvq_banked_linear_deepcopy_drops_transient_cuda_selector_cache():
 
 
 def test_qvq_propagated_bank_gate_is_opt_in_and_accepts_only_heldout_improvement():
-    config = QVQConfig(format=FORMAT.QVQ_V4, vector_size=4, bits=2, bank_count=4)
+    config = QVQConfig(format=FORMAT.QVQ_V4, vector_size=4, bits=2, bank_count=4, rounding="block_ldlq")
     assert config.propagated_bank_selection is None
     config.propagated_bank_selection = False
     config.__post_init__()
