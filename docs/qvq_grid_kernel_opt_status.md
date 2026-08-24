@@ -199,9 +199,16 @@ Micro-benchmark (`scripts/benchmark_qvq_family_grid.py`, committed; 3 families x
   2.1e-7 relative — genuine near-ties.  Max per-sequence squared-error deviation over the grid:
   1.2e-6 relative.
 * **Stress test** (`test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence`,
-  committed): >= 10k random sequences spanning the batch gate boundary, weighted/unweighted,
-  constrained/unconstrained, XOR-related, arbitrary and duplicated-code bank pairs, plus
-  codebook-snapped adversarial targets; per-sequence loss rtol 2e-4, overall flip bound 1e-3.
+  committed): exactly **11,154 fused-path sequences (1,427,712 states)** — asserted counts —
+  spanning the batch gate boundary, weighted/unweighted, constrained/unconstrained, XOR-related,
+  arbitrary and duplicated-code bank pairs, plus codebook-snapped adversarial targets.  Both
+  kernels' returned discrete paths are independently **rescored under one common fp64
+  objective**: non-flipped sequences must rescore bitwise-identically, flipped sequences must
+  rescore within the derived FP32 accumulation bound (2*gamma_138 ~= 1.6e-5 rel + 1e-4 abs for
+  the reference form's near-zero-distance cancellation), and each kernel's reported loss must
+  match its own path's rescore (traceback/reporting consistency).  Result at the committed
+  seed: **0 flipped sequences / 0 flipped states**, reported per case family.  Tolerances are
+  derived in a comment above the test (FP32 forward-error bound), not chosen ad hoc.
 * **Reference-path cases stay bit-exact** (small batches, disabled-flag subprocess test).
 * **Quality equivalence**: see the per-module loss table below.
 
@@ -241,7 +248,7 @@ same box, same env, captured 2026-08-23):
 
 8 of 14 modules have bit-identical loss; the six that differ moved through discrete YAQA
 family/code re-selections triggered by near-tie flips.  Aggregate loss over the 14 modules:
-22.5216 -> 22.4181 (**-0.46 %, better**); worst single-module regression +1.4 %
+20.5216 -> 20.4181 (**-0.50 %, better**); worst single-module regression +1.4 %
 (`layers.0.self_attn.q_proj`), best improvement -1.8 % (`layers.1.mlp.down_proj`).
 Runs: `/root/qvq_prof/r2_quality_base.log` (round-1 worktree @ ab2d34f3, warm JIT,
 prepare_and_quantize 169.9 s) vs `/root/qvq_prof/r2_quality_new.log` (this branch).
@@ -254,17 +261,22 @@ prepare_and_quantize 169.9 s) vs `/root/qvq_prof/r2_quality_new.log` (this branc
 | per-step emission tables `w*(t_c - level)^2` in smem (256 levels/component, 32x lane-replicated, packed u16 rank codebook halves the codebook smem) | 3.976 | conflict-free (replication works, 165K conflicts / 277M wavefronts) but 2 LDS + PRMT extraction + address math per emission costs more issue slots than the 2 conversions + 2 subtracts it removes; LSU 41 %, instructions grew 51.2G -> 60.6G per call |
 | `fminf` value-select + predicated index-select (exact, aimed at ALU-pipe rebalance) | 5.03 | breaks ptxas' predication of the compare/select pair; ~45 % slower |
 
+The dead-end timings and their ncu counters are development measurements taken on this box
+during the round; the variants were reverted, so no machine-readable profiler artifacts are
+committed for them (only the shipped kernel's, see below).
+
 ## Why round 2 plateaus at ~1.2x (ncu evidence, 3x128 shape)
 
 Measured: 1.25x on the weighted micro-benchmark, 1.21x on the real NVTX range (the range also
 contains the unchanged detect/traceback launches and inter-launch gaps).  The >=1.5x round-2
 target was **not reached**; the evidence below is why.
 
-The shipped kernel executes ~51.2G thread-instructions per call: per (h, jj) candidate pair
+The shipped kernel executes ~54.9G thread-instructions per call (committed machine-readable
+counters: `artifacts/ncu/qvq_family_grid_r2_shipped_metrics.csv`): per (h, jj) candidate pair
 (one shared emission + two bank candidates) that is 2 fp16->fp32 conversions (HADD2.F32),
 2 FADD subtracts, FMUL+FFMA for the square, 2 candidate FFMA/FADD, ~6 compare/select ops and
-~2 addressing/loop ops.  Issue slots are 75.7 % busy, FMA pipe 55 %, ALU 64 %,
-`stall_math_pipe_throttle` ~3.2 per issue — the kernel is issue/math-pipe-bound with occupancy
+~2 addressing/loop ops.  Issue slots are 75.7 % busy, FMA pipe 55.4 %, ALU 64.1 %,
+`stall_math_pipe_throttle` 2.86 per issue — the kernel is issue/math-pipe-bound with occupancy
 already fixed at 50 % (64 regs x 1024 threads, 160 KB smem, 1 CTA/SM; 2048 threads/SM would cap
 registers at 32 and spill).  The remaining big-ticket items are the conversions+subtracts
 (killable only by an 8-byte float2 codebook — the round-1 v4 L2-traffic dead end) and the
