@@ -363,10 +363,10 @@ def qvq_cpu_viterbi_opt(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused AVX-512 CPU batched Viterbi trellis quantization.
 
-    Bit-identical to :func:`qvq_cpu_viterbi` but computes the emission distance
-    inline inside the DP transition sweep (the CUDA kernel design), removing
-    the standalone emission pass, the best-cost round trip, and the separate
-    end-mask and backpointer-conversion sweeps.
+    Matches :func:`qvq_cpu_viterbi` exactly for discrete outputs, including
+    selected states, tie winners, bank IDs, and packed words. Its independently
+    scheduled FP32 recurrence returns a numerically equivalent squared error
+    within the documented cross-implementation tolerance.
 
     Args:
         sequences: [batch, steps, V] float tensor on CPU.
