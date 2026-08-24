@@ -21,6 +21,7 @@ from gptqmodel.quantization.qvq import (
     _canonical_qvq_v2b4_bank_stack,
     _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
+    _yaqa_inner_v2b2_family_batch_cuda,
     batched_viterbi_quantize,
     block_ldlq_inner,
     block_ldlq_inner_banked,
@@ -2077,6 +2078,42 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits
         )
         assert torch.equal(decoded, result.inner_weight)
         assert result.telemetry["counters"]["yaqa_segmented_v2_chunks"] >= 1
+
+
+def test_qvq_v2b2_family_batch_telemetry_reports_phase1_reuse_and_consumption():
+    generator = torch.Generator(device="cuda").manual_seed(20260823)
+    weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
+    hessian = torch.eye(32, device="cuda", dtype=torch.float32)
+    pair_stacks = torch.stack(
+        _canonical_qvq_v2b2_pair_stacks(
+            device=weight.device,
+            bits=2.0,
+            codebook_version=PGC16_CODEBOOK_VERSION,
+            dtype=torch.float16,
+        )
+    ).contiguous()
+    telemetry = QVQQuantizationTelemetry()
+
+    _yaqa_inner_v2b2_family_batch_cuda(
+        weight,
+        hessian,
+        hessian,
+        pair_stacks,
+        bits=2.0,
+        factorization=None,
+        rounding_bias=None,
+        telemetry=telemetry,
+    )
+    counters = telemetry.finalize()["counters"]
+
+    assert counters["viterbi_family_grid_calls"] > 0
+    assert counters["viterbi_family_state_steps"] > 0
+    assert counters["viterbi_exact_reuse_candidates"] == 0
+    assert counters["viterbi_reselection_revisits"] == 0
+    assert counters["viterbi_logical_solve_ids"] == counters["viterbi_unique_logical_solve_ids"]
+    assert counters["viterbi_provisional_states_produced"] == (
+        counters["viterbi_provisional_states_consumed"] * 128
+    )
 
 
 def test_qvq_v2b2_p32_yaqa_reselection_uses_non_default_producer_stream_safely():
