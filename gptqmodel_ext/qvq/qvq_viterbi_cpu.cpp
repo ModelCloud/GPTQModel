@@ -97,8 +97,14 @@ static void fused_g_argmin_avx512(
       const int64_t state = h * suffix_count + x;
       __m512 dot;
       if (vector_size == 2) {
-        dot = _mm512_mul_ps(_mm512_loadu_ps(c1 + state), t1);
+        // Accumulate from zero in coordinate order so this matches
+        // `fused_candidate_scalar` -- which serves both the remainder columns of
+        // this function and the entire non-AVX fallback -- bit for bit. A
+        // leading `_mm512_mul_ps` would pre-round the c1 product and make the
+        // vector body disagree with the scalar tail. V=4 below already does this.
+        dot = _mm512_setzero_ps();
         dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + state), t0, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c1 + state), t1, dot);
       } else {
         dot = _mm512_setzero_ps();
         dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + state), t0, dot);
@@ -229,6 +235,7 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
   int64_t codebook_v = codebook.size(1);
   TORCH_CHECK(vector_size == codebook_v, "qvq_viterbi_cpu: vector size mismatch");
   TORCH_CHECK(vector_size == 2 || vector_size == 4, "qvq_viterbi_cpu: only V=2 or 4 supported");
+  TORCH_CHECK(step_count > 0, "qvq_viterbi_cpu: step_count must be positive");
   TORCH_CHECK(state_count > 0 && (state_count & (state_count - 1)) == 0, "qvq_viterbi_cpu: state_count must be power of two");
 
   int l = log2_state_count(state_count);

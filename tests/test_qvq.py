@@ -5035,6 +5035,56 @@ def test_native_viterbi_single_step_overlap_applies_only_initial_constraint():
                 assert torch.equal(actual_error, expected_error)
 
 
+def test_native_viterbi_v2_is_thread_count_invariant():
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
+
+    if not qvq_cpu_supported():
+        pytest.skip("native QVQ CPU kernel unavailable")
+
+    generator = torch.Generator().manual_seed(149)
+    codebook = torch.randn((1 << 16, 2), generator=generator, dtype=torch.float32)
+    sequences = torch.randn((128, 128, 2), generator=generator, dtype=torch.float32)[101:102].contiguous()
+    overlap = torch.randint(0, 512, (128,), generator=generator, dtype=torch.int64)[101:102].contiguous()
+    original_threads = torch.get_num_threads()
+
+    def run(thread_count):
+        torch.set_num_threads(thread_count)
+        if torch.get_num_threads() != thread_count:
+            # Without this the test would pass vacuously on a runtime that
+            # clamps the request, comparing three identical 16-thread runs.
+            pytest.skip(f"cannot set torch thread count to {thread_count}")
+        states, squared_error = qvq_cpu_viterbi(
+            sequences, codebook, transition_bits=7, overlap=overlap
+        )
+        return states, pack_trellis_states(states, bits=3.5), squared_error
+
+    # suffix_count is 512, so at::parallel_for uses grain 16 and chunk
+    # divup(512, threads): 16 -> 32 and 32 -> 16 leave no scalar remainder,
+    # while 24 -> 22 sends the trailing 6 columns of every chunk through
+    # fused_candidate_scalar.  All three must agree.
+    try:
+        outputs = {threads: run(threads) for threads in (16, 24, 32)}
+    finally:
+        torch.set_num_threads(original_threads)
+
+    reference = outputs[16]
+    for threads, candidate in outputs.items():
+        for expected, actual in zip(reference, candidate):
+            assert torch.equal(expected, actual), f"thread count {threads} diverged"
+
+
+def test_native_viterbi_rejects_empty_steps():
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
+
+    if not qvq_cpu_supported():
+        pytest.skip("native QVQ CPU kernel unavailable")
+
+    sequences = torch.empty((1, 0, 2), dtype=torch.float32)
+    codebook = torch.zeros((1 << 16, 2), dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="step_count must be positive"):
+        qvq_cpu_viterbi(sequences, codebook, transition_bits=7)
+
+
 def test_native_viterbi_two_step_overlap_applies_final_constraint():
     from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
 
