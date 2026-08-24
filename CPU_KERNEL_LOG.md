@@ -1105,3 +1105,82 @@ Credit: the disagreement was identified by an independent cross-vendor review of
   `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
   `OMP_PLACES=cores` was never used. Idle was checked with a `/sys/fs/cgroup/cpu.stat` `usage_usec`
   delta, never `uptime` or `/proc/loadavg`.
+
+## 2026-08-24 V=2 reduction-order severity: controlled thread-invariance sweep with an unreachable control group
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4 `znver4`, no AMX) | 32 logical
+          cores available, thread counts set per call to 16/24/32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+Independent confirmation and refinement of the entry above. All numbers below were measured on the
+**pristine `d2222255` kernel checked out into its own worktree**, so the shared working tree's source
+state could not affect them, with `CCACHE_DISABLE=1` and a distinct empty `GPTQMODEL_QVQ_CPU_BUILD_ROOT`
+(real 28-30 s compile confirmed; pristine fingerprint `60c10c9fa1dcde19`, fixed `e223b567dff12df2`).
+
+- **MEASURED, reachability model.** `at::parallel_for` runs `#pragma omp parallel` with no `num_threads`
+  clause, so `chunk = divup(suffix_count, min(threads, divup(suffix_count, grain)))` and the vector body
+  covers only whole 16-column groups. For 65,536 states the trailing-scalar column count per chunk is:
+
+  | transition bits | suffix_count | 16 threads | 24 threads | 32 threads | exposed? |
+  |---|---|---|---|---|---|
+  | 1 | 32768 | 0 | 6 | 0 | yes |
+  | 5 | 2048 | 0 | 6 | 0 | yes |
+  | 7 (**production W3.5**) | 512 | 0 | 6 | 0 | **yes** |
+  | 8 (W4) | 256 | 0 | 0 | 0 | no |
+  | 9 | 128 | 0 | 0 | 0 | no |
+  | 15 | 2 | all | all | all | no (all-scalar at every count) |
+
+  A config is only exposed when the vector/scalar split **differs** between thread counts. Transition
+  bits 8 and 9 are 16-aligned at all three counts; transition bits 15 leaves `suffix_count < grain`, so
+  every column is scalar everywhere. **Only transition bits <= 7 are exposed, which includes the
+  production W3.5 rate but not W4.**
+
+- **MEASURED, sweep with per-config `try`/`except`, four counts:**
+  **ATTEMPTED 1632 / COMPLETED 1632 / SKIPPED 0 / DIVERGED 0.**
+  Grid: 6 seeds x {V=2 2^16, V=4 2^16, V=2 2^12} x transition bits {1,5,7,8,9,15} x steps {32,128} x
+  batch {1,4} x overlap {on,off} x step weights {on,off}, each run at 16, 24 and 32 threads and compared
+  against the 16-thread result. DIVERGED counts **discrete state** divergence. Zero configs were skipped,
+  so the zero rests on the full 1632, not on an aborted run.
+
+- **MEASURED, and this is the substantive refinement: the returned squared error IS thread-dependent,
+  broadly.** Counting configs whose `squared_error` differs at all between thread counts:
+  **218 of the 672 remainder-reachable configs (32.4%), and 0 of the 960 unreachable configs.**
+  Maximum delta 1.52587890625e-05. The separation is total: every affected config is one the reachability
+  model predicts, and no unaffected config is. That is a controlled experiment with its own negative
+  control, not a coincidence.
+
+- **MEASURED, production-shaped probe** (V=2, 65,536 states, transition bits 7, 128 steps, batch 32,
+  tail-biting overlap, 12 seeds): ATTEMPTED 12 / COMPLETED 12 / SKIPPED 0 / DIVERGED 0 discrete.
+  But **12 of 12 seeds returned a different squared error at 24 threads** (1.907e-06 to 4.053e-06) and
+  **12 of 12 returned exactly 0.0 delta at 32 threads** — precisely the pattern the table above predicts.
+
+- **MEASURED severity, stated honestly.** The defect is **OBSERVED, not latent**. Two distinct
+  observations: (a) the discrete selected path changes in the seed-149 witness — 54 of 128 states and 13
+  of 28 packed words between 16 and 24 threads — reproduced here independently; (b) the returned cost is
+  thread-dependent in about a third of exposed configurations and in 12 of 12 production-shaped ones.
+  **Discrete path flips are rare** (0 further instances in 1632 completed configs); **numeric
+  thread-dependence is not rare**. Both vanish after the fix.
+
+- **MEASURED:** `pack_trellis_states` was exercised on 96 configurations during the sweep with **0
+  failures** (`pack_checked 96, pack_skipped 0`). The `ValueError: QVQ states must form one
+  transition-consistent tail-biting path` seen in an earlier aborted sweep was a bad generated config in
+  that sweep driver, **not** a kernel defect.
+
+- **MEASURED, `vmulps` census of `fused_g_argmin_avx512`.** Pristine has 6 `vmulps`: three are the
+  `weight != 1.0f` scaling clones, one is the auto-vectorised scalar dot loop used at V>=4, and **two are
+  the V=2 emission reduction** (`0x1f9` and `0x6a2`). The fixed object has 4 — the same four non-reduction
+  sites, at `0x1a6`, `0x352`, `0x5db`, `0x6f0`. **The fix removes exactly the two V=2 reduction sites and
+  changes nothing else in the function.**
+
+- **MEASURED, audit correction.** The entry above is right that `qvq_viterbi_cpu_opt.cpp` disagrees with
+  itself at V=4; confirmed here independently. Scalar head/tail at `0x220`:
+  `vmulss (%rbx),%xmm6` (pre-rounds `c1*t1`) then `vfmadd231ss` on `%rsi`/`%r12`/`%r10`. Vector body at
+  `0x2ca`: `vfmadd132ps (%rsi),%zmm2` from the zero seed, then `%rbx`/`%r12`/`%r10`. Scalar order is
+  `c1,c0,c2,c3` with `c1` pre-rounded; vector order is `c0,c1,c2,c3` from zero. Register identity from
+  the prologue: `%rsi`=`c0`, `%rbx`=`c1`, `%xmm8`=`t0`, `%xmm6`=`t1`. Reported, not fixed — that kernel
+  is opt-in/benchmark-only and already carries a discrete-divergence defect record above.
+
+- **MEASURED, gates at the branch tip.** Reported in the PR; pristine baseline for `test_qvq.py` with the
+  two new tests excluded was 658 passed / 248 skipped / 2 deselected, so the fix adds two tests and
+  changes no pre-existing outcome.
+
+- **MEASURED by inspection:** this entry contains no timing or speed claim.
