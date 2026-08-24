@@ -64,3 +64,7 @@ especially on Laguna, Qwen3.5-27B, and Kimi-K3 proxy shapes.
 - Do not fuse per-expert modules inside MoE `experts.N`.
 - Do not rely on `torch.compile` to optimize a Pythonic cache keyed on string UUIDs; it recompiles per value.
 - Do not report throughput for `seq=1, max_new_tokens=1` as new-token decode without halving.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for inference engines from wafer-ai's performance engineering index.

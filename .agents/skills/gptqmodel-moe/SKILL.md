@@ -64,3 +64,7 @@ or fused gate/up/QKV in MoE models (e.g., Laguna, Qwen3-MoE, Olmoe, Kimi-K3).
 - Do not call `.item()`/`.tolist()`/`nonzero()` on routing tensors inside the forward loop.
 - Do not fuse individual experts.
 - Do not drop `adapter`, `had_K`, `online_full_had`, or `online_partial_had` transforms when dequantizing expert weights.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for MoE serving from wafer-ai's performance engineering index.

@@ -43,3 +43,7 @@ TMA copies are started by one thread (or a small subset of a warp) and executed 
 See the modern SIMT/warp-specialization note in `$gptqmodel-cuda-kernels` for the Volta+ independent-thread-scheduling caveats that affect cross-warp handoffs, including why legacy assumptions that “all threads in a warp move together” can break.
 
 Retain a deterministic dense/dequantized reference and test architecture dispatch independently from kernel math.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list from wafer-ai's performance engineering index.

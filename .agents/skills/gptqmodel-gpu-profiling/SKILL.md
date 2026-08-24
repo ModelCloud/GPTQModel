@@ -43,3 +43,7 @@ Do not compare the two as if disabling graphs were free. In distributed runs, st
 5. Re-run the synchronized benchmark and correctness check after any optimization; then capture a matched follow-up trace if attribution changed.
 
 Return the artifact path, capture command, environment/configuration record, whether evidence is mapping or formal, and complete ASCII tables for dominant kernels, overlap opportunities, and source-backed fusion candidates. Clean up only processes launched by the profiling run, using recorded PIDs and graceful termination before escalation.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for GPU profiling and correctness from wafer-ai's performance engineering index.

@@ -75,3 +75,7 @@ When several jobs run in parallel, poll them together so one 60-second update co
 Report exact physical GPU IDs and UUIDs, whether the initial and pre-timing idle gates passed, any threshold
 exceptions, commands, artifacts, final metrics, model sizes, and validation status. State clearly when a run was
 correctness-only, compiled-only, skipped, interrupted, or invalidated by device contention.
+
+## See also
+
+- [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for serving benchmarks and correctness from wafer-ai's performance engineering index.
