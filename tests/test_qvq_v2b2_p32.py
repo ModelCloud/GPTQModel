@@ -1988,6 +1988,7 @@ def test_qvq_v2b2_p32_config_accepts_yaqa_and_weighted_block_ldlq():
     weighted = QVQConfig(
         bits=2,
         format=FORMAT.QVQ_V2B2_P32,
+        rounding="block_ldlq",
         viterbi_objective="hessian_diagonal",
         offload_to_disk=False,
     )

@@ -270,7 +270,13 @@ def test_qvq_lifecycle_excludes_padding_quantizes_replays_and_installs_runtime_m
 
 
 def test_qvq_lifecycle_forwards_module_scale_search_and_reports_the_guarded_decision():
-    qcfg = QVQConfig(bits=2, module_scale_search=True, device="cpu", offload_to_disk=False)
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="block_ldlq",
+        module_scale_search=True,
+        device="cpu",
+        offload_to_disk=False,
+    )
     processor = _processor(qcfg=qcfg)
     root = torch.nn.Module()
     root.proj = torch.nn.Linear(16, 16, bias=False, dtype=torch.float32)
