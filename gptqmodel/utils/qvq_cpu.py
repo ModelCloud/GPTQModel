@@ -34,6 +34,7 @@ def _qvq_cpu_sources() -> list[str]:
     return [
         str(_qvq_cpu_root() / "qvq_gemv_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_viterbi_cpu.cpp"),
+        str(_qvq_cpu_root() / "qvq_viterbi_cpu_opt.cpp"),
         str(_qvq_cpu_root() / "qvq_viterbi_banked_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_hadamard_cpu.cpp"),
         str(_qvq_cpu_root() / "qvq_yaqa_cpu.cpp"),
@@ -58,6 +59,7 @@ _QVQ_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "gemv_cpu",
         "inner_weight_cpu",
         "viterbi_cpu",
+        "viterbi_cpu_opt",
         "viterbi_banked_cpu",
         "hadamard",
         "yaqa_feedback",
@@ -325,6 +327,70 @@ def qvq_cpu_viterbi(
         step_weights = step_weights.to(torch.float32).contiguous()
 
     return _qvq_cpu_viterbi_op()(
+        sequences,
+        codebook,
+        transition_bits,
+        overlap,
+        step_weights,
+    )
+
+
+_QVQ_CPU_VITERBI_OPT_OP: Callable | None = None
+
+
+def _qvq_cpu_viterbi_opt_op() -> Callable:
+    global _QVQ_CPU_VITERBI_OPT_OP
+    if _QVQ_CPU_VITERBI_OPT_OP is None:
+        with _QVQ_CPU_OP_LOCK:
+            if _QVQ_CPU_VITERBI_OPT_OP is None:
+                _QVQ_CPU_VITERBI_OPT_OP = _extension_api().op("qvq_cpu", "viterbi_cpu_opt")
+    return _QVQ_CPU_VITERBI_OPT_OP
+
+
+def qvq_cpu_viterbi_opt(
+    sequences: torch.Tensor,
+    codebook: torch.Tensor,
+    transition_bits: int,
+    overlap: torch.Tensor | None = None,
+    step_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused AVX-512 CPU batched Viterbi trellis quantization.
+
+    Bit-identical to :func:`qvq_cpu_viterbi` but computes the emission distance
+    inline inside the DP transition sweep (the CUDA kernel design), removing
+    the standalone emission pass, the best-cost round trip, and the separate
+    end-mask and backpointer-conversion sweeps.
+
+    Args:
+        sequences: [batch, steps, V] float tensor on CPU.
+        codebook: [state_count, V] float tensor on CPU.
+        transition_bits: QVQ transition width in bits.
+        overlap: optional int64 [batch] tail-biting overlap.
+        step_weights: optional float [batch, steps] per-step weights.
+
+    Returns:
+        (states [batch, steps], squared_error [batch]).
+    """
+
+    if not qvq_cpu_supported():
+        raise RuntimeError("QVQ CPU kernel requires x86-64 (AMD64).")
+    if sequences.device.type != "cpu" or codebook.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_opt requires CPU tensors")
+    if sequences.dim() != 3 or codebook.dim() != 2 or sequences.size(2) != codebook.size(1):
+        raise ValueError("qvq_cpu_viterbi_opt: sequence/codebook shape mismatch")
+    if overlap is not None and overlap.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_opt: overlap must be on CPU")
+    if step_weights is not None and step_weights.device.type != "cpu":
+        raise ValueError("qvq_cpu_viterbi_opt: step_weights must be on CPU")
+
+    sequences = sequences.contiguous()
+    codebook = codebook.contiguous()
+    if overlap is not None:
+        overlap = overlap.to(torch.int64).contiguous()
+    if step_weights is not None:
+        step_weights = step_weights.to(torch.float32).contiguous()
+
+    return _qvq_cpu_viterbi_opt_op()(
         sequences,
         codebook,
         transition_bits,
