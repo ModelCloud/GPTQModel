@@ -9,7 +9,12 @@ import torch
 from torch import nn
 
 from gptqmodel.quantization import FORMAT
-from scripts.qvq_evaluate import _model_logits, validate_evaluation_is_held_out
+from scripts.qvq_evaluate import (
+    _greedy_rollout,
+    _model_logits,
+    _row_text,
+    validate_evaluation_is_held_out,
+)
 from scripts.qvq_evaluate import build_parser as build_evaluate_parser
 from scripts.qvq_quantize import (
     DatasetSlice,
@@ -254,3 +259,39 @@ def test_qvq_evaluate_rejects_output_without_logits():
             _CausalLMWrapper(SimpleNamespace(last_hidden_state=torch.ones(1, 2, 3))),
             {"input_ids": torch.ones(1, 2, dtype=torch.long)},
         )
+
+
+class _GenerateRecorder:
+    def __init__(self, continuation):
+        self.continuation = continuation
+        self.kwargs = None
+
+    def generate(self, **kwargs):
+        self.kwargs = kwargs
+        return torch.cat((kwargs["input_ids"], self.continuation), dim=1)
+
+
+def test_qvq_evaluate_greedy_rollout_uses_independent_fixed_horizon_generation():
+    model = _GenerateRecorder(torch.tensor([[7, 8, 9]]))
+    encoded = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "attention_mask": torch.ones((1, 2), dtype=torch.long),
+    }
+
+    result = _greedy_rollout(model, encoded, token_count=3, pad_token_id=0)
+
+    torch.testing.assert_close(result, torch.tensor([7, 8, 9]), rtol=0, atol=0)
+    assert model.kwargs["do_sample"] is False
+    assert model.kwargs["min_new_tokens"] == 3
+    assert model.kwargs["max_new_tokens"] == 3
+    assert model.kwargs["use_cache"] is True
+
+
+def test_qvq_evaluate_chat_rows_end_with_generation_prompt():
+    tokenizer = SimpleNamespace(apply_chat_template=lambda value, **kwargs: (value, kwargs))
+    messages = [{"role": "user", "content": "hello"}]
+
+    rendered_messages, kwargs = _row_text({"messages": messages}, tokenizer, None)
+
+    assert rendered_messages == messages
+    assert kwargs == {"tokenize": False, "add_generation_prompt": True}

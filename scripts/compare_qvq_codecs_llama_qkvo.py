@@ -51,8 +51,11 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION
 from gptqmodel.quantization.qvq_rates import normalize_qvq_rate
-from gptqmodel.utils.diagnostic_metrics import native_primary_metrics_cuda
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
+from gptqmodel.utils.diagnostic_metrics import (
+    greedy_trajectory_metrics,
+    native_primary_metrics_cuda,
+)
 
 QKVO_SUFFIXES = (
     "self_attn.q_proj",
@@ -1059,11 +1062,11 @@ def _divergence_metrics(
     *,
     token_count: int = 32,
 ) -> dict[str, object] | None:
-    """Compare teacher-forced greedy predictions over a fixed token horizon.
+    """Legacy teacher-forced comparison retained for historical artifact readers.
 
-    This is the local, deterministic form of the Divergent-300 measurement:
-    each evaluation row is one sequence, and at most ``token_count`` next-token
-    predictions are compared.  The returned values are intentionally separate:
+    This is not Divergence-300 @32 because both predictions use the same source
+    prefix at every position. It remains private only so historical artifacts and
+    their focused regression tests can be interpreted. The returned values are:
 
     * ``token_top1_agreement`` is the fraction of matching predictions;
     * ``exact_sequence_agreement`` requires every compared position to match;
@@ -1101,6 +1104,28 @@ def _divergence_metrics(
         "divergent_sequence_fraction": (~matches.all()).float(),
         "tokens_compared": torch.tensor(float(token_count), device=dense.device),
     }
+
+
+@torch.inference_mode()
+def _independent_greedy_divergence_metrics(
+    dense_model: torch.nn.Module,
+    quantized_model: torch.nn.Module,
+    row: dict[str, torch.Tensor],
+    *,
+    token_count: int,
+) -> dict[str, torch.Tensor]:
+    """Run independent fixed-horizon greedy continuations and compare trajectories."""
+
+    generation_kwargs = {
+        "do_sample": False,
+        "max_new_tokens": token_count,
+        "min_new_tokens": token_count,
+        "use_cache": True,
+    }
+    prompt_tokens = row["input_ids"].shape[1]
+    dense_tokens = dense_model.generate(**row, **generation_kwargs)[:, prompt_tokens:]
+    quantized_tokens = quantized_model.generate(**row, **generation_kwargs)[:, prompt_tokens:]
+    return greedy_trajectory_metrics(dense_tokens, quantized_tokens, token_count=token_count)
 
 
 @torch.inference_mode()
@@ -2944,18 +2969,18 @@ def _streaming_compare_models_cpu(
             rows=token_count,
         )
         if row_index <= divergence_rows:
-            divergence = _divergence_metrics(
-                dense_logits,
-                quantized_logits,
+            divergence = _independent_greedy_divergence_metrics(
+                dense_model,
+                quantized_model,
+                row,
                 token_count=divergence_tokens,
             )
-            if divergence is not None:
-                divergence_accumulator.add(_pythonize_metric_scalars(divergence), rows=1)
+            divergence_accumulator.add(_pythonize_metric_scalars(divergence), rows=1)
         if row_index % 16 == 0 or row_index == len(rows):
             print(
                 f"{progress_label}: eval {row_index}/{len(rows)} rows, "
                 f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
-                f"divTop1={divergence_accumulator.mean('token_top1_agreement') or float('nan'):.4f}",
+                f"divSurvival={divergence_accumulator.mean('trajectory_survival') or 0.0:.4f}",
                 flush=True,
             )
     local_metrics = local_accumulator.result()
@@ -2968,6 +2993,7 @@ def _streaming_compare_models_cpu(
     divergence_report["requested_sequences"] = min(divergence_rows, len(rows))
     divergence_report["valid_sequences"] = divergence_accumulator.weight
     divergence_report["token_horizon"] = divergence_tokens
+    divergence_report["protocol"] = "independent_greedy_rollout"
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
@@ -3072,6 +3098,14 @@ def _streaming_compare_models_cuda(
             quantized_start = phase_start("quantized_forward", forward_stream)
             quantized_logits, _, live_outputs = quantized_capture.run(row)
             phase_end("quantized_forward", forward_stream, quantized_start)
+            divergence = None
+            if row_index <= divergence_rows:
+                divergence = _independent_greedy_divergence_metrics(
+                    dense_model,
+                    quantized_model,
+                    row,
+                    token_count=divergence_tokens,
+                )
             token_count = dense_logits.shape[0]
             evaluated_tokens += token_count
             with torch.cuda.stream(metric_stream):
@@ -3132,13 +3166,7 @@ def _streaming_compare_models_cuda(
                 )
                 phase_end("logit_metrics", metric_stream, logit_metric_start)
                 if row_index <= divergence_rows:
-                    divergence = _divergence_metrics(
-                        dense_logits,
-                        quantized_logits,
-                        token_count=divergence_tokens,
-                    )
-                    if divergence is not None:
-                        divergence_accumulator.add(divergence, rows=1)
+                    divergence_accumulator.add(divergence, rows=1)
                 if diagnostic_streams == 2:
                     pipeline_events[slot].record(metric_stream)
             if row_index % 16 == 0 or row_index == len(rows):
@@ -3152,7 +3180,7 @@ def _streaming_compare_models_cuda(
                 print(
                     f"{progress_label}: eval {row_index}/{len(rows)} rows, "
                     f"finalKL={logit_accumulator.mean('kl_forward', 'mean'):.6f} "
-                    f"divTop1={divergence_accumulator.mean('token_top1_agreement') or float('nan'):.4f}",
+                    f"divSurvival={divergence_accumulator.mean('trajectory_survival') or 0.0:.4f}",
                     flush=True,
                 )
         if diagnostic_streams == 2:
@@ -3173,6 +3201,7 @@ def _streaming_compare_models_cuda(
     divergence_report["requested_sequences"] = min(divergence_rows, len(rows))
     divergence_report["valid_sequences"] = divergence_accumulator.weight
     divergence_report["token_horizon"] = divergence_tokens
+    divergence_report["protocol"] = "independent_greedy_rollout"
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
@@ -4077,7 +4106,7 @@ def main() -> None:
                 f"localKL={arm_report['local_modules']['kl_forward']['mean']:.6f} "
                 f"liveKL={arm_report['live_modules']['kl_forward']['mean']:.6f} "
                 f"layerKL={layer_kl:.6f} logitKL={logits['kl_forward']['mean']:.6f} "
-                f"divTop1={divergence.get('token_top1_agreement', float('nan')):.4f} "
+                f"divSurvival={divergence.get('trajectory_survival', float('nan')):.4f} "
                 f"divExact={divergence.get('exact_sequence_agreement', float('nan')):.4f} "
                 f"firstDiv={divergence.get('first_divergence_token', float('nan')):.2f}"
             )

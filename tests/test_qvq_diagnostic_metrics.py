@@ -15,7 +15,10 @@ from torch import nn
 
 from gptqmodel.quantization.qvq import yaqa_sketch_b
 from gptqmodel.quantization.qvq_yaqa import _sketch_b_gram_updates
-from gptqmodel.utils.diagnostic_metrics import native_divergence_metrics_cuda
+from gptqmodel.utils.diagnostic_metrics import (
+    greedy_trajectory_metrics,
+    native_divergence_metrics_cuda,
+)
 from scripts.analyze_gptq_low_bit_grid import (
     _load_nm_calibration,
     _summary,
@@ -37,7 +40,10 @@ from scripts.analyze_gptq_low_bit_grid import (
     tensor_metrics,
 )
 from scripts.analyze_gptq_low_bit_grid import main as diagnostic_main
-from scripts.compare_qvq_codecs_llama_qkvo import _divergence_metrics
+from scripts.compare_qvq_codecs_llama_qkvo import (
+    _divergence_metrics,
+    _independent_greedy_divergence_metrics,
+)
 
 
 class _TinyLayer(nn.Module):
@@ -1902,6 +1908,71 @@ def test_divergence_metrics_excludes_short_rows_and_uses_horizon_sentinel():
     assert metrics["divergent_sequence_fraction"] == 0.0
 
 
+def test_greedy_trajectory_metrics_report_survival_and_first_divergence():
+    dense = torch.arange(32)
+    quantized = dense.clone()
+    quantized[5:] += 100
+
+    metrics = greedy_trajectory_metrics(dense, quantized, token_count=32)
+
+    assert metrics["trajectory_survival"] == 0.0
+    assert metrics["exact_sequence_agreement"] == 0.0
+    assert metrics["aligned_token_agreement"] == pytest.approx(5 / 32)
+    assert metrics["first_divergence_token"] == 6.0
+
+
+def test_greedy_trajectory_metrics_identical_horizon_survives():
+    tokens = torch.arange(32)
+
+    metrics = greedy_trajectory_metrics(tokens, tokens.clone(), token_count=32)
+
+    assert metrics["trajectory_survival"] == 1.0
+    assert metrics["aligned_token_agreement"] == 1.0
+    assert metrics["first_divergence_token"] == 33.0
+
+
+def test_independent_greedy_divergence_uses_each_models_own_rollout():
+    class FixedGenerator(nn.Module):
+        def __init__(self, continuation):
+            super().__init__()
+            self.continuation = torch.tensor([continuation])
+
+        def generate(self, **kwargs):
+            assert kwargs["do_sample"] is False
+            assert kwargs["min_new_tokens"] == 4
+            assert kwargs["max_new_tokens"] == 4
+            return torch.cat((kwargs["input_ids"], self.continuation), dim=1)
+
+    row = {"input_ids": torch.tensor([[10, 11]]), "attention_mask": torch.ones((1, 2), dtype=torch.long)}
+
+    metrics = _independent_greedy_divergence_metrics(
+        FixedGenerator([1, 2, 3, 4]),
+        FixedGenerator([1, 2, 9, 8]),
+        row,
+        token_count=4,
+    )
+
+    assert metrics["trajectory_survival"] == 0.0
+    assert metrics["aligned_token_agreement"] == 0.5
+    assert metrics["first_divergence_token"] == 3.0
+
+
+@pytest.mark.parametrize("bad_count", [True, 0, -1, 1.5])
+def test_greedy_trajectory_metrics_reject_invalid_horizon(bad_count):
+    with pytest.raises(ValueError, match="positive integer"):
+        greedy_trajectory_metrics(torch.arange(2), torch.arange(2), token_count=bad_count)
+
+
+def test_greedy_trajectory_metrics_requires_exact_matching_horizons():
+    with pytest.raises(ValueError, match="exactly 32 tokens"):
+        greedy_trajectory_metrics(torch.arange(31), torch.arange(32), token_count=32)
+
+
+def test_greedy_trajectory_metrics_rejects_multi_sequence_batches():
+    with pytest.raises(ValueError, match="batch size 1"):
+        greedy_trajectory_metrics(torch.arange(32).reshape(2, 16), torch.arange(32), token_count=32)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused divergence operator")
 def test_fused_cuda_divergence_matches_reference_and_tie_order():
     dense = torch.tensor(
@@ -1921,6 +1992,21 @@ def test_fused_cuda_divergence_matches_reference_and_tie_order():
     assert result[0].item() == int(reference["token_top1_agreement"].item() * 3)
     assert result[1].item() == int(reference["exact_sequence_agreement"].item())
     assert result[2].item() == int(reference["first_divergence_token"].item())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused divergence operator")
+def test_fused_cuda_divergence_reduces_winners_across_warps():
+    dense = torch.zeros((32, 512), device="cuda")
+    candidate = torch.zeros_like(dense)
+    dense[:, 0] = 1.0
+    candidate[:, 1] = 2.0
+    dense[:, 40] = 10.0
+    candidate[:, 40] = 10.0
+
+    result = native_divergence_metrics_cuda(dense, candidate, token_count=32)
+
+    assert result is not None
+    assert result.cpu().tolist() == [32, 1, 33, 32]
 
 
 def test_qvq_diagnostic_identical_standardized_channels_are_exact():

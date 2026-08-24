@@ -50,8 +50,11 @@ python scripts/qvq_evaluate.py diagnostics \
   --output artifacts/qvq-model-diagnostics.json
 ```
 
-Diagnostics preserve full row lengths by default and report token-weighted final KL, Top-1 agreement, and the three
-Divergent-300 statistics. `--include-topn` additionally reports legacy Top-5 and Top-10 set overlap.
+Diagnostics preserve full row lengths by default and report token-weighted final KL and teacher-forced Top-1
+agreement. Divergence-300 @32 separately runs independent fixed-horizon greedy continuations from each held-out
+prompt for the dense and quantized models. Its headline `trajectory_survival` is the fraction of prompts whose full
+32-token trajectories are identical; aligned-token agreement and one-based first-divergence position are secondary
+diagnostics. `--include-topn` additionally reports legacy Top-5 and Top-10 set overlap.
 
 ## Run Evalution tasks
 

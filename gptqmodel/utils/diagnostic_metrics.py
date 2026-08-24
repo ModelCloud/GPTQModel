@@ -258,4 +258,57 @@ def native_divergence_metrics_cuda(
     return operation(dense.detach().float().contiguous(), quantized.detach().float().contiguous(), token_count)
 
 
-__all__ = ["native_divergence_metrics_cuda", "native_primary_metrics_cuda", "native_tensor_metrics"]
+def greedy_trajectory_metrics(
+    dense_tokens: torch.Tensor,
+    quantized_tokens: torch.Tensor,
+    *,
+    token_count: int,
+) -> dict[str, torch.Tensor]:
+    """Compare two independently decoded greedy token trajectories.
+
+    The inputs must contain exactly one token ID per autoregressive decode step.
+    ``trajectory_survival`` is the headline Divergence-300 @32-style metric:
+    it is one only when the complete measured trajectory is identical.
+    """
+
+    if not isinstance(token_count, int) or isinstance(token_count, bool) or token_count < 1:
+        raise ValueError(f"token_count must be a positive integer, got {token_count!r}")
+    dense_shape_is_legal = dense_tokens.ndim == 1 or (dense_tokens.ndim == 2 and dense_tokens.shape[0] == 1)
+    quantized_shape_is_legal = quantized_tokens.ndim == 1 or (
+        quantized_tokens.ndim == 2 and quantized_tokens.shape[0] == 1
+    )
+    if not dense_shape_is_legal or not quantized_shape_is_legal:
+        raise ValueError("greedy trajectories must be rank-1 or rank-2 with batch size 1")
+    dense = dense_tokens.detach().reshape(-1)
+    quantized = quantized_tokens.detach().reshape(-1)
+    if dense.numel() != token_count or quantized.numel() != token_count:
+        raise ValueError(
+            "greedy trajectories must each contain exactly "
+            f"{token_count} tokens, got {dense.numel()} and {quantized.numel()}"
+        )
+    if dense.device != quantized.device:
+        raise ValueError("greedy trajectories must share one device")
+    matches = dense.eq(quantized)
+    mismatch = (~matches).nonzero(as_tuple=False).flatten()
+    first = (
+        (mismatch[0] + 1).to(dtype=torch.float32)
+        if mismatch.numel()
+        else torch.tensor(float(token_count + 1), device=dense.device)
+    )
+    survival = matches.all().float()
+    return {
+        "trajectory_survival": survival,
+        "exact_sequence_agreement": survival,
+        "aligned_token_agreement": matches.float().mean(),
+        "first_divergence_token": first,
+        "divergent_sequence_fraction": 1.0 - survival,
+        "tokens_compared": torch.tensor(float(token_count), device=dense.device),
+    }
+
+
+__all__ = [
+    "greedy_trajectory_metrics",
+    "native_divergence_metrics_cuda",
+    "native_primary_metrics_cuda",
+    "native_tensor_metrics",
+]
