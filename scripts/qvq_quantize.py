@@ -903,6 +903,20 @@ def main(argv: list[str] | None = None) -> int:
     }
     if config.rounding == "yaqa" and streams["yaqa"] is None:
         streams["yaqa"] = streams["calibration"]
+    calibration_role = (
+        "lifecycle_forward_only; module quantization input/output Hessians come "
+        "from the YAQA Sketch-B dataset"
+        if config.rounding == "yaqa"
+        else "module_input_hessian"
+    )
+    if config.rounding == "yaqa" and yaqa_spec != calibration_spec:
+        print(
+            "[warn] Ordinary calibration is lifecycle-forward-only for YAQA: "
+            "changing it does not change module quantization Hessians. Quality "
+            "optimization must change the disjoint YAQA Sketch-B dataset or enable "
+            "a calibration-dependent replay/alignment control.",
+            flush=True,
+        )
 
     load_started = time.perf_counter()
     model = GPTQModel.load(
@@ -1034,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
                 "replay_confirmation": replay_confirmation_spec,
             }.items()
         },
+        "calibration_role": calibration_role,
         "layer_scope": "all" if args.layers is None else {"first_layers": args.layers},
         "packed_payload_parity": packed_payload_parity,
         "dense_source_binding": dense_source_binding,

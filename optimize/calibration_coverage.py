@@ -41,7 +41,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.request import urlretrieve
 
-
 if TYPE_CHECKING:
     import torch
 
@@ -93,26 +92,32 @@ def _preflight_physical_gpu(
             }
             break
     if target is None:
-        raise RuntimeError(f"Physical GPU {physical_index} not found in nvidia-smi inventory.")
+        raise RuntimeError(
+            f"Physical GPU {physical_index} not found in nvidia-smi inventory."
+        )
 
     target_uuid = str(target["uuid"])
 
     accepted_samples = []
     for sample_index in range(idle_samples):
         snapshot = _run_nvidia_smi(
-            "-i", target_uuid,
+            "-i",
+            target_uuid,
             "--query-gpu=memory.used,utilization.gpu",
             "--format=csv,noheader,nounits",
         )
         fields = [field.strip() for field in snapshot.split(",")]
         if len(fields) != 2:
-            raise RuntimeError(f"Unexpected nvidia-smi snapshot for GPU {target_uuid}: {snapshot!r}")
+            raise RuntimeError(
+                f"Unexpected nvidia-smi snapshot for GPU {target_uuid}: {snapshot!r}"
+            )
         memory_used_mib = int(fields[0])
         utilization_pct = int(fields[1])
 
         try:
             process_output = _run_nvidia_smi(
-                "-i", target_uuid,
+                "-i",
+                target_uuid,
                 "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
                 "--format=csv,noheader,nounits",
             )
@@ -131,13 +136,19 @@ def _preflight_physical_gpu(
             if pid != os.getpid():
                 foreign_processes.append({"pid": pid, "process_name": process_name})
 
-        accepted_samples.append({
-            "memory_used_mib": memory_used_mib,
-            "utilization_pct": utilization_pct,
-            "foreign_processes": foreign_processes,
-        })
+        accepted_samples.append(
+            {
+                "memory_used_mib": memory_used_mib,
+                "utilization_pct": utilization_pct,
+                "foreign_processes": foreign_processes,
+            }
+        )
 
-        if not allow_busy and (utilization_pct != 0 or memory_used_mib > max_driver_memory_mib or foreign_processes):
+        if not allow_busy and (
+            utilization_pct != 0
+            or memory_used_mib > max_driver_memory_mib
+            or foreign_processes
+        ):
             raise RuntimeError(
                 f"GPU idle preflight rejected physical_id={physical_index} uuid={target_uuid}: "
                 f"utilization={utilization_pct}% memory={memory_used_mib}MiB "
@@ -160,13 +171,17 @@ def _preflight_physical_gpu(
     return target
 
 
-def _preflight_physical_gpus(spec: str, allow_busy: bool = False) -> list[dict[str, object]]:
+def _preflight_physical_gpus(
+    spec: str, allow_busy: bool = False
+) -> list[dict[str, object]]:
     """Preflight one or more comma-separated physical GPU indices and set CUDA_VISIBLE_DEVICES."""
 
     indices = [int(part) for part in spec.split(",") if part.strip() != ""]
     if not indices:
         raise ValueError(f"Invalid --physical-gpu value: {spec!r}")
-    targets = [_preflight_physical_gpu(index, allow_busy=allow_busy) for index in indices]
+    targets = [
+        _preflight_physical_gpu(index, allow_busy=allow_busy) for index in indices
+    ]
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(t["uuid"]) for t in targets)
     return targets
 
@@ -294,13 +309,15 @@ def _tokenize_sample(
 
     chunks: list[dict[str, list[int]]] = []
     for start in range(0, len(ids), concat_size):
-        chunk_ids = ids[start:start + concat_size]
+        chunk_ids = ids[start : start + concat_size]
         if len(chunk_ids) < min_length:
             continue
-        chunks.append({
-            "input_ids": chunk_ids,
-            "attention_mask": [1] * len(chunk_ids),
-        })
+        chunks.append(
+            {
+                "input_ids": chunk_ids,
+                "attention_mask": [1] * len(chunk_ids),
+            }
+        )
     return chunks
 
 
@@ -310,7 +327,10 @@ def _load_tokenizer(model_path: str, *, trust_remote_code: bool = False):
     try:
         from tokenicer import Tokenicer
         from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+
+        config = AutoConfig.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
         tokenicer = Tokenicer.load(
             model_path,
             model_config=config,
@@ -319,7 +339,10 @@ def _load_tokenizer(model_path: str, *, trust_remote_code: bool = False):
         return tokenicer.tokenizer
     except (ImportError, RuntimeError, ValueError, OSError):
         from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+
+        return AutoTokenizer.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -329,7 +352,9 @@ def _parse_args() -> argparse.Namespace:
             "under-coverage vs a held-out reference."
         )
     )
-    parser.add_argument("--model", required=True, help="Dense Hugging Face model ID or local path.")
+    parser.add_argument(
+        "--model", required=True, help="Dense Hugging Face model ID or local path."
+    )
     parser.add_argument(
         "--dataset",
         required=True,
@@ -341,15 +366,27 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help="Held-out reference prompt set (same formats as --dataset).",
     )
-    parser.add_argument("--output-dir", required=True, help="Directory for coverage report and JSON.")
+    parser.add_argument(
+        "--output-dir", required=True, help="Directory for coverage report and JSON."
+    )
     parser.add_argument(
         "--physical-gpu",
         help="Physical nvidia-smi GPU index to use, or a comma-separated list for multi-GPU sharding.",
     )
-    parser.add_argument("--allow-busy-gpu", action="store_true", help="Skip strict idle/exclusivity gate.")
-    parser.add_argument("--max-samples", type=int, default=0, help="Max rows per dataset (0 = full).")
-    parser.add_argument("--concat-size", type=int, default=2048, help="Max tokens per forward chunk.")
-    parser.add_argument("--min-length", type=int, default=10, help="Drop chunks shorter than this.")
+    parser.add_argument(
+        "--allow-busy-gpu",
+        action="store_true",
+        help="Skip strict idle/exclusivity gate.",
+    )
+    parser.add_argument(
+        "--max-samples", type=int, default=0, help="Max rows per dataset (0 = full)."
+    )
+    parser.add_argument(
+        "--concat-size", type=int, default=2048, help="Max tokens per forward chunk."
+    )
+    parser.add_argument(
+        "--min-length", type=int, default=10, help="Drop chunks shorter than this."
+    )
     parser.add_argument(
         "--sketch-samples",
         type=int,
@@ -367,8 +404,12 @@ def _parse_args() -> argparse.Namespace:
         default="0.5%",
         help="Fallback threshold (int/float count or 'N%%' of total tokens).",
     )
-    parser.add_argument("--text-separator", default="===========", help="Separator for raw text files.")
-    parser.add_argument("--torch-dtype", default="bfloat16", choices=("bfloat16", "float16", "float32"))
+    parser.add_argument(
+        "--text-separator", default="===========", help="Separator for raw text files."
+    )
+    parser.add_argument(
+        "--torch-dtype", default="bfloat16", choices=("bfloat16", "float16", "float32")
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument(
         "--greedy-threads",
@@ -390,8 +431,17 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Minimum total tokens the selected mix must reach. "
-            "Selection continues beyond the floor while marginal gains remain positive."
+            "Desired total token target. Selection stops after reaching it, or earlier "
+            "when positive conditional gain is exhausted and --min-target-tokens is met."
+        ),
+    )
+    parser.add_argument(
+        "--min-target-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Minimum acceptable total tokens. If positive-gain selection stops below this "
+            "floor, add the least-redundant remaining datasets until it is reached."
         ),
     )
     parser.add_argument(
@@ -467,6 +517,16 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    if args.min_target_tokens is not None and args.min_target_tokens < 0:
+        parser.error("--min-target-tokens must be non-negative")
+    if args.target_tokens is not None and args.target_tokens < 0:
+        parser.error("--target-tokens must be non-negative")
+    if (
+        args.target_tokens is not None
+        and args.min_target_tokens is not None
+        and args.min_target_tokens > args.target_tokens
+    ):
+        parser.error("--min-target-tokens cannot exceed --target-tokens")
     if args.moe_routing_bypass and args.target_moe_expert_tokens is not None:
         # With bypass every expert receives the full dense stream, so the MoE
         # floor is identical to --target-tokens; keep a single source of truth.
@@ -524,6 +584,7 @@ class ActivationAccumulator:
 
     def __post_init__(self) -> None:
         import torch
+
         self.diag = torch.zeros(self.columns, dtype=torch.float32)
         self.max_abs = torch.zeros(self.columns, dtype=torch.float32)
 
@@ -549,18 +610,22 @@ class ActivationAccumulator:
         self.max_abs = torch.maximum(self.max_abs, batch_max)
 
         per_channel = abs_flat.transpose(0, 1).contiguous().cpu().float()
-        self.sample = _update_sample(self.sample, per_channel, self.total_count, self.max_samples)
+        self.sample = _update_sample(
+            self.sample, per_channel, self.total_count, self.max_samples
+        )
         self.tokens += n
         self.total_count += n
 
     def quantile(self, q: float) -> torch.Tensor:
         import torch
+
         if self.sample is None or self.sample.numel() == 0:
             return torch.zeros(self.columns, dtype=torch.float32)
         return torch.quantile(self.sample.to(torch.float32), q, dim=1)
 
     def quantiles(self, qs: Sequence[float]) -> torch.Tensor:
         import torch
+
         if self.sample is None or self.sample.numel() == 0:
             return torch.zeros(len(qs), self.columns, dtype=torch.float32)
         return torch.quantile(
@@ -571,14 +636,17 @@ class ActivationAccumulator:
 
     def merge(self, other: ActivationAccumulator) -> ActivationAccumulator:
         import torch
+
         merged = ActivationAccumulator(self.columns, self.max_samples)
         merged.diag = self.diag + other.diag
         merged.max_abs = torch.maximum(self.max_abs, other.max_abs)
         merged.tokens = self.tokens + other.tokens
         merged.total_count = self.total_count + other.total_count
         merged.sample = _merge_samples(
-            self.sample, self.total_count,
-            other.sample, other.total_count,
+            self.sample,
+            self.total_count,
+            other.sample,
+            other.total_count,
             self.max_samples,
         )
         return merged
@@ -610,7 +678,9 @@ class DatasetProfile:
     expert_diag: dict[str, torch.Tensor] = field(default_factory=dict)
 
     @classmethod
-    def from_groups(cls, name: str, groups: list[TargetGroup], max_samples: int) -> DatasetProfile:
+    def from_groups(
+        cls, name: str, groups: list[TargetGroup], max_samples: int
+    ) -> DatasetProfile:
         profile = cls(name=name)
         for group in groups:
             accum = ActivationAccumulator(group.columns, max_samples)
@@ -622,10 +692,14 @@ class DatasetProfile:
         return profile
 
     @classmethod
-    def empty_like(cls, name: str, ref: DatasetProfile, max_samples: int) -> DatasetProfile:
+    def empty_like(
+        cls, name: str, ref: DatasetProfile, max_samples: int
+    ) -> DatasetProfile:
         profile = cls(name=name, total_tokens=0)
         for group_id, ref_accum in ref.groups.items():
-            profile.groups[group_id] = ActivationAccumulator(ref_accum.columns, max_samples)
+            profile.groups[group_id] = ActivationAccumulator(
+                ref_accum.columns, max_samples
+            )
         for module_name, ref_mod in ref.modules.items():
             profile.modules[module_name] = ModuleProfile(
                 module_name,
@@ -653,9 +727,13 @@ class DatasetProfile:
             if a is not None and b is not None:
                 new.groups[group_id] = a.merge(b)
             elif a is not None:
-                new.groups[group_id] = a.merge(ActivationAccumulator(a.columns, a.max_samples))
+                new.groups[group_id] = a.merge(
+                    ActivationAccumulator(a.columns, a.max_samples)
+                )
             else:
-                new.groups[group_id] = b.merge(ActivationAccumulator(b.columns, b.max_samples))
+                new.groups[group_id] = b.merge(
+                    ActivationAccumulator(b.columns, b.max_samples)
+                )
         for module_name in set(self.modules) | set(other.modules):
             mod = self.modules.get(module_name) or other.modules[module_name]
             new.modules[module_name] = ModuleProfile(
@@ -711,7 +789,9 @@ class ScanContext:
 # ---------------------------------------------------------------------------
 
 
-def _weighted_sample_topk(values: torch.Tensor, weights: torch.Tensor, k: int) -> torch.Tensor:
+def _weighted_sample_topk(
+    values: torch.Tensor, weights: torch.Tensor, k: int
+) -> torch.Tensor:
     """Weighted reservoir sampling via A-Res keys (``log(u) / w``); picks largest keys."""
     import torch
 
@@ -857,11 +937,17 @@ def register_hooks(groups: list[TargetGroup], context: ScanContext) -> list:
             continue
 
         def make_hook(group_id: str):
-            def hook(module: object, inp: tuple, _group_id: str = group_id, _ctx: ScanContext = context) -> None:
+            def hook(
+                module: object,
+                inp: tuple,
+                _group_id: str = group_id,
+                _ctx: ScanContext = context,
+            ) -> None:
                 if _ctx.active_profile is None:
                     return
                 x = inp[0] if isinstance(inp, tuple) else inp
                 _ctx.active_profile.update(_group_id, x)
+
             return hook
 
         handle = rep.register_forward_pre_hook(make_hook(group.group_id))
@@ -910,7 +996,9 @@ def find_moe_routers(model: object) -> list[tuple[str, object]]:
     return sorted(routers, key=lambda item: item[0])
 
 
-def apply_moe_routing_bypass(routers: list[tuple[str, object]]) -> list[tuple[object, int]]:
+def apply_moe_routing_bypass(
+    routers: list[tuple[str, object]],
+) -> list[tuple[object, int]]:
     """Set every router's ``top_k`` to ``num_experts`` so all experts see every token."""
 
     originals: list[tuple[object, int]] = []
@@ -944,7 +1032,9 @@ def _update_expert_stats(
     if not MOE_EXPERT_DIAG_ENABLED:
         return
     xsq = flat.pow(2)
-    diag = torch.zeros(num_experts, flat.shape[-1], dtype=torch.float32, device=flat.device)
+    diag = torch.zeros(
+        num_experts, flat.shape[-1], dtype=torch.float32, device=flat.device
+    )
     for k in range(sel.shape[-1]):
         diag.index_add_(0, sel[:, k], xsq)
     diag = diag.cpu()
@@ -959,8 +1049,11 @@ def register_moe_hooks(targets: list[MoEExpertTarget], context: ScanContext) -> 
 
     handles = []
     for target in targets:
+
         def make_hook(name: str, num_experts: int):
-            def hook(module: object, args: tuple, kwargs: dict, _ctx: ScanContext = context) -> None:
+            def hook(
+                module: object, args: tuple, kwargs: dict, _ctx: ScanContext = context
+            ) -> None:
                 profile = _ctx.active_profile
                 if profile is None:
                     return
@@ -975,14 +1068,18 @@ def register_moe_hooks(targets: list[MoEExpertTarget], context: ScanContext) -> 
                 }
                 hidden = next(
                     (
-                        t for t in tensors
-                        if torch.is_tensor(t) and t.is_floating_point() and t.shape[-1] in hidden_dims
+                        t
+                        for t in tensors
+                        if torch.is_tensor(t)
+                        and t.is_floating_point()
+                        and t.shape[-1] in hidden_dims
                     ),
                     None,
                 )
                 idx = next(
                     (
-                        t for t in tensors
+                        t
+                        for t in tensors
                         if torch.is_tensor(t) and t.dtype in (torch.int32, torch.int64)
                     ),
                     None,
@@ -990,6 +1087,7 @@ def register_moe_hooks(targets: list[MoEExpertTarget], context: ScanContext) -> 
                 if hidden is None or idx is None:
                     return
                 _update_expert_stats(profile, name, num_experts, hidden, idx)
+
             return hook
 
         handles.append(
@@ -1023,7 +1121,11 @@ def moe_uncovered_mass(profile: DatasetProfile, ref: DatasetProfile) -> float | 
             continue
         active = rc > 0
         cc = cand_counts.get(name)
-        covered = (cc >= MOE_EXPERT_MIN_TOKENS) if cc is not None else torch.zeros_like(active)
+        covered = (
+            (cc >= MOE_EXPERT_MIN_TOKENS)
+            if cc is not None
+            else torch.zeros_like(active)
+        )
         mass = rc.float() / total
         fractions.append(float(mass[active & ~covered].sum()))
     if not fractions:
@@ -1088,10 +1190,16 @@ def scan_dataset(
         return msg
 
     for row_idx, sample in enumerate(samples):
-        chunks = _tokenize_sample(tokenizer, sample, concat_size, min_length, apply_chat_template)
+        chunks = _tokenize_sample(
+            tokenizer, sample, concat_size, min_length, apply_chat_template
+        )
         for chunk in chunks:
-            input_ids = torch.tensor([chunk["input_ids"]], dtype=torch.long, device=device)
-            attention_mask = torch.tensor([chunk["attention_mask"]], dtype=torch.long, device=device)
+            input_ids = torch.tensor(
+                [chunk["input_ids"]], dtype=torch.long, device=device
+            )
+            attention_mask = torch.tensor(
+                [chunk["attention_mask"]], dtype=torch.long, device=device
+            )
             profile.total_tokens += int(input_ids.numel())
             with torch.no_grad():
                 model(
@@ -1114,7 +1222,9 @@ def _prepare_scale_search_importance(diag: torch.Tensor) -> torch.Tensor:
     import torch
 
     importance = diag.detach().to(dtype=torch.float32)
-    importance = torch.nan_to_num(importance, nan=0.0, posinf=0.0, neginf=0.0).clamp_min_(0)
+    importance = torch.nan_to_num(
+        importance, nan=0.0, posinf=0.0, neginf=0.0
+    ).clamp_min_(0)
     diagonal_mean = importance.mean()
     valid = torch.isfinite(diagonal_mean) & (diagonal_mean > 0)
     safe_mean = torch.where(valid, diagonal_mean, torch.ones_like(diagonal_mean))
@@ -1140,7 +1250,11 @@ def score(profile: DatasetProfile, ref: DatasetProfile) -> float:
         importance = _prepare_scale_search_importance(ref_diag)
 
         calib_mod = profile.modules.get(module_name)
-        if calib_mod is None or calib_mod.accum.sample is None or calib_mod.accum.total_count == 0:
+        if (
+            calib_mod is None
+            or calib_mod.accum.sample is None
+            or calib_mod.accum.total_count == 0
+        ):
             calib_p99 = torch.zeros_like(ref_p99)
         else:
             calib_p99 = calib_mod.accum.quantile(0.99).float().clamp_min(0.0)
@@ -1195,18 +1309,19 @@ def greedy_select(
     greedy_threads: int = 0,
     target_gain: float | None = None,
     target_tokens: int | None = None,
+    min_target_tokens: int | None = None,
     target_tokens_mode: str = "gain",
     target_moe_expert_tokens: int | None = None,
 ) -> tuple[DatasetProfile, list[dict[str, object]], float, float, list[str]]:
     """Greedily add the dataset with the largest conditional gain.
 
-    Stopping rules (treats targets as floors, not ceilings):
+    Stopping rules:
     - If ``target_gain`` is set, the mix must reach at least that cumulative score
       reduction. Selection continues beyond the floor while the next marginal gain
       is greater than ``min_gain``.
-    - If ``target_tokens`` is set, the mix must contain at least that many tokens.
-      Selection continues beyond the floor while the next marginal gain is greater
-      than ``min_gain``.
+    - ``target_tokens`` is the desired (soft) target and stops selection once reached.
+    - ``min_target_tokens`` is a hard minimum when enough candidates exist. Below it,
+      the least-redundant candidate is accepted even when its gain is non-positive.
     - Otherwise stop when the next best conditional gain <= ``min_gain``.
 
     The inner candidate evaluation is parallelized with a thread pool so that, when
@@ -1243,6 +1358,8 @@ def greedy_select(
 
     cumulative_gain = 0.0
     while remaining:
+        if target_tokens is not None and selected.total_tokens >= target_tokens:
+            break
         best_metric = -float("inf")
         best_name: str | None = None
         best_score = current_score
@@ -1257,7 +1374,11 @@ def greedy_select(
         ) -> None:
             nonlocal best_metric, best_name, best_score, best_tokens, best_gain
             gain = _score - s
-            if target_tokens is not None and target_tokens_mode == "gain_per_token" and cand_tokens > 0:
+            if (
+                target_tokens is not None
+                and target_tokens_mode == "gain_per_token"
+                and cand_tokens > 0
+            ):
                 metric = gain / cand_tokens
             else:
                 metric = gain
@@ -1276,7 +1397,9 @@ def greedy_select(
         else:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_name = {
-                    executor.submit(_greedy_worker, name, selected, profiles[name], ref): name
+                    executor.submit(
+                        _greedy_worker, name, selected, profiles[name], ref
+                    ): name
                     for name in remaining
                 }
                 for future in concurrent.futures.as_completed(future_to_name):
@@ -1286,11 +1409,15 @@ def greedy_select(
         if best_name is None:
             break
 
-        floors_unmet = not _target_tokens_met(selected.total_tokens) or not _moe_met(selected)
+        floors_unmet = not _target_tokens_met(selected.total_tokens) or not _moe_met(
+            selected
+        )
+        minimum_unmet = (
+            min_target_tokens is not None and selected.total_tokens < min_target_tokens
+        )
 
-        # Never add negative-gain (redundant) data just to satisfy a floor: the
-        # floors are soft targets and an unmet floor is reported as a warning.
-        if best_gain <= 0:
+        # Negative-gain data is only admitted to satisfy the explicit minimum.
+        if best_gain <= 0 and not minimum_unmet:
             if target_gain is not None and cumulative_gain < target_gain:
                 warnings.append(
                     f"Target cumulative gain floor {target_gain} not reached "
@@ -1306,19 +1433,25 @@ def greedy_select(
         selected = selected.merge(profiles[best_name])
         current_score = best_score
         cumulative_gain += best_gain
-        order.append({
-            "name": best_name,
-            "conditional_gain": best_gain,
-            "score_after": current_score,
-            "total_tokens": selected.total_tokens,
-        })
+        order.append(
+            {
+                "name": best_name,
+                "conditional_gain": best_gain,
+                "score_after": current_score,
+                "total_tokens": selected.total_tokens,
+            }
+        )
         remaining.remove(best_name)
 
-    if target_tokens is not None and selected.total_tokens < target_tokens:
+    if min_target_tokens is not None and selected.total_tokens < min_target_tokens:
         warnings.append(
-            f"Target token floor {target_tokens} not reached "
-            f"(reached {selected.total_tokens}); remaining datasets are redundant "
-            "(negative conditional gain) and are never added just to fill the floor."
+            f"Minimum token floor {min_target_tokens} not reached "
+            f"(reached {selected.total_tokens}); the candidate pool is exhausted."
+        )
+    elif target_tokens is not None and selected.total_tokens < target_tokens:
+        warnings.append(
+            f"Desired token target {target_tokens} not reached "
+            f"(reached {selected.total_tokens}); positive conditional gain is exhausted."
         )
     if target_moe_expert_tokens is not None and not _moe_met(selected):
         reached = moe_min_expert_tokens(selected, ref)
@@ -1353,28 +1486,34 @@ def _resolve_fallback_threshold(
     return resolve_threshold(fb, expected_total_tokens)
 
 
-def find_fallback_modules(profile: DatasetProfile, threshold_setting: str) -> list[dict[str, object]]:
+def find_fallback_modules(
+    profile: DatasetProfile, threshold_setting: str
+) -> list[dict[str, object]]:
     """List modules whose token count is below the configured fallback threshold."""
 
     expected_total = profile.total_tokens
     if expected_total <= 0:
         return []
 
-    threshold_value, is_percent = _resolve_fallback_threshold(threshold_setting, expected_total)
+    threshold_value, is_percent = _resolve_fallback_threshold(
+        threshold_setting, expected_total
+    )
     if threshold_value is None:
         return []
 
     flagged = []
     for module_name, mod in profile.modules.items():
         if mod.accum.tokens < threshold_value:
-            flagged.append({
-                "module": module_name,
-                "group": mod.group_id,
-                "role": mod.role,
-                "tokens": mod.accum.tokens,
-                "threshold": threshold_value,
-                "is_percent": is_percent,
-            })
+            flagged.append(
+                {
+                    "module": module_name,
+                    "group": mod.group_id,
+                    "role": mod.role,
+                    "tokens": mod.accum.tokens,
+                    "threshold": threshold_value,
+                    "is_percent": is_percent,
+                }
+            )
     return sorted(flagged, key=lambda x: (x["group"], x["module"]))
 
 
@@ -1410,23 +1549,27 @@ def _build_report(
     for name in sorted(profiles):
         p = profiles[name]
         fb = fallback_by_dataset[name]
-        per_dataset.append({
-            "name": name,
-            "standalone_score": round(standalone_scores[name], 6),
-            "total_tokens": p.total_tokens,
-            "fallback_modules": [m["module"] for m in fb],
-            "fallback_count": len(fb),
-        })
+        per_dataset.append(
+            {
+                "name": name,
+                "standalone_score": round(standalone_scores[name], 6),
+                "total_tokens": p.total_tokens,
+                "fallback_modules": [m["module"] for m in fb],
+                "fallback_count": len(fb),
+            }
+        )
 
     greedy_rows = []
     for step, item in enumerate(greedy_order, start=1):
-        greedy_rows.append({
-            "step": step,
-            "dataset": item["name"],
-            "conditional_gain": round(float(item["conditional_gain"]), 6),
-            "score_after": round(float(item["score_after"]), 6),
-            "total_tokens": item["total_tokens"],
-        })
+        greedy_rows.append(
+            {
+                "step": step,
+                "dataset": item["name"],
+                "conditional_gain": round(float(item["conditional_gain"]), 6),
+                "score_after": round(float(item["score_after"]), 6),
+                "total_tokens": item["total_tokens"],
+            }
+        )
 
     score_start = round(final_score + cumulative_gain, 6)
     selected_mix = {
@@ -1439,6 +1582,7 @@ def _build_report(
         "fallback_count": len(fallback_selected),
         "target_gain": config.get("target_gain"),
         "target_tokens": config.get("target_tokens"),
+        "min_target_tokens": config.get("min_target_tokens"),
         "target_tokens_mode": config.get("target_tokens_mode"),
     }
 
@@ -1453,12 +1597,17 @@ def _build_report(
 
     target_gain = config.get("target_gain")
     target_tokens = config.get("target_tokens")
+    min_target_tokens = config.get("min_target_tokens")
     target_tokens_mode = config.get("target_tokens_mode", "gain")
     target_lines = []
     if target_gain is not None:
         target_lines.append(f"- target cumulative gain (floor): {target_gain}")
     if target_tokens is not None:
-        target_lines.append(f"- target tokens (floor): {target_tokens} (selection mode: {target_tokens_mode})")
+        target_lines.append(
+            f"- desired target tokens: {target_tokens} (selection mode: {target_tokens_mode})"
+        )
+    if min_target_tokens is not None:
+        target_lines.append(f"- minimum target tokens (floor): {min_target_tokens}")
 
     warning_lines: list[str] = []
     if warnings:
@@ -1466,56 +1615,67 @@ def _build_report(
         for w in warnings:
             warning_lines.append(f"- {w}")
 
-    markdown_lines = [
-        "# Calibration coverage report",
-        "",
-        "## Reference",
-        f"- model: {config['model']}",
-        f"- reference: {ref.name} ({ref.total_tokens} tokens, {len(ref.modules)} modules)",
-    ] + target_lines + warning_lines + [
-        "",
-        "## Per-dataset standalone scores",
-        "",
-        "| dataset | tokens | standalone score | fallback modules |",
-        "|---------|--------|------------------|------------------|",
-    ]
+    markdown_lines = (
+        [
+            "# Calibration coverage report",
+            "",
+            "## Reference",
+            f"- model: {config['model']}",
+            f"- reference: {ref.name} ({ref.total_tokens} tokens, {len(ref.modules)} modules)",
+        ]
+        + target_lines
+        + warning_lines
+        + [
+            "",
+            "## Per-dataset standalone scores",
+            "",
+            "| dataset | tokens | standalone score | fallback modules |",
+            "|---------|--------|------------------|------------------|",
+        ]
+    )
     for row in per_dataset:
         markdown_lines.append(
             f"| {row['name']} | {row['total_tokens']} | {row['standalone_score']:.6f} | "
             f"{row['fallback_count']} |"
         )
 
-    markdown_lines.extend([
-        "",
-        "## Greedy ranking (ranked by conditional gain)",
-        "",
-        "| step | dataset | conditional gain | score after | tokens |",
-        "|------|---------|------------------|-------------|--------|",
-    ])
+    markdown_lines.extend(
+        [
+            "",
+            "## Greedy ranking (ranked by conditional gain)",
+            "",
+            "| step | dataset | conditional gain | score after | tokens |",
+            "|------|---------|------------------|-------------|--------|",
+        ]
+    )
     for row in greedy_rows:
         markdown_lines.append(
             f"| {row['step']} | {row['dataset']} | {row['conditional_gain']:.6f} | "
             f"{row['score_after']:.6f} | {row['total_tokens']} |"
         )
 
-    markdown_lines.extend([
-        "",
-        f"## Selected mix: {' -> '.join(selected_mix['datasets']) or '(none)'}",
-        f"- score at start: {selected_mix['score_start']:.6f}",
-        f"- final score: {selected_mix['score']:.6f}",
-        f"- cumulative gain: {selected_mix['cumulative_gain']:.6f}",
-        f"- total tokens: {selected_mix['total_tokens']}",
-        f"- fallback modules: {selected_mix['fallback_count']}",
-    ])
+    markdown_lines.extend(
+        [
+            "",
+            f"## Selected mix: {' -> '.join(selected_mix['datasets']) or '(none)'}",
+            f"- score at start: {selected_mix['score_start']:.6f}",
+            f"- final score: {selected_mix['score']:.6f}",
+            f"- cumulative gain: {selected_mix['cumulative_gain']:.6f}",
+            f"- total tokens: {selected_mix['total_tokens']}",
+            f"- fallback modules: {selected_mix['fallback_count']}",
+        ]
+    )
 
     if fallback_selected:
-        markdown_lines.extend([
-            "",
-            "### Would-fall-back modules/experts",
-            "",
-            "| module | role | tokens | threshold |",
-            "|--------|------|--------|-----------|",
-        ])
+        markdown_lines.extend(
+            [
+                "",
+                "### Would-fall-back modules/experts",
+                "",
+                "| module | role | tokens | threshold |",
+                "|--------|------|--------|-----------|",
+            ]
+        )
         for m in fallback_selected:
             threshold_str = _format_threshold(
                 float(m["threshold"]), bool(m["is_percent"]), selected.total_tokens
@@ -1523,63 +1683,71 @@ def _build_report(
             markdown_lines.append(
                 f"| {m['module']} | {m['role']} | {m['tokens']} | {threshold_str} |"
             )
-        markdown_lines.extend([
-            "",
-            "Recommendation: for MoE models consider ``ExpertsRoutingBypass`` or ``ExpertsRoutingOverride`` "
-            + "so starved experts receive calibration data, or add datasets that route to those experts.",
-        ])
+        markdown_lines.extend(
+            [
+                "",
+                "Recommendation: for MoE models consider ``ExpertsRoutingBypass`` or ``ExpertsRoutingOverride`` "
+                + "so starved experts receive calibration data, or add datasets that route to those experts.",
+            ]
+        )
 
-    markdown_lines.extend([
-        "",
-        "## Complementarity vs selected mix",
-        "",
-        "| dataset | conditional gain | verdict |",
-        "|---------|------------------|---------|",
-    ])
+    markdown_lines.extend(
+        [
+            "",
+            "## Complementarity vs selected mix",
+            "",
+            "| dataset | conditional gain | verdict |",
+            "|---------|------------------|---------|",
+        ]
+    )
     for row in complementarity_rows:
         markdown_lines.append(
             f"| {row['name']} | {row['conditional_gain']:.6f} | {row['verdict']} |"
         )
 
-    markdown_lines.extend([
-        "",
-        "## Timing",
-        "",
-        "| stage | seconds |",
-        "|-------|---------|",
-    ])
+    markdown_lines.extend(
+        [
+            "",
+            "## Timing",
+            "",
+            "| stage | seconds |",
+            "|-------|---------|",
+        ]
+    )
     for key, value in timings.items():
         markdown_lines.append(f"| {key} | {value:.3f} |")
 
-    markdown_lines.extend([
-        "",
-        "## How to read this report",
-        "",
-        (
-            "*Score* is the importance-weighted tail under-coverage versus the held-out reference. "
-            "For every target module and input channel we compute:"
-        ),
-        "",
-        "- ``importance = diag / mean(diag)`` (with NaNs clamped to 0) from the reference Hessian diagonal.",
-        "- ``gap = relu(ref_p99 - calib_p99) / ref_p99`` per channel.",
-        "- ``score = sum(importance * gap)`` over all modules/channels.",
-        "",
-        (
-            "A lower score is better. A score of ``0`` means the calibration data covers every "
-            "reference tail. A high score means important reference channels are not seen in the calibration set."
-        ),
-        "",
-        "*Standalone score* is ``score(dataset, ref)`` for each dataset alone.",
-        "",
-        (
-            "*Conditional gain* for a dataset is ``score(mix_before, ref) - score(mix_before + dataset, ref)``: "
-            "how much adding that dataset to the current mix reduces the score. Positive values are complementary; "
-            "zero or negative values are redundant. The greedy ranking always selects the next dataset by this gain. "
-            "*Targets are floors, not ceilings*: once ``--target-gain`` or ``--target-tokens`` is reached, the search "
-            "continues as long as the next conditional gain remains positive. The cumulative gain is "
-            "``score_start - score_final`` for the selected mix."
-        ),
-    ])
+    markdown_lines.extend(
+        [
+            "",
+            "## How to read this report",
+            "",
+            (
+                "*Score* is the importance-weighted tail under-coverage versus the held-out reference. "
+                "For every target module and input channel we compute:"
+            ),
+            "",
+            "- ``importance = diag / mean(diag)`` (with NaNs clamped to 0) from the reference Hessian diagonal.",
+            "- ``gap = relu(ref_p99 - calib_p99) / ref_p99`` per channel.",
+            "- ``score = sum(importance * gap)`` over all modules/channels.",
+            "",
+            (
+                "A lower score is better. A score of ``0`` means the calibration data covers every "
+                "reference tail. A high score means important reference channels are not seen in the calibration set."
+            ),
+            "",
+            "*Standalone score* is ``score(dataset, ref)`` for each dataset alone.",
+            "",
+            (
+                "*Conditional gain* for a dataset is ``score(mix_before, ref) - score(mix_before + dataset, ref)``: "
+                "how much adding that dataset to the current mix reduces the score. Positive values are complementary; "
+                "zero or negative values are redundant. The greedy ranking always selects the next dataset by this gain. "
+                "``--target-tokens`` is a soft desired target and ``--min-target-tokens`` is the minimum acceptable "
+                "mix size. Negative-gain shards are admitted only while that explicit minimum is unmet. The cumulative gain is "
+                "``score_start - score_final`` for the selected mix."
+            ),
+        ]
+    )
 
     return {
         "config": config,
@@ -1596,7 +1764,9 @@ def _build_report(
         "fallback": {
             "threshold_setting": config["fallback_threshold"],
             "selected_mix": fallback_selected,
-            "per_dataset": {name: fallback_by_dataset[name] for name in fallback_by_dataset},
+            "per_dataset": {
+                name: fallback_by_dataset[name] for name in fallback_by_dataset
+            },
         },
         "timings": {k: round(v, 6) for k, v in timings.items()},
         "markdown": "\n".join(markdown_lines),
@@ -1628,8 +1798,12 @@ def main() -> int:
         try:
             from transformers import core_model_loading
 
-            core_model_loading.GLOBAL_WORKERS = max(core_model_loading.GLOBAL_WORKERS, load_workers)
-            print(f"[load] checkpoint I/O workers = {core_model_loading.GLOBAL_WORKERS}")
+            core_model_loading.GLOBAL_WORKERS = max(
+                core_model_loading.GLOBAL_WORKERS, load_workers
+            )
+            print(
+                f"[load] checkpoint I/O workers = {core_model_loading.GLOBAL_WORKERS}"
+            )
         except (ImportError, AttributeError):
             pass
 
@@ -1653,7 +1827,9 @@ def main() -> int:
     tokenizer = _load_tokenizer(args.model, trust_remote_code=args.trust_remote_code)
 
     print(f"[load] Loading model from {args.model} ...")
-    config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+    config = AutoConfig.from_pretrained(
+        args.model, trust_remote_code=args.trust_remote_code
+    )
     model_kwargs: dict[str, object] = {
         "config": config,
         "torch_dtype": dtype,
@@ -1669,7 +1845,9 @@ def main() -> int:
         model_kwargs["device_map"] = "auto"
     model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
     if multi_gpu:
-        print(f"[load] Model sharded across {len(gpu_targets)} GPUs via device_map=auto")
+        print(
+            f"[load] Model sharded across {len(gpu_targets)} GPUs via device_map=auto"
+        )
     else:
         print(f"[load] Moving model to {device} ...")
         model = model.to(device)
@@ -1712,7 +1890,10 @@ def main() -> int:
     if args.moe_expert_coverage:
         if moe_expert_targets:
             handles.extend(register_moe_hooks(moe_expert_targets, context))
-            global MOE_ROUTER_COVERAGE_WEIGHT, MOE_EXPERT_MIN_TOKENS, MOE_EXPERT_DIAG_ENABLED
+            global \
+                MOE_ROUTER_COVERAGE_WEIGHT, \
+                MOE_EXPERT_MIN_TOKENS, \
+                MOE_EXPERT_DIAG_ENABLED
             MOE_ROUTER_COVERAGE_WEIGHT = args.moe_router_coverage_weight
             MOE_EXPERT_MIN_TOKENS = args.moe_expert_min_tokens
             MOE_EXPERT_DIAG_ENABLED = args.moe_expert_diag
@@ -1735,15 +1916,21 @@ def main() -> int:
             profile_name = f"{base_name}_{counter}"
             counter += 1
         profile_names.add(profile_name)
-        print(f"[data] Loading calibration dataset `{profile_name}` from {dataset_path} ...")
-        samples = _load_raw_samples(dataset_path, dataset_name, args.text_separator, output_dir)
+        print(
+            f"[data] Loading calibration dataset `{profile_name}` from {dataset_path} ..."
+        )
+        samples = _load_raw_samples(
+            dataset_path, dataset_name, args.text_separator, output_dir
+        )
         if args.max_samples > 0:
             samples = samples[: args.max_samples]
             print(f"[data]   using first {len(samples)} rows")
         else:
             print(f"[data]   using all {len(samples)} rows")
 
-        profile = DatasetProfile.from_groups(profile_name, target_groups, args.sketch_samples)
+        profile = DatasetProfile.from_groups(
+            profile_name, target_groups, args.sketch_samples
+        )
         context.active_profile = profile
         try:
             scan_dataset(
@@ -1771,7 +1958,9 @@ def main() -> int:
     if args.max_samples > 0:
         ref_samples = ref_samples[: args.max_samples]
 
-    ref = DatasetProfile.from_groups(ref_profile_name, target_groups, args.sketch_samples)
+    ref = DatasetProfile.from_groups(
+        ref_profile_name, target_groups, args.sketch_samples
+    )
     context.active_profile = ref
     try:
         scan_dataset(
@@ -1820,6 +2009,7 @@ def main() -> int:
         args.greedy_threads,
         target_gain=args.target_gain,
         target_tokens=args.target_tokens,
+        min_target_tokens=args.min_target_tokens,
         target_tokens_mode=args.target_tokens_mode,
         target_moe_expert_tokens=args.target_moe_expert_tokens,
     )
@@ -1829,13 +2019,18 @@ def main() -> int:
 
     t = time.perf_counter()
     print("[score] Computing per-dataset fallback lists ...")
-    fallback_by_dataset = {name: find_fallback_modules(p, args.fallback_threshold) for name, p in profiles.items()}
+    fallback_by_dataset = {
+        name: find_fallback_modules(p, args.fallback_threshold)
+        for name, p in profiles.items()
+    }
     fallback_selected = find_fallback_modules(selected, args.fallback_threshold)
     timings["fallback"] = time.perf_counter() - t
 
     t = time.perf_counter()
     print("[score] Computing complementarity vs selected mix ...")
-    greedy_gains = {item["name"]: float(item["conditional_gain"]) for item in greedy_order}
+    greedy_gains = {
+        item["name"]: float(item["conditional_gain"]) for item in greedy_order
+    }
     selected_order = {name: idx for idx, name in enumerate(greedy_gains)}
     complementarity = []
     for name, p in profiles.items():
@@ -1847,11 +2042,14 @@ def main() -> int:
             s = score(merged, ref)
             gain = final_score - s
             verdict = "complementary" if gain > 0 else "redundant"
-        complementarity.append({
-            "name": name,
-            "conditional_gain": gain,
-            "verdict": verdict,
-        })
+        complementarity.append(
+            {
+                "name": name,
+                "conditional_gain": gain,
+                "verdict": verdict,
+            }
+        )
+
     def _sort_complementarity(x: dict[str, object]) -> tuple[int, float, str]:
         if x["name"] in selected_order:
             return (0, float(selected_order[x["name"]]), str(x["name"]))
@@ -1863,7 +2061,10 @@ def main() -> int:
 
     report_config = {
         "model": args.model,
-        "datasets": [f"{path}:{name or ''}" for path, name in map(_parse_dataset_spec, args.dataset)],
+        "datasets": [
+            f"{path}:{name or ''}"
+            for path, name in map(_parse_dataset_spec, args.dataset)
+        ],
         "reference": args.reference,
         "max_samples": args.max_samples,
         "concat_size": args.concat_size,
@@ -1876,6 +2077,7 @@ def main() -> int:
         "apply_chat_template": args.apply_chat_template,
         "target_gain": args.target_gain,
         "target_tokens": args.target_tokens,
+        "min_target_tokens": args.min_target_tokens,
         "target_tokens_mode": args.target_tokens_mode,
         "greedy_threads": args.greedy_threads,
         "target_moe_expert_tokens": args.target_moe_expert_tokens,
