@@ -520,3 +520,32 @@ The requested test command reported `764 passed, 263 skipped, 9 failed`; eight f
 The bitshift case was run isolated and in the full selected set on clean origin and passed in both modes, so it is
 not order-sensitive on origin. No Python files changed (Ruff not applicable), and `git diff --check` was clean.
 The JIT build increased from approximately 16 seconds before specialization to approximately 22 seconds after it.
+
+## 2026-08-24 non-banked G-only Viterbi recurrence
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- Replaced the non-banked full-state `costs`, `next_costs`, and `emission_buf` frontiers with two per-suffix FP32
+  `G` buffers. Emission, predecessor-`G` addition, strict suffix argmin, and compressed backpointer production now
+  run in one suffix-parallel pass per DP step instead of three `at::parallel_for` phases.
+- Preserved the V2/V4 AVX-512 emission instruction order and the ascending-prefix strict-`<` reduction order. Final
+  candidates compare their reconstructed full state indices on equal costs, preserving the original lowest-state
+  tie rule. Saved pre-change states and squared error compare bit-exactly; eager-oracle, ties, weighted, overlap,
+  tail-biting, W1-W8, and planar packing coverage passed.
+- Raw `viterbi_cpu` (batch 1, 128 steps, V2, 65,536 states, transition bits 5; 3 warmups, 21 samples): median
+  5.980552 ms -> 2.438298 ms, **2.45x**. Minima were 5.722426 -> 2.399361 ms. One after sample was a 113.260344 ms
+  scheduler outlier; the median remained in the 2.40-3.07 ms steady cluster.
+- Local before/after tests: focused Viterbi 90 passed / 112 skipped / 653 deselected both times; V2B2-P32 119
+  passed / 12 skipped / 1 unrelated configuration failure both times. The historical L18 V4 loss edge case passed
+  on this host before and after. `git diff --check` passed. Repository-wide Ruff 0.14.2 reported 535 pre-existing
+  Python findings; this scope changes no Python file.
+- Banked scope check: `qvq_viterbi_banked_cpu.cpp` was not modified. Saved artifacts for batches 16/32/64/128 were
+  exact for states, squared error, and segment bank IDs.
+- Rejected banked timings: pre-change medians 99.7/14.5/35.8/69.2 ms; contaminated after runs showed 95.5-800.5 ms
+  spreads and false 0.30-0.78x ratios, with a repeat spanning 18.1-159.4 ms. Because the banked source was unchanged
+  and the host noise was obvious, these numbers are recorded but not used for a performance conclusion.
+- Measurement placement was explicitly
+  `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`;
+  `/proc/self/task/*/status` proved all 32 singleton worker affinities before timing. Runs were exclusive, sequential,
+  and blocking. `scripts/benchmark_qvq_viterbi_banked_cpu.py` drove the banked artifact check; the repository's
+  `scripts/benchmark_qvq_viterbi.py` is CUDA-only, so raw CPU timing called the registered op directly.
