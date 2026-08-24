@@ -198,8 +198,9 @@ def test_qvq_viterbi_opt_repeated_calls_are_deterministic():
 
 @pytest.mark.xfail(
     strict=False,
-    reason="Known opt-kernel discrete defect adjudicated in /home/ubuntu/work/qvq-findings/"
-    "VITERBI_DIVERGENCE_ADJUDICATION.md",
+    reason="Known qvq_cpu_viterbi_opt discrete divergence from qvq_cpu_viterbi at V=2, transition_bits=16, "
+    "steps=32, batch=128; see the 2026-08-24 opt-in Viterbi discrete-divergence defect record in "
+    "CPU_KERNEL_LOG.md",
 )
 def test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence():
     vector_size = 2
