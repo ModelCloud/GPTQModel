@@ -4708,6 +4708,36 @@ def test_bitshift_rejects_invalid_trellis_geometry(kwargs, exception, message):
         bitshift_next_state(torch.tensor(0), torch.tensor(0), **kwargs)
 
 
+def test_qvq_transition_bits_rejects_bools_despite_lru_cache_hash_aliasing():
+    """Deterministic guard for the lru_cache bool-aliasing regression.
+
+    ``qvq_transition_bits`` was once ``lru_cache``-decorated directly; because
+    ``True == 1`` and ``hash(True) == hash(1)``, a cache entry populated by an
+    integer rate was returned verbatim for a boolean rate, silently skipping
+    the ``TypeError`` — but only when suite ordering had already warmed the
+    cache. Reproduce that ordering explicitly: reset the cache, populate it
+    with the aliased integer keys FIRST, then assert booleans still raise and
+    the cached integer results remain intact.
+    """
+
+    from gptqmodel.quantization import qvq_rates as qvq_rates_module
+
+    qvq_rates_module._qvq_transition_bits_cached.cache_clear()
+    assert qvq_transition_bits(1, vector_size=1) == 1
+    with pytest.raises(TypeError, match="rate"):
+        qvq_transition_bits(True, vector_size=1)
+    # rate=0 is rejected before caching (ValueError), so False cannot alias a
+    # cached zero entry — but assert the boolean still raises TypeError first.
+    with pytest.raises(ValueError, match="rate"):
+        qvq_transition_bits(0, vector_size=1)
+    with pytest.raises(TypeError, match="rate"):
+        qvq_transition_bits(False, vector_size=1)
+    # vector_size shares the aliasing hazard through the same cache key.
+    with pytest.raises(ValueError, match="vector size"):
+        qvq_transition_bits(1, vector_size=True)
+    assert qvq_transition_bits(1, vector_size=1) == 1
+
+
 def test_bitshift_rejects_out_of_range_states_and_edges():
     with pytest.raises(ValueError, match="states"):
         bitshift_next_state(
