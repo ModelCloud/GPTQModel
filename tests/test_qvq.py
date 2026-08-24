@@ -4891,6 +4891,103 @@ def test_viterbi_single_step_selects_nearest_code():
     assert torch.allclose(result.values, torch.tensor([[0.1]]))
 
 
+def test_native_viterbi_single_step_overlap_applies_only_initial_constraint():
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
+
+    if not qvq_cpu_supported():
+        pytest.skip("native QVQ CPU kernel unavailable")
+
+    codebook = torch.full((16, 2), 100.0, dtype=torch.float32)
+    codebook[5] = torch.tensor([1.0, 0.0])
+    codebook[6] = torch.tensor([0.0, 0.0])
+    sequences = torch.zeros((1, 1, 2), dtype=torch.float32)
+    overlap = torch.tensor([1], dtype=torch.int64)
+
+    states, squared_error = qvq_cpu_viterbi(
+        sequences,
+        codebook,
+        transition_bits=2,
+        overlap=overlap,
+    )
+
+    # The old step-0 early-continue semantics constrain only the high bits:
+    # valid states are 4..7, so state 6 is the unique exact match. Applying a
+    # final low-bit constraint as well would incorrectly force state 5.
+    assert states.tolist() == [[6]]
+    assert squared_error.tolist() == [0.0]
+
+    def legacy_eager_oracle(sequence, candidate_codebook, transition_bits, required_overlap, step_weights=None):
+        batch_size, step_count, _ = sequence.shape
+        state_count = candidate_codebook.shape[0]
+        suffix_count = state_count >> transition_bits
+        state_ids = torch.arange(state_count, dtype=torch.int64)
+        codebook_norm = candidate_codebook.square().sum(dim=-1)
+
+        def emission(step):
+            target = sequence[:, step]
+            distance = (
+                target.square().sum(dim=-1, keepdim=True)
+                + codebook_norm.unsqueeze(0)
+                - 2 * target @ candidate_codebook.T
+            ).clamp_min_(0)
+            if step_weights is not None:
+                distance *= step_weights[:, step, None]
+            return distance
+
+        costs = emission(0)
+        costs.masked_fill_((state_ids >> transition_bits) != required_overlap[:, None], torch.inf)
+        backpointers = []
+        for step in range(1, step_count):
+            best_cost, best_prefix = costs.reshape(batch_size, 1 << transition_bits, suffix_count).min(dim=1)
+            costs = best_cost[:, state_ids >> transition_bits] + emission(step)
+            backpointers.append(best_prefix)
+
+        # This is intentionally conditional on a transition having occurred:
+        # the old native step-0 early continue skipped its final mask.
+        if step_count > 1:
+            costs.masked_fill_((state_ids & (suffix_count - 1)) != required_overlap[:, None], torch.inf)
+
+        end_state = costs.argmin(dim=1)
+        path = torch.empty((batch_size, step_count), dtype=torch.int64)
+        path[:, -1] = end_state
+        batch_ids = torch.arange(batch_size)
+        for step in range(step_count - 1, 0, -1):
+            suffix = path[:, step] >> transition_bits
+            prefix = backpointers[step - 1][batch_ids, suffix]
+            path[:, step - 1] = prefix * suffix_count + suffix
+        return path, costs[batch_ids, end_state]
+
+    generator = torch.Generator().manual_seed(20260824)
+    for step_count in (1, 2):
+        for transition_bits in range(1, 5):
+            suffix_count = 16 >> transition_bits
+            for iteration in range(8):
+                random_codebook = torch.randint(-3, 4, (16, 2), generator=generator).float()
+                random_sequences = torch.randint(-3, 4, (3, step_count, 2), generator=generator).float()
+                random_overlap = torch.randint(0, suffix_count, (3,), generator=generator)
+                random_weights = (
+                    torch.randint(1, 4, (3, step_count), generator=generator).float()
+                    if iteration % 2
+                    else None
+                )
+                expected_states, expected_error = legacy_eager_oracle(
+                    random_sequences,
+                    random_codebook,
+                    transition_bits,
+                    random_overlap,
+                    random_weights,
+                )
+                actual_states, actual_error = qvq_cpu_viterbi(
+                    random_sequences,
+                    random_codebook,
+                    transition_bits=transition_bits,
+                    overlap=random_overlap,
+                    step_weights=random_weights,
+                )
+                assert torch.equal(actual_states, expected_states)
+                assert torch.equal(actual_error, expected_error)
+
+
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
     generator = torch.Generator().manual_seed(seed)
     shift = qvq_transition_bits(bits)

@@ -532,13 +532,24 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
   candidates compare their reconstructed full state indices on equal costs, preserving the original lowest-state
   tie rule. Saved pre-change states and squared error compare bit-exactly; eager-oracle, ties, weighted, overlap,
   tail-biting, W1-W8, and planar packing coverage passed.
-- Raw `viterbi_cpu` (batch 1, 128 steps, V2, 65,536 states, transition bits 5; 3 warmups, 21 samples): median
-  5.980552 ms -> 2.438298 ms, **2.45x**. Minima were 5.722426 -> 2.399361 ms. One after sample was a 113.260344 ms
-  scheduler outlier; the median remained in the 2.40-3.07 ms steady cluster.
-- Local before/after tests: focused Viterbi 90 passed / 112 skipped / 653 deselected both times; V2B2-P32 119
+- Initial raw `viterbi_cpu` measurement (batch 1, 128 steps, V2, 65,536 states, transition bits 5; 3 warmups, 21
+  samples): median 5.980552 ms -> 2.438298 ms, 2.45x. The authoritative post-review paired rerun used the cached
+  pristine and final fixed shared objects in the same quiet window with 10 warmups and 51 samples: 5.896012 ms ->
+  2.514544 ms, **2.34x** (minima 5.721410 -> 2.484028 ms).
+- Local before/after tests: focused Viterbi 90 -> 91 passed / 112 skipped / 653 deselected (one new regression);
+  V2B2-P32 119
   passed / 12 skipped / 1 unrelated configuration failure both times. The historical L18 V4 loss edge case passed
-  on this host before and after. `git diff --check` passed. Repository-wide Ruff 0.14.2 reported 535 pre-existing
-  Python findings; this scope changes no Python file.
+  on this host before and after. `git diff --check` and Ruff on the changed test passed. Repository-wide Ruff 0.14.2
+  reported 535 pre-existing findings.
+- Blocking defect found in adversarial review: with `state_count=16`, `transition_bits=2`, `overlap=1`, and one
+  step, the first G-only version applied both the initial high-bit and final low-bit constraints and selected state
+  5, while the old step-0 early-continue semantics applied only the initial constraint and selected state 6. The
+  regression was written and observed failing before the kernel fix. Final selection now constrains the suffix only
+  when `step_count > 1`.
+- The new test covers the concrete counterexample plus randomized one- and two-step comparisons against an eager
+  Torch implementation of the legacy recurrence, across transition bits 1-4, overlap values, multiple batches,
+  ties, and weighted/unweighted costs. States and squared errors are exact. The adjacent-step audit found no other
+  first/last-step control-flow mismatch.
 - Banked scope check: `qvq_viterbi_banked_cpu.cpp` was not modified. Saved artifacts for batches 16/32/64/128 were
   exact for states, squared error, and segment bank IDs.
 - Rejected banked timings: pre-change medians 99.7/14.5/35.8/69.2 ms; contaminated after runs showed 95.5-800.5 ms

@@ -16,7 +16,7 @@ it exactly:
 
 | Command | Before | After |
 |---|---:|---:|
-| `pytest tests/test_qvq.py -k "viterbi or tail_biting" -q` | 90 passed, 112 skipped, 653 deselected | 90 passed, 112 skipped, 653 deselected |
+| `pytest tests/test_qvq.py -k "viterbi or tail_biting" -q` | 90 passed, 112 skipped, 653 deselected | 91 passed, 112 skipped, 653 deselected |
 | `pytest tests/test_qvq_v2b2_p32.py -q` | 119 passed, 12 skipped, 1 failed | 119 passed, 12 skipped, 1 failed |
 
 The V2B2 failure is the same pre-existing configuration failure before and after:
@@ -25,9 +25,25 @@ The V2B2 failure is the same pre-existing configuration failure before and after
 kernel. The historically reported L18 V4 `1.19e-6` loss edge case did not fail on this host: its selected path test
 passed before and after.
 
-`git diff --check` passes. Ruff 0.14.2 (the version pinned by `pyproject.toml`) was run repository-wide and reports
-535 pre-existing Python violations; this PR changes no Python file, so there is no changed-Python Ruff finding to
-address within scope.
+`git diff --check` passes. Ruff 0.14.2 passes on the changed test file. A repository-wide run reports 535
+pre-existing Python violations unrelated to this change.
+
+### Adversarial-review correction: single-step overlap
+
+PR review found a real blocking bug in the first version. For `state_count=16`, `transition_bits=2`, `overlap=1`,
+and one step, the old kernel constrained only the initial high bits and could choose state 6. The first G-only
+version also restricted the final suffix and incorrectly chose state 5. The regression test was added first and
+observed failing exactly as reported (`[[5]] != [[6]]`) before kernel code changed.
+
+The fix applies the final suffix restriction only when `step_count > 1`, preserving the old step-0 early-continue
+semantics. The regression includes the concrete state-6 case and a randomized eager-Torch legacy recurrence sweep
+over one and two steps, transition bits 1-4, multiple batches, overlaps, ties, and weighted/unweighted costs. States
+and squared errors compare exactly.
+
+The adjacent-step audit found no second defect. At one step, only emission, the initial high-bit constraint, and
+global final selection apply; there is no backpointer or final low-bit mask. At two steps, `G0` supplies backpointer
+zero, the second fused pass computes `G1`, and the final low-bit constraint applies exactly where the old step-1
+branch applied it. No-overlap behavior and all longer paths are unchanged.
 
 The saved raw-op artifact comparison reported `torch.equal == True` for both selected states and FP32 squared
 error. The focused tests cover deterministic ties, weighted and constrained paths, V2/V4, W1 through W8,
@@ -64,16 +80,18 @@ Before timing, `/proc/self/task/*/status` was asserted to contain all 32 distinc
 above; the process master mask was CPU 24 after OpenMP binding. A mismatch aborted the run. No other Python,
 pytest, or benchmark process exceeded 5% CPU, and sampled host idle was 84–87%. Runs were sequential and blocking.
 
-Raw `gptqmodel_qvq.viterbi_cpu`, batch 1, 128 steps, V2, 65,536 states, transition bits 5, fixed generated inputs,
-3 warmups and 21 samples:
+Raw `gptqmodel_qvq.viterbi_cpu`, batch 1, 128 steps, V2, 65,536 states, transition bits 5, fixed generated inputs.
+The post-fix completion measurement paired the cached pristine and final fixed shared objects in the same quiet
+window, with 10 warmups and 51 samples each:
 
 | Revision | Median | Minimum | Maximum | Exact vs before |
 |---|---:|---:|---:|---:|
-| pristine `ede2695e` | 5.980552 ms | 5.722426 ms | 7.639101 ms | reference |
-| fused G-only | 2.438298 ms | 2.399361 ms | 113.260344 ms | states yes; squared error yes |
+| pristine `ede2695e` | 5.896012 ms | 5.721410 ms | 10.465439 ms | reference |
+| fixed fused G-only | 2.514544 ms | 2.484028 ms | 5.662962 ms | states yes; squared error yes |
 
-Median speedup: **2.45x**. The after maximum is one scheduler outlier; 20/21 after samples were 2.399–8.456 ms,
-and the median lies in the steady 2.40–3.07 ms cluster.
+Post-fix median speedup: **2.34x**. The initial pre-review measurement was 5.980552 -> 2.438298 ms (2.45x), but an
+intermediate post-fix run was noisy and did not reproduce it. The paired 51-sample result above is the authoritative
+completion number.
 
 The repository's `scripts/benchmark_qvq_viterbi.py` is CUDA-only (it requires `--physical-gpu`, an idle NVIDIA
 GPU, and CUDA events), so it cannot measure the requested CPU raw op. The raw op was therefore called directly
@@ -88,5 +106,6 @@ for states, squared error, and bank IDs.
 
 ## Verdict
 
-Accepted: the non-banked raw op is bit-exact and 2.45x faster by pinned median, within the 1.5–3x target. The banked
+Accepted: after the blocking single-step correction, the non-banked raw op is bit-exact and 2.34x faster by pinned
+paired median, within the 1.5–3x target. The banked
 kernel remains out of scope, source-unchanged, suite-non-regressed, and artifact-exact.
