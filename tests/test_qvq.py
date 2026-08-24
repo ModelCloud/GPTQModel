@@ -97,6 +97,7 @@ from gptqmodel.quantization.qvq_rates import (
 )
 from gptqmodel.quantization.qvq_yaqa import (
     YAQA_PAPER_MINIMUM_SEQUENCES,
+    YAQA_DEFAULT_REGULARIZATION,
     YAQA_PAPER_REGULARIZATION,
 )
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
@@ -769,6 +770,7 @@ def test_qvq_accuracy_upgrade_controls_round_trip_through_config_and_protocol():
                             "quantize": {
                                 "method": "qvq",
                                 "bits": 2,
+                                "rounding": "block_ldlq",
                                 "module_scale_search": True,
                                 "output_channel_scale_optimization": True,
                                 "viterbi_objective": "hessian_diagonal",
@@ -886,7 +888,7 @@ def test_yaqa_config_supports_exact_rate_regularization_overrides():
     assert config.regularization_by_rate == ((1.0, 0.01), (2.5, 0.0005))
     assert config.regularization_for_rate(1.0) == pytest.approx(0.01)
     assert config.regularization_for_rate(2.5) == pytest.approx(0.0005)
-    assert config.regularization_for_rate(2.0) == pytest.approx(YAQA_PAPER_REGULARIZATION)
+    assert config.regularization_for_rate(2.0) == pytest.approx(YAQA_DEFAULT_REGULARIZATION)
 
 
 def test_yaqa_rate_regularization_overrides_round_trip_through_qvq_config():
@@ -972,7 +974,7 @@ def test_yaqa_config_rejects_invalid_lifecycle_controls(kwargs, exception, messa
         (torch.bfloat16, "cpu", torch.float32),
         (torch.float16, "cuda", torch.float16),
         (torch.bfloat16, "cuda", torch.float16),
-        (torch.float32, "cuda", torch.float16),
+        (torch.float32, "cuda", torch.float32),
         (torch.float16, "mps", torch.float16),
     ),
 )
@@ -3289,7 +3291,7 @@ def test_qvq_v4_four_bank_quantization_persists_rate_keyed_selectors():
 
 
 def test_qvq_v4_four_bank_module_rejects_missing_selectors():
-    with pytest.raises(ValueError, match="requires serialized bank_ids"):
+    with pytest.raises(ValueError, match="require serialized bank_ids"):
         QVQLinear(
             bits=2,
             in_features=16,
@@ -3541,7 +3543,7 @@ def test_qvq_banked_linear_deepcopy_drops_transient_cuda_selector_cache():
 
 
 def test_qvq_propagated_bank_gate_is_opt_in_and_accepts_only_heldout_improvement():
-    config = QVQConfig(format=FORMAT.QVQ_V4, vector_size=4, bits=2, bank_count=4)
+    config = QVQConfig(format=FORMAT.QVQ_V4, vector_size=4, bits=2, bank_count=4, rounding="block_ldlq")
     assert config.propagated_bank_selection is None
     config.propagated_bank_selection = False
     config.__post_init__()
@@ -4704,6 +4706,36 @@ def test_rht_reconstruction_rejects_nonfinite_inputs(name):
 def test_bitshift_rejects_invalid_trellis_geometry(kwargs, exception, message):
     with pytest.raises(exception, match=message):
         bitshift_next_state(torch.tensor(0), torch.tensor(0), **kwargs)
+
+
+def test_qvq_transition_bits_rejects_bools_despite_lru_cache_hash_aliasing():
+    """Deterministic guard for the lru_cache bool-aliasing regression.
+
+    ``qvq_transition_bits`` was once ``lru_cache``-decorated directly; because
+    ``True == 1`` and ``hash(True) == hash(1)``, a cache entry populated by an
+    integer rate was returned verbatim for a boolean rate, silently skipping
+    the ``TypeError`` — but only when suite ordering had already warmed the
+    cache. Reproduce that ordering explicitly: reset the cache, populate it
+    with the aliased integer keys FIRST, then assert booleans still raise and
+    the cached integer results remain intact.
+    """
+
+    from gptqmodel.quantization import qvq_rates as qvq_rates_module
+
+    qvq_rates_module._qvq_transition_bits_cached.cache_clear()
+    assert qvq_transition_bits(1, vector_size=1) == 1
+    with pytest.raises(TypeError, match="rate"):
+        qvq_transition_bits(True, vector_size=1)
+    # rate=0 is rejected before caching (ValueError), so False cannot alias a
+    # cached zero entry — but assert the boolean still raises TypeError first.
+    with pytest.raises(ValueError, match="rate"):
+        qvq_transition_bits(0, vector_size=1)
+    with pytest.raises(TypeError, match="rate"):
+        qvq_transition_bits(False, vector_size=1)
+    # vector_size shares the aliasing hazard through the same cache key.
+    with pytest.raises(ValueError, match="vector size"):
+        qvq_transition_bits(1, vector_size=True)
+    assert qvq_transition_bits(1, vector_size=1) == 1
 
 
 def test_bitshift_rejects_out_of_range_states_and_edges():

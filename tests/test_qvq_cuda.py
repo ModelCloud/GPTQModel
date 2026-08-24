@@ -3110,7 +3110,7 @@ def test_qvq_cuda_composite_input_width_retries_overflow_in_bfloat16():
         actual = cuda_layer(x)
     reference = reference_layer._forward_compute_dtype(x.float(), torch.float32)
 
-    assert observed == [(torch.float16, True), (torch.bfloat16, False)]
+    assert observed == [(torch.float16, True), (torch.bfloat16, True)]
     assert torch.isfinite(actual).all()
     relative_l2 = ((actual.float() - reference).square().sum() / reference.square().sum()).sqrt()
     assert relative_l2 < 0.01

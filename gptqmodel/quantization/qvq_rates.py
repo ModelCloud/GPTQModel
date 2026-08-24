@@ -50,12 +50,21 @@ def normalize_qvq_rate(rate: float | str | Fraction) -> int | float:
     return normalized.numerator / normalized.denominator
 
 
-@functools.lru_cache(maxsize=128)
 def qvq_transition_bits(rate: float | str | Fraction, *, vector_size: int = QVQ_VECTOR_SIZE) -> int:
     """Return the integer bits appended by one trellis transition."""
 
+    # Validate outside the cache: `True == 1` and `hash(True) == hash(1)`, so a
+    # cached lru_cache entry for an integer rate would otherwise be returned
+    # for a boolean argument instead of raising.
+    if isinstance(rate, bool):
+        raise TypeError("QVQ rate must be an integer, float, string, or Fraction.")
     if isinstance(vector_size, bool) or not isinstance(vector_size, int) or vector_size < 1:
         raise ValueError("QVQ vector size must be a positive integer.")
+    return _qvq_transition_bits_cached(rate, vector_size)
+
+
+@functools.lru_cache(maxsize=128)
+def _qvq_transition_bits_cached(rate: float | str | Fraction, vector_size: int) -> int:
     transition_width = _qvq_rate_fraction(rate) * vector_size
     if transition_width.denominator != 1:
         raise ValueError("QVQ requires `rate * vector_size` to be an integer transition width.")
