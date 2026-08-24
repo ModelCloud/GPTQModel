@@ -29,7 +29,7 @@ def _processor():
     ]
     return QVQProcessor(
         tokenizer=None,
-        qcfg=QVQConfig(bits=2, device="cpu", offload_to_disk=False),
+        qcfg=QVQConfig(bits=2, rounding="block_ldlq", device="cpu", offload_to_disk=False),
         calibration=calibration,
         prepare_dataset_func=_prepared_calibration,
         calibration_concat_size=None,

@@ -31,7 +31,12 @@ def test_qvq_scoped_fractional_rate_metadata_allocates_and_loads_exact_trellis(b
     scoped = ScopedModel.__new__(ScopedModel)
     torch.nn.Module.__init__(scoped)
     scoped.model = TinyModel(installed)
-    scoped.quantize_config = QVQConfig(bits=2, device="cpu", offload_to_disk=False)
+    scoped.quantize_config = QVQConfig(
+        bits=2,
+        rounding="block_ldlq",
+        device="cpu",
+        offload_to_disk=False,
+    )
 
     dynamic = scoped._capture_quantized_layer_dynamic()
     assert dynamic == {"+:.*model\\.layers\\.0\\.proj": {"bits": bits}}
