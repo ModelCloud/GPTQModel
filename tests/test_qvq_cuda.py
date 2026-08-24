@@ -1183,7 +1183,7 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
     fused_sequences = 0
     fused_states = 0
     flip_deltas = []
-    per_family_stats = {}
+    per_category_stats = {}
     generator = torch.Generator(device="cuda").manual_seed(20260901)
 
     def bank_pair(family, xor_related, adversarial_dup):
@@ -1283,7 +1283,7 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
                     (delta / rescore_e[flipped].abs().clamp_min(1e-9)).tolist())
             fused_sequences += batch
             fused_states += states_e.numel()
-            stats = per_family_stats.setdefault(
+            stats = per_category_stats.setdefault(
                 case_key, {"sequences": 0, "states": 0, "flip_sequences": 0, "flip_states": 0})
             stats["sequences"] += batch
             stats["states"] += states_e.numel()
@@ -1295,15 +1295,15 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
     expected_sequences = sum(families * b for (b, *_rest) in cases if families * b >= 40)
     assert fused_sequences == expected_sequences == 11_154, (fused_sequences, expected_sequences)
     assert fused_states == expected_sequences * 128 == 1_427_712, fused_states
-    flip_sequences = sum(s["flip_sequences"] for s in per_family_stats.values())
-    flip_states = sum(s["flip_states"] for s in per_family_stats.values())
+    flip_sequences = sum(s["flip_sequences"] for s in per_category_stats.values())
+    flip_states = sum(s["flip_states"] for s in per_category_stats.values())
     report = {
         "fused_sequences": fused_sequences,
         "fused_states": fused_states,
         "flip_sequences": flip_sequences,
         "flip_states": flip_states,
         "max_flip_rescore_rel": max(flip_deltas, default=0.0),
-        "per_case_family": per_family_stats,
+        "per_case_category": per_category_stats,
     }
     print("fused family-grid stress report:", report)
     # Flip-rate bound: measured-distribution-plus-margin (see the report print

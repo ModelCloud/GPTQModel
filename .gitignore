@@ -206,3 +206,4 @@ tmp
 *.nsys-rep
 *.sqlite
 !artifacts/nsys/*.csv
+!artifacts/ncu/*.csv

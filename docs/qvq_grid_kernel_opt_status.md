@@ -207,8 +207,11 @@ Micro-benchmark (`scripts/benchmark_qvq_family_grid.py`, committed; 3 families x
   rescore within the derived FP32 accumulation bound (2*gamma_138 ~= 1.6e-5 rel + 1e-4 abs for
   the reference form's near-zero-distance cancellation), and each kernel's reported loss must
   match its own path's rescore (traceback/reporting consistency).  Result at the committed
-  seed: **0 flipped sequences / 0 flipped states**, reported per case family.  Tolerances are
-  derived in a comment above the test (FP32 forward-error bound), not chosen ad hoc.
+  seed: **0 flipped sequences / 0 flipped states**, reported per case category (bank-pair kind x adversarial x weighted x constrained).  Tolerances are
+  derived in a comment above the test (FP32 forward-error bound), not chosen ad hoc.  Note the
+  fixed-seed comparison tolerances changed shape, not just direction: rtol tightened 2e-4 -> 4e-5,
+  while atol widened 1e-6 -> 1e-4 to cover the reference emission form's absolute cancellation
+  error on near-zero step distances (it dominates only when the objective itself is ~0).
 * **Reference-path cases stay bit-exact** (small batches, disabled-flag subprocess test).
 * **Quality equivalence**: see the per-module loss table below.
 
