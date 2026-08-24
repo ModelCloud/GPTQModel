@@ -520,3 +520,69 @@ The requested test command reported `764 passed, 263 skipped, 9 failed`; eight f
 The bitshift case was run isolated and in the full selected set on clean origin and passed in both modes, so it is
 not order-sensitive on origin. No Python files changed (Ruff not applicable), and `git diff --check` was clean.
 The JIT build increased from approximately 16 seconds before specialization to approximately 22 seconds after it.
+
+## 2026-08-24 non-banked G-only Viterbi recurrence
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- Replaced the non-banked full-state `costs`, `next_costs`, and `emission_buf` frontiers with two per-suffix FP32
+  `G` buffers. Emission, predecessor-`G` addition, strict suffix argmin, and compressed backpointer production now
+  run in one suffix-parallel pass per DP step instead of three `at::parallel_for` phases.
+- Preserved the V2/V4 AVX-512 emission instruction order and the ascending-prefix strict-`<` reduction order. Final
+  candidates compare their reconstructed full state indices on equal costs, preserving the original lowest-state
+  tie rule. Saved pre-change states and squared error compare bit-exactly; eager-oracle, ties, weighted, overlap,
+  tail-biting, W1-W8, and planar packing coverage passed.
+- Initial raw `viterbi_cpu` measurement (batch 1, 128 steps, V2, 65,536 states, transition bits 5; 3 warmups, 21
+  samples): median 5.980552 ms -> 2.438298 ms, 2.45x. The authoritative post-review paired rerun used the cached
+  pristine and final fixed shared objects in the same quiet window with 10 warmups and 51 samples: 5.896012 ms ->
+  2.514544 ms, **2.34x** (minima 5.721410 -> 2.484028 ms).
+- Local before/after tests: focused Viterbi 90 -> 91 passed / 112 skipped / 653 deselected (one new regression);
+  V2B2-P32 119
+  passed / 12 skipped / 1 unrelated configuration failure both times. The historical L18 V4 loss edge case passed
+  on this host before and after. `git diff --check` and Ruff on the changed test passed. Repository-wide Ruff 0.14.2
+  reported 535 pre-existing findings.
+- Blocking defect found in adversarial review: with `state_count=16`, `transition_bits=2`, `overlap=1`, and one
+  step, the first G-only version applied both the initial high-bit and final low-bit constraints and selected state
+  5, while the old step-0 early-continue semantics applied only the initial constraint and selected state 6. The
+  regression was written and observed failing before the kernel fix. Final selection now constrains the suffix only
+  when `step_count > 1`.
+- The new test covers the concrete counterexample plus randomized one- and two-step comparisons against an eager
+  Torch implementation of the legacy recurrence, across transition bits 1-4, overlap values, multiple batches,
+  ties, and weighted/unweighted costs. States and squared errors are exact. The adjacent-step audit found no other
+  first/last-step control-flow mismatch.
+- A second adversarial review found two native-boundary defects: `-1` conflated "no initial constraint" with a
+  negative overlap, and AVX-512 narrowed a large int64 overlap before checking its range. Tests were written first;
+  a mixed batch returned invalid one-step states 59 and 6, and invalid three-step tracebacks `[12,48,0]` and
+  `[4,16,0]`, instead of zero paths/infinite errors. The high-level quantizer already validates the range, but the
+  Python CPU wrapper and public torch op remain directly reachable. A separate constraint boolean plus an int64
+  `[0,suffix_count)` check before narrowing now implements the invalid-overlap policy identically in AVX-512 and
+  scalar code for one and multiple steps.
+- New coverage includes negative, truncating-large, and mixed valid/invalid batches at one and three steps, checking
+  states and squared error. A deterministic adjacent-boundary fixture proves the two-step final mask is active:
+  unconstrained state 10 has suffix 2, while overlap 1 produces path `[6,9]` with squared error 8.
+- Final focused tests are 95 passed / 112 skipped / 653 deselected (baseline 90 passed; five added cases). V2B2-P32
+  remains 119 passed / 12 skipped / 1 identical unrelated configuration failure. The historical L18 V4 case still
+  passes, and `git diff --check` plus Ruff pass.
+- Post-second-review paired raw timing, using the same explicit placement, verified 32 singleton affinities, 10
+  warmups, and 51 samples: pristine 5.893175 ms median (5.618564 min) -> fixed 2.465951 ms (2.403298 min), **2.39x**.
+  States/error had identical combined SHA-256
+  `5be22fad56a88fff21c3b510ebcf9c982b7fd298e36247a5fa391ba4f563f86e`.
+- A third adversarial review found `suffix_begin + 1` was evaluated before the final overlap range check, causing
+  signed-overflow UB for `INT64_MAX`. The expanded ordinary test passed before the fix because observed wraparound
+  was overwritten; a focused UBSan run reported the overflow explicitly. The addition is now formed only in the
+  valid constrained branch. Invalid mixed-batch coverage includes step counts 1/2/3, `INT64_MIN`, `INT64_MAX`,
+  `suffix_count`, negative values, and a `2**32 + valid_overlap` alias, checking zero paths and infinite errors.
+- Post-third-fix fixed median was 2.502110 ms (minimum 2.386086 ms), consistent with the authoritative 2.465951 ms.
+  Three pristine reruns were rejected for 83-114 ms maxima and unstable 9.160888/7.490947/7.783496 ms medians;
+  no inflated speedup is claimed, and the prior clean paired **2.39x** remains authoritative. Affinity verification
+  and the exact output digest passed in every run.
+- Banked scope check: `qvq_viterbi_banked_cpu.cpp` was not modified. Saved artifacts for batches 16/32/64/128 were
+  exact for states, squared error, and segment bank IDs.
+- Rejected banked timings: pre-change medians 99.7/14.5/35.8/69.2 ms; contaminated after runs showed 95.5-800.5 ms
+  spreads and false 0.30-0.78x ratios, with a repeat spanning 18.1-159.4 ms. Because the banked source was unchanged
+  and the host noise was obvious, these numbers are recorded but not used for a performance conclusion.
+- Measurement placement was explicitly
+  `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`;
+  `/proc/self/task/*/status` proved all 32 singleton worker affinities before timing. Runs were exclusive, sequential,
+  and blocking. `scripts/benchmark_qvq_viterbi_banked_cpu.py` drove the banked artifact check; the repository's
+  `scripts/benchmark_qvq_viterbi.py` is CUDA-only, so raw CPU timing called the registered op directly.

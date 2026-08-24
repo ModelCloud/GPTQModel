@@ -27,6 +27,184 @@ inline int log2_state_count(int64_t state_count) {
   return l;
 }
 
+inline float fused_candidate_scalar(
+    int64_t state_count,
+    int64_t vector_size,
+    const float* codebook_t,
+    const float* codebook_norm,
+    const float* target,
+    float target_norm,
+    float weight,
+    const float* previous_g,
+    int64_t state,
+    int64_t transition_bits) {
+  float dot = 0.0f;
+  for (int64_t v = 0; v < vector_size; ++v) {
+    dot += target[v] * codebook_t[v * state_count + state];
+  }
+  float distance = target_norm + codebook_norm[state] - 2.0f * dot;
+  if (distance < 0.0f) distance = 0.0f;
+  distance *= weight;
+  return distance + (previous_g == nullptr ? 0.0f : previous_g[state >> transition_bits]);
+}
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512dq,fma")))
+static void fused_g_argmin_avx512(
+    int64_t state_count,
+    int64_t vector_size,
+    const float* __restrict__ codebook_t,
+    const float* __restrict__ codebook_norm,
+    const float* __restrict__ target,
+    float target_norm,
+    float weight,
+    const float* __restrict__ previous_g,
+    int64_t transition_bits,
+    int64_t prefix_count,
+    int64_t suffix_count,
+    bool constrain_initial,
+    int64_t required_initial_overlap,
+    float* __restrict__ next_g,
+    int32_t* __restrict__ best_prefix,
+    int64_t suffix_begin,
+    int64_t suffix_end) {
+  const float* c0 = codebook_t;
+  const float* c1 = codebook_t + state_count;
+  const float* c2 = vector_size == 4 ? codebook_t + 2 * state_count : nullptr;
+  const float* c3 = vector_size == 4 ? codebook_t + 3 * state_count : nullptr;
+  const __m512 t0 = _mm512_set1_ps(target[0]);
+  const __m512 t1 = _mm512_set1_ps(target[1]);
+  const __m512 t2 = vector_size == 4 ? _mm512_set1_ps(target[2]) : _mm512_setzero_ps();
+  const __m512 t3 = vector_size == 4 ? _mm512_set1_ps(target[3]) : _mm512_setzero_ps();
+  const __m512 tn = _mm512_set1_ps(target_norm);
+  const __m512 w = _mm512_set1_ps(weight);
+  const __m512 two = _mm512_set1_ps(2.0f);
+  const __m512 zero = _mm512_setzero_ps();
+  const __m512 inf = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+  const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+  const bool initial_overlap_valid =
+      !constrain_initial ||
+      (required_initial_overlap >= 0 && required_initial_overlap < suffix_count);
+  const __m512i required_initial_overlap_v = initial_overlap_valid
+      ? _mm512_set1_epi32(static_cast<int>(required_initial_overlap))
+      : _mm512_setzero_epi32();
+
+  int64_t x = suffix_begin;
+  for (; x + 16 <= suffix_end; x += 16) {
+    __m512 best = inf;
+    __m512i best_h = _mm512_setzero_epi32();
+    for (int64_t h = 0; h < prefix_count; ++h) {
+      const int64_t state = h * suffix_count + x;
+      __m512 dot;
+      if (vector_size == 2) {
+        dot = _mm512_mul_ps(_mm512_loadu_ps(c1 + state), t1);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + state), t0, dot);
+      } else {
+        dot = _mm512_setzero_ps();
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + state), t0, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c1 + state), t1, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c2 + state), t2, dot);
+        dot = _mm512_fmadd_ps(_mm512_loadu_ps(c3 + state), t3, dot);
+      }
+      __m512 value = _mm512_fnmadd_ps(
+          dot, two, _mm512_add_ps(tn, _mm512_loadu_ps(codebook_norm + state)));
+      value = _mm512_max_ps(value, zero);
+      if (weight != 1.0f) {
+        value = _mm512_mul_ps(value, w);
+      }
+      const __m512i states = _mm512_add_epi32(_mm512_set1_epi32(static_cast<int>(state)), lanes);
+      if (previous_g != nullptr) {
+        const __m512i predecessors = _mm512_srli_epi32(states, static_cast<unsigned>(transition_bits));
+        value = _mm512_add_ps(value, _mm512_i32gather_ps(predecessors, previous_g, 4));
+      } else if (constrain_initial && initial_overlap_valid) {
+        const __m512i predecessors = _mm512_srli_epi32(states, static_cast<unsigned>(transition_bits));
+        const __mmask16 valid = _mm512_cmpeq_epi32_mask(predecessors, required_initial_overlap_v);
+        value = _mm512_mask_mov_ps(inf, valid, value);
+      } else if (constrain_initial) {
+        value = inf;
+      }
+      const __mmask16 lower = _mm512_cmp_ps_mask(value, best, _CMP_LT_OQ);
+      best = _mm512_mask_mov_ps(best, lower, value);
+      best_h = _mm512_mask_mov_epi32(best_h, lower, _mm512_set1_epi32(static_cast<int>(h)));
+    }
+    _mm512_storeu_ps(next_g + x, best);
+    _mm512_storeu_si512(reinterpret_cast<__m512i*>(best_prefix + x), best_h);
+  }
+  for (; x < suffix_end; ++x) {
+    float best = std::numeric_limits<float>::infinity();
+    int32_t best_h = 0;
+    for (int64_t h = 0; h < prefix_count; ++h) {
+      const int64_t state = h * suffix_count + x;
+      float value = fused_candidate_scalar(
+          state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
+          weight, previous_g, state, transition_bits);
+      if (previous_g == nullptr && constrain_initial &&
+          (!initial_overlap_valid || (state >> transition_bits) != required_initial_overlap)) {
+        value = std::numeric_limits<float>::infinity();
+      }
+      if (value < best) {
+        best = value;
+        best_h = static_cast<int32_t>(h);
+      }
+    }
+    next_g[x] = best;
+    best_prefix[x] = best_h;
+  }
+}
+#endif
+
+static void fused_g_argmin(
+    int64_t state_count,
+    int64_t vector_size,
+    const float* codebook_t,
+    const float* codebook_norm,
+    const float* target,
+    float target_norm,
+    float weight,
+    const float* previous_g,
+    int64_t transition_bits,
+    int64_t prefix_count,
+    int64_t suffix_count,
+    bool constrain_initial,
+    int64_t required_initial_overlap,
+    float* next_g,
+    int32_t* best_prefix,
+    int64_t suffix_begin,
+    int64_t suffix_end) {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+  if (cpu_has_avx512()) {
+    fused_g_argmin_avx512(
+        state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
+        weight, previous_g, transition_bits, prefix_count, suffix_count,
+        constrain_initial, required_initial_overlap, next_g, best_prefix, suffix_begin, suffix_end);
+    return;
+  }
+#endif
+  const bool initial_overlap_valid =
+      !constrain_initial ||
+      (required_initial_overlap >= 0 && required_initial_overlap < suffix_count);
+  for (int64_t x = suffix_begin; x < suffix_end; ++x) {
+    float best = std::numeric_limits<float>::infinity();
+    int32_t best_h = 0;
+    for (int64_t h = 0; h < prefix_count; ++h) {
+      const int64_t state = h * suffix_count + x;
+      float value = fused_candidate_scalar(
+          state_count, vector_size, codebook_t, codebook_norm, target, target_norm,
+          weight, previous_g, state, transition_bits);
+      if (previous_g == nullptr && constrain_initial &&
+          (!initial_overlap_valid || (state >> transition_bits) != required_initial_overlap)) {
+        value = std::numeric_limits<float>::infinity();
+      }
+      if (value < best) {
+        best = value;
+        best_h = static_cast<int32_t>(h);
+      }
+    }
+    next_g[x] = best;
+    best_prefix[x] = best_h;
+  }
+}
+
 }  // namespace
 
 std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
@@ -58,9 +236,6 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
 
   int64_t prefix_count = static_cast<int64_t>(1) << transition_bits;
   int64_t suffix_count = static_cast<int64_t>(1) << (l - transition_bits);
-  int64_t overlap_bits = l - transition_bits;
-  int64_t overlap_mask = (static_cast<int64_t>(1) << overlap_bits) - 1;
-
   bool has_overlap = overlap.has_value() && overlap->defined();
   bool has_step_weights = step_weights.has_value() && step_weights->defined();
 
@@ -118,16 +293,12 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
     }
   }
 
-  std::vector<float> costs(static_cast<size_t>(batch_size) * state_count, 0.0f);
-  std::vector<float> next_costs(static_cast<size_t>(batch_size) * state_count, 0.0f);
-  std::vector<float> emission_buf(static_cast<size_t>(batch_size) * state_count, 0.0f);
-  std::vector<float> best_cost(static_cast<size_t>(batch_size) * suffix_count, 0.0f);
+  std::vector<float> g_a(static_cast<size_t>(batch_size) * suffix_count, 0.0f);
+  std::vector<float> g_b(static_cast<size_t>(batch_size) * suffix_count, 0.0f);
   std::vector<int32_t> best_prefix(static_cast<size_t>(batch_size) * suffix_count, 0);
 
-  auto* costs_a = costs.data();
-  auto* next_costs_a = next_costs.data();
-  auto* emission_a = emission_buf.data();
-  auto* best_cost_a = best_cost.data();
+  auto* previous_g = g_a.data();
+  auto* next_g = g_b.data();
   auto* best_prefix_a = best_prefix.data();
 
   const float inf = std::numeric_limits<float>::infinity();
@@ -145,134 +316,68 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
     }
   }
 
-  // Process the DP step by step.  Emission and the per-step reductions are
-  // parallelised over the state/suffix dimension so all CPU cores are used even
-  // for batch_size == 1.
+  // G-only recurrence: fuse emission, predecessor-G addition, suffix argmin,
+  // and compressed backpointer production in one suffix-parallel pass.
   for (int64_t step = 0; step < step_count; ++step) {
-    // 1. Emission distances for all batches.
-    int64_t grain = std::max<int64_t>(256, state_count / (at::get_num_threads() * 4));
-    at::parallel_for(0, state_count, grain, [&](int64_t start_state, int64_t end_state) {
+    int64_t suffix_grain = std::max<int64_t>(16, suffix_count / (at::get_num_threads() * 4));
+    at::parallel_for(0, suffix_count, suffix_grain, [&](int64_t start_suffix, int64_t end_suffix) {
       for (int64_t b = 0; b < batch_size; ++b) {
         const float* target = seq_ptr + (b * step_count + step) * vector_size;
         float target_norm = target_norms[b * step_count + step];
         float w = has_step_weights ? step_weights_ptr[b * step_count + step] : 1.0f;
-        float* emission_b = emission_a + b * state_count;
-        emit_distance(
-            state_count,
-            vector_size,
-            codebook_t_ptr,
-            codebook_norm.data(),
-            target,
-            target_norm,
-            w,
-            emission_b,
-            start_state,
-            end_state);
+        const float* previous_g_b = step == 0 ? nullptr : previous_g + b * suffix_count;
+        const bool constrain_initial = step == 0 && has_overlap;
+        const int64_t required_initial_overlap = constrain_initial ? overlap_ptr[b] : 0;
+        fused_g_argmin(
+            state_count, vector_size, codebook_t_ptr, codebook_norm.data(), target,
+            target_norm, w, previous_g_b, transition_bits, prefix_count, suffix_count,
+            constrain_initial, required_initial_overlap, next_g + b * suffix_count,
+            best_prefix_a + b * suffix_count, start_suffix, end_suffix);
       }
     });
 
-    if (step == 0) {
-      // First step: costs are just the (masked) emission.
-      if (has_overlap) {
-        for (int64_t b = 0; b < batch_size; ++b) {
-          float* costs_b = costs_a + b * state_count;
-          const float* emission_b = emission_a + b * state_count;
-          int64_t overlap_val = overlap_ptr[b];
-          // Only the block of states whose high bits equal overlap_val is legal.
-          int64_t block_start = overlap_val * prefix_count;
-          int64_t block_end = block_start + prefix_count;
-          if (block_start < 0) block_start = 0;
-          if (block_end > state_count) block_end = state_count;
-          std::memcpy(costs_b, emission_b, static_cast<size_t>(state_count) * sizeof(float));
-          for (int64_t s = 0; s < block_start; ++s) costs_b[s] = inf;
-          for (int64_t s = block_end; s < state_count; ++s) costs_b[s] = inf;
-        }
-      } else {
-        std::memcpy(costs_a, emission_a, costs.size() * sizeof(float));
-      }
-      continue;
-    }
-
-    // 2. Reduce previous costs over prefix dimension per (batch, suffix).
-    int64_t suffix_grain = std::max<int64_t>(16, suffix_count / (at::get_num_threads() * 4));
-    at::parallel_for(0, suffix_count, suffix_grain, [&](int64_t start_suffix, int64_t end_suffix) {
+    if (step < step_count - 1) {
       for (int64_t b = 0; b < batch_size; ++b) {
-        const float* costs_b = costs_a + b * state_count;
-        float* best_cost_b = best_cost_a + b * suffix_count;
-        int32_t* best_prefix_b = best_prefix_a + b * suffix_count;
-        column_argmin(
-            costs_b,
-            prefix_count,
-            suffix_count,
-            best_cost_b,
-            best_prefix_b,
-            start_suffix,
-            end_suffix);
-      }
-    });
-
-    // 3. Combine transition cost with emission for the next costs.
-    int64_t prefix_grain = std::max<int64_t>(prefix_count, state_count / (at::get_num_threads() * 4));
-    // Round grain up to a multiple of prefix_count to keep broadcast_add block-aligned.
-    prefix_grain = ((prefix_grain + prefix_count - 1) / prefix_count) * prefix_count;
-    at::parallel_for(0, state_count, prefix_grain, [&](int64_t start_state, int64_t end_state) {
-      for (int64_t b = 0; b < batch_size; ++b) {
-        const float* emission_b = emission_a + b * state_count;
-        const float* best_cost_b = best_cost_a + b * suffix_count;
-        float* next_b = next_costs_a + b * state_count;
-        broadcast_add(
-            emission_b,
-            best_cost_b,
-            prefix_count,
-            suffix_count,
-            next_b,
-            start_state,
-            end_state);
-      }
-    });
-
-    // 4. Apply end-of-sequence overlap mask if requested.
-    if (has_overlap && step == step_count - 1) {
-      for (int64_t b = 0; b < batch_size; ++b) {
-        float* next_b = next_costs_a + b * state_count;
-        int64_t overlap_val = overlap_ptr[b];
-        for (int64_t s = 0; s < state_count; ++s) {
-          if ((s & overlap_mask) != overlap_val) {
-            next_b[s] = inf;
+        int64_t bp_step = step;
+        if (use_int16) {
+          int16_t* bp = static_cast<int16_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
+          const int32_t* bp_src = best_prefix_a + b * suffix_count;
+          for (int64_t col = 0; col < suffix_count; ++col) {
+            bp[col] = static_cast<int16_t>(bp_src[col]);
           }
+        } else {
+          int32_t* bp = static_cast<int32_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
+          const int32_t* bp_src = best_prefix_a + b * suffix_count;
+          std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
         }
       }
     }
-
-    // 5. Store backpointers.
-    for (int64_t b = 0; b < batch_size; ++b) {
-      int64_t bp_step = step - 1;
-      if (use_int16) {
-        int16_t* bp = static_cast<int16_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
-        const int32_t* bp_src = best_prefix_a + b * suffix_count;
-        for (int64_t col = 0; col < suffix_count; ++col) {
-          bp[col] = static_cast<int16_t>(bp_src[col]);
-        }
-      } else {
-        int32_t* bp = static_cast<int32_t*>(bp_ptr) + (bp_step * batch_size + b) * suffix_count;
-        const int32_t* bp_src = best_prefix_a + b * suffix_count;
-        std::memcpy(bp, bp_src, static_cast<size_t>(suffix_count) * sizeof(int32_t));
-      }
-    }
-
-    std::swap(costs_a, next_costs_a);
+    std::swap(previous_g, next_g);
   }
 
   // Find end state per batch and traceback.
   for (int64_t b = 0; b < batch_size; ++b) {
-    float* final_costs = costs_a + b * state_count;
+    const float* final_g = previous_g + b * suffix_count;
+    const int32_t* final_prefix = best_prefix_a + b * suffix_count;
     float best_final = inf;
     int64_t end_state = 0;
-    for (int64_t s = 0; s < state_count; ++s) {
-      float c = final_costs[s];
-      if (c < best_final) {
+    const bool constrain_final = has_overlap && step_count > 1;
+    int64_t suffix_begin = constrain_final ? overlap_ptr[b] : 0;
+    int64_t suffix_end = suffix_count;
+    if (suffix_begin < 0 || suffix_begin >= suffix_count) {
+      // Match the old full-frontier mask: an invalid overlap leaves every
+      // final cost at infinity and therefore retains end state zero.
+      suffix_begin = 0;
+      suffix_end = 0;
+    } else if (constrain_final) {
+      suffix_end = suffix_begin + 1;
+    }
+    for (int64_t x = suffix_begin; x < suffix_end; ++x) {
+      float c = final_g[x];
+      int64_t candidate_state = static_cast<int64_t>(final_prefix[x]) * suffix_count + x;
+      if (c < best_final || (c == best_final && candidate_state < end_state)) {
         best_final = c;
-        end_state = s;
+        end_state = candidate_state;
       }
     }
     se_ptr[b] = best_final;
