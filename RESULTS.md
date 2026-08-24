@@ -16,7 +16,7 @@ remains at baseline; the focused total increases only by four added regression c
 
 | Command | Before | After |
 |---|---:|---:|
-| `pytest tests/test_qvq.py -k "viterbi or tail_biting" -q` | 90 passed, 112 skipped, 653 deselected | 94 passed, 112 skipped, 653 deselected |
+| `pytest tests/test_qvq.py -k "viterbi or tail_biting" -q` | 90 passed, 112 skipped, 653 deselected | 95 passed, 112 skipped, 653 deselected |
 | `pytest tests/test_qvq_v2b2_p32.py -q` | 119 passed, 12 skipped, 1 failed | 119 passed, 12 skipped, 1 failed |
 
 The V2B2 failure is the same pre-existing configuration failure before and after:
@@ -60,9 +60,21 @@ policy is now explicit: a separate boolean distinguishes absence of a constraint
 `[0, suffix_count)` before AVX narrowing, and invalid values create an all-infinity first frontier. AVX-512 and
 scalar paths therefore return an all-zero path with infinite error for every step count, including mixed batches.
 
-Coverage includes negative and truncating-large overlaps in mixed batches for one and three steps, asserting both
+Coverage includes negative and truncating-large overlaps in mixed batches for one, two, and three steps, asserting both
 states and squared errors. A deterministic two-step fixture also guarantees the final mask is exercised: the
 unconstrained unique final state is 10 (suffix 2), while overlap 1 produces `[6, 9]` with error 8.
+
+### Adversarial-review correction: final-range overflow
+
+A third review found that final selection formed `suffix_begin + 1` before checking whether `suffix_begin` was a
+valid suffix. With `INT64_MAX` and more than one step this is signed-overflow undefined behavior. The expanded
+ordinary regression passed on the unfixed binary because this compiler's observed wraparound was immediately
+overwritten by the following invalid-range branch; no output failure is claimed. A focused UBSan reproduction of
+the same expression reported `signed integer overflow: 9223372036854775807 + 1 cannot be represented`.
+
+Final selection now forms `suffix_begin + 1` only inside the valid, constrained branch. The invalid-overlap matrix
+now covers step counts 1, 2, and 3; `INT64_MIN`, `INT64_MAX`, `suffix_count` exactly, negative values, and a
+`2**32 + valid_overlap` truncation alias in a mixed batch. All assert zero paths and infinite errors.
 
 The saved raw-op artifact comparison reported `torch.equal == True` for both selected states and FP32 squared
 error. The focused tests cover deterministic ties, weighted and constrained paths, V2/V4, W1 through W8,
@@ -111,6 +123,12 @@ window, with 10 warmups and 51 samples each:
 Post-second-review median speedup: **2.39x**. The output tensors have the same combined SHA-256 digest,
 `5be22fad56a88fff21c3b510ebcf9c982b7fd298e36247a5fa391ba4f563f86e`. The initial pre-review measurement was
 5.980552 -> 2.438298 ms (2.45x); the paired 51-sample result above is authoritative.
+
+After the third fix, the fixed binary measured 2.502110 ms median (2.386086 ms minimum, 7.950348 ms maximum),
+consistent with the authoritative 2.465951 ms fixed median. Three same-protocol pristine attempts were rejected as
+contaminated: medians 9.160888, 7.490947, and 7.783496 ms with maxima 83.325833, 92.529305, and 114.239829 ms.
+Because those baselines were unstable, no new speedup is computed; the prior clean paired **2.39x** remains the
+reported before/after result. Every run verified the same 32 singleton affinities and identical output digest.
 
 The repository's `scripts/benchmark_qvq_viterbi.py` is CUDA-only (it requires `--physical-gpu`, an idle NVIDIA
 GPU, and CUDA events), so it cannot measure the requested CPU raw op. The raw op was therefore called directly

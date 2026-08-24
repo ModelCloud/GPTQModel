@@ -363,12 +363,14 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu(
     int64_t end_state = 0;
     const bool constrain_final = has_overlap && step_count > 1;
     int64_t suffix_begin = constrain_final ? overlap_ptr[b] : 0;
-    int64_t suffix_end = constrain_final ? suffix_begin + 1 : suffix_count;
+    int64_t suffix_end = suffix_count;
     if (suffix_begin < 0 || suffix_begin >= suffix_count) {
       // Match the old full-frontier mask: an invalid overlap leaves every
       // final cost at infinity and therefore retains end state zero.
       suffix_begin = 0;
       suffix_end = 0;
+    } else if (constrain_final) {
+      suffix_end = suffix_begin + 1;
     }
     for (int64_t x = suffix_begin; x < suffix_end; ++x) {
       float c = final_g[x];

@@ -560,13 +560,22 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
 - New coverage includes negative, truncating-large, and mixed valid/invalid batches at one and three steps, checking
   states and squared error. A deterministic adjacent-boundary fixture proves the two-step final mask is active:
   unconstrained state 10 has suffix 2, while overlap 1 produces path `[6,9]` with squared error 8.
-- Final focused tests are 94 passed / 112 skipped / 653 deselected (baseline 90 passed; four added cases). V2B2-P32
+- Final focused tests are 95 passed / 112 skipped / 653 deselected (baseline 90 passed; five added cases). V2B2-P32
   remains 119 passed / 12 skipped / 1 identical unrelated configuration failure. The historical L18 V4 case still
   passes, and `git diff --check` plus Ruff pass.
 - Post-second-review paired raw timing, using the same explicit placement, verified 32 singleton affinities, 10
   warmups, and 51 samples: pristine 5.893175 ms median (5.618564 min) -> fixed 2.465951 ms (2.403298 min), **2.39x**.
   States/error had identical combined SHA-256
   `5be22fad56a88fff21c3b510ebcf9c982b7fd298e36247a5fa391ba4f563f86e`.
+- A third adversarial review found `suffix_begin + 1` was evaluated before the final overlap range check, causing
+  signed-overflow UB for `INT64_MAX`. The expanded ordinary test passed before the fix because observed wraparound
+  was overwritten; a focused UBSan run reported the overflow explicitly. The addition is now formed only in the
+  valid constrained branch. Invalid mixed-batch coverage includes step counts 1/2/3, `INT64_MIN`, `INT64_MAX`,
+  `suffix_count`, negative values, and a `2**32 + valid_overlap` alias, checking zero paths and infinite errors.
+- Post-third-fix fixed median was 2.502110 ms (minimum 2.386086 ms), consistent with the authoritative 2.465951 ms.
+  Three pristine reruns were rejected for 83-114 ms maxima and unstable 9.160888/7.490947/7.783496 ms medians;
+  no inflated speedup is claimed, and the prior clean paired **2.39x** remains authoritative. Affinity verification
+  and the exact output digest passed in every run.
 - Banked scope check: `qvq_viterbi_banked_cpu.cpp` was not modified. Saved artifacts for batches 16/32/64/128 were
   exact for states, squared error, and segment bank IDs.
 - Rejected banked timings: pre-change medians 99.7/14.5/35.8/69.2 ms; contaminated after runs showed 95.5-800.5 ms

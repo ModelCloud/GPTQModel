@@ -5015,7 +5015,7 @@ def test_native_viterbi_two_step_overlap_applies_final_constraint():
     assert squared_error.tolist() == [8.0]
 
 
-@pytest.mark.parametrize("step_count", [1, 3])
+@pytest.mark.parametrize("step_count", [1, 2, 3])
 def test_native_viterbi_invalid_overlap_is_all_infinity(step_count):
     from gptqmodel.utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
 
@@ -5024,8 +5024,19 @@ def test_native_viterbi_invalid_overlap_is_all_infinity(step_count):
 
     generator = torch.Generator().manual_seed(20260825 + step_count)
     codebook = torch.randn((64, 2), generator=generator)
-    sequences = torch.randn((3, step_count, 2), generator=generator)
-    overlaps = torch.tensor([2, -1, (1 << 32) + 1], dtype=torch.int64)
+    sequences = torch.randn((7, step_count, 2), generator=generator)
+    overlaps = torch.tensor(
+        [
+            2,
+            -1,
+            16,
+            (1 << 32) + 2,
+            torch.iinfo(torch.int64).min,
+            torch.iinfo(torch.int64).max,
+            17,
+        ],
+        dtype=torch.int64,
+    )
 
     states, squared_error = qvq_cpu_viterbi(
         sequences,
@@ -5044,7 +5055,7 @@ def test_native_viterbi_invalid_overlap_is_all_infinity(step_count):
     # overlap deterministically produce the native op's documented sentinel.
     assert torch.equal(states[:1], valid_states)
     assert torch.equal(squared_error[:1], valid_error)
-    assert states[1:].tolist() == [[0] * step_count, [0] * step_count]
+    assert states[1:].tolist() == [[0] * step_count] * 6
     assert torch.isinf(squared_error[1:]).all()
 
 
