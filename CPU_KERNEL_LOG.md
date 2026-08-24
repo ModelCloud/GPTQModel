@@ -1014,3 +1014,94 @@ has been annotated in place. The separately reported V=2 reduction-order finding
 not merely fail on pristine `d9d37181` — it terminates the interpreter with `Fatal Python error: Floating-point
 exception` (SIGFPE), reachable from the public banked Viterbi op. The same test passes at `1c567c00`. That crash,
 not the speedup, is the strongest justification for that change.
+
+## 2026-08-24 QVQ Viterbi V=2 FP32 reduction-order defect record (not a performance entry)
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 32 logical cores,
+          OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+Credit: the disagreement was identified by an independent cross-vendor review of `qvq_viterbi_cpu.cpp`.
+
+- **MEASURED by disassembly** (gcc 15.2.0, `-O3`, default `-ffp-contract=fast`), `origin/main` kernel
+  `41309aa602d31edec38af37a855ce369`, object `qvq_viterbi_cpu.o`, function `fused_g_argmin_avx512`:
+  the V=2 emission dot product was computed two different ways in one file. Vector body at `0x6a2`:
+  `vmulps (%r15),%zmm13` then `vfmadd231ps (%r13),%zmm12`, i.e. `RN(c0*t0 + RN(c1*t1))` -- the **c1**
+  product is pre-rounded. Scalar helper `fused_candidate_scalar`, entered for V<=2 at `0x471`:
+  `vxorps %xmm2` (zero seed), then `vfmadd231ss` on c0 at `0x37a` and on c1 at `0x39a`, i.e.
+  `RN(c1*t1 + RN(c0*t0))` -- the **c0** product is pre-rounded. The scalar helper serves both the
+  trailing `chunk mod 16` columns of every `at::parallel_for` chunk and the entire non-AVX fallback.
+- **MEASURED by disassembly** after the fix (object `e223b567dff12df2`): the vector body becomes
+  `vmovaps %zmm11,%zmm0` (zero seed), `vfmadd132ps (%r13),%zmm14` (c0), `vfmadd231ps (%r9),%zmm12`
+  (c1) at `0x6c3`/`0x6d2`. The two memory operands swap order so c0 is consumed first, matching the
+  scalar chain. V=4 already used this order and is byte-for-byte unchanged.
+- **MEASURED:** which path a suffix column takes depends on `at::get_num_threads()`. `at::parallel_for`
+  uses `#pragma omp parallel` with no `num_threads` clause; `omp_get_dynamic()` is 0 on this host and
+  the team size equals the request exactly, including under heavy load from a second tenant. For
+  `suffix_count = 512` the chunk is `divup(512, min(threads, 32))`: 16 -> 32 and 32 -> 16 leave no
+  scalar remainder, 24 -> 22 sends the trailing 6 columns of every chunk through the scalar helper.
+- **MEASURED severity, `origin/main` kernel.** One configuration diverges: seed 149, one row sliced
+  from a 128-row draw, V=2, transition bits 7, 128 steps, batch 1, tail-biting overlap. 16 threads vs
+  24 threads differ in **54 of 128 selected states** and **13 of 28 packed trellis words**, with a
+  squared-error delta of 7.15256e-07; 32 threads match 16 exactly. Confirmed with one thread count per
+  fresh process and bit-identical across 3 repeats at each thread count, so this is not a race.
+- **MEASURED severity, independent sweep, same kernel: 0 divergences in 572 completed configurations**
+  (508 direct-construction: 64 seeds x transition bits 5/6/7/8 x overlap on/off x 32 steps; 64
+  sliced-construction: 64 seeds x transition bits 7 x 128 steps). 0 unstable, 0 skipped. Detection was
+  proven live throughout by a positive-control canary re-run every 20-50 configurations, which
+  reproduced the seed-149 divergence 16 of 16 times. The 572 swept configurations are disjoint from
+  seed 149. **The defect is therefore real and OBSERVED, not latent -- but rare: one known divergent
+  configuration and zero further instances in 572 swept.**
+- **MEASURED after the fix:** the same 64 sliced configurations and seed 149 itself all show 0
+  divergences across 16/24/32 threads.
+- **MEASURED:** `step_count == 0` segfaulted the interpreter on `origin/main` (exit 139); the
+  traceback indexes one element before the start of the output buffer. A `TORCH_CHECK` at the op
+  boundary now rejects it with `RuntimeError`. The thread-invariance regression FAILS and the empty
+  step regression SEGFAULTS on `origin/main`; both pass here.
+- **MEASURED, audit of sibling kernels (reported, not edited).**
+  `qvq_viterbi_cpu_opt.cpp`: at **V=2 the two paths agree**. Its vector body pre-rounds c1
+  (`_mm512_mul_ps(v1, t1v)`) and its scalar head/tail `target[0]*c0[s] + target[1]*c1[s]` also
+  pre-rounds c1, because gcc contracts the *first* product into the FMA and leaves the *second* as a
+  `vmulss` (verified with a standalone probe and in the shipped object at `0x6b0` and `0x740`). At
+  **V=4 they disagree**: the vector body is zero-seeded c0->c3 (operand order `rsi,rbx,r12,r10` at
+  `0x2ca`) while the scalar expression pre-rounds c1 (`mul rbx` then `rsi,r12,r10` at `0x220`).
+  `qvq_gemv_cpu.cpp`: no analogous defect -- every accumulator is `_mm512_setzero_ps()` followed by
+  `_mm512_fmadd_ps` chains over fixed 16-lane tiles with no head/tail split, and `accumulate_tile_scalar`
+  is selected only by `cpu_has_avx512()` for the whole run, never mixed with the vector path.
+  `qvq_hadamard_cpu.cpp`: no analogous defect -- the transform is `_mm512_add_ps`/`_mm512_sub_ps`
+  butterflies with no dot product and no FMA; its scalar (stride < 16) and vector (stride >= 16) paths
+  cover disjoint stride ranges and each output is a single add or sub of the same two inputs.
+- **INFERRED** from the two probes above, not measured across toolchains: the V=2 agreement in
+  `qvq_viterbi_cpu_opt.cpp` is incidental to gcc's contraction choice rather than structural. A
+  different compiler, or `-ffp-contract=off`, would break it.
+- **MEASURED, performance, no regression.** 6 interleaved A/B rounds (before/after alternating within
+  one series to cancel drift), 5 warmups and 21 samples per round, `OMP_NUM_THREADS=32`, the explicit
+  32 singleton placement recorded below, cgroup 98.99%-99.23% idle before each series. Min-of-mins
+  moved +1.3% / -0.1% / +0.7% for V2/t7/128 steps/batch 32, batch 8, and V2/t5/batch 32 respectively;
+  median-of-medians moved -4.3% / +1.9% / +5.8%. The medians move in both directions across rounds and
+  single-run spreads reached 60 ms against 25 ms medians, so the deltas are run-to-run noise on this
+  shared host, not a regression.
+- **MEASURED, gates.** Before (`origin/main` kernel): `test_qvq.py` 658 passed / 248 skipped / 2
+  deselected (the two new regressions cannot run: one fails, one segfaults the session);
+  `test_qvq_v2b2_p32.py` 120 passed / 12 skipped; `test_qvq_viterbi_cpu_opt.py` 18 passed / 1 xfailed.
+  After: 660 passed / 248 skipped; 120 passed / 12 skipped; 18 passed / 1 xfailed.
+- **MEASURED:** correcting the production reduction order shifted the production-vs-opt cost delta in
+  `test_qvq_viterbi_opt_large_magnitudes` to 0.046875 absolute on a cost of about 1.54e5, i.e.
+  3.04e-07 relative or roughly two float32 ulp, which exceeded that assertion's absolute-only
+  `atol=1.25e-5, rtol=0`. The discrete `torch.equal` assertion in the same test still passes exactly.
+  The absolute bound is retained and `rtol=2e-5` added -- the same rtol the oracle assertion a few
+  lines above already uses -- so the bound stays valid as input magnitude changes.
+- **MEASURED, methodology corrections for this repository.** (1) The JIT build line is
+  `cxx = ccache c++`, so "confirm a real ~30 s compile" is **not** a reliable freshness signal: ccache
+  returned all six objects in 533 ms for a byte-identical source tree in a freshly emptied
+  `GPTQMODEL_QVQ_CPU_BUILD_ROOT`. That is correct behaviour, but wall-clock cannot distinguish it from
+  a stale load. The reliable checks are the source-hash fingerprint subdirectory and reading the
+  emitted instructions out of the `.o`. (2) An aborted sweep is not a clean sweep: an early
+  `pack_trellis_states` failure on open (non-overlap) paths killed a 1024-configuration run at its
+  first configuration and left a log with zero divergences. Sweeps here now report ATTEMPTED /
+  COMPLETED / UNSTABLE / SKIPPED / DIVERGED separately and carry a positive-control canary, so a
+  zero is falsifiable rather than merely empty.
+- **MEASURED by inspection:** the only timing claim in this entry is the no-regression A/B above.
+- Measurement placement was
+  `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
+  `OMP_PLACES=cores` was never used. Idle was checked with a `/sys/fs/cgroup/cpu.stat` `usage_usec`
+  delta, never `uptime` or `/proc/loadavg`.
