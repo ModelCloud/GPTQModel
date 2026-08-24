@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import gc
 import io
 import itertools
+import weakref
 from dataclasses import fields
 from unittest.mock import patch
 
@@ -19,6 +21,7 @@ from gptqmodel.nn_modules.qlinear.qvq import (
     QVQLinear,
     QVQReferenceLinear,
     _qvq_compute_dtype,
+    qvq_dense_oracle_forward,
 )
 from gptqmodel.quantization import (
     FORMAT,
@@ -5200,6 +5203,131 @@ def test_qvq_torch_linear_matches_explicit_reference(bits):
     expected = (expected * tensors["SV"] + tensors["bias"]).reshape(2, 3, 16)
 
     torch.testing.assert_close(layer(x), expected)
+
+
+def _qvq_oracle_layer(*, bias: bool = True) -> QVQLinear:
+    generator = torch.Generator().manual_seed(20260824)
+    states = _tail_biting_states(2, tiles=1, seed=20260824)
+    tensors = {
+        "trellis": pack_trellis_states(states, bits=2),
+        "SU": torch.randn(16, generator=generator),
+        "SV": torch.randn(16, generator=generator),
+    }
+    if bias:
+        tensors["bias"] = torch.randn(16, generator=generator)
+    return QVQLinear.from_tensors(
+        bits=2,
+        in_features=16,
+        out_features=16,
+        name="oracle_proj",
+        tensors=tensors,
+    )
+
+
+def test_qvq_dense_oracle_is_full_layer_fp32_finite_and_does_not_cache():
+    layer = _qvq_oracle_layer()
+    x = torch.randn((2, 3, 16), generator=torch.Generator().manual_seed(7), dtype=torch.float16)
+    attributes_before = set(vars(layer))
+    assert layer._dtype_cache == {}
+    assert layer._qvq_cuda_bank_cache is None
+    assert layer._qvq_mps_bank_ids_cache is None
+    assert not hasattr(layer, "_qvq_cpu_dense_inner_cache")
+
+    actual = qvq_dense_oracle_forward(layer, x, device="cpu")
+    inner = layer.get_inner_weight_tensor()
+    x_fp32 = x.float().reshape(-1, 16)
+    expected = matmul_hadU(matmul_hadU(x_fp32 * layer.SU.float()) @ inner)
+    expected = (expected * layer.SV.float() + layer.bias.float()).reshape(2, 3, 16)
+
+    assert actual.dtype == torch.float32
+    assert actual.device.type == "cpu"
+    assert not actual.requires_grad
+    assert torch.isfinite(actual).all()
+    assert (actual - expected).abs().max().item() <= 2e-3
+    torch.testing.assert_close(actual, expected, rtol=0, atol=2e-3)
+    assert set(vars(layer)) == attributes_before
+    assert layer._dtype_cache == {}
+    assert layer._qvq_cuda_bank_cache is None
+    assert layer._qvq_mps_bank_ids_cache is None
+    assert not hasattr(layer, "_qvq_cpu_dense_inner_cache")
+
+
+def test_qvq_dense_oracle_does_not_inherit_input_dtype():
+    layer = _qvq_oracle_layer()
+    rounded = torch.randn((4, 16), generator=torch.Generator().manual_seed(8)).half()
+
+    from_fp16 = qvq_dense_oracle_forward(layer, rounded)
+    from_same_values_fp32 = qvq_dense_oracle_forward(layer, rounded.float())
+
+    torch.testing.assert_close(from_fp16, from_same_values_fp32, rtol=0, atol=0)
+
+
+def test_qvq_dense_oracle_releases_reconstruction_after_return_and_repeated_calls():
+    layer = _qvq_oracle_layer()
+    x = torch.randn((2, 16), generator=torch.Generator().manual_seed(9))
+    references = []
+    original = reconstruct_qvq_inner_weight
+
+    def tracked_reconstruction(*args, **kwargs):
+        assert torch.is_inference_mode_enabled()
+        inner = original(*args, **kwargs)
+        references.append(weakref.ref(inner))
+        return inner
+
+    with patch("gptqmodel.nn_modules.qlinear.qvq.reconstruct_qvq_inner_weight", tracked_reconstruction):
+        for _ in range(4):
+            result = qvq_dense_oracle_forward(layer, x)
+            del result
+            gc.collect()
+            assert all(reference() is None for reference in references)
+
+
+def test_qvq_dense_oracle_releases_reconstruction_on_exception():
+    layer = _qvq_oracle_layer()
+    x = torch.randn((2, 16), generator=torch.Generator().manual_seed(10))
+    references = []
+    original = reconstruct_qvq_inner_weight
+
+    def tracked_reconstruction(*args, **kwargs):
+        inner = original(*args, **kwargs)
+        references.append(weakref.ref(inner))
+        return inner
+
+    with (
+        patch("gptqmodel.nn_modules.qlinear.qvq.reconstruct_qvq_inner_weight", tracked_reconstruction),
+        patch("gptqmodel.nn_modules.qlinear.qvq.matmul_hadU", side_effect=RuntimeError("injected failure")),
+        pytest.raises(RuntimeError, match="injected failure"),
+    ):
+        qvq_dense_oracle_forward(layer, x)
+
+    gc.collect()
+    assert len(references) == 1
+    assert references[0]() is None
+
+
+def test_qvq_dense_oracle_rejects_grad_enabled_input_before_reconstruction():
+    layer = _qvq_oracle_layer()
+    x = torch.randn((2, 16), requires_grad=True)
+
+    with (
+        patch("gptqmodel.nn_modules.qlinear.qvq.reconstruct_qvq_inner_weight") as reconstruct,
+        pytest.raises(RuntimeError, match="requires gradients"),
+    ):
+        qvq_dense_oracle_forward(layer, x)
+
+    reconstruct.assert_not_called()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device parity requires a CUDA-enabled Torch host")
+def test_qvq_dense_oracle_cpu_and_cuda_device_parity():
+    layer = _qvq_oracle_layer()
+    x = torch.randn((2, 16), generator=torch.Generator().manual_seed(11))
+
+    cpu = qvq_dense_oracle_forward(layer, x, device="cpu")
+    cuda = qvq_dense_oracle_forward(layer, x, device="cuda").cpu()
+
+    assert torch.isfinite(cuda).all()
+    torch.testing.assert_close(cuda, cpu, rtol=0, atol=2e-3)
 
 
 def _qvq_linear_tensors(*, bits: float = 2):

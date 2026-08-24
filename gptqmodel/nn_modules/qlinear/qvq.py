@@ -683,10 +683,9 @@ class QVQLinear(BaseQuantLinear):
                 return packed
         raise RuntimeError("QVQ `bank_ids` changed concurrently while preparing MPS inference selectors")
 
-    def get_inner_weight_tensor(self, dtype: torch.dtype | None = None) -> torch.Tensor:
-        dtype = dtype or (
-            torch.float32 if self.trellis.device.type == "cpu" else torch.float16
-        )
+    def get_inner_weight_tensor(self, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Materialize the dense inner weight, in FP32 unless explicitly requested otherwise."""
+
         return reconstruct_qvq_inner_weight(
             self.trellis,
             bits=self.bits,
@@ -703,6 +702,12 @@ class QVQLinear(BaseQuantLinear):
         ).to(dtype=dtype)
 
     def _reference_inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Differentiable training reference; its graph may retain the dense weight.
+
+        This legacy path intentionally follows ``x.dtype`` and is not the accuracy
+        oracle. Use :func:`qvq_dense_oracle_forward` for inference comparisons.
+        """
+
         inner = self.get_inner_weight_tensor(dtype=x.dtype)
         return x @ inner
 
@@ -1040,8 +1045,71 @@ class QVQLinear(BaseQuantLinear):
         return output
 
 
+def qvq_dense_oracle_forward(
+    layer: QVQLinear,
+    x: torch.Tensor,
+    *,
+    device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    """Run the canonical full-layer dense QVQ accuracy oracle in FP32.
+
+    The helper reconstructs and accumulates in FP32 under ``inference_mode`` on
+    the explicitly selected device. It never uses production dispatch or
+    populates a module cache, and the locally reconstructed dense weight is
+    released when the call returns (allocator-reserved memory may remain).
+
+    Kernels claiming the canonical accuracy tier must produce finite FP32 output
+    with ``max_abs(actual_fp32 - oracle_fp32) <= 2e-3`` and ``rtol=0``.
+    """
+
+    if not isinstance(layer, QVQLinear):
+        raise TypeError(f"layer must be a QVQLinear, got {type(layer).__name__}")
+    if not isinstance(x, torch.Tensor):
+        raise TypeError(f"x must be a torch.Tensor, got {type(x).__name__}")
+    if x.requires_grad:
+        raise RuntimeError("qvq_dense_oracle_forward does not accept input that requires gradients")
+    if x.shape[-1] != layer.in_features:
+        raise ValueError(
+            f"QVQ oracle input width must be {layer.in_features}, got {x.shape[-1]}"
+        )
+
+    compute_device = torch.device(device)
+    inner = None
+    try:
+        with torch.inference_mode():
+            inner = reconstruct_qvq_inner_weight(
+                layer.trellis.to(device=compute_device),
+                bits=layer.bits,
+                vector_size=layer.vector_size,
+                trellis_window=layer.trellis_window,
+                in_features=layer.in_features,
+                out_features=layer.out_features,
+                codebook_version=layer.codebook_version,
+                bank_ids=None if layer.bank_ids is None else layer.bank_ids.to(device=compute_device),
+                dual_v2=layer.dual_v2,
+                v2b4_p64=layer.v2b4_p64,
+                v2b2_p32=layer.v2b2_p32,
+                bank_alt_id=(
+                    None if layer.bank_alt_id is None else layer.bank_alt_id.to(device=compute_device)
+                ),
+            ).to(dtype=torch.float32)
+            x_2d = x.to(device=compute_device, dtype=torch.float32).reshape(-1, layer.in_features)
+            transformed = matmul_hadU(x_2d * layer.SU.to(device=compute_device, dtype=torch.float32))
+            output = matmul_hadU(transformed @ inner)
+            output = output * layer.SV.to(device=compute_device, dtype=torch.float32)
+            if layer.bias is not None:
+                output = output + layer.bias.to(device=compute_device, dtype=torch.float32)
+            return output.reshape(*x.shape[:-1], layer.out_features).detach()
+    finally:
+        del inner
+
+
 class QVQReferenceLinear(QVQLinear):
-    """Readable dense reconstruction oracle independent of optimized kernels."""
+    """Diagnostic/differentiable dense wrapper, not the canonical accuracy oracle.
+
+    Its training graph may retain the reconstructed dense weight. Use
+    :func:`qvq_dense_oracle_forward` for memory-clean FP32 accuracy comparisons.
+    """
 
     SUPPORTS_BACKEND_SELECTION = False
 
@@ -1057,4 +1125,4 @@ class QVQReferenceLinear(QVQLinear):
         return self._reference_inner_forward(x)
 
 
-__all__ = ["QVQLinear", "QVQReferenceLinear"]
+__all__ = ["QVQLinear", "QVQReferenceLinear", "qvq_dense_oracle_forward"]
