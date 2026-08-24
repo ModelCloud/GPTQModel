@@ -888,3 +888,20 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
 - **MEASURED:** the explicit placement was
   `{24},{27},{28},{42},{43},{44},{45},{54},{55},{65},{90},{94},{96},{104},{113},{114},{118},{123},{135},{139},{143},{150},{156},{161},{164},{169},{172},{173},{175},{176},{179},{183}`.
   `OMP_PLACES=cores` was never used; the benchmark asserts the placement once before timing.
+
+## 2026-08-24 segmented banked Viterbi review correction
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- **MEASURED:** corrected the V=2 AVX-512 reduction to scalar-reference order and kept non-aligned suffix chunks
+  scalar so predecessor broadcasts cannot cross a boundary. The 16-vs-24-thread regression failed before the fix
+  with 31 states, one segment bank ID, and seven packed words changed; it passes afterward.
+- **MEASURED:** replaced the former 16.49x headline. In the self-consistent t5 row-parallel regime, accepted
+  batch-32/64/128 speedups are 1.26x/1.47x/1.23x. Batch 16 is reported separately at 15.76x as repair of the
+  pristine three-barrier small-batch pathology.
+- **MEASURED:** a 16-cell t15/t16, segment-16/32 sweep showed t15 G-only is 0.27-0.28x for batches 32-128; it remains
+  enabled because pristine t15 overflows combined bank/prefix int16 backpointers and emits negative states. T16
+  unconstrained two-bank cases retain the pristine recurrence and measure 0.98-1.09x with exact outputs and costs.
+- **MEASURED:** every timing cell used 3 warmups and 15 samples and reports median, minimum, and max-minus-min spread
+  in `RESULTS.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
+  placements recorded above; runs were exclusive and `OMP_PLACES=cores` was never used.

@@ -5142,6 +5142,37 @@ def test_native_banked_viterbi_adjacent_steps_invalid_sentinels_and_boundary_tra
     assert torch.equal(squared_error, torch.zeros_like(squared_error))
 
 
+def test_native_banked_viterbi_v2_is_thread_count_invariant():
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    generator = torch.Generator().manual_seed(2)
+    codebooks = torch.randn((2, 65536, 2), generator=generator, dtype=torch.float32)
+    sequences = torch.randn((1, 32, 2), generator=generator, dtype=torch.float32)
+    overlap = torch.tensor([2], dtype=torch.int64)
+    original_threads = torch.get_num_threads()
+
+    def run(thread_count):
+        torch.set_num_threads(thread_count)
+        states, _, segment_bank_ids = qvq_cpu_viterbi_banked(
+            sequences,
+            codebooks,
+            transition_bits=7,
+            segment_steps=16,
+            overlap=overlap,
+        )
+        packed_words = pack_trellis_states(states, bits=3.5)
+        return states, segment_bank_ids, packed_words
+
+    try:
+        aligned = run(16)  # suffix chunks are 32 columns: no scalar remainder.
+        unaligned = run(24)  # suffix chunks are 22 columns: scalar remainder is reachable.
+    finally:
+        torch.set_num_threads(original_threads)
+
+    for aligned_output, unaligned_output in zip(aligned, unaligned):
+        assert torch.equal(aligned_output, unaligned_output)
+
+
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
     generator = torch.Generator().manual_seed(seed)
     shift = qvq_transition_bits(bits)
