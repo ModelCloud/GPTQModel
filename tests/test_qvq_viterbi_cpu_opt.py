@@ -135,8 +135,14 @@ def _run_case(
     # MEASURED matrix-calibrated, not universal: a standardized 96-config matrix
     # had max delta 1.1205673217773438e-5, so 1.25e-5 provides about 11.6%
     # headroom. A fixed absolute bound cannot remain valid as step count,
-    # weights, or input magnitude changes.
-    torch.testing.assert_close(actual_se, baseline_se, atol=1.25e-5, rtol=0)
+    # weights, or input magnitude changes -- which is exactly what the large
+    # magnitude case does. MEASURED after correcting the production V=2
+    # reduction order: that case reports 0.046875 absolute on a cost of about
+    # 1.54e5, i.e. 3.04e-7 relative, roughly two float32 ulp. The absolute bound
+    # is kept for the small-magnitude configurations it was calibrated on, and
+    # the same rtol the oracle assertion above already uses makes it valid at
+    # large magnitude. The discrete assertion above stays exact.
+    torch.testing.assert_close(actual_se, baseline_se, atol=1.25e-5, rtol=2e-5)
 
 
 @pytest.mark.parametrize("vector_size", (2, 4))
