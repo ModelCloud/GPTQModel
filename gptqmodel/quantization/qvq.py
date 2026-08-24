@@ -3016,6 +3016,21 @@ def _block_ldlq_v2b2_family_batch_cuda(
                     else torch.roll(chunk_weights, shifts=midpoint, dims=2).contiguous(),
                 )
                 overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+                if telemetry is not None:
+                    family_sequences = families * chunk_count
+                    telemetry.count("viterbi_family_grid_calls", 2)
+                    telemetry.count("viterbi_logical_solve_ids", 2)
+                    telemetry.count("viterbi_unique_logical_solve_ids", 2)
+                    telemetry.count("viterbi_family_grid_sequences", family_sequences * 2)
+                    telemetry.count("viterbi_family_state_steps", family_sequences * 128 * 2)
+                    telemetry.count("viterbi_provisional_states_produced", family_sequences * 128)
+                    telemetry.count("viterbi_provisional_states_consumed", family_sequences)
+                    telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
+                    telemetry.count("viterbi_provisional_selectors_discarded", family_sequences * 8)
+                    # Each block/chunk is generated once and feedback changes
+                    # before the next block, so no call has identical inputs.
+                    telemetry.count("viterbi_exact_reuse_candidates", 0)
+                    telemetry.count("viterbi_reselection_revisits", 0)
                 chunk_states, _, chunk_selectors = family_viterbi(
                     chunk,
                     family_stacks,
@@ -4569,6 +4584,21 @@ def _yaqa_inner_v2b2_family_batch_cuda(
                 None,
             )
             overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+            if telemetry is not None:
+                family_sequences = families * count
+                telemetry.count("viterbi_family_grid_calls", 2)
+                telemetry.count("viterbi_logical_solve_ids", 2)
+                telemetry.count("viterbi_unique_logical_solve_ids", 2)
+                telemetry.count("viterbi_family_grid_sequences", family_sequences * 2)
+                telemetry.count("viterbi_family_state_steps", family_sequences * steps * 2)
+                telemetry.count("viterbi_provisional_states_produced", family_sequences * steps)
+                telemetry.count("viterbi_provisional_states_consumed", family_sequences)
+                telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
+                telemetry.count("viterbi_provisional_selectors_discarded", family_sequences * 8)
+                # Anti-diagonal coordinates are disjoint and the feedback
+                # tensors mutate after every commit; exact reuse is impossible.
+                telemetry.count("viterbi_exact_reuse_candidates", 0)
+                telemetry.count("viterbi_reselection_revisits", 0)
             states, _, segment_ids = family_viterbi(
                 sequences,
                 family_stacks,
@@ -4710,6 +4740,19 @@ def yaqa_inner_v2b2_p32(
                 )
                 overlap_mask = (1 << (16 - transition_bits)) - 1
                 overlaps = (provisional_states[:, :, midpoint - 1] & overlap_mask).contiguous()
+                if telemetry is not None:
+                    family_sequences_count = 3 * sample_count
+                    telemetry.count("viterbi_family_grid_calls", 2)
+                    telemetry.count("viterbi_logical_solve_ids", 2)
+                    telemetry.count("viterbi_unique_logical_solve_ids", 2)
+                    telemetry.count("viterbi_family_grid_sequences", family_sequences_count * 2)
+                    telemetry.count("viterbi_family_state_steps", family_sequences_count * 128 * 2)
+                    telemetry.count("viterbi_provisional_states_produced", family_sequences_count * 128)
+                    telemetry.count("viterbi_provisional_states_consumed", family_sequences_count)
+                    telemetry.count("viterbi_provisional_losses_discarded", family_sequences_count)
+                    telemetry.count("viterbi_provisional_selectors_discarded", family_sequences_count * 8)
+                    telemetry.count("viterbi_exact_reuse_candidates", 0)
+                    telemetry.count("viterbi_reselection_revisits", 0)
                 family_states, _, family_selectors = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
                     family_sequences,
                     family_codebooks,
