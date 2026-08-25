@@ -846,6 +846,10 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Freeze provenance before any long-running data preparation or quantization.
+    # Reading HEAD while writing the report can misattribute a run when a docs-only
+    # commit is made concurrently with GPU work.
+    run_commit = _git_commit()
     if args.batch_size < 1 or args.concat_size < 0:
         raise ValueError(
             "batch size must be positive and concat size must be nonnegative"
@@ -1044,7 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "model": args.model,
         "output": str(output),
-        "commit": _git_commit(),
+        "commit": run_commit,
         "python": platform.python_version(),
         "python_gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
         "torch": torch.__version__,
