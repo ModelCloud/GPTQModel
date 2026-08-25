@@ -349,6 +349,15 @@ The bracket's reg `.10` and `.30` arms completed D300 at `14.5417%` and
 Their GSM8K Platinum tasks are running, and all report hashes/configuration
 details are in the sweep JSON ledger.
 
+### 500k-token D300-source-shaped W2 arm (queued)
+
+`build_div300_source_mix.py` produced 993 rows / 501,692 tokenizer tokens from
+unused Terminal-Bench, SWE-Bench, MathArena, Multi-IF, and LongBench source
+rows. It excludes exact D300 prompt hashes and existing calibration hashes,
+and caps each source prompt before token counting. The W2 reg .20 arm is now
+queued on GPU4; its complete provenance, checkpoint, D300 report, and GSM8K
+chain are in `docs/experiments/2026-08-25-llama32-w2-div300-sources-500k.json`.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is

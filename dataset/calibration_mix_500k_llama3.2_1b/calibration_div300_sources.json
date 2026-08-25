@@ -1,0 +1,16 @@
+{
+  "candidate_rows": 4548,
+  "d300_manifest_sha256": "701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2",
+  "excluded_d300_or_existing": 482,
+  "rows": 993,
+  "sha256": "4052d41f3d9bc456135ebd9930839a7b99d88a23ccef6780f4abfefd77d0b9b0",
+  "source_counts": {
+    "longbench_v2": 119,
+    "matharena_2025_2026": 11,
+    "multi_if_non_english": 766,
+    "swe_bench_verified": 83,
+    "terminal_bench_2_1": 14
+  },
+  "target_tokens": 500000,
+  "tokens": 501692
+}
