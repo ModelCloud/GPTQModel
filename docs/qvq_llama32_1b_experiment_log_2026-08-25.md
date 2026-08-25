@@ -301,6 +301,13 @@ The flat-W2 AIME checkpoint's D300 evaluation was moved to free GPU7 and is
 now running immediately; this avoids serializing the decisive flat-W2 result
 behind the mixed-rate GSM8K task.
 
+The mixed-rate diagnostic has completed canonical D300: W2 everywhere with
+only `mlp.down_proj` at W3 reached `16.7396%` Divergence-32 top-1, `2/300`
+exact trajectories, and mean first divergence `4.8267`. This is below the
+best flat-W2 reg .020 arm (18.7813%), so the extra down-projection bit did not
+improve this AIME mix; the full GSM8K Platinum task is now running for the
+real-world comparison.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
