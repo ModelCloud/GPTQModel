@@ -1420,3 +1420,90 @@ Two baseline deviations from the brief this work was handed, both measured:
   in-flight `fix/qvq-explicit-rounding-rate-damping` workstream.
 
 Gate 2 gains 3: the two new tests, plus the de-xfailed divergence test.
+
+## 2026-08-25 CORRECTION -- the "eager oracle" is not an oracle for near-tie path selection
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4 `znver4`, no AMX) | 32-CPU
+          cgroup out of 192 host CPUs | torch 2.13.0+cpu | host zen5-cpu-6
+
+### What this corrects
+
+The 2026-08-25 legacy transition-15 entry above states that legacy "differed on rows 4/7/30/43 and
+**failed the eager state oracle**", and that transition-15 dispatch stays on G-only "because selected
+states fail the eager oracle". Similar oracle-conformance language appears elsewhere in this log and
+in `gptqmodel/utils/qvq_cpu.py`.
+
+**That framing is wrong, and this entry corrects it.** Disagreeing with the eager reference is not
+the same as being incorrect. The eager reference accumulates in FP32 like the kernels do, so on
+near-ties it is *also* capable of selecting the worse path -- and measurably does.
+
+### MEASURED: FP64 adjudication of the disagreements
+
+Method: for each disagreeing row, both complete candidate state paths were extracted and their
+**total squared error recomputed in float64** from the original sequences and codebooks, independent
+of any FP32 kernel accumulation. Both paths were additionally checked for validity; **every legacy,
+eager, and G-only path packed successfully**, proving transition consistency and tail-biting closure.
+No candidate was illegal. These are genuine alternative optima-adjacent paths, not corruption.
+
+Transition width 16 (the reachable production dispatch predicate: `bank_count <= 2`, unconstrained):
+
+| seed; batch; banks; steps; segment | row | legacy FP64 | eager FP64 | genuine winner | rel. diff |
+|---|---:|---:|---:|---|---:|
+| 20260821; 16; 1; 32; 8   | 13 | 0.03372126385533342   | 0.03372192710214201   | **legacy** | 1.97e-05 |
+| 20260821; 16; 1; 128; 8  |  3 | 0.06033789687043987   | 0.06033856011724845   | **legacy** | 1.10e-05 |
+| 20260822; 128; 2; 32; 8  |  9 | 0.003980354006866752  | 0.003980362759275328  | **legacy** | 2.20e-06 |
+| 20260821; 16; 2; 32; 8   | 10 | 0.0025584008785275196 | 0.0025579453464234400 | eager      | 1.78e-04 |
+| 20260821; 64; 2; 128; 32 | 43 | 0.036088594007618865  | 0.036087340711329670  | eager      | 3.47e-05 |
+| 20260822; 32; 1; 128; 8  | 12 | 0.013112702866913933  | 0.013112697300806359  | eager      | 4.25e-07 |
+| 20260822; 128; 2; 32; 8  | 60 | 0.0025891787639937235 | 0.0025882629459672533 | eager      | 3.54e-04 |
+| 20260821; 128; 2; 128; 8 | 24 | 0.028722643170709935  | 0.028722286093767698  | eager      | 1.24e-05 |
+
+**Legacy is genuinely better in 3 of 8; the eager/G-only path is genuinely better in 5 of 8.**
+Row 60 also covers differing segment selectors: legacy `[1,0,0,0]`, eager `[1,0,0,1]`.
+
+Transition width 15, re-adjudicating the rows cited in the entry above:
+
+| batch | row | legacy FP64 | eager FP64 | genuine winner |
+|---:|---:|---:|---:|---|
+| 64  |  4 | 0.018935450916467410 | 0.018935582084779842 | **legacy** |
+| 64  |  7 | 0.028982814541042044 | 0.028982827673776943 | **legacy** |
+| 64  | 30 | 0.024162003140010840 | 0.024161946689342035 | eager |
+| 64  | 43 | 0.042650861021430950 | 0.042650754240254830 | eager |
+| 128 | 55 | 0.024012466221767410 | 0.024012505978935634 | **legacy** |
+| 128 | 92 | 0.019251765456184587 | 0.019251679434209266 | eager |
+
+**The earlier blanket claim does not stand.** On rows 4, 7 and 55 the eager/G-only path was the
+suboptimal one. Rows 30, 43 and 92 are genuine legacy losses, so the *decision* to keep transition-15
+dispatch on G-only remains justified -- but the stated *reason* ("legacy fails the oracle") was not
+accurate, and the 3.87x-3.99x legacy speedup recorded above was rejected on a partly incorrect basis.
+
+### INFERRED: what is actually true
+
+- **Neither FP32 implementation is a universal oracle.** Both legacy and the eager/G-only recurrence
+  select suboptimal near-tie paths, in different configurations, purely as a consequence of FP32
+  accumulation order.
+- **Severity of the transition-16 finding is MODERATE production quality, not corruption.** All
+  produced paths are valid and packable. The defect is that the production path is measurably the
+  worse choice more often than not (5 of 8 sampled disagreements) at `transition_bits == 16`,
+  `bank_count <= 2`, unconstrained. Relative cost differences ranged 4.25e-07 to 3.54e-04.
+- Choosing between these paths on quality grounds is a **product decision**, and it trades against
+  speed: G-only is slower at transition width 16, which is why legacy is dispatched there at all.
+  Eliminating the class -- rather than picking a winner -- would require higher-precision
+  accumulation in the recurrence, which is a design change, not a kernel tweak.
+
+### METHODOLOGY RULE (adopt this)
+
+**"Matches the eager reference" is not a correctness proof, and "differs from the eager reference"
+is not a defect report.** For discrete Viterbi outputs, disagreement between two FP32
+implementations at a near tie must be adjudicated by:
+
+1. recomputing **both** candidate paths' total cost in **float64** from the original inputs, and
+2. verifying **both** candidates are valid (transition-consistent, tail-biting-closed).
+
+Only then does "wrong" mean anything. An exact FP64 tie falls back to the documented lowest-index
+rule. This log previously recorded two separate defect claims that this procedure partially
+overturns; both were derived from oracle-conformance alone.
+
+Corollary: an eager reference is a useful *cross-check*, and its agreement with a kernel is
+meaningful evidence about that kernel's schedule. It is not a ground truth for which of two
+near-tied discrete paths is correct.
