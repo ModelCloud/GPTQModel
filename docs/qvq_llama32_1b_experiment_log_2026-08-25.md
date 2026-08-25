@@ -246,3 +246,12 @@ The W2 arm uses `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg010_aime2526.json`
 mode, seed 0) and ordinary lifecycle rows 0--127.  It is running on the freed
 GPU4 as `/root/qvq-results/llama32-1b-w2-aime2526-yaqa-mix-main-1f6c2132`;
 canonical D300 and GSM8K Platinum are evaluated only after quantization.
+
+The already-completed higher-rate Q07 checkpoints were then evaluated first on
+the full 1,209-row GSM8K Platinum task with Evalution 0.0.14, batch 16,
+continuous refill, and `paged|flash_attention_2`: W2.5 reached `acc,num=
+0.3358` and W3 reached `0.4127`, both with zero invalid generations. Reports:
+`/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w25-reg010-pruneauto-main-329cc0a5-gsm8k-platinum-v1.json`
+and the corresponding W3 path. Four completed W2 sweep arms are now undergoing
+the same canonical D300 development check; their reports will be appended when
+the 300-prompt runs finish.
