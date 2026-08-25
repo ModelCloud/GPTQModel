@@ -425,3 +425,25 @@ canonical D300 manifest and protocol; `Divergence-32 top-1` below is the report'
 
 The 25% W2 target remains unverified; the best completed arm is 6.2187 points
 short. reg .0025 and reg .005 D300 reports are still running.
+
+### PR progress note — completed arm results
+
+All values below use the canonical 300-prompt D300 manifest. New completed-arm
+results should be appended to this table before being reported in PR notes.
+
+| Arm | Quantization rate | Calibration arm | D300 top-1 @32 | Exact / 300 | Mean first divergence | Status |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| YAQA reg .020 | Flat W2 | YAQA 302k | **18.7813%** | 6 | 5.3633 | Best completed W2 |
+| YAQA seed 1 | Flat W2 | YAQA 302k | 17.7083% | 2 | 4.9667 | Below leader |
+| Full reference reg .030 | Flat W2 | Full reference | 17.7292% | 3 | 4.5700 | Below leader |
+| D300-source reg .020 | Flat W2 | 501,692-token source mix | 17.0729% | 5 | 4.9933 | Below leader |
+| Fixed-block LDLQ reg .005 | Flat W2 | YAQA 302k | 16.3021% | 5 | 4.9133 | Below leader |
+| AIME 2025/26 | Flat W2 | AIME mix | 14.9792% | 0 | 3.9967 | Below leader |
+| AIME + MLP down W3 | W2 + W3 down | AIME mix | 16.7396% | 2 | 4.8267 | Mixed-rate diagnostic |
+
+The focused `.15/.175/.225/.25/.30` bracket and the 500k mixed-rate/source
+arms are still running; their rows will be appended here when canonical D300
+reports complete.
+
+GSM8K Platinum for the best YAQA reg .020 checkpoint is queued behind the
+first free GPU (session `24963`).
