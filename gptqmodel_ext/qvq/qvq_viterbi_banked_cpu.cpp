@@ -704,11 +704,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   // At transition width 16 the suffix frontier has one element. Legacy is
   // 2.7-2.9x faster than G-only at batch >= 32 (median; 2.9-3.7x on minima).
   // A 72-config, one-thread FP64 path-cost sweep found only near-tie noise
-  // (3e-06..1.1e-04 relative), so no accuracy claim is made either way. Below
-  // For batch < at::get_num_threads(), legacy takes the outer-serial tiled path
-  // above and is about 6.1x slower; that regime is documented, not dispatched
-  // on yet. Transition width 15's G-only choice is inherited and unmeasured by
-  // this change.
+  // (3e-06..1.1e-04 relative), so no accuracy claim is made either way. For
+  // batch < at::get_num_threads(), legacy takes the outer-serial, inner-parallel
+  // tiled path above and is about 6.1x slower; that regime is documented, not
+  // dispatched on yet. Transition width 15's G-only choice is inherited and
+  // unmeasured by this change.
   if (transition_bits == 16 && bank_count <= 2 &&
       !(overlap.has_value() && overlap->defined()) &&
       !(entry_states.has_value() && entry_states->defined()) &&
