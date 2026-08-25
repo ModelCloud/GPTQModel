@@ -1228,6 +1228,9 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4 `znver
 - **MEASURED gates, before and after:** `test_qvq.py` stayed at 661 passed/248 skipped;
   `test_qvq_v2b2_p32.py` plus `test_qvq_viterbi_cpu_opt.py` stayed at 138 passed/12 skipped/1 xfailed; lifecycle stayed
   at the same two pre-existing `damp_percent` failures with 29 passed/2 skipped; `git diff --check` passed.
+- **MEASURED after merging current `origin/main`:** `test_qvq.py` remained 661 passed/248 skipped; the combined
+  V2B2/opt gate became 141 passed/12 skipped because upstream added opt tests and removed the xfail; lifecycle still
+  had the identical two pre-existing failures with 29 passed/2 skipped; `git diff --check` passed.
 ## 2026-08-24 -- `qvq_viterbi_cpu_opt`: V=2 emission accumulation order + zero-step guard
 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/CD/IFMA/VBMI (Zen 4,
