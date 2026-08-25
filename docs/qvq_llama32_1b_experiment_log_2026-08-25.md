@@ -367,6 +367,10 @@ and caps each source prompt before token counting. The W2 reg .20 arm is now
 queued on GPU4; its complete provenance, checkpoint, D300 report, and GSM8K
 chain are in `docs/experiments/2026-08-25-llama32-w2-div300-sources-500k.json`.
 
+The 500k-token source-shaped checkpoint has completed quantization with
+`valid_output_samples=502,685`; its canonical D300 rollout is now running on
+GPU4, followed by GSM8K Platinum.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
