@@ -11,6 +11,13 @@ validated bit-exactly against the eager PyTorch recurrence oracle.
 Example:
     python scripts/benchmark_qvq_v2_segment_grid.py --batches 8 32 64 128
     python scripts/benchmark_qvq_v2_segment_grid.py --check
+    python scripts/benchmark_qvq_v2_segment_grid.py --model /path/to/model  # real weight tiles
+
+With ``--model``, sequences are production-style [batch, 128, 2] tiles cut
+from real checkpoint weight matrices (16-row slabs, the same construction as
+``benchmark_qvq_v2_prune_rate.py``) instead of ``torch.randn``; this is the
+distribution the QVQ Viterbi quantizer actually sees, and the workload the
+norm-rank contiguous-band kernel is tuned for.
 """
 
 from __future__ import annotations
@@ -26,6 +33,47 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch  # noqa: E402
 
+_TILE_POOL: dict[str, torch.Tensor] = {}
+
+
+def _real_tile_pool(model_dir: str, max_tiles: int = 4096) -> torch.Tensor:
+    """Production-style [tiles, 128, 2] sequences from real checkpoint weights."""
+
+    if model_dir in _TILE_POOL:
+        return _TILE_POOL[model_dir]
+    import glob
+    import os
+
+    from safetensors.torch import load_file
+
+    slabs = []
+    total = 0
+    for path in sorted(glob.glob(os.path.join(model_dir, "*.safetensors"))):
+        tensors = load_file(path)
+        for name, w in tensors.items():
+            if w.ndim != 2 or "embed" in name or "lm_head" in name or w.size(0) < 16:
+                continue
+            w = w.to(device="cuda", dtype=torch.float32)
+            cols = (w.size(1) // 256) * 256
+            if cols < 256:
+                continue
+            for start in range(0, w.size(0) - 15, 16):
+                block = w[start : start + 16, :cols]
+                tiles = block.reshape(16, cols // 16, 16).permute(1, 0, 2).reshape(-1, 128, 2)
+                slabs.append(tiles)
+                total += tiles.size(0)
+                if total >= max_tiles:
+                    break
+            if total >= max_tiles:
+                break
+        if total >= max_tiles:
+            break
+    if not slabs:
+        raise SystemExit(f"no usable weight matrices under {model_dir}")
+    pool = torch.cat(slabs)[:max_tiles].contiguous()
+    _TILE_POOL[model_dir] = pool
+    return pool
+
 
 def _build_case(
     *,
@@ -37,11 +85,18 @@ def _build_case(
     constrained: bool,
     weighted: bool,
     codebook_dtype: torch.dtype,
+    model: str | None = None,
 ):
     from gptqmodel.quantization.qvq_codecs import pgc16_codebook_v2_bank
 
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    if model is not None:
+        pool = _real_tile_pool(model)
+        if pool.size(0) < batch:
+            raise SystemExit(f"tile pool holds {pool.size(0)} tiles < batch {batch}")
+        sequences = pool[:batch].contiguous()
+    else:
+        sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
         tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=codebook_dtype)
@@ -158,6 +213,12 @@ def main() -> None:
     parser.add_argument("--constrained", action="store_true")
     parser.add_argument("--weighted", action="store_true")
     parser.add_argument("--legacy", action="store_true", help="also time viterbi_v2_segment_banked")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="benchmark real weight tiles cut from this checkpoint directory instead of randn",
+    )
     parser.add_argument("--check", action="store_true", help="bit-exactness gate vs eager oracle")
     args = parser.parse_args()
 
@@ -176,7 +237,8 @@ def main() -> None:
     print(f"GPU: {torch.cuda.get_device_name(0)} | sm_{props.major}{props.minor} | "
           f"{props.multi_processor_count} SMs | torch {torch.__version__}")
     print(f"warmup={args.warmup} iters={args.iters} half_codebook={not args.float32_codebook} "
-          f"constrained={args.constrained} weighted={args.weighted}")
+          f"constrained={args.constrained} weighted={args.weighted} "
+          f"workload={'real:' + args.model if args.model else 'randn'}")
 
     if args.check:
         print("\n== Bit-exactness gate ==")
@@ -212,6 +274,7 @@ def main() -> None:
                     constrained=args.constrained,
                     weighted=args.weighted,
                     codebook_dtype=codebook_dtype,
+                    model=args.model,
                 )
 
                 def run_grid():
