@@ -353,6 +353,11 @@ The bracket's reg `.10` and `.30` arms completed D300 at `14.5417%` and
 Their GSM8K Platinum tasks are running, and all report hashes/configuration
 details are in the sweep JSON ledger.
 
+The completed GSM8K Platinum scores for the full-reference bracket are
+reg .10 `0.2142`, reg .20 `0.2316`, and reg .30 `0.1960` (all 1,209 rows,
+zero invalid). None offsets the D300 degradation from expanding the generic
+mix.
+
 ### 500k-token D300-source-shaped W2 arm (queued)
 
 `build_div300_source_mix.py` produced 993 rows / 501,692 tokenizer tokens from
