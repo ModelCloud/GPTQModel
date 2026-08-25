@@ -1919,7 +1919,9 @@ def test_greedy_trajectory_metrics_report_survival_and_first_divergence():
     assert metrics["trajectory_survival"] == 0.0
     assert metrics["exact_sequence_agreement"] == 0.0
     assert metrics["aligned_token_agreement"] == pytest.approx(5 / 32)
+    assert metrics["aligned_token_matches"].tolist() == [1.0] * 5 + [0.0] * 27
     assert metrics["first_divergence_token"] == 6.0
+    assert metrics["prefix_survival"].tolist() == [1.0] * 5 + [0.0] * 27
 
 
 def test_shared_prefix_top1_metrics_reports_same_context_agreement():
@@ -1966,6 +1968,7 @@ def test_greedy_trajectory_metrics_identical_horizon_survives():
     assert metrics["trajectory_survival"] == 1.0
     assert metrics["aligned_token_agreement"] == 1.0
     assert metrics["first_divergence_token"] == 33.0
+    assert metrics["prefix_survival"].tolist() == [1.0] * 32
 
 
 def test_independent_greedy_divergence_uses_each_models_own_rollout():

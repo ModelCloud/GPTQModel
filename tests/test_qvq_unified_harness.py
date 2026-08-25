@@ -10,9 +10,11 @@ from torch import nn
 
 from gptqmodel.quantization import FORMAT
 from scripts.qvq_evaluate import (
+    _encode_prompt,
     _greedy_rollout,
     _model_logits,
     _row_text,
+    _wilson_interval,
     validate_evaluation_is_held_out,
 )
 from scripts.qvq_evaluate import build_parser as build_evaluate_parser
@@ -244,6 +246,27 @@ def test_qvq_evaluate_parser_keeps_quantization_out_of_evaluation():
     assert not hasattr(args, "bits")
 
 
+def test_qvq_evaluate_parser_has_canonical_divergence300_contract():
+    args = build_evaluate_parser().parse_args(
+        [
+            "divergence300",
+            "--dense-model",
+            "dense-model",
+            "--checkpoint",
+            "quantized-model",
+            "--dataset",
+            "locked.jsonl",
+            "--output",
+            "result.json",
+        ]
+    )
+
+    assert args.command == "divergence300"
+    assert args.max_prompt_tokens == 16384
+    assert args.dtype == "float16"
+    assert args.attn_implementation == "sdpa"
+
+
 class _BareDecoder(nn.Module):
     def forward(self, **_kwargs):
         return SimpleNamespace(last_hidden_state=torch.zeros(1, 2, 3))
@@ -315,3 +338,37 @@ def test_qvq_evaluate_chat_rows_end_with_generation_prompt():
 
     assert rendered_messages == messages
     assert kwargs == {"tokenize": False, "add_generation_prompt": True}
+
+
+def test_qvq_evaluate_encodes_chat_prompt_once_with_left_truncation():
+    class FakeTokenizer:
+        truncation_side = "right"
+
+        def apply_chat_template(self, messages, **kwargs):
+            assert self.truncation_side == "left"
+            assert messages == [{"role": "user", "content": "hello"}]
+            assert kwargs == {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "return_tensors": "pt",
+                "return_dict": True,
+                "truncation": True,
+                "max_length": 128,
+            }
+            return {"input_ids": torch.tensor([[1, 2, 3]])}
+
+    tokenizer = FakeTokenizer()
+    encoded = _encode_prompt(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        tokenizer,
+        max_prompt_tokens=128,
+    )
+
+    torch.testing.assert_close(encoded["input_ids"], torch.tensor([[1, 2, 3]]), rtol=0, atol=0)
+    assert tokenizer.truncation_side == "right"
+
+
+def test_qvq_evaluate_wilson_interval_contains_observed_rate():
+    low, high = _wilson_interval(246, 300)
+
+    assert low < 0.82 < high

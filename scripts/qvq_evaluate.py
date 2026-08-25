@@ -12,9 +12,12 @@ never prepares or quantizes a model.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -80,6 +83,31 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--trust-remote-code", action="store_true")
     diagnostics.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
     diagnostics.add_argument("--allow-calibration-overlap", action="store_true")
+
+    divergence = subparsers.add_parser(
+        "divergence300",
+        help="Run the canonical 300-prompt, 32-token independent greedy-trajectory comparison.",
+    )
+    divergence.add_argument("--dense-model", required=True)
+    divergence.add_argument("--checkpoint", type=Path, required=True)
+    divergence.add_argument("--dataset", type=Path, required=True, help="Pinned local 300-prompt JSONL manifest.")
+    divergence.add_argument("--device", default="cuda:0")
+    divergence.add_argument("--output", type=Path, required=True)
+    divergence.add_argument("--max-prompt-tokens", type=int, default=16384)
+    divergence.add_argument(
+        "--dtype",
+        choices=("float16", "bfloat16"),
+        default="float16",
+        help="Compute dtype used identically by the dense and quantized models.",
+    )
+    divergence.add_argument(
+        "--attn-implementation",
+        choices=("eager", "sdpa", "flash_attention_2"),
+        default="sdpa",
+        help="Attention implementation used identically by dense and quantized models.",
+    )
+    divergence.add_argument("--trust-remote-code", action="store_true")
+    divergence.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
 
     tasks = subparsers.add_parser("tasks", help="Run Evalution tasks on the quantized checkpoint.")
     tasks.add_argument("--checkpoint", type=Path, required=True)
@@ -148,6 +176,40 @@ def _row_text(row: dict[str, Any], tokenizer, text_column: str | None) -> str:
     if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
         return tokenizer.apply_chat_template(value, tokenize=False, add_generation_prompt=True)
     raise ValueError("Every evaluation row must provide nonempty text or a supported messages list")
+
+
+def _encode_prompt(row: dict[str, Any], tokenizer, *, max_prompt_tokens: int) -> dict[str, torch.Tensor]:
+    messages = row.get("messages")
+    if not isinstance(messages, list) or not messages or not all(isinstance(item, dict) for item in messages):
+        raise ValueError("Divergence-300 rows must contain a nonempty `messages` conversation")
+    previous_side = tokenizer.truncation_side
+    tokenizer.truncation_side = "left"
+    try:
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+            truncation=True,
+            max_length=max_prompt_tokens,
+        )
+    finally:
+        tokenizer.truncation_side = previous_side
+    if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
+        raise TypeError("tokenizer chat template did not return an encoded input mapping")
+    return dict(encoded)
+
+
+def _wilson_interval(successes: int, total: int, *, z: float = 1.959963984540054) -> tuple[float, float]:
+    if total < 1 or successes < 0 or successes > total:
+        raise ValueError("Wilson interval requires 0 <= successes <= total and total > 0")
+    proportion = successes / total
+    z2 = z * z
+    denominator = 1.0 + z2 / total
+    center = (proportion + z2 / (2.0 * total)) / denominator
+    half_width = z * math.sqrt(proportion * (1.0 - proportion) / total + z2 / (4.0 * total * total)) / denominator
+    return center - half_width, center + half_width
 
 
 def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -251,7 +313,9 @@ def _diagnostics(args: argparse.Namespace) -> int:
     token_total = 0
     divergence_sequences = 0
     divergence_aligned_token_sum = 0.0
+    divergence_aligned_match_sum = torch.zeros(args.divergence_tokens, dtype=torch.float64)
     divergence_survival_sum = 0.0
+    divergence_prefix_survival_sum = torch.zeros(args.divergence_tokens, dtype=torch.float64)
     divergence_first_sum = 0.0
     shared_prefix_sequences = 0
     shared_prefix_top1_sum = 0.0
@@ -303,7 +367,9 @@ def _diagnostics(args: argparse.Namespace) -> int:
             )
             divergence_sequences += 1
             divergence_aligned_token_sum += float(trajectory["aligned_token_agreement"].item())
+            divergence_aligned_match_sum += trajectory["aligned_token_matches"].double().cpu()
             divergence_survival_sum += float(trajectory["trajectory_survival"].item())
+            divergence_prefix_survival_sum += trajectory["prefix_survival"].double().cpu()
             divergence_first_sum += float(trajectory["first_divergence_token"].item())
 
         keep = attention_mask.to(dtype=torch.bool)
@@ -362,12 +428,49 @@ def _diagnostics(args: argparse.Namespace) -> int:
             "final_kl": float((kl_sum / token_total).item()),
             "top1_agreement": float((top1_sum / token_total).item()),
         },
-        "divergence_300": {
+        "divergence_300_at_32": {
+            "display_name": "Divergence-300 @32",
             "requested_sequences": min(args.divergence_rows, len(dataset)),
             "valid_sequences": divergence_sequences,
             "token_horizon": args.divergence_tokens,
             "protocol": "independent_greedy_rollout",
+            "published_aggregation_status": "Unsloth has not published its scalar reduction; report both reductions",
             "skipped": args.skip_independent_rollout,
+            "independent_token_top1_agreement_at_32": (
+                divergence_aligned_token_sum / divergence_sequences if divergence_sequences else None
+            ),
+            "independent_token_top1_by_position": (
+                {
+                    str(position): float(
+                        divergence_aligned_match_sum[position - 1].item() / divergence_sequences
+                    )
+                    for position in range(1, args.divergence_tokens + 1)
+                }
+                if divergence_sequences
+                else None
+            ),
+            "independent_token_top1_by_horizon": (
+                {
+                    str(horizon): float(
+                        divergence_aligned_match_sum[:horizon].sum().item()
+                        / (divergence_sequences * horizon)
+                    )
+                    for horizon in range(1, args.divergence_tokens + 1)
+                }
+                if divergence_sequences
+                else None
+            ),
+            "exact_trajectory_agreement_at_32": (
+                divergence_survival_sum / divergence_sequences if divergence_sequences else None
+            ),
+            "exact_prefix_survival_by_horizon": (
+                {
+                    str(horizon): float(divergence_prefix_survival_sum[horizon - 1].item() / divergence_sequences)
+                    for horizon in range(1, args.divergence_tokens + 1)
+                }
+                if divergence_sequences
+                else None
+            ),
             "trajectory_survival": divergence_survival_sum / divergence_sequences if divergence_sequences else None,
             "exact_sequence_agreement": (
                 divergence_survival_sum / divergence_sequences if divergence_sequences else None
@@ -422,6 +525,199 @@ def _diagnostics(args: argparse.Namespace) -> int:
     return 0
 
 
+@torch.inference_mode()
+def _divergence300(args: argparse.Namespace) -> int:
+    checkpoint = args.checkpoint.expanduser().resolve()
+    dataset_path = args.dataset.expanduser().resolve()
+    output_path = args.output.expanduser().resolve()
+    if not checkpoint.is_dir():
+        raise FileNotFoundError(f"Quantized checkpoint does not exist: {checkpoint}")
+    if not dataset_path.is_file() or dataset_path.suffix.lower() != ".jsonl":
+        raise FileNotFoundError(f"Pinned Divergence-300 JSONL does not exist: {dataset_path}")
+    if output_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing result: {output_path}")
+    if args.max_prompt_tokens < 1:
+        raise ValueError("max prompt tokens must be positive")
+
+    evaluation_spec = DatasetSlice(str(dataset_path), None, "train", 0, 300)
+    validate_evaluation_is_held_out(checkpoint, evaluation_spec, allow_overlap=False)
+    dataset = load_dataset_slice(evaluation_spec)
+    if len(dataset) != 300:
+        raise RuntimeError(f"Divergence-300 requires exactly 300 prompts, got {len(dataset)}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.dense_model,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
+    started = time.perf_counter()
+    dense = AutoModelForCausalLM.from_pretrained(
+        args.dense_model,
+        dtype=model_dtype,
+        device_map={"": args.device},
+        attn_implementation=args.attn_implementation,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    ).eval()
+    dense_load_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    quantized = GPTQModel.load(
+        str(checkpoint),
+        backend=BACKEND.QVQ,
+        dtype=model_dtype,
+        device_map={"": args.device},
+        attn_implementation=args.attn_implementation,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    quantized_load_seconds = time.perf_counter() - started
+
+    horizon = 32
+    prefix_successes = torch.zeros(horizon, dtype=torch.int64)
+    aligned_token_sum = 0.0
+    aligned_match_sum = torch.zeros(horizon, dtype=torch.int64)
+    first_divergence_sum = 0.0
+    prompt_token_total = 0
+    prompts_at_token_cap = 0
+    dense_generate_seconds = 0.0
+    quantized_generate_seconds = 0.0
+    per_source: dict[str, dict[str, int]] = {}
+    prompt_results = []
+    for row_index, raw_row in enumerate(dataset):
+        row = dict(raw_row)
+        encoded_cpu = _encode_prompt(row, tokenizer, max_prompt_tokens=args.max_prompt_tokens)
+        prompt_tokens = int(encoded_cpu["input_ids"].shape[1])
+        prompt_token_total += prompt_tokens
+        prompts_at_token_cap += int(prompt_tokens == args.max_prompt_tokens)
+        encoded = {name: value.to(args.device) for name, value in encoded_cpu.items()}
+
+        started = time.perf_counter()
+        dense_tokens = _greedy_rollout(
+            dense,
+            encoded,
+            token_count=horizon,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        dense_generate_seconds += time.perf_counter() - started
+
+        started = time.perf_counter()
+        quantized_tokens = _greedy_rollout(
+            quantized,
+            encoded,
+            token_count=horizon,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        quantized_generate_seconds += time.perf_counter() - started
+
+        metrics = greedy_trajectory_metrics(dense_tokens, quantized_tokens, token_count=horizon)
+        prefix = metrics["prefix_survival"].to(dtype=torch.int64).cpu()
+        prefix_successes += prefix
+        aligned_match_sum += metrics["aligned_token_matches"].to(dtype=torch.int64).cpu()
+        aligned_token_sum += float(metrics["aligned_token_agreement"].item())
+        first_divergence_sum += float(metrics["first_divergence_token"].item())
+        exact = int(metrics["trajectory_survival"].item())
+        source_group = str(row.get("source_group", "unknown"))
+        source_stats = per_source.setdefault(
+            source_group,
+            {"prompts": 0, "exact_at_32": 0, "aligned_token_matches": 0},
+        )
+        source_stats["prompts"] += 1
+        source_stats["exact_at_32"] += exact
+        source_stats["aligned_token_matches"] += int(metrics["aligned_token_matches"].sum().item())
+        prompt_results.append(
+            {
+                "manifest_index": row.get("manifest_index", row_index),
+                "source_group": source_group,
+                "source_id": row.get("source_id"),
+                "prompt_sha256": row.get("prompt_sha256"),
+                "prompt_tokens": prompt_tokens,
+                "exact_at_32": bool(exact),
+                "first_divergence_token": int(metrics["first_divergence_token"].item()),
+                "aligned_token_agreement": float(metrics["aligned_token_agreement"].item()),
+                "dense_token_ids": dense_tokens.tolist(),
+                "quantized_token_ids": quantized_tokens.tolist(),
+                "dense_text": tokenizer.decode(dense_tokens, skip_special_tokens=False),
+                "quantized_text": tokenizer.decode(quantized_tokens, skip_special_tokens=False),
+            }
+        )
+        if row_index == 0 or (row_index + 1) % 10 == 0:
+            print(
+                f"[Divergence-300 @32] prompts={row_index + 1}/300 "
+                f"exact={int(prefix_successes[-1])}/{row_index + 1}",
+                flush=True,
+            )
+
+    successes_at_32 = int(prefix_successes[-1].item())
+    confidence_low, confidence_high = _wilson_interval(successes_at_32, 300)
+    for stats in per_source.values():
+        stats["exact_trajectory_agreement_at_32"] = stats["exact_at_32"] / stats["prompts"]  # type: ignore[assignment]
+        stats["independent_token_top1_agreement_at_32"] = (  # type: ignore[assignment]
+            stats["aligned_token_matches"] / (stats["prompts"] * horizon)
+        )
+    result = {
+        "schema": "qvq.divergence300.result.v2",
+        "dense_model": args.dense_model,
+        "checkpoint": str(checkpoint),
+        "dataset": {
+            "path": str(dataset_path),
+            "sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+            "prompts": 300,
+            "max_prompt_tokens": args.max_prompt_tokens,
+            "prompt_tokens_total": prompt_token_total,
+            "prompts_at_token_cap": prompts_at_token_cap,
+        },
+        "decoding": {
+            "algorithm": "independent_greedy_argmax",
+            "do_sample": False,
+            "new_tokens": horizon,
+            "chat_template": True,
+            "dtype": args.dtype,
+            "attn_implementation": args.attn_implementation,
+        },
+        "divergence_300_at_32": {
+            "display_name": "Divergence-300 @32",
+            "protocol": "independent_greedy_rollout",
+            "published_aggregation_status": (
+                "Unsloth has not published its scalar reduction; report both aligned-token top-1 and exact survival"
+            ),
+            "independent_token_top1_agreement_at_32": aligned_token_sum / 300,
+            "independent_token_top1_by_position": {
+                str(index + 1): int(value.item()) / 300 for index, value in enumerate(aligned_match_sum)
+            },
+            "independent_token_top1_by_horizon": {
+                str(index + 1): int(aligned_match_sum[: index + 1].sum().item()) / (300 * (index + 1))
+                for index in range(horizon)
+            },
+            "exact_trajectory_agreement_at_32": successes_at_32 / 300,
+            "exact_prompts_at_32": successes_at_32,
+            "exact_trajectory_wilson_95_percent": [confidence_low, confidence_high],
+            "exact_prefix_survival_by_horizon": {
+                str(index + 1): int(value.item()) / 300 for index, value in enumerate(prefix_successes)
+            },
+            "mean_first_divergence_token": first_divergence_sum / 300,
+            "per_source": dict(sorted(per_source.items())),
+        },
+        "seconds": {
+            "dense_load": dense_load_seconds,
+            "quantized_load": quantized_load_seconds,
+            "dense_generate": dense_generate_seconds,
+            "quantized_generate": quantized_generate_seconds,
+        },
+        "prompts": prompt_results,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps({key: value for key, value in result.items() if key != "prompts"}, indent=2, sort_keys=True))
+    return 0
+
+
 def _tasks(args: argparse.Namespace) -> int:
     if args.batch_size < 1:
         raise ValueError("batch size must be positive")
@@ -469,7 +765,11 @@ def _tasks(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return _diagnostics(args) if args.command == "diagnostics" else _tasks(args)
+    if args.command == "diagnostics":
+        return _diagnostics(args)
+    if args.command == "divergence300":
+        return _divergence300(args)
+    return _tasks(args)
 
 
 if __name__ == "__main__":

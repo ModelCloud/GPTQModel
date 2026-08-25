@@ -267,8 +267,11 @@ def greedy_trajectory_metrics(
     """Compare two independently decoded greedy token trajectories.
 
     The inputs must contain exactly one token ID per autoregressive decode step.
-    ``trajectory_survival`` is the headline Divergence-300 @32-style metric:
-    it is one only when the complete measured trajectory is identical.
+    ``trajectory_survival`` is one only when the complete measured trajectory
+    is identical. ``aligned_token_matches`` retains the separate per-position
+    top-1 comparison after the two model prefixes have been allowed to diverge.
+    Both reductions are returned because public Divergence-300 descriptions do
+    not specify which scalar aggregation their chart uses.
     """
 
     if not isinstance(token_count, int) or isinstance(token_count, bool) or token_count < 1:
@@ -289,16 +292,19 @@ def greedy_trajectory_metrics(
     if dense.device != quantized.device:
         raise ValueError("greedy trajectories must share one device")
     matches = dense.eq(quantized)
+    prefix_survival = matches.to(dtype=torch.int64).cumprod(dim=0).to(dtype=torch.float32)
     mismatch = (~matches).nonzero(as_tuple=False).flatten()
     first = (
         (mismatch[0] + 1).to(dtype=torch.float32)
         if mismatch.numel()
         else torch.tensor(float(token_count + 1), device=dense.device)
     )
-    survival = matches.all().float()
+    survival = prefix_survival[-1]
     return {
         "trajectory_survival": survival,
         "exact_sequence_agreement": survival,
+        "prefix_survival": prefix_survival,
+        "aligned_token_matches": matches.to(dtype=torch.float32),
         "aligned_token_agreement": matches.float().mean(),
         "first_divergence_token": first,
         "divergent_sequence_fraction": 1.0 - survival,
