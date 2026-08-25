@@ -445,8 +445,9 @@ The focused `.15/.175/.225/.25/.30` bracket and the 500k mixed-rate/source
 arms are still running; their rows will be appended here when canonical D300
 reports complete.
 
-GSM8K Platinum for the best YAQA reg .020 checkpoint is queued behind the
-first free GPU (session `24963`).
+GSM8K Platinum for the best YAQA reg .020 checkpoint is now running on the
+newly freed GPU0 (session `98290`); the earlier GPU2 waiter (`24963`) was
+superseded. It uses batch 16 with continuous batching and paged attention.
 
 ### Queued full-subset final-logit replay control
 
