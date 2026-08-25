@@ -1197,6 +1197,40 @@ state could not affect them, with `CCACHE_DISABLE=1` and a distinct empty `GPTQM
 
 - **MEASURED by inspection:** this entry contains no timing or speed claim.
 
+## 2026-08-25 legacy banked transition-15 backpointer-width correction
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4 `znver4`, no AMX) | 32-CPU
+          cgroup out of 192 host CPUs, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
+
+- **INFERRED by whole-repository caller audit:** severity is **LATENT, NOT OBSERVED**. The legacy function is not
+  separately registered as a Torch op and has no Python, test, or benchmark caller. Its sole caller is the public
+  dispatcher, which selects it only for unconstrained transition-16 configurations; that path already allocates
+  int32 backpointers. No reachable public configuration exposed the defective transition-15 narrowing.
+- **MEASURED with a temporary t15 dispatch hook:** the pre-fix legacy path returned state `-1` instead of `65535`
+  when its winning two-bank boundary predecessor flattened to `65535`. A fresh 16-second cached-compiler build
+  failed the focused test; after changing the predicate to cover `bank_count * prefix_count - 1`, a distinct fresh
+  build passed. The temporary hook and test are not shipped because unchanged production dispatch cannot reach
+  legacy at t15; the same test would pass before and after through G-only and would therefore be a false regression.
+- **INFERRED by source audit:** non-boundary prefix backpointers store only `0..prefix_count-1`. The shared width
+  predicate is conservative for that array and exact for the flattened boundary array, so separate dtypes are not
+  required for correctness.
+- **MEASURED eager-oracle gate:** G-only and fixed legacy both matched 8 targeted configurations covering one/two
+  banks, V=2/V=4, steps 1/2/4/32, segment boundaries, weights, exact ties, states, bank IDs, and packed words/selectors.
+  The larger benchmark then exposed discrete differences. On the exact batch-64 seed, legacy differed on rows
+  4/7/30/43 and failed the eager state oracle while G-only matched all four. Legacy also failed the batch-128 eager
+  adjudication. Therefore transition-15 dispatch remains G-only.
+- **MEASURED but rejected for dispatch:** with cgroup preflight deltas of 1.56 and 1.26 CPU-seconds over 3 seconds,
+  explicit singleton placement, 3 warmups, and 15 samples, legacy/G-only speedups at batch 32/64/128 were
+  3.87x/3.99x/3.92x. Legacy medians were 23.9/46.2/94.4 ms (mins 22.9/45.6/90.7; spreads 2.8/44.2/25.1 ms), versus
+  G-only medians 92.6/184.4/369.6 ms (mins 92.5/184.3/368.4; spreads 3.7/2.9/6.2 ms). The speedup is not enabled
+  because selected states fail the eager oracle. Both binaries came from distinct empty build roots with ccache
+  disabled and real 25-second compiles (28.7/29.5 seconds wall time). `OMP_PLACES=cores` was never used.
+- **MEASURED gates, before and after:** `test_qvq.py` stayed at 661 passed/248 skipped;
+  `test_qvq_v2b2_p32.py` plus `test_qvq_viterbi_cpu_opt.py` stayed at 138 passed/12 skipped/1 xfailed; lifecycle stayed
+  at the same two pre-existing `damp_percent` failures with 29 passed/2 skipped; `git diff --check` passed.
+- **MEASURED after merging current `origin/main`:** `test_qvq.py` remained 661 passed/248 skipped; the combined
+  V2B2/opt gate became 141 passed/12 skipped because upstream added opt tests and removed the xfail; lifecycle still
+  had the identical two pre-existing failures with 29 passed/2 skipped; `git diff --check` passed.
 ## 2026-08-24 -- `qvq_viterbi_cpu_opt`: V=2 emission accumulation order + zero-step guard
 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/CD/IFMA/VBMI (Zen 4,
