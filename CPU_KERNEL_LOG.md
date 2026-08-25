@@ -1696,3 +1696,38 @@ Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver
   translation units in 95 seconds. Its commit-tagged artifact records states, segment bank IDs, packed words, and
   packed selectors. Baseline gates were `803 passed, 260 skipped` and `178 passed, 8 skipped`. The complete durable
   report is `docs/qvq/qvq_banked_t16_dispatch_results.md`.
+
+## 2026-08-25 transition-16 deterministic small-batch dispatch
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X) | AVX-512F/BW/VL/DQ/FMA, no AMX |
+          32 logical CPUs used, OMP_NUM_THREADS=32 | torch 2.13.0+cpu |
+          host zen5-cpu-6
+
+- **MEASURED:** A fresh alternating paired sweep (3 warmups, 15 repeats per arm,
+  explicit singleton places) reproduced the legacy discontinuity. On minima,
+  batch 16 was 22.732 ms/row versus 0.721 ms/row at batch 32, a 31.5x drop in
+  per-row cost. G-only was 2.807 and 2.599 ms/row respectively.
+- **MEASURED:** The onset sweep at batches 1/2/4/8/12/16/20/24/28/32 found
+  legacy minima of 21.120--26.097 ms/row at every batch below 32, then 0.718
+  ms/row at 32. G-only minima were 2.827--5.525 ms/row at batches 8--28 and
+  2.600 ms/row at 32; batches 1--4 had a separate G-only parallelism onset.
+- **INFERRED:** Dispatching on `at::get_num_threads()` is unsafe because the two
+  FP32 recurrences can select different near-tie paths. A fixed `<32` cutoff
+  preserves output determinism across thread settings and has margin over the
+  last measured pathological batch (28). This is justified on speed only.
+- **MEASURED:** Candidate-default timing confirmed the implemented selection:
+  batch 16 was 44.2 ms minimum / 45.9 ms median and batch 32 was 22.0 ms
+  minimum / 23.0 ms median (3 warmups, 15 repeats).
+- **MEASURED:** The unflipped batches 32/64 are byte-identical to the unmodified
+  `5ee72d93f3079f2c17e7e441e3c85670ea7a29e4` baseline for states, segment bank
+  IDs, packed words, and packed selectors, with zero loss delta.
+- **MEASURED:** FP64 adjudication completed 72 of 144 attempted configurations
+  and found 18 divergent configurations. The flipped batches 8/16 favored
+  G-only in 10/10 divergences; the overall divergent-row tally was 10-10. This
+  demonstrates sampled non-regression, not an accuracy improvement.
+- **MEASURED:** The banked-kernel gate compares the same transition-16 inputs at
+  16/24/32 threads on both sides of the cutoff and requires identical states,
+  segment bank IDs, packed words, and packed selectors. It passes. Full gates:
+  `803 passed, 260 skipped` and `178 passed, 8 skipped`.
+- Full methodology, positional medians, raw-regime table, and provenance:
+  `docs/qvq/qvq_banked_t16_small_batch_results.md`.

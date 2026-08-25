@@ -5215,7 +5215,7 @@ def test_native_banked_viterbi_adjacent_steps_invalid_sentinels_and_boundary_tra
     assert torch.equal(squared_error, torch.zeros_like(squared_error))
 
 
-def test_native_banked_viterbi_v2_is_thread_count_invariant():
+def test_native_banked_viterbi_v2_is_thread_count_invariant(monkeypatch):
     from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
 
     generator = torch.Generator().manual_seed(2)
@@ -5244,6 +5244,54 @@ def test_native_banked_viterbi_v2_is_thread_count_invariant():
 
     for aligned_output, unaligned_output in zip(aligned, unaligned):
         assert torch.equal(aligned_output, unaligned_output)
+
+    # The production t16 dispatcher must select the same recurrence at every
+    # thread count. Exercise both sides of its fixed batch cutoff and compare
+    # selected states, bank IDs, and both packed representations.
+    from gptqmodel.quantization.qvq import pack_qvq_bank_ids
+
+    for batch_size, expected_arm in ((16, "g_only"), (32, "legacy")):
+        generator = torch.Generator().manual_seed(20260825 + batch_size)
+        t16_sequences = torch.randn((batch_size, 32, 2), generator=generator, dtype=torch.float32)
+        t16_codebooks = torch.randn((2, 1 << 16, 2), generator=generator, dtype=torch.float32)
+
+        def run_t16(thread_count):
+            torch.set_num_threads(thread_count)
+            if torch.get_num_threads() != thread_count:
+                pytest.skip(f"cannot set torch thread count to {thread_count}")
+            states, _, segment_bank_ids = qvq_cpu_viterbi_banked(
+                t16_sequences, t16_codebooks, transition_bits=16, segment_steps=16
+            )
+            return (
+                states,
+                segment_bank_ids,
+                pack_trellis_states(states, bits=8),
+                pack_qvq_bank_ids(segment_bank_ids.reshape(-1)),
+            )
+
+        try:
+            outputs = {threads: run_t16(threads) for threads in (16, 24, 32)}
+        finally:
+            torch.set_num_threads(original_threads)
+        reference = outputs[16]
+        for threads, candidate in outputs.items():
+            for expected, actual in zip(reference, candidate):
+                assert torch.equal(expected, actual), f"t16 batch {batch_size}, threads {threads} diverged"
+
+        monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_LEGACY", raising=False)
+        monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_G_ONLY", raising=False)
+        default = run_t16(16)
+        monkeypatch.setenv(
+            "QVQ_TEST_FORCE_BANKED_LEGACY" if expected_arm == "legacy" else "QVQ_TEST_FORCE_BANKED_G_ONLY",
+            "1",
+        )
+        forced = run_t16(16)
+        for expected, actual in zip(default, forced):
+            assert torch.equal(expected, actual)
+        monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_LEGACY", raising=False)
+        monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_G_ONLY", raising=False)
+
+    torch.set_num_threads(original_threads)
 
 
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:

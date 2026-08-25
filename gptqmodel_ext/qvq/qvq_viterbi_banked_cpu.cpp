@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -702,17 +703,22 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
       "qvq_viterbi_banked_cpu: positive segment_steps must divide step_count");
 
   // At transition width 16 the suffix frontier has one element. Legacy is
-  // 2.7-2.9x faster than G-only at batch >= 32 (median; 2.9-3.7x on minima).
-  // A 72-config, one-thread FP64 path-cost sweep found only near-tie noise
-  // (3e-06..1.1e-04 relative), so no accuracy claim is made either way. For
-  // batch < at::get_num_threads(), legacy takes the outer-serial, inner-parallel
-  // tiled path above and is about 6.1x slower; that regime is documented, not
-  // dispatched on yet. Transition width 15's G-only choice is inherited and
-  // unmeasured by this change.
-  if (transition_bits == 16 && bank_count <= 2 &&
+  // faster from batch 32 upward, but its inner-parallel path has a severe
+  // small-batch cliff. Use a fixed cutoff: basing this dispatch on
+  // at::get_num_threads() would make FP32 near-tie winners thread-count
+  // dependent because the two recurrences can select different paths.
+  constexpr int64_t legacy_t16_min_batch = 32;
+  const bool test_force_legacy = std::getenv("QVQ_TEST_FORCE_BANKED_LEGACY") != nullptr;
+  const bool test_force_g_only = std::getenv("QVQ_TEST_FORCE_BANKED_G_ONLY") != nullptr;
+  TORCH_CHECK(
+      !(test_force_legacy && test_force_g_only),
+      "qvq_viterbi_banked_cpu: forced legacy and G-only paths are mutually exclusive");
+  const bool legacy_t16_shape = transition_bits == 16 && bank_count <= 2 &&
       !(overlap.has_value() && overlap->defined()) &&
       !(entry_states.has_value() && entry_states->defined()) &&
-      !(exit_states.has_value() && exit_states->defined())) {
+      !(exit_states.has_value() && exit_states->defined());
+  if (test_force_legacy ||
+      (!test_force_g_only && legacy_t16_shape && batch_size >= legacy_t16_min_batch)) {
     return qvq_viterbi_banked_cpu_legacy(
         sequences, codebooks, transition_bits, segment_steps, overlap, step_weights,
         entry_states, exit_states);
