@@ -168,6 +168,12 @@ def _default_first_decoder_layer(model: nn.Module) -> nn.Module:
     return layers[0]
 
 
+def _exact_symmetric_gram(matrix: torch.Tensor) -> torch.Tensor:
+    """Project a numerically accumulated Gram matrix onto exact symmetry."""
+
+    return (matrix + matrix.T) * 0.5
+
+
 def _sketch_b_gram_updates(
     activation: torch.Tensor,
     gradient: torch.Tensor,
@@ -222,7 +228,7 @@ def _sketch_b_gram_updates(
         output_source = projected_activation.permute(1, 0, 2).reshape(out_features, -1)
         input_update = input_source @ input_source.T
         output_update = output_source @ output_source.T
-        return input_update, output_update
+        return _exact_symmetric_gram(input_update), _exact_symmetric_gram(output_update)
     if strategy == "token_space":
         # Associativity gives A.T @ (D @ D.T) @ A and
         # D.T @ (A @ A.T) @ D.  This avoids materializing G when the token
@@ -237,10 +243,7 @@ def _sketch_b_gram_updates(
             gradient.transpose(1, 2),
             torch.bmm(activation_token_gram, gradient),
         ).sum(dim=0)
-        # The reassociated products can differ across mirrored entries by a
-        # few FP32 ulps. Restore the exact symmetric contract required by the
-        # packed accumulator and LDL factorization.
-        return (input_update + input_update.T) * 0.5, (output_update + output_update.T) * 0.5
+        return _exact_symmetric_gram(input_update), _exact_symmetric_gram(output_update)
 
     per_sequence_gradient = torch.bmm(gradient.transpose(1, 2), activation)
     if strategy == "flattened":
@@ -252,14 +255,11 @@ def _sketch_b_gram_updates(
         )
         input_update = input_source.T @ input_source
         output_update = output_source @ output_source.T
-        # GEMM may accumulate mirrored entries in a different order. Restore
-        # the exact symmetric contract required by packed accumulation and LDL.
-        return (input_update + input_update.T) * 0.5, (output_update + output_update.T) * 0.5
+        return _exact_symmetric_gram(input_update), _exact_symmetric_gram(output_update)
 
-    return (
-        torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0),
-        torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0),
-    )
+    input_update = torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0)
+    output_update = torch.bmm(per_sequence_gradient, per_sequence_gradient.transpose(1, 2)).sum(dim=0)
+    return _exact_symmetric_gram(input_update), _exact_symmetric_gram(output_update)
 
 
 def capture_yaqa_sketch_b(

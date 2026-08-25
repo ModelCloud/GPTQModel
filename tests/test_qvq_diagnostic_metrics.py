@@ -866,12 +866,19 @@ def test_yaqa_sketch_b_gram_strategies_preserve_fp32_factor_geometry(shape, stra
         assert torch.equal(actual_factor, actual_factor.T)
 
 
-def test_yaqa_flattened_sketch_b_gram_is_bit_exact_symmetric():
-    generator = torch.Generator().manual_seed(20260825)
-    activation = torch.randn((3, 7, 8), generator=generator, dtype=torch.float32)
-    gradient = torch.randn((3, 7, 6), generator=generator, dtype=torch.float32)
+@pytest.mark.parametrize("strategy", ("batched", "flattened", "projected", "token_space"))
+def test_yaqa_all_sketch_b_gram_strategies_are_bit_exact_symmetric(strategy):
+    generator = torch.Generator().manual_seed(1000)
+    activation = torch.randn((5, 50, 97), generator=generator, dtype=torch.float32)
+    gradient = torch.randn((5, 50, 71), generator=generator, dtype=torch.float32)
+    kwargs = {"strategy": strategy}
+    if strategy == "projected":
+        kwargs["projections"] = (
+            torch.randn((71, 32), generator=generator, dtype=torch.float32),
+            torch.randn((97, 32), generator=generator, dtype=torch.float32),
+        )
 
-    for factor in _sketch_b_gram_updates(activation, gradient, strategy="flattened"):
+    for factor in _sketch_b_gram_updates(activation, gradient, **kwargs):
         assert torch.equal(factor, factor.T)
 
 
