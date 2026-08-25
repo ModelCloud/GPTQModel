@@ -36,6 +36,8 @@
 #include <type_traits>
 #include <limits>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -3341,6 +3343,14 @@ int64_t qvq_norm_cache_size() {
 // empty, or exactly "0" leave the fast path enabled; any other non-empty
 // value (including "00" and "0foo") forces the unmodified baseline grid
 // recurrence.
+// Exact survivor-pruning policy codes shared with
+// `gptqmodel/quantization/qvq_pruning.py`.  These are part of the native op
+// schema and must stay stable.
+constexpr int64_t kViterbiPruningAuto = 0;       // auto + fallback=baseline
+constexpr int64_t kViterbiPruningOff = 1;        // off
+constexpr int64_t kViterbiPruningAutoError = 2;  // auto + fallback=error
+constexpr int64_t kViterbiPruningRequired = 3;   // required
+
 bool norm_rank_grid_disabled() {
   static const bool disabled = [] {
     const char* value = std::getenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID");
@@ -3474,7 +3484,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     bool validate_values = true,
     int family_batch = 0,
     int bank_count_override = 0,
-    bool midpoint_only = false) {
+    bool midpoint_only = false,
+    // Exact survivor-pruning policy from `ViterbiPruningConfig`. Zero is the
+    // historical automatic behavior, so every direct low-level caller that
+    // omits it keeps the pre-policy dispatch exactly.
+    int64_t pruning_policy = kViterbiPruningAuto) {
   const bool g_only = kernel_mode != 0;
   bool cooperative = false;
   int cooperative_threads = 0;
@@ -3590,6 +3604,62 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
               "midpoint-only segmented V2 currently requires an sm_80 grid recurrence");
   TORCH_CHECK(!cooperative || (!midpoint_only && transition_bits == 5 && bank_count == 2 && segment_steps == 16),
               "cooperative segmented V2 currently supports only full W2.5 B2-P32 recurrence");
+  TORCH_CHECK(pruning_policy >= kViterbiPruningAuto && pruning_policy <= kViterbiPruningRequired,
+              "segmented-bank V2 Viterbi pruning policy must be 0 (auto), 1 (off), 2 (auto+error), "
+              "or 3 (required)");
+  // Explicit configuration is authoritative.  The deprecated
+  // GPTQMODEL_QVQ_DISABLE_OCTET_GRID A/B escape hatch is consulted only for the
+  // two `auto` policies; `off` and `required` ignore it entirely.
+  const bool pruning_strict =
+      pruning_policy == kViterbiPruningAutoError || pruning_policy == kViterbiPruningRequired;
+  const bool pruning_env_honored =
+      pruning_policy == kViterbiPruningAuto || pruning_policy == kViterbiPruningAutoError;
+  const bool pruning_env_disabled = pruning_env_honored && norm_rank_grid_disabled();
+  const bool pruning_requested = pruning_policy != kViterbiPruningOff && !pruning_env_disabled;
+  const bool norm_rank_eligible =
+      grid_parallel && !midpoint_only && !cooperative &&
+      !constrained && !weighted && family_batch == 0 &&
+      codebooks.scalar_type() == at::kHalf &&
+      (bank_count == 2 || bank_count == 4) &&
+      segment_steps == (bank_count == 2 ? 16 : 32) &&
+      (transition_bits == 5 || transition_bits == 6);
+  // Refuse before any kernel selection so `required` and `fallback="error"`
+  // can never be satisfied by a silent fallback -- including the fused
+  // family-grid and cooperative launches that return early below.
+  if (pruning_strict && !(pruning_requested && norm_rank_eligible)) {
+    std::ostringstream reason;
+    if (pruning_env_disabled) {
+      reason << "the deprecated GPTQMODEL_QVQ_DISABLE_OCTET_GRID escape hatch disabled it";
+    } else if (constrained) {
+      reason << "constrained (overlap) calls keep the exact baseline recurrence";
+    } else if (weighted) {
+      reason << "weighted (step_weights) calls keep the exact baseline recurrence";
+    } else if (family_batch != 0) {
+      reason << "family-batched calls keep the exact baseline recurrence";
+    } else if (codebooks.scalar_type() != at::kHalf) {
+      reason << "only float16 codebooks are supported (got " << codebooks.scalar_type() << ")";
+    } else if (bank_count != 2 && bank_count != 4) {
+      reason << "only two-bank P32 and four-bank P64 stacks are supported (got bank_count="
+             << bank_count << ")";
+    } else if (segment_steps != (bank_count == 2 ? 16 : 32)) {
+      reason << "segment_steps=" << segment_steps << " does not match bank_count=" << bank_count;
+    } else if (transition_bits != 5 && transition_bits != 6) {
+      reason << "only the benchmark-supported W2.5/W3 rates (transition_bits 5 or 6) are supported "
+                "(got transition_bits=" << transition_bits << ")";
+    } else if (midpoint_only) {
+      reason << "midpoint-only traceback is not a norm-band shape";
+    } else if (cooperative) {
+      reason << "the cooperative W2.5 recurrence is not a norm-band shape";
+    } else {
+      reason << "this call does not use the grid-parallel segmented recurrence";
+    }
+    TORCH_CHECK(false,
+                "QVQ exact norm-band Viterbi pruning was requested with "
+                "`viterbi_pruning.mode='required'` or `fallback='error'`, but this call cannot "
+                "use it: ", reason.str(),
+                ". Set `viterbi_pruning.mode='auto'` with the default "
+                "`fallback='baseline'` to keep the exact baseline recurrence instead.");
+  }
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
   // Below ~40 sequences both paths are bound by the serial 127-step chain of a
   // single sequence and the reference layout (one CTA per bank) has twice the
@@ -3828,12 +3898,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   // W2.5 and W3.0 only: at shift 4 the 16-entry candidate list is too short
   // for the band overhead to pay for itself (measured 0.88-1.15x on real
   // tiles), so W2.0 keeps the pristine grid recurrence unconditionally.
-  if (!norm_rank_grid_disabled() && grid_parallel && !midpoint_only && !cooperative &&
-      !constrained && !weighted && family_batch == 0 &&
-      codebooks.scalar_type() == at::kHalf &&
-      (bank_count == 2 || bank_count == 4) &&
-      segment_steps == (bank_count == 2 ? 16 : 32) &&
-      (transition_bits == 5 || transition_bits == 6)) {
+  if (pruning_requested && norm_rank_eligible) {
     if (bank_count == 2) {
       if (transition_bits == 5) {
         QVQ_V2_NORM_RANK_DISPATCH(5, 2, 16, kNormRankChunkWidthW25);
@@ -3880,9 +3945,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     int64_t transition_bits,
     int64_t segment_steps,
     const c10::optional<at::Tensor>& overlap,
-    const c10::optional<at::Tensor>& step_weights) {
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
   return qvq_viterbi_v2_segment_banked_cuda_impl(
-      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 0);
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 0,
+      true, 0, 0, false, pruning_policy);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_g_cuda(
@@ -3891,9 +3958,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_g_cuda(
     int64_t transition_bits,
     int64_t segment_steps,
     const c10::optional<at::Tensor>& overlap,
-    const c10::optional<at::Tensor>& step_weights) {
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
   return qvq_viterbi_v2_segment_banked_cuda_impl(
-      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 1);
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 1,
+      true, 0, 0, false, pruning_policy);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_cuda(
@@ -3902,9 +3971,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_cuda(
     int64_t transition_bits,
     int64_t segment_steps,
     const c10::optional<at::Tensor>& overlap,
-    const c10::optional<at::Tensor>& step_weights) {
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
   return qvq_viterbi_v2_segment_banked_cuda_impl(
-      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2);
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2,
+      true, 0, 0, false, pruning_policy);
 }
 
 // Internal hot-path entry point. YAQA validates one complete anti-diagonal
@@ -3918,9 +3989,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_grid_trust
     int64_t transition_bits,
     int64_t segment_steps,
     const c10::optional<at::Tensor>& overlap,
-    const c10::optional<at::Tensor>& step_weights) {
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
   return qvq_viterbi_v2_segment_banked_cuda_impl(
-      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false);
+      sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false,
+      0, 0, false, pruning_policy);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trusted_cuda(
@@ -3928,7 +4001,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trust
     const at::Tensor& codebooks,
     int64_t transition_bits,
     int64_t segment_steps,
-    const c10::optional<at::Tensor>& step_weights) {
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
   constexpr int64_t midpoint = 64;
   auto rotated_sequences = at::roll(sequences, {midpoint}, {1}).contiguous();
   c10::optional<at::Tensor> rotated_weights = c10::nullopt;
@@ -3948,12 +4022,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_tail_trust
       rotated_weights,
       2,
       false,
-      single_family_batch);
+      single_family_batch,
+      0,
+      false,
+      pruning_policy);
   const int64_t overlap_mask = (int64_t{1} << (16 - transition_bits)) - 1;
   auto overlap = std::get<0>(provisional).select(1, midpoint - 1).bitwise_and(overlap_mask).contiguous();
   return qvq_viterbi_v2_segment_banked_cuda_impl(
       sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, 2, false,
-      single_family_batch);
+      single_family_batch, 0, false, pruning_policy);
 }
 
 at::Tensor qvq_viterbi_v2_segment_midpoint_trusted_cuda(
@@ -3983,7 +4060,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_family_gri
     int64_t transition_bits,
     int64_t segment_steps,
     const c10::optional<at::Tensor>& overlap,
-    const c10::optional<at::Tensor>& step_weights) {
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
   TORCH_CHECK(sequences.dim() == 4 && sequences.size(2) == 128 && sequences.size(3) == 2,
               "family-batched segmented V2 sequences must have shape [families, batch, 128, 2]");
   TORCH_CHECK(codebooks.dim() == 4 && codebooks.size(0) == sequences.size(0) && codebooks.size(1) == 2 &&
@@ -4015,7 +4093,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_family_gri
       2,
       false,
       static_cast<int>(family_batch),
-      2);
+      2,
+      false,
+      pruning_policy);
   return {
       std::get<0>(result).view({families, family_batch, 128}),
       std::get<1>(result).view({families, family_batch}),
@@ -4036,20 +4116,23 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
   m.def("viterbi_banked(Tensor sequences, Tensor codebooks, int transition_bits, Tensor? overlap=None, "
         "Tensor? step_weights=None) -> (Tensor, Tensor)");
+  // `pruning_policy` defaults to 0 (auto), so pre-policy callers keep the
+  // historical automatic norm-band behavior with no source change.
   m.def("viterbi_v2_segment_banked(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
-        "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+        "Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_g(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
-        "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+        "Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_grid(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
-        "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+        "Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
-        "Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+        "Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_tail_trusted(Tensor sequences, Tensor codebooks, int transition_bits, int segment_steps, "
-        "Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+        "Tensor? step_weights=None, int pruning_policy=0) -> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_midpoint_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? step_weights=None) -> Tensor");
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
-        "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
+        "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) "
+        "-> (Tensor, Tensor, Tensor)");
   // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
   m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
   m.def("norm_rank_grid_dispatch_count() -> int", &qvq_norm_rank_grid_dispatch_count);

@@ -1386,6 +1386,7 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.yaqa.spectral_localized_direct_replay_candidates
                 ),
                 viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
+                viterbi_pruning=module_qcfg.viterbi_pruning,
                 telemetry=telemetry,
                 bank_count=module_qcfg.bank_count,
                 propagated_inputs=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[0],

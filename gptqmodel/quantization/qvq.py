@@ -33,6 +33,7 @@ from .qvq_codecs import (
     pgc18_codebook_v4,
     pgc18_decode_states_v4,
 )
+from .qvq_pruning import viterbi_pruning_dispatch_code
 from .qvq_rates import (
     QVQ_BITS as _QVQ_BITS,
 )
@@ -1511,6 +1512,7 @@ def _batched_v2_banked_viterbi_quantize(
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
     mlx_codebooks=None,
+    viterbi_pruning: object | None = None,
     _cuda_values_prevalidated: bool = False,
 ) -> BankedTrellisQuantizationResult:
     """Exact min-sum recurrence over banked V2 segments.
@@ -1656,6 +1658,7 @@ def _batched_v2_banked_viterbi_quantize(
         if torch.any((overlap_i64 < 0) | (overlap_i64 >= 1 << overlap_bits)):
             raise ValueError("QVQ banked V2 overlap is outside the legal retained-state range.")
 
+    pruning_policy = viterbi_pruning_dispatch_code(viterbi_pruning)
     if (
         sequences.device.type == "cuda"
         and work_dtype == torch.float32
@@ -1680,6 +1683,7 @@ def _batched_v2_banked_viterbi_quantize(
                 segment_steps,
                 native_overlap,
                 native_weights,
+                pruning_policy,
             )
         else:
             native_states, native_loss, segment_bank_ids = qvq_cuda_viterbi_v2_segment_banked(
@@ -1689,6 +1693,7 @@ def _batched_v2_banked_viterbi_quantize(
                 segment_steps,
                 native_overlap,
                 native_weights,
+                pruning_policy,
             )
         path_banks = segment_bank_ids.to(torch.long).repeat_interleave(segment_steps, dim=1)
         return BankedTrellisQuantizationResult(
@@ -1783,6 +1788,7 @@ def batched_v2b4_p64_viterbi_quantize(
     bits: float,
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
+    viterbi_pruning: object | None = None,
 ) -> BankedTrellisQuantizationResult:
     """Exact coupled four-bank V2 recurrence with P64 switching."""
 
@@ -1795,6 +1801,7 @@ def batched_v2b4_p64_viterbi_quantize(
         segment_steps=QVQ_V2B4_P64_STEPS_PER_SEGMENT,
         overlap=overlap,
         step_weights=step_weights,
+        viterbi_pruning=viterbi_pruning,
     )
 
 
@@ -1943,6 +1950,7 @@ def batched_v2b2_p32_viterbi_quantize(
     bits: float,
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
+    viterbi_pruning: object | None = None,
 ) -> BankedTrellisQuantizationResult:
     """Exact coupled binary-bank V2 recurrence with P32 switching."""
 
@@ -1955,6 +1963,7 @@ def batched_v2b2_p32_viterbi_quantize(
         segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
         overlap=overlap,
         step_weights=step_weights,
+        viterbi_pruning=viterbi_pruning,
     )
 
 
@@ -1967,6 +1976,7 @@ def _tail_biting_v2_banked_quantize(
     step_weights: torch.Tensor | None = None,
     candidate_count: int = 1,
     mlx_codebooks=None,
+    viterbi_pruning: object | None = None,
     _cuda_values_prevalidated: bool = False,
 ) -> BankedTrellisQuantizationResult:
     """Apply the canonical two-pass tail-biting approximation to banked V2."""
@@ -1991,6 +2001,7 @@ def _tail_biting_v2_banked_quantize(
             shift,
             segment_steps,
             None if step_weights is None else step_weights.to(torch.float32).contiguous(),
+            viterbi_pruning_dispatch_code(viterbi_pruning),
         )
         path_banks = segment_bank_ids.to(torch.long).repeat_interleave(segment_steps, dim=1)
         return BankedTrellisQuantizationResult(
@@ -2026,6 +2037,7 @@ def _tail_biting_v2_banked_quantize(
             segment_steps=segment_steps,
             step_weights=rotated_weights,
             mlx_codebooks=mlx_codebooks,
+            viterbi_pruning=viterbi_pruning,
             _cuda_values_prevalidated=_cuda_values_prevalidated,
         )
         overlap = provisional.states[:, midpoint - 1] & ((1 << (16 - shift)) - 1)
@@ -2039,6 +2051,7 @@ def _tail_biting_v2_banked_quantize(
         overlap=overlap,
         step_weights=step_weights,
         mlx_codebooks=mlx_codebooks,
+        viterbi_pruning=viterbi_pruning,
         _cuda_values_prevalidated=_cuda_values_prevalidated,
     )
 
@@ -2050,6 +2063,7 @@ def tail_biting_v2b4_p64_quantize(
     bits: float,
     step_weights: torch.Tensor | None = None,
     candidate_count: int = 1,
+    viterbi_pruning: object | None = None,
 ) -> BankedTrellisQuantizationResult:
     """Apply the canonical two-pass tail-biting approximation to V2B4-P64."""
 
@@ -2062,6 +2076,7 @@ def tail_biting_v2b4_p64_quantize(
         segment_steps=QVQ_V2B4_P64_STEPS_PER_SEGMENT,
         step_weights=step_weights,
         candidate_count=candidate_count,
+        viterbi_pruning=viterbi_pruning,
     )
 
 
@@ -2072,6 +2087,7 @@ def tail_biting_v2b2_p32_quantize(
     bits: float,
     step_weights: torch.Tensor | None = None,
     candidate_count: int = 1,
+    viterbi_pruning: object | None = None,
 ) -> BankedTrellisQuantizationResult:
     """Apply the canonical two-pass tail-biting approximation to V2B2-P32."""
 
@@ -2084,6 +2100,7 @@ def tail_biting_v2b2_p32_quantize(
         segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
         step_weights=step_weights,
         candidate_count=candidate_count,
+        viterbi_pruning=viterbi_pruning,
     )
 
 
@@ -2776,6 +2793,7 @@ def _block_ldlq_inner_v2_banked(
     telemetry: QVQQuantizationTelemetry | None = None,
     factorization: tuple[torch.Tensor, torch.Tensor] | None = None,
     bank0_oracle: tuple[torch.Tensor, torch.Tensor] | None = None,
+    viterbi_pruning: object | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sequential Block-LDLQ using a coupled segmented V2 recurrence.
 
@@ -2879,6 +2897,7 @@ def _block_ldlq_inner_v2_banked(
                     segment_steps=segment_steps,
                     step_weights=chunk_weights,
                     candidate_count=tail_biting_candidates,
+                    viterbi_pruning=viterbi_pruning,
                 )
                 reconstructed_chunks.append(result.values)
                 state_chunks.append(result.states)
@@ -3722,6 +3741,7 @@ def yaqa_inner(
     _incremental_cuda_factored_feedback: bool = False,
     _incremental_cpu_factored_feedback: bool = False,
     _trusted_inputs: bool = False,
+    viterbi_pruning: object | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Quantize QVQ's ``[in, out]`` weight with YAQA v3 feedback.
 
@@ -4229,6 +4249,7 @@ def yaqa_inner(
                             bits=bits,
                             segment_steps=segment_steps,
                             candidate_count=tail_biting_candidates,
+                            viterbi_pruning=viterbi_pruning,
                             _cuda_values_prevalidated=cuda_values_prevalidated,
                         )
                     values.append(result.values.to(source.device))
@@ -4484,6 +4505,7 @@ def yaqa_inner_v2b4_p64(
         trellis_batch_size=kwargs.get("trellis_batch_size", 16),
         viterbi_objective="euclidean",
         tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
+        viterbi_pruning=kwargs.get("viterbi_pruning"),
     )
     local_diagnostics: dict[str, object] = {}
     weight, states, selectors = yaqa_inner(
@@ -4785,6 +4807,7 @@ def yaqa_inner_v2b2_p32(
                         bits=kwargs["bits"],
                         segment_steps=QVQ_V2B2_P32_STEPS_PER_SEGMENT,
                         candidate_count=kwargs.get("tail_biting_candidates", 1),
+                        viterbi_pruning=kwargs.get("viterbi_pruning"),
                     )
                     error = result.values.to("cpu", torch.float32).reshape(sample_count, 16, 16) - source_tiles
                     family_losses.append(
@@ -4809,6 +4832,7 @@ def yaqa_inner_v2b2_p32(
                 viterbi_objective="euclidean",
                 tail_biting_candidates=kwargs.get("tail_biting_candidates", 1),
                 bank_codebook_pair_stacks=bank_codebook_pair_stacks,
+                viterbi_pruning=kwargs.get("viterbi_pruning"),
             )
         block_alt_id = int(block_alt_id_tensor.item())
     else:
@@ -6349,6 +6373,9 @@ def quantize_qvq_linear(
     propagated_candidate_score: Callable[[torch.Tensor], float] | None = None,
     propagated_candidate_gradient: Callable[[torch.Tensor], torch.Tensor] | None = None,
     input_hessian_preparation: QVQInputHessianPreparation | None = None,
+    # Exact Viterbi survivor-pruning policy (`QVQConfig.viterbi_pruning`).
+    # `None` resolves to `auto`, which reproduces today's automatic behavior.
+    viterbi_pruning: object | None = None,
 ) -> QVQLinearQuantizationResult:
     """Run RHT, BlockLDLQ/YAQA, PGC16 TCQ, and planar packing for a linear.
 
@@ -6839,6 +6866,7 @@ def quantize_qvq_linear(
                     bits=bits,
                     trellis_batch_size=trellis_batch_size,
                     tail_biting_candidates=tail_biting_candidates,
+                    viterbi_pruning=viterbi_pruning,
                     diagnostics=yaqa_bank_diagnostics,
                     factorization=prepared_yaqa_factorization,
                     segmented_bank_stack=segmented_bank_stack,
@@ -6859,6 +6887,7 @@ def quantize_qvq_linear(
                         bits=bits,
                         trellis_batch_size=trellis_batch_size,
                         tail_biting_candidates=tail_biting_candidates,
+                        viterbi_pruning=viterbi_pruning,
                         factorization=prepared_yaqa_factorization,
                         telemetry=telemetry,
                         _incremental_cuda_feedback=incremental_cuda_feedback,
@@ -6887,6 +6916,7 @@ def quantize_qvq_linear(
                     bits=bits,
                     trellis_batch_size=trellis_batch_size,
                     tail_biting_candidates=tail_biting_candidates,
+                    viterbi_pruning=viterbi_pruning,
                     family_mode=yaqa_v2b2_family_mode,
                     sample_strategy=yaqa_sample_strategy,
                     block_family_id=yaqa_v2b2_fixed_family_id,
@@ -6906,6 +6936,7 @@ def quantize_qvq_linear(
                 bits=bits,
                 trellis_batch_size=trellis_batch_size,
                 tail_biting_candidates=tail_biting_candidates,
+                viterbi_pruning=viterbi_pruning,
                 bank_codebooks=bank_codebooks,
                 bank_codebook_stack=bank_codebook_stack,
                 dual_v2=dual_v2,
@@ -6928,6 +6959,7 @@ def quantize_qvq_linear(
                 trellis_batch_size=trellis_batch_size,
                 viterbi_objective=objective,
                 tail_biting_candidates=tail_biting_candidates,
+                viterbi_pruning=viterbi_pruning,
                 telemetry=telemetry,
                 factorization=prepared_block_factors,
             )
@@ -6943,6 +6975,7 @@ def quantize_qvq_linear(
                 trellis_batch_size=trellis_batch_size,
                 viterbi_objective=objective,
                 tail_biting_candidates=tail_biting_candidates,
+                viterbi_pruning=viterbi_pruning,
                 telemetry=telemetry,
                 factorization=prepared_block_factors,
                 bank_codebook_pair_stacks=bank_codebook_pair_stacks,
