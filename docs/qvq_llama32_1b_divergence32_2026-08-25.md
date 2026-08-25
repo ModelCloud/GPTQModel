@@ -39,6 +39,21 @@ prompt manifest, and unpublished Unsloth scalar reduction are not identical.
 The locked slice was not used for calibration or candidate selection. Of its 300 rows, 298 were long enough for
 the half-context warmup plus the fixed 32-position horizon.
 
+## Rendering and template-weighting contract
+
+The optimized 182-row YAQA mix is stored as `messages`. Both the coverage scanner and the quantization lifecycle
+therefore render every row through the Llama 3.2 Instruct tokenizer's native chat template. The scanner artifact's
+`apply_chat_template: false` means only that raw strings are not wrapped as synthetic user messages; it does not
+disable rendering for rows that already carry a `messages` conversation.
+
+The selected checkpoint records `yaqa.chat_template.enabled: false`. Its serialized `content_weight: 0.97` is thus
+inactive: YAQA did **not** apply the optional 97% content / 3% template-structure Fisher weighting. That option changes
+the direct token weights while retaining all template tokens in the forward context; it is not a row-fraction control.
+
+Every Divergence-300 row is also message-shaped. The evaluator calls the dense model tokenizer's
+`apply_chat_template(..., tokenize=True, add_generation_prompt=True)`, left-truncates only above 16,384 prompt tokens,
+and supplies the exact same encoded prompt tensors to dense and QVQ models before their independent greedy rollouts.
+
 ## Locked results
 
 | Checkpoint | Effective precision | Final KL | Token top-1 | Top-5 overlap | Top-10 overlap | SP-Top1@32-W50 | Legacy first-32 top-1 |
@@ -70,27 +85,55 @@ development results; the locked Divergence-300 split remains untouched.
 | Horizon | 1 | 2 | 4 | 8 | 16 | 32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Layer damping: exact-prefix survival | **71.0000%** | **56.6667%** | 34.3333% | 10.0000% | 2.3333% | 0.3333% |
-| Layer damping + alignment: exact-prefix survival | 60.3333% | 50.3333% | **38.6667%** | **17.0000%** | **3.0000%** | **0.6667%** |
+| Layer damping + alignment: exact-prefix survival | 60.3333% | 50.3333% | 38.6667% | **17.0000%** | 3.0000% | 0.6667% |
 | Two-epoch / 64-batch alignment: exact-prefix survival | 64.0000% | 51.0000% | 33.0000% | 14.6667% | 2.6667% | **1.0000%** |
+| Uniform `0.10`: exact-prefix survival | 67.3333% | 55.0000% | **42.6667%** | 14.6667% | **4.6667%** | **1.0000%** |
 
 | Checkpoint | Independent aligned-token Top-1 through 32 | Matching positions | Exact trajectories at 32 | Mean first divergence |
 | --- | ---: | ---: | ---: | ---: |
 | Layer damping | 13.9896% | 1,343 / 9,600 | 1 / 300 (0.3333%) | 4.1667 |
-| Layer damping + output alignment | **15.1667%** | **1,456 / 9,600** | **2 / 300 (0.6667%)** | **4.5733** |
-| Two-epoch / 64-batch output alignment | **17.0938%** | **1,641 / 9,600** | **3 / 300 (1.0000%)** | 4.5633 |
+| Layer damping + output alignment | 15.1667% | 1,456 / 9,600 | 2 / 300 (0.6667%) | 4.5733 |
+| Two-epoch / 64-batch output alignment | 17.0938% | 1,641 / 9,600 | **3 / 300 (1.0000%)** | 4.5633 |
+| Uniform `0.10`, no output alignment | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** | **4.8533** |
 
-The larger alignment budget gained another 185 aligned positions over the one-epoch candidate, or 1.9271 percentage
-points (+12.71% relative), and one additional exact trajectory. Its exact-trajectory 95% Wilson interval is
-0.3407%--2.8983%. It does not dominate exact-prefix survival at every early horizon, which is why the full horizon
-curve and the aggregate aligned-token score are both reported. Its per-source aligned-token scores are 24.2188% on
-MathArena, 19.2500% on LongBench v2, 16.4062% on SWE-bench Verified, 12.0313% on Terminal-Bench 2.1, and 11.8125%
-on non-English Multi-IF.
+The larger hybrid alignment budget gained another 185 aligned positions over the one-epoch candidate, or 1.9271
+percentage points (+12.71% relative), and one additional exact trajectory. The corrected damping control then found
+that uniform `0.10` regularization without output alignment improves another 76 positions over that aligned hybrid,
+making it the current development leader. Its exact-trajectory 95% Wilson interval is 0.3407%--2.8983%. It does not
+dominate every source: its per-source aligned-token scores are 15.1563% on MathArena, 19.3750% on LongBench v2,
+22.0000% on SWE-bench Verified, 17.5781% on Terminal-Bench 2.1, and 11.6875% on non-English Multi-IF. This is why the
+full source breakdown, horizon curve, and aggregate aligned-token score are all reported.
 
 The prompt manifest SHA-256 is `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
 
 This result formally rules out interpreting the historical 82.0365% shared-prefix score as Divergence-300 @32. The
 corrected development target of 25% aligned-token agreement requires 2,400 of 9,600 positions to match; the current
-candidate matches 1,641, leaving a gap of 759 positions. If the target were instead interpreted as exact-trajectory
+candidate matches 1,717, leaving a gap of 683 positions. If the target were instead interpreted as exact-trajectory
 survival, it would require 75 of 300 prompts; the candidate matches three. The 25% target is therefore **not yet
 reached under either reduction**. Configuration sweeps must report both
 reductions without renaming shared-prefix agreement or silently switching which reduction is used for the target.
+
+## Corrected-metric damping control
+
+The layers 0/6/10/12 regularization override was originally selected by greedily splicing `0.10`-regularized layer
+payloads into an otherwise `0.05` checkpoint on the older teacher-forced proxy. A full corrected-protocol control on
+the same pinned development manifest confirms that the layer-specific choice is positive before output alignment:
+
+| Damping checkpoint | Independent aligned-token Top-1 through 32 | Matching positions | Exact trajectories at 32 |
+| --- | ---: | ---: | ---: |
+| Uniform `0.05` | 12.6042% | 1,210 / 9,600 | 2 / 300 (0.6667%) |
+| Layers 0/6/10/12 at `0.10`, all others `0.05` | 13.9896% | 1,343 / 9,600 | 1 / 300 (0.3333%) |
+| Uniform `0.10` | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** |
+
+The hybrid gains 133 aligned positions over uniform `0.05`, but uniform `0.10` gains another 374 positions over the
+hybrid and 507 over uniform `0.05`. The old proxy-selected dynamic override is therefore positive relative to `0.05`
+but is not the corrected-metric optimum. Exact survival is sparse and does not rank the first two arms consistently,
+so neither reduction is silently substituted for the aligned-token optimization target.
+
+## Teacher-rollout alignment diagnostic
+
+An exact fixed-trellis post-quant arm trained only the existing SU/SV alignment tensors on 32 dense-teacher greedy
+continuation tokens for each of the 182 disjoint YAQA prompts. Template and prompt tokens remained in context but were
+excluded from the loss. On separate NM slices it moved evaluation KL from `0.273135` to `0.265773` and Top-1 from
+`80.6132%` to `81.1481%`, but JSD regressed from `0.059245` to `0.059727`. The strict all-metric gate therefore rejected
+the arm and wrote no derived checkpoint. This is directional training evidence, not a promoted Divergence-300 result.
