@@ -227,3 +227,22 @@ locked ordinary and canonical mixed-source D300 protocols. W3 wins every recorde
 Nothing in this ledger
 claims the target has been reached, and no proxy-only
 arm is eligible for promotion.
+
+## AIME 2025/2026 YAQA augmentation (queued)
+
+To test whether math-focused activation coverage improves post-quant GSM8K
+without contaminating evaluation, `build_aime2526_mix.py` downloads the pinned
+local HF cache entries for `MathArena/aime_2025` and `MathArena/aime_2026`,
+formats each problem with the same competition prompt wrapper used by D300,
+and filters exact canonical-message SHA-256 intersections with the D300
+development manifest.  Of 60 source problems, 26 overlap D300 and are excluded;
+34 new rows are appended to the existing 182-row YAQA mix, producing 216 rows.
+The resulting parquet SHA-256 is recorded in
+`dataset/calibration_mix_500k_llama3.2_1b/calibration_aime2526.json`; no GSM8K
+Platinum examples are used for calibration.
+
+The W2 arm uses `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg010_aime2526.json`
+(flat QVQ V2B2-P32, YAQA, regularization .05, full 216-row mix, reselect family
+mode, seed 0) and ordinary lifecycle rows 0--127.  It is running on the freed
+GPU4 as `/root/qvq-results/llama32-1b-w2-aime2526-yaqa-mix-main-1f6c2132`;
+canonical D300 and GSM8K Platinum are evaluated only after quantization.
