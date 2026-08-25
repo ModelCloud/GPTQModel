@@ -1814,15 +1814,24 @@ initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
   `vfmadd231ss`. The register mapping is object-local and was not reused from
   any other build. The header is therefore unchanged.
 - **Item 2 — LATENT, NOT OBSERVED IN PRODUCTION.** The override is a test-only
-  environment hook and is not set by production. Before the fix, a direct
-  V=4/t16/bank-count-1 call with `QVQ_TEST_FORCE_BANKED_G_ONLY=1` changed all
-  four squared-error values while states and segment bank IDs stayed equal:
-  unforced `[0.8787578344, 0.9491938949, 1.6207495928, 1.2397410870]` versus
-  forced `[0.8787583113, 0.9491969943, 1.6207460165, 1.2397413254]`. The
-  `legacy_t16_shape` guard now includes `vector_size == 2`, so V=4 remains on
-  G-only and the override cannot move it. The new V=4 assertion failed first on
-  the unmodified base with `AssertionError: QVQ_TEST_FORCE_BANKED_G_ONLY escaped
-  the V=2 dispatcher scope`, then passed after the fix.
+  environment hook and is not set by production. Transition width 16 is also
+  rejected by both production call sites. The original PR changed the default
+  unconstrained V=4/t16 predicate by adding `vector_size == 2`, so I measured
+  parent `2a36a047` versus PR tree `b396dfc2` with no environment variables:
+  32 attempted, 16 completed, 16 explicitly skipped because the packed-word
+  helper rejects 16-step streams that are not whole 32-edge blocks, and 0
+  divergences. The completed cases covered seeds `2, 11, 202, 3033`, bank
+  counts `1, 2`, batch sizes `1, 4`, and 32 steps, with minimum duplicate/tie
+  density 99.8046875%. Selected states, segment bank IDs, packed words, and
+  squared errors were exactly equal in all completed cases. **MEASURED:
+  default V=4 t16 output is unchanged by this scoping, 16 configs, 0
+  divergences.** The guard is retained, and the source comment records this
+  measured fact without asserting which recurrence V=4 belongs to.
+  The pre-fix direct V=4 override reproducer remains real: the random fixture
+  changed all four squared-error values while states and segment bank IDs stayed
+  equal. The V=4 default-control assertion is a regression net because it
+  passes on both trees; the bank-count-3 override-scope assertion is the
+  fail-first Item-2 gate.
 - **Item 3 — regression net, not fail-first.** Added exact-equality coverage at
   transition bits 7 (`suffix_count == 512`, genuinely partitioned) and 16
   (`suffix_count == 1` control), across 8/16/24/32 threads. It compares states,
@@ -1831,11 +1840,14 @@ initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
   99.99847412109375% at width 16, and produces nonzero packed words plus bank
   IDs `[0, 1]`. It passed before and after the fix, so it is explicitly a
   regression net rather than a fail-first gate.
-- **MEASURED gates.** The unmodified base produced `806 passed, 260 skipped`
-  and `182 passed, 17 skipped` for the two requested suites. The focused
-  post-fix scope/partition run produced `3 passed`; the cold build root emitted
-  a real native compilation before loading the extension. No speed or timing
-  claim is made.
+- **MEASURED gates.** Fresh exact reruns produced `806 passed, 260 skipped`
+  and `182 passed, 17 skipped` on parent `2a36a047`, and `808 passed, 260
+  skipped` and `182 passed, 17 skipped` on PR tree `b396dfc2`. The two-case
+  difference is exactly the new Item-3 parameterization. All commands exited
+  zero. Parent and PR QVQ imports each used a distinct empty build root and
+  completed a real cold native compile before loading the extension. The
+  focused scope/partition run produced `3 passed`. No accuracy, timing, or
+  speedup claim is made.
 
 Durable details and the quoted fail-first output are in
 `docs/qvq/qvq_banked_simd_v2_order_results_2026-08-25.md`.

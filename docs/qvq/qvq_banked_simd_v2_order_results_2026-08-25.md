@@ -1,44 +1,90 @@
 # Banked SIMD V=2 order and dispatch-scope review
 
 Base under test: merged PR #49 tree `2a36a047` (GitHub merge commit
-`348cb603`). The worktree was recreated from the refreshed local
-`origin/main`; the first local ref was stale at `35b347ec` and was not used for
-the final evidence.
+`348cb603`). The parent and PR trees were tested in separate worktrees with
+distinct initially-empty `GPTQMODEL_QVQ_CPU_BUILD_ROOT` directories.
 
 ## Item 1: V=2 emission reduction order
 
 Severity: **NOT A DEFECT** on the built object and compiler used here.
 
-Source inspection was not used to make this ruling. The clean baseline object
-was `/home/ubuntu/work/qvq-build-pr49-baseline-a.AnlLpg/a6a73c9cf1052d06/qvq_viterbi_banked_cpu.o`,
-compiled by the QVQ CPU JIT with GCC 15.2.0, `-O3`, and FMA enabled. I
-re-derived the register mapping from this object's prologue:
+This ruling came from disassembly, not source reading. The clean baseline
+object was compiled by the QVQ CPU JIT with GCC 15.2.0, `-O3`, and FMA
+enabled. Register mapping was re-derived from that object's prologue:
 
-- `rsi` is the V=2 `c0` base and `r14 = rsi + state_count * 4` is `c1`
-  (`0x13f-0x143`).
-- `xmm6` is `target[0]` and `xmm4` is `target[1]` (`0x155-0x159`).
-- The vector constants are `zmm15 = target[0]` and `zmm13 = target[1]`
-  (`0x1d2-0x1da`).
+- `rsi` is the V=2 `c0` base and `r14 = rsi + state_count * 4` is `c1`.
+- `xmm6`/`xmm4` are `target[0]`/`target[1]`.
+- `zmm15`/`zmm13` are the corresponding vector broadcasts.
 
-The vector body at `0x210` first emits
-`vmulps zmm0,zmm13,[r15+...]` (`c1 * t1`, rounded), then
-`vfmadd231ps zmm0,zmm15,[r13+...]` (`c0 * t0 + dot`, fused). The scalar
-prefix/tail at `0x298` and `0x463` emits the same ordered pair:
-`vmulss xmm2,xmm4,[r14+...]`, then `vfmadd231ss xmm2,xmm6,[rsi+...]`.
-The scalar and vector paths therefore have the same reduction order in this
-object. No Item-1 source change is made, and no thread-count divergence is
-claimed.
+The vector body at `0x210` and `0x344` emits `vmulps c1*t1` followed by
+`vfmadd231ps c0*t0 + dot`. The scalar prefix/tail at `0x298` and `0x463`
+emit the same ordered `vmulss c1*t1` followed by `vfmadd231ss c0*t0`. Both
+paths therefore use the same ordered arithmetic in this object. The header is
+untouched; no Item-1 output divergence is claimed.
 
-## Item 2: V=4 test override scope
+## Item 2: V=4 default dispatch and test override scope
 
 Severity: **LATENT, NOT OBSERVED IN PRODUCTION**. The environment override is
-only referenced by the C++ test/measurement hook and is never set by the
-production Python path. A direct wrapper call can reach V=4/t16, but production
-quantization call sites do not request transition width 16.
+test-only and is never set by the production Python path. Transition width 16
+is also rejected by both production call sites, so this remains latent.
 
-Before the fix, a direct V=4/t16/bank-count-1 call with
-`QVQ_TEST_FORCE_BANKED_G_ONLY=1` changed all four squared-error values while
-leaving states and segment bank IDs equal. The measured values were:
+The original PR changed the default predicate for unconstrained V=4/t16 calls
+by adding `vector_size == 2` to `legacy_t16_shape`. I measured that effect
+directly with no environment variables set, comparing parent `2a36a047` with
+PR tree `b396dfc2`:
+
+- 32 configurations attempted: seeds `2, 11, 202, 3033`; bank counts `1, 2`;
+  batch sizes `1, 4`; and step counts `16, 32`.
+- 16 completed comparisons (the 32-step cases), 16 explicitly skipped because
+  the packed-word helper rejects 16-step streams that are not whole 32-edge
+  blocks, and 0 comparison skips or errors.
+- Minimum duplicate/tie density among completed configurations was
+  **99.8046875%**.
+- With no overrides set, selected states, segment bank IDs, packed words, and
+  squared errors were all exactly equal in every completed configuration:
+  **MEASURED: default V=4 t16 output is unchanged by this scoping, 16 configs,
+  0 divergences.**
+
+The measured result supports keeping the `vector_size == 2` guard. The C++
+comment records the measured fact and does not assert which recurrence V=4
+belongs to.
+
+The direct pre-fix V=4 override reproducer remains real: with a random
+V=4/t16/bank-count-1 call, setting `QVQ_TEST_FORCE_BANKED_G_ONLY=1` changed all
+four squared-error values while states and segment bank IDs stayed equal. The
+test-only override is therefore scoped to the V=2 predicate. The updated V=4
+default-control assertion uses a tie-rich fixture and passes on both parent
+and PR trees; it is explicitly a regression net, not a fail-first test. The
+bank-count-3 override-scope assertion is the fail-first Item-2 gate.
+
+## Item 3: suffix-column partition coverage
+
+`test_native_banked_viterbi_suffix_partition_is_thread_count_invariant` covers
+transition bits 7 and 16 at thread counts 8, 16, 24, and 32. Width 7 has
+`suffix_count == 512`, so the G-only `parallel_for` genuinely partitions suffix
+columns; width 16 has `suffix_count == 1` and is the required control. The
+test compares selected states, squared error, segment bank IDs, and packed
+trellis words with `torch.equal`.
+
+The fixture is intentionally tie-rich: measured duplicate/tie density is
+99.21875% at width 7 and 99.99847412109375% at width 16. The selected path is
+nontrivial at width 7, with segment bank IDs `[0, 1]` and nonzero packed words.
+Both parameter cases pass on parent and PR trees, so this is labelled a
+regression net rather than a fail-first gate.
+
+## Test evidence
+
+Fresh exact gate reruns in this environment produced:
+
+- Parent `2a36a047`: `806 passed, 260 skipped` for the first requested suite;
+  `182 passed, 17 skipped` for the second.
+- PR tree `b396dfc2` (before this follow-up commit): `808 passed, 260 skipped`
+  for the first suite; `182 passed, 17 skipped` for the second.
+- The difference is exactly the two new Item-3 parameter cases. All commands
+  exited zero. The parent and PR QVQ imports each performed a real cold native
+  compile from their distinct empty build roots before loading the extension.
+
+The prior Item-2 direct values were independently recorded as:
 
 ```text
 unforced: [0.8787578344345093, 0.9491938948631287,
@@ -47,48 +93,5 @@ forced:   [0.8787583112716675, 0.949196994304657,
            1.6207460165023804, 1.239741325378418]
 ```
 
-The dispatcher guard now includes `vector_size == 2`. V=4 stays on the normal
-G-only recurrence whether or not the test-only override is set. The focused
-pre-fix test failed with:
-
-```text
-FAILED tests/test_qvq.py::test_native_banked_viterbi_force_overrides_are_parsed_and_scoped
-AssertionError: QVQ_TEST_FORCE_BANKED_G_ONLY escaped the V=2 dispatcher scope
-```
-
-After the fix, that test passes exactly for states, squared error, and segment
-bank IDs.
-
-## Item 3: suffix-column partition coverage
-
-`test_native_banked_viterbi_suffix_partition_is_thread_count_invariant` covers
-transition widths 7 and 16 at thread counts 8, 16, 24, and 32. Width 7 has
-`suffix_count == 512`, so the G-only `parallel_for` genuinely partitions suffix
-columns; width 16 has `suffix_count == 1` and remains the required control.
-The test compares selected states, squared error, segment bank IDs, and packed
-trellis words using `torch.equal`.
-
-The fixture is intentionally tie-rich: each suffix codeword is repeated over
-all prefix rows. Measured duplicate/tie density is **99.21875%** at width 7
-(512 distinct rows repeated across 65,536 states) and **99.99847412109375%** at
-width 16 (one distinct row). The selected path is nontrivial at width 7 and
-has segment bank IDs `[0, 1]`; the packed words are nonzero, so the check is
-not a tie-free or all-zero pass.
-
-This test passed on both unmodified PR-49 base and the fix, so it is labelled
-a regression net rather than a fail-first gate. The V=4 scope assertion is the
-fail-first gate.
-
-## Test evidence
-
-On the unmodified PR-49 base, each commit-specific build root started empty and
-the first QVQ import performed a real native compile:
-
-- `806 passed, 260 skipped` for the first requested suite.
-- `182 passed, 17 skipped` for the second requested suite.
-- The corrected Item-3 regression net passed at both widths; the Item-2 V=4
-  scope assertion failed as quoted above.
-
-On the fixed working tree, the focused scope/partition run was `3 passed`.
-Its build root was initially empty and reported a non-instant native compile
-before the tests ran. No timing or speedup claim is made.
+The focused post-fix scope/partition run passed all 3 cases. No accuracy,
+timing, or speedup claim is made.

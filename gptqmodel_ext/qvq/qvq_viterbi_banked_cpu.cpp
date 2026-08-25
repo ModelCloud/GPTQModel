@@ -740,9 +740,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   // have a severe small-batch cliff, but that came from its own
   // `batch_size >= at::get_num_threads()` tiling predicate, which is now
   // clamped the same way the G-only recurrence already clamps its own. The
-  // cliff is therefore fixed at its source and this dispatch stays purely
-  // shape-based, exactly as before: byte-identical selection at every batch
-  // size and every thread count, so no FP32 near-tie regime is flipped.
+  // cliff is therefore fixed at its source. The V=2 legacy dispatch remains
+  // shape-based; the V=4/t16 default comparison is recorded at the guard below.
   //
   // The two force overrides exist so the recurrences can be A/B measured on
   // one build. Both are scoped to `legacy_t16_shape`, i.e. neither can move a
@@ -753,13 +752,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   // silently returns a different answer (measured: one selected state and all
   // four squared errors change on a bank_count-3 t16 case).
   //
-  // Only V=2 is a legacy-t16 shape. The public wrapper accepts V=4, but that
-  // path belongs to the normal G-only recurrence; keeping vector_size in this
-  // guard also prevents the G-only test override from moving V=4 calls.
-  // The legacy override is scoped by construction, because the default already
-  // routes every `legacy_t16_shape` call to legacy; it therefore has no
-  // remaining effect on dispatch and is retained as the explicit mirror of the
-  // G-only override and as a regression pin on that default.
+  // Keep the test-only G-only override scoped to the V=2 legacy-t16 predicate.
+  // Do not infer recurrence ownership from the public V: MEASURED: default V=4
+  // t16 output is unchanged by this scoping, 16 completed tie-rich configs,
+  // 0 divergences in selected states, bank IDs, and packed words.
   const bool test_force_legacy = qvq_env_enabled("QVQ_TEST_FORCE_BANKED_LEGACY");
   const bool test_force_g_only = qvq_env_enabled("QVQ_TEST_FORCE_BANKED_G_ONLY");
   TORCH_CHECK(

@@ -5411,16 +5411,25 @@ def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch
         for expected, actual in zip(unforced, forced):
             assert torch.equal(expected, actual), f"{name} escaped its dispatcher scope"
 
-    # V=4 is accepted by the public wrapper but is not a legacy-t16 dispatch
-    # shape. The G-only override must not divert this call either.
+    # Pin the no-env V=4/t16 default against the explicit G-only control. This
+    # is a regression net: the parent and the scoped branch produced the same
+    # exact output on this tie-rich fixture, so it is expected to pass on both.
     generator = torch.Generator().manual_seed(2)
-    v4_sequences = torch.randn((4, 32, 4), generator=generator, dtype=torch.float32)
-    v4_codebooks = torch.randn((1, 1 << 16, 4), generator=generator, dtype=torch.float32)
+    v4_sequences = torch.round(
+        torch.randn((4, 32, 4), generator=generator, dtype=torch.float32) * 2.0
+    ) / 2.0
+    v4_base = torch.round(torch.randn((128, 4), generator=generator, dtype=torch.float32) * 2.0) / 2.0
+    v4_codebooks = v4_base.repeat((1 << 16) // 128, 1).unsqueeze(0)
+    v4_tie_density = 1.0 - torch.unique(v4_codebooks[0], dim=0).shape[0] / (1 << 16)
+    assert v4_tie_density >= 0.99
     v4_unforced = qvq_cpu_viterbi_banked(v4_sequences, v4_codebooks, transition_bits=16, segment_steps=16)
     monkeypatch.setenv("QVQ_TEST_FORCE_BANKED_G_ONLY", "1")
     v4_forced = qvq_cpu_viterbi_banked(v4_sequences, v4_codebooks, transition_bits=16, segment_steps=16)
     for expected, actual in zip(v4_unforced, v4_forced):
-        assert torch.equal(expected, actual), "QVQ_TEST_FORCE_BANKED_G_ONLY escaped the V=2 dispatcher scope"
+        assert torch.equal(expected, actual), (
+            "default V=4/t16 output changed under the G-only control: "
+            f"tie_density={v4_tie_density:.6f}"
+        )
 
 
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
