@@ -6,6 +6,7 @@
   "protocol": "independent_greedy_rollout, horizon=32, max_prompt_tokens=16384, fp16 SDPA",
   "calibration": {"ordinary_rows": "0:128", "yaqa_rows": "0:182", "yaqa_tokens": 302193},
   "arms": [
+    {"name":"reg0025", "report":"/root/qvq-results/llama32-1b-w2-reg0025-yaqa302k-main-a12ce4e3-div300-dev-v1.json", "report_sha256":"da101ee20d8638526b162e1518a42cb5af339d8f606cbfb388a3cd8b1961e19b", "divergence32_top1":0.16822916666666668, "exact_trajectory":0.0033333333333333335, "exact_prompts":1, "mean_first_divergence":4.243333333333333},
     {"name":"reg0125", "report":"/root/qvq-results/llama32-1b-w2-reg0125-yaqa302k-main-a12ce4e3-div300-dev-v1.json", "report_sha256":"3280aea1079578964b8987b123ec158c29852e760d6ea8ee88b2d97356cd920b", "divergence32_top1":0.134375, "exact_trajectory":0.006666666666666667, "exact_prompts":2, "mean_first_divergence":3.6233333333333335},
     {"name":"reg020", "report":"/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3-div300-dev-v1.json", "report_sha256":"03ed03d6563e0e785c203bc99ccb90869a35e5843b830a66a16db88051a1350c", "divergence32_top1":0.1878125, "exact_trajectory":0.02, "exact_prompts":6, "mean_first_divergence":5.363333333333333},
     {"name":"seed1", "report":"/root/qvq-results/llama32-1b-w2-seed1-yaqa302k-main-a12ce4e3-div300-dev-v1.json", "report_sha256":"fe710acdc141b5a12a66c343b5b359b5e7ae87c18b36fd3728c744cc305a6d85", "divergence32_top1":0.17708333333333334, "exact_trajectory":0.006666666666666667, "exact_prompts":2, "mean_first_divergence":4.966666666666667}
