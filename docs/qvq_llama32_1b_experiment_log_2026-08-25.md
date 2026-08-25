@@ -291,3 +291,19 @@ The AIME-only flat-W2 checkpoint finished quantization at
 D300 rollout is queued on GPU4 behind the mixed-rate diagnostic; the queue and
 completion marker are recorded in
 `docs/experiments/2026-08-25-llama32-w2-aime2526.json`.
+
+### Completed W2 regularization/seed D300 results
+
+The completed-arm machine-readable summary is
+`docs/experiments/2026-08-25-llama32-w2-sweep-a12ce4e3.json`. All use the same
+canonical D300 manifest and protocol; `Divergence-32 top-1` below is the report's
+`independent_token_top1_agreement_at_32` field.
+
+| Arm | D300 top-1 | Exact 32-token trajectories | Mean first divergence | Result |
+| --- | ---: | ---: | ---: | --- |
+| reg .0125 | 13.4375% | 2/300 (0.6667%) | 3.6233 | below target |
+| reg .020 | **18.7813%** | 6/300 (2.0000%) | 5.3633 | current completed W2 sweep best |
+| seed 1 | 17.7083% | 2/300 (0.6667%) | 4.9667 | below target |
+
+The 25% W2 target remains unverified; the best completed arm is 6.2187 points
+short. reg .0025 and reg .005 D300 reports are still running.
