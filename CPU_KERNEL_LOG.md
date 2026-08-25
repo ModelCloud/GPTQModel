@@ -864,6 +864,18 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AM
 - **MEASURED:** the previously documented exact-discrete-equivalence contract is false and has been withdrawn.
   Cost checks now use a matrix-calibrated, non-universal `atol=1.25e-5, rtol=0`; discrete checks remain exact.
 - **MEASURED by inspection:** this defect record contains no timing or speed claim.
+- **RESOLVED 2026-08-25 -- follow-up, record above retained as history.** The V=2 half of this
+  defect was root-caused and fixed; see the `qvq_viterbi_cpu_opt`: V=2 emission accumulation order
+  entry at the end of this log. **MEASURED:** the cause was the V=2 arm of `emission_avx512`
+  opening its 16-lane body with `_mm512_mul_ps(v1, t1v)`, which pre-rounds one product instead of
+  accumulating from zero in coordinate order; both lanes now accumulate from zero, verified by
+  objdump on cold builds. On a 24-configuration matrix on this host, discrete state mismatches
+  against `qvq_cpu_viterbi` went 1 -> 0 and non-bit-identical squared error went 14 -> 2, with the
+  2 residual cases both at V=4 and numerically unchanged. `test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence`
+  XPASSed after the fix and its `xfail` marker was removed. **STILL OPEN from this record:** the V=4
+  squared-error deltas, and the fact that discrete agreement is measured on one host and one
+  compiler rather than guaranteed -- the opt kernel is still two-sweep where production is fused.
+  The matrix-calibrated `atol=1.25e-5, rtol=0` cost tolerance was deliberately NOT tightened.
 
 ## 2026-08-24 segmented banked G-only Viterbi recurrence
 
@@ -1293,9 +1305,26 @@ before: 24 configs, 1 with a discrete mismatch
 after:  24 configs, 0 with a discrete mismatch
 ```
 
+Squared error over the same 24 configurations, exact `torch.equal`:
+
+```text
+before: 14 of 24 configs not bit-identical; worst relative delta 1.450e-3
+        (V=2, state_count=65536, transition_bits=16, batch=128, steps=32).
+        All 12 V=2 configs were non-bit-identical.
+after:   2 of 24 configs not bit-identical; worst relative delta 7.373e-6.
+        Both are V=4, transition_bits=16, and their values are numerically
+        UNCHANGED by the fix (2.822e-6 and 7.373e-6 before and after).
+        All 12 V=2 configs are now bit-identical.
+```
+
 So this is **not** a latent-only change: it removes a measured discrete
-divergence. All 24 V=4 configs are identical before and after, confirming the
-V=4 arm was not disturbed.
+divergence and a measured squared-error divergence across every V=2
+configuration tested. All 24 V=4 configs are identical before and after on
+states, and the two V=4 squared-error deltas are bit-for-bit the same before and
+after -- a second, numeric confirmation that the V=4 arm was not disturbed. The
+residual V=4 deltas are attributed (INFERRED) to the structural two-sweep versus
+fused difference, not to the V=4 rounding asymmetry, which the probe showed is
+unreachable dead code.
 
 The pre-existing `xfail` on
 `test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence` covers exactly the
@@ -1303,9 +1332,19 @@ one config that diverged. After the fix it XPASSes, so **the marker was removed*
 -- deliberately and recorded here, not silently -- and the test now asserts
 agreement. Caveat: this is one host and one compiler. `_opt` still differs from
 the production kernel structurally (two-sweep emission-then-add vs fused), so the
-owner should confirm the agreement on their CI before relying on it. The
-`qvq_cpu_viterbi_opt` docstring in `gptqmodel/utils/qvq_cpu.py` still advertises
-the divergence; that file was out of scope for this change and needs a follow-up.
+owner should confirm the agreement on their CI before relying on it.
+
+**Follow-up completed in this same PR (2026-08-25):** the `qvq_cpu_viterbi_opt`
+docstring in `gptqmodel/utils/qvq_cpu.py` had continued to advertise the
+now-fixed divergence and has been rewritten to state what is now true, keeping
+its MEASURED/INFERRED labels and scoping every number to this host and this
+24-configuration matrix. A dated `RESOLVED` follow-up was appended to the
+2026-08-24 defect record earlier in this log; that record itself was retained.
+Verified by grep that no other in-repo text still advertises the divergence: the
+removed `xfail` reason string is gone, and `qvq_viterbi_cpu_opt.cpp` carries no
+such comment. Two historical entries still describe it in the past tense and
+were deliberately left alone as history -- in particular the V=4 audit-correction
+entry, which is under third-vendor adjudication.
 
 ### Zero-step guard (MEASURED)
 
