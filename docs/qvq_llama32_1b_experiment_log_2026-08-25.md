@@ -447,3 +447,15 @@ reports complete.
 
 GSM8K Platinum for the best YAQA reg .020 checkpoint is queued behind the
 first free GPU (session `24963`).
+
+### Queued full-subset final-logit replay control
+
+The prior `D05` attention replay was only a proxy evaluation and was rejected;
+it did not establish a canonical D300 gain. The implementation does support
+cross-fitted replay over coupled semantic subsets, so a complete flat-W2
+control is queued after the leader GSM8K job: `attention_qkvo`, `mlp_gate_up`,
+and `mlp_down`, with greedy alternative-bank selection, final-logit horizon,
+two search folds, and disjoint confirmation. Ordinary calibration, YAQA, replay
+search, and replay confirmation are separate slices. The config and queue
+ledger are `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020_all_subset_replay.json`
+and `docs/experiments/2026-08-25-llama32-w2-reg020-all-subset-replay.json`.
