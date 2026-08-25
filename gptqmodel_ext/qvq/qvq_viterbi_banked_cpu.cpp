@@ -701,12 +701,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
       step_count > 0 && segment_steps > 0 && step_count % segment_steps == 0,
       "qvq_viterbi_banked_cpu: positive segment_steps must divide step_count");
 
-  // At transition width 16, FP64 path-cost adjudication slightly favors the
-  // G-only recurrence on divergent near ties. Retain legacy as an explicit
-  // speed tradeoff: G-only is about 2.7-2.9x slower at batches 32-128 (though
-  // faster at batch 16) for this unconstrained production shape. Transition
-  // width 15 stays on G-only because fixed-width legacy can still select
-  // different FP32 near-tie winners.
+  // At transition width 16 the suffix frontier has one element. Legacy is
+  // 2.7-2.9x faster than G-only at batch >= 32 (median; 2.9-3.7x on minima).
+  // A 72-config, one-thread FP64 path-cost sweep found only near-tie noise
+  // (3e-06..1.1e-04 relative), so no accuracy claim is made either way. Below
+  // For batch < at::get_num_threads(), legacy takes the outer-serial tiled path
+  // above and is about 6.1x slower; that regime is documented, not dispatched
+  // on yet. Transition width 15's G-only choice is inherited and unmeasured by
+  // this change.
   if (transition_bits == 16 && bank_count <= 2 &&
       !(overlap.has_value() && overlap->defined()) &&
       !(entry_states.has_value() && entry_states->defined()) &&

@@ -1642,7 +1642,7 @@ Corollary: an eager reference is a useful *cross-check*, and its agreement with 
 meaningful evidence about that kernel's schedule. It is not a ground truth for which of two
 near-tied discrete paths is correct.
 
-## 2026-08-25 transition-16 production dispatch: measured legacy speed tradeoff
+## 2026-08-25 transition-16 production dispatch: measured batch-regime split
 
 Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver4`)
           NO AMX; AVX-512 double-pumped 256-bit datapath
@@ -1652,16 +1652,29 @@ Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver
 - **MEASURED:** A fresh adjudication attempted 144 transition-16, unconstrained, one/two-bank configurations across
   three seeds, batches 8/16/32, steps 16/32, state counts 65,536/131,072, and segment lengths 8/16. Counts were
   **ATTEMPTED 144 / COMPLETED 72 / SKIPPED 72 / DIVERGED 18**. Every configuration was exception-isolated.
-- **MEASURED:** All 72 state-count-65,536 configurations completed; both candidate paths were in range,
-  transition-consistent, and tail-biting-closed. The 72 state-count-131,072 attempts were explicitly SKIPPED because
-  both unconstrained candidates failed circular closure and cannot be represented by the production 16-bit trellis
-  packer. No skip aborted the sweep.
+- **MEASURED:** All 72 state-count-65,536 configurations completed and both candidates passed the state-range check.
+  At that state count `suffix_count == 1`, so the transition-consistency and circular-closure checks reduce to
+  `0 == 0` and are vacuous by construction. They do not add validity evidence.
+- **MEASURED:** The 72 state-count-131,072 attempts were explicitly SKIPPED because the adjudicator incorrectly
+  required circular closure from unconstrained calls. The kernel promises closure only when overlap or entry/exit
+  constraints provide it. The check has content at 131,072 and failed symmetrically for both arms; no skip aborted
+  the sweep and there was no arm-selection effect.
+- **INFERRED coverage gap:** Today's production Python entry point requires `codebooks.shape[1] == (1 << 16)` at
+  `gptqmodel/quantization/qvq.py:1590`, so 131,072 states are unreachable there. The C++ dispatcher has no state-count
+  condition and a direct t16/131,072-state call routes to legacy. This only sampled shape with a non-trivial suffix
+  frontier was therefore left unmeasured; the skip is not a kernel finding.
 - **MEASURED:** FP64 costs were recomputed directly from the original sequences and codebooks for every divergent
-  returned row, independently of kernel FP32 accumulation. By divergent configuration, G-only was better in 10 and
-  legacy in 8, with no ties or mixed-winner configurations. Across all 20 divergent rows the tally was 10 to 10.
-  Relative cost differences ranged `3.01e-06 .. 1.09e-04`; segment bank IDs did not diverge in this matrix.
-- **INFERRED:** This agrees with the prior adjudication's direction (G-only slightly favored) but shows a narrower
-  quality distinction than its 5-to-3 sample. Neither recurrence is an FP64 oracle.
+  returned row, independently of kernel FP32 accumulation and without using either returned FP32 `squared_error`.
+  Quality adjudication used one Torch thread only; the near-tie winners are not established as invariant at the
+  32-thread production setting.
+- **MEASURED:** The raw divergent-configuration tally was G-only 10, legacy 8. It is inflated by aliasing:
+  `segment_steps` does not affect generated tensors, and the one-bank codebook aliases bank zero in some two-bank
+  cases. Collapsing 18 raw configurations to 9 distinct `(seed,batch,banks,steps)` cases and then 5 distinct
+  `(seed,batch,steps)` data instances yields G-only 3, legacy 2. Even raw 10-of-18 is not significant (two-sided
+  `p ~= 0.81`). Across 20 raw divergent rows the tally was 10 to 10; relative differences were
+  `3.01e-06 .. 1.09e-04`; segment bank IDs did not diverge.
+- **MEASURED:** By raw divergent configuration, G-only won 8/8 at batch 8 and 2/2 at batch 16; legacy won 8/8 at
+  batch 32. **INFERRED:** There is no measurable quality difference; these sampled differences are near-tie noise.
 - **MEASURED:** Paired timings used three warmups, 15 samples per arm, alternating back-to-back arm order, 32
   threads, explicit singleton OpenMP places, and one affinity assertion per series. Legacy versus G-only median
   (minimum) milliseconds were: batch 16, `397.19 (343.33)` versus `65.09 (45.44)`; batch 32,
@@ -1671,10 +1684,14 @@ Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver
 - **MEASURED:** One-second pre-series cgroup `usage_usec` deltas for batches 16/32/64/128 were respectively
   `265770 / 282716 / 539855 / 306403` microseconds. Host uptime/load average was not used. All 32 worker affinities
   matched the explicit `{cpu}` place list once per series; `OMP_PLACES=cores` was not used.
-- **INFERRED decision:** KEEP the legacy transition-16 production dispatch. G-only's narrow configuration-level FP64
-  advantage does not justify a 2.67-2.91x slowdown at batches 32-128. The batch-16 crossover is documented rather
-  than hidden. The dispatcher comment now describes this measured quality/speed tradeoff and no longer calls legacy
-  pristine.
+- **MEASURED methodology:** A temporary measurement-only source gate selected arms through
+  `QVQ_TEST_FORCE_BANKED_LEGACY` / `QVQ_TEST_FORCE_BANKED_G_ONLY`; it was deliberately not shipped and the clean final
+  build contains neither name. The retained host harness is `/home/ubuntu/work/qvq-findings/t16_dispatch_measure.py`.
+- **INFERRED decision:** KEEP the legacy transition-16 production dispatch. Performance alone supports it: G-only is
+  2.67-2.91x slower by median at batches 32-128 (2.89-3.66x on minima). At batch 16 legacy uses the outer-serial,
+  inner-parallel tiled path selected below `batch_size >= at::get_num_threads()` and is about 6.1x slower; that
+  regime is documented but not dispatched on in this PR. The transition-15 rationale is inherited and unmeasured
+  here.
 - **MEASURED:** The unmodified `df80f33e` baseline used a distinct initially empty build root and compiled all seven
   translation units in 95 seconds. Its commit-tagged artifact records states, segment bank IDs, packed words, and
   packed selectors. Baseline gates were `803 passed, 260 skipped` and `178 passed, 8 skipped`. The complete durable
