@@ -1,0 +1,14 @@
+{
+  "base": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
+  "base_rows": 182,
+  "disjointness_evidence": {
+    "reference_vs_benchmark_or_yaqa": 0,
+    "selected_vs_reference": 0
+  },
+  "output": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration_full_reference.parquet",
+  "output_rows": 292,
+  "reference": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/_shards/reference.parquet",
+  "reference_provenance": "calibration_mix_500k_llama3.2_1b/dataset_info.json",
+  "reference_rows": 110,
+  "sha256": "713e03483841e678ddb8334589f13c5881fe97700e42803a2e96de522675f916"
+}

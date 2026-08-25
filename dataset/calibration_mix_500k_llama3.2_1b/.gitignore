@@ -2,6 +2,7 @@ _scanner/
 _shards/
 calibration.parquet
 calibration_aime2526.parquet
+calibration_full_reference.parquet
 dataset_info.json
 preparation.json
 report.json
