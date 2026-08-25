@@ -800,6 +800,8 @@ class _YaqaQModel:
 
 @pytest.mark.parametrize("bits", (1, 1.5))
 def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quantizer(bits):
+    # Source of truth: config.py's default rate-regularization table.
+    expected_damp_percent = {1: 0.1, 1.5: 0.1}[bits]
     calibration = [
         {
             "input_ids": torch.tensor([[1, 2, 0], [3, 0, 0]]),
@@ -897,7 +899,7 @@ def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quanti
     torch.testing.assert_close(quantize.call_args.args[1], input_hessian)
     torch.testing.assert_close(quantize.call_args.kwargs["output_hessian"], output_hessian)
     assert quantize.call_args.kwargs["rounding"] == "yaqa"
-    assert quantize.call_args.kwargs["damp_percent"] == qcfg.yaqa.regularization_for_rate(bits)
+    assert quantize.call_args.kwargs["damp_percent"] == expected_damp_percent
     assert processor.log[-1]["yaqa_independent_sequences"] == 3
     assert processor.log[-1]["yaqa_kronecker_proxy_loss"] == 0.75
     assert full_name not in processor._yaqa_input_hessians
