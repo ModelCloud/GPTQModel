@@ -5245,6 +5245,59 @@ def test_native_banked_viterbi_v2_is_thread_count_invariant():
     for aligned_output, unaligned_output in zip(aligned, unaligned):
         assert torch.equal(aligned_output, unaligned_output)
 
+
+@pytest.mark.parametrize("transition_bits", (7, 16))
+def test_native_banked_viterbi_suffix_partition_is_thread_count_invariant(transition_bits):
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    state_count = 1 << 16
+    suffix_count = 1 << (16 - transition_bits)
+    prefix_count = state_count // suffix_count
+    suffix = torch.arange(suffix_count, dtype=torch.float32)
+    bank_zero = torch.stack((suffix.remainder(31) / 8, suffix.remainder(29) / 8), dim=-1)
+    bank_one = bank_zero + torch.tensor((0.75, -0.5), dtype=torch.float32)
+    codebooks = torch.stack((bank_zero.repeat((prefix_count, 1)), bank_one.repeat((prefix_count, 1))))
+
+    distinct_codewords = torch.unique(codebooks[0], dim=0).shape[0]
+    tie_density = 1.0 - distinct_codewords / state_count
+    assert tie_density >= 0.99
+
+    selected_suffix = min(37, suffix_count - 1)
+    sequences = torch.empty((1, 32, 2), dtype=torch.float32)
+    sequences[:, :16] = codebooks[0, selected_suffix]
+    sequences[:, 16:] = codebooks[1, selected_suffix]
+    original_threads = torch.get_num_threads()
+    outputs = {}
+
+    try:
+        for thread_count in (8, 16, 24, 32):
+            torch.set_num_threads(thread_count)
+            if torch.get_num_threads() != thread_count:
+                pytest.skip(f"cannot set torch thread count to {thread_count}")
+            states, squared_error, segment_bank_ids = qvq_cpu_viterbi_banked(
+                sequences,
+                codebooks,
+                transition_bits=transition_bits,
+                segment_steps=16,
+                overlap=torch.tensor([selected_suffix], dtype=torch.int64),
+            )
+            outputs[thread_count] = (
+                states,
+                squared_error,
+                segment_bank_ids,
+                pack_trellis_states(states, bits=transition_bits / 2),
+            )
+    finally:
+        torch.set_num_threads(original_threads)
+
+    reference = outputs[8]
+    for thread_count, actual in outputs.items():
+        for expected, observed in zip(reference, actual):
+            assert torch.equal(expected, observed), (
+                f"transition_bits={transition_bits} thread_count={thread_count} "
+                f"tie_density={tie_density:.6f} output diverged"
+            )
+
     # Legacy's row-parallel / tiled split must be bit-identical.
     #
     # qvq_viterbi_banked_cpu_legacy picks between a row-parallel leg and an
@@ -5357,6 +5410,17 @@ def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch
         monkeypatch.delenv(name, raising=False)
         for expected, actual in zip(unforced, forced):
             assert torch.equal(expected, actual), f"{name} escaped its dispatcher scope"
+
+    # V=4 is accepted by the public wrapper but is not a legacy-t16 dispatch
+    # shape. The G-only override must not divert this call either.
+    generator = torch.Generator().manual_seed(2)
+    v4_sequences = torch.randn((4, 32, 4), generator=generator, dtype=torch.float32)
+    v4_codebooks = torch.randn((1, 1 << 16, 4), generator=generator, dtype=torch.float32)
+    v4_unforced = qvq_cpu_viterbi_banked(v4_sequences, v4_codebooks, transition_bits=16, segment_steps=16)
+    monkeypatch.setenv("QVQ_TEST_FORCE_BANKED_G_ONLY", "1")
+    v4_forced = qvq_cpu_viterbi_banked(v4_sequences, v4_codebooks, transition_bits=16, segment_steps=16)
+    for expected, actual in zip(v4_unforced, v4_forced):
+        assert torch.equal(expected, actual), "QVQ_TEST_FORCE_BANKED_G_ONLY escaped the V=2 dispatcher scope"
 
 
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:

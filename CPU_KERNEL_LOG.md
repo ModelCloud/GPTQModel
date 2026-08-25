@@ -1796,3 +1796,46 @@ originates.
   32 threads.
 - Full methodology and provenance:
   `docs/qvq/qvq_banked_t16_small_batch_results.md`.
+
+## 2026-08-25 banked SIMD V=2 order and dispatch-scope review
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 32 logical CPUs in the cgroup, PyTorch thread sweeps at 8/16/24/32 | torch 2.13.0+cpu | GCC 15.2.0 | host `zen5-cpu-6`
+
+Base: merged PR #49 tree `2a36a047` (`348cb603` on GitHub), tested from an
+initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
+
+- **Item 1 — NOT A DEFECT.** This ruling is from disassembly of the built
+  `qvq_viterbi_banked_cpu.o`, not source reading. I re-derived the mapping from
+  this object's prologue: `rsi` is `c0`, `r14 = rsi + state_count * 4` is `c1`,
+  `xmm6`/`xmm4` are `target[0]`/`target[1]`, and `zmm15`/`zmm13` are their
+  vector broadcasts. The vector body at `0x210` and `0x344` emits
+  `vmulps c1*t1` followed by `vfmadd231ps c0*t0 + dot`; the scalar prefix/tail
+  at `0x298` and `0x463` emits the same ordered `vmulss` followed by
+  `vfmadd231ss`. The register mapping is object-local and was not reused from
+  any other build. The header is therefore unchanged.
+- **Item 2 — LATENT, NOT OBSERVED IN PRODUCTION.** The override is a test-only
+  environment hook and is not set by production. Before the fix, a direct
+  V=4/t16/bank-count-1 call with `QVQ_TEST_FORCE_BANKED_G_ONLY=1` changed all
+  four squared-error values while states and segment bank IDs stayed equal:
+  unforced `[0.8787578344, 0.9491938949, 1.6207495928, 1.2397410870]` versus
+  forced `[0.8787583113, 0.9491969943, 1.6207460165, 1.2397413254]`. The
+  `legacy_t16_shape` guard now includes `vector_size == 2`, so V=4 remains on
+  G-only and the override cannot move it. The new V=4 assertion failed first on
+  the unmodified base with `AssertionError: QVQ_TEST_FORCE_BANKED_G_ONLY escaped
+  the V=2 dispatcher scope`, then passed after the fix.
+- **Item 3 — regression net, not fail-first.** Added exact-equality coverage at
+  transition bits 7 (`suffix_count == 512`, genuinely partitioned) and 16
+  (`suffix_count == 1` control), across 8/16/24/32 threads. It compares states,
+  squared error, segment bank IDs, and packed words with `torch.equal`. The
+  fixture has 99.21875% duplicate/tied codeword rows at width 7 and
+  99.99847412109375% at width 16, and produces nonzero packed words plus bank
+  IDs `[0, 1]`. It passed before and after the fix, so it is explicitly a
+  regression net rather than a fail-first gate.
+- **MEASURED gates.** The unmodified base produced `806 passed, 260 skipped`
+  and `182 passed, 17 skipped` for the two requested suites. The focused
+  post-fix scope/partition run produced `3 passed`; the cold build root emitted
+  a real native compilation before loading the extension. No speed or timing
+  claim is made.
+
+Durable details and the quoted fail-first output are in
+`docs/qvq/qvq_banked_simd_v2_order_results_2026-08-25.md`.
