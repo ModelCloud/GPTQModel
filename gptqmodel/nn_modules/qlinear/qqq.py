@@ -287,13 +287,8 @@ class QQQLinear(GroupedQuantLinear):
             buf.append(self.reduce_buffer)
         return buf
 
-    #def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None):
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor, s_extra=None):
-        """Pack a fake-quantized linear layer into this actual Marlin representation.
-        @linear: fake-quantized `torch.nn.Linear` layer to convert (must be of type `torch.float16`)
-        @scales: corresponding quantization scales of shape `(infeatures, groups)`
-        @s_extra: corresponding quantization scales of shape `(1, outfeatures)`
-        """
+        """Pack a fake-quantized linear layer into the Marlin representation."""
         if self.group_size != self.in_features:
             assert s_extra is not None, "s_extra is needed"
         if linear.weight.dtype != torch.float16:
@@ -302,87 +297,112 @@ class QQQLinear(GroupedQuantLinear):
                 If you can ensure your GEMM results don't overflow torch.float16, it will still function correctly.
                 Otherwise, it will yield incorrect results."""
             )
-        s = scales.t()
-        w = linear.weight.data.t()
-        if self.group_size != self.in_features:
-            w = w.reshape((-1, self.group_size, self.out_features))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((self.group_size, -1))
-            s = s.reshape((1, -1))
-        w = torch.round(w / s).int()
-        if self.group_size != self.in_features:
-            w += (self.maxq + 1) // 2
-            w = torch.clamp(w, 0, self.maxq)
-        else:
-            w = torch.clamp(w, -self.maxq, self.maxq)
+
+        raw_scales = scales.t()
         if self.group_size != self.in_features:
             s_extra = s_extra.reshape(1, -1).to(dtype=torch.float32)
-            s = (s.reshape(-1, self.out_features) / s_extra).to(dtype=torch.float16)
-
-            w = w.reshape((self.group_size, -1, self.out_features))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((self.in_features, self.out_features)).contiguous()
-            s = s.reshape((-1, len(self._scale_perm)))[:, self._scale_perm]
-            s_extra = s_extra.reshape((-1, len(self._scale_perm_single)))[
-                      :, self._scale_perm_single
-                      ]
-            s_extra = s_extra.reshape((-1, self.out_features)).contiguous()
+            packed_s_group = (raw_scales / s_extra).to(dtype=torch.float16)
+            packed_s_group = packed_s_group.reshape(
+                (-1, len(self._scale_perm))
+            )[:, self._scale_perm].reshape((-1, self.out_features)).contiguous()
+            packed_s_channel = s_extra.reshape(
+                (-1, len(self._scale_perm_single))
+            )[:, self._scale_perm_single].reshape((-1, self.out_features)).contiguous()
         else:
-            # NOTE(zhangying): div 2 ** (8 - self.bits)) to deal with right_shift in unpacking
-            s = (
-                (s / (2 ** (8 - self.bits)))
+            packed_s_group = None
+            packed_s_channel = (
+                (raw_scales / (2 ** (8 - self.bits)))
                 .reshape((-1, len(self._scale_perm_single)))[:, self._scale_perm_single]
                 .to(dtype=torch.float32)
+                .reshape((-1, self.out_features))
+                .contiguous()
             )
-        s = s.reshape((-1, self.out_features)).contiguous()
-        w = w.reshape(
-            (
-                self.in_features // self.tile,
-                self.tile,
-                self.out_features // self.tile,
-                self.tile,
+
+        input_chunk_size = min(1024, self.in_features)
+        output_chunk_size = min(256, self.out_features)
+        input_chunk_size -= input_chunk_size % self.tile
+        output_chunk_size -= output_chunk_size % 64
+        if input_chunk_size == 0 or output_chunk_size == 0:
+            raise ValueError(
+                f"QQQ pack requires dimensions divisible by {self.tile} and 64, "
+                f"got in_features={self.in_features}, out_features={self.out_features}"
             )
+
+        packed_weight = torch.empty(
+            (self.in_features // self.tile, self.out_features * 2),
+            dtype=torch.int32,
+            device=CPU,
         )
-        w = w.permute((0, 2, 1, 3))
-        w = w.reshape((self.in_features // self.tile, self.out_features * self.tile))
-        res = w
-        res = res.reshape((-1, self._perm.numel()))[:, self._perm].reshape(res.shape)
-        q = np.zeros((res.shape[0], res.shape[1] // 8), dtype=np.uint32)
-        res = res.cpu().numpy().astype(np.uint32)
+        weight = linear.weight.data
+        perm = self._perm.to(device=weight.device)
+        for input_start in range(0, self.in_features, input_chunk_size):
+            input_end = min(input_start + input_chunk_size, self.in_features)
+            input_size = input_end - input_start
+            if input_size % self.tile != 0:
+                raise ValueError("QQQ pack input chunk is not tile aligned")
+
+            input_indices = torch.arange(
+                input_start,
+                input_end,
+                device=weight.device,
+                dtype=torch.long,
+            )
+            if self.group_size != self.in_features:
+                group_indices = torch.div(input_indices, self.group_size, rounding_mode="floor")
+                scale_chunk = raw_scales.index_select(0, group_indices)
+            else:
+                scale_chunk = raw_scales.expand(input_size, -1)
+
+            for output_start in range(0, self.out_features, output_chunk_size):
+                output_end = min(output_start + output_chunk_size, self.out_features)
+                output_size = output_end - output_start
+                if output_size % 64 != 0:
+                    raise ValueError("QQQ pack output chunk is not permutation aligned")
+
+                weight_chunk = weight[output_start:output_end, input_start:input_end].transpose(0, 1)
+                scale_chunk_view = scale_chunk[:, output_start:output_end]
+                codes = torch.round(weight_chunk / scale_chunk_view).to(dtype=torch.int32)
+                if self.group_size != self.in_features:
+                    codes.add_((self.maxq + 1) // 2).clamp_(0, self.maxq)
+                else:
+                    codes.clamp_(-self.maxq, self.maxq)
+
+                transformed = codes.reshape(
+                    input_size // self.tile,
+                    self.tile,
+                    output_size // self.tile,
+                    self.tile,
+                ).permute(0, 2, 1, 3).reshape(
+                    input_size // self.tile,
+                    output_size * self.tile,
+                )
+                transformed = transformed.reshape(-1, perm.numel()).index_select(1, perm).reshape(
+                    input_size // self.tile,
+                    output_size * self.tile,
+                )
+                packed_chunk = torch.zeros(
+                    (input_size // self.tile, output_size * 2),
+                    dtype=torch.int32,
+                    device=weight.device,
+                )
+                for lane in range(8):
+                    packed_chunk.bitwise_or_(
+                        (transformed[:, lane::8] & 0xF) << (4 * lane)
+                    )
+
+                packed_weight[
+                    input_start // self.tile:input_end // self.tile,
+                    output_start * 2:output_end * 2,
+                ].copy_(packed_chunk.to(device=CPU))
+
+        self.register_buffer("B", packed_weight)
         if self.group_size != self.in_features:
-            for i in range(8):
-                q |= res[:, i::8] << 4 * i
+            self.register_buffer("s_group", packed_s_group)
+            self.register_buffer("s_channel", packed_s_channel)
         else:
-            for i in range(8):
-                q |= (res[:, i::8] & 0xF) << 4 * i
-        q = torch.from_numpy(q.astype(np.int32)).to(CPU)
-
-        #self.B[:, :] = q.to(self.B.device)
-        self.register_buffer("B", q)
-
-        if self.group_size != self.in_features:
-            #self.s_group[:, :] = s.to(self.s_group.device)
-            self.register_buffer("s_group", s.to(CPU))
-
-            #self.s_channel[:, :] = s_extra.to(self.s_channel.device)
-            self.register_buffer("s_channel", s_extra.to(CPU))
-        else:
-            # self.s_group = torch.tensor(
-            #     [], dtype=torch.float16, device=self.s_channel.device
-            # )
-            # self.register_buffer("s_group", torch.tensor(
-            #     [], dtype=torch.float16, device=CPU
-            # ))
-
-            #self.s_channel[:, :] = s.to(self.s_channel.device)
-            self.register_buffer("s_channel", s.to(CPU))
-        if linear.bias is not None:
-            if self.bias is not None:
-                # self.bias[:] = linear.bias.data.to(self.bias.device).to(torch.float16)
-                self.register_buffer("bias", linear.bias.data.to(self.bias.device).to(torch.float16))
-            # else:
-            #    # self.bias = linear.bias.clone().to(torch.float16)
-            #    self.register_buffer("bias", linear.bias.clone().to(torch.float16))
+            self.register_buffer("s_channel", packed_s_channel)
+        if linear.bias is not None and self.bias is not None:
+            self.register_buffer("bias", linear.bias.data.to(self.bias.device).to(torch.float16))
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
