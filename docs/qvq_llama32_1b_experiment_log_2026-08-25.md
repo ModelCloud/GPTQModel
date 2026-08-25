@@ -400,6 +400,15 @@ To continue the flat-W2 target after the `.02` source-shaped arm reached
 `20309`) and `.03` on GPU1 (session `75708`). Their machine-readable ledger is
 `docs/experiments/2026-08-25-llama32-w2-div300-sources-500k-reg-bracket.json`.
 
+### Queued focused bracket around the best W2 regularization
+
+The completed leader uses YAQA regularization `0.2` (the historical `reg020`
+label). To test whether its gain is a narrow optimum, five flat-W2 arms using
+the same disjoint 302k YAQA mix are queued at `0.15`, `0.175`, `0.225`, `0.25`,
+and `0.3` on GPUs 2, 3, 4, 6, and 7. Each has a canonical D300/GSM8K watcher;
+the full session/checkpoint ledger is
+`docs/experiments/2026-08-25-llama32-w2-yaqa302k-reg-focused-bracket.json`.
+
 The completed-arm machine-readable summary is
 `docs/experiments/2026-08-25-llama32-w2-sweep-a12ce4e3.json`. All use the same
 canonical D300 manifest and protocol; `Divergence-32 top-1` below is the report's
