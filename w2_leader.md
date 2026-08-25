@@ -107,6 +107,61 @@ The 25% development target is 2,400 matching positions. This checkpoint is short
 two-epoch checkpoint remains the flat-W2 teacher-forced leader at KL 0.239397, Top-1 82.6090%, Top-5 74.3085%,
 Top-10 73.6837%, and warm shared-prefix Top-1 83.0222%.
 
+## Teacher-forced hybrid-aligned leader
+
+Checkpoint: `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da`.
+
+This is the comparison arm for determining whether the teacher-forced metric winner or corrected-D300 winner better
+predicts downstream accuracy. It retains flat W2 V2B2-P32 and the same optimized 182-row YAQA data. Regularization is
+`.10` on every projection in layers 0, 6, 10, and 12 and `.05` elsewhere, followed by fixed-trellis output alignment.
+
+```json
+{
+  "bits": 2,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "yaqa",
+  "device": "cuda:0",
+  "offload_to_disk": false,
+  "dynamic": {
+    "+:model\\.layers\\.(0|6|10|12)\\..*": {"yaqa_regularization": 0.1}
+  },
+  "yaqa": {
+    "seed": 0,
+    "regularization": 0.05,
+    "regularization_by_rate": [[2.0, 0.05]],
+    "minimum_sequences": 182,
+    "batch_size": 1,
+    "sequence_sort": "desc",
+    "activation_checkpointing": true,
+    "v2b2_family_mode": "reselect",
+    "sample_strategy": "full"
+  },
+  "output_alignment": {
+    "learning_rate": 0.00001,
+    "epochs": 2,
+    "optimizer": "adam",
+    "weight_decay": 0.0,
+    "maximum_train_batches": 64,
+    "maximum_validation_batches": 24,
+    "validation_fraction": 0.2,
+    "minimum_relative_improvement": 0.0,
+    "pristine_hessian": true
+  }
+}
+```
+
+| Metric | Hybrid-aligned leader | Uniform `.10` D300 leader |
+| --- | ---: | ---: |
+| Corrected D300 aligned Top-1 | 17.0938% | **17.8854%** |
+| D300 aligned matches | 1,641 / 9,600 | **1,717 / 9,600** |
+| Exact D300 trajectories | 3 / 300 | 3 / 300 |
+| Locked final KL | **0.239397** | 0.272819 |
+| Locked token Top-1 | **82.6090%** | 81.2380% |
+| Locked Top-5 overlap | **74.3085%** | 72.6887% |
+| Locked Top-10 overlap | **73.6837%** | 71.6885% |
+| Warm shared-prefix Top-1 | **83.0222%** | 82.4350% |
+
 ## Full downstream task evaluation
 
 Status: **running**.
@@ -127,6 +182,18 @@ python scripts/qvq_evaluate.py tasks \
 
 The result table and serialized report path will be appended here after all three suites finish.
 
+The same full evaluation is queued for the hybrid-aligned leader:
+
+```bash
+python scripts/qvq_evaluate.py tasks \
+  --checkpoint /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da \
+  --output /root/qvq-results/llama32-1b-v2b2p32-layerdamp-align2e64-full-tasks-v1.json \
+  --batch-size 16 \
+  --task gsm8k_platinum_cot --task mmlu_stem --task mmlu_humanities
+```
+
+The task-winner comparison will be appended only after both complete reports exist.
+
 Pre-run validation:
 
 | Command | Result |
@@ -134,3 +201,4 @@ Pre-run validation:
 | `pytest -q tests/test_qvq_unified_harness.py tests/test_validate_qvq_lifecycle.py` | 55 passed, 14 pre-existing dependency warnings |
 | broad `ruff check` on the four touched Python files | failed on 14 existing style/executable-bit findings; no undefined-name or task-mapping failure |
 | `ruff check --select F401,F811,F821,F822,F823` on the four touched Python files | passed |
+| `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental'` | 2 passed; full humanities and forced incremental-progress contracts covered |

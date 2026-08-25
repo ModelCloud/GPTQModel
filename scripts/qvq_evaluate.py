@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import sys
 import time
 from collections.abc import Mapping
@@ -25,6 +26,10 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# Evalution already maintains sample-level running metrics in progress titles.
+# LogBar otherwise suppresses them when it detects an agent or CI environment.
+os.environ["LOGBAR_FORCE_PROGRESS"] = "1"
 
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402

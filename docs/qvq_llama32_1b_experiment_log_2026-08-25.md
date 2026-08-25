@@ -190,6 +190,9 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | Q07 full downstream pre-run | `pytest -q tests/test_qvq_unified_harness.py tests/test_validate_qvq_lifecycle.py` | 55 passed; full MMLU humanities mapping covered |
 | Q07 full downstream pre-run | broad `ruff check` on the four touched Python files | failed on 14 existing style/executable-bit findings; failure retained rather than silently omitted |
 | Q07 full downstream pre-run | `ruff check --select F401,F811,F821,F822,F823` on the four touched Python files | passed |
+| Q07 full downstream tasks | command recorded in `w2_leader.md`; GSM8K Platinum 1,209 rows, MMLU STEM full, MMLU humanities full | running; report `/root/qvq-results/llama32-1b-v2b2p32-reg010-leader-full-tasks-v1.json` |
+| Q03 full downstream tasks | same task/batch contract as Q07 | queued; report `/root/qvq-results/llama32-1b-v2b2p32-layerdamp-align2e64-full-tasks-v1.json` |
+| downstream progress fix | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental'` plus focused Ruff correctness gate | 2 passed; Ruff passed |
 
 ## Current decision
 

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -274,6 +275,10 @@ def test_qvq_evaluate_exposes_full_mmlu_humanities_category():
         False,
         {"subsets": "humanities"},
     )
+
+
+def test_qvq_evaluate_forces_incremental_evalution_progress():
+    assert os.environ["LOGBAR_FORCE_PROGRESS"] == "1"
 
 
 class _BareDecoder(nn.Module):
