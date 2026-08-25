@@ -174,6 +174,9 @@ def test_qvq_e2e_split_contract_rejects_internal_and_inherited_overlap(tmp_path)
     checkpoint.mkdir()
     args = SimpleNamespace(
         dataset=dataset,
+        train_dataset=None,
+        validation_dataset=None,
+        evaluation_dataset=None,
         checkpoint=checkpoint,
         train_offset=128,
         train_rows=128,
@@ -203,8 +206,18 @@ def test_qvq_e2e_split_contract_rejects_internal_and_inherited_overlap(tmp_path)
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="train.*inherited.*calibration"):
+    _validate_split_contract(args)
+    args.validation_offset = 0
+    with pytest.raises(ValueError, match="validation.*inherited.*calibration"):
         _validate_split_contract(args)
+    args.validation_offset = 256
+
+    second_dataset = tmp_path / "second.parquet"
+    second_dataset.touch()
+    args.train_dataset = second_dataset
+    args.train_offset = 0
+    args.validation_offset = 256
+    _validate_split_contract(args)
 
 
 def test_qvq_e2e_saved_checkpoint_carries_derived_split_provenance(tmp_path):
@@ -220,6 +233,9 @@ def test_qvq_e2e_saved_checkpoint_carries_derived_split_provenance(tmp_path):
     )
     args = SimpleNamespace(
         dataset=dataset,
+        train_dataset=None,
+        validation_dataset=None,
+        evaluation_dataset=None,
         checkpoint=checkpoint,
         output_checkpoint=output,
         train_offset=128,

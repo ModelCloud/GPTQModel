@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,14 +26,15 @@ from gptqmodel.looper.qvq_output_alignment import _FixedTrellisAlignmentLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.utils.model import recurse_setattr
 
-from scripts.analyze_gptq_low_bit_grid import load_nm_evaluation_batch
-
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dense-model", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, default=Path("neuralmagic/calibration"))
+    parser.add_argument("--train-dataset", type=Path)
+    parser.add_argument("--validation-dataset", type=Path)
+    parser.add_argument("--evaluation-dataset", type=Path)
     parser.add_argument("--train-offset", type=int, default=0)
     parser.add_argument("--train-rows", type=int, default=32)
     parser.add_argument("--validation-offset", type=int, default=96)
@@ -76,18 +78,67 @@ def _load_dense(path: Path, device: str):
     return AutoModelForCausalLM.from_pretrained(path, device_map={"": device}, **kwargs).eval()
 
 
-def _encoded_rows(tokenizer, args, *, offset: int, rows: int) -> dict[str, torch.Tensor]:
-    encoded, _ = load_nm_evaluation_batch(
-        tokenizer,
-        dataset_path=args.dataset,
-        row_offset=offset,
-        rows=rows,
-        max_length=None if args.max_length == 0 else args.max_length,
-    )
-    return encoded
+def _split_dataset(args, split_name: str) -> Path:
+    return getattr(args, f"{split_name}_dataset", None) or args.dataset
 
 
-def _encoded_provenance(encoded: dict[str, torch.Tensor], *, offset: int) -> dict[str, int | str]:
+def _encoded_rows(
+    tokenizer,
+    args,
+    *,
+    split_name: str,
+    offset: int,
+    rows: int,
+) -> dict[str, torch.Tensor]:
+    dataset_path = _split_dataset(args, split_name).expanduser().resolve()
+    if dataset_path.is_file() and dataset_path.suffix.lower() == ".parquet":
+        dataset = load_dataset("parquet", data_files={"train": str(dataset_path)}, split="train")
+    else:
+        dataset = load_dataset(str(dataset_path), name="LLM", split="train")
+    row_end = offset + rows
+    if row_end > len(dataset):
+        raise ValueError(
+            f"requested {split_name} rows [{offset}, {row_end}), but `{dataset_path}` contains {len(dataset)}"
+        )
+    selected = dataset.select(range(offset, row_end))
+    column_names = set(selected.column_names)
+    if "text" in column_names:
+        texts = list(selected["text"])
+    elif "messages" in column_names:
+        texts = [
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            for messages in selected["messages"]
+        ]
+    else:
+        raise ValueError(
+            f"QVQ end-to-end dataset `{dataset_path}` requires a `text` or `messages` column; "
+            f"got {sorted(column_names)}"
+        )
+    if len(texts) != rows or any(not isinstance(text, str) or not text.strip() for text in texts):
+        raise ValueError(f"QVQ end-to-end {split_name} slice contains an empty/non-text example")
+    tokenizer_kwargs = {
+        "return_tensors": "pt",
+        "padding": True,
+        "truncation": args.max_length != 0,
+    }
+    if args.max_length != 0:
+        tokenizer_kwargs["max_length"] = args.max_length
+    encoded = tokenizer(texts, **tokenizer_kwargs)
+    if "attention_mask" not in encoded:
+        raise ValueError("QVQ end-to-end tokenizer output must include an attention mask")
+    return dict(encoded)
+
+
+def _encoded_provenance(
+    encoded: dict[str, torch.Tensor],
+    *,
+    offset: int,
+    source: Path | None = None,
+) -> dict[str, int | str]:
     attention_mask = encoded.get("attention_mask")
     input_ids = encoded.get("input_ids")
     if attention_mask is None or input_ids is None:
@@ -96,7 +147,7 @@ def _encoded_provenance(encoded: dict[str, torch.Tensor], *, offset: int) -> dic
     digest = hashlib.sha256()
     digest.update(input_ids.contiguous().numpy().tobytes())
     digest.update(attention_mask.contiguous().numpy().tobytes())
-    return {
+    result = {
         "row_start": offset,
         "row_end_exclusive": offset + int(input_ids.shape[0]),
         "rows": int(input_ids.shape[0]),
@@ -105,6 +156,9 @@ def _encoded_provenance(encoded: dict[str, torch.Tensor], *, offset: int) -> dic
         "maximum_tokens_per_row": int(lengths.max()),
         "token_contract_sha256": digest.hexdigest(),
     }
+    if source is not None:
+        result["source"] = str(source.expanduser().resolve())
+    return result
 
 
 def _ranges_overlap(left_start: int, left_rows: int, right_start: int, right_rows: int) -> bool:
@@ -112,35 +166,50 @@ def _ranges_overlap(left_start: int, left_rows: int, right_start: int, right_row
 
 
 def _validate_split_contract(args) -> None:
-    """Fail closed on internal or inherited calibration overlap."""
+    """Fail closed on split overlap while permitting calibration reuse for training."""
 
     splits = {
-        "train": (args.train_offset, args.train_rows),
-        "validation": (args.validation_offset, args.validation_rows),
-        "evaluation": (args.evaluation_offset, args.evaluation_rows),
+        "train": (_split_dataset(args, "train").expanduser().resolve(), args.train_offset, args.train_rows),
+        "validation": (
+            _split_dataset(args, "validation").expanduser().resolve(),
+            args.validation_offset,
+            args.validation_rows,
+        ),
+        "evaluation": (
+            _split_dataset(args, "evaluation").expanduser().resolve(),
+            args.evaluation_offset,
+            args.evaluation_rows,
+        ),
     }
     names = tuple(splits)
     for index, left_name in enumerate(names):
         for right_name in names[index + 1 :]:
-            if _ranges_overlap(*splits[left_name], *splits[right_name]):
+            left_source, left_start, left_rows = splits[left_name]
+            right_source, right_start, right_rows = splits[right_name]
+            if left_source == right_source and _ranges_overlap(
+                left_start, left_rows, right_start, right_rows
+            ):
                 raise ValueError(
                     f"QVQ end-to-end `{left_name}` and `{right_name}` row ranges overlap: "
-                    f"{splits[left_name]} vs {splits[right_name]}"
+                    f"({left_start}, {left_rows}) vs ({right_start}, {right_rows}) in `{left_source}`"
                 )
 
     manifest = args.checkpoint / "qvq_quantize_run.json"
     if not manifest.is_file():
         return
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    dataset_source = str(args.dataset.expanduser().resolve())
     for inherited_name, raw in payload.get("datasets", {}).items():
         if not isinstance(raw, dict) or not {"source", "row_start", "rows"}.issubset(raw):
             continue
         inherited_source = Path(str(raw["source"])).expanduser()
         inherited_source = str(inherited_source.resolve()) if inherited_source.exists() else str(raw["source"])
-        if inherited_source != dataset_source:
-            continue
-        for split_name, (row_start, rows) in splits.items():
+        for split_name, (split_source, row_start, rows) in splits.items():
+            # Additional optimization may reuse an already-declared calibration
+            # stream. Candidate selection and report-only metrics may not.
+            if split_name == "train":
+                continue
+            if inherited_source != str(split_source):
+                continue
             if _ranges_overlap(int(raw["row_start"]), int(raw["rows"]), row_start, rows):
                 raise ValueError(
                     f"QVQ end-to-end `{split_name}` rows [{row_start}, {row_start + rows}) overlap inherited "
@@ -158,14 +227,25 @@ def _write_derived_manifest(args) -> None:
         else {}
     )
     datasets = payload.setdefault("datasets", {})
-    source = str(args.dataset.expanduser().resolve())
-    for name, offset, rows, role in (
-        ("e2e_alignment_train", args.train_offset, args.train_rows, "soft_target_training"),
-        ("e2e_alignment_validation", args.validation_offset, args.validation_rows, "candidate_selection"),
-        ("e2e_alignment_evaluation", args.evaluation_offset, args.evaluation_rows, "report_only"),
+    for name, split_name, offset, rows, role in (
+        ("e2e_alignment_train", "train", args.train_offset, args.train_rows, "soft_target_training"),
+        (
+            "e2e_alignment_validation",
+            "validation",
+            args.validation_offset,
+            args.validation_rows,
+            "candidate_selection",
+        ),
+        (
+            "e2e_alignment_evaluation",
+            "evaluation",
+            args.evaluation_offset,
+            args.evaluation_rows,
+            "report_only",
+        ),
     ):
         datasets[name] = {
-            "source": source,
+            "source": str(_split_dataset(args, split_name).expanduser().resolve()),
             "config": None,
             "split": "train",
             "row_start": offset,
@@ -430,13 +510,43 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.dense_model, local_files_only=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    train = _encoded_rows(tokenizer, args, offset=args.train_offset, rows=args.train_rows)
-    validation = _encoded_rows(tokenizer, args, offset=args.validation_offset, rows=args.validation_rows)
-    evaluation = _encoded_rows(tokenizer, args, offset=args.evaluation_offset, rows=args.evaluation_rows)
+    train = _encoded_rows(
+        tokenizer,
+        args,
+        split_name="train",
+        offset=args.train_offset,
+        rows=args.train_rows,
+    )
+    validation = _encoded_rows(
+        tokenizer,
+        args,
+        split_name="validation",
+        offset=args.validation_offset,
+        rows=args.validation_rows,
+    )
+    evaluation = _encoded_rows(
+        tokenizer,
+        args,
+        split_name="evaluation",
+        offset=args.evaluation_offset,
+        rows=args.evaluation_rows,
+    )
     split_provenance = {
-        "train": _encoded_provenance(train, offset=args.train_offset),
-        "validation": _encoded_provenance(validation, offset=args.validation_offset),
-        "evaluation": _encoded_provenance(evaluation, offset=args.evaluation_offset),
+        "train": _encoded_provenance(
+            train,
+            offset=args.train_offset,
+            source=_split_dataset(args, "train"),
+        ),
+        "validation": _encoded_provenance(
+            validation,
+            offset=args.validation_offset,
+            source=_split_dataset(args, "validation"),
+        ),
+        "evaluation": _encoded_provenance(
+            evaluation,
+            offset=args.evaluation_offset,
+            source=_split_dataset(args, "evaluation"),
+        ),
     }
 
     started = time.perf_counter()
