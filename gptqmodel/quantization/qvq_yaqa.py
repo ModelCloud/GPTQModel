@@ -250,7 +250,11 @@ def _sketch_b_gram_updates(
         output_source = per_sequence_gradient.permute(1, 0, 2).reshape(
             out_features, batch_sequences * in_features
         )
-        return input_source.T @ input_source, output_source @ output_source.T
+        input_update = input_source.T @ input_source
+        output_update = output_source @ output_source.T
+        # GEMM may accumulate mirrored entries in a different order. Restore
+        # the exact symmetric contract required by packed accumulation and LDL.
+        return (input_update + input_update.T) * 0.5, (output_update + output_update.T) * 0.5
 
     return (
         torch.bmm(per_sequence_gradient.transpose(1, 2), per_sequence_gradient).sum(dim=0),

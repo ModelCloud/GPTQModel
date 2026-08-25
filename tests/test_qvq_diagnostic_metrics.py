@@ -866,6 +866,15 @@ def test_yaqa_sketch_b_gram_strategies_preserve_fp32_factor_geometry(shape, stra
         assert torch.equal(actual_factor, actual_factor.T)
 
 
+def test_yaqa_flattened_sketch_b_gram_is_bit_exact_symmetric():
+    generator = torch.Generator().manual_seed(20260825)
+    activation = torch.randn((3, 7, 8), generator=generator, dtype=torch.float32)
+    gradient = torch.randn((3, 7, 6), generator=generator, dtype=torch.float32)
+
+    for factor in _sketch_b_gram_updates(activation, gradient, strategy="flattened"):
+        assert torch.equal(factor, factor.T)
+
+
 def test_yaqa_projected_sketch_b_gram_matches_explicit_projected_weight_scores():
     generator = torch.Generator().manual_seed(20260819)
     activation = torch.randn((3, 11, 13), generator=generator, dtype=torch.float32)
@@ -1378,8 +1387,8 @@ def test_yaqa_diagnostic_sketch_b_rejects_nonfinite_full_model_gradients():
         "attention_mask": torch.ones(1, 2, dtype=torch.long),
     }
 
-    def nonfinite_loss(logits, _attention_mask, *, generator):
-        del generator
+    def nonfinite_loss(logits, _attention_mask, *, generator, token_weights=None):
+        del generator, token_weights
         return logits.sum() * torch.tensor(float("nan")), 2
 
     with (

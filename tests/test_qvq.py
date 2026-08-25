@@ -705,7 +705,7 @@ def test_qvq_dynamic_bits_allow_only_supported_rates():
         QVQConfig(dynamic={r".*q_proj": {"bits": 9}}, offload_to_disk=False)
     with pytest.raises(ValueError, match="half-integer"):
         QVQConfig(dynamic={r".*q_proj": {"bits": 2.25}}, offload_to_disk=False)
-    with pytest.raises(ValueError, match="only supports a `bits` override"):
+    with pytest.raises(ValueError, match="only supports `bits` and `yaqa_regularization` overrides"):
         QVQConfig(dynamic={r".*q_proj": {"group_size": 128}}, offload_to_disk=False)
 
     with pytest.raises(ValueError, match="format=qvq_v4.*W1 through W4"):
