@@ -1263,6 +1263,38 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     model_type = getattr(config, "model_type", None)
     model_type_lower = model_type.lower() if isinstance(model_type, str) else None
 
+    if model_type_lower == "unlimited-ocr":
+        # transformers 5 synthesizes an initializer for the remote empty
+        # UnlimitedOCRConfig subclass and omits defaults declared by its
+        # DeepseekV2Config parent. Restore only missing fields so serialized
+        # checkpoint values remain authoritative.
+        defaults = {
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "aux_loss_alpha": 0.001,
+            "ep_size": 1,
+            "hidden_act": "silu",
+            "initializer_range": 0.02,
+            "moe_layer_freq": 1,
+            "norm_topk_prob": False,
+            "pad_token_id": None,
+            "pretraining_tp": 1,
+            "rms_norm_eps": 1e-6,
+            "rope_scaling": None,
+            "rope_theta": 10000.0,
+            "routed_scaling_factor": 1.0,
+            "scoring_func": "softmax",
+            "seq_aux": True,
+            "tie_word_embeddings": False,
+            "use_cache": True,
+        }
+        for name, value in defaults.items():
+            if not hasattr(config, name):
+                setattr(config, name, value)
+
+        if not hasattr(config, "sliding_window") and hasattr(config, "sliding_window_size"):
+            config.sliding_window = config.sliding_window_size
+
     if model_type_lower == "hymba":
         # hymba uses Flex by default;
         # however, `modeling_hymba` has not yet been adapted to support the latest version of PyTorch Flex.

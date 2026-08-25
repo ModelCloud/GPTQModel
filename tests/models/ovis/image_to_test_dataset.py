@@ -22,6 +22,7 @@ from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
+from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
 from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
 
 
@@ -103,6 +104,14 @@ def format_deepseek_ocr2_dataset(image, assistant):
     }
 
 
+def format_unlimited_ocr_dataset(image, assistant):
+    del assistant
+    return {
+        "image": image,
+        "text": "<image>\nFree OCR.",
+    }
+
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -147,6 +156,10 @@ def prepare_deepseek_ocr2_dataset(n_sample: int = 20) -> list[dict]:
     return prepare_dataset(format_deepseek_ocr2_dataset, n_sample=n_sample)
 
 
+def prepare_unlimited_ocr_dataset(n_sample: int = 20) -> list[dict]:
+    return prepare_dataset(format_unlimited_ocr_dataset, n_sample=n_sample)
+
+
 def get_calib_dataset(model):
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
@@ -187,5 +200,8 @@ def get_calib_dataset(model):
 
     if isinstance(model, DeepSeekOCR2QModel):
         return prepare_deepseek_ocr2_dataset(n_sample=20)
+
+    if isinstance(model, UnlimitedOCRQModel):
+        return prepare_unlimited_ocr_dataset(n_sample=20)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")

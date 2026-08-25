@@ -187,6 +187,7 @@ from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
+from .definitions.unlimited_ocr import UnlimitedOCRQModel  # noqa: E402
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
 from .definitions.zamba import ZambaQModel  # noqa: E402
@@ -364,6 +365,7 @@ MODEL_MAP = {
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
+    "unlimited-ocr": UnlimitedOCRQModel,
     "voxtral": VoxtralGPTQ,
 }
 
