@@ -17,6 +17,8 @@ from scripts.analyze_qvq_e2e_alignment import (
     _restore_floating_tensor_dtypes,
     _restore_parameter_state,
     _valid_next_token_logits,
+    _validate_split_contract,
+    _write_derived_manifest,
 )
 
 
@@ -163,3 +165,82 @@ def test_qvq_e2e_accuracy_gate_uses_one_exact_finite_population():
     ):
         with pytest.raises(ValueError, match="missing acceptance fields"):
             _passes_accuracy_gate(baseline_metrics, candidate_metrics)
+
+
+def test_qvq_e2e_split_contract_rejects_internal_and_inherited_overlap(tmp_path):
+    dataset = tmp_path / "calibration.parquet"
+    dataset.touch()
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    args = SimpleNamespace(
+        dataset=dataset,
+        checkpoint=checkpoint,
+        train_offset=128,
+        train_rows=128,
+        validation_offset=256,
+        validation_rows=32,
+        evaluation_offset=288,
+        evaluation_rows=32,
+    )
+    _validate_split_contract(args)
+
+    args.validation_offset = 255
+    with pytest.raises(ValueError, match="train.*validation.*overlap"):
+        _validate_split_contract(args)
+    args.validation_offset = 256
+
+    (checkpoint / "qvq_quantize_run.json").write_text(
+        __import__("json").dumps(
+            {
+                "datasets": {
+                    "calibration": {
+                        "source": str(dataset),
+                        "row_start": 0,
+                        "rows": 129,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="train.*inherited.*calibration"):
+        _validate_split_contract(args)
+
+
+def test_qvq_e2e_saved_checkpoint_carries_derived_split_provenance(tmp_path):
+    dataset = tmp_path / "calibration.parquet"
+    dataset.touch()
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    (checkpoint / "qvq_quantize_run.json").write_text(
+        '{"datasets":{"calibration":{"source":"base","row_start":0,"rows":128}}}\n',
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        dataset=dataset,
+        checkpoint=checkpoint,
+        output_checkpoint=output,
+        train_offset=128,
+        train_rows=300,
+        validation_offset=428,
+        validation_rows=40,
+        evaluation_offset=468,
+        evaluation_rows=44,
+        max_length=1024,
+    )
+
+    _write_derived_manifest(args)
+    payload = __import__("json").loads((output / "qvq_quantize_run.json").read_text(encoding="utf-8"))
+    assert payload["derived_from_checkpoint"] == str(checkpoint.resolve())
+    assert payload["datasets"]["calibration"]["source"] == "base"
+    assert payload["datasets"]["e2e_alignment_train"] == {
+        "source": str(dataset.resolve()),
+        "config": None,
+        "split": "train",
+        "row_start": 128,
+        "rows": 300,
+        "role": "soft_target_training",
+        "max_length": 1024,
+    }

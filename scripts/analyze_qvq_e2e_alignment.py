@@ -16,15 +16,16 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.looper.qvq_output_alignment import _FixedTrellisAlignmentLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.utils.model import recurse_setattr
 
-if __package__:
-    from scripts.analyze_gptq_low_bit_grid import load_nm_evaluation_batch
-else:
-    from analyze_gptq_low_bit_grid import load_nm_evaluation_batch
+from scripts.analyze_gptq_low_bit_grid import load_nm_evaluation_batch
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -104,6 +105,80 @@ def _encoded_provenance(encoded: dict[str, torch.Tensor], *, offset: int) -> dic
         "maximum_tokens_per_row": int(lengths.max()),
         "token_contract_sha256": digest.hexdigest(),
     }
+
+
+def _ranges_overlap(left_start: int, left_rows: int, right_start: int, right_rows: int) -> bool:
+    return max(left_start, right_start) < min(left_start + left_rows, right_start + right_rows)
+
+
+def _validate_split_contract(args) -> None:
+    """Fail closed on internal or inherited calibration overlap."""
+
+    splits = {
+        "train": (args.train_offset, args.train_rows),
+        "validation": (args.validation_offset, args.validation_rows),
+        "evaluation": (args.evaluation_offset, args.evaluation_rows),
+    }
+    names = tuple(splits)
+    for index, left_name in enumerate(names):
+        for right_name in names[index + 1 :]:
+            if _ranges_overlap(*splits[left_name], *splits[right_name]):
+                raise ValueError(
+                    f"QVQ end-to-end `{left_name}` and `{right_name}` row ranges overlap: "
+                    f"{splits[left_name]} vs {splits[right_name]}"
+                )
+
+    manifest = args.checkpoint / "qvq_quantize_run.json"
+    if not manifest.is_file():
+        return
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    dataset_source = str(args.dataset.expanduser().resolve())
+    for inherited_name, raw in payload.get("datasets", {}).items():
+        if not isinstance(raw, dict) or not {"source", "row_start", "rows"}.issubset(raw):
+            continue
+        inherited_source = Path(str(raw["source"])).expanduser()
+        inherited_source = str(inherited_source.resolve()) if inherited_source.exists() else str(raw["source"])
+        if inherited_source != dataset_source:
+            continue
+        for split_name, (row_start, rows) in splits.items():
+            if _ranges_overlap(int(raw["row_start"]), int(raw["rows"]), row_start, rows):
+                raise ValueError(
+                    f"QVQ end-to-end `{split_name}` rows [{row_start}, {row_start + rows}) overlap inherited "
+                    f"`{inherited_name}` rows [{raw['row_start']}, {int(raw['row_start']) + int(raw['rows'])})"
+                )
+
+
+def _write_derived_manifest(args) -> None:
+    """Carry preparation provenance into a saved post-alignment checkpoint."""
+
+    source_manifest = args.checkpoint / "qvq_quantize_run.json"
+    payload = (
+        json.loads(source_manifest.read_text(encoding="utf-8"))
+        if source_manifest.is_file()
+        else {}
+    )
+    datasets = payload.setdefault("datasets", {})
+    source = str(args.dataset.expanduser().resolve())
+    for name, offset, rows, role in (
+        ("e2e_alignment_train", args.train_offset, args.train_rows, "soft_target_training"),
+        ("e2e_alignment_validation", args.validation_offset, args.validation_rows, "candidate_selection"),
+        ("e2e_alignment_evaluation", args.evaluation_offset, args.evaluation_rows, "report_only"),
+    ):
+        datasets[name] = {
+            "source": source,
+            "config": None,
+            "split": "train",
+            "row_start": offset,
+            "rows": rows,
+            "role": role,
+            "max_length": None if args.max_length == 0 else args.max_length,
+        }
+    payload["derived_from_checkpoint"] = str(args.checkpoint.expanduser().resolve())
+    payload["output"] = str(args.output_checkpoint.expanduser().resolve())
+    (args.output_checkpoint / "qvq_quantize_run.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _batches(encoded: dict[str, torch.Tensor], batch_size: int):
@@ -349,6 +424,7 @@ def main() -> None:
         raise ValueError("QVQ end-to-end alignment learning rate must be finite and positive.")
     if args.results.exists():
         raise FileExistsError(f"Refusing to overwrite existing result: {args.results}")
+    _validate_split_contract(args)
 
     device = torch.device(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.dense_model, local_files_only=True)
@@ -463,6 +539,7 @@ def main() -> None:
         if args.output_checkpoint.exists():
             raise FileExistsError(f"Refusing to overwrite existing checkpoint: {args.output_checkpoint}")
         quantized.save(str(args.output_checkpoint))
+        _write_derived_manifest(args)
         reloaded = GPTQModel.load(
             str(args.output_checkpoint),
             backend=BACKEND.QVQ,
