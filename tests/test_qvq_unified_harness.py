@@ -113,6 +113,10 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
                         }
                     },
                     "counters": {"input_features": 16, "output_features": 32, "yaqa_tiles": 2},
+                    "viterbi_pruning": {
+                        "baseline_candidates_possible": 100,
+                        "candidates_evaluated": 40,
+                    },
                 },
             },
             {
@@ -127,6 +131,10 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
                         }
                     },
                     "counters": {"input_features": 16, "output_features": 32, "yaqa_tiles": 4},
+                    "viterbi_pruning": {
+                        "baseline_candidates_possible": 250,
+                        "candidates_evaluated": 90,
+                    },
                 },
             },
         ]
@@ -142,6 +150,11 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
         "gpu_ms": 4700.0,
     }
     assert telemetry["counters"]["yaqa_tiles"] == 6
+    assert telemetry["viterbi_pruning"] == {
+        "baseline_candidates_possible": 250,
+        "candidates_evaluated": 90,
+    }
+    assert telemetry["modules"][0]["viterbi_pruning"]["baseline_candidates_possible"] == 100
     assert telemetry["shapes"]["32x16"]["modules"] == 2
     assert telemetry["shapes"]["32x16"]["process_quant_seconds"] == 6.0
     assert len(telemetry["modules"]) == 2

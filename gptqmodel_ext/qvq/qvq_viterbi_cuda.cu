@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <type_traits>
 #include <limits>
@@ -1857,6 +1858,12 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 constexpr float kNormRankEps = 1.9073486328125e-06f;         // 2^-19, exact in FP32
 constexpr float kNormRankRelax = 1.0000019073486328125f;     // 1 + 2^-19, exact in FP32
 
+// Telemetry is opt-in through GPTQMODEL_QVQ_TELEMETRY.  Each CTA contributes
+// one pair of 64-bit atomics after reducing its per-thread totals in shared
+// memory, keeping observability out of the inner candidate loop.
+__device__ unsigned long long g_norm_rank_candidates_evaluated = 0;
+__device__ unsigned long long g_norm_rank_candidates_possible = 0;
+
 template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth>
 __global__ __launch_bounds__(kThreads, Shift >= 6 ? 1 : 2)
 void qvq_v2_segment_grid_norm_rank_kernel(
@@ -1870,7 +1877,8 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     uint8_t* __restrict__ backpointers,
     uint8_t* __restrict__ boundary_banks,
     int batch,
-    int segment_index) {
+    int segment_index,
+    bool collect_telemetry) {
   using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
   constexpr int shift = Shift;
   constexpr int prefix_count = 1 << shift;
@@ -1904,6 +1912,8 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     return;
   }
   const int thread = static_cast<int>(threadIdx.x);
+  unsigned long long candidates_evaluated = 0;
+  unsigned long long candidates_possible = 0;
   const int first_step = segment_index * segment_steps;
   // Step 127 stays folded into the final reduction, as in the baseline.
   const int end_step = min(first_step + segment_steps, 127);
@@ -1998,6 +2008,9 @@ void qvq_v2_segment_grid_norm_rank_kernel(
         pointer_base + static_cast<int64_t>(step) * bank_suffix_count;
     #pragma unroll
     for (int column = 0; column < column_iterations; ++column) {
+      if (collect_telemetry) {
+        candidates_possible += prefix_count;
+      }
       const int x = thread + column * kThreads;
       const int group = x >> shift;
       const float floor_cost = __uint_as_float(group_min[group]);
@@ -2007,6 +2020,9 @@ void qvq_v2_segment_grid_norm_rank_kernel(
       int best_chunk = 0;
       // One warp-uniform straight-line block of ChunkWidth candidates.
       const auto evaluate_chunk = [&](int chunk) {
+        if (collect_telemetry) {
+          candidates_evaluated += ChunkWidth;
+        }
         const PackType packed = bank_prefixes[static_cast<int64_t>(chunk) * suffix_count + x];
         const uint64_t* lane_records =
             bank_records + (static_cast<int64_t>(chunk) * suffix_count + x) * ChunkWidth;
@@ -2038,6 +2054,9 @@ void qvq_v2_segment_grid_norm_rank_kernel(
       };
 
       if (degenerate[column] && !probe) {
+        if (collect_telemetry) {
+          candidates_evaluated += prefix_count;
+        }
         // The last band probe covered most of the list: until the next probe,
         // run the baseline's own prefix-order scan over the original packed
         // records - the identical straight-line body ptxas fully unrolls, so
@@ -2141,6 +2160,27 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   }
   for (int x = thread; x < suffix_count; x += kThreads) {
     g_output_all[g_base + x] = g_previous[x + (x >> group_shift)];
+  }
+  if (collect_telemetry) {
+    __syncthreads();
+    // The recurrence no longer needs shared frontier storage. Reuse its first
+    // 16 KiB for two block reductions; the launcher reserves that minimum for
+    // telemetry when the recurrence's normal workspace is smaller.
+    auto* reduction = reinterpret_cast<unsigned long long*>(shared_frontiers);
+    reduction[thread] = candidates_evaluated;
+    reduction[kThreads + thread] = candidates_possible;
+    __syncthreads();
+    for (int stride = kThreads / 2; stride > 0; stride >>= 1) {
+      if (thread < stride) {
+        reduction[thread] += reduction[thread + stride];
+        reduction[kThreads + thread] += reduction[kThreads + thread + stride];
+      }
+      __syncthreads();
+    }
+    if (thread == 0) {
+      atomicAdd(&g_norm_rank_candidates_evaluated, reduction[0]);
+      atomicAdd(&g_norm_rank_candidates_possible, reduction[kThreads]);
+    }
   }
 }
 
@@ -3318,9 +3358,25 @@ bool fused_w2_family_grid_supported(const cudaDeviceProp& properties) {
 // this process; exposed as gptqmodel_qvq.norm_rank_grid_dispatch_count() so
 // tests can assert which path produced a result.
 std::atomic<int64_t> g_norm_rank_grid_dispatches{0};
+std::atomic<int64_t> g_norm_rank_baseline_fallbacks{0};
 
 int64_t qvq_norm_rank_grid_dispatch_count() {
   return g_norm_rank_grid_dispatches.load();
+}
+
+std::vector<int64_t> qvq_norm_rank_telemetry_snapshot() {
+  unsigned long long evaluated = 0;
+  unsigned long long possible = 0;
+  C10_CUDA_CHECK(cudaMemcpyFromSymbol(
+      &evaluated, g_norm_rank_candidates_evaluated, sizeof(evaluated), 0, cudaMemcpyDeviceToHost));
+  C10_CUDA_CHECK(cudaMemcpyFromSymbol(
+      &possible, g_norm_rank_candidates_possible, sizeof(possible), 0, cudaMemcpyDeviceToHost));
+  return {
+      g_norm_rank_grid_dispatches.load(),
+      g_norm_rank_baseline_fallbacks.load(),
+      static_cast<int64_t>(evaluated),
+      static_cast<int64_t>(possible),
+  };
 }
 
 // Number of live norm-rank table cache entries; exposed as
@@ -3361,6 +3417,13 @@ bool norm_rank_grid_disabled() {
   return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
 }
 
+bool norm_rank_telemetry_enabled() {
+  const char* value = std::getenv("GPTQMODEL_QVQ_TELEMETRY");
+  return value != nullptr &&
+      (std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
+       std::strcmp(value, "yes") == 0 || std::strcmp(value, "on") == 0);
+}
+
 // Segment loop for the norm-rank contiguous-band recurrence.  Launch geometry,
 // frontier ping-pong, and the final frontier parity all match
 // QVQ_V2_SEGMENT_GRID_LAUNCH, so the shared finalize kernel is reused verbatim.
@@ -3374,15 +3437,19 @@ void launch_qvq_v2_segment_norm_rank_segments(
     uint8_t* backpointers,
     uint8_t* boundary_banks,
     int batch,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    bool collect_telemetry) {
   using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
   constexpr int prefix_count = 1 << Shift;
   constexpr int suffix_count = 1 << (16 - Shift);
   constexpr int group_count = 1 << (16 - 2 * Shift);
   constexpr int segments = 128 / SegmentSteps;
-  constexpr size_t shared_bytes =
+  constexpr size_t recurrence_shared_bytes =
       2 * static_cast<size_t>(suffix_count + prefix_count) * sizeof(float) +
       3 * static_cast<size_t>(group_count) * sizeof(unsigned);
+  const size_t shared_bytes = collect_telemetry
+      ? std::max(recurrence_shared_bytes, 2 * static_cast<size_t>(kThreads) * sizeof(unsigned long long))
+      : recurrence_shared_bytes;
   auto* kernel = qvq_v2_segment_grid_norm_rank_kernel<Shift, BankCount, SegmentSteps, ChunkWidth>;
   C10_CUDA_CHECK(cudaFuncSetAttribute(
       kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)));
@@ -3393,13 +3460,13 @@ void launch_qvq_v2_segment_norm_rank_segments(
   const float* low_norms = tables.low_norms.const_data_ptr<float>();
   kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
       sequences, baseline_records, records, prefixes, low_norms, nullptr,
-      frontier_a, backpointers, boundary_banks, batch, 0);
+      frontier_a, backpointers, boundary_banks, batch, 0, collect_telemetry);
   for (int segment = 1; segment < segments; ++segment) {
     const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
     float* output = segment % 2 == 1 ? frontier_b : frontier_a;
     kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
         sequences, baseline_records, records, prefixes, low_norms, input, output,
-        backpointers, boundary_banks, batch, segment);
+        backpointers, boundary_banks, batch, segment, collect_telemetry);
   }
 }
 
@@ -3662,7 +3729,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
                 ". Set `viterbi_pruning.mode='auto'` with the default "
                 "`fallback='baseline'` to keep the exact baseline recurrence instead.");
   }
+  if ((pruning_policy == kViterbiPruningAuto || pruning_policy == kViterbiPruningAutoError) &&
+      !(pruning_requested && norm_rank_eligible)) {
+    g_norm_rank_baseline_fallbacks.fetch_add(1, std::memory_order_relaxed);
+  }
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
+  const bool collect_pruning_telemetry = norm_rank_telemetry_enabled();
   // Below ~40 sequences both paths are bound by the serial 127-step chain of a
   // single sequence and the reference layout (one CTA per bank) has twice the
   // per-sequence parallelism; measured crossover on the 124-SM sm_80 device.
@@ -3877,7 +3949,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         qvq_norm_rank_tables,                                                                      \
         costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),                      \
         backpointers.mutable_data_ptr<uint8_t>(),                                                  \
-        boundary_banks.mutable_data_ptr<uint8_t>(), batch, stream);                                \
+        boundary_banks.mutable_data_ptr<uint8_t>(), batch, stream, collect_pruning_telemetry);     \
     qvq_v2_segment_grid_finalize_kernel<BITS, BANKS, SEGMENT_STEPS, false, half, uint8_t>          \
         <<<batch, kThreads, 0, stream>>>(                                                          \
             sequences.const_data_ptr<float>(),                                                     \
@@ -4138,6 +4210,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
   m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
   m.def("norm_rank_grid_dispatch_count() -> int", &qvq_norm_rank_grid_dispatch_count);
+  m.def("norm_rank_telemetry_snapshot() -> int[]", &qvq_norm_rank_telemetry_snapshot);
   m.def("norm_rank_cache_size() -> int", &qvq_norm_rank_cache_size);
   m.def("norm_cache_size() -> int", &qvq_norm_cache_size);
 }

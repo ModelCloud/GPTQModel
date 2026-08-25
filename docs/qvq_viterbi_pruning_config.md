@@ -64,6 +64,29 @@ non-family-batched, FP16 codebooks, `bank_count` 2 with `segment_steps` 16 or
 (W3). W1.5/W2/W3.5 stay on the baseline under `auto` and are rejected under
 `required` and under `auto` + `fallback="error"`.
 
+## Runtime telemetry
+
+When `GPTQMODEL_QVQ_TELEMETRY=1` (the default for `scripts/qvq_quantize.py`),
+every finalized module log includes a cumulative `viterbi_pruning` snapshot
+for its CUDA device:
+
+- `eligible_dispatches`: native calls that selected the exact norm-band recurrence;
+- `baseline_fallbacks`: automatic-policy calls that retained the exact baseline recurrence;
+- `baseline_candidates_possible`: candidate evaluations the pristine scan would perform over the same prunable steps (the shared final-step reduction is excluded from both counts);
+- `candidates_evaluated`: candidates the norm-band kernel actually evaluated, including seed chunks and degenerate full scans;
+- `candidates_skipped` and `candidate_reduction`: their exact difference and ratio; and
+- `norm_rank_cache_entries`: the current bounded codebook-table cache size.
+
+The counters are cumulative because attention projections may quantize concurrently.
+The last module snapshot is also copied to the run manifest's aggregate telemetry.
+This avoids attributing another worker's overlapping CUDA work to the wrong module.
+
+Candidate reduction is a performance/work metric, not a correctness proof. Correctness is
+verified separately by the CUDA A/B suite, which forces the pristine recurrence and requires
+states, segment selectors, and squared errors to match bit-for-bit for every supported W2.5/W3
+two-bank/four-bank cell. Each saved V2B2/V2B4 module additionally performs an exact packed-payload
+round trip, recorded as `packed_roundtrip_verifications`.
+
 ## Precedence over `GPTQMODEL_QVQ_DISABLE_OCTET_GRID`
 
 Explicit configuration is authoritative. The legacy

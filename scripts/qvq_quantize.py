@@ -233,11 +233,19 @@ def aggregate_qvq_process_telemetry(
     counters: Counter[str] = Counter()
     modules: list[dict[str, object]] = []
     shapes: dict[str, dict[str, object]] = {}
+    latest_pruning: dict[str, object] | None = None
     for row in _quant_log_rows(quant_log):
         telemetry = row.get("qvq_telemetry")
         if not isinstance(telemetry, dict):
             continue
         module_counters = telemetry.get("counters", {})
+        module_pruning = telemetry.get("viterbi_pruning")
+        if isinstance(module_pruning, dict) and (
+            latest_pruning is None
+            or int(module_pruning.get("baseline_candidates_possible", 0))
+            >= int(latest_pruning.get("baseline_candidates_possible", 0))
+        ):
+            latest_pruning = dict(module_pruning)
         counters.update(module_counters)
         input_features = int(module_counters.get("input_features", 0))
         output_features = int(module_counters.get("output_features", 0))
@@ -280,6 +288,7 @@ def aggregate_qvq_process_telemetry(
                 "process_quant_seconds": float(row.get("time", 0.0)),
                 "phases": module_phases,
                 "counters": dict(module_counters),
+                "viterbi_pruning": module_pruning,
             }
         )
     if not modules:
@@ -293,6 +302,7 @@ def aggregate_qvq_process_telemetry(
         ),
         "phases": phases,
         "counters": dict(counters),
+        "viterbi_pruning": latest_pruning,
         "shapes": shapes,
         "modules": modules,
     }

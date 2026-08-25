@@ -110,6 +110,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard",
         "yaqa_feedback",
         "yaqa_feedback_update_",
+        "norm_rank_telemetry_snapshot",
         "norm_rank_cache_size",
         "norm_cache_size",
     ),
@@ -140,6 +141,29 @@ def _extension_api():
     from gptqmodel import extension as extension_api
 
     return extension_api
+
+
+def qvq_cuda_norm_rank_telemetry_snapshot(device: torch.device | str | int) -> dict[str, int | float | bool | str]:
+    """Return cumulative exact-pruning work counters for one CUDA device."""
+
+    resolved = torch.device("cuda", device) if isinstance(device, int) else torch.device(device)
+    with torch.cuda.device(resolved):
+        values = _extension_api().op("qvq_cuda", "norm_rank_telemetry_snapshot")()
+        cache_entries = int(_extension_api().op("qvq_cuda", "norm_rank_cache_size")())
+    dispatches, baseline_fallbacks, evaluated, possible = (int(value) for value in values)
+    skipped = max(0, possible - evaluated)
+    reduction = 0.0 if possible == 0 else skipped / possible
+    return {
+        "strategy": "norm_band",
+        "exact": True,
+        "eligible_dispatches": dispatches,
+        "baseline_fallbacks": baseline_fallbacks,
+        "candidates_evaluated": evaluated,
+        "baseline_candidates_possible": possible,
+        "candidates_skipped": skipped,
+        "candidate_reduction": reduction,
+        "norm_rank_cache_entries": cache_entries,
+    }
 
 
 def _qvq_cuda_op() -> Callable:

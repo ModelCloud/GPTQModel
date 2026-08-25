@@ -33,7 +33,11 @@ from .qvq_codecs import (
     pgc18_codebook_v4,
     pgc18_decode_states_v4,
 )
-from .qvq_pruning import reject_viterbi_pruning_fallback_if_strict, viterbi_pruning_dispatch_code
+from .qvq_pruning import (
+    reject_viterbi_pruning_fallback_if_strict,
+    resolve_viterbi_pruning_policy,
+    viterbi_pruning_dispatch_code,
+)
 from .qvq_rates import (
     QVQ_BITS as _QVQ_BITS,
 )
@@ -747,7 +751,12 @@ class QVQQuantizationTelemetry:
             }
             for name in self.calls
         }
-        return {"phases": phases, "counters": dict(self.counters)}
+        result: dict[str, object] = {"phases": phases, "counters": dict(self.counters)}
+        if self._device is not None and self._device.type == "cuda":
+            from ..utils.qvq_cuda import qvq_cuda_norm_rank_telemetry_snapshot
+
+            result["viterbi_pruning"] = qvq_cuda_norm_rank_telemetry_snapshot(self._device)
+        return result
 
 
 def _qvq_phase(
@@ -6690,6 +6699,12 @@ def quantize_qvq_linear(
         telemetry.count("weight_elements", weight.numel())
         telemetry.count("input_features", in_features)
         telemetry.count("output_features", out_features)
+        pruning_policy = resolve_viterbi_pruning_policy(viterbi_pruning)
+        telemetry.count("viterbi_pruning_configured")
+        telemetry.count(f"viterbi_pruning_mode_{pruning_policy.mode}")
+        telemetry.count(f"viterbi_pruning_strategy_{pruning_policy.strategy}")
+        telemetry.count("viterbi_pruning_exact", int(pruning_policy.exact))
+        telemetry.count(f"viterbi_pruning_fallback_{pruning_policy.fallback}")
     if trellis_batch_size is None:
         trellis_batch_size = default_qvq_trellis_batch_size(
             bits,
@@ -7706,6 +7721,8 @@ def quantize_qvq_linear(
         )
         if not torch.equal(roundtrip_inner.to(dtype=quantized_inner.dtype), quantized_inner):
             raise RuntimeError("QVQ V2B4-P64 packed trellis/selectors do not reproduce the selected inner weight.")
+        if telemetry is not None:
+            telemetry.count("packed_roundtrip_verifications")
     if v2b2_p32:
         if selected_bank_ids is None or selected_bank_alt_id is None:
             raise RuntimeError("QVQ V2B2-P32 quantization did not produce selectors and an alternative bank ID.")
@@ -7723,6 +7740,8 @@ def quantize_qvq_linear(
         )
         if not torch.equal(roundtrip_inner.to(dtype=quantized_inner.dtype), quantized_inner):
             raise RuntimeError("QVQ V2B2-P32 packed trellis/selectors do not reproduce the selected inner weight.")
+        if telemetry is not None:
+            telemetry.count("packed_roundtrip_verifications")
     kronecker_proxy_loss = None
     if output_hessian is not None:
         kronecker_proxy_loss = yaqa_proxy_loss(
