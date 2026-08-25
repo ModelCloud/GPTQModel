@@ -10,6 +10,7 @@ from torch import nn
 
 from gptqmodel.quantization import FORMAT
 from scripts.qvq_evaluate import (
+    TASKS as QVQ_EVALUATION_TASKS,
     _encode_prompt,
     _greedy_rollout,
     _model_logits,
@@ -265,6 +266,14 @@ def test_qvq_evaluate_parser_has_canonical_divergence300_contract():
     assert args.max_prompt_tokens == 16384
     assert args.dtype == "float16"
     assert args.attn_implementation == "sdpa"
+
+
+def test_qvq_evaluate_exposes_full_mmlu_humanities_category():
+    assert QVQ_EVALUATION_TASKS["mmlu_humanities"] == (
+        "mmlu",
+        False,
+        {"subsets": "humanities"},
+    )
 
 
 class _BareDecoder(nn.Module):

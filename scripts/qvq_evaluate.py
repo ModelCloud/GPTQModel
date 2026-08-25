@@ -52,6 +52,7 @@ TASKS = {
     "arc_challenge": ("arc_challenge", True, {}),
     "gsm8k_platinum_cot": ("gsm8k_platinum_cot", True, {}),
     "mmlu_stem": ("mmlu_stem", False, {}),
+    "mmlu_humanities": ("mmlu", False, {"subsets": "humanities"}),
     "mmlu_history": ("mmlu", False, {"subsets": MMLU_HISTORY_SUBSETS}),
 }
 

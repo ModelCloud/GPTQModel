@@ -187,6 +187,9 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | `8ae2db25`, Q11 config validation | quantization manifest inspection | 112 quant rows; every module damping `.125`; YAQA 182/182 sequences; 302,193 valid samples; no fallback |
 | `8ae2db25`, Q11 corrected D300 | common corrected rollout command above | report checkpoint and manifest SHA matched; 300/300 prompts completed; 1,290/9,600 aligned; 2/300 exact |
 | `723a8f95`, Q07 locked ordinary metrics | exact diagnostics command above | 300/300 rows; 105,618 tokens; KL .272819; Top-1 81.2380%; Top-5 72.6887%; Top-10 71.6885%; SP-Top1@32-W50 82.4350% |
+| Q07 full downstream pre-run | `pytest -q tests/test_qvq_unified_harness.py tests/test_validate_qvq_lifecycle.py` | 55 passed; full MMLU humanities mapping covered |
+| Q07 full downstream pre-run | broad `ruff check` on the four touched Python files | failed on 14 existing style/executable-bit findings; failure retained rather than silently omitted |
+| Q07 full downstream pre-run | `ruff check --select F401,F811,F821,F822,F823` on the four touched Python files | passed |
 
 ## Current decision
 
