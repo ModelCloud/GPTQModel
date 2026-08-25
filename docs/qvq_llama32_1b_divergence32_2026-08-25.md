@@ -71,21 +71,26 @@ development results; the locked Divergence-300 split remains untouched.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Layer damping: exact-prefix survival | **71.0000%** | **56.6667%** | 34.3333% | 10.0000% | 2.3333% | 0.3333% |
 | Layer damping + alignment: exact-prefix survival | 60.3333% | 50.3333% | **38.6667%** | **17.0000%** | **3.0000%** | **0.6667%** |
+| Two-epoch / 64-batch alignment: exact-prefix survival | 64.0000% | 51.0000% | 33.0000% | 14.6667% | 2.6667% | **1.0000%** |
 
 | Checkpoint | Independent aligned-token Top-1 through 32 | Matching positions | Exact trajectories at 32 | Mean first divergence |
 | --- | ---: | ---: | ---: | ---: |
 | Layer damping | 13.9896% | 1,343 / 9,600 | 1 / 300 (0.3333%) | 4.1667 |
 | Layer damping + output alignment | **15.1667%** | **1,456 / 9,600** | **2 / 300 (0.6667%)** | **4.5733** |
+| Two-epoch / 64-batch output alignment | **17.0938%** | **1,641 / 9,600** | **3 / 300 (1.0000%)** | 4.5633 |
 
-Output alignment gained 113 aligned positions, or 1.1771 percentage points (+8.41% relative), and one additional
-exact trajectory. The candidate's exact-trajectory 95% Wilson interval is 0.1830%--2.3978%; the baseline interval is
-0.0589%--1.8637%. Exact-prefix survival is lower for the candidate at tokens 1 and 2 but higher from token 3 onward,
-which is why the full horizon curve and the aggregate aligned-token score are both useful.
+The larger alignment budget gained another 185 aligned positions over the one-epoch candidate, or 1.9271 percentage
+points (+12.71% relative), and one additional exact trajectory. Its exact-trajectory 95% Wilson interval is
+0.3407%--2.8983%. It does not dominate exact-prefix survival at every early horizon, which is why the full horizon
+curve and the aggregate aligned-token score are both reported. Its per-source aligned-token scores are 24.2188% on
+MathArena, 19.2500% on LongBench v2, 16.4062% on SWE-bench Verified, 12.0313% on Terminal-Bench 2.1, and 11.8125%
+on non-English Multi-IF.
 
 The prompt manifest SHA-256 is `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
 
 This result formally rules out interpreting the historical 82.0365% shared-prefix score as Divergence-300 @32. The
 corrected development target of 25% aligned-token agreement requires 2,400 of 9,600 positions to match; the current
-candidate matches 1,456, leaving a gap of 944 positions. If the target were instead interpreted as exact-trajectory
-survival, it would require 75 of 300 prompts; the candidate matches two. Configuration sweeps must report both
+candidate matches 1,641, leaving a gap of 759 positions. If the target were instead interpreted as exact-trajectory
+survival, it would require 75 of 300 prompts; the candidate matches three. The 25% target is therefore **not yet
+reached under either reduction**. Configuration sweeps must report both
 reductions without renaming shared-prefix agreement or silently switching which reduction is used for the target.
