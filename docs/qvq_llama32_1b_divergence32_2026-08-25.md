@@ -84,20 +84,22 @@ development results; the locked Divergence-300 split remains untouched.
 
 | Horizon | 1 | 2 | 4 | 8 | 16 | 32 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Layer damping: exact-prefix survival | **71.0000%** | **56.6667%** | 34.3333% | 10.0000% | 2.3333% | 0.3333% |
+| Layer damping: exact-prefix survival | **71.0000%** | 56.6667% | 34.3333% | 10.0000% | 2.3333% | 0.3333% |
 | Layer damping + alignment: exact-prefix survival | 60.3333% | 50.3333% | 38.6667% | **17.0000%** | 3.0000% | 0.6667% |
-| Two-epoch / 64-batch alignment: exact-prefix survival | 64.0000% | 51.0000% | 33.0000% | 14.6667% | 2.6667% | **1.0000%** |
-| Uniform `0.10`: exact-prefix survival | 67.3333% | 55.0000% | 42.6667% | 14.6667% | **4.6667%** | **1.0000%** |
+| Two-epoch / 64-batch alignment: exact-prefix survival | 64.0000% | 51.0000% | 33.0000% | 14.6667% | 2.6667% | 1.0000% |
+| Uniform `0.10`: exact-prefix survival | 67.3333% | 55.0000% | 42.6667% | 14.6667% | 4.6667% | 1.0000% |
 | Uniform `0.10` + output alignment: exact-prefix survival | 68.6667% | 56.3333% | **44.3333%** | 14.3333% | 3.6667% | 0.6667% |
+| Uniform `0.10` + 97/3 chat weighting: exact-prefix survival | **71.0000%** | **59.0000%** | 40.0000% | 16.6667% | **5.3333%** | **1.3333%** |
 
 | Checkpoint | Independent aligned-token Top-1 through 32 | Matching positions | Exact trajectories at 32 | Mean first divergence |
 | --- | ---: | ---: | ---: | ---: |
 | Layer damping | 13.9896% | 1,343 / 9,600 | 1 / 300 (0.3333%) | 4.1667 |
 | Layer damping + output alignment | 15.1667% | 1,456 / 9,600 | 2 / 300 (0.6667%) | 4.5733 |
-| Two-epoch / 64-batch output alignment | 17.0938% | 1,641 / 9,600 | **3 / 300 (1.0000%)** | 4.5633 |
-| Uniform `0.10`, no output alignment | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** | **4.8533** |
+| Two-epoch / 64-batch output alignment | 17.0938% | 1,641 / 9,600 | 3 / 300 (1.0000%) | 4.5633 |
+| Uniform `0.10`, no output alignment | **17.8854%** | **1,717 / 9,600** | 3 / 300 (1.0000%) | 4.8533 |
 | Uniform `0.10` + output alignment | 17.2188% | 1,653 / 9,600 | 2 / 300 (0.6667%) | 4.7500 |
-| Uniform `0.20`, no output alignment | 16.3333% | 1,568 / 9,600 | **3 / 300 (1.0000%)** | 4.6100 |
+| Uniform `0.20`, no output alignment | 16.3333% | 1,568 / 9,600 | 3 / 300 (1.0000%) | 4.6100 |
+| Uniform `0.10` + 97/3 chat weighting | 15.2604% | 1,465 / 9,600 | **4 / 300 (1.3333%)** | **5.0333** |
 
 The larger hybrid alignment budget gained another 185 aligned positions over the one-epoch candidate, or 1.9271
 percentage points (+12.71% relative), and one additional exact trajectory. The corrected damping control then found
@@ -111,6 +113,11 @@ The existing uniform-`0.10` output-aligned checkpoint improves early prefix surv
 over the complete 32-token horizon. Its teacher-forced alignment objective therefore does not stack with the corrected
 damping gain. The unaligned uniform-`0.10` checkpoint remains selected; the aligned arm is retained as negative
 evidence rather than promoted from its stronger token-1/4 behavior.
+
+The 97% content / 3% template-structure YAQA weighting control shows the same objective tension more strongly. It
+raises token-1 agreement from 67.3333% to 71.0000%, exact 32-token trajectories from 3 to 4, and mean first divergence
+from 4.8533 to 5.0333, but loses 252 aligned positions over the complete horizon. The control is therefore rejected
+for the aligned-token target despite its stronger early-prefix and exact-survival reductions.
 
 The prompt manifest SHA-256 is `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
 
