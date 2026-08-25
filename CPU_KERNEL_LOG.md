@@ -1830,8 +1830,11 @@ initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
   The pre-fix direct V=4 override reproducer remains real: the random fixture
   changed all four squared-error values while states and segment bank IDs stayed
   equal. The V=4 default-control assertion is a regression net because it
-  passes on both trees; the bank-count-3 override-scope assertion is the
-  fail-first Item-2 gate.
+  passes on both trees. The dedicated no-environment V=4/t16 default pin also
+  passes on both trees as a regression net: it uses 32 steps, bank_count 1,
+  99.804688% tie density, and exact selected states, segment bank IDs, and
+  packed words. The bank-count-3 override-scope assertion is the fail-first
+  Item-2 gate.
 - **Item 3 — regression net, not fail-first.** Added exact-equality coverage at
   transition bits 7 (`suffix_count == 512`, genuinely partitioned) and 16
   (`suffix_count == 1` control), across 8/16/24/32 threads. It compares states,
@@ -1840,14 +1843,21 @@ initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
   99.99847412109375% at width 16, and produces nonzero packed words plus bank
   IDs `[0, 1]`. It passed before and after the fix, so it is explicitly a
   regression net rather than a fail-first gate.
-- **MEASURED gates.** Fresh exact reruns produced `806 passed, 260 skipped`
-  and `182 passed, 17 skipped` on parent `2a36a047`, and `808 passed, 260
-  skipped` and `182 passed, 17 skipped` on PR tree `b396dfc2`. The two-case
-  difference is exactly the new Item-3 parameterization. All commands exited
-  zero. Parent and PR QVQ imports each used a distinct empty build root and
-  completed a real cold native compile before loading the extension. The
-  focused scope/partition run produced `3 passed`. No accuracy, timing, or
-  speedup claim is made.
+- **MEASURED gates.** These are the exact pytest invocations used:
+  Gate A: `/home/ubuntu/venvs/qvq/bin/python -m pytest -q tests/test_qvq.py
+  tests/test_qvq_v2b2_p32.py tests/test_qvq_viterbi_cpu_opt.py
+  tests/test_calibration_coverage.py tests/test_qvq_yaqa_factor_ensemble.py`.
+  Gate B: `/home/ubuntu/venvs/qvq/bin/python -m pytest -q
+  tests/test_qvq_diagnostic_metrics.py tests/test_qvq_lifecycle.py
+  tests/test_qvq_v2b4_p64.py tests/test_qvq_yaqa_mps.py
+  tests/test_qvq_cpu_yaqa.py`. With those file lists, parent `4fcf4fbc`
+  produced Gate A `806 passed, 260 skipped` and Gate B `182 passed, 17
+  skipped`; PR tree `aab4417a` before the pin test produced `808 passed, 260
+  skipped` and `182 passed, 17 skipped`; the working tree with the pin test
+  produced `809 passed, 260 skipped` and `182 passed, 17 skipped`. All
+  commands exited zero. Each QVQ-loading run used a distinct empty build root
+  and completed a real cold native compile with compiler caching disabled. No
+  accuracy, timing, or speedup claim is made.
 
 Durable details and the quoted fail-first output are in
 `docs/qvq/qvq_banked_simd_v2_order_results_2026-08-25.md`.

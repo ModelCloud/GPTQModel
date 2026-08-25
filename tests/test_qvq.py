@@ -5432,6 +5432,50 @@ def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch
         )
 
 
+def test_native_banked_viterbi_v4_t16_default_dispatch_is_pinned(monkeypatch):
+    """Pin no-env V=4/t16 output; this fixture has 99.804688% tie density."""
+
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_LEGACY", raising=False)
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_G_ONLY", raising=False)
+
+    # One bank is within the legacy_t16_shape bank_count <= 2 predicate. The
+    # codebook has 128 repeated rows across 65536 states, making the default
+    # output sensitive to scan-order drift rather than a tie-free accident.
+    generator = torch.Generator().manual_seed(2 + 1000 + 100 + 32)
+    codebook_base = torch.round(torch.randn((128, 4), generator=generator) * 2.0) / 2.0
+    codebooks = codebook_base.repeat((1 << 16) // 128, 1).unsqueeze(0)
+    # Keep the fixture's generation order aligned with the two-bank sweep.
+    torch.round(torch.randn((128, 4), generator=generator) * 2.0) / 2.0
+    sequences = torch.round(torch.randn((1, 32, 4), generator=generator) * 2.0) / 2.0
+    tie_density = 1.0 - torch.unique(codebooks[0], dim=0).shape[0] / (1 << 16)
+    assert tie_density == pytest.approx(0.998046875)
+
+    states, _, segment_bank_ids = qvq_cpu_viterbi_banked(
+        sequences, codebooks, transition_bits=16, segment_steps=16
+    )
+    packed_words = pack_trellis_states(states, bits=8)
+
+    assert torch.equal(
+        states,
+        torch.tensor(
+            [[26, 38, 66, 103, 58, 91, 102, 78, 24, 81, 3, 5, 35, 20, 22, 81,
+              7, 78, 79, 1, 18, 40, 103, 56, 97, 82, 79, 25, 41, 61, 66, 2]],
+            dtype=torch.int64,
+        ),
+    )
+    assert torch.equal(segment_bank_ids, torch.tensor([[0, 0]], dtype=torch.uint8))
+    assert torch.equal(
+        packed_words,
+        torch.tensor(
+            [[2490394, 6750274, 5963834, 5111910, 5308440, 327683, 1310755, 5308438,
+              5111815, 65615, 2621458, 3670119, 5374049, 1638479, 3997737, 131138]],
+            dtype=torch.int64,
+        ),
+    )
+
+
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
     generator = torch.Generator().manual_seed(seed)
     shift = qvq_transition_bits(bits)

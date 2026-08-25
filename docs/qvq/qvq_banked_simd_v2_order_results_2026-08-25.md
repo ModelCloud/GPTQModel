@@ -55,7 +55,10 @@ four squared-error values while states and segment bank IDs stayed equal. The
 test-only override is therefore scoped to the V=2 predicate. The updated V=4
 default-control assertion uses a tie-rich fixture and passes on both parent
 and PR trees; it is explicitly a regression net, not a fail-first test. The
-bank-count-3 override-scope assertion is the fail-first Item-2 gate.
+dedicated no-environment pin test also asserts exact selected states, segment
+bank IDs, and packed words for a 32-step V=4/t16/bank-count-1 fixture with
+99.804688% tie density; it passes on both trees and is likewise a regression
+net. The bank-count-3 override-scope assertion is the fail-first Item-2 gate.
 
 ## Item 3: suffix-column partition coverage
 
@@ -74,15 +77,30 @@ regression net rather than a fail-first gate.
 
 ## Test evidence
 
-Fresh exact gate reruns in this environment produced:
+The exact gate commands used for the counts below were:
 
-- Parent `2a36a047`: `806 passed, 260 skipped` for the first requested suite;
-  `182 passed, 17 skipped` for the second.
-- PR tree `b396dfc2` (before this follow-up commit): `808 passed, 260 skipped`
-  for the first suite; `182 passed, 17 skipped` for the second.
-- The difference is exactly the two new Item-3 parameter cases. All commands
-  exited zero. The parent and PR QVQ imports each performed a real cold native
-  compile from their distinct empty build roots before loading the extension.
+Gate A:
+
+```text
+/home/ubuntu/venvs/qvq/bin/python -m pytest -q tests/test_qvq.py tests/test_qvq_v2b2_p32.py tests/test_qvq_viterbi_cpu_opt.py tests/test_calibration_coverage.py tests/test_qvq_yaqa_factor_ensemble.py
+```
+
+Gate B:
+
+```text
+/home/ubuntu/venvs/qvq/bin/python -m pytest -q tests/test_qvq_diagnostic_metrics.py tests/test_qvq_lifecycle.py tests/test_qvq_v2b4_p64.py tests/test_qvq_yaqa_mps.py tests/test_qvq_cpu_yaqa.py
+```
+
+With those exact file lists, fresh current-tree runs exited zero and produced:
+
+- Parent `4fcf4fbc`: Gate A `806 passed, 260 skipped`; Gate B `182 passed,
+  17 skipped`.
+- PR tree `aab4417a` before the dedicated pin test: Gate A `808 passed, 260
+  skipped`; Gate B `182 passed, 17 skipped`.
+- PR working tree with the dedicated pin test: Gate A `809 passed, 260
+  skipped`; Gate B `182 passed, 17 skipped`. The one-case increase is the
+  new default pin test. Each QVQ-loading run used a distinct empty build root
+  and a confirmed real cold native compile with compiler caching disabled.
 
 The prior Item-2 direct values were independently recorded as:
 
