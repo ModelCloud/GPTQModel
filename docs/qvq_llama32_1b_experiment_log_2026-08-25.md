@@ -353,6 +353,7 @@ canonical D300 manifest and protocol; `Divergence-32 top-1` below is the report'
 | seed 1 | 17.7083% | 2/300 (0.6667%) | 4.9667 | below target |
 | reg .0025 | 16.8229% | 1/300 (0.3333%) | 4.2433 | below target |
 | reg .005 | 14.1042% | 2/300 (0.6667%) | 4.5167 | below target |
+| fixed-block LDLQ reg .005 | 16.3021% | 5/300 (1.6667%) | 4.9133 | below target |
 
 The 25% W2 target remains unverified; the best completed arm is 6.2187 points
 short. reg .0025 and reg .005 D300 reports are still running.
