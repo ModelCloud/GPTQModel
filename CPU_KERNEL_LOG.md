@@ -1677,4 +1677,5 @@ Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver
   pristine.
 - **MEASURED:** The unmodified `df80f33e` baseline used a distinct initially empty build root and compiled all seven
   translation units in 95 seconds. Its commit-tagged artifact records states, segment bank IDs, packed words, and
-  packed selectors. Baseline gates were `803 passed, 260 skipped` and `178 passed, 8 skipped`.
+  packed selectors. Baseline gates were `803 passed, 260 skipped` and `178 passed, 8 skipped`. The complete durable
+  report is `docs/qvq/qvq_banked_t16_dispatch_results.md`.
