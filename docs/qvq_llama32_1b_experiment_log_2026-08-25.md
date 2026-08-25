@@ -382,6 +382,16 @@ D300 report SHA-256 is
 
 ### Completed W2 regularization/seed D300 results
 
+### Queued 500k source-shaped W2 + MLP down W3 arm
+
+To test whether extra precision only in the SwiGLU `down_proj` recovers the
+lost behavior, a mixed-rate arm is queued on GPU5. All other modules remain
+flat W2; `+:.*\\.mlp\\.down_proj` is W3. It reuses the disjoint 501,692-token
+D300-source-shaped calibration set, with YAQA regularization `.05` (W2) and
+`.10` (W3). Quantization session `66993` chains to canonical D300 and GSM8K
+Platinum evaluation in session `15403`; the complete ledger is
+`docs/experiments/2026-08-25-llama32-w2-div300-sources-500k-mlpdown-w3.json`.
+
 The completed-arm machine-readable summary is
 `docs/experiments/2026-08-25-llama32-w2-sweep-a12ce4e3.json`. All use the same
 canonical D300 manifest and protocol; `Divergence-32 top-1` below is the report's
