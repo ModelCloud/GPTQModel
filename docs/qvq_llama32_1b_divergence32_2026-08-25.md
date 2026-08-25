@@ -87,7 +87,8 @@ development results; the locked Divergence-300 split remains untouched.
 | Layer damping: exact-prefix survival | **71.0000%** | **56.6667%** | 34.3333% | 10.0000% | 2.3333% | 0.3333% |
 | Layer damping + alignment: exact-prefix survival | 60.3333% | 50.3333% | 38.6667% | **17.0000%** | 3.0000% | 0.6667% |
 | Two-epoch / 64-batch alignment: exact-prefix survival | 64.0000% | 51.0000% | 33.0000% | 14.6667% | 2.6667% | **1.0000%** |
-| Uniform `0.10`: exact-prefix survival | 67.3333% | 55.0000% | **42.6667%** | 14.6667% | **4.6667%** | **1.0000%** |
+| Uniform `0.10`: exact-prefix survival | 67.3333% | 55.0000% | 42.6667% | 14.6667% | **4.6667%** | **1.0000%** |
+| Uniform `0.10` + output alignment: exact-prefix survival | 68.6667% | 56.3333% | **44.3333%** | 14.3333% | 3.6667% | 0.6667% |
 
 | Checkpoint | Independent aligned-token Top-1 through 32 | Matching positions | Exact trajectories at 32 | Mean first divergence |
 | --- | ---: | ---: | ---: | ---: |
@@ -95,6 +96,7 @@ development results; the locked Divergence-300 split remains untouched.
 | Layer damping + output alignment | 15.1667% | 1,456 / 9,600 | 2 / 300 (0.6667%) | 4.5733 |
 | Two-epoch / 64-batch output alignment | 17.0938% | 1,641 / 9,600 | **3 / 300 (1.0000%)** | 4.5633 |
 | Uniform `0.10`, no output alignment | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** | **4.8533** |
+| Uniform `0.10` + output alignment | 17.2188% | 1,653 / 9,600 | 2 / 300 (0.6667%) | 4.7500 |
 
 The larger hybrid alignment budget gained another 185 aligned positions over the one-epoch candidate, or 1.9271
 percentage points (+12.71% relative), and one additional exact trajectory. The corrected damping control then found
@@ -103,6 +105,11 @@ making it the current development leader. Its exact-trajectory 95% Wilson interv
 dominate every source: its per-source aligned-token scores are 15.1563% on MathArena, 19.3750% on LongBench v2,
 22.0000% on SWE-bench Verified, 17.5781% on Terminal-Bench 2.1, and 11.6875% on non-English Multi-IF. This is why the
 full source breakdown, horizon curve, and aggregate aligned-token score are all reported.
+
+The existing uniform-`0.10` output-aligned checkpoint improves early prefix survival but loses 64 aligned positions
+over the complete 32-token horizon. Its teacher-forced alignment objective therefore does not stack with the corrected
+damping gain. The unaligned uniform-`0.10` checkpoint remains selected; the aligned arm is retained as negative
+evidence rather than promoted from its stronger token-1/4 behavior.
 
 The prompt manifest SHA-256 is `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
 
