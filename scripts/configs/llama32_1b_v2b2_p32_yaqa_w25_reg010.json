@@ -1,0 +1,36 @@
+{
+  "bits": 2.5,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "yaqa",
+  "device": "cuda:0",
+  "offload_to_disk": false,
+  "yaqa": {
+    "seed": 0,
+    "regularization": 0.05,
+    "regularization_by_rate": [[2.5, 0.1]],
+    "minimum_sequences": 182,
+    "batch_size": 1,
+    "chat_template": {
+      "enabled": false,
+      "content_weight": 0.97
+    },
+    "activation_checkpointing": true,
+    "mps_cleanup_interval": 8,
+    "sequence_sort": "desc",
+    "max_factor_bytes_per_pass": null,
+    "v2b2_family_mode": "reselect",
+    "sample_strategy": "full",
+    "spectral_refinement": false,
+    "spectral_ranks": [8, 16, 32],
+    "spectral_lambdas": [0.1, 0.25, 0.5, 1.0],
+    "spectral_push": false,
+    "spectral_push_alphas": [0.25, 0.5, 1.0],
+    "spectral_localized": false,
+    "spectral_localized_alphas": [0.25, 0.5, 1.0],
+    "spectral_localized_max_segments": 8,
+    "spectral_localized_max_changes": 1,
+    "spectral_localized_replay_candidates": 0,
+    "spectral_localized_direct_replay_candidates": 0
+  }
+}
