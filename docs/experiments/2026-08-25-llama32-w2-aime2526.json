@@ -16,6 +16,6 @@
     "w2_5_checkpoint": "/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w25-reg010-pruneauto-main-329cc0a5",
     "w3_checkpoint": "/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w30-reg010-pruneauto-main-329cc0a5"
   },
-  "queue": {"mixed_rate_dependency": "/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e-gsm8k-platinum-v1.json", "d300_session": 77618, "status": "queued_after_mixed_rate_gsm8k"},
+  "queue": {"gpu": "GPU-724ea08e-67c3-c0ce-29bb-e6c48e7dde28", "d300_session": 58062, "status": "d300_running"},
   "status": "quantization_complete_d300_queued"
 }

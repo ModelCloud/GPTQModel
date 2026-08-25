@@ -297,6 +297,10 @@ The mixed-rate checkpoint has now completed quantization at
 canonical D300 rollout is running on GPU4, followed automatically by GSM8K
 Platinum; no metric is promoted until both reports are published.
 
+The flat-W2 AIME checkpoint's D300 evaluation was moved to free GPU7 and is
+now running immediately; this avoids serializing the decisive flat-W2 result
+behind the mixed-rate GSM8K task.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
