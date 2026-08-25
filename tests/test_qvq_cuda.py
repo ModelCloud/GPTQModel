@@ -3534,7 +3534,7 @@ def _norm_rank_dispatch_count():
 
 
 @pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
-def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(bits, bank_count, segment_steps):
+def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(monkeypatch, bits, bank_count, segment_steps):
     """The norm-rank band path must actually dispatch for supported configs and
     agree bit-for-bit with the segmented banked reference."""
 
@@ -3547,6 +3547,14 @@ def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(bits, bank_count, s
     assert _norm_rank_dispatch_count() == before + 1
     expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+    # This is an independent eager recurrence oracle, not another CUDA kernel.
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (7, 5))
+    eager = _batched_v2_banked_viterbi_quantize(
+        sequences, codebooks, bits=bits, segment_steps=segment_steps
+    )
+    assert torch.equal(actual[0], eager.states)
+    assert torch.equal(actual[1], eager.squared_error)
+    assert torch.equal(actual[2], eager.segment_bank_ids)
 
 
 @pytest.mark.parametrize(
@@ -3585,10 +3593,15 @@ def test_qvq_cuda_norm_rank_grid_leaves_unsupported_configs_on_reference_path(
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
-def test_qvq_cuda_norm_rank_grid_disable_env_forces_reference_path():
-    """GPTQMODEL_QVQ_DISABLE_OCTET_GRID=1 must route an eligible launch through
-    the pristine grid recurrence (0 norm-rank dispatches, bit-exact outputs).
-    The flag is read once per process, so this runs in a subprocess."""
+@pytest.mark.parametrize(
+    "value,enabled",
+    ((None, True), ("", True), ("0", True), ("1", False), ("00", False), ("0foo", False), ("false", False)),
+)
+def test_qvq_cuda_norm_rank_grid_disable_env_parser(value, enabled):
+    """Only unset, empty, and exact ``0`` keep the eligible path enabled.
+
+    The flag is read once per process, so each spelling runs in a subprocess.
+    """
 
     import os
     import subprocess
@@ -3609,18 +3622,23 @@ codebooks = torch.stack(
      pgc16_codebook_v2_bank(1, bits=3.0, dtype=torch.float32))
 ).to(device="cuda", dtype=torch.float16)
 actual = op(sequences, codebooks, 6, 16, None, None)
-assert int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) == 0
+assert int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) == EXPECTED
 expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 3.0, 16, None, None)
 for index in range(3):
     assert torch.equal(expected[index], actual[index]), index
-print("DISABLED-PATH-OK")
+print("ENV-PARSER-OK")
 """
-    env = dict(os.environ, GPTQMODEL_QVQ_DISABLE_OCTET_GRID="1")
+    env = dict(os.environ)
+    if value is None:
+        env.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+    else:
+        env["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = value
+    script = f"EXPECTED = {int(enabled)}\n" + script
     result = subprocess.run(
         [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=600, check=False
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert "DISABLED-PATH-OK" in result.stdout
+    assert "ENV-PARSER-OK" in result.stdout
 
 
 def test_qvq_cuda_norm_rank_codebook_mutation_rebuilds_tables():
@@ -3690,6 +3708,105 @@ def test_qvq_cuda_norm_rank_table_cache_survives_stream_order_reuse():
     done.synchronize()
     producer.synchronize()
     assert all(torch.equal(f, s) for f, s in zip(first, second))
+
+
+def test_qvq_cuda_norm_rank_cache_eviction_lifetime_and_boundedness():
+    """>8 entries must remain valid across queued consumers and allocator reuse."""
+
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    sequences, source = _norm_rank_case(20260836, 2, 2.5, 2)
+    codebooks = [source.clone() for _ in range(10)]
+    producer = torch.cuda.Stream()
+    consumer = torch.cuda.Stream()
+    with torch.cuda.stream(producer):
+        first = op(sequences, codebooks[0], 5, 16, None, None)
+    with torch.cuda.stream(consumer):
+        # The cache-hit wait is the only producer-to-consumer dependency.
+        queued = op(sequences, codebooks[0], 5, 16, None, None)
+    for codebook in codebooks[1:]:
+        op(sequences, codebook, 5, 16, None, None)
+    del codebooks
+    pressure = [torch.empty((1 << 20,), device="cuda", dtype=torch.uint8) for _ in range(32)]
+    for tensor in pressure:
+        tensor.fill_(0x5A)
+    consumer.synchronize()
+    producer.synchronize()
+    assert all(torch.equal(a, b) for a, b in zip(first, queued))
+    assert int(torch.ops.gptqmodel_qvq.norm_rank_cache_size()) <= 8
+
+    # Repeated versions of one storage must evict old versions and stay exact.
+    _, mutable = _norm_rank_case(20260837, 2, 2.5, 2)
+    for index in range(12):
+        mutation_stream = torch.cuda.Stream()
+        consumer_stream = torch.cuda.Stream()
+        with torch.cuda.stream(mutation_stream):
+            mutable[:, index, 0].add_(torch.tensor(0.125, device="cuda", dtype=torch.float16))
+            mutation_done = torch.cuda.Event()
+            mutation_done.record()
+        # Mutation is asynchronous; make its cross-stream dependency explicit.
+        consumer_stream.wait_event(mutation_done)
+        with torch.cuda.stream(consumer_stream):
+            mutated = op(sequences, mutable, 5, 16, None, None)
+        consumer_stream.synchronize()
+        fresh = op(sequences, mutable.clone(), 5, 16, None, None)
+        assert all(torch.equal(a, b) for a, b in zip(mutated, fresh))
+        assert int(torch.ops.gptqmodel_qvq.norm_rank_cache_size()) <= 8
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible CUDA devices")
+def test_qvq_cuda_mixed_device_cache_eviction_destroys_events_on_owner_device():
+    """Both event-owning caches may evict an entry created on another GPU."""
+
+    original_device = torch.cuda.current_device()
+    for index in range(33):
+        device = torch.device("cuda", 0 if index == 0 else 1)
+        generator = torch.Generator(device=device).manual_seed(20260900 + index)
+        sequences = torch.randn((1, 2, 4), generator=generator, device=device)
+        codebook = torch.randn((1 << 16, 4), generator=generator, device=device, dtype=torch.float16)
+        qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
+    with torch.cuda.device(0):
+        op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+        for index in range(9):
+            generator = torch.Generator(device="cuda:0").manual_seed(20261000 + index)
+            sequences = torch.randn((1, 128, 2), generator=generator, device="cuda:0")
+            codebooks = torch.randn((2, 1 << 16, 2), generator=generator, device="cuda:0", dtype=torch.float16)
+            op(sequences, codebooks, 5, 16, None, None)
+    with torch.cuda.device(1):
+        generator = torch.Generator(device="cuda:1").manual_seed(20261100)
+        sequences = torch.randn((1, 128, 2), generator=generator, device="cuda:1")
+        codebooks = torch.randn((2, 1 << 16, 2), generator=generator, device="cuda:1", dtype=torch.float16)
+        op(sequences, codebooks, 5, 16, None, None)
+        assert torch.cuda.current_device() == 1
+    torch.cuda.synchronize(0)
+    torch.cuda.synchronize(1)
+    assert int(torch.ops.gptqmodel_qvq.norm_cache_size()) <= 32
+    assert int(torch.ops.gptqmodel_qvq.norm_rank_cache_size()) <= 8
+    assert torch.cuda.current_device() == original_device
+
+
+def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(monkeypatch):
+    """Irregular finite FP16 values around a width-4 rank boundary stay exact."""
+
+    bits, bank_count, segment_steps = 2.5, 4, 32
+    sequences, codebooks = _norm_rank_case(20260838, 3, bits, bank_count)
+    lo = torch.tensor(0.5, device="cuda", dtype=torch.float16)
+    hi = torch.nextafter(lo, torch.tensor(torch.inf, device="cuda", dtype=torch.float16))
+    below = torch.nextafter(lo, torch.tensor(-torch.inf, device="cuda", dtype=torch.float16))
+    # Prefixes 3/4 straddle a sorted width-4 chunk boundary for suffix zero.
+    suffix_count = 1 << (16 - 5)
+    codebooks[:, 3 * suffix_count, :] = torch.stack((below, hi))
+    codebooks[:, 4 * suffix_count, :] = torch.stack((lo, below))
+    sequence_values = torch.stack((below.float(), lo.float(), hi.float(), -hi.float()))
+    repeated = sequence_values.repeat((sequences.numel() + 3) // 4)
+    sequences.copy_(repeated[: sequences.numel()].reshape_as(sequences))
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(sequences, codebooks, 5, segment_steps, None, None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (7, 5))
+    eager = _batched_v2_banked_viterbi_quantize(
+        sequences, codebooks, bits=bits, segment_steps=segment_steps
+    )
+    assert torch.equal(actual[0], eager.states)
+    assert torch.equal(actual[1], eager.squared_error)
+    assert torch.equal(actual[2], eager.segment_bank_ids)
 
 
 @pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32)))

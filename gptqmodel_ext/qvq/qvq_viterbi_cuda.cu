@@ -280,11 +280,20 @@ struct NormCacheEntry {
 std::mutex g_norm_cache_mutex;
 std::vector<NormCacheEntry> g_norm_cache;
 
+// cudaEventDestroy is device-sensitive: an event is owned by the device that
+// was current at cudaEventCreate*, and destroying it while another device is
+// current is invalid.  Both caches mix devices.  Use a guard so the previous
+// device is restored even when C10_CUDA_CHECK throws.
+void destroy_cuda_event_on_device(cudaEvent_t event, int device) {
+  const c10::cuda::CUDAGuard device_guard(device);
+  C10_CUDA_CHECK(cudaEventDestroy(event));
+}
+
 void evict_norm_cache_entry() {
   if (g_norm_cache.size() < kMaxNormCacheEntries) {
     return;
   }
-  C10_CUDA_CHECK(cudaEventDestroy(g_norm_cache.front().ready));
+  destroy_cuda_event_on_device(g_norm_cache.front().ready, g_norm_cache.front().device);
   g_norm_cache.erase(g_norm_cache.begin());
 }
 
@@ -603,7 +612,10 @@ NormRankTables cached_norm_rank_tables(
   C10_CUDA_CHECK(cudaEventRecord(entry.ready, stream));
   NormRankTables result = entry.tables;
   if (g_norm_rank_cache.size() >= kMaxNormRankCacheEntries) {
-    C10_CUDA_CHECK(cudaEventDestroy(g_norm_rank_cache.front().ready));
+    // The cache mixes devices: destroy the evicted entry's event on the
+    // device that created it, not on the calling thread's current device.
+    destroy_cuda_event_on_device(
+        g_norm_rank_cache.front().ready, g_norm_rank_cache.front().device);
     g_norm_rank_cache.erase(g_norm_rank_cache.begin());
   }
   g_norm_rank_cache.push_back(std::move(entry));
@@ -1798,7 +1810,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // Measured on real Qwen3 weight tiles the warp union costs the same as the
 // per-lane maximum (bands overlap almost perfectly within a warp).  A column
 // whose band degenerates to the full list drops to a straight full scan - the
-// baseline body - and re-probes its band every fourth step.
+// baseline body - and re-probes its band every sixteenth step.
 //
 // Notation for one step: t = (tx, ty), tn = fl(fl(tx*tx) + fl(ty*ty)) is the
 // kernel's own FP32 target norm, nu is a state's cached FP32 norm, gp is its
@@ -3308,14 +3320,30 @@ int64_t qvq_norm_rank_grid_dispatch_count() {
   return g_norm_rank_grid_dispatches.load();
 }
 
+// Number of live norm-rank table cache entries; exposed as
+// gptqmodel_qvq.norm_rank_cache_size() so tests can assert the cache stays
+// bounded under eviction pressure.  Snapshot only: entries come and go under
+// g_norm_rank_cache_mutex in whichever thread dispatched the recurrence.
+int64_t qvq_norm_rank_cache_size() {
+  std::lock_guard<std::mutex> lock(g_norm_rank_cache_mutex);
+  return static_cast<int64_t>(g_norm_rank_cache.size());
+}
+
+int64_t qvq_norm_cache_size() {
+  std::lock_guard<std::mutex> lock(g_norm_cache_mutex);
+  return static_cast<int64_t>(g_norm_cache.size());
+}
+
 // Pristine A/B control, read once on first use (cached for the process
 // lifetime).  GPTQMODEL_QVQ_DISABLE_OCTET_GRID keeps its historical name so
-// existing enabled-versus-pristine harnesses keep working; any non-empty,
-// non-"0" value forces the unmodified baseline grid recurrence.
+// existing enabled-versus-pristine harnesses keep working.  Only unset,
+// empty, or exactly "0" leave the fast path enabled; any other non-empty
+// value (including "00" and "0foo") forces the unmodified baseline grid
+// recurrence.
 bool norm_rank_grid_disabled() {
   static const bool disabled = [] {
     const char* value = std::getenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID");
-    return value != nullptr && value[0] != '\0' && value[0] != '0';
+    return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
   }();
   return disabled;
 }
@@ -3761,7 +3789,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     }                                                                                                  \
   } while (0)
   // Exact norm-rank contiguous-band fast path for the unconstrained,
-  // unweighted, half-codebook grid recurrence at W2/W2.5/W3.  Every other
+  // unweighted, half-codebook grid recurrence at W2.5/W3 only.  Every other
   // configuration (constrained, weighted, family-batched, cooperative,
   // midpoint-only, fp32 codebooks, other rates) falls through to the
   // unmodified baseline below, which remains the exact reference.
@@ -4024,6 +4052,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
   m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
   m.def("norm_rank_grid_dispatch_count() -> int", &qvq_norm_rank_grid_dispatch_count);
+  m.def("norm_rank_cache_size() -> int", &qvq_norm_rank_cache_size);
+  m.def("norm_cache_size() -> int", &qvq_norm_cache_size);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
