@@ -1,5 +1,9 @@
 # Llama 3.2 1B Instruct QVQ quantization-fidelity audit
 
+The append-only [experiment ledger](qvq_llama32_1b_experiment_log_2026-08-25.md) records the complete configuration,
+data slices, commands, artifacts, positive results, negative results, invalid evidence, and test outcomes for every
+arm in this campaign.
+
 ## Protocol correction
 
 The historical `token_top1_agreement` implementation compared positions 0--31 of every source row. PR #35 then
