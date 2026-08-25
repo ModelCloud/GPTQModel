@@ -380,13 +380,24 @@ def qvq_cpu_viterbi_opt(
       largest relative delta is 7.4e-6. Those two V=4 values are unchanged by
       the fix.
 
+    MEASURED, cause of the two residual V=4 deltas -- verified by disassembly on
+    this host rather than inherited: both sit at transition_bits=16, where
+    suffix_count is 1, so :func:`qvq_cpu_viterbi`'s 16-wide suffix loop cannot
+    run and it falls into its scalar remainder. For V>2 gcc vectorizes that
+    remainder as a packed 4-lane multiply followed by a horizontal ``vaddss``
+    reduction (``qvq_viterbi_cpu.o``, inside ``fused_g_argmin_avx512`` at
+    0x330-0x372), which rounds all four products separately and then sums them.
+    This kernel's V=4 body is a zero-seeded fused FMA chain, which rounds only
+    the running accumulator. The two are not instruction-equivalent, so they can
+    differ by an ulp. This is a CROSS-KERNEL difference between the two
+    implementations; it is NOT caused by this kernel's own scalar-versus-vector
+    arrangement, whose scalar head/tail is unreachable under 16-aligned
+    partitioning -- an instrumented build counted zero entries there across the
+    whole matrix.
+
     INFERRED, not measured across compilers, hosts, or inputs beyond that
     matrix: the agreement above is not a universal bit-exactness guarantee and
-    is not a contract. This kernel still computes emission and the transition
-    add in two separate sweeps where :func:`qvq_cpu_viterbi` fuses them, so its
-    FP32 schedule remains structurally different and can still round
-    differently; the residual V=4 squared-error deltas are that difference
-    showing through.
+    is not a contract.
 
     Args:
         sequences: [batch, steps, V] float tensor on CPU.

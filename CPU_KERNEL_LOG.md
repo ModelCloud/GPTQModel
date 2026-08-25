@@ -1288,7 +1288,9 @@ Both lanes now emit the identical ordered accumulation from zero, and the
 schedule matches `fused_g_argmin_avx512` / `fused_candidate_scalar` in
 `qvq_viterbi_cpu.cpp`. The V=4 arm was verified untouched by extracting the 125
 floating-point instructions in `[0x5b, 0x608)` from both objects and diffing them:
-identical. Outside that range only branch displacements move, because the V=2 arm
+identical. (True as of that commit. The V=4 scalar head/tail was subsequently
+hardened on purpose once the adjudication cleared it -- see the 2026-08-25 V=4
+section at the end of this log. The V=4 *vector body* is still untouched.) Outside that range only branch displacements move, because the V=2 arm
 got 16 bytes shorter.
 
 ### Correction to the incoming cross-review (MEASURED)
@@ -1356,8 +1358,11 @@ divergence and a measured squared-error divergence across every V=2
 configuration tested. All 24 V=4 configs are identical before and after on
 states, and the two V=4 squared-error deltas are bit-for-bit the same before and
 after -- a second, numeric confirmation that the V=4 arm was not disturbed. The
-residual V=4 deltas are attributed (INFERRED) to the structural two-sweep versus
-fused difference, not to the V=4 rounding asymmetry, which the probe showed is
+residual V=4 deltas were originally attributed here (INFERRED) to the structural
+two-sweep versus fused difference. **That attribution was imprecise and is
+superseded** -- see the 2026-08-25 V=4 section at the end of this log, where the
+real mechanism is identified and verified by disassembly. What does hold: the
+deltas are not caused by the V=4 rounding asymmetry, which the probe showed is
 unreachable dead code.
 
 The pre-existing `xfail` on
@@ -1420,3 +1425,374 @@ Two baseline deviations from the brief this work was handed, both measured:
   in-flight `fix/qvq-explicit-rounding-rate-damping` workstream.
 
 Gate 2 gains 3: the two new tests, plus the de-xfailed divergence test.
+
+
+## 2026-08-25 -- `qvq_viterbi_cpu_opt` V=4: verified delta attribution + latent scalar hardening
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/CD/IFMA/VBMI (Zen 4,
+          no AMX; hostname says `zen5-cpu-6`, silicon is `znver4`) | 32 logical
+          cores visible to the cgroup | torch 2.13.0+cpu | gcc 15.2.0 | host zen5-cpu-6
+
+This entry contains **no timing or speed claim**; the host was shared with another
+workstream that owned it for timing, and no benchmark was run. Correctness results
+are unaffected by CPU contention. Compile durations appear only to evidence cold
+builds.
+
+### Register mapping (re-derived, and it MOVED)
+
+An independent third-vendor adjudication confirmed the mapping recorded in the
+previous entry -- `rsi = codebook_t = c0`, `rbx = codebook_t + 4*state_count = c1`,
+`r12 = c2`, `r10 = c3` -- and refuted the inverted mapping in the incoming
+cross-review.
+
+**MEASURED, and worth flagging:** the *xmm* half of that mapping is NOT stable
+across builds. In the pre-fix object `xmm8 = target[0]`, `xmm6 = target[1]`; after
+this change gcc swapped them, so in the new object `xmm6 = target[0]`,
+`xmm8 = target[1]` (prologue `0x36`/`0x3b`). Any future reader must re-derive the
+xmm mapping from the prologue of the object in hand. Reusing the old attribution
+would invert the reading of every scalar FMA in the function.
+
+### Attribution of the 2 residual V=4 squared-error deltas -- CORRECTED and VERIFIED
+
+The previous entry attributed them (INFERRED) to `_opt` being two-sweep where
+production is fused. That was imprecise. The adjudicator proposed a different
+mechanism; rather than copy it, it was verified here at instruction level, and it
+holds:
+
+- **MEASURED, production side.** `fused_g_argmin` calls `fused_g_argmin_avx512`
+  unconditionally on an AVX-512 host (`qvq_viterbi_cpu.cpp:180-187`) regardless of
+  `suffix_count`. At `transition_bits=16` with `state_count=65536`, `suffix_count`
+  is 1, so the 16-wide loop (`x + 16 <= suffix_end`) cannot execute and control
+  reaches the scalar remainder. For `vector_size > 2` gcc vectorizes that remainder
+  rather than emitting scalar FMAs -- guarded by `cmp QWORD PTR [rsp-0x8],0x2 ;
+  jbe` at `0x30f`, which diverts V<=2 to the scalar path at `0x491`. The V>2 block
+  in `qvq_viterbi_cpu.o` is:
+
+```text
+330-34e: vmovss / vinsertps / vmovlhps   # gather c0..c3 for one state into xmm0
+352:     vmulps  xmm0,xmm0,[r8-0x10]     # 4 products, EACH SEPARATELY ROUNDED
+358:     vaddss  xmm2,xmm0,xmm2          # horizontal reduction, lane 0
+35c-361: vshufps / vaddss                # lane 1
+365-372: vunpckhps / vshufps / vaddss x2 # lanes 2 and 3
+```
+
+- **MEASURED, `_opt` side.** Its V=4 body is a zero-seeded fused FMA chain, which
+  rounds only the running accumulator, never the individual products. The two
+  schedules are therefore not instruction-equivalent and can differ by an ulp.
+- **MEASURED, `_opt` scalar head/tail is not involved.** An instrumented build
+  (atomic counters on all four scalar loops, reported from a static destructor) run
+  over the exact 24-configuration matrix reported
+  `PROBE v2_prologue=0 v2_tail=0 v4_prologue=0 v4_tail=0`.
+
+So the deltas are a **cross-kernel** difference at `suffix_count == 1`, not an
+artifact of `_opt`'s own scalar-versus-vector arrangement. The
+`qvq_cpu_viterbi_opt` docstring was corrected to say this.
+
+### V=4 scalar head/tail hardened -- LATENT, NOT OBSERVED
+
+**Severity is LATENT. No behavioural change was observed, and none was expected.**
+The adjudication ruled the `_opt` V=4 scalar-versus-vector asymmetry REAL and
+admitting finite FP32 counterexamples (the earlier "signed-zero/NaN only"
+conclusion was wrong): pre-fix the scalar lane rounded `t1*c1` first, then
+`c0,c2,c3`, while the vector body was zero-seeded `c0,c1,c2,c3`.
+
+That path is **unreachable today** -- the op requires a power-of-two
+`state_count >= 16` and partitions sweep B on `state_count` alone, so every
+`[begin, end)` is 16-aligned with a 16-multiple length, which the probe above
+confirms empirically. It was fixed anyway, because relying on "the tail happens to
+be unreachable" is exactly how the production V=2 defect stayed hidden: it became
+reachable only when a `parallel_for` chunk size stopped being a multiple of 16, and
+it was then OBSERVED. Making the agreement structural removes the dependence on
+today's chunking arithmetic.
+
+**No regression test accompanies this change, deliberately.** The path cannot be
+reached through the operator's public surface, so a behavioural fail-first test is
+impossible; writing one would produce a test that passes before and after and
+proves nothing. The property is asserted by disassembly instead.
+
+Cold build in a fresh empty `GPTQMODEL_QVQ_CPU_BUILD_ROOT` with `CCACHE_DISABLE=1`,
+compiler reported 25 s, fingerprint `9e222c6033c2343a`. With the corrected xmm
+mapping for this object (`xmm6 = t0`, `xmm8 = t1`, `xmm9 = t2`, `xmm10 = t3`):
+
+```text
+AFTER -- V=4 scalar head/tail        AFTER -- V=4 16-lane body
+223: vxorps      xmm12,xmm12,xmm12   2ba: vxorps      xmm2,xmm2,xmm2
+230: vmovaps     xmm0,xmm6           2dc: vmovaps     zmm0,zmm5
+234: vfmadd132ss xmm0,xmm12,[rsi]    2e2: vfmadd132ps zmm0,zmm2,[rsi]   # t0*c0 + 0
+23f: vfmadd231ss xmm0,xmm8,[rbx]     2f0: vfmadd231ps zmm0,zmm4,[rbx]   # += t1*c1
+245: vfmadd231ss xmm0,xmm9,[r12]     2f7: vfmadd231ps zmm0,zmm13,[r12]  # += t2*c2
+24b: vfmadd231ss xmm0,xmm10,[r10]    2fe: vfmadd231ps zmm0,zmm14,[r10]  # += t3*c3
+```
+
+Both lanes now emit the same zero-seeded, coordinate-ordered FMA chain. The V=2 arm
+was re-verified in the same object and is unchanged in effect -- still zero-seeded
+`c0` then `c1` in both lanes (scalar `0x77e-0x797`, vector `0x7fa-0x830`).
+
+### Behaviour is unchanged, as predicted (MEASURED)
+
+24-configuration matrix, `_opt` vs `qvq_cpu_viterbi`, exact comparison:
+
+```text
+states:         0 mismatched configs, before and after the V=4 change
+squared error:  2 configs not bit-identical, before and after -- the SAME two,
+                with byte-identical magnitudes 2.822e-6 and 7.373e-6 relative
+```
+
+The deltas surviving the V=4 hardening **unchanged** is positive confirmation of
+the attribution above: had they come from `_opt`'s scalar/vector asymmetry, they
+would have moved. They did not.
+
+### Gates (MEASURED)
+
+```text
+tests/test_qvq.py                            661 passed, 248 skipped
+tests/test_qvq_v2b2_p32.py +
+  tests/test_qvq_viterbi_cpu_opt.py          141 passed,  12 skipped
+tests/test_qvq_lifecycle.py                    2 failed,  29 passed, 2 skipped
+```
+
+Identical to the previous commit. The 2 lifecycle failures are the pre-existing
+`damp_percent` `assert 0.1 == 0.0001` failures present on `ecf7081e`, unrelated to
+the Viterbi kernels.
+
+## 2026-08-25 CORRECTION -- the "eager oracle" is not an oracle for near-tie path selection
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4 `znver4`, no AMX) | 32-CPU
+          cgroup out of 192 host CPUs | torch 2.13.0+cpu | host zen5-cpu-6
+
+### What this corrects
+
+The 2026-08-25 legacy transition-15 entry above states that legacy "differed on rows 4/7/30/43 and
+**failed the eager state oracle**", and that transition-15 dispatch stays on G-only "because selected
+states fail the eager oracle". Similar oracle-conformance language appears elsewhere in this log and
+in `gptqmodel/utils/qvq_cpu.py`.
+
+**That framing is wrong, and this entry corrects it.** Disagreeing with the eager reference is not
+the same as being incorrect. The eager reference accumulates in FP32 like the kernels do, so on
+near-ties it is *also* capable of selecting the worse path -- and measurably does.
+
+### MEASURED: FP64 adjudication of the disagreements
+
+Method: for each disagreeing row, both complete candidate state paths were extracted and their
+**total squared error recomputed in float64** from the original sequences and codebooks, independent
+of any FP32 kernel accumulation. Both paths were additionally checked for validity; **every legacy,
+eager, and G-only path packed successfully**, proving transition consistency and tail-biting closure.
+No candidate was illegal. These are genuine alternative optima-adjacent paths, not corruption.
+
+Transition width 16 (the reachable production dispatch predicate: `bank_count <= 2`, unconstrained):
+
+| seed; batch; banks; steps; segment | row | legacy FP64 | eager FP64 | genuine winner | rel. diff |
+|---|---:|---:|---:|---|---:|
+| 20260821; 16; 1; 32; 8   | 13 | 0.03372126385533342   | 0.03372192710214201   | **legacy** | 1.97e-05 |
+| 20260821; 16; 1; 128; 8  |  3 | 0.06033789687043987   | 0.06033856011724845   | **legacy** | 1.10e-05 |
+| 20260822; 128; 2; 32; 8  |  9 | 0.003980354006866752  | 0.003980362759275328  | **legacy** | 2.20e-06 |
+| 20260821; 16; 2; 32; 8   | 10 | 0.0025584008785275196 | 0.0025579453464234400 | eager      | 1.78e-04 |
+| 20260821; 64; 2; 128; 32 | 43 | 0.036088594007618865  | 0.036087340711329670  | eager      | 3.47e-05 |
+| 20260822; 32; 1; 128; 8  | 12 | 0.013112702866913933  | 0.013112697300806359  | eager      | 4.25e-07 |
+| 20260822; 128; 2; 32; 8  | 60 | 0.0025891787639937235 | 0.0025882629459672533 | eager      | 3.54e-04 |
+| 20260821; 128; 2; 128; 8 | 24 | 0.028722643170709935  | 0.028722286093767698  | eager      | 1.24e-05 |
+
+**Legacy is genuinely better in 3 of 8; the eager/G-only path is genuinely better in 5 of 8.**
+Row 60 also covers differing segment selectors: legacy `[1,0,0,0]`, eager `[1,0,0,1]`.
+
+Transition width 15, re-adjudicating the rows cited in the entry above:
+
+| batch | row | legacy FP64 | eager FP64 | genuine winner |
+|---:|---:|---:|---:|---|
+| 64  |  4 | 0.018935450916467410 | 0.018935582084779842 | **legacy** |
+| 64  |  7 | 0.028982814541042044 | 0.028982827673776943 | **legacy** |
+| 64  | 30 | 0.024162003140010840 | 0.024161946689342035 | eager |
+| 64  | 43 | 0.042650861021430950 | 0.042650754240254830 | eager |
+| 128 | 55 | 0.024012466221767410 | 0.024012505978935634 | **legacy** |
+| 128 | 92 | 0.019251765456184587 | 0.019251679434209266 | eager |
+
+**The earlier blanket claim does not stand.** On rows 4, 7 and 55 the eager/G-only path was the
+suboptimal one. Rows 30, 43 and 92 are genuine legacy losses, so the *decision* to keep transition-15
+dispatch on G-only remains justified -- but the stated *reason* ("legacy fails the oracle") was not
+accurate, and the 3.87x-3.99x legacy speedup recorded above was rejected on a partly incorrect basis.
+
+### INFERRED: what is actually true
+
+- **Neither FP32 implementation is a universal oracle.** Both legacy and the eager/G-only recurrence
+  select suboptimal near-tie paths, in different configurations, purely as a consequence of FP32
+  accumulation order.
+- **Severity of the transition-16 finding is MODERATE production quality, not corruption.** All
+  produced paths are valid and packable. The defect is that the production path is measurably the
+  worse choice more often than not (5 of 8 sampled disagreements) at `transition_bits == 16`,
+  `bank_count <= 2`, unconstrained. Relative cost differences ranged 4.25e-07 to 3.54e-04.
+- Choosing between these paths on quality grounds is a **product decision**, and it trades against
+  speed: G-only is slower at transition width 16, which is why legacy is dispatched there at all.
+  Eliminating the class -- rather than picking a winner -- would require higher-precision
+  accumulation in the recurrence, which is a design change, not a kernel tweak.
+
+### METHODOLOGY RULE (adopt this)
+
+**"Matches the eager reference" is not a correctness proof, and "differs from the eager reference"
+is not a defect report.** For discrete Viterbi outputs, disagreement between two FP32
+implementations at a near tie must be adjudicated by:
+
+1. recomputing **both** candidate paths' total cost in **float64** from the original inputs, and
+2. verifying **both** candidates are valid (transition-consistent, tail-biting-closed).
+
+Only then does "wrong" mean anything. An exact FP64 tie falls back to the documented lowest-index
+rule. This log previously recorded two separate defect claims that this procedure partially
+overturns; both were derived from oracle-conformance alone.
+
+Corollary: an eager reference is a useful *cross-check*, and its agreement with a kernel is
+meaningful evidence about that kernel's schedule. It is not a ground truth for which of two
+near-tied discrete paths is correct.
+
+## 2026-08-25 transition-16 production dispatch: measured batch-regime split
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver4`)
+          NO AMX; AVX-512 double-pumped 256-bit datapath
+          32-CPU cgroup out of a 192-CPU multi-tenant host
+          gcc 15.2.0; torch 2.13.0+cpu
+
+- **MEASURED:** A fresh adjudication attempted 144 transition-16, unconstrained, one/two-bank configurations across
+  three seeds, batches 8/16/32, steps 16/32, state counts 65,536/131,072, and segment lengths 8/16. Counts were
+  **ATTEMPTED 144 / COMPLETED 72 / SKIPPED 72 / DIVERGED 18**. Every configuration was exception-isolated.
+- **MEASURED:** All 72 state-count-65,536 configurations completed and both candidates passed the state-range check.
+  At that state count `suffix_count == 1`, so the transition-consistency and circular-closure checks reduce to
+  `0 == 0` and are vacuous by construction. They do not add validity evidence.
+- **MEASURED:** The 72 state-count-131,072 attempts were explicitly SKIPPED because the adjudicator incorrectly
+  required circular closure from unconstrained calls. The kernel promises closure only when overlap or entry/exit
+  constraints provide it. The check has content at 131,072 and failed symmetrically for both arms; no skip aborted
+  the sweep and there was no arm-selection effect.
+- **INFERRED coverage gap:** Today's production Python entry point requires `codebooks.shape[1] == (1 << 16)` at
+  `gptqmodel/quantization/qvq.py:1590`, so 131,072 states are unreachable there. The C++ dispatcher has no state-count
+  condition and a direct t16/131,072-state call routes to legacy. This only sampled shape with a non-trivial suffix
+  frontier was therefore left unmeasured; the skip is not a kernel finding.
+- **MEASURED:** FP64 costs were recomputed directly from the original sequences and codebooks for every divergent
+  returned row, independently of kernel FP32 accumulation and without using either returned FP32 `squared_error`.
+  Quality adjudication used one Torch thread only; the near-tie winners are not established as invariant at the
+  32-thread production setting.
+- **MEASURED:** The raw divergent-configuration tally was G-only 10, legacy 8. It is inflated by aliasing:
+  `segment_steps` does not affect generated tensors, and the one-bank codebook aliases bank zero in some two-bank
+  cases. Collapsing 18 raw configurations to 9 distinct `(seed,batch,banks,steps)` cases and then 5 distinct
+  `(seed,batch,steps)` data instances yields G-only 3, legacy 2. Even raw 10-of-18 is not significant (two-sided
+  `p ~= 0.81`). Across 20 raw divergent rows the tally was 10 to 10; relative differences were
+  `3.01e-06 .. 1.09e-04`; segment bank IDs did not diverge.
+- **MEASURED:** By raw divergent configuration, G-only won 8/8 at batch 8 and 2/2 at batch 16; legacy won 8/8 at
+  batch 32. **INFERRED:** There is no measurable quality difference; these sampled differences are near-tie noise.
+- **MEASURED:** Paired timings used three warmups, 15 samples per arm, alternating back-to-back arm order, 32
+  threads, explicit singleton OpenMP places, and one affinity assertion per series. Legacy versus G-only median
+  (minimum) milliseconds were: batch 16, `397.19 (343.33)` versus `65.09 (45.44)`; batch 32,
+  `31.62 (23.42)` versus `84.38 (83.33)`; batch 64, `60.26 (57.37)` versus `166.27 (165.81)`; batch 128,
+  `116.24 (90.42)` versus `338.09 (331.03)`. G-only/legacy median ratios were `0.16x / 2.67x / 2.76x / 2.91x`;
+  minimum ratios were `0.13x / 3.56x / 2.89x / 3.66x`.
+- **MEASURED:** One-second pre-series cgroup `usage_usec` deltas for batches 16/32/64/128 were respectively
+  `265770 / 282716 / 539855 / 306403` microseconds. Host uptime/load average was not used. All 32 worker affinities
+  matched the explicit `{cpu}` place list once per series; `OMP_PLACES=cores` was not used.
+- **MEASURED methodology:** A temporary measurement-only source gate selected arms through
+  `QVQ_TEST_FORCE_BANKED_LEGACY` / `QVQ_TEST_FORCE_BANKED_G_ONLY`; it was deliberately not shipped and the clean final
+  build contains neither name. The retained host harness is `/home/ubuntu/work/qvq-findings/t16_dispatch_measure.py`.
+- **INFERRED decision:** KEEP the legacy transition-16 production dispatch. Performance alone supports it: G-only is
+  2.67-2.91x slower by median at batches 32-128 (2.89-3.66x on minima). At batch 16 legacy uses the outer-serial,
+  inner-parallel tiled path selected below `batch_size >= at::get_num_threads()` and is about 6.1x slower; that
+  regime is documented but not dispatched on in this PR. The transition-15 rationale is inherited and unmeasured
+  here.
+- **MEASURED:** The unmodified `df80f33e` baseline used a distinct initially empty build root and compiled all seven
+  translation units in 95 seconds. Its commit-tagged artifact records states, segment bank IDs, packed words, and
+  packed selectors. Baseline gates were `803 passed, 260 skipped` and `178 passed, 8 skipped`. The complete durable
+  report is `docs/qvq/qvq_banked_t16_dispatch_results.md`.
+
+## 2026-08-25 transition-16 small-batch cliff fixed at its source
+
+Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X) | AVX-512F/BW/VL/DQ/FMA, no AMX |
+          32 logical CPUs used, OMP_NUM_THREADS=32 | torch 2.13.0+cpu |
+          host zen5-cpu-6
+
+Supersedes the batch-32 dispatch cutoff drafted earlier the same day. That
+cutoff was blocked in cross-vendor review: the constant was only correct at 32
+threads, and its own onset sweep showed G-only slower than legacy at batches
+1/2/4, so it selected the slower arm there. The cliff is instead fixed where it
+originates.
+
+- **Scope, LATENT:** transition width 16 is not reachable from production. Both
+  CPU call sites reject `shift > 7` (`gptqmodel/quantization/qvq.py:1552-1553`
+  and `:1836-1837`) and width 16 is rate W8. The only callers of this shape are
+  the benchmark script and the tests, so no shipped quantized output is affected
+  by anything in this entry.
+- **Fix:** `qvq_viterbi_banked_cpu_legacy` chose its tiling leg on
+  `batch_size >= at::get_num_threads()`, so on a 32-thread box every batch from
+  1 to 31 took the slow outer-serial/inner-parallel leg (and on a 64-thread box,
+  1 to 63). It now uses `std::min<int64_t>(8, at::get_num_threads())`, the idiom
+  the G-only recurrence in the same file already uses. The transition-16
+  dispatcher is restored to its `origin/main` shape-only form, so there is no
+  flipped regime and no output change at any batch size or thread count.
+- **MEASURED, gate on the central assumption:** the fix is only safe if legacy's
+  two tiling legs are bit-identical. Two probes, both at `2d921abf`, over the
+  same 72 configurations ({16, 7} transition widths x {1, 2} banks x
+  {exact-tie, random} codebooks x 3 seeds x {4, 16, 32} batches), each
+  comparing selected states, squared error, segment bank IDs, packed words and
+  packed selectors. Probe A used a measurement-only build exposing
+  `QVQ_PROBE_FORCE_LEG`, so both legs run at the SAME thread count and the
+  thread count is not a confound: 432 kernel runs, 2,520 tensor comparisons,
+  449,904 element comparisons, **0 mismatches** (360/1,080/1,080 comparisons at
+  16/24/32 threads; 1,260 at each transition width). Probe B used the shipped
+  binary with no overrides, crossing the real predicate by thread count alone
+  (16/24/32/4/2/1): 1,800 tensor comparisons, 321,360 element comparisons,
+  **0 mismatches**. The leg override is demonstrably not a no-op — forcing the
+  tiled leg at batch 16 is 19.4x slower at width 16 and 6.3x at width 7 with an
+  identical selected-state checksum — and a tie-density assertion fails the run
+  if the exact-tie fixture ever stops producing ties.
+- **Why transition width 7 is required:** at width 16 `suffix_count` is 1, so the
+  `at::parallel_for` over the suffix-column argmin cannot partition and a
+  width-16-only gate is VACUOUS for that reduction. At width 7 `suffix_count` is
+  512 and it genuinely partitions. The shipped dispatcher routes width 7 to
+  G-only, so reaching legacy there needs the measurement-only build.
+- **MEASURED, byte-identity with `origin/main`:** 128 configurations dumped from
+  unmodified `origin/main` `5ee72d93` in its own initially-empty build root and
+  compared chunk-by-chunk against the Option C build: 640 tensor comparisons,
+  87,360 element comparisons, **0 mismatches**. The reference is still valid
+  against `35b347ec`, which touches only `qvq_viterbi_cuda.cu`.
+- **MEASURED, speed:** paired row-parallel versus tiled legs at 32 threads,
+  width 16, two banks, 32 steps; 3 warmups, 15 repeats, back-to-back arms with
+  alternating order, explicit singleton `OMP_PLACES` from the cgroup cpuset
+  (never `OMP_PLACES=cores`). On a 32-thread box the fix changes production
+  behaviour only for batches 8..31. Across that range the row leg is
+  **6.50x-12.88x faster by median (6.28x-12.98x on minima)**: batch 8
+  6.50x, batch 12 9.57x, batch 16 10.64x, batch 24 12.88x. Controls behave as
+  predicted: batch 1 shows only 1.13x (which is why the clamp is 8 and not 1)
+  and batch 32 was already on the row leg before the fix. Per-batch one-second
+  cgroup `usage_usec` idle deltas were 129,377-322,120 us against a
+  32,000,000 us/s budget; uptime and load average were not used.
+- **MEASURED, override scope defect:** `QVQ_TEST_FORCE_BANKED_LEGACY`
+  short-circuited the shape guard, sending every banked call to legacy including
+  shapes the dispatcher excludes. At `4b227a66` this changed one selected state
+  and all four squared errors on a `transition_bits=16`, `bank_count=3`, batch-4,
+  seed-2 case, reproducibly at 4/16/32 threads. Both overrides are now scoped to
+  `legacy_t16_shape`, their values are parsed with the repository convention
+  (`gptqmodel/utils/qvq_cpu.py:211`) instead of tested for presence, and either
+  one being active now emits `TORCH_WARN_ONCE`.
+- **MEASURED, de-aliasing:** the superseded entry's "18 divergent configurations"
+  and "10/10 at flipped batches 8/16" were alias-duplicated. `segment_steps` does
+  not change the input tensors, collapsing 18 to 9 and 10 to 5; the adjudication
+  harness also seeds without `banks`, so the `banks=1` codebook is bank 0 of the
+  `banks=2` codebook over identical sequences, collapsing further to 5 and 3
+  distinct data instances. The figures were overstated by 2-3.6x. This no longer
+  bears on the shipped change, which flips nothing.
+- **MEASURED gates at `2d921abf`:** gate 1
+  (`tests/test_qvq.py tests/test_qvq_v2b2_p32.py tests/test_qvq_viterbi_cpu_opt.py
+  tests/test_calibration_coverage.py`) `804 passed, 260 skipped`, exit 0 — one
+  above the 803 baseline because the new
+  `test_native_banked_viterbi_force_overrides_are_parsed_and_scoped` adds a
+  collected case; collection on this set goes 1,062 -> 1,063, confirming the
+  delta is exactly the added test and not a reshaped suite. Gate 2
+  (`tests/test_qvq_diagnostic_metrics.py tests/test_qvq_lifecycle.py
+  tests/test_qvq_v2b4_p64.py`) `178 passed, 8 skipped`, exit 0, matching baseline.
+  `git diff --check` clean. The candidate build used a distinct initially-empty
+  `GPTQMODEL_QVQ_CPU_BUILD_ROOT` with a confirmed real 25 s compile of all seven
+  translation units.
+- **MEASURED, new test proven to fail first:**
+  `test_native_banked_viterbi_force_overrides_are_parsed_and_scoped` was run
+  against unmodified `4b227a66` and failed with
+  `RuntimeError: qvq_viterbi_banked_cpu: forced legacy and G-only paths are
+  mutually exclusive` on `QVQ_TEST_FORCE_BANKED_G_ONLY=0`, which is the
+  presence-only `getenv` bug. Its scope half was measured separately at
+  `4b227a66`: an unscoped force-legacy changed 1 of 128 selected states and all
+  4 squared errors on a `bank_count=3` width-16 case, reproducibly at 4, 16 and
+  32 threads.
+- Full methodology and provenance:
+  `docs/qvq/qvq_banked_t16_small_batch_results.md`.

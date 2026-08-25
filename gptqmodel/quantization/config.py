@@ -36,6 +36,7 @@ from .qvq_yaqa import (
     YAQA_PAPER_MINIMUM_SEQUENCES,
 )
 
+
 log = setup_logger()
 
 
@@ -57,6 +58,91 @@ class ChatTemplateConfig:
         ):
             raise ValueError("ChatTemplateConfig: `content_weight` must be finite and in (0, 1).")
         self.content_weight = float(self.content_weight)
+
+
+VITERBI_PRUNING_MODES = ("auto", "off", "required")
+VITERBI_PRUNING_STRATEGIES = ("norm_band",)
+VITERBI_PRUNING_FALLBACKS = ("baseline", "error")
+
+
+@dataclass
+class ViterbiPruningConfig:
+    """Exact survivor-pruning policy for the QVQ V2 segmented grid recurrence.
+
+    ``mode`` selects the policy that reaches the CUDA V2 segmented grid
+    dispatch:
+
+    - ``auto`` (default) reproduces today's automatic behavior exactly. The
+      exact norm-band survivor pruning runs for eligible unconstrained,
+      unweighted, FP16-codebook W2.5/W3 two-bank/four-bank grid calls, and
+      every other call keeps the unmodified baseline recurrence.
+    - ``off`` deterministically suppresses norm-band dispatch, so every call
+      uses the baseline recurrence.
+    - ``required`` demands norm-band dispatch for every requested call and
+      raises a clear error instead of silently falling back to the baseline
+      recurrence.
+
+    ``fallback`` only decides what ``auto`` does with a call that cannot use
+    norm-band pruning: ``baseline`` keeps the exact baseline recurrence and
+    ``error`` raises. ``off`` and ``required`` fully determine their own
+    behavior, so they must leave ``fallback`` at its ``baseline`` default
+    rather than encoding a redundant or contradictory combination.
+
+    ``strategy`` names the pruning family; only the exact ``norm_band`` band
+    is implemented. ``exact`` guards the future introduction of an approximate
+    strategy and must stay ``True`` until one exists.
+
+    Precedence: this configuration is authoritative. The deprecated
+    ``GPTQMODEL_QVQ_DISABLE_OCTET_GRID`` A/B escape hatch is honored only when
+    ``mode="auto"``; ``off`` and ``required`` ignore it entirely. Under
+    ``mode="auto"`` with ``fallback="error"`` a variable that disables the fast
+    path makes the call unable to prune, which raises like any other
+    ineligible call.
+    """
+
+    mode: str = "auto"
+    strategy: str = "norm_band"
+    exact: bool = True
+    fallback: str = "baseline"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, str):
+            raise TypeError("ViterbiPruningConfig: `mode` must be a string.")
+        self.mode = self.mode.strip().lower()
+        if self.mode not in VITERBI_PRUNING_MODES:
+            raise ValueError(
+                "ViterbiPruningConfig: `mode` must be one of "
+                f"{list(VITERBI_PRUNING_MODES)}, got {self.mode!r}."
+            )
+        if not isinstance(self.strategy, str):
+            raise TypeError("ViterbiPruningConfig: `strategy` must be a string.")
+        self.strategy = self.strategy.strip().lower()
+        if self.strategy not in VITERBI_PRUNING_STRATEGIES:
+            raise ValueError(
+                "ViterbiPruningConfig: `strategy` must be one of "
+                f"{list(VITERBI_PRUNING_STRATEGIES)}, got {self.strategy!r}."
+            )
+        if not isinstance(self.exact, bool):
+            raise TypeError("ViterbiPruningConfig: `exact` must be boolean.")
+        if not self.exact:
+            raise ValueError(
+                "ViterbiPruningConfig: `exact=False` is rejected because no approximate "
+                "survivor-pruning strategy exists; the `norm_band` strategy is exact."
+            )
+        if not isinstance(self.fallback, str):
+            raise TypeError("ViterbiPruningConfig: `fallback` must be a string.")
+        self.fallback = self.fallback.strip().lower()
+        if self.fallback not in VITERBI_PRUNING_FALLBACKS:
+            raise ValueError(
+                "ViterbiPruningConfig: `fallback` must be one of "
+                f"{list(VITERBI_PRUNING_FALLBACKS)}, got {self.fallback!r}."
+            )
+        if self.mode != "auto" and self.fallback != "baseline":
+            raise ValueError(
+                f"ViterbiPruningConfig: `mode={self.mode!r}` already determines the behavior of "
+                "ineligible calls, so `fallback` must stay at its default `baseline`; "
+                "`fallback` applies to `mode='auto'` only."
+            )
 
 
 @dataclass
@@ -6173,6 +6259,10 @@ class QVQConfig(BaseQuantizeConfig):
     # local-only baseline must request rounding="block_ldlq" explicitly.
     rounding: str = field(default="yaqa")
     yaqa: YaqaConfig = field(default_factory=YaqaConfig)
+    # Exact Viterbi survivor-pruning policy threaded to the CUDA V2 segmented
+    # grid dispatch. A missing key deserializes to `auto`, which reproduces
+    # the historical automatic behavior exactly.
+    viterbi_pruning: ViterbiPruningConfig = field(default_factory=ViterbiPruningConfig)
     incoherence: str = field(default="rht")
     module_scale_search: bool = field(default=False)
     output_channel_scale_optimization: bool = field(default=False)
@@ -6324,6 +6414,14 @@ class QVQConfig(BaseQuantizeConfig):
             self.yaqa.__post_init__()
         else:
             raise TypeError("QVQConfig: `yaqa` must be a YaqaConfig or dictionary.")
+        if self.viterbi_pruning is None:
+            self.viterbi_pruning = ViterbiPruningConfig()
+        elif isinstance(self.viterbi_pruning, dict):
+            self.viterbi_pruning = ViterbiPruningConfig(**self.viterbi_pruning)
+        elif isinstance(self.viterbi_pruning, ViterbiPruningConfig):
+            self.viterbi_pruning.__post_init__()
+        else:
+            raise TypeError("QVQConfig: `viterbi_pruning` must be a ViterbiPruningConfig or dictionary.")
         if (self.yaqa.spectral_refinement or self.yaqa.spectral_push or self.yaqa.spectral_localized) and (
             self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
@@ -6497,6 +6595,7 @@ class QVQConfig(BaseQuantizeConfig):
         out["tile_cols"] = self.tile_cols
         out["rounding"] = self.rounding
         out["yaqa"] = None if self.yaqa is None else asdict(self.yaqa)
+        out["viterbi_pruning"] = asdict(self.viterbi_pruning)
         out["incoherence"] = self.incoherence
         out["module_scale_search"] = self.module_scale_search
         out["output_channel_scale_optimization"] = self.output_channel_scale_optimization

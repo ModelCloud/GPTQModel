@@ -705,7 +705,7 @@ def test_qvq_dynamic_bits_allow_only_supported_rates():
         QVQConfig(dynamic={r".*q_proj": {"bits": 9}}, offload_to_disk=False)
     with pytest.raises(ValueError, match="half-integer"):
         QVQConfig(dynamic={r".*q_proj": {"bits": 2.25}}, offload_to_disk=False)
-    with pytest.raises(ValueError, match="only supports a `bits` override"):
+    with pytest.raises(ValueError, match="only supports `bits` and `yaqa_regularization` overrides"):
         QVQConfig(dynamic={r".*q_proj": {"group_size": 128}}, offload_to_disk=False)
 
     with pytest.raises(ValueError, match="format=qvq_v4.*W1 through W4"):
@@ -5244,6 +5244,119 @@ def test_native_banked_viterbi_v2_is_thread_count_invariant():
 
     for aligned_output, unaligned_output in zip(aligned, unaligned):
         assert torch.equal(aligned_output, unaligned_output)
+
+    # Legacy's row-parallel / tiled split must be bit-identical.
+    #
+    # qvq_viterbi_banked_cpu_legacy picks between a row-parallel leg and an
+    # outer-serial / inner-parallel tiled leg on
+    # `batch_size >= min(8, at::get_num_threads())`. Both legs must produce the
+    # same answer, and this is the only test that crosses that branch. Batch 4
+    # does cross it: 2 threads takes the row-parallel leg (4 >= min(8, 2) == 2)
+    # and 16 threads takes the tiled leg (4 < 8). Batch >= 8 is row-parallel at
+    # every thread count and would NOT exercise the split.
+    #
+    # The codebooks are quantised onto a coarse grid so the 65536 codewords
+    # collapse onto a couple of hundred distinct vectors. Every argmin in the
+    # recurrence is then an exact tie broken purely by scan order, which is
+    # what a leg that reordered a reduction would corrupt. The tie-density
+    # assertion below keeps this gate from passing vacuously on an input that
+    # happens to have no ties.
+    #
+    # Transition width 16 is a latent path: both CPU call sites reject
+    # shift > 7 (qvq.py), so nothing in production reaches it today.
+    from gptqmodel.quantization.qvq import pack_qvq_bank_ids
+
+    def run_legacy_t16(thread_count, t16_sequences, t16_codebooks, segment_steps):
+        torch.set_num_threads(thread_count)
+        if torch.get_num_threads() != thread_count:
+            pytest.skip(f"cannot set torch thread count to {thread_count}")
+        states, squared_error, segment_bank_ids = qvq_cpu_viterbi_banked(
+            t16_sequences, t16_codebooks, transition_bits=16, segment_steps=segment_steps
+        )
+        return (
+            states,
+            squared_error,
+            segment_bank_ids,
+            pack_trellis_states(states, bits=8),
+            pack_qvq_bank_ids(segment_bank_ids.reshape(-1)),
+        )
+
+    try:
+        for seed in (11, 202, 3033, 40404):
+            for banks, segment_steps in ((1, 16), (2, 16), (2, 8)):
+                generator = torch.Generator().manual_seed(seed)
+                t16_sequences = torch.round(
+                    torch.randn((4, 32, 2), generator=generator, dtype=torch.float32) * 2.0
+                ) / 2.0
+                t16_codebooks = torch.round(
+                    torch.randn((banks, 1 << 16, 2), generator=generator, dtype=torch.float32) * 2.0
+                ) / 2.0
+                distinct = torch.unique(t16_codebooks[0], dim=0).shape[0]
+                assert distinct < 1024, (
+                    "tie-density fixture broken: "
+                    f"{distinct} distinct codewords means the gate no longer tests tie order"
+                )
+                row_parallel = run_legacy_t16(2, t16_sequences, t16_codebooks, segment_steps)
+                tiled = run_legacy_t16(16, t16_sequences, t16_codebooks, segment_steps)
+                for expected, actual in zip(row_parallel, tiled):
+                    assert torch.equal(expected, actual), (
+                        "legacy t16 tiling legs diverged: "
+                        f"seed={seed} banks={banks} segment_steps={segment_steps}"
+                    )
+    finally:
+        torch.set_num_threads(original_threads)
+
+
+def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch):
+    """QVQ_TEST_FORCE_BANKED_* must parse their value and stay in scope."""
+
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_LEGACY", raising=False)
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_G_ONLY", raising=False)
+
+    # 1. Value parsing. The two overrides are mutually exclusive, so setting one
+    #    truthy and the other to a falsey value must NOT trip the exclusion
+    #    check. Under presence-only `getenv(...) != nullptr` semantics every one
+    #    of these would raise, which is what makes this assertion non-vacuous.
+    generator = torch.Generator().manual_seed(7)
+    sequences = torch.randn((4, 16, 2), generator=generator, dtype=torch.float32)
+    codebooks = torch.randn((2, 1 << 16, 2), generator=generator, dtype=torch.float32)
+
+    monkeypatch.setenv("QVQ_TEST_FORCE_BANKED_LEGACY", "1")
+    for falsey in ("0", "false", "FALSE", "off", "Off", ""):
+        monkeypatch.setenv("QVQ_TEST_FORCE_BANKED_G_ONLY", falsey)
+        qvq_cpu_viterbi_banked(sequences, codebooks, transition_bits=16, segment_steps=16)
+
+    # ...and two genuinely truthy values still do trip it.
+    monkeypatch.setenv("QVQ_TEST_FORCE_BANKED_G_ONLY", "1")
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        qvq_cpu_viterbi_banked(sequences, codebooks, transition_bits=16, segment_steps=16)
+
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_LEGACY", raising=False)
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_G_ONLY", raising=False)
+
+    # 2. Scope. The overrides only select between the two recurrences for the
+    #    shapes the dispatcher actually considers. They must not divert shapes
+    #    it deliberately excludes -- here bank_count 3, which the t16 predicate
+    #    excludes. Legacy implements bank_count 3, so an out-of-scope
+    #    QVQ_TEST_FORCE_BANKED_LEGACY does not crash; it silently returns a
+    #    different answer. This fixture is not vacuous: with the override
+    #    unscoped it changes one selected state and all four squared errors,
+    #    reproducibly at 4, 16 and 32 threads.
+    def run_banks3():
+        gen = torch.Generator().manual_seed(2)
+        seq = torch.randn((4, 32, 2), generator=gen, dtype=torch.float32)
+        cbs = torch.randn((3, 1 << 16, 2), generator=gen, dtype=torch.float32)
+        return qvq_cpu_viterbi_banked(seq, cbs, transition_bits=16, segment_steps=16)
+
+    unforced = run_banks3()
+    for name in ("QVQ_TEST_FORCE_BANKED_LEGACY", "QVQ_TEST_FORCE_BANKED_G_ONLY"):
+        monkeypatch.setenv(name, "1")
+        forced = run_banks3()
+        monkeypatch.delenv(name, raising=False)
+        for expected, actual in zip(unforced, forced):
+            assert torch.equal(expected, actual), f"{name} escaped its dispatcher scope"
 
 
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:
