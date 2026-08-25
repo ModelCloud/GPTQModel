@@ -84,6 +84,7 @@ def test_qvq_v2b4_p64_config_rejects_unsupported_math():
         QVQConfig(
             bits=2,
             format=FORMAT.QVQ_V2B4_P64,
+            rounding="block_ldlq",
             propagated_bank_selection=True,
             offload_to_disk=False,
         )
@@ -179,7 +180,7 @@ def test_qvq_v2b4_p64_block_ldlq_pack_reload_and_torch_forward(bits):
         v2b4_p64=True,
         tensors=tensors,
     ).eval()
-    shell = QVQLinear(bits=bits, in_features=16, out_features=16, bank_count=4, v2b4_p64=True)
+    shell = QVQLinear(bits=bits, in_features=16, out_features=16, bank_count=4, v2b4_p64=True).eval()
     shell.load_state_dict(layer.state_dict(), strict=True)
     x = torch.randn((3, 16), generator=generator)
     torch.testing.assert_close(layer(x), x @ result.weight.T, rtol=1e-5, atol=1e-6)

@@ -124,6 +124,20 @@ def test_yaqa_mlx_symmetric_gram_pack_round_trip_is_bit_exact(width):
     assert torch.equal(restored, symmetric.cpu())
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        torch.tensor([[1.0, float("nan")], [float("nan"), 4.0]]),
+    ),
+)
+def test_yaqa_mlx_symmetric_gram_pack_rejects_invalid_input(invalid):
+    from gptqmodel.utils.qvq_mlx import qvq_mlx_pack_symmetric_gram_from_torch_mps
+
+    with pytest.raises(ValueError, match="finite and exactly symmetric"):
+        qvq_mlx_pack_symmetric_gram_from_torch_mps(invalid.to("mps"))
+
+
 def test_yaqa_mps_packed_symmetric_accumulation_matches_full_factors_exactly():
     baseline = _TinySketchModel().eval().to("mps")
     packed_model = copy.deepcopy(baseline)
