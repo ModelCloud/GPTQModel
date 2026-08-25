@@ -64,6 +64,7 @@ from .config import (
                      SmoothRowCol,
                      SmoothSoftNorm,
                      TensorParallelPadderConfig,
+                     ViterbiPruningConfig,
                      WeightOnlyConfig,
                      WeightOnlyMethod,
                      YaqaConfig,
