@@ -1288,7 +1288,9 @@ Both lanes now emit the identical ordered accumulation from zero, and the
 schedule matches `fused_g_argmin_avx512` / `fused_candidate_scalar` in
 `qvq_viterbi_cpu.cpp`. The V=4 arm was verified untouched by extracting the 125
 floating-point instructions in `[0x5b, 0x608)` from both objects and diffing them:
-identical. Outside that range only branch displacements move, because the V=2 arm
+identical. (True as of that commit. The V=4 scalar head/tail was subsequently
+hardened on purpose once the adjudication cleared it -- see the 2026-08-25 V=4
+section at the end of this log. The V=4 *vector body* is still untouched.) Outside that range only branch displacements move, because the V=2 arm
 got 16 bytes shorter.
 
 ### Correction to the incoming cross-review (MEASURED)
@@ -1356,8 +1358,11 @@ divergence and a measured squared-error divergence across every V=2
 configuration tested. All 24 V=4 configs are identical before and after on
 states, and the two V=4 squared-error deltas are bit-for-bit the same before and
 after -- a second, numeric confirmation that the V=4 arm was not disturbed. The
-residual V=4 deltas are attributed (INFERRED) to the structural two-sweep versus
-fused difference, not to the V=4 rounding asymmetry, which the probe showed is
+residual V=4 deltas were originally attributed here (INFERRED) to the structural
+two-sweep versus fused difference. **That attribution was imprecise and is
+superseded** -- see the 2026-08-25 V=4 section at the end of this log, where the
+real mechanism is identified and verified by disassembly. What does hold: the
+deltas are not caused by the V=4 rounding asymmetry, which the probe showed is
 unreachable dead code.
 
 The pre-existing `xfail` on
@@ -1420,3 +1425,132 @@ Two baseline deviations from the brief this work was handed, both measured:
   in-flight `fix/qvq-explicit-rounding-rate-damping` workstream.
 
 Gate 2 gains 3: the two new tests, plus the de-xfailed divergence test.
+
+
+## 2026-08-25 -- `qvq_viterbi_cpu_opt` V=4: verified delta attribution + latent scalar hardening
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/CD/IFMA/VBMI (Zen 4,
+          no AMX; hostname says `zen5-cpu-6`, silicon is `znver4`) | 32 logical
+          cores visible to the cgroup | torch 2.13.0+cpu | gcc 15.2.0 | host zen5-cpu-6
+
+This entry contains **no timing or speed claim**; the host was shared with another
+workstream that owned it for timing, and no benchmark was run. Correctness results
+are unaffected by CPU contention. Compile durations appear only to evidence cold
+builds.
+
+### Register mapping (re-derived, and it MOVED)
+
+An independent third-vendor adjudication confirmed the mapping recorded in the
+previous entry -- `rsi = codebook_t = c0`, `rbx = codebook_t + 4*state_count = c1`,
+`r12 = c2`, `r10 = c3` -- and refuted the inverted mapping in the incoming
+cross-review.
+
+**MEASURED, and worth flagging:** the *xmm* half of that mapping is NOT stable
+across builds. In the pre-fix object `xmm8 = target[0]`, `xmm6 = target[1]`; after
+this change gcc swapped them, so in the new object `xmm6 = target[0]`,
+`xmm8 = target[1]` (prologue `0x36`/`0x3b`). Any future reader must re-derive the
+xmm mapping from the prologue of the object in hand. Reusing the old attribution
+would invert the reading of every scalar FMA in the function.
+
+### Attribution of the 2 residual V=4 squared-error deltas -- CORRECTED and VERIFIED
+
+The previous entry attributed them (INFERRED) to `_opt` being two-sweep where
+production is fused. That was imprecise. The adjudicator proposed a different
+mechanism; rather than copy it, it was verified here at instruction level, and it
+holds:
+
+- **MEASURED, production side.** `fused_g_argmin` calls `fused_g_argmin_avx512`
+  unconditionally on an AVX-512 host (`qvq_viterbi_cpu.cpp:180-187`) regardless of
+  `suffix_count`. At `transition_bits=16` with `state_count=65536`, `suffix_count`
+  is 1, so the 16-wide loop (`x + 16 <= suffix_end`) cannot execute and control
+  reaches the scalar remainder. For `vector_size > 2` gcc vectorizes that remainder
+  rather than emitting scalar FMAs -- guarded by `cmp QWORD PTR [rsp-0x8],0x2 ;
+  jbe` at `0x30f`, which diverts V<=2 to the scalar path at `0x491`. The V>2 block
+  in `qvq_viterbi_cpu.o` is:
+
+```text
+330-34e: vmovss / vinsertps / vmovlhps   # gather c0..c3 for one state into xmm0
+352:     vmulps  xmm0,xmm0,[r8-0x10]     # 4 products, EACH SEPARATELY ROUNDED
+358:     vaddss  xmm2,xmm0,xmm2          # horizontal reduction, lane 0
+35c-361: vshufps / vaddss                # lane 1
+365-372: vunpckhps / vshufps / vaddss x2 # lanes 2 and 3
+```
+
+- **MEASURED, `_opt` side.** Its V=4 body is a zero-seeded fused FMA chain, which
+  rounds only the running accumulator, never the individual products. The two
+  schedules are therefore not instruction-equivalent and can differ by an ulp.
+- **MEASURED, `_opt` scalar head/tail is not involved.** An instrumented build
+  (atomic counters on all four scalar loops, reported from a static destructor) run
+  over the exact 24-configuration matrix reported
+  `PROBE v2_prologue=0 v2_tail=0 v4_prologue=0 v4_tail=0`.
+
+So the deltas are a **cross-kernel** difference at `suffix_count == 1`, not an
+artifact of `_opt`'s own scalar-versus-vector arrangement. The
+`qvq_cpu_viterbi_opt` docstring was corrected to say this.
+
+### V=4 scalar head/tail hardened -- LATENT, NOT OBSERVED
+
+**Severity is LATENT. No behavioural change was observed, and none was expected.**
+The adjudication ruled the `_opt` V=4 scalar-versus-vector asymmetry REAL and
+admitting finite FP32 counterexamples (the earlier "signed-zero/NaN only"
+conclusion was wrong): pre-fix the scalar lane rounded `t1*c1` first, then
+`c0,c2,c3`, while the vector body was zero-seeded `c0,c1,c2,c3`.
+
+That path is **unreachable today** -- the op requires a power-of-two
+`state_count >= 16` and partitions sweep B on `state_count` alone, so every
+`[begin, end)` is 16-aligned with a 16-multiple length, which the probe above
+confirms empirically. It was fixed anyway, because relying on "the tail happens to
+be unreachable" is exactly how the production V=2 defect stayed hidden: it became
+reachable only when a `parallel_for` chunk size stopped being a multiple of 16, and
+it was then OBSERVED. Making the agreement structural removes the dependence on
+today's chunking arithmetic.
+
+**No regression test accompanies this change, deliberately.** The path cannot be
+reached through the operator's public surface, so a behavioural fail-first test is
+impossible; writing one would produce a test that passes before and after and
+proves nothing. The property is asserted by disassembly instead.
+
+Cold build in a fresh empty `GPTQMODEL_QVQ_CPU_BUILD_ROOT` with `CCACHE_DISABLE=1`,
+compiler reported 25 s, fingerprint `9e222c6033c2343a`. With the corrected xmm
+mapping for this object (`xmm6 = t0`, `xmm8 = t1`, `xmm9 = t2`, `xmm10 = t3`):
+
+```text
+AFTER -- V=4 scalar head/tail        AFTER -- V=4 16-lane body
+223: vxorps      xmm12,xmm12,xmm12   2ba: vxorps      xmm2,xmm2,xmm2
+230: vmovaps     xmm0,xmm6           2dc: vmovaps     zmm0,zmm5
+234: vfmadd132ss xmm0,xmm12,[rsi]    2e2: vfmadd132ps zmm0,zmm2,[rsi]   # t0*c0 + 0
+23f: vfmadd231ss xmm0,xmm8,[rbx]     2f0: vfmadd231ps zmm0,zmm4,[rbx]   # += t1*c1
+245: vfmadd231ss xmm0,xmm9,[r12]     2f7: vfmadd231ps zmm0,zmm13,[r12]  # += t2*c2
+24b: vfmadd231ss xmm0,xmm10,[r10]    2fe: vfmadd231ps zmm0,zmm14,[r10]  # += t3*c3
+```
+
+Both lanes now emit the same zero-seeded, coordinate-ordered FMA chain. The V=2 arm
+was re-verified in the same object and is unchanged in effect -- still zero-seeded
+`c0` then `c1` in both lanes (scalar `0x77e-0x797`, vector `0x7fa-0x830`).
+
+### Behaviour is unchanged, as predicted (MEASURED)
+
+24-configuration matrix, `_opt` vs `qvq_cpu_viterbi`, exact comparison:
+
+```text
+states:         0 mismatched configs, before and after the V=4 change
+squared error:  2 configs not bit-identical, before and after -- the SAME two,
+                with byte-identical magnitudes 2.822e-6 and 7.373e-6 relative
+```
+
+The deltas surviving the V=4 hardening **unchanged** is positive confirmation of
+the attribution above: had they come from `_opt`'s scalar/vector asymmetry, they
+would have moved. They did not.
+
+### Gates (MEASURED)
+
+```text
+tests/test_qvq.py                            661 passed, 248 skipped
+tests/test_qvq_v2b2_p32.py +
+  tests/test_qvq_viterbi_cpu_opt.py          141 passed,  12 skipped
+tests/test_qvq_lifecycle.py                    2 failed,  29 passed, 2 skipped
+```
+
+Identical to the previous commit. The 2 lifecycle failures are the pre-existing
+`damp_percent` `assert 0.1 == 0.0001` failures present on `ecf7081e`, unrelated to
+the Viterbi kernels.

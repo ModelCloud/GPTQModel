@@ -214,8 +214,23 @@ static void emission_avx512(
   const __m512 t2v = _mm512_set1_ps(target[2]);
   const __m512 t3v = _mm512_set1_ps(target[3]);
   int64_t s = begin;
+  // Accumulate from zero in coordinate order (c0..c3) so these scalar lanes
+  // match the zero-seeded FMA chain in the 16-lane body below.  Written as a
+  // sum expression, gcc contracts the *first* product into an FMA and pre-rounds
+  // one of the others, which desynchronises the two lanes -- the same defect
+  // fixed in the V=2 arm above.  This head/tail is currently UNREACHABLE (the op
+  // requires a power-of-two state_count >= 16 and partitions sweep B on
+  // state_count alone, so every [begin, end) is 16-aligned with a 16-multiple
+  // length; an instrumented build counted zero entries here across the whole
+  // test matrix).  It is written this way so the agreement is structural rather
+  // than a property of today's chunking -- the production V=2 defect stayed
+  // hidden in exactly this way until a chunk size stopped being a multiple of 16.
   for (; s < end && (s & 15); ++s) {
-    float dot = target[0] * c0[s] + target[1] * c1[s] + target[2] * c2[s] + target[3] * c3[s];
+    float dot = 0.0f;
+    dot += target[0] * c0[s];
+    dot += target[1] * c1[s];
+    dot += target[2] * c2[s];
+    dot += target[3] * c3[s];
     float dist = target_norm + codebook_norm[s] - 2.0f * dot;
     if (dist < 0.0f) dist = 0.0f;
     out[s] = dist * weight;
@@ -235,7 +250,11 @@ static void emission_avx512(
     _mm512_storeu_ps(out + s, dist);
   }
   for (; s < end; ++s) {
-    float dot = target[0] * c0[s] + target[1] * c1[s] + target[2] * c2[s] + target[3] * c3[s];
+    float dot = 0.0f;
+    dot += target[0] * c0[s];
+    dot += target[1] * c1[s];
+    dot += target[2] * c2[s];
+    dot += target[3] * c3[s];
     float dist = target_norm + codebook_norm[s] - 2.0f * dot;
     if (dist < 0.0f) dist = 0.0f;
     out[s] = dist * weight;
