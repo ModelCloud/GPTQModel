@@ -17,5 +17,6 @@
     "w3_checkpoint": "/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w30-reg010-pruneauto-main-329cc0a5"
   },
   "queue": {"gpu": "GPU-724ea08e-67c3-c0ce-29bb-e6c48e7dde28", "d300_session": 58062, "gsm8k_session": 79173, "status": "d300_then_gsm8k"},
-  "status": "quantization_complete_d300_queued"
+  "d300": {"status":"complete", "report":"/root/qvq-results/llama32-1b-w2-aime2526-yaqa-mix-main-1f6c2132-div300-dev-v1.json", "report_sha256":"a01f0ec41956420676fc07805b70793f06e4c484b200e9407042acb0123dbff2", "divergence32_top1":0.14979166666666666, "exact_trajectory":0.0, "exact_prompts":0, "mean_first_divergence":3.9966666666666666},
+  "status": "quantization_complete_d300_complete_gsm8k_queued"
 }
