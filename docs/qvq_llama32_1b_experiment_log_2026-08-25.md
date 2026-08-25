@@ -308,6 +308,17 @@ best flat-W2 reg .020 arm (18.7813%), so the extra down-projection bit did not
 improve this AIME mix; the full GSM8K Platinum task is now running for the
 real-world comparison.
 
+### Full reference YAQA W2 arm (queued)
+
+The original scan deliberately held out a 110-row reference set. It is proven
+disjoint from benchmark/YAQA rows and is now appended to the 182-row mix,
+creating a 292-row calibration set (`713e034c...f916`, provenance in
+`calibration_full_reference.json`). This is the largest locally available
+leakage-safe mix and is the next flat-W2 test using the best completed
+regularization (`reg .020`). Quantization is running on GPU0, followed by
+canonical D300 and GSM8K Platinum. Full queue/config/results are recorded in
+`docs/experiments/2026-08-25-llama32-w2-full-reference-reg020.json`.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
