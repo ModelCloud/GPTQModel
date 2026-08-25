@@ -164,7 +164,16 @@ predicts downstream accuracy. It retains flat W2 V2B2-P32 and the same optimized
 
 ## Full downstream task evaluation
 
-Status: **running**.
+Status: **GSM8K pair complete; full MMLU cancelled as too slow**.
+
+| Task | Uniform `.10` D300 leader | Hybrid-aligned leader | Winner |
+| --- | ---: | ---: | --- |
+| GSM8K Platinum CoT, full 1,209 rows | **24.1522%** | 20.6782% | **Uniform `.10` by 3.4740 points** |
+
+Atomic reports:
+
+- `/root/qvq-results/llama32-1b-v2b2p32-reg010-leader-full-tasks-v1.json`
+- `/root/qvq-results/llama32-1b-v2b2p32-layerdamp-align2e64-full-tasks-v1.json`
 
 The requested tasks are full-dataset evaluations with no row cap:
 
@@ -193,8 +202,10 @@ python scripts/qvq_evaluate.py tasks \
   --task gsm8k_platinum_cot --task mmlu_stem --task mmlu_humanities
 ```
 
-The task-winner comparison will be appended only after both complete reports exist. Execution is interleaved by
-benchmark to reduce time/runtime drift: Q07 GSM8K, Q03 GSM8K, Q07 STEM, Q03 STEM, Q07 humanities, Q03 humanities.
+Execution was interleaved by benchmark to reduce time/runtime drift. The GSM8K pair completed. Q07 STEM was then
+stopped at 217/3,153 question rows on user direction because the full suite was too slow; Q03 STEM and both humanities
+runs were cancelled before starting. Atomic per-task publication means no partial MMLU metric appears in either
+report and the completed GSM8K evidence remains valid.
 
 Pre-run validation:
 
@@ -224,3 +235,7 @@ unchanged.
 The third Q07 attempt was superseded at 643/1,209 GSM8K rows (`numeric=0.2348`, zero invalid) before publication when
 the evaluation order changed from model-serial to benchmark-paired. The report-producing paired queue uses one task
 per invocation and atomic `--resume`; a failure can no longer discard already completed suites.
+
+The paired report-producing GSM8K runs completed under Evalution 0.0.14, paged attention, and continuous refill:
+Q07 scored `0.2415219189` in 592.787 seconds and Q03 scored `0.2067824648` in 598.368 seconds. This first real-world
+task favors the D300 metric winner, not the teacher-forced KL/Top-N winner.
