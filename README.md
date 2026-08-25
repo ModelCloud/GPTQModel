@@ -23,30 +23,12 @@
 
 * 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
 * 08/24/2026 7.4.0-dev `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
-* 08/20/2026 7.4.0-dev `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2 model support
-* 08/19/2026 7.4.0-dev `main`: ✨ Added `muse_glimmer` / Muse Glimmer multimodal model support.
-* 08/19/2026 7.4.0-dev `main`: ✨ Added `mage_vl` / Mage-VL model support
-* 08/18/2026 7.4.0-dev `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
-* 08/04/2026 7.4.0-dev `main`: ✨ Added `axk2` (A.X-K2) model support
+* 08/20/2026 7.4.0-dev `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2; `muse_glimmer` / Muse Glimmer multimodal; `mage_vl` / Mage-VL; Cohere `North Micro Vision` (`cohere_compass`); `axk2` (A.X-K2) model support.
 * 08/04/2026 7.4.0-dev `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
-* 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2` model support
-* 07/23/2026 7.3.1 `main`: ✨ Added `Intern S2 PreView` model support
-* 07/23/2026 7.3.1 `main`: ✨ Added `inkling_mm_model` model support
-* 07/22/2026 7.3.1 `main`: ✨ Added Poolside `Laguna S 2.1` model support
-* 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle` model support
-* 07/07/2026 7.3.0-dev `main`: ✨ Added `deepseek_vl` model support
-* 07/06/2026 7.3.0-dev `main`: ✨ Added `deepseek_ocr2` model support
-* 04/07/2026 7.3.0-dev `main`: ✨ Added `deepseek_vl_v2` model support
-* 02/07/2026 7.2.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl` model support
-* 06/30/2026 7.2.0-dev `main`: ✨ Added `minimax_m3_vl` / MiniMax M3 model support
-* 06/25/2026 7.2.0-dev `main`: ✨ Added `cohere2_moe` model support
-* 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3` model support
-* 05/25/2026 7.1.0-dev `main`: ✨ Added `hunyuan_v1_dense` and `hunyuan_v1_moe` model support
-* 05/21/2026 7.1.0-dev `main`: ✨ Added `nemotron_labs_diffusion` model support
-* 05/20/2026 7.1.0-dev `main`: ✨ Added `interns1`, `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next` model support
-* 05/15/2026 7.1.0-dev `main`: ✨ Added `mimo_v2` model support
-* 05/13/2026 7.1.0-dev `main`: ✨ Added `minicpmv_4_6` and `DeepSeek V4` model support
-* 05/07/2026 7.1.0-dev `main`: ✨ Added `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support
+* 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2`; `Intern S2 PreView`; `inkling_mm_model`; Poolside `Laguna S 2.1` model support.
+* 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle`; `deepseek_vl`; `deepseek_ocr2`; `deepseek_vl_v2` model support.
+* 06/30/2026 7.2.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl`; `minimax_m3_vl` / MiniMax M3; `cohere2_moe` model support.
+* 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3`; `hunyuan_v1_dense` and `hunyuan_v1_moe`; `nemotron_labs_diffusion`; `interns1`, `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next`; `mimo_v2`; `minicpmv_4_6` and `DeepSeek V4`; `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support.
 * 04/29/2026 7.1.0-dev `main`: ✨ Added PoolSideAI `Laguna` model support for fused Laguna MoE checkpoints. Added `ERNIE 4.5 VL MoE`, `Ling-2.6-flash` and NVIDIA `Nemotron 3 Nano Omni` model support.
 * 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. Added `internvl_chat`, `gemma3n`, `GLM-OCR`, `GLM-ASR`, and `falcon_mamba` model support.
 * 04/16/2026 [6.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.1.0): 🚀🔥⚡ CUDA kernels are now fully JIT-compiled, shrinking the wheel by about 300x and building only what you use; Marlin now supports NVIDIA `Turing+` GPUs, Machete kernel validation now covers supported GPUs, `GLM 5/5.1` joins the lineup, and LazyTurtle plus AWQ / multi-GPU MoE fixes make large-model quantization easier, lighter, and smoother.
