@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 import threading
@@ -319,6 +320,86 @@ def marlin_make_workspace_new(device: torch.device,
                        requires_grad=False)
 
 
+def _round_up(value: int, multiple: int) -> int:
+    """Round value up to the next multiple."""
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+# Marlin accepts either orientation of its 64 x 128 thread tile.
+def marlin_is_tile_aligned(size_n: int, size_k: int) -> bool:
+    return (
+        size_n % 64 == 0 and size_k % 128 == 0
+    ) or (
+        size_n % 128 == 0 and size_k % 64 == 0
+    )
+
+
+def marlin_padded_nk(size_n: int, size_k: int,
+                     group_size: int = -1) -> Tuple[int, int]:
+    """Return the smallest N/K pair supported by a Marlin thread tile.
+
+    Padded K consumes zero activations; padded N uses zero scales, so neither
+    region changes the logical output.
+    """
+    group = group_size if group_size > 0 else 1
+    # Try both tile orientations and keep the one with the least padded work.
+    candidates = (
+        (_round_up(size_n, 64), _round_up(size_k, math.lcm(128, group))),
+        (_round_up(size_n, 128), _round_up(size_k, math.lcm(64, group))),
+    )
+    padded_nk = min(candidates, key=lambda nk: (nk[0] * nk[1], nk[0] + nk[1]))
+    if padded_nk != (size_n, size_k):
+        log.warn.once(
+            "Marlin is padding a tile-misaligned weight shape. Activations "
+            "and outputs for this layer are padded and sliced on each forward; "
+            "performance may be degraded."
+        )
+    return padded_nk
+
+
+def marlin_pad_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
+                       padded_n: int, padded_k: int) -> torch.Tensor:
+    """Zero-pad a GPTQ-layout packed weight before Marlin repacking."""
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qweight
+    # Each packed row stores pack_factor consecutive K values.
+    pack_factor = size_k // qweight.size(0)
+    return torch.nn.functional.pad(
+        qweight,
+        (0, padded_n - size_n, 0, (padded_k - size_k) // pack_factor),
+    )
+
+
+def marlin_pad_scales(scales: torch.Tensor, size_n: int, size_k: int,
+                      padded_n: int, padded_k: int,
+                      group_size: int) -> torch.Tensor:
+    """Zero-pad scale rows and columns to the padded Marlin shape."""
+    if (padded_n, padded_k) == (size_n, size_k):
+        return scales
+    # Extra K groups need zero scales so padded weights stay inactive.
+    pad_rows = padded_k // group_size - scales.size(0) if group_size > 0 else 0
+    if pad_rows < 0:
+        raise ValueError("Padded Marlin K cannot contain fewer scale groups.")
+    return torch.nn.functional.pad(
+        scales, (0, padded_n - size_n, 0, pad_rows)
+    )
+
+
+def marlin_pad_dim(x: torch.Tensor, size: int, padded: int) -> torch.Tensor:
+    """Zero-pad the last tensor dimension when a Marlin tile requires it."""
+    if padded == size:
+        return x
+    return torch.nn.functional.pad(x, (0, padded - size))
+
+
+def marlin_unpad_output(output: torch.Tensor, size_n: int,
+                        padded_n: int) -> torch.Tensor:
+    """Slice a padded Marlin result back to its logical output width."""
+    if padded_n == size_n:
+        return output
+    return output[..., :size_n].contiguous()
+
+
 def update_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
     assert dst.dtype == src.dtype, "Tensors must have the same dtype"
 
@@ -514,6 +595,46 @@ def apply_gptq_marlin_linear(
                               is_zp_float=False)
 
     return output.reshape(out_shape)
+
+
+def apply_gptq_marlin_linear_padded(
+        *,
+        tile_padding: Tuple[int, int],
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        wtype: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        is_k_full: bool,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = True,
+        use_atomics: bool = False,
+) -> torch.Tensor:
+    """Pad one tile-misaligned GEMM around the unchanged Marlin hot path."""
+    padded_n, padded_k = tile_padding
+    padded_input = marlin_pad_dim(input, input_size_per_partition, padded_k)
+    output = apply_gptq_marlin_linear(
+        input=padded_input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_zp=weight_zp,
+        g_idx=g_idx,
+        g_idx_sort_indices=g_idx_sort_indices,
+        workspace=workspace,
+        wtype=wtype,
+        output_size_per_partition=padded_n,
+        input_size_per_partition=padded_k,
+        is_k_full=is_k_full,
+        bias=bias,
+        use_fp32_reduce=use_fp32_reduce,
+        use_atomics=use_atomics,
+    )
+    return marlin_unpad_output(output, output_size_per_partition, padded_n)
 
 
 def apply_awq_marlin_linear(
