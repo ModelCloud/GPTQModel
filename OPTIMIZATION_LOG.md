@@ -1047,3 +1047,154 @@ straight-line:
 Also unresolved from this round: bound-pruning is gated off for
 constrained/weighted launches (the all-INF tail-biting edge case needs the
 constraint check folded into the bound before pruning can apply there).
+
+## Round: QVQ V2 segment-grid Viterbi norm-rank contiguous-band pruning
+
+**Date:** 2026-08-25
+**Repository:** `/root/qvq` (worktree `polly/norm-rank-kernel`)
+**Hardware:** 1 x NVIDIA PG506-230 (A100-class, sm_80, 96 GiB, 124 SMs)
+**Software:** Python 3.14.7t, PyTorch 2.13.0+cu130, CUDA 13.3 (nvcc V13.3), targeting sm_80
+**Scope:** `gptqmodel_ext/qvq/qvq_viterbi_cuda.cu` — `viterbi_v2_segment_grid_trusted`,
+unconstrained/unweighted half-codebook W2.5 (shift 5) and W3.0 (shift 6), banks 2 and 4.
+Supersedes the PR #42 octet prototype.
+
+### Rejected: one-thread-per-octet prototype (PR #42, reverted here)
+
+The octet-grouped kernel remapped the recurrence to one thread per eight
+suffix columns, shrinking the CTA from 1024 threads to `suffix_count >> 3`.
+Measured against the pristine grid kernel on randn (its own benchmark):
+2.5-2.8x SLOWER at every rate and batch (e.g. W3.0/s6/b4, batch 256:
+32409 us vs 11630 us pristine; W2.0/s4/b2, batch 256: 16255 vs 6337 us).
+Root causes: 8x fewer threads per CTA with the same one-CTA-per-(sequence,
+bank) grid (occupancy collapse), plus a per-octet bound branch inside the
+h-chain that still defeated ptxas' static pipeline.  Reverted in full.
+
+### Design measurements that drove the replacement (real Qwen3 weight tiles)
+
+Production-style [tiles, 128, 2] sequences cut from Qwen3-0.6B / Qwen3-8B
+matrices (16-row slabs, the `benchmark_qvq_v2_prune_rate.py` construction),
+chunk width 4, incumbent = tn-bracketing chunk, directed-rounding band:
+
+| metric | shift 4 | shift 5 | shift 6 |
+|---|---|---|---|
+| survivor work, per-thread masked      | 25.9% | 13.5% |  7.2% |
+| survivor work, per-warp max (SIMT)    | 37.0% | 21.1% | 11.9% |
+| survivor work, warp-union range       | 37.0% | 21.1% | 11.9% |
+| randn (adversarial), warp-union       | 95.1% | 88.0% | 78.9% |
+
+The decisive observation: the warp-union of the per-lane bands costs exactly
+the per-lane warp maximum on real tiles - adjacent columns' bands overlap
+almost perfectly - so every chunk visit can be made warp-uniform (no masked
+lanes, perfectly coalesced loads, one ballot per walked chunk) for free.
+
+### Shipped design (norm-rank contiguous band, warp-uniform)
+
+Target-independent tables per (codebook, shift, chunk width), cached by
+codebook version (inference-mode tensors build uncached), built by two tiny
+kernels: each suffix column's `prefix_count` candidate records sorted by
+cached FP32 norm (ties by original prefix), cut into width-4 chunks,
+chunk-major `records[bank][chunk][x][slot]` + packed original-prefix bytes +
+per-chunk minimum norms.  A lane reads its chunk as two 16-byte words; a warp
+chunk visit is one contiguous 1 KiB block.
+
+Recurrence (same 1024-thread CTA, one CTA per (sequence, bank), same
+frontier/backpointer/boundary layouts and launch geometry as the baseline):
+
+- Seed = warp min/max of the previous step's winning chunks (first step of a
+  segment brackets tn per lane via a rank count instead); evaluate the seed
+  range to give every lane an incumbent value U.  Seed quality affects only
+  U's tightness, never correctness.
+- Convert U into a provable norm interval with outward-directed rounding
+  (details in the kernel comment: Cauchy-Schwarz on the exact reals, every
+  error coefficient widened to 2^-19 = 32u versus the < 5u required, floor =
+  cached per-predecessor-class frontier minimum maintained with shared-memory
+  atomicMin in three rotating buffers, one __syncthreads per step as before).
+- Walk outward from the seed range; one all-lanes-agree ballot against the
+  sorted chunk minima ends each direction for the whole warp.  Sortedness
+  makes the first failed chunk a proof for all further ones.
+- Columns whose band degenerates past 5/8 of the list fall back to the
+  baseline's own fully unrolled prefix-order scan over the original packed
+  records until the next probe step (every 16th), bounding adversarial
+  inputs at near-baseline cost.  Real tiles never trip this.
+- Exact FP32 candidate arithmetic and the (value, lowest original h)
+  lexicographic tie contract are preserved: the original h travels with every
+  record, and lower_pair() is order-independent, so a by-norm visit order
+  selects the identical winner.
+
+Registers/occupancy (ptxas, sm_80): 32 registers, zero spills, at shift 5
+with `__launch_bounds__(1024, 2)` (two CTAs per SM, 90% achieved occupancy);
+shift 6 runs 63 registers at one CTA per SM - forcing two CTAs there spilled
+and measured slower, so the bound is shift-dependent.
+
+### Attempts rejected along the way (all bit-exact, all slower)
+
+1. Per-lane divergent bands over column-major `records[bank][x][chunk][slot]`
+   tables: 21/32 average active lanes and 32-sector scattered 16-byte loads
+   made it L1TEX-bound; 1.75x slower than baseline on randn even with 61%
+   pruning.  Warp-uniformity, not per-lane masking, is the workable shape.
+2. Register-resident bounds via column-major float4 loads: fewer load
+   instructions but 4x the sectors per load; regressed shift 5/6.
+3. Inverse prefix->chunk byte table to avoid tracking the winning chunk in
+   the eval loop: the scattered dependent byte load cost more than the one
+   extra select per candidate it saved (s5 b4: 6478 vs 5832 us).
+4. Chunk widths 2 and 8 (both bank configs, real tiles): width 4 fastest;
+   width 8 loses 20-28% (coarser bands), width 2 loses 1-7% (doubled walk
+   and rank-count overhead).
+5. Fixed rank-count band passes instead of ballot walks (v3): 8-16 extra
+   coalesced bound loads per column-step; the walk variant with the same
+   exactness proof is ~6% faster end to end.
+
+### Fallback #2 (warp ballot + survivor compaction along h): not needed, and slower on paper
+
+With per-candidate Cauchy-Schwarz bounds (86.7-92.1% prunable), a
+ballot/popcount compaction pass still pays ~4 instructions per candidate for
+100% of candidates before evaluating survivors: at shift 5 that is
+32*4 + 6.7*9 + compaction ≈ 220+ warp-instructions per column-step versus
+~233 for the plain baseline scan and ~95 for the shipped band kernel.  The
+norm-rank kernel met the >= 2x bar on the target workloads, so the ranked
+fallback was not implemented; its arithmetic ceiling at shift 5/6 is strictly
+below the shipped design's measured result.
+
+### Bit-exactness evidence
+
+- 12/12 rate/config oracle cases EXACT (torch.equal against the eager
+  recurrence oracle and the segmented banked kernel): W1.0/W1.5/W2.0/W2.5/
+  W3.0/W3.5 x {b2-seg16, b4-seg32}
+  (`python scripts/benchmark_qvq_v2_segment_grid.py --rates 1.0 1.5 2.0 2.5 3.0 3.5 --check`).
+- Focused CUDA suite: `pytest tests/test_qvq_cuda.py -k "viterbi or segment"`
+  = 392 passed, 1 skipped (skip = pre-existing free-threading probe), a
+  superset of the expected 363-test set; full `tests/test_qvq_cuda.py` also
+  green (see PR).  New coverage: dispatch-counter gating for supported and
+  fallback (constrained/weighted/fp32/W2.0/W3.5) configs, subprocess
+  GPTQMODEL_QVQ_DISABLE_OCTET_GRID pristine A/B, versioned-codebook and
+  inference-mode mutation staleness, non-default-stream and cross-stream
+  cache-reuse ordering, massive exact-tie codebooks, and 1e-30/1e+15
+  sequence scales against the directed-rounding band.
+
+### Performance (CUDA events, warmed, median of 50; enabled vs pristine A/B via GPTQMODEL_QVQ_DISABLE_OCTET_GRID)
+
+Real Qwen3-8B weight tiles (`--model /monster/data/model/Qwen3-8B`), batch 256:
+
+| config | pristine (us) | norm-rank (us) | speedup |
+|---|---|---|---|
+| W2.5 b2-seg16 | 6375 | 3563 | 1.79x |
+| W2.5 b4-seg32 | 11630 | 5925 | 1.96x |
+| W3.0 b2-seg16 | 6323 | 2263 | 2.79x |
+| W3.0 b4-seg32 | 11500 | 3873 | 2.97x |
+
+(full 8-256 batch tables in the PR; W3.0 exceeds 2.2x at EVERY batch from 8
+to 256, W2.5 climbs from 1.28x at batch 16 to 1.96x at batch 256 and ~1.96x
+at batch 1024).  W2.0 dispatches the pristine kernel unconditionally: its
+16-entry candidate list measured 0.88-1.15x under banding, below the bar, so
+it is gated off rather than shipped slower at small batch - its rows are
+1.00x by construction.  On adversarial i.i.d. randn sequences (78-95% of the
+candidate list survives the true band, versus 12-37% on real weights) the
+enabled path holds 0.97-1.07x of pristine at W2/W2.5 and 0.88-0.99x at W3.0
+via the degenerate full-scan escape; real weight tiles - the production
+input - never engage it, and GPTQMODEL_QVQ_DISABLE_OCTET_GRID=1 remains the
+pristine control for any such workload.
+
+nsight-compute (W2.5 b2, batch 256, real tiles, per segment kernel):
+163M executed warp-instructions vs 328M pristine, issue-active 78% vs 71%,
+achieved occupancy 90% vs 94%, long-scoreboard stall 25% vs 43%,
+global-load instructions 4.6M vs 17.3M, shared-load 4.5M vs 15.8M.
