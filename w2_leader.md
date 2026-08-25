@@ -107,6 +107,43 @@ The 25% development target is 2,400 matching positions. This checkpoint is short
 two-epoch checkpoint remains the flat-W2 teacher-forced leader at KL 0.239397, Top-1 82.6090%, Top-5 74.3085%,
 Top-10 73.6837%, and warm shared-prefix Top-1 83.0222%.
 
+## Higher-rate Q07 sweep
+
+The Q07 calibration and YAQA contract was rerun without changing its data, seed, bank count, family reselection, or
+regularization. Only the trellis rate changed from W2 to W2.5 or W3. Both higher-rate checkpoints use V2B2-P32,
+two banks, seed 0, batch 1, all 182 optimized YAQA rows / 302,193 valid tokens, ordinary NM rows 0--127, exact-rate
+YAQA regularization `.10`, `v2b2_family_mode="reselect"`, and no alignment, chat-token weighting, spectral
+refinement, or scale optimization. Their complete checked-in configs are
+`scripts/configs/llama32_1b_v2b2_p32_yaqa_w25_reg010.json` and
+`scripts/configs/llama32_1b_v2b2_p32_yaqa_w30_reg010.json`.
+
+| Metric | Flat W2 Q07 | W2.5 | W3.0 |
+| --- | ---: | ---: | ---: |
+| Final KL | 0.272819 | 0.125240 | **0.060929** |
+| Token Top-1 | 81.2380% | 87.1177% | **91.1634%** |
+| Top-5 overlap | 72.6887% | 79.9364% | **85.3099%** |
+| Top-10 overlap | 71.6885% | 79.4622% | **85.0076%** |
+| Shared-prefix Top-1 agreement@32, with 50% context warmup | 82.4350% | 87.8146% | **91.4115%** |
+| Canonical D300 aligned-token Top-1 through 32 | 17.8854% | 25.1771% | **33.6667%** |
+| Canonical D300 aligned matches | 1,717 / 9,600 | 2,417 / 9,600 | **3,232 / 9,600** |
+| Canonical exact trajectories | 3 / 300 | 5 / 300 | **16 / 300** |
+| Canonical mean first divergence token | 4.8533 | 7.5000 | **9.9133** |
+
+W3.0 wins every measured fidelity metric. W2.5 is consistently intermediate and crosses the 25% D300 development
+target by 17 positions. W3 exceeds it by 832 positions. No GSM8K or MMLU evaluation was run for either higher-rate
+checkpoint.
+
+Artifacts and immutable evidence:
+
+| Arm | Checkpoint | Locked ordinary report | Canonical D300 report |
+| --- | --- | --- | --- |
+| W2.5 | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w25-reg010-pruneauto-main-329cc0a5` | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w25-reg010-pruneauto-main-329cc0a5-locked-r512-n300-full-v1.json`, SHA-256 `b40dd718cf6dd322a1e02f3620703cc950bfade871809e11a5427eda5450d1bf` | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w25-reg010-pruneauto-main-329cc0a5-div300-dev-v1.json`, SHA-256 `7b93c80590e12fcfcf249855a6d971ac390c08f34a1fc3ad1127caa02080b6c4` |
+| W3.0 | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w30-reg010-pruneauto-main-329cc0a5` | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w30-reg010-pruneauto-main-329cc0a5-locked-r512-n300-full-v1.json`, SHA-256 `535b41a38f6b2707690bf08e988e7ac05799e9bf382cb706e5323b55c5e9dae6` | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w30-reg010-pruneauto-main-329cc0a5-div300-dev-v1.json`, SHA-256 `08a4bc6ccd8b4a3b4ead7b21fb8de5a47c1e1d611cd7c3ee2bd588ccb3fa1a09` |
+
+The separate independent rollouts over NM rows 512--811 scored 25.6146% (W2.5) and 33.8125% (W3). They are valid
+diagnostics but are **not** canonical D300 and are not used in the ranking above. Canonical D300 uses the pinned
+mixed-source manifest with SHA-256 `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
+
 ## Teacher-forced hybrid-aligned leader
 
 Checkpoint: `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da`.
