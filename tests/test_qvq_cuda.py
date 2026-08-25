@@ -3710,6 +3710,28 @@ def test_qvq_cuda_norm_rank_table_cache_survives_stream_order_reuse():
     assert all(torch.equal(f, s) for f, s in zip(first, second))
 
 
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps",
+    ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)),
+)
+def test_qvq_cuda_viterbi_norm_rank_repeated_later_segment_initialization(
+    bits, bank_count, segment_steps
+):
+    """Repeatedly exercise initialization of every segment after segment zero."""
+
+    sequences, codebooks = _norm_rank_case(20260839 + bank_count, 2, bits, bank_count)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    for repeat in range(8):
+        candidate_sequences = sequences.clone()
+        candidate_sequences[:, repeat::segment_steps, 0].add_(repeat * 0.03125)
+        actual = op(candidate_sequences, codebooks, transition_bits, segment_steps, None, None)
+        expected = qvq_cuda_viterbi_v2_segment_banked(
+            candidate_sequences, codebooks, bits, segment_steps, None, None
+        )
+        assert all(torch.equal(a, e) for a, e in zip(actual, expected))
+
+
 def test_qvq_cuda_norm_rank_cache_eviction_lifetime_and_boundedness():
     """>8 entries must remain valid across queued consumers and allocator reuse."""
 

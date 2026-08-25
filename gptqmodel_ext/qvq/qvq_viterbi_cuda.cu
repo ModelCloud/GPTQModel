@@ -1931,6 +1931,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   for (int slot = thread; slot < 3 * group_count; slot += kThreads) {
     group_min_all[slot] = kInfBits;
   }
+  __syncthreads();
   if (segment_index == 0) {
     // Step 0 has no predecessor.  A zero frontier makes __fadd_rn(0, e) == e
     // for the non-negative emission e, so the shared step body below is
