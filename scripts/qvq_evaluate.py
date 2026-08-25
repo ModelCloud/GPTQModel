@@ -120,6 +120,13 @@ def build_parser() -> argparse.ArgumentParser:
     tasks.add_argument("--output", type=Path, required=True)
     tasks.add_argument("--batch-size", type=int, default=16)
     tasks.add_argument("--backend", choices=(BACKEND.QVQ.value, BACKEND.EXL3_EXLLAMA_V3.value), default="qvq")
+    tasks.add_argument("--device", default="cuda:0")
+    tasks.add_argument(
+        "--attn-implementation",
+        default="paged|flash_attention_2",
+        choices=("paged|flash_attention_2", "paged|sdpa"),
+        help="Paged attention backend; paged mode also activates native continuous batching.",
+    )
     tasks.add_argument("--task", action="append", choices=tuple(TASKS), help="Repeat to select tasks.")
     return parser
 
@@ -741,6 +748,10 @@ def _tasks(args: argparse.Namespace) -> int:
         "backend": args.backend,
         "dtype": "float16",
         "batch_size": args.batch_size,
+        "device": args.device,
+        "attn_implementation": args.attn_implementation,
+        "continuous_batching_required": True,
+        "paged_attention_required": True,
         "tasks": {},
     }
     for label in selected:
@@ -750,7 +761,11 @@ def _tasks(args: argparse.Namespace) -> int:
             model_or_id_or_path=str(checkpoint),
             tasks=[task],
             backend=BACKEND(args.backend),
-            model_args={"dtype": "float16"},
+            model_args={
+                "dtype": "float16",
+                "device": args.device,
+                "attn_implementation": args.attn_implementation,
+            },
             batch_size=args.batch_size,
             apply_chat_template=apply_chat_template,
             gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",

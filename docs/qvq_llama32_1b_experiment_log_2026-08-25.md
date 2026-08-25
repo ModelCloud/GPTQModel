@@ -193,6 +193,8 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | Q07 full downstream tasks | command recorded in `w2_leader.md`; GSM8K Platinum 1,209 rows, MMLU STEM full, MMLU humanities full | running; report `/root/qvq-results/llama32-1b-v2b2p32-reg010-leader-full-tasks-v1.json` |
 | Q03 full downstream tasks | same task/batch contract as Q07 | queued; report `/root/qvq-results/llama32-1b-v2b2p32-layerdamp-align2e64-full-tasks-v1.json` |
 | downstream progress fix | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental'` plus focused Ruff correctness gate | 2 passed; Ruff passed |
+| Q07 full downstream attempt 1 | full task command in `w2_leader.md`; continuous refill active, paged attention false | interrupted manually during GSM8K at user request; no report or partial score published |
+| downstream paged/continuous gate | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental or paged_continuous'` plus focused Ruff correctness gate | 3 passed; Ruff passed |
 
 ## Current decision
 

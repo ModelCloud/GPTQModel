@@ -281,6 +281,23 @@ def test_qvq_evaluate_forces_incremental_evalution_progress():
     assert os.environ["LOGBAR_FORCE_PROGRESS"] == "1"
 
 
+def test_qvq_evaluate_tasks_require_paged_continuous_batching_defaults():
+    args = build_evaluate_parser().parse_args(
+        [
+            "tasks",
+            "--checkpoint",
+            "quantized-model",
+            "--output",
+            "result.json",
+            "--task",
+            "gsm8k_platinum_cot",
+        ]
+    )
+
+    assert args.device == "cuda:0"
+    assert args.attn_implementation == "paged|flash_attention_2"
+
+
 class _BareDecoder(nn.Module):
     def forward(self, **_kwargs):
         return SimpleNamespace(last_hidden_state=torch.zeros(1, 2, 3))

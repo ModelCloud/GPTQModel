@@ -176,7 +176,7 @@ The requested tasks are full-dataset evaluations with no row cap:
 python scripts/qvq_evaluate.py tasks \
   --checkpoint /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365 \
   --output /root/qvq-results/llama32-1b-v2b2p32-reg010-leader-full-tasks-v1.json \
-  --batch-size 16 \
+  --batch-size 16 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
   --task gsm8k_platinum_cot --task mmlu_stem --task mmlu_humanities
 ```
 
@@ -188,7 +188,7 @@ The same full evaluation is queued for the hybrid-aligned leader:
 python scripts/qvq_evaluate.py tasks \
   --checkpoint /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da \
   --output /root/qvq-results/llama32-1b-v2b2p32-layerdamp-align2e64-full-tasks-v1.json \
-  --batch-size 16 \
+  --batch-size 16 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
   --task gsm8k_platinum_cot --task mmlu_stem --task mmlu_humanities
 ```
 
@@ -202,3 +202,10 @@ Pre-run validation:
 | broad `ruff check` on the four touched Python files | failed on 14 existing style/executable-bit findings; no undefined-name or task-mapping failure |
 | `ruff check --select F401,F811,F821,F822,F823` on the four touched Python files | passed |
 | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental'` | 2 passed; full humanities and forced incremental-progress contracts covered |
+| `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental or paged_continuous'` | 3 passed; paged/continuous defaults also covered |
+
+The first Q07 attempt used continuous refill but reported `paged_attention=False`; it was manually interrupted during
+GSM8K at the user's request so live scoring and paged attention could be enabled. No partial score was published or
+used. The restarted commands require `paged|flash_attention_2`; paged mode is also the Evalution/GPTQModel switch for
+native continuous batching. A run is valid only if startup reports `backend=continuous_batching`,
+`paged_attention=True`, and `generation submission mode=continuous_refill`.
