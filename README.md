@@ -2,9 +2,9 @@
 <div align=center>
 <img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=500>
 </div>
-<h1 align="center">GPT-QModel</h1>
+<h1 align="center">GPT-QModel ⚡</h1>
 </p>
-<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for NVIDIA CUDA, AMD ROCm, Huawei Ascend NPU, Intel XPU, and Intel/AMD/Apple CPUs via HF, vLLM, and SGLang.</p>
+<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for NVIDIA CUDA, AMD ROCm, Huawei Ascend NPU, Intel XPU, and Intel/AMD/Apple CPUs via HF, vLLM, and SGLang. ✨</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -19,15 +19,16 @@
     </a>
 </p>
 
-## Latest News
+## Latest News 🗞️🚀
 
-* 08/24/2026 7.4.0 `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
-* 08/20/2026 7.4.0 `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2 model support
-* 08/19/2026 7.4.0 `main`: ✨ Added `muse_glimmer` / Muse Glimmer multimodal model support.
-* 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl` / Mage-VL model support
-* 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
-* 08/04/2026 7.4.0 `main`: ✨ Added `axk2` (A.X-K2) model support
-* 08/04/2026 7.4.0 `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
+* 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
+* 08/24/2026 7.4.0-dev `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
+* 08/20/2026 7.4.0-dev `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2 model support
+* 08/19/2026 7.4.0-dev `main`: ✨ Added `muse_glimmer` / Muse Glimmer multimodal model support.
+* 08/19/2026 7.4.0-dev `main`: ✨ Added `mage_vl` / Mage-VL model support
+* 08/18/2026 7.4.0-dev `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
+* 08/04/2026 7.4.0-dev `main`: ✨ Added `axk2` (A.X-K2) model support
+* 08/04/2026 7.4.0-dev `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
 * 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `Intern S2 PreView` model support
 * 07/23/2026 7.3.1 `main`: ✨ Added `inkling_mm_model` model support
@@ -171,30 +172,30 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ [0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the open-source ML community for their contributions!
 </details>
 
-## Special Notes: 
+## Special Notes 📝
 
 PrismAI/Bonsai inference sample script. GPT-QModel loads Prism/Bonsai GGUF checkpoints through its native GGUF loading path and internal GGUF runtime shim. No external `gguf` PyPI package is required.
 
 ```py
-• from gptqmodel import GPTQModel
+from gptqmodel import GPTQModel
 
-  model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
-  # or: model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf", profile="low_memory")
+model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
+# or: model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf", profile="low_memory")
 
-  tokens = model.generate(
-      "Who wrote Romeo and Juliet?",
-      max_new_tokens=128,
-  )[0]
+tokens = model.generate(
+    "Who wrote Romeo and Juliet?",
+    max_new_tokens=128,
+)[0]
 
-  print(model.tokenizer.decode(tokens, skip_special_tokens=True))
-  ```
+print(model.tokenizer.decode(tokens, skip_special_tokens=True))
+```
 
-## What is GPT-QModel?
+## What is GPT-QModel? 🤔
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, GAR and FOEM, with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR and FOEM, with more quantization methods and enhancements planned. 
 
-## Quantization Support
+## Quantization Support 🛠️
 
 GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
@@ -215,7 +216,7 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 
 `GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
 
-### Quant Method / Format / Backend Matrix
+### Quant Method / Format / Backend Matrix 📋
 
 Canonical backend names are shown below. Method-specific aliases are only accepted where explicitly implemented by that quant method.
 
@@ -234,7 +235,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
-## Features
+## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
@@ -251,7 +252,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
 * 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 
-## Who's Using GPT-QModel?
+## Who's Using GPT-QModel? 🌐
 
 Selected public references where teams or companies explicitly mention GPT-QModel in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
 
@@ -261,12 +262,12 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 * <img src="https://cdn.simpleicons.org/alibabacloud/FF6A00" alt="Alibaba Cloud logo" height="14"> Alibaba Cloud
 
 
-## Quality: GPTQ 4bit can match native BF16:
+## Quality: GPTQ 4bit can match native BF16 🏆
 🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
-## Model Support  
+## Model Support 🤖
 
 | Model                         |   |                                 |  |                            |  |                                 |  |                        |   |
 |-------------------------------|---|---------------------------------|--|----------------------------|--|---------------------------------|--|------------------------|---|
@@ -293,7 +294,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
-## Platform and HW Support 
+## Platform and HW Support 🖥️
 
 GPT-QModel is validated on Linux, macOS, and Windows 11:
 
@@ -311,9 +312,9 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
 
 
-## Install
+## Install 💾
 
-### PIP/UV 
+### PIP/UV 💿
 
 ```bash
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas.
@@ -324,7 +325,7 @@ uv pip install -v gptqmodel
 
 The package depends on `ninja` for first-use JIT kernel compilation.
 
-### Install from source
+### Install from source 🛠️
 
 ```bash
 # clone repo
@@ -339,7 +340,7 @@ apt install python3-dev
 pip install -v .
 ```
 
-### Inference
+### Inference 🔮
 Three-line API to use `GPT-QModel` for GPTQ model inference:
 
 ```py
@@ -355,7 +356,7 @@ To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFa
 export GPTQMODEL_USE_MODELSCOPE=True
 ```
 
-### FP32 accumulation toggle
+### FP32 accumulation toggle 🔢
 
 Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to reduce numerical drift during fused quantized matmul. This setting defaults to `True` because accuracy is prioritized over speed.
 
@@ -367,7 +368,7 @@ export GPTQMODEL_FP32_ACCUM=1
 export GPTQMODEL_FP32_ACCUM=0
 ```
 
-### JIT kernel cache and multi-process quantization
+### JIT kernel cache and multi-process quantization ⚙️
 
 JIT-compiled kernels are cached at `~/.cache/gptqmodel/torch_extensions` by default. Multiple processes on one host may safely share the cache: builds are serialized with a cross-process file lock that the OS releases automatically if a process dies.
 
@@ -386,13 +387,13 @@ Notes:
 * It mainly affects some fused AWQ and ParoQuant CUDA/Triton kernels. Dense/dequantize fallback paths are mostly unaffected.
 * `1` is recommended for regression testing and quality-sensitive evaluation. `0` may be useful when chasing a small latency win and the quality tradeoff is acceptable.
 
-### OpenAI API compatible endpoint
+### OpenAI API compatible endpoint 🌐
 ```py
 # load model using above inference guide first
 model.serve(host="0.0.0.0",port="12345")
 ```
 
-### Quantization
+### Quantization 🔧
 Basic example of using `GPT-QModel` to quantize an LLM model:
 
 ```py
@@ -418,13 +419,13 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
-#### Other Quantization Formats
+#### Other Quantization Formats 📦
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
-##### Preprocessors
+##### Preprocessors 🧹
 
 `preprocessors=[...]` adds optional module-weight preparation steps before quantization or repacking. They are available on `GPTQConfig`, `AWQConfig`, `ParoConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, and `BitsAndBytesConfig`.
 
@@ -527,7 +528,7 @@ model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V
 model.save(quant_path)
 ```
 
-#### MoE Quantization
+#### MoE Quantization 🧩
 
 Some MoE (mixture of experts) models have extremely uneven/biased routing (distribution of tokens) to the `experts` causing some expert modules to receive close-to-zero activated tokens, thus failing to complete calibration-based quantization (GPTQ/AWQ).
 To better quantize these heavily biased `MoE` routed modules, GPT-QModel exposes 3 controls:
@@ -541,7 +542,7 @@ There are various `FailSafeStrategy` options, along with `SmoothMethod` options,
 
 `FailSafe` can be combined with `ExpertsRoutingOverride`. There is no single best way to quantize MoE, and we recommend users to test all three methods.
 
-### Quantized Inference
+### Quantized Inference 🔍
 ```py
 # test post-quant inference
 model = GPTQModel.load(quant_path)
@@ -549,7 +550,7 @@ result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
 ```
 
-### EoRA Accuracy Recovery: Enhanced Post-Quant Error Recovery via Lora
+### EoRA Accuracy Recovery: Enhanced Post-Quant Error Recovery via Lora 🎯
 
 GPT-QModel supports EoRA, a LoRA method developed by Nvidia that can further improve the accuracy of the quantized model.
 ```py
@@ -585,13 +586,13 @@ print(f"Result: {result}")
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
-### How to Add Support for a New Model
+### How to Add Support for a New Model 🛠️
 
 Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
 
-### Pair with Evaluation for post-quantization LLM Benchmarks
+### Pair with Evaluation for post-quantization LLM Benchmarks 📊
 
-GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 150+ of the world's most widely used benchmark suites.
+GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 153 of the world's most widely used benchmark suites.
 We highly recommend using Evalution to measure post-quant accuracy recovery after quantization instead of relying on narrow regression-only language-model metrics.
 
 ```
@@ -616,7 +617,7 @@ run = (
 print(run.to_dict()["tests"][0]["metrics"])
 
 ```
-### Dynamic Quantization (Per Module QuantizeConfig Override)
+### Dynamic Quantization (Per Module QuantizeConfig Override) ⚙️
 
 `QuantizeConfig.dynamic` is a dynamic control that allows specific matching `modules` to be skipped for quantization (negative matching)
 or have a unique `[bits, group_size, sym, desc_act, mse, pack_dtype]` property override per matching `module` vs base `QuantizeConfig` (positive match with override). 
@@ -643,7 +644,7 @@ dynamic = {
 
 ```
 
-### Group Aware Reordering (GAR)
+### Group Aware Reordering (GAR) 🔄
 
 Group Aware Reordering (GAR) is an enhanced activation reordering scheme developed by Intel to improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
 
@@ -656,9 +657,9 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ```
 
 
-### Experimental Features
+### Experimental Features 🧪
 
-#### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)
+#### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
 
 Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 ```py
@@ -668,14 +669,14 @@ Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
 ```
 
-#### Using FOEM
+#### Using FOEM 🧮
 
 FOEM (First-order error matters) adds first-order error compensation for GPTQ-style quantization. Enable FOEM by setting `foem = FOEMConfig(...)`.
 ```py
 # FOEM default hyperparameters are alpha=0.0 and beta=0.2
 quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
 ```
-### Migrating from AutoGPTQ and AutoAWQ:
+### Migrating from AutoGPTQ and AutoAWQ 🔄
 
 GPT-QModel has fully supplanted AutoGPTQ and AutoAWQ for HF Transformers/Optimum/Peft integration. Model inference has drop-in support with zero changes. 
 
@@ -685,7 +686,7 @@ For model quantization, there are some config changes for AutoAWQ:
 
 Models quantized by GPT-QModel are inference compatible with HF Transformers (minus `dynamic`), vLLM, and SGLang. 
 
-## Attributions:
+## Attributions 📚
 
 * GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
 * AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
@@ -698,7 +699,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 
-## Citations:
+## Citations 📖
 
 ```bibtex
 # GPT-QModel
@@ -820,9 +821,9 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 ```
 
-## Quick Notes
+## Quick Notes 🗒️
 
-### Limit log level
+### Limit log level 🔇
 
 `GPT-QModel` uses a shared `LogBar` logger. Set the level once near process startup:
 
@@ -832,7 +833,7 @@ from logbar import LogBar
 LogBar.shared().setLevel("WARNING")  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 ```
 
-### Apply Triton nogil patch early in multi-package scripts
+### Apply Triton nogil patch early in multi-package scripts 🩹
 
 If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, and `sglang`), apply the patch at the very top before other Triton-related imports:
 
@@ -843,6 +844,6 @@ from gptqmodel import TritonPatch
 TritonPatch.apply()
 ```
 
-## License
+## License 📜
 
 GPT-QModel is licensed under the Apache-2.0 license. The optional Swordfish kernel sources vendored under `gptqmodel_ext/swordfish/` are licensed under the AGPL-3.0-or-later license and are only compiled/linked at runtime via JIT. A copy of the Swordfish license is included in `gptqmodel_ext/swordfish/licenses/LICENSE` and `licenses/SWORDFISH`.
