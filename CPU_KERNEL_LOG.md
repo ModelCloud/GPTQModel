@@ -753,7 +753,7 @@ discrete outputs plus a numerical tolerance on cost instead.
   24,27,28,42-45,54-55,65,90,94,96,104,113-114,118,123,135,139,143,150,156,161,164,169,172-173,175-176,179,183.
   Affinity was asserted once immediately before each timed series; N=256 direct proved `{24},{27},{28},{42}`.
   Raw matrices are `/home/ubuntu/work/qvq-findings/gemv_smalln_before.csv` and `gemv_smalln_after.csv`; full tables
-  and test baselines are in `RESULTS.md`.
+  and test baselines are in `docs/kernels/qvq_segmented_viterbi_cpu_results.md`.
 ## 2026-08-24 direct packed GEMV production dispatch and dense-cache deletion
 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 32 logical cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
@@ -864,6 +864,18 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AM
 - **MEASURED:** the previously documented exact-discrete-equivalence contract is false and has been withdrawn.
   Cost checks now use a matrix-calibrated, non-universal `atol=1.25e-5, rtol=0`; discrete checks remain exact.
 - **MEASURED by inspection:** this defect record contains no timing or speed claim.
+- **RESOLVED 2026-08-25 -- follow-up, record above retained as history.** The V=2 half of this
+  defect was root-caused and fixed; see the `qvq_viterbi_cpu_opt`: V=2 emission accumulation order
+  entry at the end of this log. **MEASURED:** the cause was the V=2 arm of `emission_avx512`
+  opening its 16-lane body with `_mm512_mul_ps(v1, t1v)`, which pre-rounds one product instead of
+  accumulating from zero in coordinate order; both lanes now accumulate from zero, verified by
+  objdump on cold builds. On a 24-configuration matrix on this host, discrete state mismatches
+  against `qvq_cpu_viterbi` went 1 -> 0 and non-bit-identical squared error went 14 -> 2, with the
+  2 residual cases both at V=4 and numerically unchanged. `test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence`
+  XPASSed after the fix and its `xfail` marker was removed. **STILL OPEN from this record:** the V=4
+  squared-error deltas, and the fact that discrete agreement is measured on one host and one
+  compiler rather than guaranteed -- the opt kernel is still two-sweep where production is fused.
+  The matrix-calibrated `atol=1.25e-5, rtol=0` cost tolerance was deliberately NOT tightened.
 
 ## 2026-08-24 segmented banked G-only Viterbi recurrence
 
@@ -908,7 +920,7 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
   enabled because pristine t15 overflows combined bank/prefix int16 backpointers and emits negative states. T16
   unconstrained two-bank cases retain the pristine recurrence and measure 0.98-1.09x with exact outputs and costs.
 - **MEASURED:** every timing cell used 3 warmups and 15 samples and reports median, minimum, and max-minus-min spread
-  in `RESULTS.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
+  in `docs/kernels/qvq_segmented_viterbi_cpu_results.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
   placements recorded above; runs were exclusive and `OMP_PLACES=cores` was never used.
 ## 2026-08-24 — METHODOLOGY CORRECTION: `uptime` load average is not a valid idle check on this host
 
@@ -1216,3 +1228,192 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4 `znver
 - **MEASURED gates, before and after:** `test_qvq.py` stayed at 661 passed/248 skipped;
   `test_qvq_v2b2_p32.py` plus `test_qvq_viterbi_cpu_opt.py` stayed at 138 passed/12 skipped/1 xfailed; lifecycle stayed
   at the same two pre-existing `damp_percent` failures with 29 passed/2 skipped; `git diff --check` passed.
+## 2026-08-24 -- `qvq_viterbi_cpu_opt`: V=2 emission accumulation order + zero-step guard
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/CD/IFMA/VBMI (Zen 4,
+          no AMX; hostname says `zen5-cpu-6` but the silicon is `znver4`) |
+          32 logical cores visible to the cgroup, torch default thread pool |
+          torch 2.13.0+cpu | gcc 15.2.0 | host zen5-cpu-6
+
+Base commit: `ecf7081ee08a2beed93597b9508d98ab5b000025`.
+This entry contains no timing or speedup claim; the only durations quoted are
+compile wall-times recorded to prove the builds were cold.
+
+### What changed
+
+`gptqmodel_ext/qvq/qvq_viterbi_cpu_opt.cpp` only:
+
+1. `emission_avx512`, V=2 arm: the 16-lane body and the scalar prologue/tail both
+   now accumulate from zero in coordinate order (`c0` then `c1`). The body
+   previously opened with `_mm512_mul_ps(v1, t1v)`, which pre-rounds one product
+   and leaves the corresponding choice in the scalar lanes to the compiler's
+   contraction of `target[0]*c0[s] + target[1]*c1[s]`. The V=4 arm is untouched.
+2. `TORCH_CHECK(step_count > 0, "qvq_viterbi_cpu_opt: step_count must be positive")`
+   at the op boundary, matching the guard merged into `qvq_viterbi_cpu.cpp:238`.
+
+### Disassembly, cold builds, `emission_avx512` V=2 arm
+
+Distinct initially-empty `GPTQMODEL_QVQ_CPU_BUILD_ROOT` per source tree,
+`CCACHE_DISABLE=1`; the compiler reported 25 s in every case, so no cached `.so`
+answered. Before: fingerprint `e5e4b2c3cc01eb89` (29.557 s wall / 104.970 cgroup
+CPU-seconds for build plus a one-call smoke script). After: fingerprint
+`26360bb60ffda61f` (40.647 s wall / 289.220 cgroup CPU-seconds for build plus the
+full gate-2 suite). Two further cold roots were used along the way: an
+instrumented probe build, and `dc333810a37215fa` for the pre-comment revision of
+this same fix, whose V=2 schedule is identical to the final one.
+
+Register mapping, established from the function prologue and stable across the
+whole body: `rsi = codebook_t = c0`, `rbx = codebook_t + state_count = c1`,
+`xmm8/zmm5 = target[0]`, `xmm6/zmm4 = target[1]`.
+
+```text
+BEFORE -- V=2 scalar prologue/tail            BEFORE -- V=2 16-lane body
+740: vmulss      xmm2,xmm6,[rbx+rax*4]        804: vmulps      zmm0,zmm4,[rbx+rax*4]
+     # round(t1*c1)                                # round(t1*c1)
+74a: vfmadd231ss xmm2,xmm8,[rsi+rax*4]        812: vfmadd231ps zmm0,zmm5,[rsi+rax*4]
+     # += t0*c0, fused                             # += t0*c0, fused
+
+AFTER -- V=2 scalar prologue/tail             AFTER -- V=2 16-lane body
+73e: vxorps      xmm9,xmm9,xmm9               7ba: vxorps      xmm2,xmm2,xmm2
+74c: vfmadd132ss xmm2,xmm9,[rsi+rax*4]        7e2: vfmadd132ps zmm0,zmm2,[rsi+rax*4]
+     # t0*c0 + 0                                   # t0*c0 + 0
+757: vfmadd231ss xmm2,xmm6,[rbx+rax*4]        7f0: vfmadd231ps zmm0,zmm4,[rbx+rax*4]
+     # += t1*c1, fused                             # += t1*c1, fused
+```
+
+Both lanes now emit the identical ordered accumulation from zero, and the
+schedule matches `fused_g_argmin_avx512` / `fused_candidate_scalar` in
+`qvq_viterbi_cpu.cpp`. The V=4 arm was verified untouched by extracting the 125
+floating-point instructions in `[0x5b, 0x608)` from both objects and diffing them:
+identical. Outside that range only branch displacements move, because the V=2 arm
+got 16 bytes shorter.
+
+### Correction to the incoming cross-review (MEASURED)
+
+The review that prompted this work read offsets `0x740`/`0x804` as evidence that
+the scalar lane pre-rounded coordinate 0 while the vector lane pre-rounded
+coordinate 1. That attribution is wrong: `rbx` is a single register holding `c1`
+throughout the function, so **both** pre-fix V=2 lanes pre-rounded the *same*
+product, `t1*c1`. The vector mapping is confirmed independently by source
+correspondence -- `_mm512_mul_ps(v1, t1v)` is exactly `vmulps zmm0,zmm4,[rbx]`.
+
+Applying the same corrected mapping to the V=4 arm inverts the review's other
+conclusion: pre-fix V=4 *does* pre-round opposite products (vector rounds
+`t0*c0` into zero at `0x2ca`; scalar rounds `t1*c1` at `0x220`). V=4 was declared
+out of scope for this change and is left untouched -- see the reachability note
+below for why it is not urgent, and treat it as an open item for the owner.
+
+### Reachability of the scalar prologue/tail (MEASURED, instrumented build)
+
+A throwaway instrumented build (atomic counters on all four scalar loops in
+`emission_avx512`, reported from a static destructor) recorded:
+
+```text
+PROBE v2_prologue=0 v2_tail=0 v4_prologue=0 v4_tail=0
+```
+
+after (a) the entire `tests/test_qvq_viterbi_cpu_opt.py` suite and (b) the
+16/24/32-thread `state_count=65536, transition_bits=7` config, V=2 and V=4.
+
+Root cause: `_opt` partitions sweep B as `chunks_per_batch = (state_count+4095)/4096`
+with `chunk_states = ceil(state_count / chunks_per_batch)`. That is a function of
+`state_count` alone -- not of the thread count -- and the op requires `state_count`
+to be a power of two >= 16, so every `[begin, end)` is 16-aligned with a
+16-multiple length. The scalar prologue/tail is therefore dead code for every
+input the op accepts. This is why the thread-invariance test below cannot fail
+pre-fix, and why the residual V=4 asymmetry is not currently reachable either.
+
+### Discrete impact (MEASURED, 24 configs)
+
+`qvq_cpu_viterbi_opt` vs `qvq_cpu_viterbi`, exact state comparison, V in {2,4} x
+`state_count` in {1024, 4096, 65536} x `transition_bits` in {5,7,8,12,16} x
+(batch,steps) in {(8,16), (128,32)}, 16 threads:
+
+```text
+before: 24 configs, 1 with a discrete mismatch
+        (V=2, state_count=65536, transition_bits=16, batch=128, steps=32
+         -> 2 of 4096 state entries differ)
+after:  24 configs, 0 with a discrete mismatch
+```
+
+Squared error over the same 24 configurations, exact `torch.equal`:
+
+```text
+before: 14 of 24 configs not bit-identical; worst relative delta 1.450e-3
+        (V=2, state_count=65536, transition_bits=16, batch=128, steps=32).
+        All 12 V=2 configs were non-bit-identical.
+after:   2 of 24 configs not bit-identical; worst relative delta 7.373e-6.
+        Both are V=4, transition_bits=16, and their values are numerically
+        UNCHANGED by the fix (2.822e-6 and 7.373e-6 before and after).
+        All 12 V=2 configs are now bit-identical.
+```
+
+So this is **not** a latent-only change: it removes a measured discrete
+divergence and a measured squared-error divergence across every V=2
+configuration tested. All 24 V=4 configs are identical before and after on
+states, and the two V=4 squared-error deltas are bit-for-bit the same before and
+after -- a second, numeric confirmation that the V=4 arm was not disturbed. The
+residual V=4 deltas are attributed (INFERRED) to the structural two-sweep versus
+fused difference, not to the V=4 rounding asymmetry, which the probe showed is
+unreachable dead code.
+
+The pre-existing `xfail` on
+`test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence` covers exactly the
+one config that diverged. After the fix it XPASSes, so **the marker was removed**
+-- deliberately and recorded here, not silently -- and the test now asserts
+agreement. Caveat: this is one host and one compiler. `_opt` still differs from
+the production kernel structurally (two-sweep emission-then-add vs fused), so the
+owner should confirm the agreement on their CI before relying on it.
+
+**Follow-up completed in this same PR (2026-08-25):** the `qvq_cpu_viterbi_opt`
+docstring in `gptqmodel/utils/qvq_cpu.py` had continued to advertise the
+now-fixed divergence and has been rewritten to state what is now true, keeping
+its MEASURED/INFERRED labels and scoping every number to this host and this
+24-configuration matrix. A dated `RESOLVED` follow-up was appended to the
+2026-08-24 defect record earlier in this log; that record itself was retained.
+Verified by grep that no other in-repo text still advertises the divergence: the
+removed `xfail` reason string is gone, and `qvq_viterbi_cpu_opt.cpp` carries no
+such comment. Two historical entries still describe it in the past tense and
+were deliberately left alone as history -- in particular the V=4 audit-correction
+entry, which is under third-vendor adjudication.
+
+### Zero-step guard (MEASURED)
+
+Pre-fix, the documented reproducer reached
+`states_ptr[b * step_count + step_count - 1] = end_state;` with `step_count == 0`
+and wrote at index -1:
+
+```text
+$ PYTHONPATH=. python -c "...qvq_cpu_viterbi_opt(torch.empty((1,0,2)), torch.zeros((16,2)), 2)"
+Segmentation fault; exit status 139
+```
+
+The new `test_qvq_viterbi_opt_rejects_empty_steps`, run pre-fix in a subprocess,
+takes the interpreter down with it -- `pytest` itself exits **139**. Post-fix the
+op raises `RuntimeError: qvq_viterbi_cpu_opt: step_count must be positive` and the
+test passes. The banked/segmented operator already guards `step_count > 0` at
+`qvq_viterbi_banked_cpu.cpp:260` and `:697-699`; it was confirmed and not touched.
+
+### Gates (MEASURED, before and after, same host)
+
+```text
+                                          before                    after
+tests/test_qvq.py                         661 passed, 248 skipped   661 passed, 248 skipped
+tests/test_qvq_v2b2_p32.py +              138 passed, 12 skipped,   141 passed, 12 skipped
+  tests/test_qvq_viterbi_cpu_opt.py         1 xfailed
+tests/test_qvq_lifecycle.py               2 failed, 29 passed,      2 failed, 29 passed,
+                                            2 skipped                 2 skipped
+```
+
+Two baseline deviations from the brief this work was handed, both measured:
+
+- `test_qvq.py` is 661 passed on `ecf7081e`, not the 660 the brief quotes; `main`
+  moved (PR #35) between the brief and this branch.
+- `test_qvq_lifecycle.py` has **2 pre-existing failures on `ecf7081e`**, not
+  `30 passed, 2 skipped`:
+  `test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quantizer[1]`
+  and `[1.5]`, both `assert 0.1 == 0.0001` on `damp_percent`. Identical before and
+  after this change, unrelated to the Viterbi kernels, and presumably owned by the
+  in-flight `fix/qvq-explicit-rounding-rate-damping` workstream.
+
+Gate 2 gains 3: the two new tests, plus the de-xfailed divergence test.
