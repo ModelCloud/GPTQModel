@@ -36,7 +36,6 @@ from .qvq_yaqa import (
     YAQA_PAPER_MINIMUM_SEQUENCES,
 )
 
-
 log = setup_logger()
 
 
@@ -6210,10 +6209,11 @@ class QVQConfig(BaseQuantizeConfig):
             return
 
         del valid_bit_widths, checkpoint_format
-        unsupported = set(layer_dict) - {"bits"}
+        unsupported = set(layer_dict) - {"bits", "yaqa_regularization"}
         if unsupported:
             raise ValueError(
-                f"QVQConfig: layer `{layer_name}` only supports a `bits` override; got {sorted(unsupported)}."
+                f"QVQConfig: layer `{layer_name}` only supports `bits` and `yaqa_regularization` overrides; "
+                f"got {sorted(unsupported)}."
             )
         if "bits" in layer_dict:
             layer_bits = _normalize_quant_bits(layer_dict["bits"], format_value=FORMAT.QVQ)
@@ -6238,6 +6238,18 @@ class QVQConfig(BaseQuantizeConfig):
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32` only supports W1 through W3.5."
                 )
             layer_dict["bits"] = layer_bits
+        if "yaqa_regularization" in layer_dict:
+            value = layer_dict["yaqa_regularization"]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+            ):
+                raise ValueError(
+                    f"QVQConfig: layer `{layer_name}` `yaqa_regularization` must be finite and nonnegative."
+                )
+            layer_dict["yaqa_regularization"] = float(value)
 
     def __post_init__(self):
         requested_group_size = self.group_size
