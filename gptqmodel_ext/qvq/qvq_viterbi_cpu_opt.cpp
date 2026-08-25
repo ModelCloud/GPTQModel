@@ -170,17 +170,25 @@ static void emission_avx512(
     const __m512 t0v = _mm512_set1_ps(target[0]);
     const __m512 t1v = _mm512_set1_ps(target[1]);
     int64_t s = begin;
+    // Both lanes below accumulate from zero in coordinate order (c0 then c1).
+    // A leading `_mm512_mul_ps` pre-rounds one product and leaves the choice of
+    // which one to the compiler's contraction of the scalar expression, so the
+    // 16-lane body and the scalar prologue/tail can end up rounding different
+    // coordinates.  Chunk alignment decides which states take which lane, so
+    // that desynchronisation can flip exact Viterbi winners.  Mirrors the fix
+    // in `qvq_viterbi_cpu.cpp` and the V=4 vector body below.
     for (; s < end && (s & 15); ++s) {
-      float dot = target[0] * c0[s] + target[1] * c1[s];
+      float dot = 0.0f;
+      dot += target[0] * c0[s];
+      dot += target[1] * c1[s];
       float dist = target_norm + codebook_norm[s] - 2.0f * dot;
       if (dist < 0.0f) dist = 0.0f;
       out[s] = dist * weight;
     }
     for (; s + 16 <= end; s += 16) {
-      __m512 v0 = _mm512_loadu_ps(c0 + s);
-      __m512 v1 = _mm512_loadu_ps(c1 + s);
-      __m512 dot = _mm512_mul_ps(v1, t1v);
-      dot = _mm512_fmadd_ps(v0, t0v, dot);
+      __m512 dot = _mm512_setzero_ps();
+      dot = _mm512_fmadd_ps(_mm512_loadu_ps(c0 + s), t0v, dot);
+      dot = _mm512_fmadd_ps(_mm512_loadu_ps(c1 + s), t1v, dot);
       __m512 cn = _mm512_loadu_ps(codebook_norm + s);
       __m512 dist = _mm512_fnmadd_ps(dot, two, _mm512_add_ps(tnv, cn));
       dist = _mm512_max_ps(dist, zero);
@@ -190,7 +198,9 @@ static void emission_avx512(
       _mm512_storeu_ps(out + s, dist);
     }
     for (; s < end; ++s) {
-      float dot = target[0] * c0[s] + target[1] * c1[s];
+      float dot = 0.0f;
+      dot += target[0] * c0[s];
+      dot += target[1] * c1[s];
       float dist = target_norm + codebook_norm[s] - 2.0f * dot;
       if (dist < 0.0f) dist = 0.0f;
       out[s] = dist * weight;
@@ -409,6 +419,7 @@ std::tuple<torch::Tensor, torch::Tensor> qvq_viterbi_cpu_opt_impl(
   int64_t codebook_v = codebook.size(1);
   TORCH_CHECK(vector_size == codebook_v, "qvq_viterbi_cpu_opt: vector size mismatch");
   TORCH_CHECK(vector_size == 2 || vector_size == 4, "qvq_viterbi_cpu_opt: only V=2 or 4 supported");
+  TORCH_CHECK(step_count > 0, "qvq_viterbi_cpu_opt: step_count must be positive");
   TORCH_CHECK(state_count > 0 && (state_count & (state_count - 1)) == 0,
               "qvq_viterbi_cpu_opt: state_count must be power of two");
 

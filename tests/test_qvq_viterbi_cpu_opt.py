@@ -10,6 +10,7 @@ import torch
 
 import gptqmodel.quantization.qvq as qvq_module
 import gptqmodel.utils.qvq_cpu as qvq_cpu_module
+from gptqmodel.quantization.qvq import pack_trellis_states
 from gptqmodel.utils.qvq_cpu import (
     qvq_cpu_supported,
     qvq_cpu_viterbi,
@@ -202,13 +203,17 @@ def test_qvq_viterbi_opt_repeated_calls_are_deterministic():
         assert torch.equal(first[1], repeat[1])
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="Known qvq_cpu_viterbi_opt discrete divergence from qvq_cpu_viterbi at V=2, transition_bits=16, "
-    "steps=32, batch=128; see the 2026-08-24 opt-in Viterbi discrete-divergence defect record in "
-    "CPU_KERNEL_LOG.md",
-)
 def test_qvq_viterbi_opt_known_v2_rate8_large_batch_divergence():
+    """Previously xfail: the documented `_opt` discrete divergence from
+    `qvq_cpu_viterbi` at V=2, transition_bits=16, steps=32, batch=128.
+
+    The xfail marker was REMOVED (not silently) when `emission_avx512`'s V=2 arm
+    was changed to accumulate from zero in coordinate order, matching the merged
+    `qvq_viterbi_cpu.cpp` schedule.  Before that change this case mismatched on
+    2 of 4096 state entries on the reference host; after it, 0.  See the
+    2026-08-24 entry in CPU_KERNEL_LOG.md.
+    """
+
     vector_size = 2
     steps = 32
     generator = torch.Generator().manual_seed(2026082400 + 100 * vector_size + steps)
@@ -279,3 +284,50 @@ def test_qvq_viterbi_opt_tied_end_state_picks_lowest_index():
     torch.testing.assert_close(opt_se, base_se, atol=1.25e-5, rtol=0)
     assert base_states[0, -1].item() == 18554
     assert opt_states[0, -1].item() == 18554
+
+
+def test_qvq_viterbi_opt_v2_is_thread_count_invariant():
+    """`_opt` V=2 must not depend on how `at::parallel_for` splits the work.
+
+    Same config as the merged `test_native_viterbi_v2_is_thread_count_invariant`:
+    `state_count = 65536`, `transition_bits = 7`, so `suffix_count = 512`.  In the
+    production kernel the 24-thread split yields `divup(512, 24) == 22` suffix
+    columns per chunk, i.e. `chunk % 16 != 0`, which drives the trailing columns
+    through the scalar remainder.  `_opt` partitions sweep B on `state_count`
+    instead, so this asserts invariance across the same thread counts for the
+    opt operator's own partitioning.
+    """
+
+    generator = torch.Generator().manual_seed(149)
+    codebook = torch.randn((1 << 16, 2), generator=generator, dtype=torch.float32)
+    sequences = torch.randn((128, 128, 2), generator=generator, dtype=torch.float32)[101:102].contiguous()
+    overlap = torch.randint(0, 512, (128,), generator=generator, dtype=torch.int64)[101:102].contiguous()
+    original_threads = torch.get_num_threads()
+
+    def run(thread_count):
+        torch.set_num_threads(thread_count)
+        if torch.get_num_threads() != thread_count:
+            # Without this the test would pass vacuously on a runtime that
+            # clamps the request, comparing three identical 16-thread runs.
+            pytest.skip(f"cannot set torch thread count to {thread_count}")
+        states, squared_error = qvq_cpu_viterbi_opt(
+            sequences, codebook, transition_bits=7, overlap=overlap
+        )
+        return states, pack_trellis_states(states, bits=3.5), squared_error
+
+    try:
+        outputs = {threads: run(threads) for threads in (16, 24, 32)}
+    finally:
+        torch.set_num_threads(original_threads)
+
+    reference = outputs[16]
+    for threads, candidate in outputs.items():
+        for expected, actual in zip(reference, candidate):
+            assert torch.equal(expected, actual), f"thread count {threads} diverged"
+
+
+def test_qvq_viterbi_opt_rejects_empty_steps():
+    sequences = torch.empty((1, 0, 2), dtype=torch.float32)
+    codebook = torch.zeros((16, 2), dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="step_count must be positive"):
+        qvq_cpu_viterbi_opt(sequences, codebook, 2)

@@ -363,12 +363,30 @@ def qvq_cpu_viterbi_opt(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Opt-in, benchmark-only fused AVX-512 CPU Viterbi implementation.
 
-    MEASURED: production does not dispatch to this function. It has a known
-    discrete divergence from :func:`qvq_cpu_viterbi` and the eager oracle for
-    V=2, transition widths 7-8, and large batches. INFERRED from the measured
-    near ties and the implementation schedule: its emission-then-add FP32
-    schedule can select a different path. MEASURED: its squared error remains
-    numerically close in the standardized matrix, but is not bit-identical.
+    MEASURED: production does not dispatch to this function.
+
+    MEASURED on this host only (AMD EPYC 9V33X, gcc 15.2.0, torch 2.13.0+cpu),
+    against :func:`qvq_cpu_viterbi` over a 24-configuration matrix -- V in
+    {2, 4} x state_count in {1024, 4096, 65536} x transition_bits in
+    {5, 7, 8, 12, 16} x (batch, steps) in {(8, 16), (128, 32)}:
+
+    * States are exactly equal in all 24 configurations. The V=2 discrete
+      divergence this docstring previously documented was root-caused to the
+      emission accumulation order in ``emission_avx512`` and fixed; on the same
+      matrix before that fix, 1 configuration diverged.
+    * Squared error is bit-identical in all 12 V=2 configurations -- it was
+      non-bit-identical in all 12 before the fix -- and is NOT bit-identical in
+      2 of the 12 V=4 configurations, both at transition_bits=16, where the
+      largest relative delta is 7.4e-6. Those two V=4 values are unchanged by
+      the fix.
+
+    INFERRED, not measured across compilers, hosts, or inputs beyond that
+    matrix: the agreement above is not a universal bit-exactness guarantee and
+    is not a contract. This kernel still computes emission and the transition
+    add in two separate sweeps where :func:`qvq_cpu_viterbi` fuses them, so its
+    FP32 schedule remains structurally different and can still round
+    differently; the residual V=4 squared-error deltas are that difference
+    showing through.
 
     Args:
         sequences: [batch, steps, V] float tensor on CPU.
