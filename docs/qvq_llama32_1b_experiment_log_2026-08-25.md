@@ -292,6 +292,11 @@ D300 rollout is queued on GPU4 behind the mixed-rate diagnostic; the queue and
 completion marker are recorded in
 `docs/experiments/2026-08-25-llama32-w2-aime2526.json`.
 
+The mixed-rate checkpoint has now completed quantization at
+`/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e`. Its
+canonical D300 rollout is running on GPU4, followed automatically by GSM8K
+Platinum; no metric is promoted until both reports are published.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
