@@ -255,3 +255,23 @@ continuous refill, and `paged|flash_attention_2`: W2.5 reached `acc,num=
 and the corresponding W3 path. Four completed W2 sweep arms are now undergoing
 the same canonical D300 development check; their reports will be appended when
 the 300-prompt runs finish.
+
+### Reproducibility ledger
+
+The machine-readable record for this AIME arm is
+`docs/experiments/2026-08-25-llama32-w2-aime2526.json`.  The concurrent W2
+regularization/seed sweep arms, each using the same 302,193-token YAQA mix and
+ordinary rows 0--127, are recorded here with their live D300 report paths:
+
+| Arm | Checkpoint | D300 report | Status |
+| --- | --- | --- | --- |
+| reg .0025 | `/root/qvq-results/llama32-1b-w2-reg0025-yaqa302k-main-a12ce4e3` | `/root/qvq-results/llama32-1b-w2-reg0025-yaqa302k-main-a12ce4e3-div300-dev-v1.json` | rollout running |
+| reg .005 | `/root/qvq-results/llama32-1b-w2-reg005-yaqa302k-main-a12ce4e3` | `/root/qvq-results/llama32-1b-w2-reg005-yaqa302k-main-a12ce4e3-div300-dev-v1.json` | rollout running |
+| reg .0125 | `/root/qvq-results/llama32-1b-w2-reg0125-yaqa302k-main-a12ce4e3` | `/root/qvq-results/llama32-1b-w2-reg0125-yaqa302k-main-a12ce4e3-div300-dev-v1.json` | rollout running |
+| reg .020 | `/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3` | `/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3-div300-dev-v1.json` | rollout running |
+| seed 1 | `/root/qvq-results/llama32-1b-w2-seed1-yaqa302k-main-a12ce4e3` | `/root/qvq-results/llama32-1b-w2-seed1-yaqa302k-main-a12ce4e3-div300-dev-v1.json` | rollout running |
+| fixed-block LDLQ reg .005 | `/root/qvq-results/llama32-1b-w2-fixedreg005-yaqa302k-main-a12ce4e3` | — | quantized; D300 pending |
+
+All rows above use the pinned D300 manifest and must be compared using its
+aligned token top-1, exact trajectory survival, and mean first divergence; no
+NM-only proxy result is substituted.
