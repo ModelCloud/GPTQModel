@@ -339,6 +339,11 @@ at `.10` and `.30` are queued on GPUs2/3. Their complete configs, checkpoints,
 canonical D300 reports, and GSM8K reports are tracked in
 `docs/experiments/2026-08-25-llama32-w2-full-reference-reg-sweep.json`.
 
+The full-reference reg .020 arm has completed D300 at `14.0313%` top-1,
+`4/300` exact trajectories, mean first divergence `4.1467`; it is below the
+302k-row reg .020 result (18.7813%) and is not a promotion candidate. Its
+GSM8K Platinum run is still completing.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
