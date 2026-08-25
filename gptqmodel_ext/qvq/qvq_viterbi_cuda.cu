@@ -206,6 +206,72 @@ __global__ void qvq_half2_codebook_norm_pack_kernel(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Octet table build kernel: one entry per 8 consecutive states.
+// Each entry stores {min_norm, -2*sqrt_ru(max_norm)} for an octet of states.
+// ---------------------------------------------------------------------------
+__global__ void qvq_octet_table_build_kernel(
+    const half* __restrict__ codebook,
+    float2* __restrict__ octet_table,
+    int bank_count) {
+  const int total_octets = (kStateCount >> 3) * bank_count;
+  for (int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+       index < total_octets;
+       index += static_cast<int>(gridDim.x * blockDim.x)) {
+    const half2* codes = reinterpret_cast<const half2*>(codebook) + index * 8;
+    float min_norm = CUDART_INF_F;
+    float max_norm = -CUDART_INF_F;
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) {
+      const float2 code2 = __half22float2(codes[r]);
+      float norm = 0.0f;
+      norm = __fadd_rn(norm, __fmul_rn(code2.x, code2.x));
+      norm = __fadd_rn(norm, __fmul_rn(code2.y, code2.y));
+      min_norm = fminf(min_norm, norm);
+      max_norm = fmaxf(max_norm, norm);
+    }
+    const float neg_p = __fmul_rd(-2.0f, __fsqrt_ru(max_norm));
+    octet_table[index] = make_float2(min_norm, neg_p);
+  }
+}
+
+struct OctetTableCacheEntry {
+  at::Tensor codebook;
+  at::Tensor table;
+};
+std::mutex g_octet_table_cache_mutex;
+std::vector<OctetTableCacheEntry> g_octet_table_cache;
+
+at::Tensor cached_octet_tables(const at::Tensor& codebooks, cudaStream_t stream) {
+  {
+    std::lock_guard<std::mutex> lock(g_octet_table_cache_mutex);
+    for (const auto& entry : g_octet_table_cache) {
+      if (entry.codebook.is_same(codebooks)) {
+        return entry.table;
+      }
+    }
+  }
+  const int bank_count = static_cast<int>(codebooks.size(0));
+  auto table = at::empty(
+      {bank_count * (kStateCount >> 3), 2},
+      codebooks.options().dtype(at::kFloat));
+  constexpr int kBlock = 256;
+  const int total = bank_count * (kStateCount >> 3);
+  const int blocks = std::min((total + kBlock - 1) / kBlock, 4096);
+  qvq_octet_table_build_kernel<<<blocks, kBlock, 0, stream>>>(
+      reinterpret_cast<const half*>(codebooks.const_data_ptr()),
+      reinterpret_cast<float2*>(table.mutable_data_ptr<float>()), bank_count);
+  C10_CUDA_CHECK(cudaGetLastError());
+  {
+    std::lock_guard<std::mutex> lock(g_octet_table_cache_mutex);
+    if (g_octet_table_cache.size() >= 8) {
+      g_octet_table_cache.erase(g_octet_table_cache.begin());
+    }
+    g_octet_table_cache.push_back(OctetTableCacheEntry{codebooks, table});
+  }
+  return table;
+}
+
 template <int VectorSize, typename CodebookScalar>
 __global__ void qvq_memoryless_kernel(
     const float* __restrict__ sequences,
@@ -1561,6 +1627,213 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Octet-grouped exact bound-pruned segmented grid recurrence.
+//
+// Same exact recurrence, candidate order, and lower_pair tie contract as
+// qvq_v2_segment_grid_kernel, with one branch per eight candidates instead of
+// one per candidate: each thread owns one octet of suffix columns (eight
+// consecutive x values), and for every prefix h the eight states h*S+x..x+7
+// share one predecessor entry (state >> shift is constant within an octet for
+// shift >= 3). The precomputed per-octet table {min_norm, -2*sqrt_ru(max_norm)}
+// yields a provable round-down lower bound of every candidate value in the
+// octet; an octet whose bound exceeds ALL eight running bests cannot win or
+// tie anywhere, so skipping it preserves bit-identical selections. The
+// survivor body evaluates all eight candidates with the reference arithmetic
+// in straight-line code.
+// ---------------------------------------------------------------------------
+template <int Shift, int BankCount, int SegmentSteps>
+__global__ __launch_bounds__((1 << (16 - Shift)) >> 3) void qvq_v2_segment_grid_octet_kernel(
+    const float* __restrict__ sequences,
+    const uint64_t* __restrict__ packed_records,
+    const float2* __restrict__ octet_tables,
+    const float* __restrict__ g_input_all,
+    float* __restrict__ g_output_all,
+    uint8_t* __restrict__ backpointers,
+    uint8_t* __restrict__ boundary_banks,
+    int batch,
+    int segment_index) {
+  constexpr int shift = Shift;
+  constexpr int suffix_count = 1 << (16 - shift);
+  constexpr int prefix_count = 1 << shift;
+  constexpr int bank_count = BankCount;
+  constexpr int segment_steps = SegmentSteps;
+  constexpr int segment_count = 128 / segment_steps;
+  constexpr int bank_suffix_count = bank_count * suffix_count;
+  constexpr int threads = suffix_count >> 3;
+  constexpr int octets_per_bank = kStateCount >> 3;
+
+  const int flat_block = static_cast<int>(blockIdx.x);
+  const int sequence = flat_block / bank_count;
+  const int bank = flat_block - sequence * bank_count;
+  if (sequence >= batch) {
+    return;
+  }
+  const int thread = static_cast<int>(threadIdx.x);
+  const int x_base = thread << 3;
+  const int first_step = segment_index * segment_steps;
+  const int end_step = min(first_step + segment_steps, 127);
+  const int64_t sequence_base = static_cast<int64_t>(sequence) * 128 * 2;
+  const int64_t g_base =
+      static_cast<int64_t>(sequence) * bank_suffix_count + bank * suffix_count;
+  const int64_t pointer_base =
+      static_cast<int64_t>(sequence) * 127 * bank_suffix_count +
+      static_cast<int64_t>(bank) * suffix_count;
+  const int64_t boundary_base =
+      static_cast<int64_t>(sequence) * (segment_count - 1) * suffix_count;
+
+  extern __shared__ float shared_frontiers[];
+  float* g_previous = shared_frontiers;
+  float* g_scratch = shared_frontiers + suffix_count;
+  const uint64_t* bank_records =
+      packed_records + static_cast<int64_t>(bank) * kStateCount;
+  const float2* bank_table =
+      octet_tables + static_cast<int64_t>(bank) * octets_per_bank;
+
+  if (segment_index == 0) {
+    const float* target0 = sequences + sequence_base;
+    const float tx = target0[0];
+    const float ty = target0[1];
+    const float tn = __fadd_rn(__fmul_rn(tx, tx), __fmul_rn(ty, ty));
+    const float rho = __fsqrt_ru(tn);
+    float best[8];
+    int best_h[8];
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) {
+      best[r] = CUDART_INF_F;
+      best_h[r] = 0;
+    }
+    float2 entry = bank_table[x_base >> 3];
+    #pragma unroll
+    for (int h = 0; h < prefix_count; ++h) {
+      const float2 entry_next =
+          h + 1 < prefix_count
+              ? bank_table[(h + 1) * (suffix_count >> 3) + (x_base >> 3)]
+              : entry;
+      const float bound =
+          __fadd_rd(__fadd_rd(tn, entry.x), __fmul_rd(entry.y, rho));
+      float worst = fmaxf(fmaxf(fmaxf(best[0], best[1]), fmaxf(best[2], best[3])),
+                          fmaxf(fmaxf(best[4], best[5]), fmaxf(best[6], best[7])));
+      if (bound <= worst) {
+        #pragma unroll
+        for (int r = 0; r < 8; ++r) {
+          const uint64_t record = bank_records[h * suffix_count + x_base + r];
+          const float nb = __uint_as_float(static_cast<uint32_t>(record >> 32));
+          const uint32_t cb = static_cast<uint32_t>(record);
+          const float2 c2 = __half22float2(*reinterpret_cast<const half2*>(&cb));
+          float dot = 0.0f;
+          dot = __fmaf_rn(tx, c2.x, dot);
+          dot = __fmaf_rn(ty, c2.y, dot);
+          const float distance = __fsub_rn(__fadd_rn(tn, nb), __fmul_rn(2.0f, dot));
+          const float value = fmaxf(distance, 0.0f);
+          if (lower_pair(value, h, best[r], best_h[r])) {
+            best[r] = value;
+            best_h[r] = h;
+          }
+        }
+      }
+      entry = entry_next;
+    }
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) {
+      g_previous[x_base + r] = best[r];
+      backpointers[pointer_base + x_base + r] = static_cast<uint8_t>(best_h[r]);
+    }
+    __syncthreads();
+  } else {
+    const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) {
+      const int x = x_base + r;
+      float best = g_input_all[input_base + x];
+      int best_bank = 0;
+      #pragma unroll
+      for (int previous_bank = 1; previous_bank < bank_count; ++previous_bank) {
+        const float candidate = g_input_all[input_base + previous_bank * suffix_count + x];
+        if (candidate < best) {
+          best = candidate;
+          best_bank = previous_bank;
+        }
+      }
+      g_previous[x] = best;
+      if (bank == 0) {
+        boundary_banks[boundary_base +
+                       static_cast<int64_t>(segment_index - 1) * suffix_count + x] =
+            static_cast<uint8_t>(best_bank);
+      }
+    }
+    __syncthreads();
+  }
+
+  const int recurrence_start = segment_index == 0 ? 1 : first_step;
+  for (int step = recurrence_start; step < end_step; ++step) {
+    const float* t = sequences + sequence_base + static_cast<int64_t>(step) * 2;
+    const float tx = t[0];
+    const float ty = t[1];
+    const float tn = __fadd_rn(__fmul_rn(tx, tx), __fmul_rn(ty, ty));
+    const float rho = __fsqrt_ru(tn);
+    float best[8];
+    int best_h[8];
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) {
+      best[r] = CUDART_INF_F;
+      best_h[r] = 0;
+    }
+    float2 entry = bank_table[x_base >> 3];
+    float gp = g_previous[x_base >> shift];
+    #pragma unroll
+    for (int h = 0; h < prefix_count; ++h) {
+      const int state_octet = h * (suffix_count >> 3) + (x_base >> 3);
+      const float2 entry_next =
+          h + 1 < prefix_count ? bank_table[state_octet + (suffix_count >> 3)] : entry;
+      const int pred_next =
+          h + 1 < prefix_count
+              ? (((h + 1) * suffix_count + x_base) >> shift)
+              : 0;
+      const float bound =
+          __fadd_rd(__fadd_rd(tn, entry.x), __fmul_rd(entry.y, rho));
+      const float bound_full = __fadd_rd(gp, bound);
+      float worst = fmaxf(fmaxf(fmaxf(best[0], best[1]), fmaxf(best[2], best[3])),
+                          fmaxf(fmaxf(best[4], best[5]), fmaxf(best[6], best[7])));
+      if (bound_full <= worst) {
+        #pragma unroll
+        for (int r = 0; r < 8; ++r) {
+          const uint64_t record = bank_records[h * suffix_count + x_base + r];
+          const float nb = __uint_as_float(static_cast<uint32_t>(record >> 32));
+          const uint32_t cb = static_cast<uint32_t>(record);
+          const float2 c2 = __half22float2(*reinterpret_cast<const half2*>(&cb));
+          float dot = 0.0f;
+          dot = __fmaf_rn(tx, c2.x, dot);
+          dot = __fmaf_rn(ty, c2.y, dot);
+          const float distance = __fsub_rn(__fadd_rn(tn, nb), __fmul_rn(2.0f, dot));
+          const float value = fmaxf(distance, 0.0f);
+          const float candidate = __fadd_rn(gp, value);
+          if (lower_pair(candidate, h, best[r], best_h[r])) {
+            best[r] = candidate;
+            best_h[r] = h;
+          }
+        }
+      }
+      entry = entry_next;
+      gp = h + 1 < prefix_count ? g_previous[pred_next] : gp;
+    }
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) {
+      g_scratch[x_base + r] = best[r];
+      backpointers[pointer_base + static_cast<int64_t>(step) * bank_suffix_count + x_base + r] =
+          static_cast<uint8_t>(best_h[r]);
+    }
+    __syncthreads();
+    float* swap = g_previous;
+    g_previous = g_scratch;
+    g_scratch = swap;
+  }
+  #pragma unroll
+  for (int r = 0; r < 8; ++r) {
+    g_output_all[g_base + x_base + r] = g_previous[x_base + r];
+  }
+}
+
 // W2.5 B2-P32 is badly underfilled by the one-CTA-per-bank recurrence: a
 // singleton tile launches only two 1024-thread CTAs on a 124-SM local sm_80
 // device.  This exact cooperative variant partitions the 2048 suffixes into
@@ -2731,6 +3004,43 @@ bool fused_w2_family_grid_supported(const cudaDeviceProp& properties) {
       !fused_w2_family_grid_disabled();
 }
 
+// Segment-loop launcher for the octet-grouped bound-pruned recurrence.
+template <int Shift, int BankCount, int SegmentSteps>
+void launch_qvq_v2_segment_octet_segments(
+    const float* sequences,
+    const uint64_t* packed_records,
+    const float2* octet_tables,
+    float* frontier_a,
+    float* frontier_b,
+    uint8_t* backpointers,
+    uint8_t* boundary_banks,
+    int batch,
+    cudaStream_t stream) {
+  constexpr int suffix_count = 1 << (16 - Shift);
+  constexpr int segments = 128 / SegmentSteps;
+  constexpr int threads = suffix_count >> 3;
+  constexpr size_t shared_bytes = 2 * suffix_count * sizeof(float);
+
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_v2_segment_grid_octet_kernel<Shift, BankCount, SegmentSteps>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(shared_bytes)));
+
+  auto run_segment = [&](int segment_index, const float* input, float* output) {
+    qvq_v2_segment_grid_octet_kernel<Shift, BankCount, SegmentSteps>
+        <<<batch * BankCount, suffix_count >> 3, shared_bytes, stream>>>(
+            sequences, packed_records, octet_tables, input, output,
+            backpointers, boundary_banks, batch, segment_index);
+  };
+
+  run_segment(0, nullptr, frontier_a);
+  for (int segment = 1; segment < segments; ++segment) {
+    const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
+    float* output = segment % 2 == 1 ? frontier_b : frontier_a;
+    run_segment(segment, input, output);
+  }
+}
+
 // Host side of the fused path; called only for the family op with
 // transition_bits == 4, bank_count == 2, segment_steps == 16, fp16 codebooks.
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_fused_w2_family_grid_launch(
@@ -3129,6 +3439,66 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       }                                                                                                 \
     }                                                                                                  \
   } while (0)
+  static const bool octet_grid_disabled = [] {
+    const char* value = std::getenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID");
+    return value != nullptr && value[0] != '0' && value[0] != '\0';
+  }();
+  if (!octet_grid_disabled && !weighted && !constrained && grid_parallel &&
+      !midpoint_only && !cooperative && family_batch == 0 &&
+      codebooks.scalar_type() == at::kHalf &&
+      (transition_bits == 4 || transition_bits == 5 || transition_bits == 6)) {
+    const at::Tensor octet_tables = cached_octet_tables(codebooks, stream);
+    const float2* octet_ptr = reinterpret_cast<const float2*>(octet_tables.const_data_ptr<float>());
+    const uint64_t* packed_ptr =
+        reinterpret_cast<const uint64_t*>(codebook_norm.const_data_ptr<float>());
+#define QVQ_V2_OCTET_RUN(BITS, BANKS, SEGMENT_STEPS)                                             \
+  launch_qvq_v2_segment_octet_segments<BITS, BANKS, SEGMENT_STEPS>(                             \
+      sequences.const_data_ptr<float>(), packed_ptr, octet_ptr,                                  \
+      costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),                      \
+      backpointers.mutable_data_ptr<uint8_t>(),                                                  \
+      boundary_banks.mutable_data_ptr<uint8_t>(), batch, stream)
+#define QVQ_V2_OCTET_FINALIZE(BITS, BANKS, SEGMENT_STEPS)                                        \
+  qvq_v2_segment_grid_finalize_kernel<BITS, BANKS, SEGMENT_STEPS, false, half, uint8_t>          \
+      <<<batch, kThreads, 0, stream>>>(                                                          \
+          sequences.const_data_ptr<float>(),                                                     \
+          reinterpret_cast<const half*>(codebooks.const_data_ptr()),                             \
+          codebook_norm.const_data_ptr<float>(), overlap_ptr, weight_ptr,                        \
+          segments % 2 == 1 ? costs_a.const_data_ptr<float>()                                    \
+                            : costs_b.const_data_ptr<float>(),                                   \
+          backpointers.const_data_ptr<uint8_t>(),                                                \
+          boundary_banks.const_data_ptr<uint8_t>(),                                              \
+          states.mutable_data_ptr<int64_t>(),                                                    \
+          segment_bank_ids.mutable_data_ptr<uint8_t>(),                                          \
+          squared_error.mutable_data_ptr<float>(), batch, /*family_batch=*/0,                    \
+          constrained, weighted)
+    if (transition_bits == 4 && bank_count == 2) {
+      QVQ_V2_OCTET_RUN(4, 2, 16);
+      QVQ_V2_OCTET_FINALIZE(4, 2, 16);
+    } else if (transition_bits == 4) {
+      QVQ_V2_OCTET_RUN(4, 4, 32);
+      QVQ_V2_OCTET_FINALIZE(4, 4, 32);
+    } else if (transition_bits == 5 && bank_count == 2) {
+      QVQ_V2_OCTET_RUN(5, 2, 16);
+      QVQ_V2_OCTET_FINALIZE(5, 2, 16);
+    } else if (transition_bits == 5) {
+      QVQ_V2_OCTET_RUN(5, 4, 32);
+      QVQ_V2_OCTET_FINALIZE(5, 4, 32);
+    } else if (transition_bits == 6 && bank_count == 2) {
+      QVQ_V2_OCTET_RUN(6, 2, 16);
+      QVQ_V2_OCTET_FINALIZE(6, 2, 16);
+    } else {
+      QVQ_V2_OCTET_RUN(6, 4, 32);
+      QVQ_V2_OCTET_FINALIZE(6, 4, 32);
+    }
+#undef QVQ_V2_OCTET_RUN
+#undef QVQ_V2_OCTET_FINALIZE
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    record_norm_cache_use(codebooks, codebook_norm, stream);
+    c10::cuda::CUDACachingAllocator::recordStream(
+        octet_tables.storage().data_ptr(),
+        c10::cuda::getStreamFromExternal(stream, codebooks.get_device()));
+    return {states, squared_error, segment_bank_ids};
+  }
   switch (transition_bits) {
     case 2: QVQ_V2_SEGMENT_DISPATCH(2, uint8_t); break;
     case 3: QVQ_V2_SEGMENT_DISPATCH(3, uint8_t); break;
