@@ -51,14 +51,21 @@ python scripts/qvq_evaluate.py diagnostics \
 ```
 
 Diagnostics preserve full row lengths by default and report token-weighted final KL and teacher-forced Top-1
-agreement. `shared_prefix_300_at_32.top1_agreement` is the llama.cpp-style ``Same top p`` comparison over 32
-positions beginning after a half-context warmup: both models see the same source prefix at every position.
+agreement. The compact JSON name `sp_top1_32_w50` means **Shared-prefix top-1 agreement@32, with 50% context
+warmup**. It is the llama.cpp-style ``Same top p`` comparison over 32 positions beginning halfway through each
+context: both models see the same source prefix at every position.
 `legacy_shared_prefix_first_32` retains the former position-0 measurement solely to interpret historical artifacts;
 it is not the headline because those predictions have almost no conditioning context.
 `divergence_300` separately runs independent fixed-horizon greedy continuations from each held-out prompt. Its
 `trajectory_survival` is the fraction of prompts whose full 32-token trajectories are identical; aligned-token
 agreement after the trajectories split is a secondary diagnostic and is not reported as shared-prefix Top-1.
 `--include-topn` additionally reports legacy Top-5 and Top-10 set overlap.
+
+This distinction also matters when comparing against [Unsloth's Divergence-300 @32](https://unsloth.ai/docs/basics/dynamic-3.0-ggufs#divergence-300-32).
+Unsloth uses 300 unseen task prompts and independently greedy-decodes BF16 and quantized trajectories for 32 tokens. It is conceptually
+closest to this harness's `divergence_300`, not `sp_top1_32_w50`. The Unsloth documentation does not currently
+specify its scalar aggregation precisely enough to claim numerical parity, so results should not be compared until
+the prompts, chat templates, decoding settings, and aggregation rule are identical.
 
 ## Run Evalution tasks
 

@@ -379,12 +379,13 @@ def _diagnostics(args: argparse.Namespace) -> int:
                 divergence_first_sum / divergence_sequences if divergence_sequences else None
             ),
         },
-        "shared_prefix_300_at_32": {
+        "sp_top1_32_w50": {
             "requested_sequences": min(args.divergence_rows, len(dataset)),
             "valid_sequences": shared_prefix_sequences,
             "token_horizon": args.divergence_tokens,
+            "display_name": "Shared-prefix top-1 agreement@32, with 50% context warmup",
             "protocol": "teacher_forced_shared_prefix",
-            "position_policy": "start_at_half_context",
+            "position_policy": "start_at_50_percent_context",
             "top1_agreement": shared_prefix_top1_sum / shared_prefix_sequences if shared_prefix_sequences else None,
             "exact_sequence_agreement": (
                 shared_prefix_exact_sum / shared_prefix_sequences if shared_prefix_sequences else None
