@@ -337,7 +337,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu_l
   }
 
   // Backpointers.
-  const bool use_int16 = transition_bits <= 15;
+  // Boundary backpointers flatten bank * prefix_count + prefix, so size
+  // against the full flattened range rather than transition_bits alone.
+  const bool use_int16 =
+      bank_count * prefix_count - 1 <= std::numeric_limits<int16_t>::max();
   torch::Tensor prefix_backpointers;
   torch::Tensor boundary_backpointers;
   void* prefix_bp_ptr = nullptr;
@@ -701,8 +704,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   // At transition width 16, the suffix frontier has one element. The
   // prefix-heavy G-only recurrence is slower there and can pick different FP32
   // near-tie winners, so retain the pristine recurrence for the unconstrained
-  // two-bank production shape. Transition width 15 cannot use this fallback:
-  // the pristine int16 boundary backpointer overflows for two banks.
+  // two-bank production shape. Transition width 15 also stays on G-only:
+  // fixed-width legacy can still select different FP32 near-tie winners.
   if (transition_bits == 16 && bank_count <= 2 &&
       !(overlap.has_value() && overlap->defined()) &&
       !(entry_states.has_value() && entry_states->defined()) &&
