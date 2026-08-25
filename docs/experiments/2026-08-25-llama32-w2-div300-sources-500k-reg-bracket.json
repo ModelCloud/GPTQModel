@@ -1,0 +1,10 @@
+{
+  "experiment": "llama32-1b-flat-w2-div300-source-shaped-500k-reg-bracket",
+  "git_commit": "41106a47",
+  "calibration": {"dataset": "calibration_div300_sources.parquet", "rows": 993, "tokens": 501692, "sha256": "4052d41f3d9bc456135ebd9930839a7b99d88a23ccef6780f4abfefd77d0b9b0", "d300_overlap": 0},
+  "arms": [
+    {"regularization": 0.01, "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_div300_sources_reg010.json", "gpu": 0, "quant_session": 20309, "checkpoint": "/root/qvq-results/llama32-1b-w2-div300-sources-500k-reg010-main-41106a47", "status": "quantizing"},
+    {"regularization": 0.03, "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_div300_sources_reg030.json", "gpu": 1, "quant_session": 75708, "checkpoint": "/root/qvq-results/llama32-1b-w2-div300-sources-500k-reg030-main-41106a47", "status": "quantizing"}
+  ],
+  "protocol": {"d300_manifest_sha256": "701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2", "d300": "canonical divergence300 @32", "gsm8k": "gsm8k_platinum_cot"}
+}

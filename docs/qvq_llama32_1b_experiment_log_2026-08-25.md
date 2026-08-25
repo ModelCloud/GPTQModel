@@ -392,6 +392,14 @@ D300-source-shaped calibration set, with YAQA regularization `.05` (W2) and
 Platinum evaluation in session `15403`; the complete ledger is
 `docs/experiments/2026-08-25-llama32-w2-div300-sources-500k-mlpdown-w3.json`.
 
+### Queued 500k source-shaped flat-W2 regularization bracket
+
+To continue the flat-W2 target after the `.02` source-shaped arm reached
+`17.0729%`, two disjoint, canonical evaluations are queued using the same
+501,692-token calibration set: YAQA regularization `.01` on GPU0 (session
+`20309`) and `.03` on GPU1 (session `75708`). Their machine-readable ledger is
+`docs/experiments/2026-08-25-llama32-w2-div300-sources-500k-reg-bracket.json`.
+
 The completed-arm machine-readable summary is
 `docs/experiments/2026-08-25-llama32-w2-sweep-a12ce4e3.json`. All use the same
 canonical D300 manifest and protocol; `Divergence-32 top-1` below is the report's
