@@ -92,6 +92,7 @@ development results; the locked Divergence-300 split remains untouched.
 | Layer damping + alignment: exact-prefix survival | 60.3333% | 50.3333% | 38.6667% | **17.0000%** | 3.0000% | 0.6667% |
 | Two-epoch / 64-batch alignment: exact-prefix survival | 64.0000% | 51.0000% | 33.0000% | 14.6667% | 2.6667% | 1.0000% |
 | Uniform `0.10`: exact-prefix survival | 67.3333% | 55.0000% | 42.6667% | 14.6667% | 4.6667% | 1.0000% |
+| Uniform `0.125`: exact-prefix survival | 63.3333% | 50.0000% | 30.3333% | 7.0000% | 2.3333% | 0.6667% |
 | Uniform `0.10` + output alignment: exact-prefix survival | 68.6667% | 56.3333% | **44.3333%** | 14.3333% | 3.6667% | 0.6667% |
 | Uniform `0.10` + 97/3 chat weighting: exact-prefix survival | **71.0000%** | **59.0000%** | 40.0000% | 16.6667% | **5.3333%** | **1.3333%** |
 
@@ -101,6 +102,7 @@ development results; the locked Divergence-300 split remains untouched.
 | Layer damping + output alignment | 15.1667% | 1,456 / 9,600 | 2 / 300 (0.6667%) | 4.5733 |
 | Two-epoch / 64-batch output alignment | 17.0938% | 1,641 / 9,600 | 3 / 300 (1.0000%) | 4.5633 |
 | Uniform `0.10`, no output alignment | **17.8854%** | **1,717 / 9,600** | 3 / 300 (1.0000%) | 4.8533 |
+| Uniform `0.125`, no output alignment | 13.4375% | 1,290 / 9,600 | 2 / 300 (0.6667%) | 3.6233 |
 | Uniform `0.10` + output alignment | 17.2188% | 1,653 / 9,600 | 2 / 300 (0.6667%) | 4.7500 |
 | Uniform `0.20`, no output alignment | 16.3333% | 1,568 / 9,600 | 3 / 300 (1.0000%) | 4.6100 |
 | Uniform `0.10` + 97/3 chat weighting | 15.2604% | 1,465 / 9,600 | **4 / 300 (1.3333%)** | **5.0333** |
@@ -143,6 +145,7 @@ the same pinned development manifest confirms that the layer-specific choice is 
 | Uniform `0.05` | 12.6042% | 1,210 / 9,600 | 2 / 300 (0.6667%) |
 | Layers 0/6/10/12 at `0.10`, all others `0.05` | 13.9896% | 1,343 / 9,600 | 1 / 300 (0.3333%) |
 | Uniform `0.10` | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** |
+| Uniform `0.125` | 13.4375% | 1,290 / 9,600 | 2 / 300 (0.6667%) |
 | Uniform `0.20` | 16.3333% | 1,568 / 9,600 | **3 / 300 (1.0000%)** |
 
 The hybrid gains 133 aligned positions over uniform `0.05`, but uniform `0.10` gains another 374 positions over the
@@ -150,6 +153,12 @@ hybrid and 507 over uniform `0.05`. The old proxy-selected dynamic override is t
 but is not the corrected-metric optimum. Uniform `0.20` then loses 149 positions relative to `0.10`, bracketing the
 best tested damping region instead of supporting still stronger regularization. Exact survival is sparse and does not
 rank these arms consistently, so neither reduction is silently substituted for the aligned-token optimization target.
+
+The follow-up `0.125` midpoint also failed: it matched 1,290 positions, losing 427 to `0.10` and 278 to `0.20`.
+Behavioral fidelity is therefore not a smooth interpolation of the damping scalar at W2; this arm is negative
+evidence, not a reason to average the endpoints. Its per-source aligned-token scores were 12.7500% on LongBench v2,
+11.5625% on MathArena, 11.1250% on non-English Multi-IF, 16.5000% on SWE-bench Verified, and 12.3438% on
+Terminal-Bench 2.1.
 
 ## Teacher-rollout alignment diagnostic
 

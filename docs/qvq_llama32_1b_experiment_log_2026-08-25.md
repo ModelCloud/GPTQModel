@@ -114,7 +114,7 @@ a different column because they are teacher-forced/shared-prefix diagnostics and
 | Q08 | `ecf7081e` lineage | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-align-main-ecf7081e` | 1,653/9,600 = 17.2188% | 2/300 | loses 64 matches to Q07 despite stronger early survival |
 | Q09 | `ecf7081e` lineage | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg020-main-ecf7081e` | 1,568/9,600 = 16.3333% | 3/300 | loses 149 matches to Q07 |
 | Q10 | `d7eae64a` | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-main-d7eae64a` | 1,465/9,600 = 15.2604% | 4/300 | token-1 71%; mean first divergence 5.0333; loses 252 aggregate matches |
-| Q11 | `8ae2db25` | **evaluation running** | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-main-8ae2db25` | pending | pending | quant completed: 112/112 modules, damping .125, 182 sequences, 302,193 samples |
+| Q11 | `8ae2db25` | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-main-8ae2db25` | 1,290/9,600 = 13.4375% | 2/300 | mean first divergence 3.6233; loses 427 matches to Q07 |
 | D01 | `ecf7081e` lineage | diagnostic only | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-only-main-ecf7081e` | not run | not run | rows 428..511: final Top-1 90.5371%; shared-prefix first-32 90.0298% |
 | D02 | `ecf7081e` lineage | diagnostic only | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e` | not run | not run | rows 428..511: final Top-1 83.0951%; shared-prefix first-32 72.6935% |
 | D03 | `ecf7081e` lineage | proxy-only; rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e` | not run | not run | rows 428..511: final Top-1 80.5823%; shared-prefix first-32 70.3125% |
@@ -133,7 +133,7 @@ Corrected D300 report paths, in Q01--Q11 order when available:
 /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-align-div300-dev-v2.json
 /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg020-div300-dev-v2.json
 /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-div300-dev-v2.json
-/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-div300-dev-v2.json  # running
+/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-div300-dev-v2.json
 ```
 
 ## Post-quant alignment experiments
@@ -172,9 +172,11 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | `d7eae64a`, chat token weighting and harness provenance | `pytest -q tests/test_prepare_dataset.py tests/test_qvq_unified_harness.py` | 46 passed |
 | `d7eae64a`, changed Python files | `ruff check ...` and `git diff --check` | passed |
 | `8ae2db25`, Q11 config validation | quantization manifest inspection | 112 quant rows; every module damping `.125`; YAQA 182/182 sequences; 302,193 valid samples; no fallback |
+| `8ae2db25`, Q11 corrected D300 | common corrected rollout command above | report checkpoint and manifest SHA matched; 300/300 prompts completed; 1,290/9,600 aligned; 2/300 exact |
 
 ## Current decision
 
-The completed flat-W2 leader is Q07 at 17.8854%, 683 aligned positions short of the 25% development target. Q11 is
-the only running arm. Nothing in this ledger claims the target has been reached, and no proxy-only arm is eligible for
-promotion.
+The completed flat-W2 leader remains Q07 at 17.8854%, 683 aligned positions short of the 25% development target.
+Q11's midpoint damping was not intermediate in behavioral fidelity: it lost 427 matches to Q07 and 278 matches to
+uniform `.20`. There is no running arm. Nothing in this ledger claims the target has been reached, and no proxy-only
+arm is eligible for promotion.
