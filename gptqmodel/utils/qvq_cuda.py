@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 
 from ..quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
+from ..quantization.qvq_pruning import VITERBI_PRUNING_AUTO
 from ..quantization.qvq_rates import (
     QVQ_BITS,
     normalize_qvq_rate,
@@ -482,8 +483,14 @@ def qvq_cuda_viterbi_v2_segment_banked(
     segment_steps: int,
     overlap: torch.Tensor | None = None,
     step_weights: torch.Tensor | None = None,
+    pruning_policy: int = VITERBI_PRUNING_AUTO,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run the exact coupled V2 bank recurrence for P32 or P64 selectors."""
+    """Run the exact coupled V2 bank recurrence for P32 or P64 selectors.
+
+    ``pruning_policy`` is the native exact survivor-pruning policy code from
+    :mod:`gptqmodel.quantization.qvq_pruning`. It defaults to ``auto``, so
+    direct low-level callers keep the historical automatic behavior.
+    """
 
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
@@ -540,6 +547,7 @@ def qvq_cuda_viterbi_v2_segment_banked(
         segment_steps,
         overlap,
         step_weights,
+        int(pruning_policy),
     )
 
 

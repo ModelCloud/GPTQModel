@@ -13,6 +13,7 @@ import torch
 import gptqmodel.utils.qvq_cuda as qvq_cuda_utils
 from gptqmodel.looper.qvq_output_alignment import _FixedTrellisAlignmentLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear, QVQReferenceLinear
+from gptqmodel.quantization.config import ViterbiPruningConfig
 from gptqmodel.quantization.qvq import (
     QVQQuantizationTelemetry,
     _batched_v2_banked_viterbi_quantize,
@@ -46,6 +47,7 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_codebook_v2_bank,
     pgc16_codebook_v4,
 )
+from gptqmodel.quantization.qvq_pruning import viterbi_pruning_dispatch_code
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 from gptqmodel.quantization.rotation.hadamard_utils import (
@@ -55,15 +57,15 @@ from gptqmodel.quantization.rotation.hadamard_utils import (
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
-    _qvq_cuda_yaqa_feedback_op,
-    _qvq_cuda_yaqa_feedback_update_op,
     _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
+    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
-    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
     _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
+    _qvq_cuda_yaqa_feedback_op,
+    _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_supported,
@@ -71,6 +73,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_viterbi_banked,
     qvq_cuda_viterbi_v2_segment_banked,
 )
+
 
 pytestmark = [
     pytest.mark.cuda,
@@ -3600,7 +3603,9 @@ def test_qvq_cuda_norm_rank_grid_leaves_unsupported_configs_on_reference_path(
 def test_qvq_cuda_norm_rank_grid_disable_env_parser(value, enabled):
     """Only unset, empty, and exact ``0`` keep the eligible path enabled.
 
-    The flag is read once per process, so each spelling runs in a subprocess.
+    Each spelling runs in a subprocess so the cases stay independent; the
+    variable itself is re-read on every dispatch (see the same-process
+    mutation tests below).
     """
 
     import os
@@ -3862,3 +3867,301 @@ def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(bits,
     )
     expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+
+
+# ---------------------------------------------------------------------------
+# ViterbiPruningConfig policy -> CUDA V2 segmented grid dispatch
+# ---------------------------------------------------------------------------
+
+
+def _pruning_code(**kwargs):
+    """Resolve a public `ViterbiPruningConfig` into its native policy code."""
+
+    return viterbi_pruning_dispatch_code(ViterbiPruningConfig(**kwargs))
+
+
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
+@pytest.mark.parametrize("mode", ("auto", "required"))
+def test_qvq_pruning_policy_dispatches_eligible_cells(bits, bank_count, segment_steps, mode):
+    """`auto` and `required` both norm-band dispatch every eligible cell and
+    stay bit-exact against the unmodified reference."""
+
+    sequences, codebooks = _norm_rank_case(20260901 + bank_count, 9, bits, bank_count)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    # The oracle explicitly forces the pristine baseline recurrence with
+    # `mode="off"`; a default-`auto` reference could itself take the norm-band
+    # path and the comparison would prove nothing.
+    reference = qvq_cuda_viterbi_v2_segment_banked(
+        sequences, codebooks, bits, segment_steps, None, None, _pruning_code(mode="off")
+    )
+    before = _norm_rank_dispatch_count()
+    actual = op(
+        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode=mode)
+    )
+    assert _norm_rank_dispatch_count() == before + 1
+    assert all(torch.equal(e, a) for e, a in zip(reference, actual))
+
+
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 4, 32)))
+def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(bits, bank_count, segment_steps):
+    """`off` deterministically suppresses norm-band dispatch on a cell that
+    `auto` would have dispatched, and the baseline result is identical."""
+
+    sequences, codebooks = _norm_rank_case(20260902 + bank_count, 9, bits, bank_count)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+
+    before = _norm_rank_dispatch_count()
+    dispatched = op(
+        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode="auto")
+    )
+    assert _norm_rank_dispatch_count() == before + 1
+
+    before = _norm_rank_dispatch_count()
+    suppressed = op(
+        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode="off")
+    )
+    assert _norm_rank_dispatch_count() == before
+    assert all(torch.equal(d, s) for d, s in zip(dispatched, suppressed))
+
+
+# W1.5/W2/W3.5 stay outside the benchmark-supported W2.5/W3 set, and fp32
+# codebooks, constrained calls, and weighted calls keep the exact baseline.
+_UNSUPPORTED_PRUNING_CELLS = (
+    pytest.param(2.0, 2, 16, False, False, torch.float16, "transition_bits=4", id="w2-rate"),
+    pytest.param(1.5, 2, 16, False, False, torch.float16, "transition_bits=3", id="w1p5-rate"),
+    pytest.param(3.5, 2, 16, False, False, torch.float16, "transition_bits=7", id="w3p5-rate"),
+    pytest.param(3.0, 2, 16, False, False, torch.float32, "float16 codebooks", id="fp32-codebooks"),
+    pytest.param(2.5, 2, 16, True, False, torch.float16, "constrained", id="constrained"),
+    pytest.param(3.0, 4, 32, False, True, torch.float16, "weighted", id="weighted"),
+)
+
+
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps,constrained,weighted,codebook_dtype,expected",
+    _UNSUPPORTED_PRUNING_CELLS,
+)
+def test_qvq_pruning_policy_auto_leaves_unsupported_cells_on_baseline(
+    bits, bank_count, segment_steps, constrained, weighted, codebook_dtype, expected
+):
+    """`auto` with the default `baseline` fallback keeps every unsupported cell
+    on the unmodified reference recurrence."""
+
+    sequences, codebooks = _norm_rank_case(20260903, 5, bits, bank_count, codebook_dtype=codebook_dtype)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    generator = torch.Generator(device="cuda").manual_seed(20260904)
+    overlap = (
+        torch.randint(0, 1 << (16 - transition_bits), (5,), generator=generator, device="cuda", dtype=torch.int64)
+        if constrained
+        else None
+    )
+    step_weights = (
+        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+    before = _norm_rank_dispatch_count()
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, _pruning_code(mode="auto")
+    )
+    assert _norm_rank_dispatch_count() == before
+    expected_triple = qvq_cuda_viterbi_v2_segment_banked(
+        sequences, codebooks, bits, segment_steps, overlap, step_weights
+    )
+    assert all(torch.equal(e, a) for e, a in zip(expected_triple, actual))
+
+
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps,constrained,weighted,codebook_dtype,expected",
+    _UNSUPPORTED_PRUNING_CELLS,
+)
+@pytest.mark.parametrize(
+    "policy",
+    (
+        pytest.param({"mode": "required"}, id="required"),
+        pytest.param({"mode": "auto", "fallback": "error"}, id="auto-fallback-error"),
+    ),
+)
+def test_qvq_pruning_policy_rejects_unsupported_cells_before_silent_fallback(
+    bits, bank_count, segment_steps, constrained, weighted, codebook_dtype, expected, policy
+):
+    """`required` and `auto`+`fallback="error"` must raise, naming the reason,
+    instead of silently using the baseline recurrence."""
+
+    sequences, codebooks = _norm_rank_case(20260905, 5, bits, bank_count, codebook_dtype=codebook_dtype)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    generator = torch.Generator(device="cuda").manual_seed(20260906)
+    overlap = (
+        torch.randint(0, 1 << (16 - transition_bits), (5,), generator=generator, device="cuda", dtype=torch.int64)
+        if constrained
+        else None
+    )
+    step_weights = (
+        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+    before = _norm_rank_dispatch_count()
+    with pytest.raises(RuntimeError) as excinfo:
+        _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+            sequences, codebooks, transition_bits, segment_steps, overlap, step_weights,
+            _pruning_code(**policy),
+        )
+    assert "cannot use it" in str(excinfo.value)
+    assert expected in str(excinfo.value)
+    assert _norm_rank_dispatch_count() == before
+
+
+def test_qvq_pruning_policy_code_is_validated_natively():
+    sequences, codebooks = _norm_rank_case(20260907, 4, 3.0, 2)
+    with pytest.raises(RuntimeError, match="pruning policy must be 0"):
+        _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(sequences, codebooks, 6, 16, None, None, 4)
+
+
+def test_qvq_pruning_policy_default_argument_matches_auto():
+    """Direct low-level callers that omit the argument keep today's behavior."""
+
+    sequences, codebooks = _norm_rank_case(20260908, 6, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    before = _norm_rank_dispatch_count()
+    legacy = op(sequences, codebooks, 6, 16, None, None)
+    assert _norm_rank_dispatch_count() == before + 1
+    explicit = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="auto"))
+    assert all(torch.equal(a, b) for a, b in zip(legacy, explicit))
+
+
+@pytest.mark.parametrize(
+    "mode,fallback,env,expected",
+    (
+        # `auto` keeps honoring the deprecated A/B escape hatch in both directions.
+        ("auto", "baseline", None, "dispatched"),
+        ("auto", "baseline", "1", "suppressed"),
+        # Explicit configuration is authoritative: `off`/`required` ignore it.
+        ("off", "baseline", None, "suppressed"),
+        ("off", "baseline", "1", "suppressed"),
+        ("required", "baseline", None, "dispatched"),
+        ("required", "baseline", "1", "dispatched"),
+        # Under `auto` the variable makes the call unable to prune, which
+        # `fallback="error"` reports rather than silently falling back.
+        ("auto", "error", None, "dispatched"),
+        ("auto", "error", "1", "raised"),
+    ),
+)
+def test_qvq_pruning_config_precedence_over_the_legacy_env_variable(mode, fallback, env, expected):
+    """`GPTQMODEL_QVQ_DISABLE_OCTET_GRID` is a deprecated A/B escape honored
+    only under `mode="auto"`. Each combination runs in its own subprocess so
+    the eight cases cannot contaminate one another's environment; the
+    same-process mutation contract is covered separately below."""
+
+    import os
+    import subprocess
+    import sys
+
+    script = r"""
+import torch
+from gptqmodel.quantization.config import ViterbiPruningConfig
+from gptqmodel.quantization.qvq_pruning import viterbi_pruning_dispatch_code
+from gptqmodel.quantization.qvq_codecs.pgc16 import pgc16_codebook_v2_bank
+from gptqmodel.utils.qvq_cuda import (
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
+    qvq_cuda_viterbi_v2_segment_banked,
+)
+op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+generator = torch.Generator(device="cuda").manual_seed(20260909)
+sequences = torch.randn((7, 128, 2), generator=generator, device="cuda")
+codebooks = torch.stack(
+    (pgc16_codebook_v2_bank(0, bits=3.0, dtype=torch.float32),
+     pgc16_codebook_v2_bank(1, bits=3.0, dtype=torch.float32))
+).to(device="cuda", dtype=torch.float16)
+code = viterbi_pruning_dispatch_code(ViterbiPruningConfig(mode=MODE, fallback=FALLBACK))
+before = int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count())
+if EXPECTED == "raised":
+    try:
+        op(sequences, codebooks, 6, 16, None, None, code)
+    except RuntimeError as error:
+        assert "GPTQMODEL_QVQ_DISABLE_OCTET_GRID" in str(error), str(error)
+    else:
+        raise AssertionError("expected a refusal")
+    assert int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) == before
+else:
+    actual = op(sequences, codebooks, 6, 16, None, None, code)
+    delta = int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) - before
+    assert delta == (1 if EXPECTED == "dispatched" else 0), delta
+    expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 3.0, 16, None, None)
+    for index in range(3):
+        assert torch.equal(expected[index], actual[index]), index
+print("PRECEDENCE-OK")
+"""
+    env_vars = dict(os.environ)
+    if env is None:
+        env_vars.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+    else:
+        env_vars["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = env
+    script = f"MODE = {mode!r}\nFALLBACK = {fallback!r}\nEXPECTED = {expected!r}\n" + script
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env_vars, capture_output=True, text=True, timeout=900, check=False
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "PRECEDENCE-OK" in result.stdout
+
+
+def test_qvq_pruning_legacy_env_mutation_is_observed_same_process():
+    """B2: `GPTQMODEL_QVQ_DISABLE_OCTET_GRID` must be re-read on every
+    dispatch. Mutating it between calls in one process deterministically
+    toggles the `auto` fast path, and clearing it restores dispatch — no
+    stale cached process-global policy."""
+
+    import os
+
+    sequences, codebooks = _norm_rank_case(20260913, 7, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    auto = _pruning_code(mode="auto")
+    saved = os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+    try:
+        before = _norm_rank_dispatch_count()
+        first = op(sequences, codebooks, 6, 16, None, None, auto)
+        assert _norm_rank_dispatch_count() == before + 1
+
+        os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = "1"
+        before = _norm_rank_dispatch_count()
+        disabled = op(sequences, codebooks, 6, 16, None, None, auto)
+        assert _norm_rank_dispatch_count() == before
+
+        # `auto` + `fallback="error"` must also observe the fresh value.
+        with pytest.raises(RuntimeError, match="GPTQMODEL_QVQ_DISABLE_OCTET_GRID"):
+            op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="auto", fallback="error"))
+
+        del os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"]
+        before = _norm_rank_dispatch_count()
+        restored = op(sequences, codebooks, 6, 16, None, None, auto)
+        assert _norm_rank_dispatch_count() == before + 1
+
+        assert all(torch.equal(a, b) for a, b in zip(first, disabled))
+        assert all(torch.equal(a, b) for a, b in zip(first, restored))
+    finally:
+        if saved is None:
+            os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+        else:
+            os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = saved
+
+
+def test_qvq_pruning_required_ignores_env_mutation_same_process():
+    """`required` ignores the deprecated variable even when it is set mid
+    process: dispatch continues and results stay bit-identical."""
+
+    import os
+
+    # W3 batch 6: the W2.5 small-batch cooperative kernel is not band
+    # eligible, so use the W3 grid cell that `required` can always serve.
+    sequences, codebooks = _norm_rank_case(20260914, 6, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    saved = os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+    try:
+        reference = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required"))
+        os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = "1"
+        before = _norm_rank_dispatch_count()
+        actual = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required"))
+        assert _norm_rank_dispatch_count() == before + 1
+        assert all(torch.equal(a, b) for a, b in zip(reference, actual))
+    finally:
+        if saved is None:
+            os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+        else:
+            os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = saved

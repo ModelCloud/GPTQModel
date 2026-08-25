@@ -7,6 +7,12 @@ environment variable; `enabled` is the W2.5/W3 norm-rank path. All values below
 are measured values copied from the PR #45 run, not values derived from the
 rounded speedups.
 
+The user-facing policy that selects this path per run is documented separately
+in [`qvq_viterbi_pruning_config.md`](qvq_viterbi_pruning_config.md); the
+deprecated `GPTQMODEL_QVQ_DISABLE_OCTET_GRID` variable used for the `pristine`
+column above remains an A/B escape hatch under `viterbi_pruning.mode="auto"`
+only.
+
 ## Environment
 
 - NVIDIA PG506-230, compute capability 8.0 (`sm_80`), 124 SMs
