@@ -308,6 +308,11 @@ best flat-W2 reg .020 arm (18.7813%), so the extra down-projection bit did not
 improve this AIME mix; the full GSM8K Platinum task is now running for the
 real-world comparison.
 
+The mixed-rate checkpoint's GSM8K Platinum task completed all 1,209 examples
+with zero invalid generations at `acc,num=0.2779`. This is logged alongside
+its canonical D300 result in
+`docs/experiments/2026-08-25-llama32-w2-mlpdown-w3.json`.
+
 The flat-W2 AIME arm's canonical D300 is complete: `14.9792%` Divergence-32
 top-1, `0/300` exact trajectories, mean first divergence `3.9967`. It is below
 the 18.7813% reg .020 baseline, so AIME-only augmentation is rejected for

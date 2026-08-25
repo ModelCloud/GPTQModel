@@ -10,6 +10,6 @@
   "queue": {"gpu": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c", "quant_session": 3320, "eval_chain_session": 45752, "status": "d300_running_then_gsm8k", "completion_marker": "qvq_quantize_run.json"},
   "evaluations": {
     "d300": {"status": "complete", "report": "/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e-div300-dev-v1.json", "report_sha256": "fd31c39d59f1a761031a72fda28d95786a5c8a9017f7eabeaef40c37b17c316b", "divergence32_top1": 0.16739583333333333, "exact_trajectory": 0.006666666666666667, "exact_prompts": 2, "mean_first_divergence": 4.826666666666667},
-    "gsm8k_platinum": {"status": "running_after_d300", "report": "/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e-gsm8k-platinum-v1.json"}
+    "gsm8k_platinum": {"status": "complete", "report": "/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e-gsm8k-platinum-v1.json", "acc_num": 0.2779}
   }
 }
