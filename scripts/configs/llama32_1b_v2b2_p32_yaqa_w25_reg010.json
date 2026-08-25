@@ -5,6 +5,12 @@
   "rounding": "yaqa",
   "device": "cuda:0",
   "offload_to_disk": false,
+  "viterbi_pruning": {
+    "mode": "auto",
+    "strategy": "norm_band",
+    "exact": true,
+    "fallback": "baseline"
+  },
   "yaqa": {
     "seed": 0,
     "regularization": 0.05,
