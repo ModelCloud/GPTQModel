@@ -344,6 +344,11 @@ The full-reference reg .020 arm has completed D300 at `14.0313%` top-1,
 302k-row reg .020 result (18.7813%) and is not a promotion candidate. Its
 GSM8K Platinum run is still completing.
 
+The bracket's reg `.10` and `.30` arms completed D300 at `14.5417%` and
+`17.7292%`, respectively; neither exceeds the 18.7813% completed W2 leader.
+Their GSM8K Platinum tasks are running, and all report hashes/configuration
+details are in the sweep JSON ledger.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is
