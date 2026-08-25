@@ -319,6 +319,10 @@ the 18.7813% reg .020 baseline, so AIME-only augmentation is rejected for
 promotion; its full report and hash are in
 `docs/experiments/2026-08-25-llama32-w2-aime2526.json`.
 
+The same flat-W2 AIME checkpoint scored `acc,num=0.1737` on all 1,209 GSM8K
+Platinum examples with zero invalid generations. This confirms the AIME-only
+mix is not a useful promotion candidate for either canonical D300 or GSM8K.
+
 ### Full reference YAQA W2 arm (queued)
 
 The original scan deliberately held out a 110-row reference set. It is proven
