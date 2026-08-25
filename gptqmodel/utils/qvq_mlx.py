@@ -353,7 +353,7 @@ def qvq_mlx_pack_symmetric_gram_from_torch_mps(matrix):
     if not matrix.is_contiguous():
         raise ValueError("QVQ symmetric-Gram packing requires a contiguous matrix")
     if not torch.equal(matrix, matrix.T):
-        raise ValueError("QVQ symmetric-Gram packing requires an exactly symmetric matrix")
+        raise ValueError("QVQ symmetric-Gram packing requires a finite and exactly symmetric matrix")
     width = matrix.shape[0]
     packed_count = width * (width + 1) // 2
     with _TORCH_MLX_BRIDGE_LOCK:
