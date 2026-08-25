@@ -1804,15 +1804,29 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AM
 Base: merged PR #49 tree `2a36a047` (`348cb603` on GitHub), tested from an
 initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
 
-- **Item 1 — NOT A DEFECT.** This ruling is from disassembly of the built
+**MEASURED baseline distinction:** the Item-2 sweep compares `2a36a047` with
+`b396dfc2`, while the merge target and gate parent are `4fcf4fbc`. This is
+benign: `git diff 2a36a047 4fcf4fbc -- gptqmodel_ext/qvq` touches only
+`qvq_viterbi_cuda.cu`; the banked CPU kernel is identical.
+
+- **MEASURED, Item 1 — NOT A DEFECT.** This ruling is from disassembly of the built
   `qvq_viterbi_banked_cpu.o`, not source reading. I re-derived the mapping from
   this object's prologue: `rsi` is `c0`, `r14 = rsi + state_count * 4` is `c1`,
   `xmm6`/`xmm4` are `target[0]`/`target[1]`, and `zmm15`/`zmm13` are their
-  vector broadcasts. The vector body at `0x210` and `0x344` emits
-  `vmulps c1*t1` followed by `vfmadd231ps c0*t0 + dot`; the scalar prefix/tail
-  at `0x298` and `0x463` emits the same ordered `vmulss` followed by
-  `vfmadd231ss`. The register mapping is object-local and was not reused from
-  any other build. The header is therefore unchanged.
+  vector broadcasts. The intrinsic V=2 body at `0x344` emits `vmulps c1*t1`
+  followed by `vfmadd231ps c0*t0 + dot`; `0x210` is GCC's auto-vectorization
+  of the scalar-prefix loop, not the intrinsic body. The scalar prefix/tail at
+  `0x298` and `0x463` emits the same ordered `vmulss` followed by `vfmadd231ss`;
+  the 8-wide and 4-wide tails were also checked. For V=2, the leading
+  `_mm512_mul_ps` at `qvq_viterbi_simd.h:68-69` matches the flat scalar
+  expression at `:61` because GCC contracts the first `c0` product into an FMA
+  and leaves the second `c1` product as a plain multiply. This is opposite the
+  accumulator-loop scalar side in `qvq_viterbi_cpu.cpp`
+  (`fused_candidate_scalar`, `:41-44`), which is why that sibling had the
+  defect. **INFERRED:** the audited `emit_distance_avx512_v2` paths therefore
+  agree in this object. `emit_distance_avx512_v4` in the same header was not
+  audited by this PR. The header is unchanged only because no V=2 edit was
+  warranted.
 - **Item 2 — LATENT, NOT OBSERVED IN PRODUCTION.** The override is a test-only
   environment hook and is not set by production. Transition width 16 is also
   rejected by both production call sites. The original PR changed the default
@@ -1822,7 +1836,11 @@ initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
   helper rejects 16-step streams that are not whole 32-edge blocks, and 0
   divergences. The completed cases covered seeds `2, 11, 202, 3033`, bank
   counts `1, 2`, batch sizes `1, 4`, and 32 steps, with minimum duplicate/tie
-  density 99.8046875%. Selected states, segment bank IDs, packed words, and
+  density 99.8046875%. **MEASURED:** `state_count` was held at 65,536 (`L=16`),
+  so `suffix_count == 1` throughout and the G-only suffix-column partition was
+  degenerate. An independent review extended this to `L=17` (`suffix_count 2`)
+  and `L=18` (`suffix_count 4`), 4 seeds each, batch 2, 24 threads, main versus
+  PR, with 0 divergences. Selected states, segment bank IDs, packed words, and
   squared errors were exactly equal in all completed cases. **MEASURED:
   default V=4 t16 output is unchanged by this scoping, 16 configs, 0
   divergences.** The guard is retained, and the source comment records this
@@ -1833,9 +1851,12 @@ initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
   passes on both trees. The dedicated no-environment V=4/t16 default pin also
   passes on both trees as a regression net: it uses 32 steps, bank_count 1,
   99.804688% tie density, and exact selected states, segment bank IDs, and
-  packed words. The bank-count-3 override-scope assertion is the fail-first
-  Item-2 gate.
-- **Item 3 — regression net, not fail-first.** Added exact-equality coverage at
+  packed words. It pins output, not dispatch, and still passes if the
+  `vector_size == 2` guard is reverted. **MEASURED status:** the bank-count-3
+  override-scope assertion passes unmodified against current merge target
+  `4fcf4fbc`; it was fail-first only against a pre-PR-#49 tree, so this PR does
+  not claim to ship a fail-first Item-2 gate.
+- **MEASURED, Item 3 — regression net, not fail-first.** Added exact-equality coverage at
   transition bits 7 (`suffix_count == 512`, genuinely partitioned) and 16
   (`suffix_count == 1` control), across 8/16/24/32 threads. It compares states,
   squared error, segment bank IDs, and packed words with `torch.equal`. The
