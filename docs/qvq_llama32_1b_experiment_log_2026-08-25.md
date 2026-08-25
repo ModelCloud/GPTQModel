@@ -285,3 +285,9 @@ GPU4 as `/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e`;
 canonical D300 and full GSM8K Platinum are queued after the checkpoint. The
 machine-readable record is
 `docs/experiments/2026-08-25-llama32-w2-mlpdown-w3.json`.
+
+The AIME-only flat-W2 checkpoint finished quantization at
+`/root/qvq-results/llama32-1b-w2-aime2526-yaqa-mix-main-1f6c2132`. Its canonical
+D300 rollout is queued on GPU4 behind the mixed-rate diagnostic; the queue and
+completion marker are recorded in
+`docs/experiments/2026-08-25-llama32-w2-aime2526.json`.
