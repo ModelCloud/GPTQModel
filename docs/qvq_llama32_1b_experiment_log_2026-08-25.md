@@ -373,7 +373,11 @@ independent token top-1 at 32 is `17.0729%`, exact 32-token trajectories are
 `5/300 (1.6667%)`, and mean first divergence is `4.9933`. This is below the
 current completed flat-W2 leader (`18.7813%`), so the 500k expansion does not
 meet the 25% target. The chained GSM8K Platinum run is now active; its result
-will be appended to the JSON ledger when complete. D300 report SHA-256 is
+The chained GSM8K Platinum evaluation is complete: `acc,num=0.1191` on
+`1,209` rows, with one invalid output, using Evalution 0.0.14, batch 16,
+continuous batching, and paged attention. Its report SHA-256 is
+`540bbb783ab7f94f5efdd442a8ae0714dca233221f5439fca92a2dcd05e4c2e9`.
+D300 report SHA-256 is
 `9d61f42c894efc894f2ff2530c70a3a59b2c85635a17b6432b1da3eabab9caec`.
 
 ### Completed W2 regularization/seed D300 results

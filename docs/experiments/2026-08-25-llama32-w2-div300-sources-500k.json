@@ -5,7 +5,7 @@
   "config":"scripts/configs/llama32_1b_v2b2_p32_yaqa_div300_sources_reg020.json",
   "calibration":{"dataset":"calibration_div300_sources.parquet","rows":993,"token_target":500000,"tokens":501692,"sha256":"4052d41f3d9bc456135ebd9930839a7b99d88a23ccef6780f4abfefd77d0b9b0","source_counts":{"terminal_bench_2_1":14,"swe_bench_verified":83,"matharena_2025_2026":11,"multi_if_non_english":766,"longbench_v2":119},"d300_overlap":0},
   "checkpoint":"/root/qvq-results/llama32-1b-w2-div300-sources-500k-reg020-main-5544143c",
-  "queue":{"gpu":"GPU-14ab23f1-a785-e9df-bbb5-215547154e3c","quant_session":80159,"eval_chain_session":48835,"status":"gsm8k_running"},
+  "queue":{"gpu":"GPU-14ab23f1-a785-e9df-bbb5-215547154e3c","quant_session":80159,"eval_chain_session":48835,"status":"complete"},
   "d300":{"manifest_sha256":"701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2","report":"/root/qvq-results/llama32-1b-w2-div300-sources-500k-reg020-main-5544143c-div300-dev-v1.json","report_sha256":"9d61f42c894efc894f2ff2530c70a3a59b2c85635a17b6432b1da3eabab9caec","status":"complete","independent_token_top1_agreement_at_32":0.17072916666666665,"exact_prompts_at_32":5,"exact_trajectory_agreement_at_32":0.016666666666666666,"mean_first_divergence_token":4.993333333333333},
-  "gsm8k_platinum":{"report":"/root/qvq-results/llama32-1b-w2-div300-sources-500k-reg020-main-5544143c-gsm8k-platinum-v1.json","status":"queued"}
+  "gsm8k_platinum":{"report":"/root/qvq-results/llama32-1b-w2-div300-sources-500k-reg020-main-5544143c-gsm8k-platinum-v1.json","report_sha256":"540bbb783ab7f94f5efdd442a8ae0714dca233221f5439fca92a2dcd05e4c2e9","status":"complete","acc_num":0.11910669975186104,"invalid":1,"rows":1209,"continuous_batching":true,"paged_attention":true}
 }
