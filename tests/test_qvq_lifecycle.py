@@ -157,6 +157,22 @@ def test_qvq_dynamic_clone_materializes_yaqa_rate_regularization():
     assert overridden.yaqa.regularization == pytest.approx(0.2)
 
 
+def test_qvq_dynamic_clone_can_override_yaqa_regularization_per_module():
+    cfg = QVQConfig(
+        bits=2,
+        rounding="yaqa",
+        yaqa=YaqaConfig(regularization_by_rate=((2.0, 0.05),)),
+        dynamic={"+:model.layers.0.*": {"yaqa_regularization": 0.1}},
+        offload_to_disk=False,
+    )
+
+    overridden = clone_qvq_config_for_module(cfg, "model.layers.0.mlp.down_proj")
+    base = clone_qvq_config_for_module(cfg, "model.layers.1.mlp.down_proj")
+
+    assert overridden.yaqa.regularization == pytest.approx(0.1)
+    assert base.yaqa.regularization == pytest.approx(0.05)
+
+
 def test_qvq_propagated_bank_selection_builds_a_heldout_gate_from_dense_hook():
     root = torch.nn.Module()
     root.proj = torch.nn.Linear(16, 16, bias=False)

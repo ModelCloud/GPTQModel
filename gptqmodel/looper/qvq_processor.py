@@ -68,7 +68,7 @@ log = setup_logger()
 
 
 def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optional[QVQConfig]:
-    """Clone QVQ config, apply the one supported dynamic override, or skip the module."""
+    """Clone QVQ config, apply supported dynamic overrides, or skip the module."""
 
     dynamic_overrides = qcfg.dynamic_get(layer_name=module_full_name)
     if dynamic_overrides is False:
@@ -85,6 +85,9 @@ def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optio
         qcfg_clone.yaqa.regularization = qcfg_clone.yaqa.regularization_for_rate(
             qcfg_clone.bits
         )
+        if dynamic_overrides and "yaqa_regularization" in dynamic_overrides:
+            qcfg_clone.yaqa.regularization = dynamic_overrides["yaqa_regularization"]
+            qcfg_clone.yaqa.__post_init__()
     qcfg_clone.__post_init__()
     return qcfg_clone
 
@@ -509,6 +512,13 @@ class QVQProcessor(LoopProcessor):
         quantization_kwargs = dict(quantization_kwargs)
         quantization_kwargs.pop("yaqa_v2b2_family_mode", None)
         quantization_kwargs.pop("yaqa_v2b2_fixed_family_id", None)
+        # ``quantize_qvq_linear`` finalizes its telemetry collector before it
+        # returns. Replay evaluates several complete candidates for one live
+        # module, so sharing the caller's one-shot collector makes candidate
+        # two fail while trying to record into an already-finalized object.
+        # Give every candidate an independent collector and retain the one
+        # attached to whichever complete result is ultimately selected.
+        telemetry_enabled = quantization_kwargs.pop("telemetry", None) is not None
         model = self._module_replay_model.model
         self._ensure_module_replay_residency(model)
         original = model.get_submodule(module.full_name)
@@ -524,13 +534,17 @@ class QVQProcessor(LoopProcessor):
         with self._module_replay_lock:
             try:
                 for alternative_bank_id in (0, *replay_config.alternative_bank_ids):
+                    candidate_kwargs = dict(quantization_kwargs)
+                    candidate_kwargs["telemetry"] = (
+                        QVQQuantizationTelemetry() if telemetry_enabled else None
+                    )
                     result = quantize_qvq_linear(
                         canonical_weight,
                         quantization_hessian,
                         bits=module_qcfg.bits,
                         yaqa_v2b2_family_mode="fixed_block_ldlq",
                         yaqa_v2b2_fixed_family_id=alternative_bank_id,
-                        **quantization_kwargs,
+                        **candidate_kwargs,
                     )
                     candidate = self._module_replay_qlinear(
                         original,
