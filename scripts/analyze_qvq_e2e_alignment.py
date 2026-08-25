@@ -55,6 +55,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--trainable-parameter-scope", choices=("su-sv", "all"), default="su-sv")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument(
+        "--teacher-rollout-tokens",
+        type=int,
+        default=0,
+        help="Greedily generate this many dense-teacher tokens per training prompt and optimize only those positions.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--output-checkpoint", type=Path)
@@ -105,11 +111,12 @@ def _encoded_rows(
     if "text" in column_names:
         texts = list(selected["text"])
     elif "messages" in column_names:
+        add_generation_prompt = split_name == "train" and args.teacher_rollout_tokens > 0
         texts = [
             tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=add_generation_prompt,
             )
             for messages in selected["messages"]
         ]
@@ -127,7 +134,14 @@ def _encoded_rows(
     }
     if args.max_length != 0:
         tokenizer_kwargs["max_length"] = args.max_length
-    encoded = tokenizer(texts, **tokenizer_kwargs)
+    original_truncation_side = tokenizer.truncation_side
+    if split_name == "train" and args.teacher_rollout_tokens > 0:
+        # Preserve the final user turn and assistant-generation header.
+        tokenizer.truncation_side = "left"
+    try:
+        encoded = tokenizer(texts, **tokenizer_kwargs)
+    finally:
+        tokenizer.truncation_side = original_truncation_side
     if "attention_mask" not in encoded:
         raise ValueError("QVQ end-to-end tokenizer output must include an attention mask")
     return dict(encoded)
@@ -286,6 +300,53 @@ def _batches(encoded: dict[str, torch.Tensor], batch_size: int):
 def _valid_next_token_logits(logits: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     keep = attention_mask[:, 1:].to(torch.bool)
     return logits[:, :-1][keep]
+
+
+@torch.no_grad()
+def _teacher_rollout_training_rows(
+    teacher,
+    encoded: dict[str, torch.Tensor],
+    *,
+    token_count: int,
+    pad_token_id: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """Materialize dense greedy continuations and mark only generated targets for loss."""
+
+    if token_count < 1:
+        return encoded
+    sequences: list[torch.Tensor] = []
+    for batch in _batches(encoded, 1):
+        prompt = {name: value.to(device) for name, value in batch.items() if name != "loss_mask"}
+        generated = teacher.generate(
+            **prompt,
+            do_sample=False,
+            max_new_tokens=token_count,
+            min_new_tokens=token_count,
+            pad_token_id=pad_token_id,
+            use_cache=True,
+        )
+        if generated.shape[0] != 1 or generated.shape[1] != prompt["input_ids"].shape[1] + token_count:
+            raise RuntimeError(
+                "QVQ teacher rollout returned an unexpected shape: "
+                f"prompt={tuple(prompt['input_ids'].shape)} generated={tuple(generated.shape)}"
+            )
+        sequences.append(generated[0].cpu())
+
+    maximum = max(sequence.numel() for sequence in sequences)
+    input_ids = torch.full((len(sequences), maximum), pad_token_id, dtype=sequences[0].dtype)
+    attention_mask = torch.zeros((len(sequences), maximum), dtype=torch.long)
+    loss_mask = torch.zeros((len(sequences), maximum), dtype=torch.long)
+    for row_index, sequence in enumerate(sequences):
+        length = sequence.numel()
+        input_ids[row_index, :length] = sequence
+        attention_mask[row_index, :length] = 1
+        loss_mask[row_index, length - token_count : length] = 1
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "loss_mask": loss_mask,
+    }
 
 
 @torch.no_grad()
@@ -502,6 +563,8 @@ def main() -> None:
         raise ValueError("QVQ end-to-end alignment row offsets must be nonnegative.")
     if not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         raise ValueError("QVQ end-to-end alignment learning rate must be finite and positive.")
+    if args.teacher_rollout_tokens < 0:
+        raise ValueError("QVQ teacher rollout token count must be nonnegative.")
     if args.results.exists():
         raise FileExistsError(f"Refusing to overwrite existing result: {args.results}")
     _validate_split_contract(args)
@@ -531,6 +594,15 @@ def main() -> None:
         offset=args.evaluation_offset,
         rows=args.evaluation_rows,
     )
+    started = time.perf_counter()
+    teacher = _load_dense(args.dense_model, args.device)
+    train = _teacher_rollout_training_rows(
+        teacher,
+        train,
+        token_count=args.teacher_rollout_tokens,
+        pad_token_id=tokenizer.pad_token_id,
+        device=device,
+    )
     split_provenance = {
         "train": _encoded_provenance(
             train,
@@ -548,9 +620,6 @@ def main() -> None:
             source=_split_dataset(args, "evaluation"),
         ),
     }
-
-    started = time.perf_counter()
-    teacher = _load_dense(args.dense_model, args.device)
     quantized = GPTQModel.load(
         str(args.checkpoint),
         backend=BACKEND.QVQ,
@@ -593,16 +662,18 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         for batch_index, batch in enumerate(_batches(train, args.train_batch_size)):
             batch = {name: value.to(device) for name, value in batch.items()}
+            model_batch = {name: value for name, value in batch.items() if name != "loss_mask"}
+            target_mask = batch.get("loss_mask", batch["attention_mask"])
             with torch.no_grad():
                 teacher_logits = _valid_next_token_logits(
-                    teacher(**batch, use_cache=False).logits,
-                    batch["attention_mask"],
+                    teacher(**model_batch, use_cache=False).logits,
+                    target_mask,
                 ).float()
                 teacher_prob = F.softmax(teacher_logits, dim=-1)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 student_logits = _valid_next_token_logits(
-                    student(**batch, use_cache=False).logits,
-                    batch["attention_mask"],
+                    student(**model_batch, use_cache=False).logits,
+                    target_mask,
                 ).float()
                 loss = -(teacher_prob * F.log_softmax(student_logits, dim=-1)).sum(dim=-1).mean()
             if not torch.isfinite(loss):

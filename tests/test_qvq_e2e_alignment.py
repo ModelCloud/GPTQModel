@@ -16,6 +16,7 @@ from scripts.analyze_qvq_e2e_alignment import (
     _passes_accuracy_gate,
     _restore_floating_tensor_dtypes,
     _restore_parameter_state,
+    _teacher_rollout_training_rows,
     _valid_next_token_logits,
     _validate_split_contract,
     _write_derived_manifest,
@@ -30,6 +31,14 @@ class _FixedLogitModel(torch.nn.Module):
     def forward(self, input_ids, attention_mask, use_cache=False):
         del attention_mask, use_cache
         return SimpleNamespace(logits=self.stored_logits[: input_ids.shape[0], : input_ids.shape[1]])
+
+
+class _FixedGenerateModel:
+    def generate(self, input_ids, attention_mask, **kwargs):
+        del attention_mask
+        count = kwargs["max_new_tokens"]
+        suffix = torch.arange(10, 10 + count, device=input_ids.device).reshape(1, -1)
+        return torch.cat((input_ids, suffix), dim=1)
 
 
 def test_qvq_e2e_batching_next_token_mask_and_exact_digest_exclude_padding():
@@ -103,6 +112,23 @@ def test_qvq_e2e_metrics_and_dtype_rollback_are_exact():
     assert model.stored_logits.dtype == torch.float32
     _restore_floating_tensor_dtypes(original)
     assert model.stored_logits.dtype == torch.float16
+
+
+def test_qvq_e2e_teacher_rollout_marks_only_generated_targets():
+    encoded = {
+        "input_ids": torch.tensor([[1, 2, 0], [3, 4, 5]]),
+        "attention_mask": torch.tensor([[1, 1, 0], [1, 1, 1]]),
+    }
+    rolled = _teacher_rollout_training_rows(
+        _FixedGenerateModel(),
+        encoded,
+        token_count=2,
+        pad_token_id=0,
+        device=torch.device("cpu"),
+    )
+    torch.testing.assert_close(rolled["input_ids"], torch.tensor([[1, 2, 10, 11, 0], [3, 4, 5, 10, 11]]))
+    torch.testing.assert_close(rolled["attention_mask"], torch.tensor([[1, 1, 1, 1, 0], [1, 1, 1, 1, 1]]))
+    torch.testing.assert_close(rolled["loss_mask"], torch.tensor([[0, 0, 1, 1, 0], [0, 0, 0, 1, 1]]))
 
 
 def test_qvq_e2e_parameter_state_is_exact_and_rejects_scope_drift():
