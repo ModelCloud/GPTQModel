@@ -203,9 +203,18 @@ Pre-run validation:
 | `ruff check --select F401,F811,F821,F822,F823` on the four touched Python files | passed |
 | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental'` | 2 passed; full humanities and forced incremental-progress contracts covered |
 | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental or paged_continuous'` | 3 passed; paged/continuous defaults also covered |
+| `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental or paged_continuous or completed_rows'` | 4 passed on Evalution 0.0.14; MMLU progress maps four completed choice likelihoods to one completed question row |
+| `ruff check --select E9,F63,F7,F82 scripts/qvq_evaluate.py tests/test_qvq_unified_harness.py` | passed after the Evalution 0.0.14 and MMLU row-progress update |
 
 The first Q07 attempt used continuous refill but reported `paged_attention=False`; it was manually interrupted during
 GSM8K at the user's request so live scoring and paged attention could be enabled. No partial score was published or
 used. The restarted commands require `paged|flash_attention_2`; paged mode is also the Evalution/GPTQModel switch for
 native continuous batching. A run is valid only if startup reports `backend=continuous_batching`,
 `paged_attention=True`, and `generation submission mode=continuous_refill`.
+
+The second Q07 attempt completed GSM8K Platinum at `acc,num=0.2415` over all 1,209 rows with zero invalid
+generations, then reached 630/12,612 MMLU STEM choice likelihoods. It was intentionally interrupted before publishing
+a combined report to upgrade the runtime from Evalution 0.0.12 to the current PyPI release, Evalution 0.0.14, and to
+make MMLU display completed question rows (`completed / 3,153` for STEM) instead of internal choice requests
+(`completed / 12,612`). The underlying four-choice likelihood computation and continuous-refill scheduling are
+unchanged. The clean third attempt is the report-producing run.

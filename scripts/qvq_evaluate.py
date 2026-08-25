@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import math
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +63,62 @@ TASKS = {
     "mmlu_humanities": ("mmlu", False, {"subsets": "humanities"}),
     "mmlu_history": ("mmlu", False, {"subsets": MMLU_HISTORY_SUBSETS}),
 }
+
+
+class _ChoiceProgressAsRows:
+    """Expose four MMLU choice completions as one completed question row."""
+
+    def __init__(self, progress: Any, *, choices_per_row: int) -> None:
+        self._progress = progress
+        self._choices_per_row = choices_per_row
+        self._completed_choices = 0
+        self._row_advanced = False
+
+    def next(self) -> _ChoiceProgressAsRows:
+        self._completed_choices += 1
+        self._row_advanced = self._completed_choices % self._choices_per_row == 0
+        if self._row_advanced:
+            self._progress.next()
+        return self
+
+    def draw(self) -> _ChoiceProgressAsRows:
+        if self._row_advanced:
+            self._progress.draw()
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._progress, name)
+
+
+@contextmanager
+def _mmlu_question_row_progress(enabled: bool) -> Generator[None]:
+    """Render MMLU progress in completed rows while preserving choice-level work."""
+
+    if not enabled:
+        yield
+        return
+
+    mmlu_module = importlib.import_module("evalution.benchmarks.mmlu")
+    original_manual_progress = mmlu_module.manual_progress
+    choices_per_row = len(mmlu_module._MMLU_LABELS)
+
+    def manual_row_progress(total: int, *, title: str, subtitle: str) -> Any:
+        if not title.endswith(": scoring answer choices"):
+            return original_manual_progress(total, title=title, subtitle=subtitle)
+        if total % choices_per_row:
+            raise ValueError(f"MMLU choice request total {total} is not divisible by {choices_per_row}")
+        progress = original_manual_progress(
+            total // choices_per_row,
+            title=title.removesuffix("scoring answer choices") + "completed question rows",
+            subtitle=f"{subtitle} choices_per_row={choices_per_row}",
+        )
+        return _ChoiceProgressAsRows(progress, choices_per_row=choices_per_row)
+
+    mmlu_module.manual_progress = manual_row_progress
+    try:
+        yield
+    finally:
+        mmlu_module.manual_progress = original_manual_progress
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -752,26 +811,34 @@ def _tasks(args: argparse.Namespace) -> int:
         "attn_implementation": args.attn_implementation,
         "continuous_batching_required": True,
         "paged_attention_required": True,
+        "package_versions": {
+            "evalution": package_version("evalution"),
+            "gptqmodel": package_version("gptqmodel"),
+            "logbar": package_version("logbar"),
+            "torch": package_version("torch"),
+            "transformers": package_version("transformers"),
+        },
         "tasks": {},
     }
     for label in selected:
         task, apply_chat_template, suite_kwargs = TASKS[label]
         started = time.perf_counter()
-        output = evaluate(
-            model_or_id_or_path=str(checkpoint),
-            tasks=[task],
-            backend=BACKEND(args.backend),
-            model_args={
-                "dtype": "float16",
-                "device": args.device,
-                "attn_implementation": args.attn_implementation,
-            },
-            batch_size=args.batch_size,
-            apply_chat_template=apply_chat_template,
-            gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
-            suite_kwargs=suite_kwargs,
-            trust_remote_code=False,
-        )
+        with _mmlu_question_row_progress(task.startswith("mmlu")):
+            output = evaluate(
+                model_or_id_or_path=str(checkpoint),
+                tasks=[task],
+                backend=BACKEND(args.backend),
+                model_args={
+                    "dtype": "float16",
+                    "device": args.device,
+                    "attn_implementation": args.attn_implementation,
+                },
+                batch_size=args.batch_size,
+                apply_chat_template=apply_chat_template,
+                gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
+                suite_kwargs=suite_kwargs,
+                trust_remote_code=False,
+            )
         print(format_eval_result_table(output), flush=True)
         metrics = get_eval_task_results(output)
         payload["tasks"][label] = {

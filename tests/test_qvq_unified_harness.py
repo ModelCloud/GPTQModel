@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 import os
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from scripts.qvq_evaluate import (
     TASKS as QVQ_EVALUATION_TASKS,
     _encode_prompt,
     _greedy_rollout,
+    _mmlu_question_row_progress,
     _model_logits,
     _row_text,
     _wilson_interval,
@@ -296,6 +298,45 @@ def test_qvq_evaluate_tasks_require_paged_continuous_batching_defaults():
 
     assert args.device == "cuda:0"
     assert args.attn_implementation == "paged|flash_attention_2"
+
+
+def test_qvq_evaluate_reports_mmlu_choice_work_as_completed_rows(monkeypatch):
+    mmlu_module = importlib.import_module("evalution.benchmarks.mmlu")
+
+    class FakeProgress:
+        def __init__(self):
+            self.next_calls = 0
+            self.draw_calls = 0
+
+        def next(self):
+            self.next_calls += 1
+            return self
+
+        def draw(self):
+            self.draw_calls += 1
+            return self
+
+    captured = {}
+
+    def fake_manual_progress(total, *, title, subtitle):
+        captured.update(total=total, title=title, subtitle=subtitle, progress=FakeProgress())
+        return captured["progress"]
+
+    monkeypatch.setattr(mmlu_module, "manual_progress", fake_manual_progress)
+    with _mmlu_question_row_progress(True):
+        row_progress = mmlu_module.manual_progress(
+            12,
+            title="mmlu_stem: scoring answer choices",
+            subtitle="batch_size=16",
+        )
+        for _ in range(7):
+            row_progress.next().draw()
+
+    assert captured["total"] == 3
+    assert captured["title"] == "mmlu_stem: completed question rows"
+    assert captured["subtitle"] == "batch_size=16 choices_per_row=4"
+    assert captured["progress"].next_calls == 1
+    assert captured["progress"].draw_calls == 1
 
 
 class _BareDecoder(nn.Module):

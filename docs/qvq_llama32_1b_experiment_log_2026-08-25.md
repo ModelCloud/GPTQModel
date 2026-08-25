@@ -195,6 +195,8 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | downstream progress fix | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental'` plus focused Ruff correctness gate | 2 passed; Ruff passed |
 | Q07 full downstream attempt 1 | full task command in `w2_leader.md`; continuous refill active, paged attention false | interrupted manually during GSM8K at user request; no report or partial score published |
 | downstream paged/continuous gate | `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental or paged_continuous'` plus focused Ruff correctness gate | 3 passed; Ruff passed |
+| Q07 full downstream attempt 2 | exact full command in `w2_leader.md`; Evalution 0.0.12; paged attention true; continuous refill active | GSM8K Platinum completed all 1,209 rows at `acc,num=0.2415`, zero invalid, generation 599.716s; MMLU STEM reached 630/12,612 choice requests before intentional dependency/progress-display restart; no combined JSON report published |
+| Evalution update and MMLU row progress | upgraded PyPI Evalution 0.0.12 -> 0.0.14, LogBar 0.4.12 -> 0.4.13, PyPcre 0.6.0 -> 0.6.2; `pytest -q tests/test_qvq_unified_harness.py -k 'humanities or incremental or paged_continuous or completed_rows'`; focused Ruff correctness gate | 4 passed, 22 deselected, 14 dependency warnings; Ruff passed; latest Evalution still counts four choice requests per MMLU row, so QvQ adapter now reports completed/max question rows without changing continuous-refill work |
 
 ## Current decision
 
