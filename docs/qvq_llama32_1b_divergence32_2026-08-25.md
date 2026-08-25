@@ -65,6 +65,7 @@ and supplies the exact same encoded prompt tensors to dense and QVQ models befor
 | Layer-damping YAQA | W2, V2B2-P32 (2.03125 BPW payload estimate) | 0.271032 | 81.7096% | 72.6876% | 71.7525% | **82.0365%** | 76.9753% |
 | Layer damping + output alignment | W2, V2B2-P32 (2.03125 BPW payload estimate) | **0.248805** | **82.0343%** | **73.9342%** | **73.1259%** | **82.9698%** | 71.2688% |
 | Two-epoch / 64-batch output alignment | W2, V2B2-P32 (2.03125 BPW payload estimate) | **0.239397** | **82.6090%** | **74.3085%** | **73.6837%** | **83.0222%** | 75.0000% |
+| Uniform `0.10`, no output alignment | W2, V2B2-P32 (2.03125 BPW payload estimate) | 0.272819 | 81.2380% | 72.6887% | 71.6885% | 82.4350% | 70.5999% |
 | MLP-down diagnostic | W2.5 down; all other projections W2 | 0.229711 | 82.3401% | 74.3826% | 73.5418% | **83.5570%** | 68.4469% |
 
 The best flat-W2 checkpoint cleared the historical 80% **shared-prefix** target without a precision exception.
@@ -73,6 +74,11 @@ reported final-logit metric: KL fell 3.78%, Top-1 gained 0.5747 percentage point
 points over the prior aligned checkpoint. These gains do not imply that the independent-trajectory target has been
 reached; Divergence-300 @32 remains a separate and substantially stricter gate. The W2.5 arm is diagnostic only and
 confirms that MLP sensitivity remains the next optimization target.
+
+“Best” depends on the declared metric. The uniform-`0.10` checkpoint is the corrected D300 leader, while the
+two-epoch hybrid-aligned checkpoint remains the flat-W2 leader on locked teacher-forced KL, Top-1, Top-5, Top-10,
+and shared-prefix agreement. The locked uniform-`0.10` row contains 105,618 valid tokens; 298 rows support the full
+50%-warmup horizon and 299 support the legacy first-32 horizon.
 
 The reproducible W2 configuration uses regularization 0.10 for layers 0, 6, 10, and 12 and 0.05 elsewhere. Dynamic
 `yaqa_regularization` support was added so the selected checkpoint can be produced directly rather than assembled

@@ -110,7 +110,7 @@ a different column because they are teacher-forced/shared-prefix diagnostics and
 | Q04 | `54ccd365` lineage | proxy-only; not promoted | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0025-main-54ccd365` | not run | not run | rows 428..511: final Top-1 80.2898%; obsolete first-32 proxy 70.1265% |
 | Q05 | `54ccd365` lineage | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg005-main-54ccd365` | 1,210/9,600 = 12.6042% | 2/300 | mean first divergence 4.0100 |
 | Q06 | `54ccd365` lineage | proxy-only; not promoted | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg005-align-main-54ccd365` | not run | not run | rows 428..511: final Top-1 80.8682%; obsolete first-32 proxy 71.1310% |
-| Q07 | `54ccd365` lineage | **current completed leader** | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365` | **1,717/9,600 = 17.8854%** | 3/300 | mean first divergence 4.8533 |
+| Q07 | `54ccd365` lineage | **current completed leader** | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365` | **1,717/9,600 = 17.8854%** | 3/300 | mean first divergence 4.8533; locked KL .272819, Top-1 81.2380%, Top-5 72.6887%, Top-10 71.6885%, SP-Top1@32-W50 82.4350% |
 | Q08 | `ecf7081e` lineage | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-align-main-ecf7081e` | 1,653/9,600 = 17.2188% | 2/300 | loses 64 matches to Q07 despite stronger early survival |
 | Q09 | `ecf7081e` lineage | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg020-main-ecf7081e` | 1,568/9,600 = 16.3333% | 3/300 | loses 149 matches to Q07 |
 | Q10 | `d7eae64a` | rejected | `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-main-d7eae64a` | 1,465/9,600 = 15.2604% | 4/300 | token-1 71%; mean first divergence 5.0333; loses 252 aggregate matches |
@@ -134,6 +134,19 @@ Corrected D300 report paths, in Q01--Q11 order when available:
 /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg020-div300-dev-v2.json
 /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-div300-dev-v2.json
 /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-div300-dev-v2.json
+```
+
+Q07's locked ordinary evaluation used this exact invocation and wrote
+`/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-main-locked-r512-n300-v3.json`:
+
+```bash
+python scripts/qvq_evaluate.py diagnostics \
+  --dense-model /monster/data/model/Llama-3.2-1B-Instruct \
+  --checkpoint /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365 \
+  --dataset /monster/data/model/dataset/nm-calibration/llm.parquet --dataset-split train \
+  --row-start 512 --rows 300 --device cuda:0 \
+  --output /root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-main-locked-r512-n300-v3.json \
+  --divergence-rows 300 --divergence-tokens 32 --skip-independent-rollout --include-topn
 ```
 
 ## Post-quant alignment experiments
@@ -173,6 +186,7 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | `d7eae64a`, changed Python files | `ruff check ...` and `git diff --check` | passed |
 | `8ae2db25`, Q11 config validation | quantization manifest inspection | 112 quant rows; every module damping `.125`; YAQA 182/182 sequences; 302,193 valid samples; no fallback |
 | `8ae2db25`, Q11 corrected D300 | common corrected rollout command above | report checkpoint and manifest SHA matched; 300/300 prompts completed; 1,290/9,600 aligned; 2/300 exact |
+| `723a8f95`, Q07 locked ordinary metrics | exact diagnostics command above | 300/300 rows; 105,618 tokens; KL .272819; Top-1 81.2380%; Top-5 72.6887%; Top-10 71.6885%; SP-Top1@32-W50 82.4350% |
 
 ## Current decision
 
