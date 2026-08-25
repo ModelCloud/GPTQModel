@@ -23,6 +23,12 @@ shared-prefix score teacher-forces the same source context at every position and
 agreement. Unsloth's test is conceptually closest to `divergence_300_at_32`; numerical comparison additionally requires
 the same prompts, chat templates, decoding settings, and scalar aggregation rule.
 
+The published Unsloth scale also resolves the earlier target mismatch: its narrative places UD-Q2_K_XL at roughly
+25% and lower 1-bit quants at roughly 8--10%, even though ordinary teacher-forced Top-1 can be about 77%. Therefore
+the current flat-W2 development target is **at least 25% independent aligned-token agreement through 32**, not 82%.
+This is a directional Q2 reference rather than a direct leaderboard comparison because the models, quant formats,
+prompt manifest, and unpublished Unsloth scalar reduction are not identical.
+
 ## Disjoint data contract
 
 - ordinary calibration: `nm-calibration/llm.parquet`, rows 0--127;
@@ -73,8 +79,8 @@ which is why the full horizon curve and the aggregate aligned-token score are bo
 
 The prompt manifest SHA-256 is `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
 
-This result formally rules out interpreting the historical 82.0365% shared-prefix score as Divergence-300 @32.
-Reaching 82% independent-rollout aligned-token Top-1 would require 7,872 of 9,600 positions to match; the candidate
-matches 1,456. Reaching 82% exact survival would separately require 246 of 300 prompts to match all 32 generated
-tokens; the candidate matches two. The >82% target was therefore **not reached under either reduction**. Configuration
-sweeps must report both reductions without renaming shared-prefix agreement.
+This result formally rules out interpreting the historical 82.0365% shared-prefix score as Divergence-300 @32. The
+corrected development target of 25% aligned-token agreement requires 2,400 of 9,600 positions to match; the current
+candidate matches 1,456, leaving a gap of 944 positions. If the target were instead interpreted as exact-trajectory
+survival, it would require 75 of 300 prompts; the candidate matches two. Configuration sweeps must report both
+reductions without renaming shared-prefix agreement or silently switching which reduction is used for the target.

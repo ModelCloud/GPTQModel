@@ -67,6 +67,11 @@ It is conceptually closest to this harness's `divergence_300_at_32`, not `sp_top
 Unsloth does not publish the scalar reduction or executable grader. QVQ therefore reports both plausible reductions
 under unambiguous names rather than choosing one silently.
 
+For scale, Unsloth's published narrative describes UD-Q2_K_XL at roughly 25% and lower 1-bit quants at roughly
+8--10% on Divergence-300 @32, despite ordinary Top-1 around 77%. A 25% development target is therefore plausible for
+a strong two-bit result; an 80% shared-prefix score must not be reused as an independent-rollout target. These values
+are context, not directly comparable scores, because Unsloth has not released its exact prompts or scalar reducer.
+
 ## Run Divergence-300 @32
 
 First download the named source datasets to a local immutable cache. Then construct both prompt splits together;
