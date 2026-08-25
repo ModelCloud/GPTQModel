@@ -334,6 +334,11 @@ regularization (`reg .020`). Quantization is running on GPU0, followed by
 canonical D300 and GSM8K Platinum. Full queue/config/results are recorded in
 `docs/experiments/2026-08-25-llama32-w2-full-reference-reg020.json`.
 
+To bracket regularization on the larger mix, parallel full-reference W2 arms
+at `.10` and `.30` are queued on GPUs2/3. Their complete configs, checkpoints,
+canonical D300 reports, and GSM8K reports are tracked in
+`docs/experiments/2026-08-25-llama32-w2-full-reference-reg-sweep.json`.
+
 ### Completed W2 regularization/seed D300 results
 
 The completed-arm machine-readable summary is

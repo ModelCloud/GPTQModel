@@ -1,0 +1,11 @@
+{
+  "experiment": "llama32-1b-flat-w2-full-reference-regularization-bracket",
+  "git_commit": "03d8682c",
+  "calibration": {"dataset":"calibration_full_reference.parquet", "rows":292, "sha256":"713e03483841e678ddb8334589f13c5881fe97700e42803a2e96de522675f916", "d300_overlap":0},
+  "arms": [
+    {"regularization":0.1, "config":"scripts/configs/llama32_1b_v2b2_p32_yaqa_full_reference_reg010.json", "gpu":"GPU-8be4c651-4058-83df-154b-291f1b86add8", "quant_session":45385, "eval_session":35293, "checkpoint":"/root/qvq-results/llama32-1b-w2-full-reference-reg010-main-5544143c", "d300_report":"/root/qvq-results/llama32-1b-w2-full-reference-reg010-main-5544143c-div300-dev-v1.json", "gsm8k_report":"/root/qvq-results/llama32-1b-w2-full-reference-reg010-main-5544143c-gsm8k-platinum-v1.json", "status":"queued"},
+    {"regularization":0.3, "config":"scripts/configs/llama32_1b_v2b2_p32_yaqa_full_reference_reg030.json", "gpu":"GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c", "quant_session":14295, "eval_session":41602, "checkpoint":"/root/qvq-results/llama32-1b-w2-full-reference-reg030-main-5544143c", "d300_report":"/root/qvq-results/llama32-1b-w2-full-reference-reg030-main-5544143c-div300-dev-v1.json", "gsm8k_report":"/root/qvq-results/llama32-1b-w2-full-reference-reg030-main-5544143c-gsm8k-platinum-v1.json", "status":"queued"}
+  ],
+  "manifest_sha256":"701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b",
+  "target":{"divergence32_top1":0.25,"status":"pending"}
+}
