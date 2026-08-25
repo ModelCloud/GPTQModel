@@ -3510,3 +3510,212 @@ def test_qvq_v4_cuda_w4_memoryless_weighted_matches_reference(codebook_dtype):
     torch.cuda.synchronize()
     assert torch.equal(states.cpu(), expected.states)
     torch.testing.assert_close(error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Norm-rank contiguous-band grid recurrence (W2.5/W3.0 half-codebook fast path)
+# ---------------------------------------------------------------------------
+
+
+def _norm_rank_case(seed, batch, bits, bank_count, codebook_dtype=torch.float16, sequence_scale=None):
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    if sequence_scale is not None:
+        sequences = sequences * sequence_scale
+    codebooks = torch.stack(
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
+    ).to(device="cuda", dtype=codebook_dtype)
+    return sequences, codebooks
+
+
+def _norm_rank_dispatch_count():
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op()  # ensure the extension is loaded
+    return int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count())
+
+
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
+def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(bits, bank_count, segment_steps):
+    """The norm-rank band path must actually dispatch for supported configs and
+    agree bit-for-bit with the segmented banked reference."""
+
+    sequences, codebooks = _norm_rank_case(20260825 + bank_count, 9, bits, bank_count)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    before = _norm_rank_dispatch_count()
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences, codebooks, transition_bits, segment_steps, None, None
+    )
+    assert _norm_rank_dispatch_count() == before + 1
+    expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+
+
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps,constrained,weighted,codebook_dtype",
+    (
+        (2.0, 2, 16, False, False, torch.float16),   # shift 4: candidate list too short to pay for banding
+        (3.5, 2, 16, False, False, torch.float16),   # shift 7: unsupported rate
+        (2.5, 2, 16, True, False, torch.float16),    # constrained keeps the exact fallback
+        (2.5, 2, 16, False, True, torch.float16),    # weighted keeps the exact fallback
+        (3.0, 4, 32, True, True, torch.float16),
+        (3.0, 2, 16, False, False, torch.float32),   # fp32 codebooks keep the reference path
+    ),
+)
+def test_qvq_cuda_norm_rank_grid_leaves_unsupported_configs_on_reference_path(
+    bits, bank_count, segment_steps, constrained, weighted, codebook_dtype
+):
+    sequences, codebooks = _norm_rank_case(20260826, 5, bits, bank_count, codebook_dtype=codebook_dtype)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    generator = torch.Generator(device="cuda").manual_seed(20260827)
+    overlap = (
+        torch.randint(0, 1 << (16 - transition_bits), (5,), generator=generator, device="cuda", dtype=torch.int64)
+        if constrained
+        else None
+    )
+    step_weights = (
+        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous() if weighted else None
+    )
+    before = _norm_rank_dispatch_count()
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences, codebooks, transition_bits, segment_steps, overlap, step_weights
+    )
+    assert _norm_rank_dispatch_count() == before
+    expected = qvq_cuda_viterbi_v2_segment_banked(
+        sequences, codebooks, bits, segment_steps, overlap, step_weights
+    )
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+
+
+def test_qvq_cuda_norm_rank_grid_disable_env_forces_reference_path():
+    """GPTQMODEL_QVQ_DISABLE_OCTET_GRID=1 must route an eligible launch through
+    the pristine grid recurrence (0 norm-rank dispatches, bit-exact outputs).
+    The flag is read once per process, so this runs in a subprocess."""
+
+    import os
+    import subprocess
+    import sys
+
+    script = r"""
+import torch
+from gptqmodel.quantization.qvq_codecs.pgc16 import pgc16_codebook_v2_bank
+from gptqmodel.utils.qvq_cuda import (
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
+    qvq_cuda_viterbi_v2_segment_banked,
+)
+op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+generator = torch.Generator(device="cuda").manual_seed(20260828)
+sequences = torch.randn((7, 128, 2), generator=generator, device="cuda")
+codebooks = torch.stack(
+    (pgc16_codebook_v2_bank(0, bits=3.0, dtype=torch.float32),
+     pgc16_codebook_v2_bank(1, bits=3.0, dtype=torch.float32))
+).to(device="cuda", dtype=torch.float16)
+actual = op(sequences, codebooks, 6, 16, None, None)
+assert int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) == 0
+expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 3.0, 16, None, None)
+for index in range(3):
+    assert torch.equal(expected[index], actual[index]), index
+print("DISABLED-PATH-OK")
+"""
+    env = dict(os.environ, GPTQMODEL_QVQ_DISABLE_OCTET_GRID="1")
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=600, check=False
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "DISABLED-PATH-OK" in result.stdout
+
+
+def test_qvq_cuda_norm_rank_codebook_mutation_rebuilds_tables():
+    """An in-place codebook mutation bumps the version counter, so the cached
+    sorted tables must be rebuilt rather than served stale."""
+
+    sequences, codebooks = _norm_rank_case(20260829, 6, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    op(sequences, codebooks, 6, 16, None, None)
+    with torch.no_grad():
+        codebooks[:, :1024].mul_(-1.0)
+    mutated = op(sequences, codebooks, 6, 16, None, None)
+    fresh = op(sequences, codebooks.clone(), 6, 16, None, None)
+    torch.cuda.synchronize()
+    assert all(torch.equal(m, f) for m, f in zip(mutated, fresh))
+
+
+def test_qvq_cuda_norm_rank_inference_mode_codebook_mutation_is_not_stale():
+    """Inference-mode tensors keep no useful version counter, so the norm-rank
+    tables must be rebuilt (uncached) every call for them."""
+
+    sequences, source = _norm_rank_case(20260830, 4, 2.5, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    with torch.inference_mode():
+        codebooks = source.clone()
+        op(sequences, codebooks, 5, 16, None, None)
+        codebooks[:, :512].mul_(-1.0)
+        mutated = op(sequences, codebooks, 5, 16, None, None)
+        fresh = op(sequences, codebooks.clone(), 5, 16, None, None)
+    torch.cuda.synchronize()
+    assert all(torch.equal(m, f) for m, f in zip(mutated, fresh))
+
+
+def test_qvq_cuda_norm_rank_grid_uses_current_non_default_stream():
+    sequences, codebooks = _norm_rank_case(20260831, 6, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    expected = op(sequences, codebooks, 6, 16, None, None)
+    torch.cuda.synchronize()
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        # A fresh clone on the side stream also exercises the table build and
+        # cache insertion off the default stream.
+        actual = op(sequences, codebooks.clone(), 6, 16, None, None)
+        completion = torch.cuda.Event()
+        completion.record(stream)
+    completion.synchronize()
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
+
+
+def test_qvq_cuda_norm_rank_table_cache_survives_stream_order_reuse():
+    """A cache hit from a second stream must wait on the producing stream's
+    ready event instead of reading half-built tables."""
+
+    sequences, codebooks = _norm_rank_case(20260832, 6, 2.5, 4)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    producer = torch.cuda.Stream()
+    consumer = torch.cuda.Stream()
+    with torch.cuda.stream(producer):
+        first = op(sequences, codebooks, 5, 32, None, None)
+    with torch.cuda.stream(consumer):
+        # No cross-stream synchronisation on purpose: the cached-table hit must
+        # order itself after the producer's build.
+        second = op(sequences, codebooks, 5, 32, None, None)
+        done = torch.cuda.Event()
+        done.record(consumer)
+    done.synchronize()
+    producer.synchronize()
+    assert all(torch.equal(f, s) for f, s in zip(first, second))
+
+
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32)))
+@pytest.mark.parametrize("pattern", ("ties", "tiny", "large"))
+def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(bits, bank_count, segment_steps, pattern):
+    """Adversarial inputs for the directed-rounding band derivation: massive
+    exact value ties (the lowest original prefix must win), denormal-scale
+    sequences, and large sequences near the finite-accumulation contract."""
+
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    if pattern == "ties":
+        # Repeat one small code table across every prefix of each suffix column:
+        # every candidate value ties, so selections exercise pure tie-breaking.
+        generator = torch.Generator(device="cuda").manual_seed(20260833)
+        base = torch.randn((bank_count, 1 << (16 - transition_bits), 2), generator=generator, device="cuda")
+        codebooks = (
+            base.repeat(1, 1 << transition_bits, 1).to(torch.float16).contiguous()
+        )
+        sequences = torch.randn((5, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
+    elif pattern == "tiny":
+        sequences, codebooks = _norm_rank_case(20260834, 5, bits, bank_count, sequence_scale=1e-30)
+    else:
+        # Just inside the finite FP32 squared-distance contract of the op.
+        sequences, codebooks = _norm_rank_case(20260835, 5, bits, bank_count, sequence_scale=1e15)
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences, codebooks, transition_bits, segment_steps, None, None
+    )
+    expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
