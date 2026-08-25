@@ -41,6 +41,14 @@ YAQA_ROWS = range(512, 640)
 
 def assemble_existing(repo_root: Path, out_dir: Path) -> int:
     """Assemble the saved scan, extending positive gain to the requested floor."""
+    assembly_floor = int(
+        os.environ.get("LLAMA_CALIBRATION_ASSEMBLE_FLOOR", MIN_TARGET_TOKENS)
+    )
+    if assembly_floor < MIN_TARGET_TOKENS or assembly_floor > TARGET_TOKENS:
+        raise ValueError(
+            "LLAMA_CALIBRATION_ASSEMBLE_FLOOR must be between "
+            f"{MIN_TARGET_TOKENS} and {TARGET_TOKENS}"
+        )
     scanner_dir = out_dir / "_scanner"
     preparation = json.loads((out_dir / "preparation.json").read_text())
     report = json.loads((scanner_dir / "coverage_report.json").read_text())
@@ -63,7 +71,7 @@ def assemble_existing(repo_root: Path, out_dir: Path) -> int:
     )
     selected_effective_tokens = sum(effective_tokens[name] for name in order)
     for name in remaining:
-        if selected_effective_tokens >= MIN_TARGET_TOKENS:
+        if selected_effective_tokens >= assembly_floor:
             break
         order.append(name)
         selected_effective_tokens += effective_tokens[name]
@@ -96,6 +104,7 @@ def assemble_existing(repo_root: Path, out_dir: Path) -> int:
         "model": MODEL,
         "target_tokens_floor": TARGET_TOKENS,
         "min_target_tokens": MIN_TARGET_TOKENS,
+        "assembly_floor": assembly_floor,
         "selected_tokens": selected_tokens,
         "selected_effective_tokens": selected_effective_tokens,
         "selected_rows": len(mix),

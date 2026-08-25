@@ -306,9 +306,50 @@ def greedy_trajectory_metrics(
     }
 
 
+def shared_prefix_top1_metrics(
+    dense_logits: torch.Tensor,
+    quantized_logits: torch.Tensor,
+    *,
+    token_count: int,
+    start_index: int = 0,
+) -> dict[str, torch.Tensor] | None:
+    """Compare next-token argmaxes under identical teacher-forced prefixes.
+
+    This is llama.cpp's ``Same top p`` protocol restricted to the first
+    ``token_count`` valid positions in one row. It is distinct from comparing
+    two independently generated trajectories. Short rows are excluded.
+    """
+
+    if not isinstance(token_count, int) or isinstance(token_count, bool) or token_count < 1:
+        raise ValueError(f"token_count must be a positive integer, got {token_count!r}")
+    if not isinstance(start_index, int) or isinstance(start_index, bool) or start_index < 0:
+        raise ValueError(f"start_index must be a nonnegative integer, got {start_index!r}")
+    if dense_logits.ndim != 2 or quantized_logits.ndim != 2 or dense_logits.shape != quantized_logits.shape:
+        raise ValueError("shared-prefix logits must be matching rank-2 tensors")
+    if dense_logits.shape[0] < start_index + token_count:
+        return None
+    stop_index = start_index + token_count
+    matches = dense_logits[start_index:stop_index].argmax(dim=-1).eq(
+        quantized_logits[start_index:stop_index].argmax(dim=-1)
+    )
+    mismatch = (~matches).nonzero(as_tuple=False).flatten()
+    first = (
+        (mismatch[0] + 1).to(dtype=torch.float32)
+        if mismatch.numel()
+        else torch.tensor(float(token_count + 1), device=dense_logits.device)
+    )
+    return {
+        "top1_agreement": matches.float().mean(),
+        "exact_sequence_agreement": matches.all().float(),
+        "first_mismatch_token": first,
+        "tokens_compared": torch.tensor(float(token_count), device=dense_logits.device),
+    }
+
+
 __all__ = [
     "greedy_trajectory_metrics",
     "native_divergence_metrics_cuda",
     "native_primary_metrics_cuda",
     "native_tensor_metrics",
+    "shared_prefix_top1_metrics",
 ]

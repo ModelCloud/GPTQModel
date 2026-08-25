@@ -18,6 +18,7 @@ from gptqmodel.quantization.qvq_yaqa import _sketch_b_gram_updates
 from gptqmodel.utils.diagnostic_metrics import (
     greedy_trajectory_metrics,
     native_divergence_metrics_cuda,
+    shared_prefix_top1_metrics,
 )
 from scripts.analyze_gptq_low_bit_grid import (
     _load_nm_calibration,
@@ -1919,6 +1920,42 @@ def test_greedy_trajectory_metrics_report_survival_and_first_divergence():
     assert metrics["exact_sequence_agreement"] == 0.0
     assert metrics["aligned_token_agreement"] == pytest.approx(5 / 32)
     assert metrics["first_divergence_token"] == 6.0
+
+
+def test_shared_prefix_top1_metrics_reports_same_context_agreement():
+    dense = torch.zeros((32, 4), dtype=torch.float32)
+    candidate = dense.clone()
+    dense[:, 0] = 2.0
+    candidate[:, 0] = 2.0
+    candidate[5, 1] = 3.0
+    candidate[20, 2] = 4.0
+
+    metrics = shared_prefix_top1_metrics(dense, candidate, token_count=32)
+
+    assert metrics is not None
+    assert metrics["top1_agreement"] == pytest.approx(30 / 32)
+    assert metrics["exact_sequence_agreement"] == 0.0
+    assert metrics["first_mismatch_token"] == 6.0
+
+
+def test_shared_prefix_top1_metrics_excludes_short_rows():
+    logits = torch.zeros((31, 4), dtype=torch.float32)
+
+    assert shared_prefix_top1_metrics(logits, logits.clone(), token_count=32) is None
+
+
+def test_shared_prefix_top1_metrics_honors_warmup_start_index():
+    dense = torch.zeros((64, 3), dtype=torch.float32)
+    candidate = dense.clone()
+    dense[:, 0] = 2.0
+    candidate[:, 0] = 2.0
+    candidate[:32, 1] = 3.0
+
+    warm = shared_prefix_top1_metrics(dense, candidate, token_count=32, start_index=32)
+    cold = shared_prefix_top1_metrics(dense, candidate, token_count=32)
+
+    assert warm is not None and warm["top1_agreement"] == 1.0
+    assert cold is not None and cold["top1_agreement"] == 0.0
 
 
 def test_greedy_trajectory_metrics_identical_horizon_survives():

@@ -28,7 +28,10 @@ import torch.nn.functional as F  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.utils.diagnostic_metrics import greedy_trajectory_metrics  # noqa: E402
+from gptqmodel.utils.diagnostic_metrics import (  # noqa: E402
+    greedy_trajectory_metrics,
+    shared_prefix_top1_metrics,
+)
 
 if __package__:
     from scripts.qvq_quantize import DatasetSlice, load_dataset_slice
@@ -68,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--output", type=Path, required=True)
     diagnostics.add_argument("--divergence-rows", type=int, default=300)
     diagnostics.add_argument("--divergence-tokens", type=int, default=32)
+    diagnostics.add_argument(
+        "--skip-independent-rollout",
+        action="store_true",
+        help="Skip the slower independent greedy rollout while retaining shared-prefix @32 diagnostics.",
+    )
     diagnostics.add_argument("--include-topn", action="store_true", help="Also report Top-5/Top-10 overlap.")
     diagnostics.add_argument("--trust-remote-code", action="store_true")
     diagnostics.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
@@ -245,6 +253,12 @@ def _diagnostics(args: argparse.Namespace) -> int:
     divergence_aligned_token_sum = 0.0
     divergence_survival_sum = 0.0
     divergence_first_sum = 0.0
+    shared_prefix_sequences = 0
+    shared_prefix_top1_sum = 0.0
+    shared_prefix_exact_sum = 0.0
+    shared_prefix_first_sum = 0.0
+    legacy_first32_sequences = 0
+    legacy_first32_top1_sum = 0.0
     dense_forward_seconds = 0.0
     quantized_forward_seconds = 0.0
 
@@ -269,7 +283,7 @@ def _diagnostics(args: argparse.Namespace) -> int:
             torch.cuda.synchronize(args.device)
         quantized_forward_seconds += time.perf_counter() - started
 
-        if row_index < args.divergence_rows:
+        if not args.skip_independent_rollout and row_index < args.divergence_rows:
             dense_trajectory = _greedy_rollout(
                 dense,
                 encoded,
@@ -303,6 +317,29 @@ def _diagnostics(args: argparse.Namespace) -> int:
         dense_top1 = dense_rows.argmax(dim=-1)
         quantized_top1 = quantized_rows.argmax(dim=-1)
         top1_sum += dense_top1.eq(quantized_top1).double().sum()
+        if row_index < args.divergence_rows:
+            # Match llama.cpp's KL benchmark conditioning policy: score after
+            # a half-context warmup, while retaining a fixed 32-position
+            # horizon for this harness.
+            shared_prefix = shared_prefix_top1_metrics(
+                dense_rows,
+                quantized_rows,
+                token_count=args.divergence_tokens,
+                start_index=dense_rows.shape[0] // 2,
+            )
+            if shared_prefix is not None:
+                shared_prefix_sequences += 1
+                shared_prefix_top1_sum += float(shared_prefix["top1_agreement"].item())
+                shared_prefix_exact_sum += float(shared_prefix["exact_sequence_agreement"].item())
+                shared_prefix_first_sum += float(shared_prefix["first_mismatch_token"].item())
+            legacy_first32 = shared_prefix_top1_metrics(
+                dense_rows,
+                quantized_rows,
+                token_count=args.divergence_tokens,
+            )
+            if legacy_first32 is not None:
+                legacy_first32_sequences += 1
+                legacy_first32_top1_sum += float(legacy_first32["top1_agreement"].item())
         if args.include_topn:
             for width, accumulator in ((5, top5_sum), (10, top10_sum)):
                 effective = min(width, dense_rows.shape[-1])
@@ -330,6 +367,7 @@ def _diagnostics(args: argparse.Namespace) -> int:
             "valid_sequences": divergence_sequences,
             "token_horizon": args.divergence_tokens,
             "protocol": "independent_greedy_rollout",
+            "skipped": args.skip_independent_rollout,
             "trajectory_survival": divergence_survival_sum / divergence_sequences if divergence_sequences else None,
             "exact_sequence_agreement": (
                 divergence_survival_sum / divergence_sequences if divergence_sequences else None
@@ -339,6 +377,31 @@ def _diagnostics(args: argparse.Namespace) -> int:
             ),
             "first_divergence_token": (
                 divergence_first_sum / divergence_sequences if divergence_sequences else None
+            ),
+        },
+        "sp_top1_32_w50": {
+            "requested_sequences": min(args.divergence_rows, len(dataset)),
+            "valid_sequences": shared_prefix_sequences,
+            "token_horizon": args.divergence_tokens,
+            "display_name": "Shared-prefix top-1 agreement@32, with 50% context warmup",
+            "protocol": "teacher_forced_shared_prefix",
+            "position_policy": "start_at_50_percent_context",
+            "top1_agreement": shared_prefix_top1_sum / shared_prefix_sequences if shared_prefix_sequences else None,
+            "exact_sequence_agreement": (
+                shared_prefix_exact_sum / shared_prefix_sequences if shared_prefix_sequences else None
+            ),
+            "first_mismatch_token": (
+                shared_prefix_first_sum / shared_prefix_sequences if shared_prefix_sequences else None
+            ),
+        },
+        "legacy_shared_prefix_first_32": {
+            "requested_sequences": min(args.divergence_rows, len(dataset)),
+            "valid_sequences": legacy_first32_sequences,
+            "token_horizon": args.divergence_tokens,
+            "protocol": "teacher_forced_shared_prefix",
+            "position_policy": "start_at_token_zero",
+            "top1_agreement": (
+                legacy_first32_top1_sum / legacy_first32_sequences if legacy_first32_sequences else None
             ),
         },
         "seconds": {

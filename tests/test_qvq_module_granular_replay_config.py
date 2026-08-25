@@ -13,6 +13,7 @@ from gptqmodel.quantization import (
     QuantizeConfig,
     QVQConfig,
 )
+from gptqmodel.quantization.qvq import QVQQuantizationTelemetry
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from scripts.validate_qvq_p4_live_prefix import _parser
 
@@ -324,11 +325,13 @@ def test_module_granular_replay_candidate_selection_restores_live_dense_module()
             "v2b2_p32": True,
             "rounding": "yaqa",
             "bank_count": 2,
+            "telemetry": QVQQuantizationTelemetry(),
         },
     )
 
     assert model.layers[0].q_proj is original
     assert result.bank_ids is not None
+    assert result.telemetry is not None
     replay = processor._module_replay_stats["layers.0.q_proj"]
     assert replay["selected_alternative_bank_id"] in (0, 1, 2, 3)
     assert len(replay["candidates"]) == 4
