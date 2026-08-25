@@ -22,6 +22,7 @@ import time
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import UTC, datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
@@ -177,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     tasks = subparsers.add_parser("tasks", help="Run Evalution tasks on the quantized checkpoint.")
     tasks.add_argument("--checkpoint", type=Path, required=True)
     tasks.add_argument("--output", type=Path, required=True)
+    tasks.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append missing tasks to a compatible task report, publishing atomically after every task.",
+    )
     tasks.add_argument("--batch-size", type=int, default=16)
     tasks.add_argument("--backend", choices=(BACKEND.QVQ.value, BACKEND.EXL3_EXLLAMA_V3.value), default="qvq")
     tasks.add_argument("--device", default="cuda:0")
@@ -796,13 +802,13 @@ def _tasks(args: argparse.Namespace) -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Quantized checkpoint does not exist: {checkpoint}")
-    if args.output.exists():
+    if args.output.exists() and not args.resume:
         raise FileExistsError(f"Refusing to overwrite existing result: {args.output}")
 
     from tests.eval import evaluate, format_eval_result_table, get_eval_task_results
 
     selected = args.task or list(TASKS)
-    payload: dict[str, Any] = {
+    expected_payload: dict[str, Any] = {
         "checkpoint": str(checkpoint),
         "backend": args.backend,
         "dtype": "float16",
@@ -820,7 +826,31 @@ def _tasks(args: argparse.Namespace) -> int:
         },
         "tasks": {},
     }
+    if args.output.exists():
+        payload = json.loads(args.output.read_text(encoding="utf-8"))
+        for key, expected in expected_payload.items():
+            if key == "tasks":
+                continue
+            if payload.get(key) != expected:
+                raise ValueError(
+                    f"Cannot resume incompatible task report: `{key}` is {payload.get(key)!r}, expected {expected!r}"
+                )
+        if not isinstance(payload.get("tasks"), dict):
+            raise ValueError("Cannot resume task report with a non-object `tasks` field")
+    else:
+        payload = expected_payload
+
+    def publish() -> None:
+        payload["updated_at_utc"] = datetime.now(UTC).isoformat()
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = args.output.with_name(f".{args.output.name}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(args.output)
+
     for label in selected:
+        if label in payload["tasks"]:
+            print(f"Skipping completed task {label} from resumed report {args.output}", flush=True)
+            continue
         task, apply_chat_template, suite_kwargs = TASKS[label]
         started = time.perf_counter()
         with _mmlu_question_row_progress(task.startswith("mmlu")):
@@ -846,8 +876,10 @@ def _tasks(args: argparse.Namespace) -> int:
             "seconds": time.perf_counter() - started,
             "metrics": next(iter(metrics.values())) if metrics else {},
         }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        publish()
+        print(f"Published completed task {label} to {args.output}", flush=True)
+    if not args.output.exists():
+        publish()
     return 0
 
 

@@ -298,6 +298,7 @@ def test_qvq_evaluate_tasks_require_paged_continuous_batching_defaults():
 
     assert args.device == "cuda:0"
     assert args.attn_implementation == "paged|flash_attention_2"
+    assert args.resume is False
 
 
 def test_qvq_evaluate_reports_mmlu_choice_work_as_completed_rows(monkeypatch):

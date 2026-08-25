@@ -180,7 +180,8 @@ python scripts/qvq_evaluate.py tasks \
   --task gsm8k_platinum_cot --task mmlu_stem --task mmlu_humanities
 ```
 
-The result table and serialized report path will be appended here after all three suites finish.
+Each completed suite is now atomically appended to this report. Later paired suites use `--resume`, which validates
+the checkpoint and full runtime contract before adding a missing task.
 
 The same full evaluation is queued for the hybrid-aligned leader:
 
@@ -192,7 +193,8 @@ python scripts/qvq_evaluate.py tasks \
   --task gsm8k_platinum_cot --task mmlu_stem --task mmlu_humanities
 ```
 
-The task-winner comparison will be appended only after both complete reports exist.
+The task-winner comparison will be appended only after both complete reports exist. Execution is interleaved by
+benchmark to reduce time/runtime drift: Q07 GSM8K, Q03 GSM8K, Q07 STEM, Q03 STEM, Q07 humanities, Q03 humanities.
 
 Pre-run validation:
 
@@ -217,4 +219,8 @@ generations, then reached 630/12,612 MMLU STEM choice likelihoods. It was intent
 a combined report to upgrade the runtime from Evalution 0.0.12 to the current PyPI release, Evalution 0.0.14, and to
 make MMLU display completed question rows (`completed / 3,153` for STEM) instead of internal choice requests
 (`completed / 12,612`). The underlying four-choice likelihood computation and continuous-refill scheduling are
-unchanged. The clean third attempt is the report-producing run.
+unchanged.
+
+The third Q07 attempt was superseded at 643/1,209 GSM8K rows (`numeric=0.2348`, zero invalid) before publication when
+the evaluation order changed from model-serial to benchmark-paired. The report-producing paired queue uses one task
+per invocation and atomic `--resume`; a failure can no longer discard already completed suites.
