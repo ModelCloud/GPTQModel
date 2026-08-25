@@ -64,6 +64,7 @@ from ..utils.model import find_modules, get_layers_with_prefixes, recurse_setatt
 from ..utils.module_locks import parent_module_lock
 from .qvq_output_alignment import QVQOutputAlignmentAttachment
 
+
 log = setup_logger()
 
 
@@ -1354,49 +1355,50 @@ class QVQProcessor(LoopProcessor):
                     propagation_gate = self._require_propagation_gate(module.full_name, target_device)
             else:
                 propagation_gate = None
-            quantization_kwargs = dict(
-                output_hessian=output_hessian,
-                bias=None if module.bias is None else module.bias.detach().to(target_device),
-                seed=seed,
-                damp_percent=damp_percent,
-                codebook_version=module_qcfg.codebook,
-                vector_size=module_qcfg.vector_size,
-                trellis_window=module_qcfg.trellis_window,
-                dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
-                v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
-                v2b2_p32=module_qcfg.format == FORMAT.QVQ_V2B2_P32,
-                module_scale_search=module_qcfg.module_scale_search,
-                output_channel_scale_optimization=module_qcfg.output_channel_scale_optimization,
-                viterbi_objective=module_qcfg.viterbi_objective,
-                tail_biting_candidates=module_qcfg.tail_biting_candidates,
-                rounding=module_qcfg.rounding,
-                yaqa_v2b2_family_mode=module_qcfg.yaqa.v2b2_family_mode,
-                yaqa_sample_strategy=module_qcfg.yaqa.sample_strategy,
-                yaqa_spectral_refinement=module_qcfg.yaqa.spectral_refinement,
-                yaqa_spectral_ranks=module_qcfg.yaqa.spectral_ranks,
-                yaqa_spectral_lambdas=module_qcfg.yaqa.spectral_lambdas,
-                yaqa_spectral_push=module_qcfg.yaqa.spectral_push,
-                yaqa_spectral_push_alphas=module_qcfg.yaqa.spectral_push_alphas,
-                yaqa_spectral_localized=module_qcfg.yaqa.spectral_localized,
-                yaqa_spectral_localized_alphas=module_qcfg.yaqa.spectral_localized_alphas,
-                yaqa_spectral_localized_max_segments=module_qcfg.yaqa.spectral_localized_max_segments,
-                yaqa_spectral_localized_max_changes=module_qcfg.yaqa.spectral_localized_max_changes,
-                yaqa_spectral_localized_replay_candidates=module_qcfg.yaqa.spectral_localized_replay_candidates,
-                yaqa_spectral_localized_direct_replay_candidates=(
+            quantization_kwargs = {
+                "output_hessian": output_hessian,
+                "bias": None if module.bias is None else module.bias.detach().to(target_device),
+                "seed": seed,
+                "damp_percent": damp_percent,
+                "codebook_version": module_qcfg.codebook,
+                "vector_size": module_qcfg.vector_size,
+                "trellis_window": module_qcfg.trellis_window,
+                "dual_v2": module_qcfg.format == FORMAT.QVQ_DUAL_V2,
+                "v2b4_p64": module_qcfg.format == FORMAT.QVQ_V2B4_P64,
+                "v2b2_p32": module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+                "module_scale_search": module_qcfg.module_scale_search,
+                "output_channel_scale_optimization": module_qcfg.output_channel_scale_optimization,
+                "viterbi_objective": module_qcfg.viterbi_objective,
+                "tail_biting_candidates": module_qcfg.tail_biting_candidates,
+                "rounding": module_qcfg.rounding,
+                "yaqa_v2b2_family_mode": module_qcfg.yaqa.v2b2_family_mode,
+                "yaqa_sample_strategy": module_qcfg.yaqa.sample_strategy,
+                "yaqa_spectral_refinement": module_qcfg.yaqa.spectral_refinement,
+                "yaqa_spectral_ranks": module_qcfg.yaqa.spectral_ranks,
+                "yaqa_spectral_lambdas": module_qcfg.yaqa.spectral_lambdas,
+                "yaqa_spectral_push": module_qcfg.yaqa.spectral_push,
+                "yaqa_spectral_push_alphas": module_qcfg.yaqa.spectral_push_alphas,
+                "yaqa_spectral_localized": module_qcfg.yaqa.spectral_localized,
+                "yaqa_spectral_localized_alphas": module_qcfg.yaqa.spectral_localized_alphas,
+                "yaqa_spectral_localized_max_segments": module_qcfg.yaqa.spectral_localized_max_segments,
+                "yaqa_spectral_localized_max_changes": module_qcfg.yaqa.spectral_localized_max_changes,
+                "yaqa_spectral_localized_replay_candidates": module_qcfg.yaqa.spectral_localized_replay_candidates,
+                "yaqa_spectral_localized_direct_replay_candidates": (
                     module_qcfg.yaqa.spectral_localized_direct_replay_candidates
                 ),
-                viterbi_minimum_proxy_improvement=module_qcfg.viterbi_minimum_proxy_improvement,
-                telemetry=telemetry,
-                bank_count=module_qcfg.bank_count,
-                propagated_inputs=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[0],
-                propagated_target_output=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[1],
-                propagated_acceptance=None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[2],
-                propagated_candidate_score=(
+                "viterbi_minimum_proxy_improvement": module_qcfg.viterbi_minimum_proxy_improvement,
+                "viterbi_pruning": module_qcfg.viterbi_pruning,
+                "telemetry": telemetry,
+                "bank_count": module_qcfg.bank_count,
+                "propagated_inputs": None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[0],
+                "propagated_target_output": None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[1],
+                "propagated_acceptance": None if propagation_gate is None or not module_qcfg.propagated_bank_selection else propagation_gate[2],
+                "propagated_candidate_score": (
                     None
                     if propagation_gate is None or not module_qcfg.propagated_bank_selection
                     else propagation_gate[3]
                 ),
-            )
+            }
             result = self._select_module_granular_replay_candidate(
                 module,
                 module_qcfg,
