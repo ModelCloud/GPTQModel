@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-import math
 import hashlib
+import math
 import threading
 import time
 from collections import defaultdict
@@ -22,18 +22,18 @@ from .qvq_codecs import (
     PGC16_NORMALIZATION_RMS,
     pgc16_codebook,
     pgc16_codebook_v2_bank,
+    pgc16_codebook_v4,
+    pgc16_codebook_v4_bank,
     pgc16_decode_states,
     pgc16_decode_states_v2_banked,
     pgc16_decode_states_v4,
     pgc16_decode_states_v4_banked,
-    pgc16_codebook_v4,
-    pgc16_codebook_v4_bank,
     pgc16_levels_for_version,
     pgc16_scale_factor,
     pgc18_codebook_v4,
     pgc18_decode_states_v4,
 )
-from .qvq_pruning import viterbi_pruning_dispatch_code
+from .qvq_pruning import reject_viterbi_pruning_fallback_if_strict, viterbi_pruning_dispatch_code
 from .qvq_rates import (
     QVQ_BITS as _QVQ_BITS,
 )
@@ -44,6 +44,7 @@ from .qvq_rates import (
 )
 from .qvq_yaqa import YAQA_DEFAULT_REGULARIZATION, YAQA_PAPER_REGULARIZATION
 from .rotation.hadamard_utils import matmul_hadU
+
 
 QVQ_BITS = _QVQ_BITS
 QVQ_V2B4_P64_SEGMENT_WEIGHTS = 64
@@ -1414,7 +1415,7 @@ def batched_viterbi_quantize(
         and sequences.is_contiguous()
         and codebook.is_contiguous()
     ):
-        from ..utils.qvq_cpu import qvq_cpu_viterbi, qvq_cpu_supported
+        from ..utils.qvq_cpu import qvq_cpu_supported, qvq_cpu_viterbi
 
         if qvq_cpu_supported():
             native_step_weights = None if step_weights is None else step_weights.to(torch.float32).contiguous()
@@ -1553,6 +1554,17 @@ def _batched_v2_banked_viterbi_quantize(
     shift = _validate_trellis_shape(bits=bits, vector_size=2, trellis_window=16)
     if shift > 7:
         raise ValueError("QVQ banked V2 supports only rates W1 through W3.5.")
+    # Resolve the pruning policy before ANY dispatch decision.  The MLX, native
+    # CPU, and eager recurrences below never reach the native CUDA op that
+    # enforces the strict policies, so a non-CUDA call must be refused here or
+    # `mode="required"` / `mode="auto"`+`fallback="error"` would silently use
+    # the baseline recurrence.
+    pruning_policy = viterbi_pruning_dispatch_code(viterbi_pruning)
+    if sequences.device.type != "cuda":
+        reject_viterbi_pruning_fallback_if_strict(
+            pruning_policy,
+            reason=f"the call runs on device `{sequences.device.type}`, not the CUDA fast path",
+        )
     if (
         sequences.device.type == "mps"
         and sequences.dtype == torch.float32
@@ -1658,8 +1670,7 @@ def _batched_v2_banked_viterbi_quantize(
         if torch.any((overlap_i64 < 0) | (overlap_i64 >= 1 << overlap_bits)):
             raise ValueError("QVQ banked V2 overlap is outside the legal retained-state range.")
 
-    pruning_policy = viterbi_pruning_dispatch_code(viterbi_pruning)
-    if (
+    native_cuda_dispatch = (
         sequences.device.type == "cuda"
         and work_dtype == torch.float32
         and sequences.dtype == torch.float32
@@ -1667,7 +1678,25 @@ def _batched_v2_banked_viterbi_quantize(
         and sequences.is_contiguous()
         and codebooks.is_contiguous()
         and torch.cuda.get_device_capability(sequences.device) >= (8, 0)
-    ):
+    )
+    if not native_cuda_dispatch:
+        # Enforce the strict policies BEFORE the eager recurrence: the native
+        # op never sees a call that fails these outer guards, so without this
+        # check a CPU/MPS call (or any other non-native path) would silently
+        # use the baseline recurrence despite `mode="required"` or
+        # `mode="auto"` with `fallback="error"`.
+        if sequences.device.type != "cuda":
+            guard_reason = f"the call runs on device `{sequences.device.type}`, not the CUDA fast path"
+        elif work_dtype != torch.float32 or sequences.dtype != torch.float32:
+            guard_reason = "the call does not use FP32 sequences with the FP32 working dtype"
+        elif codebooks.dtype not in (torch.float16, torch.float32):
+            guard_reason = f"codebook dtype `{codebooks.dtype}` is not supported by the native op"
+        elif not sequences.is_contiguous() or not codebooks.is_contiguous():
+            guard_reason = "the sequences or codebooks are not contiguous"
+        else:
+            guard_reason = "the CUDA device is below compute capability 8.0"
+        reject_viterbi_pruning_fallback_if_strict(pruning_policy, reason=guard_reason)
+    if native_cuda_dispatch:
         from ..utils.qvq_cuda import (
             _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
             qvq_cuda_viterbi_v2_segment_banked,

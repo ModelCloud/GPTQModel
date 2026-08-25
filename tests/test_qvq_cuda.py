@@ -57,15 +57,15 @@ from gptqmodel.quantization.rotation.hadamard_utils import (
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
-    _qvq_cuda_yaqa_feedback_op,
-    _qvq_cuda_yaqa_feedback_update_op,
     _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
+    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
-    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
     _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
+    _qvq_cuda_yaqa_feedback_op,
+    _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_supported,
@@ -73,6 +73,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_viterbi_banked,
     qvq_cuda_viterbi_v2_segment_banked,
 )
+
 
 pytestmark = [
     pytest.mark.cuda,
@@ -3602,7 +3603,9 @@ def test_qvq_cuda_norm_rank_grid_leaves_unsupported_configs_on_reference_path(
 def test_qvq_cuda_norm_rank_grid_disable_env_parser(value, enabled):
     """Only unset, empty, and exact ``0`` keep the eligible path enabled.
 
-    The flag is read once per process, so each spelling runs in a subprocess.
+    Each spelling runs in a subprocess so the cases stay independent; the
+    variable itself is re-read on every dispatch (see the same-process
+    mutation tests below).
     """
 
     import os
@@ -3886,7 +3889,12 @@ def test_qvq_pruning_policy_dispatches_eligible_cells(bits, bank_count, segment_
     sequences, codebooks = _norm_rank_case(20260901 + bank_count, 9, bits, bank_count)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
-    reference = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
+    # The oracle explicitly forces the pristine baseline recurrence with
+    # `mode="off"`; a default-`auto` reference could itself take the norm-band
+    # path and the comparison would prove nothing.
+    reference = qvq_cuda_viterbi_v2_segment_banked(
+        sequences, codebooks, bits, segment_steps, None, None, _pruning_code(mode="off")
+    )
     before = _norm_rank_dispatch_count()
     actual = op(
         sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode=mode)
@@ -4038,8 +4046,9 @@ def test_qvq_pruning_policy_default_argument_matches_auto():
 )
 def test_qvq_pruning_config_precedence_over_the_legacy_env_variable(mode, fallback, env, expected):
     """`GPTQMODEL_QVQ_DISABLE_OCTET_GRID` is a deprecated A/B escape honored
-    only under `mode="auto"`. The variable is read once per process, so each
-    combination runs in its own subprocess."""
+    only under `mode="auto"`. Each combination runs in its own subprocess so
+    the eight cases cannot contaminate one another's environment; the
+    same-process mutation contract is covered separately below."""
 
     import os
     import subprocess
@@ -4091,3 +4100,68 @@ print("PRECEDENCE-OK")
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert "PRECEDENCE-OK" in result.stdout
+
+
+def test_qvq_pruning_legacy_env_mutation_is_observed_same_process():
+    """B2: `GPTQMODEL_QVQ_DISABLE_OCTET_GRID` must be re-read on every
+    dispatch. Mutating it between calls in one process deterministically
+    toggles the `auto` fast path, and clearing it restores dispatch — no
+    stale cached process-global policy."""
+
+    import os
+
+    sequences, codebooks = _norm_rank_case(20260913, 7, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    auto = _pruning_code(mode="auto")
+    saved = os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+    try:
+        before = _norm_rank_dispatch_count()
+        first = op(sequences, codebooks, 6, 16, None, None, auto)
+        assert _norm_rank_dispatch_count() == before + 1
+
+        os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = "1"
+        before = _norm_rank_dispatch_count()
+        disabled = op(sequences, codebooks, 6, 16, None, None, auto)
+        assert _norm_rank_dispatch_count() == before
+
+        # `auto` + `fallback="error"` must also observe the fresh value.
+        with pytest.raises(RuntimeError, match="GPTQMODEL_QVQ_DISABLE_OCTET_GRID"):
+            op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="auto", fallback="error"))
+
+        del os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"]
+        before = _norm_rank_dispatch_count()
+        restored = op(sequences, codebooks, 6, 16, None, None, auto)
+        assert _norm_rank_dispatch_count() == before + 1
+
+        assert all(torch.equal(a, b) for a, b in zip(first, disabled))
+        assert all(torch.equal(a, b) for a, b in zip(first, restored))
+    finally:
+        if saved is None:
+            os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+        else:
+            os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = saved
+
+
+def test_qvq_pruning_required_ignores_env_mutation_same_process():
+    """`required` ignores the deprecated variable even when it is set mid
+    process: dispatch continues and results stay bit-identical."""
+
+    import os
+
+    # W3 batch 6: the W2.5 small-batch cooperative kernel is not band
+    # eligible, so use the W3 grid cell that `required` can always serve.
+    sequences, codebooks = _norm_rank_case(20260914, 6, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    saved = os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+    try:
+        reference = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required"))
+        os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = "1"
+        before = _norm_rank_dispatch_count()
+        actual = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required"))
+        assert _norm_rank_dispatch_count() == before + 1
+        assert all(torch.equal(a, b) for a, b in zip(reference, actual))
+    finally:
+        if saved is None:
+            os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
+        else:
+            os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = saved

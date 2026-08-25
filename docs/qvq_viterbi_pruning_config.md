@@ -68,7 +68,9 @@ non-family-batched, FP16 codebooks, `bank_count` 2 with `segment_steps` 16 or
 
 Explicit configuration is authoritative. The legacy
 `GPTQMODEL_QVQ_DISABLE_OCTET_GRID` variable survives only as a deprecated A/B
-escape hatch, and only under `mode="auto"`:
+escape hatch, and only under `mode="auto"`. The variable is re-read on every
+dispatch, so mutating it between calls in the same process is observed
+deterministically — there is no cached process-global policy:
 
 | `mode` | `fallback` | env set to a disabling value | Result |
 | --- | --- | --- | --- |
@@ -139,6 +141,15 @@ QVQConfig.viterbi_pruning
 
 Every new argument defaults to `auto`, in both Python and the native op
 schema (`int pruning_policy=0`), so direct low-level callers are unchanged.
+
+The strict policies are enforced at both layers. The native CUDA op refuses
+before kernel selection for calls that reach it, and the Python recurrence in
+`_batched_v2_banked_viterbi_quantize` refuses before any of its own dispatch
+decisions — so a CPU/MPS call, a non-FP32 working dtype, non-contiguous
+tensors, or a pre-`sm_80` device raise under `mode="required"` and
+`mode="auto"`+`fallback="error"` instead of silently using the baseline
+recurrence. `auto`+`fallback="baseline"` and `off` keep every one of those
+fallbacks.
 
 ### Caveat: `required` is strict by design
 

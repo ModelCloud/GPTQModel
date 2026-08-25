@@ -3337,12 +3337,7 @@ int64_t qvq_norm_cache_size() {
   return static_cast<int64_t>(g_norm_cache.size());
 }
 
-// Pristine A/B control, read once on first use (cached for the process
-// lifetime).  GPTQMODEL_QVQ_DISABLE_OCTET_GRID keeps its historical name so
-// existing enabled-versus-pristine harnesses keep working.  Only unset,
-// empty, or exactly "0" leave the fast path enabled; any other non-empty
-// value (including "00" and "0foo") forces the unmodified baseline grid
-// recurrence.
+// Pristine A/B control.  See norm_rank_grid_disabled() below.
 // Exact survivor-pruning policy codes shared with
 // `gptqmodel/quantization/qvq_pruning.py`.  These are part of the native op
 // schema and must stay stable.
@@ -3351,12 +3346,19 @@ constexpr int64_t kViterbiPruningOff = 1;        // off
 constexpr int64_t kViterbiPruningAutoError = 2;  // auto + fallback=error
 constexpr int64_t kViterbiPruningRequired = 3;   // required
 
+// Pristine A/B control, re-read on every dispatch so a same-process mutation
+// of GPTQMODEL_QVQ_DISABLE_OCTET_GRID between calls is observed
+// deterministically, matching the documented precedence: the deprecated
+// escape hatch applies under `mode="auto"` only, and there it reflects the
+// environment at call time — never a stale cached process-global policy.
+// The variable keeps its historical name so existing enabled-versus-pristine
+// harnesses keep working.  Only unset, empty, or exactly "0" leave the fast
+// path enabled; any other non-empty value (including "00" and "0foo") forces
+// the unmodified baseline grid recurrence.  One getenv per dispatched batch
+// is noise next to the kernel launch itself.
 bool norm_rank_grid_disabled() {
-  static const bool disabled = [] {
-    const char* value = std::getenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID");
-    return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
-  }();
-  return disabled;
+  const char* value = std::getenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID");
+  return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
 }
 
 // Segment loop for the norm-rank contiguous-band recurrence.  Launch geometry,

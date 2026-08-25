@@ -19,7 +19,7 @@ from gptqmodel.quantization.qvq_pruning import (
 
 
 def _config(**overrides):
-    kwargs = dict(bits=3.0, format=FORMAT.QVQ_V2B2_P32, bank_count=2)
+    kwargs = {"bits": 3.0, "format": FORMAT.QVQ_V2B2_P32, "bank_count": 2}
     kwargs.update(overrides)
     return QVQConfig(**kwargs)
 
@@ -217,3 +217,100 @@ def test_the_new_key_does_not_change_the_model_format_identity():
     }
     assert with_default["checkpoint_format"] == with_off["checkpoint_format"]
     assert with_default["quant_method"] == METHOD.QVQ
+
+
+# ---------------------------------------------------------------------------
+# B1: strict policies must fail at the outer Python dispatch guards too
+# ---------------------------------------------------------------------------
+
+
+def _cpu_banked_case(seed=20260910, batch=1, bits=3.0):
+    import torch
+
+    from gptqmodel.quantization.qvq_codecs import pgc16_codebook_v2_bank
+
+    generator = torch.Generator().manual_seed(seed)
+    sequences = torch.randn((batch, 128, 2), generator=generator, dtype=torch.float32)
+    codebooks = torch.stack(
+        (pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32),
+         pgc16_codebook_v2_bank(1, bits=bits, dtype=torch.float32))
+    )
+    return sequences, codebooks
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        pytest.param({"mode": "required"}, id="required"),
+        pytest.param({"mode": "auto", "fallback": "error"}, id="auto-fallback-error"),
+    ),
+)
+def test_strict_policy_rejects_cpu_eager_fallback_before_dispatch(policy):
+    """A CPU call never reaches the native CUDA op, so its strict-policy
+    refusal must come from the Python dispatch guard, not the kernel."""
+
+    from gptqmodel.quantization.qvq import _batched_v2_banked_viterbi_quantize
+
+    sequences, codebooks = _cpu_banked_case()
+    with pytest.raises(RuntimeError, match="cannot use it: the call runs on device `cpu`"):
+        _batched_v2_banked_viterbi_quantize(
+            sequences,
+            codebooks,
+            bits=3.0,
+            segment_steps=16,
+            viterbi_pruning=ViterbiPruningConfig(**policy),
+        )
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        pytest.param({"mode": "required"}, id="required"),
+        pytest.param({"mode": "auto", "fallback": "error"}, id="auto-fallback-error"),
+    ),
+)
+def test_strict_policy_rejects_cpu_tail_biting_wrapper(policy):
+    """The public tail-biting wrapper threads the policy into the same guard."""
+
+    from gptqmodel.quantization.qvq import tail_biting_v2b2_p32_quantize
+
+    sequences, codebooks = _cpu_banked_case(seed=20260911)
+    with pytest.raises(RuntimeError, match="cannot use it: the call runs on device `cpu`"):
+        tail_biting_v2b2_p32_quantize(
+            sequences,
+            codebooks,
+            bits=3.0,
+            viterbi_pruning=ViterbiPruningConfig(**policy),
+        )
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        pytest.param(None, id="default"),
+        pytest.param({"mode": "auto", "fallback": "baseline"}, id="auto-baseline"),
+        pytest.param({"mode": "off"}, id="off"),
+    ),
+)
+def test_non_strict_policies_keep_the_cpu_eager_fallback(policy):
+    """`auto`+`baseline` and `off` retain the exact eager baseline on CPU and
+    agree with the policy-less call bit for bit."""
+
+    import torch
+
+    from gptqmodel.quantization.qvq import _batched_v2_banked_viterbi_quantize
+
+    sequences, codebooks = _cpu_banked_case(seed=20260912)
+    reference = _batched_v2_banked_viterbi_quantize(
+        sequences, codebooks, bits=3.0, segment_steps=16
+    )
+    actual = _batched_v2_banked_viterbi_quantize(
+        sequences,
+        codebooks,
+        bits=3.0,
+        segment_steps=16,
+        viterbi_pruning=None if policy is None else ViterbiPruningConfig(**policy),
+    )
+    assert torch.equal(reference.states, actual.states)
+    assert torch.equal(reference.squared_error, actual.squared_error)
+    assert torch.equal(reference.segment_bank_ids, actual.segment_bank_ids)

@@ -115,3 +115,34 @@ def viterbi_pruning_dispatch_code(value: Any) -> int:
     """Resolve any accepted policy spelling into its native dispatch code."""
 
     return resolve_viterbi_pruning_policy(value).dispatch_code
+
+
+VITERBI_PRUNING_STRICT_CODES = frozenset(
+    {VITERBI_PRUNING_AUTO_ERROR, VITERBI_PRUNING_REQUIRED}
+)
+
+
+def viterbi_pruning_is_strict(policy_code: int) -> bool:
+    """Return whether ``policy_code`` forbids any silent baseline fallback."""
+
+    return policy_code in VITERBI_PRUNING_STRICT_CODES
+
+
+def reject_viterbi_pruning_fallback_if_strict(policy_code: int, *, reason: str) -> None:
+    """Fail before a baseline fallback when the policy forbids one.
+
+    The native CUDA op enforces the same contract for calls that reach it;
+    this Python-side twin covers every outer dispatch guard the native op
+    never sees — a CPU/MPS call, a non-FP32 working dtype, non-contiguous
+    tensors, or a pre-``sm_80`` device — so ``mode="required"`` and
+    ``mode="auto"``+``fallback="error"`` can never be satisfied silently by
+    the eager recurrence.
+    """
+
+    if viterbi_pruning_is_strict(policy_code):
+        raise RuntimeError(
+            "QVQ exact norm-band Viterbi pruning was requested with "
+            "`viterbi_pruning.mode='required'` or `fallback='error'`, but this call cannot "
+            f"use it: {reason}. Set `viterbi_pruning.mode='auto'` with the default "
+            "`fallback='baseline'` to keep the exact baseline recurrence instead."
+        )
