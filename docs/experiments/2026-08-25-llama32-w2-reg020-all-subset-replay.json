@@ -5,7 +5,7 @@
   "config":"scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020_all_subset_replay.json",
   "calibration":{"ordinary_rows":128,"yaqa":"calibration.parquet rows 0:182","replay_search":"calibration_div300_sources.parquet rows 0:64","replay_confirmation":"calibration_div300_sources.parquet rows 64:128","all_replay_splits_disjoint":true},
   "checkpoint":"/root/qvq-results/llama32-1b-w2-reg020-all-subset-replay-main-210e8031",
-  "queue":{"gpu":2,"status":"queued_after_leader_gsm8k","gsm8k_session":24963},
+  "queue":{"gpu":2,"status":"queued_after_leader_gsm8k","gsm8k_session":24963,"replay_gsm8k_session":9010},
   "replay":{"subsets":["attention_qkvo","mlp_gate_up","mlp_down"],"strategy":"greedy","horizon":"final_logits","search_folds":2,"alternative_bank_ids":[1,2,3],"minimum_relative_kl_improvement":0.001,"topn_regression_limit":0.0025,"require_disjoint_confirmation":true},
   "protocol":{"d300_manifest_sha256":"701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2","d300":"canonical divergence300 @32"}
 }

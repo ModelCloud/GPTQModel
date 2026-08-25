@@ -459,3 +459,12 @@ two search folds, and disjoint confirmation. Ordinary calibration, YAQA, replay
 search, and replay confirmation are separate slices. The config and queue
 ledger are `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020_all_subset_replay.json`
 and `docs/experiments/2026-08-25-llama32-w2-reg020-all-subset-replay.json`.
+
+### Second-level verification policy
+
+From this point forward, every new D300 leader or arm within one percentage
+point of the current flat-W2 leader (`18.7813%`) receives a queued GSM8K
+Platinum evaluation after D300. The focused regularization bracket already has
+that chain; the all-subset replay control now has a dedicated GSM8K watcher
+(session `9010`) as well. This keeps D300 selection and real-task verification
+separate while ensuring close candidates are not promoted on D300 alone.
