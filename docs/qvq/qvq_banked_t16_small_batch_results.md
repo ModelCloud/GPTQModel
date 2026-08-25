@@ -40,47 +40,132 @@ suffix column reduces over prefixes serially inside one thread, and that the
 final `best_final` scan is serial per row in both legs. That argument was tested,
 not assumed.
 
-Forced legacy was run at batch 16 across 16, 24 and 32 threads, one process per
-thread count, comparing selected states, squared error, segment bank IDs, packed
-state words and packed bank selectors.
+Two independent probes were run, both at commit `2d921abf`.
 
-A temporary `fprintf` on the branch confirmed the legs were actually crossed
-rather than the test passing vacuously:
+**Probe A -- legs forced, thread count held constant.** A measurement-only build
+(not shipped; the shipped source contains no `QVQ_PROBE_*` symbol) exposes
+`QVQ_PROBE_FORCE_LEG` so the same input can be pushed through the row-parallel
+leg and the tiled leg *at the same thread count*, removing the thread count as a
+confound. The override is demonstrably not a no-op: forcing the tiled leg at
+batch 16 is 19.4x slower at transition width 16 and 6.3x slower at width 7, with
+an identical selected-state checksum.
 
-| threads | batch | leg taken | calls |
-|---:|---:|---|---:|
-| 16 | 16 | row-parallel (`16 >= 16`) | 38/38 |
-| 24 | 16 | tiled (`16 < 24`) | 38/38 |
-| 32 | 16 | tiled (`16 < 32`) | 38/38 |
-
-38 configurations were used: 5 seeds x {1, 2} banks x {exact-tie, near-tie,
-random} codebooks, plus 8 extra segment-schedule shapes. The exact-tie
+72 configurations were used: {16, 7} transition widths x {1, 2} banks x
+{exact-tie, random} codebooks x 3 seeds x {4, 16, 32} batches. The exact-tie
 configurations quantize the codebook onto a coarse grid so the 65,536 codewords
-collapse onto 214 distinct vectors — 65,322 of 65,536 rows are exact duplicates
-of another row, so essentially every argmin in the recurrence is an exact tie
-decided purely by scan order. The near-tie configurations use a finer grid
-(601-1,243 exact duplicate rows plus many distinct-but-adjacent costs). The
-random configurations are the zero-duplicate control.
+collapse onto fewer than 1,024 distinct vectors — nearly every argmin in the
+recurrence is then an exact tie decided purely by scan order, which is what a leg
+that reordered a reduction would corrupt. The random configurations are the
+zero-duplicate control. A tie-density assertion fails the run if the fixture ever
+stops producing ties, so the gate cannot pass vacuously.
 
-**Result: 380 bitwise comparisons (38 configs x 5 output tensors x 2 thread
-pairings), 0 mismatches.**
+Each configuration compares row-vs-tile at 16, 24 and 32 threads, plus
+row-vs-row and tile-vs-tile across those thread counts, over five output tensors
+(selected states, squared error, segment bank IDs, packed state words, packed
+bank selectors).
 
-At transition width 16 the suffix frontier has one element, so
-`at::parallel_for(0, suffix_count, ...)` over the suffix-column argmin is
-degenerate and that particular region is not exercised as parallel. To close
-that hole the identical probe was repeated at transition width 7, where
-`suffix_count` is 512 and the column argmin genuinely partitions: **another 380
+**Probe A result: 432 kernel runs, 2,520 tensor comparisons, 449,904 element
 comparisons, 0 mismatches.**
+
+| split | tensor comparisons | mismatches |
+|---|---:|---:|
+| 16 threads | 360 | 0 |
+| 24 threads | 1,080 | 0 |
+| 32 threads | 1,080 | 0 |
+| transition width 16 | 1,260 | 0 |
+| transition width 7 | 1,260 | 0 |
+
+**Probe B -- shipped binary, production predicate.** The same 72 configurations
+on the shipped build, crossing the real predicate by varying the thread count
+only (16, 24, 32, 4, 2, 1) with no overrides of any kind: **432 kernel runs,
+1,800 tensor comparisons, 321,360 element comparisons, 0 mismatches**, again
+split evenly 900/900 between transition widths 16 and 7.
+
+Why both transition widths matter: at width 16 the suffix frontier has one
+element, so `at::parallel_for(0, suffix_count, ...)` over the suffix-column
+argmin cannot partition and that region is never exercised in parallel. A
+width-16-only gate is therefore **vacuous** for the argmin. At width 7
+`suffix_count` is 512 and the column argmin genuinely partitions. The shipped
+dispatcher sends width 7 to the G-only recurrence, so reaching legacy there is
+exactly what the measurement-only `QVQ_PROBE_FORCE_LEGACY_ANY` build is for.
 
 The gate therefore passed, and Option C is safe on this evidence.
 
 ## MEASURED: batch sweep before and after
 
-<!--SWEEP-->
+Paired legacy row-parallel (post-fix behaviour) versus tiled (pre-fix
+behaviour) at 32 threads, transition width 16, two banks, 32 steps. Three
+warmups, 15 repeats per arm, arms back-to-back with alternating order, explicit
+singleton `OMP_PLACES` built from the cgroup cpuset (`OMP_PLACES=cores` is never
+used here — it causes a 4.1x phantom slowdown on this host). Minimum is the
+primary estimator because interference on this multi-tenant box is positive-only.
+
+On a 32-thread box the old predicate `batch_size >= at::get_num_threads()` chose
+the tiled leg for every batch 1..31; the new `>= min(8, at::get_num_threads())`
+chooses the row leg from batch 8 up. **Production behaviour therefore changes
+only for batches 8..31** — batches 1/2/4 took the tiled leg before and still do,
+and batch 32 took the row leg before and still does. Those rows are included as
+controls.
+
+| batch | row med ms/row | row min ms/row | tile med ms/row | tile min ms/row | tile/row med | tile/row min | changed by fix? |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 6.138 | 5.918 | 6.914 | 6.556 | 1.13x | 1.11x | no (control) |
+| 2 | 3.261 | 3.126 | 6.271 | 6.053 | 1.92x | 1.94x | no (control) |
+| 4 | 1.674 | 1.638 | 6.865 | 5.923 | 4.10x | 3.62x | no (control) |
+| 8 | 0.956 | 0.922 | 6.214 | 5.785 | 6.50x | 6.28x | **yes** |
+| 12 | 0.714 | 0.674 | 6.840 | 5.819 | 9.57x | 8.63x | **yes** |
+| 16 | 0.615 | 0.568 | 6.548 | 5.986 | 10.64x | 10.54x | **yes** |
+| 24 | 0.497 | 0.457 | 6.397 | 5.938 | 12.88x | 12.98x | **yes** |
+| 32 | 0.444 | 0.398 | 8.025 | 6.032 | 18.06x | 15.17x | no (control) |
+
+In the range the fix actually changes, batches 8 through 24, the row leg is
+**6.50x to 12.88x faster by median (6.28x to 12.98x on minima)**. The
+controls behave as predicted: batch 1 shows almost no gap (1.13x), which is why
+clamping at 8 rather than 1 is the right cut, and batch 32 is unchanged in
+production regardless of the 18.06x leg-to-leg gap.
+
+Position-in-pair medians (first arm / second arm, milliseconds) expose carryover:
+
+| batch | row 1st / 2nd | tile 1st / 2nd |
+|---:|---|---|
+| 1 | 5.95 / 6.23 | 6.91 / 6.80 |
+| 2 | 6.28 / 6.56 | 12.41 / 13.25 |
+| 4 | 6.64 / 6.70 | 30.72 / 26.50 |
+| 8 | 7.41 / 7.69 | 49.71 / 51.29 |
+| 12 | 8.25 / 8.61 | 82.08 / 81.40 |
+| 16 | 9.44 / 9.89 | 102.93 / 104.96 |
+| 24 | 11.34 / 12.35 | 155.97 / 149.00 |
+| 32 | 13.88 / 14.22 | 267.81 / 238.19 |
+
+Carryover is under 5% on every row except tiled batch 4 (15.4%) and tiled
+batch 32 (11.5%); minima are unaffected and remain primary. Per-batch
+one-second cgroup `usage_usec` idle deltas ranged 129,377 to 322,120
+microseconds against a 32,000,000 us/s budget, i.e. the cgroup was below 1%
+utilised before every series. Host uptime and load average were not used and are
+meaningless on this 192-CPU multi-tenant box.
 
 ## MEASURED: byte-identity against origin/main
 
-<!--BITEXACT-->
+The strongest correctness statement available here is that Option C changes
+nothing at all. The transition-16 dispatcher is restored to `origin/main`'s
+shape-only form and the tiling predicate is proven output-neutral above, so the
+shipped kernel should be byte-identical to `origin/main` everywhere, not merely
+equivalent.
+
+That was checked directly. A reference dump of 128 configurations was captured
+from unmodified `origin/main` `5ee72d93` in its own initially-empty build root
+({16, 7} transition widths x {1, 2} banks x {exact-tie, random} codebooks x
+2 seeds x {1, 4, 16, 32} batches x {16, 32} threads), recording selected
+states, squared error, segment bank IDs, packed state words and packed bank
+selectors. The Option C build was then dumped in eight chunks of 16 and each
+chunk compared against it as it was produced.
+
+**Result: 128/128 configurations, 640 tensor comparisons, 87,360 element
+comparisons, 0 mismatches.**
+
+The reference remains valid against the current `origin/main` `35b347ec`: the
+only kernel file `5ee72d93..35b347ec` touches is `qvq_viterbi_cuda.cu`, so the
+CPU banked kernel is byte-identical across that range (`git diff --stat`).
 
 ## Environment override defects fixed
 

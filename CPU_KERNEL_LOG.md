@@ -1722,18 +1722,42 @@ originates.
   dispatcher is restored to its `origin/main` shape-only form, so there is no
   flipped regime and no output change at any batch size or thread count.
 - **MEASURED, gate on the central assumption:** the fix is only safe if legacy's
-  two tiling legs are bit-identical. Forced legacy at batch 16 across 16/24/32
-  threads over 38 configurations (5 seeds x 1-2 banks x exact-tie/near-tie/random
-  codebooks, plus 8 segment-schedule shapes) gave 380 bitwise comparisons of
-  states, squared error, segment bank IDs, packed words and packed selectors with
-  0 mismatches. Temporary branch instrumentation confirmed 38/38 calls took the
-  row-parallel leg at 16 threads and 38/38 took the tiled leg at 24 and 32, so
-  the legs were genuinely crossed. The exact-tie codebooks collapse 65,536
-  codewords onto 214 distinct vectors (65,322 duplicate rows), so nearly every
-  argmin is an exact tie decided by scan order. Repeating the probe at
-  transition width 7, where `suffix_count` is 512 and the suffix-column argmin
-  actually partitions, gave another 380 comparisons with 0 mismatches.
-%SWEEP%
+  two tiling legs are bit-identical. Two probes, both at `2d921abf`, over the
+  same 72 configurations ({16, 7} transition widths x {1, 2} banks x
+  {exact-tie, random} codebooks x 3 seeds x {4, 16, 32} batches), each
+  comparing selected states, squared error, segment bank IDs, packed words and
+  packed selectors. Probe A used a measurement-only build exposing
+  `QVQ_PROBE_FORCE_LEG`, so both legs run at the SAME thread count and the
+  thread count is not a confound: 432 kernel runs, 2,520 tensor comparisons,
+  449,904 element comparisons, **0 mismatches** (360/1,080/1,080 comparisons at
+  16/24/32 threads; 1,260 at each transition width). Probe B used the shipped
+  binary with no overrides, crossing the real predicate by thread count alone
+  (16/24/32/4/2/1): 1,800 tensor comparisons, 321,360 element comparisons,
+  **0 mismatches**. The leg override is demonstrably not a no-op — forcing the
+  tiled leg at batch 16 is 19.4x slower at width 16 and 6.3x at width 7 with an
+  identical selected-state checksum — and a tie-density assertion fails the run
+  if the exact-tie fixture ever stops producing ties.
+- **Why transition width 7 is required:** at width 16 `suffix_count` is 1, so the
+  `at::parallel_for` over the suffix-column argmin cannot partition and a
+  width-16-only gate is VACUOUS for that reduction. At width 7 `suffix_count` is
+  512 and it genuinely partitions. The shipped dispatcher routes width 7 to
+  G-only, so reaching legacy there needs the measurement-only build.
+- **MEASURED, byte-identity with `origin/main`:** 128 configurations dumped from
+  unmodified `origin/main` `5ee72d93` in its own initially-empty build root and
+  compared chunk-by-chunk against the Option C build: 640 tensor comparisons,
+  87,360 element comparisons, **0 mismatches**. The reference is still valid
+  against `35b347ec`, which touches only `qvq_viterbi_cuda.cu`.
+- **MEASURED, speed:** paired row-parallel versus tiled legs at 32 threads,
+  width 16, two banks, 32 steps; 3 warmups, 15 repeats, back-to-back arms with
+  alternating order, explicit singleton `OMP_PLACES` from the cgroup cpuset
+  (never `OMP_PLACES=cores`). On a 32-thread box the fix changes production
+  behaviour only for batches 8..31. Across that range the row leg is
+  **6.50x-12.88x faster by median (6.28x-12.98x on minima)**: batch 8
+  6.50x, batch 12 9.57x, batch 16 10.64x, batch 24 12.88x. Controls behave as
+  predicted: batch 1 shows only 1.13x (which is why the clamp is 8 and not 1)
+  and batch 32 was already on the row leg before the fix. Per-batch one-second
+  cgroup `usage_usec` idle deltas were 129,377-322,120 us against a
+  32,000,000 us/s budget; uptime and load average were not used.
 - **MEASURED, override scope defect:** `QVQ_TEST_FORCE_BANKED_LEGACY`
   short-circuited the shape guard, sending every banked call to legacy including
   shapes the dispatcher excludes. At `4b227a66` this changed one selected state
@@ -1749,6 +1773,26 @@ originates.
   `banks=2` codebook over identical sequences, collapsing further to 5 and 3
   distinct data instances. The figures were overstated by 2-3.6x. This no longer
   bears on the shipped change, which flips nothing.
-%GATES%
+- **MEASURED gates at `2d921abf`:** gate 1
+  (`tests/test_qvq.py tests/test_qvq_v2b2_p32.py tests/test_qvq_viterbi_cpu_opt.py
+  tests/test_calibration_coverage.py`) `804 passed, 260 skipped`, exit 0 — one
+  above the 803 baseline because the new
+  `test_native_banked_viterbi_force_overrides_are_parsed_and_scoped` adds a
+  collected case; collection on this set goes 1,062 -> 1,063, confirming the
+  delta is exactly the added test and not a reshaped suite. Gate 2
+  (`tests/test_qvq_diagnostic_metrics.py tests/test_qvq_lifecycle.py
+  tests/test_qvq_v2b4_p64.py`) `178 passed, 8 skipped`, exit 0, matching baseline.
+  `git diff --check` clean. The candidate build used a distinct initially-empty
+  `GPTQMODEL_QVQ_CPU_BUILD_ROOT` with a confirmed real 25 s compile of all seven
+  translation units.
+- **MEASURED, new test proven to fail first:**
+  `test_native_banked_viterbi_force_overrides_are_parsed_and_scoped` was run
+  against unmodified `4b227a66` and failed with
+  `RuntimeError: qvq_viterbi_banked_cpu: forced legacy and G-only paths are
+  mutually exclusive` on `QVQ_TEST_FORCE_BANKED_G_ONLY=0`, which is the
+  presence-only `getenv` bug. Its scope half was measured separately at
+  `4b227a66`: an unscoped force-legacy changed 1 of 128 selected states and all
+  4 squared errors on a `bank_count=3` width-16 case, reproducibly at 4, 16 and
+  32 threads.
 - Full methodology and provenance:
   `docs/qvq/qvq_banked_t16_small_batch_results.md`.
