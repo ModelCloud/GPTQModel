@@ -97,6 +97,7 @@ development results; the locked Divergence-300 split remains untouched.
 | Two-epoch / 64-batch output alignment | 17.0938% | 1,641 / 9,600 | **3 / 300 (1.0000%)** | 4.5633 |
 | Uniform `0.10`, no output alignment | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** | **4.8533** |
 | Uniform `0.10` + output alignment | 17.2188% | 1,653 / 9,600 | 2 / 300 (0.6667%) | 4.7500 |
+| Uniform `0.20`, no output alignment | 16.3333% | 1,568 / 9,600 | **3 / 300 (1.0000%)** | 4.6100 |
 
 The larger hybrid alignment budget gained another 185 aligned positions over the one-epoch candidate, or 1.9271
 percentage points (+12.71% relative), and one additional exact trajectory. The corrected damping control then found
@@ -131,11 +132,13 @@ the same pinned development manifest confirms that the layer-specific choice is 
 | Uniform `0.05` | 12.6042% | 1,210 / 9,600 | 2 / 300 (0.6667%) |
 | Layers 0/6/10/12 at `0.10`, all others `0.05` | 13.9896% | 1,343 / 9,600 | 1 / 300 (0.3333%) |
 | Uniform `0.10` | **17.8854%** | **1,717 / 9,600** | **3 / 300 (1.0000%)** |
+| Uniform `0.20` | 16.3333% | 1,568 / 9,600 | **3 / 300 (1.0000%)** |
 
 The hybrid gains 133 aligned positions over uniform `0.05`, but uniform `0.10` gains another 374 positions over the
 hybrid and 507 over uniform `0.05`. The old proxy-selected dynamic override is therefore positive relative to `0.05`
-but is not the corrected-metric optimum. Exact survival is sparse and does not rank the first two arms consistently,
-so neither reduction is silently substituted for the aligned-token optimization target.
+but is not the corrected-metric optimum. Uniform `0.20` then loses 149 positions relative to `0.10`, bracketing the
+best tested damping region instead of supporting still stronger regularization. Exact survival is sparse and does not
+rank these arms consistently, so neither reduction is silently substituted for the aligned-token optimization target.
 
 ## Teacher-rollout alignment diagnostic
 
