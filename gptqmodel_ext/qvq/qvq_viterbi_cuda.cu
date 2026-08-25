@@ -280,11 +280,20 @@ struct NormCacheEntry {
 std::mutex g_norm_cache_mutex;
 std::vector<NormCacheEntry> g_norm_cache;
 
+// cudaEventDestroy is device-sensitive: an event is owned by the device that
+// was current at cudaEventCreate*, and destroying it while another device is
+// current is invalid.  Both caches mix devices.  Use a guard so the previous
+// device is restored even when C10_CUDA_CHECK throws.
+void destroy_cuda_event_on_device(cudaEvent_t event, int device) {
+  const c10::cuda::CUDAGuard device_guard(device);
+  C10_CUDA_CHECK(cudaEventDestroy(event));
+}
+
 void evict_norm_cache_entry() {
   if (g_norm_cache.size() < kMaxNormCacheEntries) {
     return;
   }
-  C10_CUDA_CHECK(cudaEventDestroy(g_norm_cache.front().ready));
+  destroy_cuda_event_on_device(g_norm_cache.front().ready, g_norm_cache.front().device);
   g_norm_cache.erase(g_norm_cache.begin());
 }
 
@@ -394,6 +403,222 @@ at::Tensor cached_banked_codebook_norm(const at::Tensor& codebook, cudaStream_t 
   at::Tensor result = entry.norm;
   evict_norm_cache_entry();
   g_norm_cache.push_back(std::move(entry));
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Norm-rank contiguous-band tables.
+//
+// For one suffix column x the segmented grid recurrence evaluates the
+// prefix_count states h * suffix_count + x, h in [0, prefix_count).  These
+// tables hold that candidate list once per codebook, sorted ascending by the
+// state's cached FP32 squared norm (ties by original prefix) and cut into
+// ChunkWidth-wide chunks, chunk-major so a warp visiting one chunk index
+// streams fully coalesced lines exactly like the baseline codebook walk:
+//
+//   records[bank][chunk][x][slot]   the state's exact 64-bit {norm, code}
+//   prefixes[bank][chunk][x][slot]  the state's original prefix h, one byte
+//   low_norms[bank][chunk][x]       smallest norm in the chunk (slot 0)
+//
+// One lane reads its chunk as two adjacent 16-byte words, so a warp's chunk
+// visit is a contiguous 32 * 32-byte block; the prefix bytes sit
+// slot-innermost, so the kernel reads a lane's chunk worth as one
+// little-endian NormRankPrefixPack integer.
+//
+// The original h travels with every record so the (value, lowest original
+// prefix) lexicographic tie contract of lower_pair() survives a scan order
+// that is by norm rather than by prefix.
+// ---------------------------------------------------------------------------
+template <int ChunkWidth>
+struct NormRankPrefixPack;
+template <>
+struct NormRankPrefixPack<2> {
+  using type = uint16_t;
+};
+template <>
+struct NormRankPrefixPack<4> {
+  using type = uint32_t;
+};
+template <>
+struct NormRankPrefixPack<8> {
+  using type = uint64_t;
+};
+
+// Width of the straight-line evaluation block, per rate.  Four keeps the
+// unrolled body inside the 32-register budget that holds two 1024-thread CTAs
+// per SM and loads one lane's chunk in two 16-byte transactions; the per-rate
+// choices are the fastest of the 2/4/8 sweep recorded in OPTIMIZATION_LOG.md.
+constexpr int kNormRankChunkWidthW25 = 4;
+constexpr int kNormRankChunkWidthW3 = 4;
+
+// Rank of each state inside its own suffix column, ordered by (norm, original
+// prefix).  One thread per state, prefix_count comparisons each; runs once per
+// codebook.
+template <int Shift, int ChunkWidth>
+__global__ void qvq_norm_rank_sort_kernel(
+    const uint64_t* __restrict__ packed_records,
+    uint64_t* __restrict__ sorted_records,
+    uint8_t* __restrict__ sorted_prefixes,
+    int bank_count) {
+  constexpr int prefix_count = 1 << Shift;
+  constexpr int suffix_count = 1 << (16 - Shift);
+  const int64_t total = static_cast<int64_t>(bank_count) * kStateCount;
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < total;
+       index += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+    const int bank = static_cast<int>(index >> 16);
+    const int state = static_cast<int>(index & (kStateCount - 1));
+    const int prefix = state >> (16 - Shift);
+    const int suffix = state - prefix * suffix_count;
+    const uint64_t* bank_records = packed_records + static_cast<int64_t>(bank) * kStateCount;
+    const uint64_t self = bank_records[state];
+    const float self_norm = __uint_as_float(static_cast<uint32_t>(self >> 32));
+    int rank = 0;
+    for (int other = 0; other < prefix_count; ++other) {
+      const float other_norm = __uint_as_float(
+          static_cast<uint32_t>(bank_records[other * suffix_count + suffix] >> 32));
+      rank += (other_norm < self_norm || (other_norm == self_norm && other < prefix)) ? 1 : 0;
+    }
+    const int64_t out = static_cast<int64_t>(bank) * kStateCount +
+        static_cast<int64_t>(rank / ChunkWidth) * suffix_count * ChunkWidth +
+        static_cast<int64_t>(suffix) * ChunkWidth + rank % ChunkWidth;
+    sorted_records[out] = self;
+    sorted_prefixes[out] = static_cast<uint8_t>(prefix);
+  }
+}
+
+// Smallest norm of every chunk, read back from slot zero of the sorted records.
+template <int Shift, int ChunkWidth>
+__global__ void qvq_norm_rank_bounds_kernel(
+    const uint64_t* __restrict__ sorted_records,
+    float* __restrict__ low_norms,
+    int bank_count) {
+  constexpr int prefix_count = 1 << Shift;
+  constexpr int chunk_count = prefix_count / ChunkWidth;
+  const int64_t total = static_cast<int64_t>(bank_count) * kStateCount / ChunkWidth;
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < total;
+       index += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+    // [bank][chunk][x] is index-compatible with slot zero of the records.
+    low_norms[index] = __uint_as_float(
+        static_cast<uint32_t>(sorted_records[index * ChunkWidth] >> 32));
+  }
+}
+
+struct NormRankTables {
+  at::Tensor records;
+  at::Tensor low_norms;
+  at::Tensor prefixes;
+};
+
+struct NormRankCacheEntry {
+  at::Tensor codebook;
+  NormRankTables tables;
+  uint32_t codebook_version = 0;
+  cudaEvent_t ready{};
+  int device = -1;
+  int bank_count = 0;
+  int shift = 0;
+  int chunk_width = 0;
+  at::ScalarType scalar_type = at::kHalf;
+};
+
+std::mutex g_norm_rank_cache_mutex;
+std::vector<NormRankCacheEntry> g_norm_rank_cache;
+constexpr size_t kMaxNormRankCacheEntries = 8;
+
+template <int Shift, int ChunkWidth>
+NormRankTables build_norm_rank_tables(
+    const at::Tensor& codebooks,
+    const at::Tensor& packed_norm,
+    int bank_count,
+    cudaStream_t stream) {
+  constexpr int prefix_count = 1 << Shift;
+  constexpr int suffix_count = 1 << (16 - Shift);
+  constexpr int chunk_count = prefix_count / ChunkWidth;
+  NormRankTables tables;
+  tables.records = at::empty({bank_count, chunk_count, suffix_count, ChunkWidth},
+                             codebooks.options().dtype(at::kLong));
+  tables.low_norms = at::empty({bank_count, chunk_count, suffix_count},
+                               codebooks.options().dtype(at::kFloat));
+  tables.prefixes = at::empty({bank_count, chunk_count, suffix_count, ChunkWidth},
+                              codebooks.options().dtype(at::kByte));
+
+  const uint64_t* records_in = reinterpret_cast<const uint64_t*>(packed_norm.const_data_ptr<float>());
+  uint64_t* records_out = reinterpret_cast<uint64_t*>(tables.records.mutable_data_ptr<int64_t>());
+  constexpr int kBuildBlock = 256;
+  const int64_t sort_total = static_cast<int64_t>(bank_count) * kStateCount;
+  const int sort_blocks = static_cast<int>(
+      std::min<int64_t>((sort_total + kBuildBlock - 1) / kBuildBlock, 8192));
+  qvq_norm_rank_sort_kernel<Shift, ChunkWidth><<<sort_blocks, kBuildBlock, 0, stream>>>(
+      records_in, records_out, tables.prefixes.mutable_data_ptr<uint8_t>(), bank_count);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  const int64_t bounds_total = sort_total / ChunkWidth;
+  const int bounds_blocks = static_cast<int>(
+      std::min<int64_t>((bounds_total + kBuildBlock - 1) / kBuildBlock, 8192));
+  qvq_norm_rank_bounds_kernel<Shift, ChunkWidth><<<bounds_blocks, kBuildBlock, 0, stream>>>(
+      records_out, tables.low_norms.mutable_data_ptr<float>(), bank_count);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return tables;
+}
+
+void record_norm_rank_cache_use(
+    const NormRankTables& tables, int device, cudaStream_t stream) {
+  const auto cuda_stream = c10::cuda::getStreamFromExternal(stream, device);
+  c10::cuda::CUDACachingAllocator::recordStream(tables.records.storage().data_ptr(), cuda_stream);
+  c10::cuda::CUDACachingAllocator::recordStream(tables.low_norms.storage().data_ptr(), cuda_stream);
+  c10::cuda::CUDACachingAllocator::recordStream(tables.prefixes.storage().data_ptr(), cuda_stream);
+}
+
+// Cached by (device, scalar type, bank count, shift, chunk width, codebook
+// storage, codebook version).  A mutated codebook bumps the version counter
+// and therefore misses; inference-mode tensors keep no useful version counter,
+// so they build uncached exactly like cached_codebook_norm().  A hit waits on
+// the producing stream's ready event, so a consumer on another stream never
+// reads a table that is still being written.
+template <int Shift, int ChunkWidth>
+NormRankTables cached_norm_rank_tables(
+    const at::Tensor& codebooks,
+    const at::Tensor& packed_norm,
+    int bank_count,
+    cudaStream_t stream) {
+  std::lock_guard<std::mutex> lock(g_norm_rank_cache_mutex);
+  const int device = codebooks.get_device();
+  const void* pointer = codebooks.data_ptr();
+  auto* codebook_impl = const_cast<c10::TensorImpl*>(codebooks.unsafeGetTensorImpl());
+  if (codebook_impl->is_inference()) {
+    return build_norm_rank_tables<Shift, ChunkWidth>(codebooks, packed_norm, bank_count, stream);
+  }
+  const uint32_t codebook_version = codebook_impl->version_counter().current_version();
+  for (const auto& entry : g_norm_rank_cache) {
+    if (entry.device == device && entry.bank_count == bank_count && entry.shift == Shift &&
+        entry.chunk_width == ChunkWidth && entry.scalar_type == codebooks.scalar_type() &&
+        entry.codebook_version == codebook_version && entry.codebook.data_ptr() == pointer) {
+      C10_CUDA_CHECK(cudaStreamWaitEvent(stream, entry.ready, 0));
+      return entry.tables;
+    }
+  }
+  NormRankCacheEntry entry;
+  entry.codebook = codebooks;
+  entry.tables = build_norm_rank_tables<Shift, ChunkWidth>(
+      codebooks, packed_norm, bank_count, stream);
+  entry.device = device;
+  entry.bank_count = bank_count;
+  entry.shift = Shift;
+  entry.chunk_width = ChunkWidth;
+  entry.scalar_type = codebooks.scalar_type();
+  entry.codebook_version = codebook_version;
+  C10_CUDA_CHECK(cudaEventCreateWithFlags(&entry.ready, cudaEventDisableTiming));
+  C10_CUDA_CHECK(cudaEventRecord(entry.ready, stream));
+  NormRankTables result = entry.tables;
+  if (g_norm_rank_cache.size() >= kMaxNormRankCacheEntries) {
+    // The cache mixes devices: destroy the evicted entry's event on the
+    // device that created it, not on the calling thread's current device.
+    destroy_cuda_event_on_device(
+        g_norm_rank_cache.front().ready, g_norm_rank_cache.front().device);
+    g_norm_rank_cache.erase(g_norm_rank_cache.begin());
+  }
+  g_norm_rank_cache.push_back(std::move(entry));
   return result;
 }
 
@@ -1558,6 +1783,362 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
   }
   for (int x = thread; x < suffix_count; x += kThreads) {
     g_output_all[g_base + x] = g_previous[x];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Norm-rank contiguous-band exact bound-pruned segmented grid recurrence.
+//
+// Same thread mapping (one thread per suffix column x, 1024 threads per CTA,
+// one CTA per (sequence, bank)), same FP32 candidate arithmetic, same
+// frontier/backpointer/boundary layouts, and the same (value, lowest original
+// prefix) tie contract as qvq_v2_segment_grid_kernel.  The difference is that
+// each thread evaluates only a provably sufficient contiguous norm-band of its
+// prefix_count-entry sorted candidate list instead of all of it, and every
+// range decision is widened to the warp so each chunk visit is a warp-uniform,
+// perfectly coalesced, branch-free straight-line block:
+//
+//   seed:  the warp range of the previous step's winning chunks (the first
+//          step of a segment brackets tn per lane instead).  Evaluating it
+//          hands every lane an incumbent value U; seed quality affects only
+//          how tight U is, never correctness.
+//   walk:  each lane converts U into a provable norm interval; the warp walks
+//          outward from the seed range and one all-lanes-agree ballot against
+//          the sorted chunk-minimum norms ends each direction for everyone.
+//
+// Warp-widening only ever ADDS evaluated chunks, so exactness is per-lane.
+// Measured on real Qwen3 weight tiles the warp union costs the same as the
+// per-lane maximum (bands overlap almost perfectly within a warp).  A column
+// whose band degenerates to the full list drops to a straight full scan - the
+// baseline body - and re-probes its band every sixteenth step.
+//
+// Notation for one step: t = (tx, ty), tn = fl(fl(tx*tx) + fl(ty*ty)) is the
+// kernel's own FP32 target norm, nu is a state's cached FP32 norm, gp is its
+// predecessor frontier cost, and u = 2^-24 bounds the relative error of one
+// FP32 round-to-nearest operation.  The reference candidate value is
+//   cand = fl(gp + max(fl(fl(tn + nu) - fl(2 * fl(dot))), 0)).
+//
+// Let floor <= gp be the minimum of the previous frontier over this column's
+// predecessor class and U the lane's evaluated candidate value from the seed
+// range.  If a state can still win or tie then cand <= U.  Chaining
+// |fl(y) - y| <= u|y| per operation with Cauchy-Schwarz on the exact reals
+// (dot <= sqrt(TN * NU), TN <= tn/(1-u)^2, NU <= nu/(1-u)^2) yields, for
+// constants c1, c2 < 5,
+//
+//   (sqrt(tn) - sqrt(nu))^2 <= (U - floor)(1 + c1*u) + c2*u*(tn + sqrt(tn*nu)).
+//
+// The code widens every coefficient to kNormRankEps = 2^-19 = 32u with
+// outward-directed rounding:
+//
+//   slack  = max(U*(1+eps)[ru] - floor, 0)          >= (U - floor)(1 + c1*u)
+//   radius = sqrt_ru(slack*(1+eps)[ru] + tn*eps[ru])
+//   band   = [ (sqrt_rd(tn) - radius)^2_rd , (sqrt_ru(tn)*(1+eps)[ru] + radius)^2_ru ]
+//
+// The eps*slack term inside the square root covers every multiplicative error
+// (32u versus the required < 5u) and the eps*tn term covers every additive
+// error including the self-referential sqrt(tn*nu) cross term (resolving the
+// quadratic in r = |sqrt(tn) - sqrt(nu)| consumes < 9u*tn); the remaining
+// >= 3x margin enters under the square root, so the band widens by an
+// O(sqrt(u)) sliver that admits essentially no extra survivors.  Nothing here
+// relies on the FP32 bound being monotone in nu: the band is contiguous
+// because the *table* is sorted by the very same cached FP32 norms, and every
+// rounding decision above only widens the interval.  Non-finite targets or
+// frontiers collapse the lane's band to the full list, which is exactly the
+// baseline scan.
+//
+// The chunk skip test uses only the sorted per-chunk minimum norms lo[]: a
+// chunk is skippable above the band iff lo[c] > high (and then so is every
+// later chunk), and below the band iff its maximum norm < low, for which
+// lo[c+1] < low is a sufficient (sortedness: max of chunk c <= lo[c+1]) and
+// cheaper test (and then every earlier chunk is skippable too).
+// ---------------------------------------------------------------------------
+constexpr float kNormRankEps = 1.9073486328125e-06f;         // 2^-19, exact in FP32
+constexpr float kNormRankRelax = 1.0000019073486328125f;     // 1 + 2^-19, exact in FP32
+
+template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth>
+__global__ __launch_bounds__(kThreads, Shift >= 6 ? 1 : 2)
+void qvq_v2_segment_grid_norm_rank_kernel(
+    const float* __restrict__ sequences,
+    const uint64_t* __restrict__ baseline_records,
+    const uint64_t* __restrict__ sorted_records,
+    const typename NormRankPrefixPack<ChunkWidth>::type* __restrict__ chunk_prefixes,
+    const float* __restrict__ chunk_low_norms,
+    const float* __restrict__ g_input_all,
+    float* __restrict__ g_output_all,
+    uint8_t* __restrict__ backpointers,
+    uint8_t* __restrict__ boundary_banks,
+    int batch,
+    int segment_index) {
+  using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
+  constexpr int shift = Shift;
+  constexpr int prefix_count = 1 << shift;
+  constexpr int suffix_count = 1 << (16 - shift);
+  constexpr int bank_count = BankCount;
+  constexpr int segment_steps = SegmentSteps;
+  constexpr int segment_count = 128 / segment_steps;
+  constexpr int bank_suffix_count = bank_count * suffix_count;
+  constexpr int chunk_count = prefix_count / ChunkWidth;
+  constexpr int column_iterations = suffix_count / kThreads;
+  // Predecessor of state h * suffix_count + x is h * group_count + (x >> shift):
+  // exactly the suffixes congruent to (x >> shift) modulo group_count.
+  constexpr int group_shift = 16 - 2 * shift;
+  constexpr int group_count = 1 << group_shift;
+  // Skew the shared frontier by one slot per predecessor group: the in-chunk
+  // reads go to prefix * (group_count + 1) + group, an odd stride that spreads
+  // the warp's distinct prefixes over distinct shared banks (the natural
+  // power-of-two stride would serialize them onto one).
+  constexpr int frontier_stride = suffix_count + prefix_count;
+  constexpr unsigned kInfBits = 0x7f800000u;
+  constexpr unsigned kFullMask = 0xffffffffu;
+  static_assert(group_count * prefix_count == suffix_count, "group decomposition");
+  static_assert(prefix_count % ChunkWidth == 0, "chunk width must divide the prefix count");
+  static_assert(ChunkWidth % 2 == 0, "chunk records are loaded in aligned 16-byte pairs");
+  static_assert(suffix_count % kThreads == 0, "warps must stay fully populated");
+
+  const int flat_block = static_cast<int>(blockIdx.x);
+  const int sequence = flat_block / bank_count;
+  const int bank = flat_block - sequence * bank_count;
+  if (sequence >= batch) {
+    return;
+  }
+  const int thread = static_cast<int>(threadIdx.x);
+  const int first_step = segment_index * segment_steps;
+  // Step 127 stays folded into the final reduction, as in the baseline.
+  const int end_step = min(first_step + segment_steps, 127);
+  const int64_t sequence_base = static_cast<int64_t>(sequence) * 128 * 2;
+  const int64_t g_base = static_cast<int64_t>(sequence) * bank_suffix_count + bank * suffix_count;
+  const int64_t pointer_base = static_cast<int64_t>(sequence) * 127 * bank_suffix_count +
+      static_cast<int64_t>(bank) * suffix_count;
+  const int64_t boundary_base = static_cast<int64_t>(sequence) * (segment_count - 1) * suffix_count;
+
+  extern __shared__ float shared_frontiers[];
+  float* g_previous = shared_frontiers;
+  float* g_scratch = shared_frontiers + frontier_stride;
+  // Three rotating per-group minimum buffers: one read this step, one filled
+  // for the next step, one already cleared for the step after.  This keeps the
+  // recurrence at exactly one __syncthreads() per step, like the baseline.
+  unsigned* group_min_all = reinterpret_cast<unsigned*>(shared_frontiers + 2 * frontier_stride);
+  unsigned* group_min = group_min_all;
+  unsigned* group_min_next = group_min_all + group_count;
+  unsigned* group_min_spare = group_min_all + 2 * group_count;
+
+  const uint64_t* bank_baseline = baseline_records + static_cast<int64_t>(bank) * kStateCount;
+  const uint64_t* bank_records = sorted_records + static_cast<int64_t>(bank) * kStateCount;
+  const PackType* bank_prefixes =
+      chunk_prefixes + static_cast<int64_t>(bank) * chunk_count * suffix_count;
+  const float* bank_low = chunk_low_norms + static_cast<int64_t>(bank) * chunk_count * suffix_count;
+
+  for (int slot = thread; slot < 3 * group_count; slot += kThreads) {
+    group_min_all[slot] = kInfBits;
+  }
+  __syncthreads();
+  if (segment_index == 0) {
+    // Step 0 has no predecessor.  A zero frontier makes __fadd_rn(0, e) == e
+    // for the non-negative emission e, so the shared step body below is
+    // bit-identical to the baseline's emission-only prologue, and a zero floor
+    // is trivially a valid lower bound.
+    for (int x = thread; x < suffix_count; x += kThreads) {
+      g_previous[x + (x >> group_shift)] = 0.0f;
+    }
+    if (thread < group_count) {
+      group_min[thread] = 0u;
+    }
+  } else {
+    const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
+    for (int x = thread; x < suffix_count; x += kThreads) {
+      float best = g_input_all[input_base + x];
+      int best_bank = 0;
+      #pragma unroll
+      for (int previous_bank = 1; previous_bank < bank_count; ++previous_bank) {
+        const float candidate = g_input_all[input_base + previous_bank * suffix_count + x];
+        // Strict comparison preserves bank-zero/lowest-bank tie precedence.
+        if (candidate < best) {
+          best = candidate;
+          best_bank = previous_bank;
+        }
+      }
+      g_previous[x + (x >> group_shift)] = best;
+      if (bank == 0) {
+        boundary_banks[boundary_base +
+                       static_cast<int64_t>(segment_index - 1) * suffix_count + x] =
+            static_cast<uint8_t>(best_bank);
+      }
+      atomicMin(&group_min[x & (group_count - 1)], __float_as_uint(best));
+    }
+  }
+  __syncthreads();
+
+  // Per-column carried state: last step's winning chunk (next step's seed) and
+  // whether the last band probe degenerated to the full list.
+  int winner_chunk[column_iterations];
+  bool degenerate[column_iterations];
+  #pragma unroll
+  for (int column = 0; column < column_iterations; ++column) {
+    winner_chunk[column] = 0;
+    degenerate[column] = false;
+  }
+
+  const int recurrence_start = segment_index == 0 ? 0 : first_step;
+  for (int step = recurrence_start; step < end_step; ++step) {
+    for (int slot = thread; slot < group_count; slot += kThreads) {
+      group_min_spare[slot] = kInfBits;
+    }
+    const bool reseed = step == recurrence_start;
+    const bool probe = reseed || (step & 15) == 0;
+    const float* target = sequences + sequence_base + static_cast<int64_t>(step) * 2;
+    const float tx = target[0];
+    const float ty = target[1];
+    const float tn = __fadd_rn(__fmul_rn(tx, tx), __fmul_rn(ty, ty));
+    const float root_low = __fsqrt_rd(tn);
+    const float root_high = __fmul_ru(__fsqrt_ru(tn), kNormRankRelax);
+    const float target_slack = __fmul_ru(tn, kNormRankEps);
+    const int64_t step_pointer_base =
+        pointer_base + static_cast<int64_t>(step) * bank_suffix_count;
+    #pragma unroll
+    for (int column = 0; column < column_iterations; ++column) {
+      const int x = thread + column * kThreads;
+      const int group = x >> shift;
+      const float floor_cost = __uint_as_float(group_min[group]);
+
+      float best = CUDART_INF_F;
+      int best_prefix = 0;
+      int best_chunk = 0;
+      // One warp-uniform straight-line block of ChunkWidth candidates.
+      const auto evaluate_chunk = [&](int chunk) {
+        const PackType packed = bank_prefixes[static_cast<int64_t>(chunk) * suffix_count + x];
+        const uint64_t* lane_records =
+            bank_records + (static_cast<int64_t>(chunk) * suffix_count + x) * ChunkWidth;
+        #pragma unroll
+        for (int pair = 0; pair < ChunkWidth / 2; ++pair) {
+          const ulonglong2 records =
+              *reinterpret_cast<const ulonglong2*>(lane_records + 2 * pair);
+          #pragma unroll
+          for (int half_slot = 0; half_slot < 2; ++half_slot) {
+            const uint64_t record = half_slot == 0 ? records.x : records.y;
+            const int prefix = static_cast<int>(
+                (packed >> (8 * (2 * pair + half_slot))) & 0xFFu);
+            const uint32_t code_bits = static_cast<uint32_t>(record);
+            const float2 code = __half22float2(*reinterpret_cast<const half2*>(&code_bits));
+            const float norm = __uint_as_float(static_cast<uint32_t>(record >> 32));
+            float dot = 0.0f;
+            dot = __fmaf_rn(tx, code.x, dot);
+            dot = __fmaf_rn(ty, code.y, dot);
+            const float distance = __fsub_rn(__fadd_rn(tn, norm), __fmul_rn(2.0f, dot));
+            const float candidate = __fadd_rn(
+                g_previous[prefix * (group_count + 1) + group], fmaxf(distance, 0.0f));
+            if (lower_pair(candidate, prefix, best, best_prefix)) {
+              best = candidate;
+              best_prefix = prefix;
+              best_chunk = chunk;
+            }
+          }
+        }
+      };
+
+      if (degenerate[column] && !probe) {
+        // The last band probe covered most of the list: until the next probe,
+        // run the baseline's own prefix-order scan over the original packed
+        // records - the identical straight-line body ptxas fully unrolls, so
+        // a degenerate column pays no band machinery at all.  The stale seed
+        // is refreshed by the next probe's walk, which stays exact under any
+        // seed.
+        #pragma unroll
+        for (int h = 0; h < prefix_count; ++h) {
+          const uint64_t record = bank_baseline[h * suffix_count + x];
+          const uint32_t code_bits = static_cast<uint32_t>(record);
+          const float2 code = __half22float2(*reinterpret_cast<const half2*>(&code_bits));
+          const float norm = __uint_as_float(static_cast<uint32_t>(record >> 32));
+          float dot = 0.0f;
+          dot = __fmaf_rn(tx, code.x, dot);
+          dot = __fmaf_rn(ty, code.y, dot);
+          const float distance = __fsub_rn(__fadd_rn(tn, norm), __fmul_rn(2.0f, dot));
+          const float candidate = __fadd_rn(
+              g_previous[h * (group_count + 1) + group], fmaxf(distance, 0.0f));
+          if (lower_pair(candidate, h, best, best_prefix)) {
+            best = candidate;
+            best_prefix = h;
+          }
+        }
+      } else {
+        // Seed: last step's winning chunks, or a per-lane bracket of tn (the
+        // unconstrained minimiser of the distance bound) on a segment's first
+        // step.  Any seed is correct; a good one makes U tight.
+        int seed = winner_chunk[column];
+        if (reseed) {
+          int rank_tn = 0;
+          #pragma unroll
+          for (int chunk = 0; chunk < chunk_count; ++chunk) {
+            rank_tn += (bank_low[static_cast<int64_t>(chunk) * suffix_count + x] <= tn) ? 1 : 0;
+          }
+          seed = max(rank_tn - 1, 0);
+        }
+        const int seed_first = __reduce_min_sync(kFullMask, seed);
+        const int seed_last = __reduce_max_sync(kFullMask, seed);
+        for (int chunk = seed_first; chunk <= seed_last; ++chunk) {
+          evaluate_chunk(chunk);
+        }
+
+        // Per-lane provable norm band, walked outward warp-uniformly.  One
+        // ballot per candidate chunk: the sorted minima let the whole warp
+        // stop at the first chunk no lane can use.
+        const float slack =
+            fmaxf(__fsub_ru(__fmul_ru(best, kNormRankRelax), floor_cost), 0.0f);
+        // A correctly rounded square root under-estimates the real value by at
+        // most one ulp, so scaling it up by 1 + 32u keeps the radius a strict
+        // upper bound while avoiding the long directed-rounding sqrt sequence.
+        const float radius = __fmul_ru(
+            __fsqrt_rn(__fadd_ru(__fmul_ru(slack, kNormRankRelax), target_slack)),
+            kNormRankRelax);
+        const float inner = __fsub_rd(root_low, radius);
+        float norm_low = inner > 0.0f ? __fmul_rd(inner, inner) : 0.0f;
+        const float outer = __fadd_ru(root_high, radius);
+        float norm_high = __fmul_ru(outer, outer);
+        if (!(norm_high >= norm_low)) {  // non-finite target/frontier: full scan
+          norm_low = -CUDART_INF_F;
+          norm_high = CUDART_INF_F;
+        }
+        int walk_last = seed_last;
+        for (int chunk = seed_last + 1; chunk < chunk_count; ++chunk) {
+          const float low_norm = bank_low[static_cast<int64_t>(chunk) * suffix_count + x];
+          if (__ballot_sync(kFullMask, low_norm <= norm_high) == 0u) {
+            break;
+          }
+          evaluate_chunk(chunk);
+          walk_last = chunk;
+        }
+        int walk_first = seed_first;
+        for (int chunk = seed_first - 1; chunk >= 0; --chunk) {
+          const float next_low =
+              bank_low[(static_cast<int64_t>(chunk) + 1) * suffix_count + x];
+          if (__ballot_sync(kFullMask, next_low >= norm_low) == 0u) {
+            break;
+          }
+          evaluate_chunk(chunk);
+          walk_first = chunk;
+        }
+        // Past ~5/8 of the list the fully unrolled full scan beats the
+        // dynamically bounded band walk, so wide bands drop to it until the
+        // next probe.  Real weight tiles measure 12-37% wide and never trip
+        // this; it bounds the worst case on adversarial/random sequences.
+        degenerate[column] = 8 * (walk_last - walk_first + 1) >= 5 * chunk_count;
+        winner_chunk[column] = best_chunk;
+      }
+
+      g_scratch[x + (x >> group_shift)] = best;
+      backpointers[step_pointer_base + x] = static_cast<uint8_t>(best_prefix);
+      atomicMin(&group_min_next[x & (group_count - 1)], __float_as_uint(best));
+    }
+    __syncthreads();
+    float* swap_frontier = g_previous;
+    g_previous = g_scratch;
+    g_scratch = swap_frontier;
+    unsigned* rotate = group_min;
+    group_min = group_min_next;
+    group_min_next = group_min_spare;
+    group_min_spare = rotate;
+  }
+  for (int x = thread; x < suffix_count; x += kThreads) {
+    g_output_all[g_base + x] = g_previous[x + (x >> group_shift)];
   }
 }
 
@@ -2731,6 +3312,85 @@ bool fused_w2_family_grid_supported(const cudaDeviceProp& properties) {
       !fused_w2_family_grid_disabled();
 }
 
+// Number of times the norm-rank contiguous-band recurrence was dispatched in
+// this process; exposed as gptqmodel_qvq.norm_rank_grid_dispatch_count() so
+// tests can assert which path produced a result.
+std::atomic<int64_t> g_norm_rank_grid_dispatches{0};
+
+int64_t qvq_norm_rank_grid_dispatch_count() {
+  return g_norm_rank_grid_dispatches.load();
+}
+
+// Number of live norm-rank table cache entries; exposed as
+// gptqmodel_qvq.norm_rank_cache_size() so tests can assert the cache stays
+// bounded under eviction pressure.  Snapshot only: entries come and go under
+// g_norm_rank_cache_mutex in whichever thread dispatched the recurrence.
+int64_t qvq_norm_rank_cache_size() {
+  std::lock_guard<std::mutex> lock(g_norm_rank_cache_mutex);
+  return static_cast<int64_t>(g_norm_rank_cache.size());
+}
+
+int64_t qvq_norm_cache_size() {
+  std::lock_guard<std::mutex> lock(g_norm_cache_mutex);
+  return static_cast<int64_t>(g_norm_cache.size());
+}
+
+// Pristine A/B control, read once on first use (cached for the process
+// lifetime).  GPTQMODEL_QVQ_DISABLE_OCTET_GRID keeps its historical name so
+// existing enabled-versus-pristine harnesses keep working.  Only unset,
+// empty, or exactly "0" leave the fast path enabled; any other non-empty
+// value (including "00" and "0foo") forces the unmodified baseline grid
+// recurrence.
+bool norm_rank_grid_disabled() {
+  static const bool disabled = [] {
+    const char* value = std::getenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID");
+    return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+  }();
+  return disabled;
+}
+
+// Segment loop for the norm-rank contiguous-band recurrence.  Launch geometry,
+// frontier ping-pong, and the final frontier parity all match
+// QVQ_V2_SEGMENT_GRID_LAUNCH, so the shared finalize kernel is reused verbatim.
+template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth>
+void launch_qvq_v2_segment_norm_rank_segments(
+    const float* sequences,
+    const uint64_t* baseline_records,
+    const NormRankTables& tables,
+    float* frontier_a,
+    float* frontier_b,
+    uint8_t* backpointers,
+    uint8_t* boundary_banks,
+    int batch,
+    cudaStream_t stream) {
+  using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
+  constexpr int prefix_count = 1 << Shift;
+  constexpr int suffix_count = 1 << (16 - Shift);
+  constexpr int group_count = 1 << (16 - 2 * Shift);
+  constexpr int segments = 128 / SegmentSteps;
+  constexpr size_t shared_bytes =
+      2 * static_cast<size_t>(suffix_count + prefix_count) * sizeof(float) +
+      3 * static_cast<size_t>(group_count) * sizeof(unsigned);
+  auto* kernel = qvq_v2_segment_grid_norm_rank_kernel<Shift, BankCount, SegmentSteps, ChunkWidth>;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)));
+  const uint64_t* records =
+      reinterpret_cast<const uint64_t*>(tables.records.const_data_ptr<int64_t>());
+  const PackType* prefixes =
+      reinterpret_cast<const PackType*>(tables.prefixes.const_data_ptr<uint8_t>());
+  const float* low_norms = tables.low_norms.const_data_ptr<float>();
+  kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
+      sequences, baseline_records, records, prefixes, low_norms, nullptr,
+      frontier_a, backpointers, boundary_banks, batch, 0);
+  for (int segment = 1; segment < segments; ++segment) {
+    const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
+    float* output = segment % 2 == 1 ? frontier_b : frontier_a;
+    kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
+        sequences, baseline_records, records, prefixes, low_norms, input, output,
+        backpointers, boundary_banks, batch, segment);
+  }
+}
+
 // Host side of the fused path; called only for the family op with
 // transition_bits == 4, bank_count == 2, segment_steps == 16, fp16 codebooks.
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_fused_w2_family_grid_launch(
@@ -3129,6 +3789,66 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       }                                                                                                 \
     }                                                                                                  \
   } while (0)
+  // Exact norm-rank contiguous-band fast path for the unconstrained,
+  // unweighted, half-codebook grid recurrence at W2.5/W3 only.  Every other
+  // configuration (constrained, weighted, family-batched, cooperative,
+  // midpoint-only, fp32 codebooks, other rates) falls through to the
+  // unmodified baseline below, which remains the exact reference.
+#define QVQ_V2_NORM_RANK_DISPATCH(BITS, BANKS, SEGMENT_STEPS, WIDTH)                              \
+  do {                                                                                             \
+    const NormRankTables qvq_norm_rank_tables =                                                    \
+        cached_norm_rank_tables<BITS, WIDTH>(                                                      \
+            codebooks, codebook_norm, bank_count, stream);                                         \
+    launch_qvq_v2_segment_norm_rank_segments<BITS, BANKS, SEGMENT_STEPS, WIDTH>(                   \
+        sequences.const_data_ptr<float>(),                                                         \
+        reinterpret_cast<const uint64_t*>(codebook_norm.const_data_ptr<float>()),                  \
+        qvq_norm_rank_tables,                                                                      \
+        costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),                      \
+        backpointers.mutable_data_ptr<uint8_t>(),                                                  \
+        boundary_banks.mutable_data_ptr<uint8_t>(), batch, stream);                                \
+    qvq_v2_segment_grid_finalize_kernel<BITS, BANKS, SEGMENT_STEPS, false, half, uint8_t>          \
+        <<<batch, kThreads, 0, stream>>>(                                                          \
+            sequences.const_data_ptr<float>(),                                                     \
+            reinterpret_cast<const half*>(codebooks.const_data_ptr()),                             \
+            codebook_norm.const_data_ptr<float>(), overlap_ptr, weight_ptr,                        \
+            segments % 2 == 1 ? costs_a.const_data_ptr<float>()                                    \
+                              : costs_b.const_data_ptr<float>(),                                   \
+            backpointers.const_data_ptr<uint8_t>(),                                                \
+            boundary_banks.const_data_ptr<uint8_t>(),                                              \
+            states.mutable_data_ptr<int64_t>(),                                                    \
+            segment_bank_ids.mutable_data_ptr<uint8_t>(),                                          \
+            squared_error.mutable_data_ptr<float>(), batch, /*family_batch=*/0,                    \
+            constrained, weighted);                                                                \
+    C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                \
+    record_norm_cache_use(codebooks, codebook_norm, stream);                                       \
+    record_norm_rank_cache_use(qvq_norm_rank_tables, codebooks.get_device(), stream);              \
+    g_norm_rank_grid_dispatches.fetch_add(1, std::memory_order_relaxed);                            \
+    return {states, squared_error, segment_bank_ids};                                              \
+  } while (0)
+  // W2.5 and W3.0 only: at shift 4 the 16-entry candidate list is too short
+  // for the band overhead to pay for itself (measured 0.88-1.15x on real
+  // tiles), so W2.0 keeps the pristine grid recurrence unconditionally.
+  if (!norm_rank_grid_disabled() && grid_parallel && !midpoint_only && !cooperative &&
+      !constrained && !weighted && family_batch == 0 &&
+      codebooks.scalar_type() == at::kHalf &&
+      (bank_count == 2 || bank_count == 4) &&
+      segment_steps == (bank_count == 2 ? 16 : 32) &&
+      (transition_bits == 5 || transition_bits == 6)) {
+    if (bank_count == 2) {
+      if (transition_bits == 5) {
+        QVQ_V2_NORM_RANK_DISPATCH(5, 2, 16, kNormRankChunkWidthW25);
+      } else {
+        QVQ_V2_NORM_RANK_DISPATCH(6, 2, 16, kNormRankChunkWidthW3);
+      }
+    } else {
+      if (transition_bits == 5) {
+        QVQ_V2_NORM_RANK_DISPATCH(5, 4, 32, kNormRankChunkWidthW25);
+      } else {
+        QVQ_V2_NORM_RANK_DISPATCH(6, 4, 32, kNormRankChunkWidthW3);
+      }
+    }
+  }
+#undef QVQ_V2_NORM_RANK_DISPATCH
   switch (transition_bits) {
     case 2: QVQ_V2_SEGMENT_DISPATCH(2, uint8_t); break;
     case 3: QVQ_V2_SEGMENT_DISPATCH(3, uint8_t); break;
@@ -3332,6 +4052,9 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None) -> (Tensor, Tensor, Tensor)");
   // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
   m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
+  m.def("norm_rank_grid_dispatch_count() -> int", &qvq_norm_rank_grid_dispatch_count);
+  m.def("norm_rank_cache_size() -> int", &qvq_norm_rank_cache_size);
+  m.def("norm_cache_size() -> int", &qvq_norm_cache_size);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {

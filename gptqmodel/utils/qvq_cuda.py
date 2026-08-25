@@ -109,6 +109,8 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard",
         "yaqa_feedback",
         "yaqa_feedback_update_",
+        "norm_rank_cache_size",
+        "norm_cache_size",
     ),
     sources=_qvq_cuda_sources,
     build_root_env="GPTQMODEL_QVQ_CUDA_BUILD_ROOT",
