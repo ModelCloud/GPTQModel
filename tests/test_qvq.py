@@ -5432,8 +5432,11 @@ def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch
         )
 
 
-def test_native_banked_viterbi_v4_t16_default_dispatch_is_pinned(monkeypatch):
-    """Pin no-env V=4/t16 output; this fixture has 99.804688% tie density."""
+def test_native_banked_viterbi_v4_t16_default_output_is_pinned(monkeypatch):
+    """Pin output, not dispatch, with a 99.804688% tie-rich regression net.
+
+    This test passes if the ``vector_size == 2`` guard is reverted.
+    """
 
     from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
 
