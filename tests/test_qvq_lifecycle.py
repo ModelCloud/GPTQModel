@@ -800,7 +800,8 @@ class _YaqaQModel:
 
 @pytest.mark.parametrize("bits", (1, 1.5))
 def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quantizer(bits):
-    # Source of truth: config.py's default rate-regularization table.
+    # Source of truth: YAQA_DEFAULT_RATE_REGULARIZATION in
+    # gptqmodel/quantization/qvq_yaqa.py (bound as YaqaConfig.regularization_by_rate).
     expected_damp_percent = {1: 0.1, 1.5: 0.1}[bits]
     calibration = [
         {
