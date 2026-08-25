@@ -1697,37 +1697,58 @@ Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X, CPUID family 25 model 17, `-march=znver
   packed selectors. Baseline gates were `803 passed, 260 skipped` and `178 passed, 8 skipped`. The complete durable
   report is `docs/qvq/qvq_banked_t16_dispatch_results.md`.
 
-## 2026-08-25 transition-16 deterministic small-batch dispatch
+## 2026-08-25 transition-16 small-batch cliff fixed at its source
 
 Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X) | AVX-512F/BW/VL/DQ/FMA, no AMX |
           32 logical CPUs used, OMP_NUM_THREADS=32 | torch 2.13.0+cpu |
           host zen5-cpu-6
 
-- **MEASURED:** A fresh alternating paired sweep (3 warmups, 15 repeats per arm,
-  explicit singleton places) reproduced the legacy discontinuity. On minima,
-  batch 16 was 22.732 ms/row versus 0.721 ms/row at batch 32, a 31.5x drop in
-  per-row cost. G-only was 2.807 and 2.599 ms/row respectively.
-- **MEASURED:** The onset sweep at batches 1/2/4/8/12/16/20/24/28/32 found
-  legacy minima of 21.120--26.097 ms/row at every batch below 32, then 0.718
-  ms/row at 32. G-only minima were 2.827--5.525 ms/row at batches 8--28 and
-  2.600 ms/row at 32; batches 1--4 had a separate G-only parallelism onset.
-- **INFERRED:** Dispatching on `at::get_num_threads()` is unsafe because the two
-  FP32 recurrences can select different near-tie paths. A fixed `<32` cutoff
-  preserves output determinism across thread settings and has margin over the
-  last measured pathological batch (28). This is justified on speed only.
-- **MEASURED:** Candidate-default timing confirmed the implemented selection:
-  batch 16 was 44.2 ms minimum / 45.9 ms median and batch 32 was 22.0 ms
-  minimum / 23.0 ms median (3 warmups, 15 repeats).
-- **MEASURED:** The unflipped batches 32/64 are byte-identical to the unmodified
-  `5ee72d93f3079f2c17e7e441e3c85670ea7a29e4` baseline for states, segment bank
-  IDs, packed words, and packed selectors, with zero loss delta.
-- **MEASURED:** FP64 adjudication completed 72 of 144 attempted configurations
-  and found 18 divergent configurations. The flipped batches 8/16 favored
-  G-only in 10/10 divergences; the overall divergent-row tally was 10-10. This
-  demonstrates sampled non-regression, not an accuracy improvement.
-- **MEASURED:** The banked-kernel gate compares the same transition-16 inputs at
-  16/24/32 threads on both sides of the cutoff and requires identical states,
-  segment bank IDs, packed words, and packed selectors. It passes. Full gates:
-  `803 passed, 260 skipped` and `178 passed, 8 skipped`.
-- Full methodology, positional medians, raw-regime table, and provenance:
+Supersedes the batch-32 dispatch cutoff drafted earlier the same day. That
+cutoff was blocked in cross-vendor review: the constant was only correct at 32
+threads, and its own onset sweep showed G-only slower than legacy at batches
+1/2/4, so it selected the slower arm there. The cliff is instead fixed where it
+originates.
+
+- **Scope, LATENT:** transition width 16 is not reachable from production. Both
+  CPU call sites reject `shift > 7` (`gptqmodel/quantization/qvq.py:1552-1553`
+  and `:1836-1837`) and width 16 is rate W8. The only callers of this shape are
+  the benchmark script and the tests, so no shipped quantized output is affected
+  by anything in this entry.
+- **Fix:** `qvq_viterbi_banked_cpu_legacy` chose its tiling leg on
+  `batch_size >= at::get_num_threads()`, so on a 32-thread box every batch from
+  1 to 31 took the slow outer-serial/inner-parallel leg (and on a 64-thread box,
+  1 to 63). It now uses `std::min<int64_t>(8, at::get_num_threads())`, the idiom
+  the G-only recurrence in the same file already uses. The transition-16
+  dispatcher is restored to its `origin/main` shape-only form, so there is no
+  flipped regime and no output change at any batch size or thread count.
+- **MEASURED, gate on the central assumption:** the fix is only safe if legacy's
+  two tiling legs are bit-identical. Forced legacy at batch 16 across 16/24/32
+  threads over 38 configurations (5 seeds x 1-2 banks x exact-tie/near-tie/random
+  codebooks, plus 8 segment-schedule shapes) gave 380 bitwise comparisons of
+  states, squared error, segment bank IDs, packed words and packed selectors with
+  0 mismatches. Temporary branch instrumentation confirmed 38/38 calls took the
+  row-parallel leg at 16 threads and 38/38 took the tiled leg at 24 and 32, so
+  the legs were genuinely crossed. The exact-tie codebooks collapse 65,536
+  codewords onto 214 distinct vectors (65,322 duplicate rows), so nearly every
+  argmin is an exact tie decided by scan order. Repeating the probe at
+  transition width 7, where `suffix_count` is 512 and the suffix-column argmin
+  actually partitions, gave another 380 comparisons with 0 mismatches.
+%SWEEP%
+- **MEASURED, override scope defect:** `QVQ_TEST_FORCE_BANKED_LEGACY`
+  short-circuited the shape guard, sending every banked call to legacy including
+  shapes the dispatcher excludes. At `4b227a66` this changed one selected state
+  and all four squared errors on a `transition_bits=16`, `bank_count=3`, batch-4,
+  seed-2 case, reproducibly at 4/16/32 threads. Both overrides are now scoped to
+  `legacy_t16_shape`, their values are parsed with the repository convention
+  (`gptqmodel/utils/qvq_cpu.py:211`) instead of tested for presence, and either
+  one being active now emits `TORCH_WARN_ONCE`.
+- **MEASURED, de-aliasing:** the superseded entry's "18 divergent configurations"
+  and "10/10 at flipped batches 8/16" were alias-duplicated. `segment_steps` does
+  not change the input tensors, collapsing 18 to 9 and 10 to 5; the adjudication
+  harness also seeds without `banks`, so the `banks=1` codebook is bank 0 of the
+  `banks=2` codebook over identical sequences, collapsing further to 5 and 3
+  distinct data instances. The figures were overstated by 2-3.6x. This no longer
+  bears on the shipped change, which flips nothing.
+%GATES%
+- Full methodology and provenance:
   `docs/qvq/qvq_banked_t16_small_batch_results.md`.

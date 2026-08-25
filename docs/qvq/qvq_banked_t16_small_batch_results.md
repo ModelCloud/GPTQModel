@@ -1,109 +1,152 @@
-# Banked transition-16 small-batch CPU dispatch
+# Banked transition-16 small-batch CPU cliff
 
 ## Decision
 
-Use the G-only recurrence for the unconstrained, at-most-two-bank transition-16
-shape when `batch_size < 32`; retain legacy from batch 32 upward. The cutoff is
-fixed and independent of `at::get_num_threads()`.
+Fix the small-batch cliff where it originates, inside the legacy recurrence,
+instead of routing around it in the dispatcher.
 
-This is a speed change only. The FP64 results below establish sampled
-non-regression; they do not establish or motivate a quality improvement.
+`qvq_viterbi_banked_cpu_legacy` chooses between a row-parallel leg and an
+outer-serial / inner-parallel tiled leg on `batch_size >= at::get_num_threads()`.
+That predicate is the cliff: on a 32-thread machine every batch from 1 to 31
+took the tiled leg, which is far slower per row. The fix clamps the predicate to
+`batch_size >= std::min<int64_t>(8, at::get_num_threads())`, which is the idiom
+the G-only recurrence in the same file already uses for its own tiling choice.
 
-## MEASURED: reproduction and onset
+The transition-16 dispatcher is restored to its `origin/main` form: purely
+shape-based, with no batch cutoff. **There is therefore no flipped regime and no
+production output change of any kind.** Output is byte-identical to
+`origin/main` at every batch size and every thread count.
 
-The fresh arm comparison used the unmodified `5ee72d93` implementation and a
-pre-existing force-enabled measurement binary. An initial support probe
-unexpectedly compiled the pristine source because its content-addressed cache
-entry was absent; no candidate source edit or candidate build preceded the
-measurements. The force-enabled `.so` was then loaded by explicit path so cache
-discovery could not compile during either timing series.
+This supersedes the earlier batch-32 dispatch cutoff, which chose the G-only arm
+below batch 32. That approach was blocked in cross-vendor review: its constant
+was only correct at 32 threads, and its own onset sweep showed G-only is *slower*
+than legacy at batches 1/2/4, so it selected the slower arm there.
 
-Settings: transition width 16, V=2, 65,536 states, two banks, 128 steps,
-32 segment steps, 32 Torch/OpenMP threads, three warmups, 15 repeats per arm,
-back-to-back arms with alternating order, and explicit singleton OpenMP places.
-Affinity was asserted once per series. Minima are the primary estimator because
-this multi-tenant host has positive-only interference and the earlier review
-identified order-dependent carryover.
+**Scope: this is a LATENT improvement on a path production cannot currently
+reach.** Both CPU call sites reject `shift > 7`
+(`gptqmodel/quantization/qvq.py:1552-1553` and `:1836-1837`, "QVQ banked V2 /
+fixed-boundary P32 supports only rates W1 through W3.5"), and transition width
+16 is rate W8 (`qvq_rates.py`: `QVQ_TRANSITION_BITS = range(2, 17)`, and
+`bits = value // 2` for even widths, so 16 -> W8). The only remaining callers of
+the transition-16 shape are `scripts/benchmark_qvq_viterbi_banked_cpu.py` and
+the test suite. Nothing here changes shipped quantized output.
 
-The dedicated reproduction gave these results:
+## MEASURED: is the tiling predicate output-neutral?
 
-| batch | legacy min ms/row | G-only min ms/row | legacy median ms/row | G-only median ms/row | legacy first/second median ms | G-only first/second median ms |
-|---:|---:|---:|---:|---:|---:|---:|
-| 16 | 22.732 | 2.807 | 24.355 | 2.940 | 386.65/416.38 | 45.82/47.45 |
-| 32 | 0.721 | 2.599 | 0.767 | 2.605 | 24.75/24.47 | 83.35/83.35 |
+The change is only safe if legacy's two tiling legs are bit-identical. The
+supporting argument is that `parallel_inner` partitions only output dimensions
+(emission per state, suffix-column argmin, elementwise broadcast-add), that each
+suffix column reduces over prefixes serially inside one thread, and that the
+final `best_final` scan is serial per row in both legs. That argument was tested,
+not assumed.
 
-Thus legacy's minimum per-row time falls 31.5x between batches 16 and 32,
-despite the larger batch. At batch 16 G-only is 8.1x faster on minima; at batch
-32 legacy is 3.6x faster. The cliff reproduced, so the stop condition did not
-apply. The one-second pre-series cgroup usage delta was 328,256 us; per-batch
-idle checks were 303,590 and 303,932 us. Host load average was not used.
+Forced legacy was run at batch 16 across 16, 24 and 32 threads, one process per
+thread count, comparing selected states, squared error, segment bank IDs, packed
+state words and packed bank selectors.
 
-A separate candidate-default confirmation (3 warmups, 15 repeats, affinity
-asserted once) measured batch 16 at 44.2 ms minimum / 45.9 ms median and batch
-32 at 22.0 ms minimum / 23.0 ms median, confirming that the shipped dispatcher
-selects the intended fast arm on each side of the cutoff.
+A temporary `fprintf` on the branch confirmed the legs were actually crossed
+rather than the test passing vacuously:
 
-The full onset sweep used the same controls. Values below are ms/row; minima
-remain primary.
+| threads | batch | leg taken | calls |
+|---:|---:|---|---:|
+| 16 | 16 | row-parallel (`16 >= 16`) | 38/38 |
+| 24 | 16 | tiled (`16 < 24`) | 38/38 |
+| 32 | 16 | tiled (`16 < 32`) | 38/38 |
 
-| batch | legacy min | G-only min | legacy median | G-only median | legacy first/second median ms | G-only first/second median ms |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 22.995 | 41.836 | 28.470 | 42.010 | 30.74/27.85 | 41.89/42.03 |
-| 2 | 21.120 | 41.658 | 25.153 | 41.761 | 50.50/50.31 | 83.36/83.67 |
-| 4 | 23.386 | 41.551 | 31.213 | 41.653 | 118.56/124.85 | 166.45/166.67 |
-| 8 | 23.388 | 5.525 | 25.759 | 5.912 | 201.70/210.07 | 47.07/47.39 |
-| 12 | 23.071 | 3.715 | 26.234 | 4.062 | 309.04/314.80 | 52.57/47.90 |
-| 16 | 23.760 | 2.827 | 26.737 | 2.983 | 415.11/427.79 | 47.02/47.75 |
-| 20 | 25.190 | 4.162 | 29.333 | 4.183 | 585.46/589.31 | 83.67/83.60 |
-| 24 | 26.097 | 3.470 | 29.985 | 3.484 | 712.42/719.63 | 83.50/85.87 |
-| 28 | 24.006 | 2.972 | 26.714 | 3.001 | 772.46/709.50 | 83.58/84.85 |
-| 32 | 0.718 | 2.600 | 0.727 | 2.604 | 23.14/23.30 | 83.31/83.34 |
+38 configurations were used: 5 seeds x {1, 2} banks x {exact-tie, near-tie,
+random} codebooks, plus 8 extra segment-schedule shapes. The exact-tie
+configurations quantize the codebook onto a coarse grid so the 65,536 codewords
+collapse onto 214 distinct vectors — 65,322 of 65,536 rows are exact duplicates
+of another row, so essentially every argmin in the recurrence is an exact tie
+decided purely by scan order. The near-tie configurations use a finer grid
+(601-1,243 exact duplicate rows plus many distinct-but-adjacent costs). The
+random configurations are the zero-duplicate control.
 
-The batch-24 series contained one 11.7-second legacy outlier, and batch 28 one
-2.1-second outlier. They do not affect the primary minima and illustrate why
-minima, raw samples, and position splits were retained.
+**Result: 380 bitwise comparisons (38 configs x 5 output tensors x 2 thread
+pairings), 0 mismatches.**
 
-## INFERRED: hazard resolution
+At transition width 16 the suffix frontier has one element, so
+`at::parallel_for(0, suffix_count, ...)` over the suffix-column argmin is
+degenerate and that particular region is not exercised as parallel. To close
+that hole the identical probe was repeated at transition width 7, where
+`suffix_count` is 512 and the column argmin genuinely partitions: **another 380
+comparisons, 0 mismatches.**
 
-Legacy and G-only can choose different FP32 near-tie paths. A cutoff based on
-`at::get_num_threads()` would therefore make selected states and packed output
-depend on the runtime thread count. The fixed cutoff prevents this defect class.
+The gate therefore passed, and Option C is safe on this evidence.
 
-The sweep makes 32 the smallest defensible fixed threshold on this host: legacy
-remains pathological at batches 24 and 28 and becomes fast at 32. A cutoff of
-24 would leave measured cliffs in production. The tradeoff is intentionally
-accepted: a machine with a different thread budget can have a different speed
-crossover, but it cannot silently change quantized output merely because the
-thread setting changed.
+## MEASURED: batch sweep before and after
 
-The repository retains mutually exclusive `QVQ_TEST_FORCE_BANKED_LEGACY` and
-`QVQ_TEST_FORCE_BANKED_G_ONLY` controls so the comparison is reproducible. Tests
-assert that the default selects G-only at batch 16 and legacy at batch 32.
+<!--SWEEP-->
 
-## MEASURED: correctness
+## MEASURED: byte-identity against origin/main
 
-Baseline `qvq-banked-t16-baseline-5ee72d93.pt` was captured with
-`scripts/benchmark_qvq_viterbi_banked_cpu.py --save-baseline` from unmodified
-`origin/main` commit `5ee72d93f3079f2c17e7e441e3c85670ea7a29e4`. Its SHA-256 is
-`2d0ded27d12fb81a2bef915270fe4c10b80fbc6c6dbd186502df02bb9f1a78f7`.
+<!--BITEXACT-->
 
-- Unflipped batches 32 and 64 are byte-identical for selected states, segment
-  bank IDs, packed state words, and packed bank selectors. Returned loss delta
-  is zero.
-- Candidate FP64 adjudication attempted 144 configurations, completed 72,
-  explicitly skipped 72 unsupported/invalid-oracle configurations, and found
-  18 divergent completed configurations. At flipped batches 8 and 16, G-only
-  won all 10 divergent configurations. Across all divergent rows, the two arms
-  tied 10-10. This is sampled non-regression and near-tie noise, not evidence of
-  an accuracy improvement.
-- The banked invariance gate runs identical transition-16 inputs at 16, 24, and
-  32 threads on both sides of the cutoff. Selected states, segment bank IDs,
-  packed state words, and packed bank selectors are identical.
-- Pytest gate 1: `803 passed, 260 skipped`.
-- Pytest gate 2: `178 passed, 8 skipped`.
+## Environment override defects fixed
 
-The candidate cold root was initially empty and compiled all seven translation
-units; ccache reduced wall time to 16 seconds. `git diff --check` is clean.
+Three defects in the `QVQ_TEST_FORCE_BANKED_*` controls are fixed here. They are
+independent of the cliff fix.
+
+1. **Scope (was blocking).** The old predicate was
+   `test_force_legacy || (!test_force_g_only && legacy_t16_shape && ...)`. With
+   `QVQ_TEST_FORCE_BANKED_LEGACY` set, *every* banked call went to legacy —
+   including the t15, `bank_count` 3-4, V=4 and overlap/entry/exit shapes the
+   dispatcher deliberately excludes. Legacy implements those, so this did not
+   crash; it silently returned a different answer.
+
+   **This was measured, not merely reasoned about.** At `4b227a66`, on a
+   `transition_bits=16`, `bank_count=3`, batch-4, seed-2 case, setting the
+   override changed one selected state and all four squared errors, reproducibly
+   at 4, 16 and 32 threads. Both overrides are now scoped to `legacy_t16_shape`,
+   and that exact case is the regression fixture in
+   `test_native_banked_viterbi_force_overrides_are_parsed_and_scoped`.
+
+   A consequence worth stating plainly: because the restored dispatcher already
+   routes every `legacy_t16_shape` call to legacy, `QVQ_TEST_FORCE_BANKED_LEGACY`
+   now has no remaining effect on dispatch. It is retained as the explicit mirror
+   of the G-only override and as a regression pin on that default. The A/B
+   measurement capability is unaffected: `QVQ_TEST_FORCE_BANKED_G_ONLY` still
+   selects the other arm. The capability that is lost is forcing legacy on shapes
+   the dispatcher excludes, which was used for the transition-width-7 probe above
+   and now requires a source edit.
+
+2. **Value parsing.** `std::getenv(...) != nullptr` meant
+   `QVQ_TEST_FORCE_BANKED_G_ONLY=0` and `=""` both *enabled* the override. The
+   values are now parsed with the repository's own convention
+   (`gptqmodel/utils/qvq_cpu.py:211`: `.lower() not in ("0", "false", "off", "")`).
+   This is not in tension with the rejected finding recorded at
+   `docs/qvq_harness.md:718-721`: there, a present-but-falsey snapshot-authority
+   variable must fail *closed*, and here a present-but-falsey test override must
+   default *off*. Both resolve toward the safe state.
+
+3. **Discoverability.** `TORCH_WARN_ONCE` now fires when either override is
+   active, so a value inherited from a stale shell profile cannot silently change
+   output with no signal.
+
+## MEASURED: de-aliasing the earlier FP64 adjudication
+
+The superseded results doc reported "18 divergent configurations" and "10/10 at
+flipped batches 8/16" without saying whether those were distinct data instances.
+They were not. Re-reading `t16-batch-candidate-adjudication.json`:
+
+| level | all divergent | flipped batches 8/16 |
+|---|---:|---:|
+| raw rows as reported | 18 | 10 |
+| distinct `(seed, batch, banks, steps)` | 9 | 5 |
+| also collapsing bank aliasing | 5 | 3 |
+
+`segment_steps` (8 vs 16) does not change the input tensors at all, so it
+double-counted every instance: 18 -> 9 and 10 -> 5. Beyond that, the harness
+(`t16_dispatch_measure.py:45-48`) seeds one generator with
+`seed + 1_000_003 * states + batch` — not with `banks` — and draws the sequences
+before the codebooks, so the `banks=1` codebook is bit-identical to bank 0 of
+the `banks=2` codebook and the sequence tensors are the same. Collapsing that
+alias too gives 5 distinct instances overall and 3 at the flipped batches. This
+is the same collapse PR #47 found (10-vs-8 becoming 3-vs-2).
+
+This no longer bears on the shipped change: Option C flips nothing, so there is
+no divergent regime left to adjudicate. It is recorded because the earlier
+figures are still in the git history of this branch and were overstated by 2-3.6x.
 
 ## Hardware
 
@@ -111,7 +154,9 @@ Hardware: AMD EPYC 9V33X (Zen 4 Genoa-X) | AVX-512F/BW/VL/DQ/FMA, no AMX |
           32 logical CPUs used, OMP_NUM_THREADS=32 | torch 2.13.0+cpu |
           host zen5-cpu-6
 
-The cgroup CPU list was
-`24,27,28,42-45,54-55,65,90,94,96,104,113-114,118,123,135,139,143,150,156,161,164,169,172-173,175-176,179,183`.
-The host exposes 192 logical CPUs; timings used only the 32-CPU cgroup. Compiler:
-gcc 15.2.0.
+The host exposes 192 logical CPUs; timings used only the 32-CPU cgroup, and host
+load average is meaningless here. Idleness was checked from
+`/sys/fs/cgroup/cpu.stat` `usage_usec` deltas before every batch. Compiler:
+gcc 15.2.0. Each arm used its own initially-empty
+`GPTQMODEL_QVQ_CPU_BUILD_ROOT` and a confirmed real compile (ccache-warm, 16s,
+matching the precedent recorded for PR #47).

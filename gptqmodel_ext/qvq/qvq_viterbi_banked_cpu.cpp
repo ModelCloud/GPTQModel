@@ -4,11 +4,13 @@
 #include <torch/extension.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include <ATen/Parallel.h>
@@ -27,6 +29,23 @@ inline int log2_state_count(int64_t state_count) {
     ++l;
   }
   return l;
+}
+
+// Parse a boolean-ish environment override. Matches the repository convention
+// used by gptqmodel/utils/qvq_cpu.py: a variable that is present but set to an
+// empty string, "0", "false" or "off" counts as DISABLED. Testing only for
+// presence would make `QVQ_TEST_FORCE_BANKED_G_ONLY=0` silently enable the
+// override.
+inline bool qvq_env_enabled(const char* name) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr) {
+    return false;
+  }
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return !(value.empty() || value == "0" || value == "false" || value == "off");
 }
 
 inline float fused_candidate_scalar(
@@ -601,7 +620,21 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu_l
     }
   };
 
-  if (batch_size >= at::get_num_threads()) {
+  // Row-parallel once there are enough rows to keep a reasonable number of
+  // threads busy; below that, fall back to the outer-serial, inner-parallel
+  // tiled path. The clamp to 8 mirrors the G-only recurrence below and is what
+  // keeps this from becoming a cliff: with a bare at::get_num_threads() every
+  // batch under the thread count took the tiled path, which is ~6x slower per
+  // row here, so on a 32-thread box batches 8..31 fell off a cliff and on a
+  // 64-thread box batches 8..63 did.
+  //
+  // Both legs are output-identical: run_tile's reductions (the suffix-column
+  // argmin and the final best-(bank,state) scan) run serially within one row
+  // in either leg, and parallel_inner only ever partitions output dimensions.
+  // tests/test_qvq.py::test_native_banked_viterbi_v2_is_thread_count_invariant
+  // pins this by crossing the branch at batch 4 (2 threads -> row-parallel,
+  // 16 threads -> tiled) on codebooks dense with exact cost ties.
+  if (batch_size >= std::min<int64_t>(8, at::get_num_threads())) {
     at::parallel_for(0, batch_size, 1, [&](int64_t start_batch, int64_t end_batch) {
       for (int64_t b = start_batch; b < end_batch; ++b) {
         run_tile(b, b + 1, false);
@@ -702,23 +735,52 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
       step_count > 0 && segment_steps > 0 && step_count % segment_steps == 0,
       "qvq_viterbi_banked_cpu: positive segment_steps must divide step_count");
 
-  // At transition width 16 the suffix frontier has one element. Legacy is
-  // faster from batch 32 upward, but its inner-parallel path has a severe
-  // small-batch cliff. Use a fixed cutoff: basing this dispatch on
-  // at::get_num_threads() would make FP32 near-tie winners thread-count
-  // dependent because the two recurrences can select different paths.
-  constexpr int64_t legacy_t16_min_batch = 32;
-  const bool test_force_legacy = std::getenv("QVQ_TEST_FORCE_BANKED_LEGACY") != nullptr;
-  const bool test_force_g_only = std::getenv("QVQ_TEST_FORCE_BANKED_G_ONLY") != nullptr;
+  // At transition width 16 the suffix frontier has one element and legacy is
+  // 2.7-2.9x faster than G-only (median; 2.9-3.7x on minima). Legacy used to
+  // have a severe small-batch cliff, but that came from its own
+  // `batch_size >= at::get_num_threads()` tiling predicate, which is now
+  // clamped the same way the G-only recurrence already clamps its own. The
+  // cliff is therefore fixed at its source and this dispatch stays purely
+  // shape-based, exactly as before: byte-identical selection at every batch
+  // size and every thread count, so no FP32 near-tie regime is flipped.
+  //
+  // The two force overrides exist so the recurrences can be A/B measured on
+  // one build. Both are scoped to `legacy_t16_shape`, i.e. neither can move a
+  // shape this dispatcher deliberately excludes. That scope is load-bearing:
+  // an unscoped QVQ_TEST_FORCE_BANKED_LEGACY diverts *every* banked call to
+  // legacy, including the t15, bank_count 3-4, V=4 and overlap/entry/exit
+  // shapes. Legacy implements all of those, so it does not crash -- it
+  // silently returns a different answer (measured: one selected state and all
+  // four squared errors change on a bank_count-3 t16 case).
+  //
+  // Only the G-only override appears in the predicate below. The legacy
+  // override is scoped by construction, because the default already routes
+  // every `legacy_t16_shape` call to legacy; it therefore has no remaining
+  // effect on dispatch and is retained as the explicit mirror of the G-only
+  // override and as a regression pin on that default.
+  const bool test_force_legacy = qvq_env_enabled("QVQ_TEST_FORCE_BANKED_LEGACY");
+  const bool test_force_g_only = qvq_env_enabled("QVQ_TEST_FORCE_BANKED_G_ONLY");
   TORCH_CHECK(
       !(test_force_legacy && test_force_g_only),
       "qvq_viterbi_banked_cpu: forced legacy and G-only paths are mutually exclusive");
+  if (test_force_legacy) {
+    TORCH_WARN_ONCE(
+        "qvq_viterbi_banked_cpu: QVQ_TEST_FORCE_BANKED_LEGACY is set; transition-width-16 "
+        "banked calls are pinned to the legacy recurrence. This is a test/measurement "
+        "override and must not be set in production.");
+  }
+  if (test_force_g_only) {
+    TORCH_WARN_ONCE(
+        "qvq_viterbi_banked_cpu: QVQ_TEST_FORCE_BANKED_G_ONLY is set; transition-width-16 "
+        "banked calls are diverted to the G-only recurrence and may produce different "
+        "FP32 near-tie winners. This is a test/measurement override and must not be set "
+        "in production.");
+  }
   const bool legacy_t16_shape = transition_bits == 16 && bank_count <= 2 &&
       !(overlap.has_value() && overlap->defined()) &&
       !(entry_states.has_value() && entry_states->defined()) &&
       !(exit_states.has_value() && exit_states->defined());
-  if (test_force_legacy ||
-      (!test_force_g_only && legacy_t16_shape && batch_size >= legacy_t16_min_batch)) {
+  if (legacy_t16_shape && !test_force_g_only) {
     return qvq_viterbi_banked_cpu_legacy(
         sequences, codebooks, transition_bits, segment_steps, overlap, step_weights,
         entry_states, exit_states);
