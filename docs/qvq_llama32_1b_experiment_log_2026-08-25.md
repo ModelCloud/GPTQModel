@@ -275,3 +275,13 @@ ordinary rows 0--127, are recorded here with their live D300 report paths:
 All rows above use the pinned D300 manifest and must be compared using its
 aligned token top-1, exact trajectory survival, and mean first divergence; no
 NM-only proxy result is substituted.
+
+### Mixed-rate W2 / W3 MLP-down diagnostic (queued)
+
+`llama32_1b_v2b2_p32_yaqa_aime_mlp_down_w30.json` keeps every module at flat
+W2 and overrides only `.*\\.mlp\\.down_proj` to W3. It uses the same 216-row
+leakage-safe AIME YAQA mix and ordinary rows 0--127. The quantizer is queued on
+GPU4 as `/root/qvq-results/llama32-1b-w2-aime2526-mlpdown-w3-main-fdfd760e`;
+canonical D300 and full GSM8K Platinum are queued after the checkpoint. The
+machine-readable record is
+`docs/experiments/2026-08-25-llama32-w2-mlpdown-w3.json`.
