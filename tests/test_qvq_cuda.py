@@ -3719,9 +3719,10 @@ def test_qvq_cuda_viterbi_norm_rank_repeated_later_segment_initialization(
 ):
     """Repeatedly exercise initialization of every segment after segment zero."""
 
-    sequences, codebooks = _norm_rank_case(20260839 + bank_count, 2, bits, bank_count)
+    sequences, codebooks = _norm_rank_case(20260839 + bank_count, 9, bits, bank_count)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    dispatches_before = _norm_rank_dispatch_count()
     for repeat in range(8):
         candidate_sequences = sequences.clone()
         candidate_sequences[:, repeat::segment_steps, 0].add_(repeat * 0.03125)
@@ -3730,6 +3731,9 @@ def test_qvq_cuda_viterbi_norm_rank_repeated_later_segment_initialization(
             candidate_sequences, codebooks, bits, segment_steps, None, None
         )
         assert all(torch.equal(a, e) for a, e in zip(actual, expected))
+    # Both the trusted candidate and public banked comparison dispatch the
+    # eligible norm-rank grid once per repeat at this batch size.
+    assert _norm_rank_dispatch_count() == dispatches_before + 16
 
 
 def test_qvq_cuda_norm_rank_cache_eviction_lifetime_and_boundedness():
