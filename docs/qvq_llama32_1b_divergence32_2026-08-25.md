@@ -45,16 +45,21 @@ the half-context warmup plus the fixed 32-position horizon.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Layer-damping YAQA | W2, V2B2-P32 (2.03125 BPW payload estimate) | 0.271032 | 81.7096% | 72.6876% | 71.7525% | **82.0365%** | 76.9753% |
 | Layer damping + output alignment | W2, V2B2-P32 (2.03125 BPW payload estimate) | **0.248805** | **82.0343%** | **73.9342%** | **73.1259%** | **82.9698%** | 71.2688% |
+| Two-epoch / 64-batch output alignment | W2, V2B2-P32 (2.03125 BPW payload estimate) | **0.239397** | **82.6090%** | **74.3085%** | **73.6837%** | **83.0222%** | 75.0000% |
 | MLP-down diagnostic | W2.5 down; all other projections W2 | 0.229711 | 82.3401% | 74.3826% | 73.5418% | **83.5570%** | 68.4469% |
 
-The best flat-W2 checkpoint cleared the historical 80% **shared-prefix** target without a precision exception. Output
-alignment improved every final-logit metric and SP-Top1@32-W50 over the layer-damping-only checkpoint. That result
-does not imply an 80% Divergence-300 @32 score; independent trajectories are a separate and substantially stricter
-gate. The W2.5 arm is diagnostic only and confirms that MLP sensitivity remains the next optimization target.
+The best flat-W2 checkpoint cleared the historical 80% **shared-prefix** target without a precision exception.
+Increasing output alignment from one epoch / 32 train batches to two epochs / 64 train batches improved every
+reported final-logit metric: KL fell 3.78%, Top-1 gained 0.5747 percentage points, and SP-Top1@32-W50 gained 0.0524
+points over the prior aligned checkpoint. These gains do not imply that the independent-trajectory target has been
+reached; Divergence-300 @32 remains a separate and substantially stricter gate. The W2.5 arm is diagnostic only and
+confirms that MLP sensitivity remains the next optimization target.
 
 The reproducible W2 configuration uses regularization 0.10 for layers 0, 6, 10, and 12 and 0.05 elsewhere. Dynamic
 `yaqa_regularization` support was added so the selected checkpoint can be produced directly rather than assembled
-from payload shards.
+from payload shards. The larger positive alignment run is captured by
+`scripts/configs/llama32_1b_v2b2_p32_yaqa_layer_damping_align2e64.json`; it changes only the alignment search budget,
+not the flat-W2 payload format.
 
 ## Independent-rollout development results
 
