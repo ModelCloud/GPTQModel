@@ -461,11 +461,27 @@ search, and replay confirmation are separate slices. The config and queue
 ledger are `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020_all_subset_replay.json`
 and `docs/experiments/2026-08-25-llama32-w2-reg020-all-subset-replay.json`.
 
+### Replay/subset control audit
+
+The queued control is whole-model propagated replay, not independent local
+reconstruction: each candidate bank is evaluated through the live model to
+final logits, selected only after two search folds, a relative-KL improvement
+of at least `0.001`, a top-N regression limit of `0.0025`, and disjoint
+confirmation. Supported coupled subsets include attention Q/K, V/O, Q/K/V/O,
+MLP gate/up, MLP down, and all three MLP projections. The queued control covers
+all attention projections plus gate/up and down.
+
+The old QKV-only and MLP-only figures were proxy diagnostics, not canonical
+D300, so they do not establish real inference improvement. No completed
+full-D300 replay result has yet beaten the YAQA reg `.020` leader. This control
+is intended to measure cross-layer/subset error propagation against final
+logits, followed by GSM8K Platinum verification.
+
 ### Second-level verification policy
 
 From this point forward, every new D300 leader or arm within one percentage
 point of the current flat-W2 leader (`18.7813%`) receives a queued GSM8K
 Platinum evaluation after D300. The focused regularization bracket already has
 that chain; the all-subset replay control now has a dedicated GSM8K watcher
-(session `9010`) as well. This keeps D300 selection and real-task verification
+(session `15693`) as well. This keeps D300 selection and real-task verification
 separate while ensuring close candidates are not promoted on D300 alone.
