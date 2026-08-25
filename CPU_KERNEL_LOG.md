@@ -1796,3 +1796,68 @@ originates.
   32 threads.
 - Full methodology and provenance:
   `docs/qvq/qvq_banked_t16_small_batch_results.md`.
+
+## 2026-08-25 banked SIMD V=2 order and dispatch-scope review
+
+Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 32 logical CPUs in the cgroup, PyTorch thread sweeps at 8/16/24/32 | torch 2.13.0+cpu | GCC 15.2.0 | host `zen5-cpu-6`
+
+Base: merged PR #49 tree `2a36a047` (`348cb603` on GitHub), tested from an
+initially empty, commit-specific `GPTQMODEL_QVQ_CPU_BUILD_ROOT`.
+
+- **Item 1 — NOT A DEFECT.** This ruling is from disassembly of the built
+  `qvq_viterbi_banked_cpu.o`, not source reading. I re-derived the mapping from
+  this object's prologue: `rsi` is `c0`, `r14 = rsi + state_count * 4` is `c1`,
+  `xmm6`/`xmm4` are `target[0]`/`target[1]`, and `zmm15`/`zmm13` are their
+  vector broadcasts. The vector body at `0x210` and `0x344` emits
+  `vmulps c1*t1` followed by `vfmadd231ps c0*t0 + dot`; the scalar prefix/tail
+  at `0x298` and `0x463` emits the same ordered `vmulss` followed by
+  `vfmadd231ss`. The register mapping is object-local and was not reused from
+  any other build. The header is therefore unchanged.
+- **Item 2 — LATENT, NOT OBSERVED IN PRODUCTION.** The override is a test-only
+  environment hook and is not set by production. Transition width 16 is also
+  rejected by both production call sites. The original PR changed the default
+  unconstrained V=4/t16 predicate by adding `vector_size == 2`, so I measured
+  parent `2a36a047` versus PR tree `b396dfc2` with no environment variables:
+  32 attempted, 16 completed, 16 explicitly skipped because the packed-word
+  helper rejects 16-step streams that are not whole 32-edge blocks, and 0
+  divergences. The completed cases covered seeds `2, 11, 202, 3033`, bank
+  counts `1, 2`, batch sizes `1, 4`, and 32 steps, with minimum duplicate/tie
+  density 99.8046875%. Selected states, segment bank IDs, packed words, and
+  squared errors were exactly equal in all completed cases. **MEASURED:
+  default V=4 t16 output is unchanged by this scoping, 16 configs, 0
+  divergences.** The guard is retained, and the source comment records this
+  measured fact without asserting which recurrence V=4 belongs to.
+  The pre-fix direct V=4 override reproducer remains real: the random fixture
+  changed all four squared-error values while states and segment bank IDs stayed
+  equal. The V=4 default-control assertion is a regression net because it
+  passes on both trees. The dedicated no-environment V=4/t16 default pin also
+  passes on both trees as a regression net: it uses 32 steps, bank_count 1,
+  99.804688% tie density, and exact selected states, segment bank IDs, and
+  packed words. The bank-count-3 override-scope assertion is the fail-first
+  Item-2 gate.
+- **Item 3 — regression net, not fail-first.** Added exact-equality coverage at
+  transition bits 7 (`suffix_count == 512`, genuinely partitioned) and 16
+  (`suffix_count == 1` control), across 8/16/24/32 threads. It compares states,
+  squared error, segment bank IDs, and packed words with `torch.equal`. The
+  fixture has 99.21875% duplicate/tied codeword rows at width 7 and
+  99.99847412109375% at width 16, and produces nonzero packed words plus bank
+  IDs `[0, 1]`. It passed before and after the fix, so it is explicitly a
+  regression net rather than a fail-first gate.
+- **MEASURED gates.** These are the exact pytest invocations used:
+  Gate A: `/home/ubuntu/venvs/qvq/bin/python -m pytest -q tests/test_qvq.py
+  tests/test_qvq_v2b2_p32.py tests/test_qvq_viterbi_cpu_opt.py
+  tests/test_calibration_coverage.py tests/test_qvq_yaqa_factor_ensemble.py`.
+  Gate B: `/home/ubuntu/venvs/qvq/bin/python -m pytest -q
+  tests/test_qvq_diagnostic_metrics.py tests/test_qvq_lifecycle.py
+  tests/test_qvq_v2b4_p64.py tests/test_qvq_yaqa_mps.py
+  tests/test_qvq_cpu_yaqa.py`. With those file lists, parent `4fcf4fbc`
+  produced Gate A `806 passed, 260 skipped` and Gate B `182 passed, 17
+  skipped`; PR tree `aab4417a` before the pin test produced `808 passed, 260
+  skipped` and `182 passed, 17 skipped`; the working tree with the pin test
+  produced `809 passed, 260 skipped` and `182 passed, 17 skipped`. All
+  commands exited zero. Each QVQ-loading run used a distinct empty build root
+  and completed a real cold native compile with compiler caching disabled. No
+  accuracy, timing, or speedup claim is made.
+
+Durable details and the quoted fail-first output are in
+`docs/qvq/qvq_banked_simd_v2_order_results_2026-08-25.md`.
