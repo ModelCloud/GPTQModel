@@ -180,6 +180,8 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 
 | Commit / scope | Exact command | Result |
 | --- | --- | --- |
+| `31d800b2`, Viterbi pruning configuration/default | `pytest -q tests/test_qvq_viterbi_pruning_config.py` | 41 passed; default verified as `auto`, `norm_band`, exact, baseline fallback |
+| `31d800b2`, repaired CUDA 13.3 pruning dispatch | `pytest -q tests/test_qvq_cuda.py::test_qvq_pruning_policy_dispatches_eligible_cells tests/test_qvq_cuda.py::test_qvq_pruning_policy_default_argument_matches_auto` | 9 passed across eligible W2.5/W3 two-bank/four-bank cells; native dispatch counter proved the exact norm-band path ran and matched the baseline bit-for-bit |
 | `21d92956`, teacher-rollout alignment | `pytest -q tests/test_qvq_e2e_alignment.py` | 7 passed |
 | `21d92956`, changed Python files | `ruff check scripts/qvq_e2e_align.py tests/test_qvq_e2e_alignment.py` | passed |
 | `d7eae64a`, chat token weighting and harness provenance | `pytest -q tests/test_prepare_dataset.py tests/test_qvq_unified_harness.py` | 46 passed |
@@ -204,11 +206,14 @@ P03 is the concrete reason checkpoint identity and serialized data provenance ar
 | Q07 higher-rate sweep, W2.5 | Q07-identical model/data/YAQA controls; `qvq_v2b2_p32`; 2 banks; bits 2.5; exact-rate uniform YAQA regularization 0.10; full 182-row optimized YAQA mix; seed 0; batch 1; reselect; no chat weighting, alignment, spectral refinement, or scale optimization | queued for quantization only; no evaluation authorized |
 | Q07 higher-rate sweep, W3.0 | Q07-identical model/data/YAQA controls; `qvq_v2b2_p32`; 2 banks; bits 3.0; exact-rate uniform YAQA regularization 0.10; full 182-row optimized YAQA mix; seed 0; batch 1; reselect; no chat weighting, alignment, spectral refinement, or scale optimization | queued behind W2.5 for quantization only; no evaluation authorized |
 | Q07 higher-rate sweep attempt 1 | commit `6223d8ff`; W2.5 first, W3 serial; pre-pruning `origin/main`; one GPU; otherwise exact tracked W2.5/W3 configs above | W2.5 manually stopped during YAQA factor finalization on user direction; no checkpoint/output directory published; W3 never started |
-| Q07 higher-rate sweep attempt 2 | merged `origin/main` PR #50; explicit `viterbi_pruning={mode:auto,strategy:norm_band,exact:true,fallback:baseline}`; W2.5 and W3 concurrent; each process isolated to one NVIDIA PG506-230 UUID; all Q07 data/YAQA controls unchanged | queued for quantization only on two GPUs; no evaluation authorized |
+| Q07 higher-rate sweep attempt 2 | merged `origin/main` PR #50; explicit `viterbi_pruning={mode:auto,strategy:norm_band,exact:true,fallback:baseline}`; W2.5 and W3 concurrent; each process isolated to one NVIDIA PG506-230 UUID; all Q07 data/YAQA controls unchanged | both runs completed all 182 YAQA rows / 302,193 tokens, then failed closed at layer 0 before quantizing a module because the partial CUDA 13.3 toolkit lacked `cusparse.h`; no checkpoint/output directory published |
+| CUDA 13.3 JIT environment repair | installed matching `libcusparse-dev-13-3`, `libcublas-dev-13-3`, and `libcusolver-dev-13-3`; rebuilt the QVQ torch.ops extension once from commit `31d800b2` | extension compiled and loaded successfully in 162s; no source/config semantics changed |
+| Q07 higher-rate sweep attempt 3 | same explicit exact-auto pruning and exact Q07 controls as attempt 2; W2.5 output `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w25-reg010-pruneauto-main-31d800b2-r2` on physical GPU UUID `GPU-737e2423-874a-23a4-1126-dfbe3e77c294`; W3 output `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-w30-reg010-pruneauto-main-31d800b2-r2` on `GPU-724ea08e-67c3-c0ce-29bb-e6c48e7dde28`; each process sees only its assigned GPU as `cuda:0` | running concurrently; 182 YAQA rows / 302,193 tokens and 128 ordinary lifecycle rows / 49,725 tokens; quantization only, no evaluation authorized |
 
 ## Current decision
 
 The completed flat-W2 leader remains Q07 at 17.8854%, 683 aligned positions short of the 25% development target.
 Q11's midpoint damping was not intermediate in behavioral fidelity: it lost 427 matches to Q07 and 278 matches to
-uniform `.20`. There is no running arm. Nothing in this ledger claims the target has been reached, and no proxy-only
+uniform `.20`. Concurrent W2.5 and W3 quantization-only arms are running with exact automatic Viterbi pruning. Nothing
+in this ledger claims the target has been reached, and no proxy-only
 arm is eligible for promotion.
