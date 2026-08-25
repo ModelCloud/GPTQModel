@@ -753,7 +753,7 @@ discrete outputs plus a numerical tolerance on cost instead.
   24,27,28,42-45,54-55,65,90,94,96,104,113-114,118,123,135,139,143,150,156,161,164,169,172-173,175-176,179,183.
   Affinity was asserted once immediately before each timed series; N=256 direct proved `{24},{27},{28},{42}`.
   Raw matrices are `/home/ubuntu/work/qvq-findings/gemv_smalln_before.csv` and `gemv_smalln_after.csv`; full tables
-  and test baselines are in `RESULTS.md`.
+  and test baselines are in `docs/kernels/qvq_segmented_viterbi_cpu_results.md`.
 ## 2026-08-24 direct packed GEMV production dispatch and dense-cache deletion
 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4, no AMX) | 32 logical cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
@@ -920,7 +920,7 @@ Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 
   enabled because pristine t15 overflows combined bank/prefix int16 backpointers and emits negative states. T16
   unconstrained two-bank cases retain the pristine recurrence and measure 0.98-1.09x with exact outputs and costs.
 - **MEASURED:** every timing cell used 3 warmups and 15 samples and reports median, minimum, and max-minus-min spread
-  in `RESULTS.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
+  in `docs/kernels/qvq_segmented_viterbi_cpu_results.md`. Pristine/post cgroup idle samples were 99.341%/99.191%. Both series used the explicit 32 singleton
   placements recorded above; runs were exclusive and `OMP_PLACES=cores` was never used.
 ## 2026-08-24 — METHODOLOGY CORRECTION: `uptime` load average is not a valid idle check on this host
 

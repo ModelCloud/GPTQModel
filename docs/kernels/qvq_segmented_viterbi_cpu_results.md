@@ -1,3 +1,9 @@
+<!-- Renamed from the repository-root `RESULTS.md` (2026-08-25).
+     The generic name was a collision hazard: it was deleted once and immediately
+     re-added by a later kernel PR, and any future measurement PR would overwrite it.
+     Measurement documents belong under `docs/kernels/<kernel>_results.md` so each
+     kernel's data has its own durable home. Referenced by CPU_KERNEL_LOG.md. -->
+
 # Segmented CPU Viterbi G-only results
 
 Hardware: AMD EPYC 9V33X 96-Core Processor | AVX-512F/BW/VL/DQ/FMA (Zen 4) | 32 cores, OMP_NUM_THREADS=32 | torch 2.13.0+cpu | host zen5-cpu-6
