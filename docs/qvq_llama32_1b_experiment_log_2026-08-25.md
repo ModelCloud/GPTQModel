@@ -884,4 +884,10 @@ and 3.
 
 | queue-adjustment | `09674b` / `llama32-1b-w2-reg015-o-w25-09674b` | `scheduler` | moved from physical GPU 0 (53 GiB free, below the safety threshold) to idle physical GPU 2 (95 GiB free); same output path and configuration, no data reset |
 
+| started | `738a13` / `llama32-1b-w2-reg015-vo-w30-738a13` | `quantization` | started on physical GPU 7 with valid W3 V+O config; YAQA Sketch-B capture in progress |
+
+| started | `09674b` / `llama32-1b-w2-reg015-o-w25-09674b` | `quantization` | started on physical GPU 2 after relocation; YAQA Sketch-B capture in progress |
+
+| started | `0cd45d` / `llama32-1b-w2-reg015-v-w25-0cd45d` | `quantization` | started on physical GPU 1; YAQA Sketch-B capture in progress |
+
 | failure+fix | `19d89a` / `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `atomic subset staging` | the first post-`dd089f8f` retry reached cleanup but failed because full replay paths were still used to index the layer-relative `StageSubset` dictionary (`KeyError: model.layers.0.mlp.gate_proj`). Fixed in `85d43bba` by resolving wrappers through `NamedModule.full_name`; regression coverage now exercises relative subset keys against a nested model tree. The Atomic arm was restarted on physical GPU 4 with the same disjoint replay rows. |
