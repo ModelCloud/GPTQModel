@@ -54,6 +54,7 @@ from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
 from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
+from ..quantization.swiglu import apply_swiglu_reparameterization, choose_swiglu_scales
 from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.backend import BACKEND
@@ -168,6 +169,152 @@ class QVQProcessor(LoopProcessor):
         self._automatic_propagation_gate_samples: Dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         self._additional_calibration_sample_counts: Dict[str, set[int]] = {}
         self._propagation_gates_lock = threading.RLock()
+        self._smooth_swiglu_stats: Dict[str, Dict[str, Any]] = {}
+        self._smooth_swiglu_prepared = False
+
+    @property
+    def smooth_swiglu_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Return JSON-safe statistics for the offline preconditioning pass."""
+
+        return copy.deepcopy(self._smooth_swiglu_stats)
+
+    def prepare_smooth_swiglu(self, gptq_model: BaseQModel) -> None:
+        """Choose and fold Smooth-SwiGLU scales before Hessian/YAQA capture.
+
+        The calibration stream is used only to estimate the nonlinear
+        sensitivity.  All weights are transformed before any QVQ capture, so
+        the down-projection Hessian sees the rescaled hidden state.  The
+        transformation is exact in dense arithmetic and adds no checkpoint
+        tensors or inference operations.
+        """
+
+        smooth_config = self.qcfg.smooth_swiglu
+        if smooth_config is None or not smooth_config.enabled:
+            return
+        if self._smooth_swiglu_prepared:
+            raise RuntimeError("QVQ Smooth-SwiGLU preparation was already completed.")
+        model = gptq_model.model
+        if any(isinstance(module, BaseQuantLinear) for module in model.modules()):
+            raise RuntimeError("QVQ Smooth-SwiGLU requires an entirely dense source model.")
+        input_embeddings = model.get_input_embeddings()
+        if input_embeddings is None:
+            raise RuntimeError("QVQ Smooth-SwiGLU requires model input embeddings.")
+        mlps = {}
+        for module_name, module in model.named_modules():
+            if not module_name.endswith(".mlp"):
+                continue
+            gate = getattr(module, "gate_proj", None)
+            up = getattr(module, "up_proj", None)
+            down = getattr(module, "down_proj", None)
+            if all(isinstance(item, torch.nn.Linear) for item in (gate, up, down)):
+                mlps[module_name] = (module, gate, up, down)
+        if not mlps:
+            raise ValueError("QVQ Smooth-SwiGLU could not find Llama-style gate/up/down projection triples.")
+        if not self.calibration_dataset:
+            raise ValueError("QVQ Smooth-SwiGLU requires a nonempty calibration dataset.")
+
+        max_tokens = smooth_config.max_calibration_tokens
+        activations: Dict[str, list[torch.Tensor]] = {name: [] for name in mlps}
+        retained_tokens = {name: 0 for name in mlps}
+        mask_tls = threading.local()
+        hooks = []
+
+        def capture_mlp_input(module_name: str):
+            def hook(module, inputs):
+                del module
+                if retained_tokens[module_name] >= max_tokens or not inputs:
+                    return
+                source = inputs[0]
+                if not torch.is_tensor(source) or source.ndim < 2:
+                    return
+                source = source.detach()
+                if source.ndim == 3:
+                    keep_mask = getattr(mask_tls, "value", None)
+                    if (
+                        torch.is_tensor(keep_mask)
+                        and keep_mask.ndim == 2
+                        and keep_mask.shape == source.shape[:2]
+                    ):
+                        source = source[keep_mask.to(device=source.device, dtype=torch.bool)]
+                    source = source.reshape(-1, source.shape[-1])
+                else:
+                    source = source.reshape(-1, source.shape[-1])
+                remaining = max_tokens - retained_tokens[module_name]
+                source = source[:remaining].to(device="cpu", dtype=torch.float32)
+                activations[module_name].append(source)
+                retained_tokens[module_name] += int(source.shape[0])
+
+            return hook
+
+        for module_name, (module, _, _, _) in mlps.items():
+            hooks.append(module.register_forward_pre_hook(capture_mlp_input(module_name)))
+        was_training = model.training
+        model.eval()
+        input_device = input_embeddings.weight.device
+        try:
+            with torch.no_grad():
+                for row in self.calibration_dataset:
+                    mask_tls.value = row.get("attention_mask")
+                    model(
+                        **self._module_replay_model_inputs(row, input_device),
+                        use_cache=False,
+                        return_dict=True,
+                    )
+                    if all(count >= max_tokens for count in retained_tokens.values()):
+                        break
+        finally:
+            mask_tls.value = None
+            for hook in hooks:
+                hook.remove()
+            model.train(was_training)
+
+        for module_name, (_, gate, up, down) in mlps.items():
+            if not activations[module_name]:
+                raise RuntimeError(f"QVQ Smooth-SwiGLU captured no inputs for `{module_name}`.")
+            weight_device = gate.weight.device
+            inputs = torch.cat(activations[module_name], dim=0).to(device=weight_device)
+            scales, stats = choose_swiglu_scales(
+                inputs,
+                gate.weight,
+                up.weight,
+                down.weight,
+                group_size=smooth_config.group_size,
+                candidate_exponents=smooth_config.candidate_exponents,
+                scale_min=smooth_config.scale_min,
+                scale_max=smooth_config.scale_max,
+            )
+            with torch.no_grad():
+                _, transformed_up, transformed_down = apply_swiglu_reparameterization(
+                    gate.weight,
+                    up.weight,
+                    down.weight,
+                    scales.to(device=gate.weight.device),
+                )
+                dense_gate = inputs.to(torch.float32) @ gate.weight.to(torch.float32).transpose(0, 1)
+                dense_up = inputs.to(torch.float32) @ up.weight.to(torch.float32).transpose(0, 1)
+                dense_output = (F.silu(dense_gate) * dense_up) @ down.weight.to(torch.float32).transpose(0, 1)
+                transformed_up_output = inputs.to(torch.float32) @ transformed_up.to(torch.float32).transpose(0, 1)
+                transformed_down_output = (
+                    F.silu(dense_gate) * transformed_up_output
+                ) @ transformed_down.to(torch.float32).transpose(0, 1)
+                parity_error = (transformed_down_output - dense_output).to(torch.float32)
+                parity_relative_l2 = parity_error.norm() / dense_output.norm().clamp_min(torch.finfo(torch.float32).eps)
+                if not torch.isfinite(parity_error).all() or not torch.isfinite(parity_relative_l2):
+                    raise RuntimeError(f"QVQ Smooth-SwiGLU produced non-finite dense parity for `{module_name}`.")
+                stats["dense_parity_max_abs"] = float(parity_error.abs().max().item())
+                stats["dense_parity_relative_l2"] = float(parity_relative_l2.item())
+                up.weight.copy_(transformed_up)
+                down.weight.copy_(transformed_down)
+            stats["module"] = module_name
+            stats["scale_search"] = "jacobian_proxy"
+            self._smooth_swiglu_stats[module_name] = stats
+        setattr(gptq_model, "qvq_smooth_swiglu_stats", self.smooth_swiglu_stats)
+        self._smooth_swiglu_prepared = True
+        log.info(
+            "QVQ Smooth-SwiGLU: folded scales for %d MLPs using %d-token calibration slices",
+            len(mlps),
+            max(retained_tokens.values()),
+        )
 
     @staticmethod
     def _module_replay_row_fingerprint(row: Dict[str, torch.Tensor]) -> str:

@@ -485,6 +485,47 @@ class ModuleGranularReplayConfig:
         return module_name.rsplit(".", 1)[-1] in self.roles()
 
 
+@dataclass
+class SmoothSwiGLUConfig:
+    """Offline, function-preserving preconditioning for Llama-style SwiGLU."""
+
+    enabled: bool = False
+    group_size: int = 16
+    candidate_exponents: tuple[float, ...] = (-1.0, -0.5, 0.0, 0.5, 1.0)
+    scale_min: float = 0.5
+    scale_max: float = 2.0
+    max_calibration_tokens: int = 2048
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("SmoothSwiGLUConfig: `enabled` must be boolean.")
+        if isinstance(self.group_size, bool) or not isinstance(self.group_size, int) or self.group_size < 1:
+            raise ValueError("SmoothSwiGLUConfig: `group_size` must be a positive integer.")
+        if not isinstance(self.candidate_exponents, (tuple, list)) or not self.candidate_exponents:
+            raise ValueError("SmoothSwiGLUConfig: `candidate_exponents` must be nonempty.")
+        self.candidate_exponents = tuple(float(value) for value in self.candidate_exponents)
+        if any(not math.isfinite(value) for value in self.candidate_exponents):
+            raise ValueError("SmoothSwiGLUConfig: candidate exponents must be finite.")
+        if not any(math.isclose(value, 0.0, abs_tol=1e-8) for value in self.candidate_exponents):
+            raise ValueError("SmoothSwiGLUConfig: candidate exponents must include zero.")
+        for field_name in ("scale_min", "scale_max"):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"SmoothSwiGLUConfig: `{field_name}` must be a real scalar.")
+            value = float(value)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"SmoothSwiGLUConfig: `{field_name}` must be finite and positive.")
+            setattr(self, field_name, value)
+        if self.scale_min > self.scale_max:
+            raise ValueError("SmoothSwiGLUConfig: `scale_min` must not exceed `scale_max`.")
+        if (
+            isinstance(self.max_calibration_tokens, bool)
+            or not isinstance(self.max_calibration_tokens, int)
+            or self.max_calibration_tokens < 1
+        ):
+            raise ValueError("SmoothSwiGLUConfig: `max_calibration_tokens` must be a positive integer.")
+
+
 class _SharedTemporaryDirectory:
     """Share one TemporaryDirectory handle across copied config objects."""
 
@@ -6271,6 +6312,7 @@ class QVQConfig(BaseQuantizeConfig):
     viterbi_minimum_proxy_improvement: float = field(default=0.0)
     output_alignment: Optional[OutputAlignConfig] = field(default=None)
     module_granular_replay: Optional[ModuleGranularReplayConfig] = field(default=None)
+    smooth_swiglu: Optional[SmoothSwiGLUConfig] = field(default=None)
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -6466,6 +6508,13 @@ class QVQConfig(BaseQuantizeConfig):
                 "QVQ output alignment currently supports decoder layers, not language-model head (`lm_head`) quantization."
             )
         self.module_granular_replay = _normalize_module_granular_replay_config(self.module_granular_replay)
+        if self.smooth_swiglu is not None:
+            if isinstance(self.smooth_swiglu, dict):
+                self.smooth_swiglu = SmoothSwiGLUConfig(**self.smooth_swiglu)
+            elif isinstance(self.smooth_swiglu, SmoothSwiGLUConfig):
+                self.smooth_swiglu.__post_init__()
+            else:
+                raise TypeError("QVQConfig: `smooth_swiglu` must be a SmoothSwiGLUConfig, dictionary, or None.")
         if self.module_granular_replay is not None:
             if self.format != FORMAT.QVQ_V2B2_P32 or self.rounding != "yaqa":
                 raise ValueError(
@@ -6606,6 +6655,7 @@ class QVQConfig(BaseQuantizeConfig):
         out["module_granular_replay"] = (
             None if self.module_granular_replay is None else asdict(self.module_granular_replay)
         )
+        out["smooth_swiglu"] = None if self.smooth_swiglu is None else asdict(self.smooth_swiglu)
         out["tensor_storage"] = self.tensor_storage
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
