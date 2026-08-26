@@ -695,3 +695,11 @@ and 3.
 | monitor | `llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc` | `gsm8k_platinum_cot` | complete; metric=0.22084367245657568; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.21670802315963605; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg020-tip-gpu0` | `divergence300` | complete; metric=0.14458333333333334; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-tip-gpu0-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg020-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.19520264681555005; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg020-main-ecf7081e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-shiftcal128-yaqa302k-main-a12ce4e3` | `divergence300` | complete; metric=0.18427083333333333; report `/root/qvq-results/llama32-1b-w2-shiftcal128-yaqa302k-main-a12ce4e3-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-spectral-yaqa302k-main-a12ce4e3` | `divergence300` | complete; metric=0.181875; report `/root/qvq-results/llama32-1b-w2-spectral-yaqa302k-main-a12ce4e3-div300-dev-v1.json` |
