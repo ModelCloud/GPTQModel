@@ -95,8 +95,9 @@ development split and all 1,209 GSM8K Platinum test rows; D300 and GSM8K also
 have no normalized collisions. Manifests: `docs/experiments/disjointness-yaqa182.json`
 and `docs/experiments/disjointness-full-reference.json`. Quantization can be
 made fail-closed with `--disjointness-manifest`; historical full-reference
-GSM8K scores remain marked as contamination-risk until semantic/source audits
-of derived datasets (for example OpenMathInstruct) are complete.
+GSM8K scores pass the available row-level audit and are valid on that evidence.
+Semantic similarity from derived datasets (for example OpenMathInstruct) is a
+separate, optional source-level audit and is not evidence of contamination.
 
 The first D300-source-shaped 500k artifact failed this audit: calibration row
 165 matched D300 row 212 after normalization, and 33 additional duplicate
