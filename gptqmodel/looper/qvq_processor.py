@@ -222,6 +222,26 @@ class QVQProcessor(LoopProcessor):
         if not self.calibration_dataset:
             raise ValueError("QVQ Smooth-SwiGLU requires a nonempty calibration dataset.")
 
+        # The preparation pass runs before the normal layer lifecycle.  With
+        # checkpoint-backed offload, that means the dense source can still be
+        # a meta shell even though the later lifecycle knows how to materialize
+        # one layer at a time.  A direct full-model forward would otherwise
+        # feed meta activations into this hook and fail on masked indexing.
+        if any(tensor.device.type == "meta" for tensor in model.parameters()):
+            if getattr(gptq_model, "turtle_model", None) is None:
+                raise RuntimeError(
+                    "QVQ Smooth-SwiGLU requires a materialized dense source model; found meta tensors."
+                )
+            capture_model_device = normalize_device_like(self.qcfg.device) or torch.device("cpu")
+            gptq_model.shell_module_materialize(
+                target_submodule=model,
+                device=capture_model_device,
+                module_path="",
+                recurse=True,
+                show_progress=False,
+            )
+            input_embeddings = model.get_input_embeddings()
+
         max_tokens = 512 if smooth_config is None else smooth_config.max_calibration_tokens
         input_device = input_embeddings.weight.device
         # On a CUDA-resident model, keep the small calibration activation cache
@@ -310,7 +330,11 @@ class QVQProcessor(LoopProcessor):
                 scale_min=smooth_config.scale_min,
                 scale_max=smooth_config.scale_max,
             )
-            with torch.no_grad():
+            # The lazy checkpoint loader exposes inference tensors.  This
+            # offline, function-preserving weight rewrite is an in-place
+            # mutation, so it must run inside inference mode rather than only
+            # the no-grad guard.
+            with torch.inference_mode():
                 _, transformed_up, transformed_down = apply_swiglu_reparameterization(
                     gate.weight,
                     up.weight,
