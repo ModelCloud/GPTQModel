@@ -85,3 +85,15 @@ locations are indexed here.
 The authoritative per-arm machine-readable ledgers are in
 `docs/experiments/`; the append-only chronology is
 `docs/qvq_llama32_1b_experiment_log_2026-08-25.md`.
+
+## Data-contamination audit
+
+Calibration/evaluation separation is now enforced by
+`scripts/check_calibration_disjointness.py`. The YAQA-182 and full-reference
+292-row mixes both pass normalized user-question checks against the D300
+development split and all 1,209 GSM8K Platinum test rows; D300 and GSM8K also
+have no normalized collisions. Manifests: `docs/experiments/disjointness-yaqa182.json`
+and `docs/experiments/disjointness-full-reference.json`. Quantization can be
+made fail-closed with `--disjointness-manifest`; historical full-reference
+GSM8K scores remain marked as contamination-risk until semantic/source audits
+of derived datasets (for example OpenMathInstruct) are complete.

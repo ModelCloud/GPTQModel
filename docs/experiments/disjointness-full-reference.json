@@ -1,0 +1,15 @@
+{
+  "calibration_files": [
+    "dataset/calibration_mix_500k_llama3.2_1b/calibration_full_reference.parquet"
+  ],
+  "calibration_rows": 292,
+  "evaluation_splits": [
+    "d300",
+    "gsm8k_platinum"
+  ],
+  "internal_duplicate_groups": {},
+  "method": "user-turn-only; NFKC + casefold + whitespace/punctuation normalization; SHA256",
+  "overlap_groups": {},
+  "schema": "qvq.calibration_disjointness.v1",
+  "status": "pass"
+}
