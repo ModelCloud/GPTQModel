@@ -903,3 +903,7 @@ and 3.
 | data-fix | `review-c1048540` | `D300-source calibration builder` | source-mix construction excludes the union of development and locked D300 prompt hashes (exact and normalized). Regenerated output is 981 rows and passes `docs/experiments/disjointness-div300-sources-v2.json`. |
 
 | reporting-fix | `review-c1048540` | `evaluation snapshots` | checkpoint snapshots are now digest-qualified and append-only; legacy fixed filenames are compatibility aliases written only when absent, so prior evidence cannot be overwritten. |
+
+| invalidated+restarted | `19d89a`, `ebec00` | `Atomic/Smooth+Atomic replay` | prior workers used the 959-row replay artifact that collides with locked D300 prompts; those processes were stopped before completion. Atomic was relaunched with regenerated 981-row source mix, strict bound manifest `disjointness-llama32-benchmark-replay-v2.json`, and corrected literal-greedy code; Smooth+Atomic is waiting on that clean checkpoint. |
+
+| invalidated+stopped | `llama32-1b-w2-reg020-replay-256x256-tip-gpu2` | `replay quantization` | this in-progress arm also consumed the historical 959-row replay artifact; its quantizer and waiting D300 workers were stopped before any completion marker or score was published. |
