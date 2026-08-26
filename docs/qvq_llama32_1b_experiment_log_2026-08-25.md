@@ -857,3 +857,5 @@ and 3.
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e` | `divergence300` | complete; metric=0.16864583333333333; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e` | `divergence300` | complete; metric=0.190625; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg0125-main-8ae2db25` | `divergence300` | complete; metric=0.13677083333333334; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-main-8ae2db25-div300-dev-v1.json` |
