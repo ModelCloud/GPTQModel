@@ -876,8 +876,15 @@ class QVQProcessor(LoopProcessor):
         candidate_kwargs_base.pop("yaqa_v2b2_fixed_family_id", None)
         for alternative_bank_id in (0, *replay_config.alternative_bank_ids):
             candidate_kwargs = dict(candidate_kwargs_base)
-            candidate_kwargs["yaqa_v2b2_family_mode"] = "fixed_block_ldlq"
-            candidate_kwargs["yaqa_v2b2_fixed_family_id"] = alternative_bank_id
+            if alternative_bank_id == 0:
+                # Candidate zero is the configured canonical YAQA result. In
+                # the atomic experiment this is normal V2B2-P32 reselect, not
+                # fixed family zero (which is only the independent V2
+                # fallback artifact).
+                candidate_kwargs["yaqa_v2b2_family_mode"] = module_qcfg.yaqa.v2b2_family_mode
+            else:
+                candidate_kwargs["yaqa_v2b2_family_mode"] = "fixed_block_ldlq"
+                candidate_kwargs["yaqa_v2b2_fixed_family_id"] = alternative_bank_id
             candidate_kwargs["telemetry"] = (
                 base_telemetry
                 if alternative_bank_id == 0
@@ -939,15 +946,23 @@ class QVQProcessor(LoopProcessor):
         parent_name = role_names["gate_proj"].rpartition(".")[0]
         if any(name.rpartition(".")[0] != parent_name for name in role_names.values()):
             raise RuntimeError(f"QVQ atomic_swiglu found mismatched MLP parents in {sorted(role_names.values())}.")
-        if self._module_replay_model is None:
-            raise RuntimeError("QVQ atomic_swiglu requires prepared final-logit replay targets.")
         mlp_inputs = self._atomic_swiglu_inputs.get(parent_name)
         if mlp_inputs is None:
-            raise RuntimeError(f"QVQ atomic_swiglu captured no inputs for `{parent_name}`.")
+            log.warning(
+                "QVQ atomic_swiglu skipped incomplete subset `%s`: no captured MLP inputs.",
+                parent_name,
+            )
+            return
         with self._atomic_swiglu_lock:
             records = {role: self._atomic_swiglu_candidates.get(name) for role, name in role_names.items()}
         if any(record is None for record in records.values()):
-            raise RuntimeError(f"QVQ atomic_swiglu candidate bank is incomplete for `{parent_name}`.")
+            log.warning(
+                "QVQ atomic_swiglu skipped incomplete subset `%s`: candidate bank is incomplete.",
+                parent_name,
+            )
+            return
+        if self._module_replay_model is None:
+            raise RuntimeError("QVQ atomic_swiglu requires prepared final-logit replay targets.")
 
         gate_record = records["gate_proj"]
         up_record = records["up_proj"]
@@ -1077,9 +1092,20 @@ class QVQProcessor(LoopProcessor):
             finally:
                 restore()
 
+        # The selection above temporarily installs QVQLinear candidates only
+        # for replay. Restore the original dense module first, then update its
+        # weight to the selected reconstruction. StageLayer replays the rest
+        # of the layer before submodule_finalize() installs the serialized
+        # runtime module, so leaving candidate zero here would propagate stale
+        # data into later layers and output alignment.
         for role, name in role_names.items():
             module = subset[name]
             selected_id = selected_triplet[({"gate_proj": 0, "up_proj": 1, "down_proj": 2}[role])]
+            selected_weight = records[role]["candidates"][selected_id]["weight"]
+            restored_weight = self._restore_module_weight(module, selected_weight)
+            module.module.weight.data.copy_(
+                restored_weight.to(device=module.module.weight.device, dtype=module.module.weight.dtype)
+            )
             payload = records[role]["candidates"][selected_id]["serialized_tensors"]
             module.stream_sync()
             with parent_module_lock(name):

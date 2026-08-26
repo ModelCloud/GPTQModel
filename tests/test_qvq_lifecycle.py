@@ -1046,3 +1046,133 @@ def test_qvq_lifecycle_rejects_non_linear_runtime_replacement_instead_of_changin
 
     with pytest.raises(NotImplementedError, match="Unsupported QVQ module type: Conv1d"):
         processor._restore_module_weight(named, torch.randn(16, 16))
+
+
+def test_atomic_swiglu_candidate_zero_is_normal_reselect(monkeypatch):
+    qcfg = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        rounding="yaqa",
+        yaqa={"v2b2_family_mode": "reselect", "minimum_sequences": 1},
+        module_granular_replay={
+            "strategy": "atomic_swiglu",
+            "subsets": ["mlp_gate_up_down"],
+        },
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    module = NamedModule(
+        torch.nn.Linear(4, 4, bias=False),
+        name="gate_proj",
+        full_name="model.layers.0.mlp.gate_proj",
+        layer_index=0,
+    )
+    calls = []
+
+    class FakeResult:
+        def __init__(self, weight):
+            self.weight = weight
+
+        def serialized_tensors(self):
+            return {"weight": self.weight}
+
+    def fake_quantize(weight, hessian, **kwargs):
+        del hessian
+        calls.append(kwargs)
+        family_id = kwargs.get("yaqa_v2b2_fixed_family_id", 0)
+        return FakeResult(weight.detach().clone() + family_id * 0.01)
+
+    monkeypatch.setattr("gptqmodel.looper.qvq_processor.quantize_qvq_linear", fake_quantize)
+    canonical, candidates = processor._quantize_atomic_swiglu_candidates(
+        module,
+        qcfg,
+        module.module.weight.detach().clone(),
+        torch.eye(4),
+        {"telemetry": None},
+    )
+
+    assert set(candidates) == {0, 1, 2, 3}
+    assert calls[0]["yaqa_v2b2_family_mode"] == "reselect"
+    assert "yaqa_v2b2_fixed_family_id" not in calls[0]
+    assert [call["yaqa_v2b2_fixed_family_id"] for call in calls[1:]] == [1, 2, 3]
+    torch.testing.assert_close(canonical.weight, candidates[0].weight)
+
+
+def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize(monkeypatch):
+    qcfg = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        rounding="yaqa",
+        yaqa={"v2b2_family_mode": "reselect", "minimum_sequences": 1},
+        module_granular_replay={
+            "strategy": "atomic_swiglu",
+            "subsets": ["mlp_gate_up_down"],
+            "search_folds": 2,
+        },
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    root = torch.nn.Module()
+    root.mlp = torch.nn.Module()
+    root.mlp.gate_proj = torch.nn.Linear(4, 4, bias=False)
+    root.mlp.up_proj = torch.nn.Linear(4, 4, bias=False)
+    root.mlp.down_proj = torch.nn.Linear(4, 4, bias=False)
+    processor._module_replay_model = SimpleNamespace(model=root)
+    processor._atomic_swiglu_inputs["mlp"] = torch.randn(4, 4)
+
+    subset = {}
+    records = {}
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        name = f"mlp.{role}"
+        named = NamedModule(root.mlp.__getattr__(role), name=role, full_name=name, layer_index=0)
+        subset[name] = named
+        dense_weight = named.module.weight.detach().clone()
+        candidates = {}
+        for candidate_id in (0, 1, 2, 3):
+            weight = dense_weight + (candidate_id + 1) * 0.01
+            candidates[candidate_id] = {
+                "weight": weight,
+                "serialized_tensors": {"weight": weight},
+            }
+        records[name] = {
+            "dense_weight": dense_weight,
+            "candidates": candidates,
+            "module_qcfg": qcfg,
+        }
+    processor._atomic_swiglu_candidates.update(records)
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.qvq_processor.select_swiglu_candidate_triplet",
+        lambda *args, **kwargs: {"beam": [{"gate_index": 1, "up_index": 2, "down_index": 3}]},
+    )
+    monkeypatch.setattr(
+        processor,
+        "_module_replay_metrics",
+        lambda *args, **kwargs: {
+            "kl_forward": 1.0,
+            "top1_agreement": 1.0,
+            "top5_overlap": 1.0,
+            "top10_overlap": 1.0,
+            "tokens": 1,
+        },
+    )
+    monkeypatch.setattr(processor, "_module_replay_score", lambda *args, **kwargs: 0.5)
+    monkeypatch.setattr(processor, "_module_replay_confirmation_passes", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        processor,
+        "_module_replay_qlinear_from_tensors",
+        lambda original, name, module_qcfg, tensors: torch.nn.Linear(4, 4, bias=False),
+    )
+    for named in subset.values():
+        monkeypatch.setattr(named, "stream_sync", lambda: None)
+        monkeypatch.setattr(named, "stream_state_payload_to_cpu", lambda payload: None)
+
+    processor._select_atomic_swiglu_subset(subset, subset_index=0, subset_total=1)
+
+    expected_ids = {"gate_proj": 1, "up_proj": 2, "down_proj": 3}
+    for role, candidate_id in expected_ids.items():
+        name = f"mlp.{role}"
+        expected = records[name]["candidates"][candidate_id]["weight"]
+        torch.testing.assert_close(root.mlp.__getattr__(role).weight, expected)

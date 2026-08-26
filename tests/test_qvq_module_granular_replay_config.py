@@ -188,6 +188,17 @@ def test_atomic_swiglu_strategy_requires_complete_mlp_subset():
         )
 
 
+def test_atomic_swiglu_requires_reselect_canonical_family():
+    with pytest.raises(ValueError, match="v2b2_family_mode='reselect'"):
+        _base_config(
+            yaqa={"v2b2_family_mode": "fixed_block_ldlq"},
+            module_granular_replay={
+                "strategy": "atomic_swiglu",
+                "subsets": ["mlp_gate_up_down"],
+            },
+        )
+
+
 def test_live_prefix_driver_exposes_module_granular_replay_name_and_subset_scope():
     args = _parser().parse_args(
         [

@@ -6550,6 +6550,14 @@ class QVQConfig(BaseQuantizeConfig):
                 raise ValueError(
                     "QVQConfig: module-granular replay and localized propagated bank selection are mutually exclusive."
                 )
+            if (
+                self.module_granular_replay.strategy == "atomic_swiglu"
+                and self.yaqa.v2b2_family_mode != "reselect"
+            ):
+                raise ValueError(
+                    "QVQConfig: atomic_swiglu requires YAQA `v2b2_family_mode='reselect'` "
+                    "so canonical candidate zero remains the normal reselect result."
+                )
         if self.rounding == "yaqa" and self.output_channel_scale_optimization:
             raise ValueError("QVQConfig: YAQA does not support independent output-channel scale optimization.")
         if self.rounding == "yaqa" and self.module_scale_search:
