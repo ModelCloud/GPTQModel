@@ -224,7 +224,7 @@ The flat-W2 control is the preserved artifact
 - V+O W2.5: `/tmp/qvq-mechanism-vo-w25-mps-a14`
 - Gate+Down W2.5: `/tmp/qvq-mechanism-gate-down-w25-mps-a14`
 - Up+Down W2.5: `/tmp/qvq-mechanism-up-down-w25-mps-a14` (quantization was
-  restarted after a monitor interruption and is still pending)
+  restarted after a monitor interruption and completed successfully)
 
 ### Local layer-0 held-out logits
 
@@ -233,14 +233,16 @@ The flat-W2 control is the preserved artifact
 | Flat-W2 control | none | 0.494589233 | 1.478702173 | 18.593750 | 0.887347785 | 80.4124% |
 | V+O | `self_attn.v_proj`, `self_attn.o_proj` | **0.493095418** | **1.474236026** | **18.156250** | **0.888034137** | **80.4325%** |
 | Gate+Down | `mlp.gate_proj`, `mlp.down_proj` | **0.491829011** | **1.470449775** | 18.789063 | **0.888827608** | **80.6132%** |
-| Up+Down | `mlp.up_proj`, `mlp.down_proj` | pending | pending | pending | pending | pending |
+| Up+Down | `mlp.up_proj`, `mlp.down_proj` | **0.491072044** | **1.468186628** | 19.578125 | **0.889104352** | **80.5262%** |
 
 Relative to the local control, V+O changes relative L2 by `-0.302%`, RMSE
 by `-0.302%`, max error by `-2.35%`, cosine by `+0.000686`, and top-1 by
 `+0.0201` percentage points. Gate+Down changes relative L2 by `-0.558%`,
 RMSE by `-0.558%`, cosine by `+0.001480`, and top-1 by `+0.2008` percentage
-points; its maximum error is `+1.05%` higher. These are layer-0 propagated
-logit measurements, not task scores.
+points; its maximum error is `+1.05%` higher. Up+Down changes relative L2 by
+`-0.711%`, RMSE by `-0.711%`, cosine by `+0.001757`, and top-1 by `+0.1138`
+percentage points; its maximum error is `+5.29%` higher. These are layer-0
+propagated logit measurements, not task scores.
 
 ### Canonical task-score status
 
@@ -263,4 +265,7 @@ The reproducible CUDA and MPS configs are in `scripts/configs/`:
 
 O-only/V-only, Smooth alpha, and local-only Atomic controls remain queued for
 the next available compute slot; they are intentionally not represented as
-completed results here.
+completed results here. The three completed mixed-precision arms provide the
+requested first interaction map: both MLP pairs improve aggregate teacher-
+forced fidelity on this slice, with Up+Down giving the lowest relative L2;
+V+O produces the smallest maximum-error value among the mixed arms.
