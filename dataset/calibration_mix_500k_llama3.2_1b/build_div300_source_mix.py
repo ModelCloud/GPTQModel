@@ -56,7 +56,12 @@ def main():
         tokens += n
         if tokens >= 500_000:
             break
-    pd.DataFrame({'messages': [r['messages'] for r in chosen]}).to_parquet(OUT, index=False)
+    pd.DataFrame({
+        'messages': [r['messages'] for r in chosen],
+        'source_group': [r['source_group'] for r in chosen],
+        'source_id': [r['source_id'] for r in chosen],
+        'hash': [r['hash'] for r in chosen],
+    }).to_parquet(OUT, index=False)
     info = {'target_tokens':500000,'rows':len(chosen),'tokens':tokens,'candidate_rows':len(candidates),'excluded_d300_or_existing':len(forbidden),'source_counts':{g:sum(r['source_group']==g for r in chosen) for g,_ in builders},'sha256':hashlib.sha256(OUT.read_bytes()).hexdigest(),'d300_manifest_sha256':hashlib.sha256(D300.read_bytes()).hexdigest()}
     (ROOT/'calibration_div300_sources.json').write_text(json.dumps(info,indent=2,sort_keys=True)+'\n')
     print(json.dumps(info,indent=2))
