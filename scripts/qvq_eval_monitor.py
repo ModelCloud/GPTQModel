@@ -162,10 +162,34 @@ def append_ledger(ledger: Path, job: Job, payload: dict[str, Any]) -> None:
         handle.write(line)
 
 
+def adopt_recent_reports(state: dict[str, Any], ledger: Path, checkpoints: list[Path], dry_run: bool) -> int:
+    """Adopt reports published by external wrappers during the current run window."""
+    if dry_run:
+        return 0
+    cutoff = time.time() - 6 * 3600
+    adopted = 0
+    for checkpoint in checkpoints:
+        for task in ("gsm8k_platinum_cot", "divergence300"):
+            output = report_path(checkpoint, task)
+            key = f"{checkpoint}|{task}"
+            if key in state["jobs"] or not output.is_file() or output.stat().st_mtime < cutoff:
+                continue
+            try:
+                payload = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            job = Job(str(checkpoint), task, str(output), status="complete", finished_at=datetime.now(UTC).isoformat())
+            state["jobs"][key] = asdict(job)
+            append_ledger(ledger, job, payload)
+            adopted += 1
+    return adopted
+
+
 def run_once(state_path: Path, ledger: Path, gpus: list[int], dry_run: bool = False) -> dict[str, Any]:
     state = load_state(state_path)
     checkpoints = discover_checkpoints()
     active = active_jobs()
+    adopted = adopt_recent_reports(state, ledger, checkpoints, dry_run)
     # Adopt the separately-run fresh verification of the historically surprising
     # full-reference arm so it is durable and cannot later be queued again.
     verify_checkpoint = next((p for p in checkpoints if "full-reference-reg020" in p.name), None)
@@ -217,7 +241,7 @@ def run_once(state_path: Path, ledger: Path, gpus: list[int], dry_run: bool = Fa
             raw["finished_at"] = datetime.now(UTC).isoformat()
             append_ledger(ledger, Job(**{k: raw[k] for k in Job.__dataclass_fields__}), payload)
         write_state(state_path, state)
-    return {"checkpoints": len(checkpoints), "pending": len(jobs), "launched": [asdict(j) for j in launched], "active_jobs": len(active)}
+    return {"checkpoints": len(checkpoints), "pending": len(jobs), "adopted": adopted, "launched": [asdict(j) for j in launched], "active_jobs": len(active)}
 
 
 def main() -> None:
