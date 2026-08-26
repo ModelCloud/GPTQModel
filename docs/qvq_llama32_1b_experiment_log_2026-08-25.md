@@ -959,3 +959,5 @@ and 3.
 | started | `d13602`, `b7d172` | `V+O Smooth + Atomic quantization` | both queue wrappers passed the atomic-checkpoint gate and started successfully on physical GPUs 6 and 7 at commit `9f2246d5`; output directories are `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602` and `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172`. D300 and GSM8K Platinum remain pending until each `qvq_quantize_run.json` is published; the 120-second evaluation watcher will schedule them automatically. |
 
 | monitor | `llama32-1b-w2-reg015-vo-w30-ef21af` | `gsm8k_platinum_cot` | complete; metric=0.24731182795698925; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w30-ef21af-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w35-60a68a` | `gsm8k_platinum_cot` | complete; metric=0.2663358147229115; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w35-60a68a-gsm8k-platinum-v1.json` |
