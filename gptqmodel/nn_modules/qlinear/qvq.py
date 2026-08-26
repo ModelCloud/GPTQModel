@@ -1216,4 +1216,9 @@ class QVQReferenceLinear(QVQLinear):
         return self._reference_inner_forward(x)
 
 
-__all__ = ["QVQLinear", "QVQReferenceLinear", "qvq_dense_oracle_forward"]
+__all__ = [
+    "QVQLinear",
+    "QVQReferenceLinear",
+    "qvq_dense_oracle_forward",
+    "qvq_local_ring_dense_oracle_forward",
+]

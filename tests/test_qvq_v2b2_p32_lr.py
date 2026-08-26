@@ -153,6 +153,41 @@ def test_lr32_qvq_linear_oracle_uses_torch_reference_path():
     torch.testing.assert_close(layer(x), oracle, rtol=0, atol=0)
 
 
+def test_lr32_qvq_linear_state_dict_round_trip_preserves_oracle():
+    layer = _make_torch_lr_layer(bits=2, in_features=64, out_features=8)
+    reloaded = QVQLinear(
+        bits=2,
+        in_features=64,
+        out_features=8,
+        bank_count=2,
+        v2b2_p32_lr=True,
+        dtype=torch.float32,
+    ).eval()
+    reloaded.load_state_dict(layer.state_dict(), strict=True)
+    x = torch.randn(3, 64, dtype=torch.float32)
+
+    for name, tensor in layer.state_dict().items():
+        torch.testing.assert_close(tensor, reloaded.state_dict()[name], rtol=0, atol=0)
+    torch.testing.assert_close(
+        qvq_local_ring_dense_oracle_forward(reloaded, x),
+        qvq_local_ring_dense_oracle_forward(layer, x),
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_lr32_rejects_legacy_or_multiple_format_flags():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        QVQLinear(
+            bits=2,
+            in_features=32,
+            out_features=8,
+            bank_count=2,
+            v2b2_p32=True,
+            v2b2_p32_lr=True,
+        )
+
+
 def test_lr32_config_and_format_metadata():
     config = QVQConfig(bits=2, format=FORMAT.QVQ_V2B2_P32_LR, bank_count=2)
     assert config.format == FORMAT.QVQ_V2B2_P32_LR
@@ -203,11 +238,16 @@ def test_lr32_mlx_gpu_kernel_matches_torch_reconstruction(
     torch.testing.assert_close(actual_torch, expected, rtol=0, atol=4e-3)
 
 
-def test_lr32_mlx_linear_inference_matches_torch_oracle():
+@pytest.mark.parametrize("out_features", (8, 16, 40))
+def test_lr32_mlx_linear_inference_matches_torch_oracle(out_features):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils.qvq_mlx import QVQMLXLinear
 
-    torch_layer = _make_torch_lr_layer(bits=2, in_features=64, out_features=16)
+    torch_layer = _make_torch_lr_layer(
+        bits=2,
+        in_features=64,
+        out_features=out_features,
+    )
     mlx_layer = QVQMLXLinear(
         bits=torch_layer.bits,
         in_features=torch_layer.in_features,
