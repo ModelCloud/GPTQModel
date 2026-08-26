@@ -520,3 +520,21 @@ Platinum evaluation after D300. The focused regularization bracket already has
 that chain; the all-subset replay control now has a dedicated GSM8K watcher
 (session `15693`) as well. This keeps D300 selection and real-task verification
 separate while ensuring close candidates are not promoted on D300 alone.
+
+### Parallel flat-W2 alignment sweep (2026-08-26)
+
+Four additional YAQA 302k flat-W2 arms were launched on previously idle GPUs,
+using the same 128 ordinary calibration rows plus 182 YAQA rows and the
+canonical disjoint D300 protocol. These are pending quantization and will be
+evaluated/queued for GSM8K Platinum if they become leaders or land within one
+percentage point of the current 18.7813% leader:
+
+| GPU | Arm | Config | Checkpoint | Status |
+| --- | --- | --- | --- | --- |
+| 1 | reg .010 + output alignment | `llama32_1b_v2b2_p32_yaqa_reg010_align.json` | `llama32-1b-w2-yaqa302k-reg010-align-gpu1` | running |
+| 2 | layer damping + output alignment | `llama32_1b_v2b2_p32_yaqa_layer_damping_align.json` | `llama32-1b-w2-yaqa302k-layerdamp-align-gpu2` | running |
+| 3 | layer damping + 2-epoch/64-batch alignment | `llama32_1b_v2b2_p32_yaqa_layer_damping_align2e64.json` | `llama32-1b-w2-yaqa302k-layerdamp-align2e64-gpu3` | running |
+| 4 | reg .025 + output alignment | `llama32_1b_v2b2_p32_yaqa_reg025_align.json` | `llama32-1b-w2-yaqa302k-reg025-align-gpu4` | running |
+
+No result is treated as a gain until canonical D300 completes on the exact
+same manifest/protocol.
