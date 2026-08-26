@@ -199,3 +199,68 @@ selects `Device(gpu, 0)` on this Apple host and falls back to CPU only when no
 MLX GPU is available. The public Torch/MPS evaluator still segfaulted while
 loading the quantized checkpoint, so no Torch/MPS quality number is being
 reported as valid.
+
+## Orthogonal mechanism tests on the M4 Max
+
+Date: 2026-08-26
+
+These tests implement the next mechanism-isolation arms while the full
+Atomic/Smooth+Atomic jobs are pending. They use the local cached
+`meta-llama/Llama-3.2-1B-Instruct` model, QVQ `qvq_v2b2_p32`, flat W2 as the
+default rate, YAQA regularization `0.15`, seed `0`, ordinary rows `0:128`,
+YAQA rows `128:310`, and only decoder layer `0`. V+O and Gate+Down each used
+the matched 182-sequence YAQA capture (`68,486` valid output samples).
+
+The held-out comparison uses rows `438:503`, the same chat-template rendering
+with `add_generation_prompt=False`, truncation at 256 tokens, and native MLX
+GPU teacher-forced forward. The current tokenizer produced 14,938 tokens.
+Dense outputs were MLX bfloat16 and both outputs were cast to MLX float32
+before streaming metric reduction; this avoids retaining the vocabulary-sized
+logits for all rows at once. `Device(gpu, 0)` was confirmed for every forward.
+
+The flat-W2 control is the preserved artifact
+`/tmp/qvq-swiglu-reg015-nosmooth-mps-95e206a4`. New artifacts are:
+
+- V+O W2.5: `/tmp/qvq-mechanism-vo-w25-mps-a14`
+- Gate+Down W2.5: `/tmp/qvq-mechanism-gate-down-w25-mps-a14`
+- Up+Down W2.5: `/tmp/qvq-mechanism-up-down-w25-mps-a14` (quantization was
+  restarted after a monitor interruption and is still pending)
+
+### Local layer-0 held-out logits
+
+| Arm | W2.5 projections | Relative L2 | RMSE | Max abs. error | Cosine | Top-1 agreement |
+|---|---|---:|---:|---:|---:|---:|
+| Flat-W2 control | none | 0.494589233 | 1.478702173 | 18.593750 | 0.887347785 | 80.4124% |
+| V+O | `self_attn.v_proj`, `self_attn.o_proj` | **0.493095418** | **1.474236026** | **18.156250** | **0.888034137** | **80.4325%** |
+| Gate+Down | `mlp.gate_proj`, `mlp.down_proj` | **0.491829011** | **1.470449775** | 18.789063 | **0.888827608** | **80.6132%** |
+| Up+Down | `mlp.up_proj`, `mlp.down_proj` | pending | pending | pending | pending | pending |
+
+Relative to the local control, V+O changes relative L2 by `-0.302%`, RMSE
+by `-0.302%`, max error by `-2.35%`, cosine by `+0.000686`, and top-1 by
+`+0.0201` percentage points. Gate+Down changes relative L2 by `-0.558%`,
+RMSE by `-0.558%`, cosine by `+0.001480`, and top-1 by `+0.2008` percentage
+points; its maximum error is `+1.05%` higher. These are layer-0 propagated
+logit measurements, not task scores.
+
+### Canonical task-score status
+
+The existing matched full-depth control remains D300 `17.9792%` (Exact32
+`3/300`) and GSM8K `23.8213%`, as recorded in the campaign ledger. The new
+V+O and Gate+Down arms have not received D300 or GSM8K scores: the configured
+remote GPU host was unreachable from this host (`Network is unreachable`).
+The local layer-0 arms therefore sharpen the projection interaction mechanism
+but do not replace the canonical full-model task evaluation.
+
+### Configuration files for the queued/full campaign
+
+The reproducible CUDA and MPS configs are in `scripts/configs/`:
+
+- `llama32_1b_v2b2_p32_yaqa_reg015_vo_w25{,_mps}.json`
+- `llama32_1b_v2b2_p32_yaqa_reg015_o_w25{,_mps}.json`
+- `llama32_1b_v2b2_p32_yaqa_reg015_v_w25{,_mps}.json`
+- `llama32_1b_v2b2_p32_yaqa_reg015_gate_down_w25{,_mps}.json`
+- `llama32_1b_v2b2_p32_yaqa_reg015_up_down_w25{,_mps}.json`
+
+O-only/V-only, Smooth alpha, and local-only Atomic controls remain queued for
+the next available compute slot; they are intentionally not represented as
+completed results here.
