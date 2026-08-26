@@ -31,6 +31,7 @@
     "6c2a99": {"report_row": "mlp.down_proj W2.5 reg .020", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_mlp_down_w25_reg020.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-mlp-down-w25-reg020-gpu4"},
     "4db5cf": {"report_row": "fixed-block LDLQ reg .015", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg015.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg015-gpu1"},
     "5ac42a": {"report_row": "fixed-block LDLQ reg .0225", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg0225.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu3"},
-    "46d985": {"report_row": "clean fixed-block LDLQ reg .020 replica", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg020.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu6"}
+    "46d985": {"report_row": "clean fixed-block LDLQ reg .020 replica", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg020.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu6"},
+    "37238d": {"report_row": "clean fixed-block LDLQ reg .0225 replica", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg0225.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu7"}
   }
 }
