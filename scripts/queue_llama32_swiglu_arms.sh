@@ -33,13 +33,14 @@ if [ "$MODE" = smooth ]; then
 fi
 
 while true; do
-  read -r UTIL MEM < <(nvidia-smi --id="$GPU" --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits | tr ',' ' ')
+  read -r UTIL MEM FREE < <(nvidia-smi --id="$GPU" --query-gpu=utilization.gpu,memory.used,memory.free --format=csv,noheader,nounits | tr ',' ' ')
   UTIL="${UTIL//[[:space:]]/}"
   MEM="${MEM//[[:space:]]/}"
-  if [ "${UTIL:-100}" -lt 5 ] && [ "${MEM:-999999}" -lt 2000 ]; then
+  FREE="${FREE//[[:space:]]/}"
+  if [ "${UTIL:-100}" -lt 5 ] && [ "${FREE:-0}" -gt 70000 ]; then
     break
   fi
-  echo "[$(date -u +%FT%TZ)] waiting arm=${ARM} gpu=${GPU} util=${UTIL}% mem=${MEM}MiB"
+  echo "[$(date -u +%FT%TZ)] waiting arm=${ARM} gpu=${GPU} util=${UTIL}% mem=${MEM}MiB free=${FREE}MiB"
   sleep 120
 done
 
