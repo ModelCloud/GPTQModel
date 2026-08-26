@@ -72,6 +72,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> swiglu_pr
   TORCH_CHECK(gate.is_cuda() && up.is_cuda() && up_weight.is_cuda() && down_weight.is_cuda(), "Smooth-SwiGLU CUDA op requires CUDA tensors");
   TORCH_CHECK(gate.device() == up.device() && gate.device() == up_weight.device() && gate.device() == down_weight.device(), "Smooth-SwiGLU CUDA tensors must share a device");
   TORCH_CHECK(gate.scalar_type() == at::kFloat && up.scalar_type() == at::kFloat, "gate/up activations must be float32");
+  TORCH_CHECK(up_weight.scalar_type() == down_weight.scalar_type(), "up/down weights must share a dtype");
+  TORCH_CHECK(gate.is_contiguous() && up.is_contiguous() && up_weight.is_contiguous() && down_weight.is_contiguous(), "Smooth-SwiGLU CUDA tensors must be contiguous");
   TORCH_CHECK(gate.dim() == 2 && up.sizes() == gate.sizes(), "gate/up must be [tokens, intermediate]");
   TORCH_CHECK(up_weight.dim() == 2 && down_weight.dim() == 2 && up_weight.size(0) == gate.size(1) && down_weight.size(1) == gate.size(1), "invalid projection geometry");
   TORCH_CHECK(group_size > 0 && scale_min > 0 && scale_min <= scale_max, "invalid group or scale bounds");
