@@ -3062,6 +3062,7 @@ def _streaming_compare_models_cpu(
     divergence_report["valid_sequences"] = divergence_accumulator.weight
     divergence_report["token_horizon"] = divergence_tokens
     divergence_report["protocol"] = "independent_greedy_rollout"
+    divergence_report["eos_policy"] = "EOS is an ordinary token; exactly token_horizon argmax steps"
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
@@ -3270,6 +3271,7 @@ def _streaming_compare_models_cuda(
     divergence_report["valid_sequences"] = divergence_accumulator.weight
     divergence_report["token_horizon"] = divergence_tokens
     divergence_report["protocol"] = "independent_greedy_rollout"
+    divergence_report["eos_policy"] = "EOS is an ordinary token; exactly token_horizon argmax steps"
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
