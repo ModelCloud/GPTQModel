@@ -1,10 +1,14 @@
 {
+<<<<<<< HEAD
   "bits": 2,
   "format": "qvq_v2b2_p32",
   "bank_count": 2,
   "rounding": "yaqa",
   "device": "cuda:0",
   "offload_to_disk": false,
+=======
+  "bits": 2, "format": "qvq_v2b2_p32", "bank_count": 2, "rounding": "yaqa", "device": "cuda:0", "offload_to_disk": false,
+>>>>>>> origin/feat/unsloth-div300-llama32-w2
   "dynamic": {"+:.*\\.mlp\\.(gate_proj|down_proj)": {"bits": 2.5}},
   "yaqa": {"seed": 0, "regularization": 0.15, "regularization_by_rate": [[2.0, 0.15], [2.5, 0.02]], "minimum_sequences": 182, "batch_size": 1, "sequence_sort": "desc", "activation_checkpointing": true, "v2b2_family_mode": "reselect", "sample_strategy": "full"}
 }
