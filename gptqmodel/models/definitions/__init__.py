@@ -108,6 +108,7 @@ from .zamba import ZambaQModel
 from .zamba2 import Zamba2QModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
+from .locateanything import LocateAnythingQModel
 from .apertus import ApertusQModel
 from .axk2 import AXK2QModel
 from .klear import KlearQModel

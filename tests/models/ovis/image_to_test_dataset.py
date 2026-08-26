@@ -14,6 +14,7 @@ from gptqmodel.models.definitions.inkling import InklingMMQModel
 from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
+from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
@@ -112,6 +113,19 @@ def format_unlimited_ocr_dataset(image, assistant):
     }
 
 
+def format_locateanything_dataset(image, assistant):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "Describe this image and transcribe any visible text."},
+            ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
+
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -160,6 +174,10 @@ def prepare_unlimited_ocr_dataset(n_sample: int = 20) -> list[dict]:
     return prepare_dataset(format_unlimited_ocr_dataset, n_sample=n_sample)
 
 
+def prepare_locateanything_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_locateanything_dataset, n_sample=n_sample)
+
+
 def get_calib_dataset(model):
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
@@ -203,5 +221,8 @@ def get_calib_dataset(model):
 
     if isinstance(model, UnlimitedOCRQModel):
         return prepare_unlimited_ocr_dataset(n_sample=20)
+
+    if isinstance(model, LocateAnythingQModel):
+        return prepare_locateanything_dataset(n_sample=20)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")
