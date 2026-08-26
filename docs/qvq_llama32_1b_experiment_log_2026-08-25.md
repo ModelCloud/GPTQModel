@@ -969,3 +969,7 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-vo-w30-ef21af` | `divergence300` | complete; metric=0.17927083333333332; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w30-ef21af-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-vo-w35-60a68a` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w35-60a68a-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w30-0f642c` | `divergence300` | complete; metric=0.21739583333333334; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w30-0f642c-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w35-569a95` | `divergence300` | complete; metric=0.21302083333333333; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w35-569a95-div300-dev-v1.json` |
