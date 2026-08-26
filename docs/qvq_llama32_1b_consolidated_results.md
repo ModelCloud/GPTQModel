@@ -6,30 +6,30 @@ D300 values below use the pinned divergence-300 development manifest
 independent greedy 32-token protocol. `D300 Top-1` means aligned-token
 agreement through horizon 32; exact counts are exact 32-token trajectories.
 
-## Completed arms
+## Completed arms (ordered by D300 Top-1, descending)
 
 | Family / arm | Rate | Calibration | D300 Top-1 | Exact / 300 | Mean first divergence | GSM8K Platinum | Status |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| Q07 uniform | W3 | YAQA 302k, reg .10 | **33.6667%** | 16 | 9.9133 | 41.27%* | higher-rate reference |
+| Q07 uniform | W2.5 | YAQA 302k, reg .10 | **25.1771%** | 5 | 7.5000 | 33.58%* | higher-rate reference |
+| YAQA regularization | W2 | YAQA 302k, reg .020 | **18.7813%** | **6** | **5.3633** | 17.87% | **current W2 leader** |
+| YAQA regularization | W2 | YAQA 302k, reg .015 | 17.9792% | 3 | 5.3200 | queued/recorded | D300 complete |
+| Full-reference | W2 | full-reference mix, reg .30 | 17.7292% | 3 | 4.5700 | pending/ledger stale | D300 complete |
+| Seed control | W2 | YAQA 302k, seed 1 | 17.7083% | 2 | 4.9667 | not run | complete |
+| YAQA + 2-epoch alignment | W2 | YAQA 302k, reg .05/.10 layers | 17.0938% | 3 | 4.5733 | 20.68% | teacher-forced control |
+| D300-source-shaped | W2 | source-shaped 500k, reg .20 | 17.0729% | 5 | 4.9933 | 11.91% | complete |
+| YAQA regularization | W2 | YAQA 302k, reg .0225 | 16.9271% | 6 | 4.6667 | queued/recorded | D300 complete |
+| YAQA + `mlp.down_proj` W3 | W2 + W3 down | AIME mix | 16.7396% | 2 | 4.8267 | 27.79% | mixed-rate diagnostic |
+| Fixed-block LDLQ | W2 | YAQA 302k, reg .005 | 16.3021% | 5 | 4.9133 | not run | complete |
+| YAQA regularization | W2 | YAQA 302k, reg .030 | 16.2188% | 5 | 4.4333 | queued/recorded | D300 complete |
+| YAQA regularization | W2 | YAQA 302k, reg .025 | 15.3854% | 2 | 4.2667 | queued/recorded | D300 complete |
+| YAQA + output alignment | W2 | YAQA 302k, reg .05/.10 layers | 15.1667% | 2 | 4.5733 | not run | superseded |
 | YAQA AIME mix | W2 | AIME 2526, 216 rows | 14.9792% | 0 | 3.9967 | 17.37% | complete |
 | Full-reference | W2 | full-reference mix, reg .10 | 14.5417% | 4 | 4.3300 | pending/ledger stale | D300 complete |
-| Full-reference | W2 | full-reference mix, reg .20 | 14.0313% | 4 | 4.1467 | 23.16% | complete |
-| Full-reference | W2 | full-reference mix, reg .30 | 17.7292% | 3 | 4.5700 | pending/ledger stale | D300 complete |
-| D300-source-shaped | W2 | source-shaped 500k, reg .20 | 17.0729% | 5 | 4.9933 | 11.91% | complete |
-| Seed control | W2 | YAQA 302k, seed 1 | 17.7083% | 2 | 4.9667 | not run | complete |
 | YAQA regularization | W2 | YAQA 302k, reg .005 | 14.1042% | 2 | 4.5167 | not run | complete |
-| YAQA regularization | W2 | YAQA 302k, reg .0125 | 13.4375% | 2 | 3.6233 | not run | complete |
-| YAQA regularization | W2 | YAQA 302k, reg .015 | 17.9792% | 3 | 5.3200 | queued/recorded | D300 complete |
+| Full-reference | W2 | full-reference mix, reg .20 | 14.0313% | 4 | 4.1467 | 23.16% | complete |
 | YAQA regularization | W2 | YAQA 302k, reg .0175 | 13.9271% | 1 | 4.2433 | queued/recorded | D300 complete |
-| YAQA regularization | W2 | YAQA 302k, reg .020 | **18.7813%** | **6** | **5.3633** | 17.87% | **current W2 leader** |
-| YAQA regularization | W2 | YAQA 302k, reg .0225 | 16.9271% | 6 | 4.6667 | queued/recorded | D300 complete |
-| YAQA regularization | W2 | YAQA 302k, reg .025 | 15.3854% | 2 | 4.2667 | queued/recorded | D300 complete |
-| YAQA regularization | W2 | YAQA 302k, reg .030 | 16.2188% | 5 | 4.4333 | queued/recorded | D300 complete |
-| Fixed-block LDLQ | W2 | YAQA 302k, reg .005 | 16.3021% | 5 | 4.9133 | not run | complete |
-| YAQA + output alignment | W2 | YAQA 302k, reg .05/.10 layers | 15.1667% | 2 | 4.5733 | not run | superseded |
-| YAQA + 2-epoch alignment | W2 | YAQA 302k, reg .05/.10 layers | 17.0938% | 3 | 4.5733 | 20.68% | teacher-forced control |
-| YAQA + `mlp.down_proj` W3 | W2 + W3 down | AIME mix | 16.7396% | 2 | 4.8267 | 27.79% | mixed-rate diagnostic |
-| Q07 uniform | W2.5 | YAQA 302k, reg .10 | **25.1771%** | 5 | 7.5000 | 33.58%* | higher-rate reference |
-| Q07 uniform | W3 | YAQA 302k, reg .10 | **33.6667%** | 16 | 9.9133 | 41.27%* | higher-rate reference |
+| YAQA regularization | W2 | YAQA 302k, reg .0125 | 13.4375% | 2 | 3.6233 | not run | complete |
 
 `*` GSM8K values for Q07 W2.5/W3 are reported in the existing Q07 ledger;
 they are not flat-W2 results. The W2.5/W3 rows are included for rate/fidelity
