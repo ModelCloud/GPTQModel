@@ -556,3 +556,10 @@ YAQA 182 rows, and disjoint canonical D300 manifest:
 Each watcher starts only after its current GPU's alignment quantizer exits,
 then runs canonical D300 automatically. These arms isolate the two highest
 priority controls from the review before any combination is attempted.
+
+Queue correction: the initial watcher used a `pgrep -f` pattern that matched
+its own shell command, so the follow-up did not start when GPUs 2 and 4 freed.
+That watcher was replaced with a non-self-matching `[q]vq_quantize.py` pattern;
+fixed-reg .020 and down-projection W2.5 are now running on GPUs 2 and 4, while
+fixed-reg .015 and .0225 wait behind the still-active alignment jobs on GPUs 1
+and 3.
