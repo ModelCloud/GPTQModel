@@ -1,14 +1,14 @@
 {
   "calibration_bindings": [
     {
-      "path": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
-      "sha256": "2140541facb66112428212b3a36d51a7735393b28c79db59c2429f6e51ed57ef",
-      "size_bytes": 711386,
-      "slices": [{"row_start": 0, "rows": 182}]
+      "path": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration_div300_sources.parquet",
+      "sha256": "ee3048851331913c842289e21e9c4ed6fdf1992d8921198cfc464bb80efa25c3",
+      "size_bytes": 1067697,
+      "slices": [{"row_start": 0, "rows": 981}]
     }
   ],
-  "calibration_files": ["dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet"],
-  "calibration_rows": 182,
+  "calibration_files": ["dataset/calibration_mix_500k_llama3.2_1b/calibration_div300_sources.parquet"],
+  "calibration_rows": 981,
   "evaluation_bindings": {
     "d300": {
       "path": "/root/qvq-data/divergence300-v1/divergence300-development.jsonl",

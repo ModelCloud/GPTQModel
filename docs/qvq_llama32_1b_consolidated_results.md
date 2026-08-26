@@ -5,6 +5,14 @@ D300 values below use the pinned divergence-300 development manifest
 (`701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b`) and the
 independent greedy 32-token protocol. `D300 Top-1` means aligned-token
 agreement through horizon 32; exact counts are exact 32-token trajectories.
+Regularization labels are the effective W2 `regularization_by_rate` values;
+legacy `reg010`/`reg0125` controls retain a separate base value of 0.05 and
+override only the W2 rate.
+
+The table is a descriptive ranking on one fixed 300-prompt manifest. The 9,600
+token positions are clustered within prompts, so small deltas are not treated
+as independent-sample significance; promotion decisions should use paired
+prompt-level bootstrap (and paired GSM8K tests where available).
 
 ## Completed arms (ordered by D300 Top-1, descending)
 

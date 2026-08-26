@@ -1,15 +1,35 @@
 {
-  "calibration_files": [
-    "dataset/calibration_mix_500k_llama3.2_1b/calibration_full_reference.parquet"
+  "calibration_bindings": [
+    {
+      "path": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration_full_reference.parquet",
+      "sha256": "713e03483841e678ddb8334589f13c5881fe97700e42803a2e96de522675f916",
+      "size_bytes": 870438,
+      "slices": [{"row_start": 0, "rows": 292}]
+    }
   ],
+  "calibration_files": ["dataset/calibration_mix_500k_llama3.2_1b/calibration_full_reference.parquet"],
   "calibration_rows": 292,
-  "evaluation_splits": [
-    "d300",
-    "gsm8k_platinum"
-  ],
+  "evaluation_bindings": {
+    "d300": {
+      "path": "/root/qvq-data/divergence300-v1/divergence300-development.jsonl",
+      "sha256": "701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2",
+      "size_bytes": 53374772
+    },
+    "d300_locked": {
+      "path": "/root/qvq-data/divergence300-v1/divergence300-locked.jsonl",
+      "sha256": "17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58",
+      "size_bytes": 59290198
+    },
+    "gsm8k_platinum": {
+      "config": "main",
+      "dataset": "madrylab/gsm8k-platinum",
+      "split": "test"
+    }
+  },
+  "evaluation_splits": ["d300", "d300_locked", "gsm8k_platinum"],
   "internal_duplicate_groups": {},
   "method": "user-turn-only; NFKC + casefold + whitespace/punctuation normalization; SHA256",
   "overlap_groups": {},
-  "schema": "qvq.calibration_disjointness.v1",
+  "schema": "qvq.calibration_disjointness.v2",
   "status": "pass"
 }

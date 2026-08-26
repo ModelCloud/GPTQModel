@@ -211,10 +211,15 @@ def _publish_snapshot_evaluation(checkpoint: Path, result_path: Path, result: di
     checkpoint = checkpoint.expanduser().resolve()
     if not checkpoint.is_dir():
         return
-    stem = f"post_quant_eval_result_{kind}"
-    (checkpoint / f"{stem}.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    serialized = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    result_digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+    # A digest-qualified filename makes every snapshot append-only.  Keep the
+    # historical fixed filename as a compatibility alias only when it has not
+    # been used before; never overwrite a prior evaluation in-place.
+    stem = f"post_quant_eval_result_{kind}_{result_digest}"
+    snapshot_json = checkpoint / f"{stem}.json"
+    if not snapshot_json.exists():
+        snapshot_json.write_text(serialized, encoding="utf-8")
     lines = [f"# Post-quantization evaluation: {kind}", "", f"Source report: `{result_path}`", ""]
     if isinstance(result.get("metrics"), dict):
         lines += ["## Metrics", "", *[f"- **{k}**: {v}" for k, v in result["metrics"].items()], ""]
@@ -225,7 +230,16 @@ def _publish_snapshot_evaluation(checkpoint: Path, result_path: Path, result: di
         lines += ["## Tasks", ""]
         for label, task in result["tasks"].items():
             lines.append(f"- **{label}**: {task.get('metrics', {})}")
-    (checkpoint / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    snapshot_md = checkpoint / f"{stem}.md"
+    if not snapshot_md.exists():
+        snapshot_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    legacy_stem = f"post_quant_eval_result_{kind}"
+    legacy_json = checkpoint / f"{legacy_stem}.json"
+    legacy_md = checkpoint / f"{legacy_stem}.md"
+    if not legacy_json.exists():
+        legacy_json.write_text(serialized, encoding="utf-8")
+    if not legacy_md.exists():
+        legacy_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _ranges_overlap(left_start: int, left_rows: int, right_start: int, right_rows: int) -> bool:
@@ -264,6 +278,46 @@ def validate_evaluation_is_held_out(
                 f"Evaluation [{evaluation.row_start}, {evaluation.row_stop}) overlaps recorded `{name}` "
                 f"preparation rows [{raw['row_start']}, {int(raw['row_start']) + int(raw['rows'])})"
             )
+
+
+def validate_divergence_manifest_binding(checkpoint: Path, dataset_path: Path) -> None:
+    """Require canonical D300 evaluations to use the manifest-bound file."""
+
+    run_manifest = checkpoint / "qvq_quantize_run.json"
+    if not run_manifest.is_file():
+        return
+    payload = json.loads(run_manifest.read_text(encoding="utf-8"))
+    binding = payload.get("disjointness_manifest")
+    if not isinstance(binding, dict) or not binding.get("strict_required"):
+        return
+    evaluations = binding.get("evaluation_bindings")
+    if not isinstance(evaluations, dict):
+        raise RuntimeError(
+            "checkpoint requires a strict disjointness manifest but has no evaluation bindings"
+        )
+    requested = dataset_path.expanduser().resolve()
+    digest = hashlib.sha256()
+    with requested.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    requested_sha = digest.hexdigest()
+    matches = []
+    for label in ("d300", "d300_locked"):
+        item = evaluations.get(label)
+        if isinstance(item, dict) and item.get("path"):
+            bound_path = Path(item["path"]).expanduser().resolve()
+            if bound_path == requested:
+                matches.append((label, item))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "canonical divergence evaluation dataset is not bound by the checkpoint's strict disjointness manifest: "
+            f"{requested}"
+        )
+    label, item = matches[0]
+    if item.get("sha256") != requested_sha:
+        raise RuntimeError(
+            f"checkpoint-bound {label} manifest changed on disk: {requested}"
+        )
 
 
 def _row_text(row: dict[str, Any], tokenizer, text_column: str | None) -> str:
@@ -333,19 +387,90 @@ def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
 
 @torch.inference_mode()
 def _greedy_rollout(model, encoded: dict[str, torch.Tensor], *, token_count: int, pad_token_id: int) -> torch.Tensor:
-    """Generate one independent fixed-horizon greedy continuation."""
+    """Generate one independent fixed-horizon greedy continuation.
+
+    ``generate(min_new_tokens=N)`` is not a literal greedy rollout: the
+    generation processor suppresses EOS until the minimum length is reached.
+    Divergence-300 treats EOS as an ordinary token and therefore must make
+    exactly ``N`` argmax decisions itself.  We still use the model KV cache
+    when the model provides one, but never install a stopping criterion.
+    """
 
     input_ids = encoded["input_ids"]
     if input_ids.shape[0] != 1:
         raise ValueError("Divergence-300 diagnostics require evaluation batch size 1")
-    generated = model.generate(
-        **encoded,
-        do_sample=False,
-        max_new_tokens=token_count,
-        min_new_tokens=token_count,
-        pad_token_id=pad_token_id,
-        use_cache=True,
-    )
+
+    if token_count < 1:
+        raise ValueError("greedy rollout token_count must be positive")
+    del pad_token_id  # EOS/PAD are intentionally not special in this metric.
+
+    generated = input_ids.clone()
+    attention_mask = encoded.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.clone()
+    position_ids = encoded.get("position_ids")
+    if position_ids is not None:
+        position_ids = position_ids.clone()
+    past_key_values = None
+
+    # Keep auxiliary model inputs (for example token_type_ids) but do not
+    # reuse the caller's input_ids/attention mask objects after appending.
+    static_inputs = {
+        key: value
+        for key, value in encoded.items()
+        if key not in {"input_ids", "attention_mask", "position_ids", "past_key_values"}
+    }
+    for _ in range(token_count):
+        if past_key_values is None:
+            model_inputs = dict(static_inputs)
+            model_inputs["input_ids"] = generated
+            if attention_mask is not None:
+                model_inputs["attention_mask"] = attention_mask
+            if position_ids is not None:
+                model_inputs["position_ids"] = position_ids
+        else:
+            model_inputs = dict(static_inputs)
+            model_inputs["input_ids"] = generated[:, -1:]
+            model_inputs["past_key_values"] = past_key_values
+            if attention_mask is not None:
+                model_inputs["attention_mask"] = attention_mask
+            if position_ids is not None:
+                model_inputs["position_ids"] = position_ids[:, -1:]
+            # Auxiliary per-token inputs must follow the one-token cached
+            # input, while scalar/global inputs are safe to reuse unchanged.
+            for key, value in tuple(model_inputs.items()):
+                if key in {"input_ids", "attention_mask", "position_ids", "past_key_values"}:
+                    continue
+                if isinstance(value, torch.Tensor) and value.ndim >= 2 and value.shape[1] > 1:
+                    model_inputs[key] = value[:, -1:]
+
+        output = model(**model_inputs, use_cache=True)
+        logits = getattr(output, "logits", None)
+        if logits is None and isinstance(output, Mapping):
+            logits = output.get("logits")
+        if logits is None and isinstance(output, (tuple, list)) and output:
+            logits = output[0]
+        if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
+            raise TypeError("model forward did not return [batch, sequence, vocab] logits")
+        next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated = torch.cat((generated, next_token), dim=1)
+
+        if attention_mask is not None:
+            attention_mask = torch.cat(
+                (attention_mask, torch.ones_like(attention_mask[:, :1])), dim=1
+            )
+        if position_ids is not None:
+            position_ids = torch.cat((position_ids, position_ids[:, -1:] + 1), dim=1)
+
+        next_past = getattr(output, "past_key_values", None)
+        if next_past is None and isinstance(output, Mapping):
+            next_past = output.get("past_key_values")
+        if next_past is None and isinstance(output, (tuple, list)) and len(output) > 1:
+            # Standard tuple causal-LM outputs place the cache immediately
+            # after logits when it is requested.
+            next_past = output[1]
+        past_key_values = next_past
+
     continuation = generated[:, input_ids.shape[1] :]
     if continuation.shape != (1, token_count):
         raise RuntimeError(
@@ -640,6 +765,7 @@ def _divergence300(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"Quantized checkpoint does not exist: {checkpoint}")
     if not dataset_path.is_file() or dataset_path.suffix.lower() != ".jsonl":
         raise FileNotFoundError(f"Pinned Divergence-300 JSONL does not exist: {dataset_path}")
+    validate_divergence_manifest_binding(checkpoint, dataset_path)
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite existing result: {output_path}")
     if args.max_prompt_tokens < 1:
@@ -783,6 +909,7 @@ def _divergence300(args: argparse.Namespace) -> int:
             "algorithm": "independent_greedy_argmax",
             "do_sample": False,
             "new_tokens": horizon,
+            "eos_policy": "EOS is an ordinary token; exactly 32 argmax steps are evaluated",
             "chat_template": True,
             "dtype": args.dtype,
             "attn_implementation": args.attn_implementation,

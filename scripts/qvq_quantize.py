@@ -119,7 +119,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disjointness-manifest",
         type=Path,
-        help="Strict preflight manifest from check_calibration_disjointness.py; status must be pass.",
+        help=(
+            "Preflight manifest from check_calibration_disjointness.py; when supplied, "
+            "status and cryptographic bindings are validated."
+        ),
+    )
+    parser.add_argument(
+        "--require-disjointness",
+        action="store_true",
+        help=(
+            "Fail closed unless --disjointness-manifest is present, pass-status, and "
+            "cryptographically binds every local preparation input plus both D300 manifests."
+        ),
     )
     parser.add_argument(
         "--quant-config",
@@ -840,6 +851,100 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_disjointness_manifest(
+    manifest_path: Path | None,
+    *,
+    required: bool,
+    datasets: dict[str, DatasetSlice | None],
+) -> tuple[Path, dict[str, Any]] | None:
+    """Validate a status manifest and, in strict mode, bind run inputs to it."""
+
+    if manifest_path is None:
+        if required:
+            raise RuntimeError(
+                "refusing benchmark quantization: --require-disjointness requires "
+                "a cryptographically bound --disjointness-manifest"
+            )
+        return None
+    resolved = manifest_path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"disjointness manifest not found: {resolved}")
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid disjointness manifest JSON: {resolved}") from exc
+    if data.get("status") != "pass":
+        raise RuntimeError(
+            "refusing quantization: calibration/evaluation disjointness preflight failed; "
+            f"see {resolved}"
+        )
+    if not required:
+        return resolved, data
+
+    calibration_bindings = data.get("calibration_bindings")
+    evaluation_bindings = data.get("evaluation_bindings")
+    if not isinstance(calibration_bindings, list) or not isinstance(evaluation_bindings, dict):
+        raise RuntimeError(
+            "refusing benchmark quantization: manifest lacks cryptographic input bindings; "
+            "regenerate it with the current check_calibration_disjointness.py"
+        )
+    bound_files = {
+        str(Path(item["path"]).expanduser().resolve()): item
+        for item in calibration_bindings
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for name, spec in datasets.items():
+        if spec is None:
+            continue
+        source = Path(spec.source).expanduser()
+        if not source.is_file():
+            raise RuntimeError(
+                f"refusing benchmark quantization: preparation input `{name}` is not a local file "
+                "and cannot be cryptographically bound"
+            )
+        canonical = str(source.resolve())
+        binding = bound_files.get(canonical)
+        if binding is None:
+            raise RuntimeError(
+                f"refusing benchmark quantization: manifest does not bind `{name}` source {canonical}"
+            )
+        actual_sha = _sha256_file(source.resolve())
+        if binding.get("sha256") != actual_sha:
+            raise RuntimeError(
+                f"refusing benchmark quantization: SHA-256 changed for `{name}` source {canonical}"
+            )
+        slices = binding.get("slices")
+        if not isinstance(slices, list):
+            raise RuntimeError(
+                f"refusing benchmark quantization: manifest does not bind the selected `{name}` row slice"
+            )
+        if not any(
+            isinstance(item, dict)
+            and item.get("row_start") == spec.row_start
+            and item.get("rows") == spec.rows
+            for item in slices
+        ):
+            raise RuntimeError(
+                f"refusing benchmark quantization: manifest slice does not match `{name}` "
+                f"[{spec.row_start}, {spec.row_stop})"
+            )
+    required_eval = {"d300", "d300_locked"}
+    if not required_eval.issubset(evaluation_bindings):
+        missing = ", ".join(sorted(required_eval - set(evaluation_bindings)))
+        raise RuntimeError(
+            "refusing benchmark quantization: manifest must bind both D300 development and locked manifests; "
+            f"missing {missing}"
+        )
+    for label in required_eval:
+        item = evaluation_bindings[label]
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise RuntimeError(f"refusing benchmark quantization: invalid {label} manifest binding")
+        path = Path(item["path"]).expanduser().resolve()
+        if not path.is_file() or item.get("sha256") != _sha256_file(path):
+            raise RuntimeError(f"refusing benchmark quantization: SHA-256 changed for {label} manifest {path}")
+    return resolved, data
+
+
 def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
     """Serialize slice identity and content authority for local frozen inputs."""
 
@@ -874,16 +979,6 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.disjointness_manifest is not None:
-        manifest_path = args.disjointness_manifest.expanduser().resolve()
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"disjointness manifest not found: {manifest_path}")
-        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest_data.get("status") != "pass":
-            raise RuntimeError(
-                "refusing quantization: calibration/evaluation disjointness preflight failed; "
-                f"see {manifest_path}"
-            )
     # Freeze provenance before any long-running data preparation or quantization.
     # Reading HEAD while writing the report can misattribute a run when a docs-only
     # commit is made concurrently with GPU work.
@@ -904,6 +999,21 @@ def main(argv: list[str] | None = None) -> int:
     validation_spec = _slice_from_args(args, "validation")
     replay_search_spec = _slice_from_args(args, "replay_search")
     replay_confirmation_spec = _slice_from_args(args, "replay_confirmation")
+    disjointness_binding = _validate_disjointness_manifest(
+        args.disjointness_manifest,
+        # Supplying a manifest is an assertion that this run is benchmark
+        # eligible, so validate its cryptographic bindings even without the
+        # explicit convenience flag.  ``--require-disjointness`` additionally
+        # rejects runs that omit the manifest entirely.
+        required=args.require_disjointness or args.disjointness_manifest is not None,
+        datasets={
+            "calibration": calibration_spec,
+            "yaqa": yaqa_spec,
+            "validation": validation_spec,
+            "replay_search": replay_search_spec,
+            "replay_confirmation": replay_confirmation_spec,
+        },
+    )
     config = build_quantize_config(args)
     controller = None
     dense_source_binding = None
@@ -1100,11 +1210,14 @@ def main(argv: list[str] | None = None) -> int:
         else None,
         "disjointness_manifest": (
             None
-            if args.disjointness_manifest is None
+            if disjointness_binding is None
             else {
-                "path": str(args.disjointness_manifest.expanduser().resolve()),
-                "sha256": _sha256_file(args.disjointness_manifest.expanduser().resolve()),
-                "status": "pass",
+                "path": str(disjointness_binding[0]),
+                "sha256": _sha256_file(disjointness_binding[0]),
+                "status": disjointness_binding[1].get("status"),
+                "strict_required": args.require_disjointness or args.disjointness_manifest is not None,
+                "calibration_bindings": disjointness_binding[1].get("calibration_bindings"),
+                "evaluation_bindings": disjointness_binding[1].get("evaluation_bindings"),
             }
         ),
         "quantize_config": config.to_dict(),

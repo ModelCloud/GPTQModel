@@ -1988,22 +1988,23 @@ def test_greedy_trajectory_metrics_identical_horizon_survives():
 
 
 def test_independent_greedy_divergence_uses_each_models_own_rollout():
-    class FixedGenerator(nn.Module):
+    class FixedForward(nn.Module):
         def __init__(self, continuation):
             super().__init__()
-            self.continuation = torch.tensor([continuation])
+            self.continuation = list(continuation)
+            self.calls = 0
 
-        def generate(self, **kwargs):
-            assert kwargs["do_sample"] is False
-            assert kwargs["min_new_tokens"] == 4
-            assert kwargs["max_new_tokens"] == 4
-            return torch.cat((kwargs["input_ids"], self.continuation), dim=1)
+        def forward(self, **kwargs):
+            self.calls += 1
+            logits = torch.full((1, kwargs["input_ids"].shape[1], 16), -100.0)
+            logits[:, -1, self.continuation[self.calls - 1]] = 1.0
+            return SimpleNamespace(logits=logits, past_key_values=None)
 
     row = {"input_ids": torch.tensor([[10, 11]]), "attention_mask": torch.ones((1, 2), dtype=torch.long)}
 
     metrics = _independent_greedy_divergence_metrics(
-        FixedGenerator([1, 2, 3, 4]),
-        FixedGenerator([1, 2, 9, 8]),
+        FixedForward([1, 2, 3, 4]),
+        FixedForward([1, 2, 9, 8]),
         row,
         token_count=4,
     )

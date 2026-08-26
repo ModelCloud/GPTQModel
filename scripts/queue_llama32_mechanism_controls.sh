@@ -18,7 +18,7 @@ MODEL="/monster/data/model/Llama-3.2-1B-Instruct"
 OUT="/root/qvq-results/llama32-1b-w2-reg015-${NAME}"
 CAL="/monster/data/model/dataset/nm-calibration/llm.parquet"
 YAQA="/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet"
-MANIFEST="/root/QvQ/docs/experiments/disjointness-div300-sources-disjoint.json"
+MANIFEST="/root/QvQ/docs/experiments/disjointness-llama32-benchmark-v2.json"
 LOG="/root/qvq-results/${NAME}.queue.log"
 
 exec >>"$LOG" 2>&1
@@ -51,5 +51,6 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" \
     --yaqa-dataset "$YAQA" --yaqa-row-start 0 --yaqa-rows 182 \
     --device cuda:0 \
     --disjointness-manifest "$MANIFEST" \
+    --require-disjointness \
     --no-qvq-telemetry
 echo "[$(date -u +%FT%TZ)] quantization finished arm=${ARM}; monitor will schedule evaluations"

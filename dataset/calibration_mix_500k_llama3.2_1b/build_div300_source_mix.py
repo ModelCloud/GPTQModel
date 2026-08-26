@@ -11,7 +11,9 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 SOURCE_ROOT = Path('/root/qvq-data/divergence300-sources')
-D300 = Path('/root/qvq-data/divergence300-v1/divergence300-development.jsonl')
+D300_ROOT = Path('/root/qvq-data/divergence300-v1')
+D300 = D300_ROOT / 'divergence300-development.jsonl'
+D300_LOCKED = D300_ROOT / 'divergence300-locked.jsonl'
 MODEL = '/monster/data/model/Llama-3.2-1B-Instruct'
 OUT = ROOT / 'calibration_div300_sources.parquet'
 
@@ -31,14 +33,42 @@ def normalized_digest(messages):
     return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()
 
 
+def _forbidden_from_d300(paths):
+    """Return exact and normalized prompt hashes from every protected split."""
+    exact = set()
+    normalized = set()
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"protected D300 manifest is required for leakage-safe source mix: {path}"
+            )
+        # Iterate physical JSONL records.  ``str.splitlines()`` also splits on
+        # Unicode line-separator characters that may legitimately occur inside
+        # a JSON-escaped prompt string.
+        with path.open(encoding="utf-8") as stream:
+            lines = stream
+            for line in lines:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                messages = row.get("messages", row.get("prompt", ""))
+                exact.add(digest(messages))
+                normalized.add(normalized_digest(messages))
+                # Preserve compatibility with manifests whose prompt_sha256 was
+                # computed from a canonical representation different from ours.
+                prompt_hash = row.get("prompt_sha256")
+                if isinstance(prompt_hash, str) and len(prompt_hash) == 64:
+                    exact.add(prompt_hash)
+    return exact, normalized
+
+
 def main():
     sys.path.insert(0, str(Path(__file__).parents[2] / 'scripts'))
     import prepare_divergence300 as prep
-    forbidden = set(re.findall(r'"prompt_sha256"\s*:\s*"([0-9a-f]{64})"', D300.read_text()))
-    forbidden_normalized = set()
-    for line in D300.read_text().splitlines():
-        row = json.loads(line)
-        forbidden_normalized.add(normalized_digest(row['messages']))
+    # Both D300 development and locked prompts are protected.  Excluding only
+    # development permits a source-shaped calibration row to leak into the
+    # published locked evaluation split.
+    forbidden, forbidden_normalized = _forbidden_from_d300((D300, D300_LOCKED))
     base = pd.read_parquet(ROOT / 'calibration.parquet')
     for x in base.messages:
         messages = x.tolist() if hasattr(x, 'tolist') else x
@@ -94,6 +124,11 @@ def main():
         'candidate_rows': len(candidates),
         'excluded_d300_or_existing': len(forbidden),
         'excluded_normalized_d300_or_existing': len(forbidden_normalized),
+        'protected_d300_manifests': [str(D300), str(D300_LOCKED)],
+        'protected_d300_manifest_sha256': {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (D300, D300_LOCKED)
+        },
         'source_counts': {g: sum(r['source_group'] == g for r in chosen) for g, _ in builders},
         'sha256': hashlib.sha256(OUT.read_bytes()).hexdigest(),
         'd300_manifest_sha256': hashlib.sha256(D300.read_bytes()).hexdigest(),

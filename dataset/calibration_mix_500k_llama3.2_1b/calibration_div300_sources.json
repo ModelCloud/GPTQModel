@@ -1,16 +1,25 @@
 {
-  "candidate_rows": 4548,
+  "candidate_rows": 4280,
   "d300_manifest_sha256": "701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2",
-  "excluded_d300_or_existing": 482,
-  "rows": 993,
-  "sha256": "4052d41f3d9bc456135ebd9930839a7b99d88a23ccef6780f4abfefd77d0b9b0",
+  "excluded_d300_or_existing": 782,
+  "excluded_normalized_d300_or_existing": 782,
+  "protected_d300_manifest_sha256": {
+    "/root/qvq-data/divergence300-v1/divergence300-development.jsonl": "701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2",
+    "/root/qvq-data/divergence300-v1/divergence300-locked.jsonl": "17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58"
+  },
+  "protected_d300_manifests": [
+    "/root/qvq-data/divergence300-v1/divergence300-development.jsonl",
+    "/root/qvq-data/divergence300-v1/divergence300-locked.jsonl"
+  ],
+  "rows": 981,
+  "sha256": "ee3048851331913c842289e21e9c4ed6fdf1992d8921198cfc464bb80efa25c3",
   "source_counts": {
-    "longbench_v2": 119,
-    "matharena_2025_2026": 11,
-    "multi_if_non_english": 766,
-    "swe_bench_verified": 83,
-    "terminal_bench_2_1": 14
+    "longbench_v2": 125,
+    "matharena_2025_2026": 0,
+    "multi_if_non_english": 783,
+    "swe_bench_verified": 71,
+    "terminal_bench_2_1": 2
   },
   "target_tokens": 500000,
-  "tokens": 501692
+  "tokens": 500623
 }

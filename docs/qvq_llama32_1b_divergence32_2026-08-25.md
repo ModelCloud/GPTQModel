@@ -27,11 +27,11 @@ shared-prefix score teacher-forces the same source context at every position and
 agreement. Unsloth's test is conceptually closest to `divergence_300_at_32`; numerical comparison additionally requires
 the same prompts, chat templates, decoding settings, and scalar aggregation rule.
 
-The published Unsloth scale also resolves the earlier target mismatch: its narrative places UD-Q2_K_XL at roughly
-25% and lower 1-bit quants at roughly 8--10%, even though ordinary teacher-forced Top-1 can be about 77%. Therefore
-the current flat-W2 development target is **at least 25% independent aligned-token agreement through 32**, not 82%.
-This is a directional Q2 reference rather than a direct leaderboard comparison because the models, quant formats,
-prompt manifest, and unpublished Unsloth scalar reduction are not identical.
+The published Unsloth scale provides useful motivation for an internal target: its narrative places UD-Q2_K_XL at
+roughly 25% and lower 1-bit quants at roughly 8--10%, even though ordinary teacher-forced Top-1 can be about 77%.
+Because Unsloth has not published the scalar aggregation rule, **25% is only an internal aligned-token development
+heuristic**, not an Unsloth-equivalent target or a direct leaderboard comparison. The models, quant formats, prompt
+manifest, decoding details, and aggregation are not identical.
 
 ## Disjoint data contract
 
@@ -134,9 +134,10 @@ for the aligned-token target despite its stronger early-prefix and exact-surviva
 The prompt manifest SHA-256 is `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2`.
 
 This result formally rules out interpreting the historical 82.0365% shared-prefix score as Divergence-300 @32. The
-corrected development target of 25% aligned-token agreement requires 2,400 of 9,600 positions to match; the current
+internal development heuristic of 25% aligned-token agreement requires 2,400 of 9,600 positions to match; the current
 candidate matches 1,717, leaving a gap of 683 positions. If the target were instead interpreted as exact-trajectory
-survival, it would require 75 of 300 prompts; the candidate matches three. The 25% target is therefore **not yet
+survival, it would require 75 of 300 prompts; the candidate matches three. The internal 25% heuristic is therefore
+**not yet
 reached under either reduction**. Configuration sweeps must report both
 reductions without renaming shared-prefix agreement or silently switching which reduction is used for the target.
 

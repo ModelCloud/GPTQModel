@@ -15,8 +15,8 @@ MODEL="/monster/data/model/Llama-3.2-1B-Instruct"
 OUT="/root/qvq-results/llama32-1b-w2-${NAME}"
 CAL="/monster/data/model/dataset/nm-calibration/llm.parquet"
 YAQA="/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet"
-REPLAY="/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration_div300_sources_disjoint.parquet"
-MANIFEST="/root/QvQ/docs/experiments/disjointness-div300-sources-disjoint.json"
+REPLAY="/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration_div300_sources.parquet"
+MANIFEST="/root/QvQ/docs/experiments/disjointness-llama32-benchmark-replay-v2.json"
 LOG="/root/qvq-results/${NAME}.queue.log"
 ATOMIC_OUT="/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b"
 
@@ -61,5 +61,6 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" \
     --replay-confirmation-dataset "$REPLAY" --replay-confirmation-row-start 32 --replay-confirmation-rows 32 \
     --device cuda:0 \
     --disjointness-manifest "$MANIFEST" \
+    --require-disjointness \
     --no-qvq-telemetry
 echo "[$(date -u +%FT%TZ)] quantization finished arm=${ARM}; monitor will schedule D300 and GSM8K"
