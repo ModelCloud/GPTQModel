@@ -225,6 +225,8 @@ The flat-W2 control is the preserved artifact
 - Gate+Down W2.5: `/tmp/qvq-mechanism-gate-down-w25-mps-a14`
 - Up+Down W2.5: `/tmp/qvq-mechanism-up-down-w25-mps-a14` (quantization was
   restarted after a monitor interruption and completed successfully)
+- O-only W2.5: `/tmp/qvq-mechanism-o-w25-mps-0011250f`
+- V-only W2.5: `/tmp/qvq-mechanism-v-w25-mps-0011250f`
 
 ### Local layer-0 held-out logits
 
@@ -234,6 +236,8 @@ The flat-W2 control is the preserved artifact
 | V+O | `self_attn.v_proj`, `self_attn.o_proj` | **0.493095418** | **1.474236026** | **18.156250** | **0.888034137** | **80.4325%** |
 | Gate+Down | `mlp.gate_proj`, `mlp.down_proj` | **0.491829011** | **1.470449775** | 18.789063 | **0.888827608** | **80.6132%** |
 | Up+Down | `mlp.up_proj`, `mlp.down_proj` | **0.491072044** | **1.468186628** | 19.578125 | **0.889104352** | **80.5262%** |
+| O-only | `self_attn.o_proj` | **0.494193906** | **1.477520240** | **17.949219** | **0.887693717** | 80.1848% |
+| V-only | `self_attn.v_proj` | 0.494626580 | 1.478813831 | 19.031250 | 0.887281293 | **80.4994%** |
 
 Relative to the local control, V+O changes relative L2 by `-0.302%`, RMSE
 by `-0.302%`, max error by `-2.35%`, cosine by `+0.000686`, and top-1 by
@@ -243,6 +247,23 @@ points; its maximum error is `+1.05%` higher. Up+Down changes relative L2 by
 `-0.711%`, RMSE by `-0.711%`, cosine by `+0.001757`, and top-1 by `+0.1138`
 percentage points; its maximum error is `+5.29%` higher. These are layer-0
 propagated logit measurements, not task scores.
+
+Relative to the same flat-W2 control, O-only changes relative L2 and RMSE by
+`-0.080%`, max error by `-3.47%`, cosine by `+0.000346`, and top-1 by
+`-0.2276` percentage points. V-only changes relative L2 and RMSE by
+`+0.008%`, max error by `+2.35%`, cosine by `-0.000067`, and top-1 by
+`+0.0870` percentage points. Thus, on this layer-0 slice, O-only reduces the
+largest error but does not improve aggregate top-1; V-only is effectively
+neutral on L2 and slightly improves top-1. These local controls do not replace
+the matched full-depth task evaluation.
+
+The newly completed single-projection MLX reports also measured mean absolute
+logit error: O-only `1.087624615` and V-only `1.088175197`. The earlier
+control report did not retain this extra reduction, so no control-relative
+claim is made for mean absolute error. Each new report contains the exact
+row/token counts (`65` rows, `14,938` tokens, `1,915,888,128` logit elements),
+the MLX device (`Device(gpu, 0)`), dense/compare dtypes (`bfloat16`/`float32`),
+and the reproducible checkpoint path under `/tmp` listed above.
 
 ### Canonical task-score status
 
@@ -254,10 +275,14 @@ first divergence `5.0633`) and GSM8K `25.4756%` (`308/1209`). Relative to
 the reg-0.15 flat-W2 control, that is `+1.1979` D300 percentage points and
 `+1.6543` GSM8K percentage points. The local layer-0 V+O checkpoint above is
 a separate MPS artifact used for mechanism metrics, while `d71136` is the
-full-depth CUDA task artifact. Gate+Down and Up+Down still have no full-depth
-task scores in the ledger; the configured remote host was unreachable from
-this host when those jobs were initially requested (`Network is
-unreachable`).
+full-depth CUDA task artifact. The later full-depth single-projection task
+reports publish GSM8K `22.9942%` for O-only (`09674b`) and `21.4227%` for
+V-only (`0cd45d`); V-only also publishes D300 `17.2917%`. O-only D300 and
+complete paired D300 metadata were not present in the pulled ledger snapshot,
+so they are not inferred here. Gate+Down and Up+Down publish GSM8K `27.9569%`
+and `28.1224%`, respectively, but their complete D300 metadata is likewise
+not in the local ledger. These are full-depth CUDA task artifacts and must not
+be conflated with the local layer-0 native-MLX measurements above.
 
 ### Configuration files for the queued/full campaign
 
@@ -269,9 +294,12 @@ The reproducible CUDA and MPS configs are in `scripts/configs/`:
 - `llama32_1b_v2b2_p32_yaqa_reg015_gate_down_w25{,_mps}.json`
 - `llama32_1b_v2b2_p32_yaqa_reg015_up_down_w25{,_mps}.json`
 
-O-only/V-only, Smooth alpha, and local-only Atomic controls remain queued for
-the next available compute slot; they are intentionally not represented as
-completed results here. The three completed mixed-precision arms provide the
-requested first interaction map: both MLP pairs improve aggregate teacher-
-forced fidelity on this slice, with Up+Down giving the lowest relative L2;
-V+O produces the smallest maximum-error value among the mixed arms.
+The local M4 Max O-only and V-only controls are now complete and represented
+above. Smooth-alpha and local-only Atomic are not exposed as runnable MLX
+experiment configs yet; the available Atomic config still performs the
+validated propagated final-logit replay rather than a local-only selector.
+The five completed mixed-precision arms provide the first interaction map:
+both MLP pairs improve aggregate teacher-forced fidelity on this slice, with
+Up+Down giving the lowest relative L2; O-only gives the smallest maximum
+error; and V-only gives the highest top-1 among the two single-projection
+attention controls.
