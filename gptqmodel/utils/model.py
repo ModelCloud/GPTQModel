@@ -98,6 +98,8 @@ if hasattr(torch, "float8_e4m3fn"):
     _DTYPE_SAFE_MAP[torch.float8_e4m3fn] = ("F8_E4M3", 1)
 if hasattr(torch, "float8_e5m2"):
     _DTYPE_SAFE_MAP[torch.float8_e5m2] = ("F8_E5M2", 1)
+if hasattr(torch, "float8_e8m0fnu"):
+    _DTYPE_SAFE_MAP[torch.float8_e8m0fnu] = ("F8_E8M0", 1)
 
 _FLOAT8_DTYPE_NAMES = tuple(
     name
