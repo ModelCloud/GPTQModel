@@ -895,3 +895,11 @@ and 3.
 | restarted | `45a387` / `llama32-1b-w2-reg015-up-down-w25-45a387` | `quantization` | old wrapper was still using the pre-fix memory gate and remained waiting despite an idle GPU; restarted on physical GPU 5 with repaired valid JSON config |
 
 | failure+fix | `19d89a` / `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `atomic subset staging` | the first post-`dd089f8f` retry reached cleanup but failed because full replay paths were still used to index the layer-relative `StageSubset` dictionary (`KeyError: model.layers.0.mlp.gate_proj`). Fixed in `85d43bba` by resolving wrappers through `NamedModule.full_name`; regression coverage now exercises relative subset keys against a nested model tree. The Atomic arm was restarted on physical GPU 4 with the same disjoint replay rows. |
+
+| protocol-fix | `review-c1048540` | `Divergence-300 decoding` | replaced `generate(min_new_tokens=32)` with an explicit 32-step argmax loop; EOS is now an ordinary token and no stopping processor changes the fixed horizon. Existing D300 scores produced by the old EOS-suppressing protocol require rerun. |
+
+| contamination-fix | `review-c1048540` | `disjointness` | manifests now bind selected calibration slices and both D300 development/locked JSONL files by SHA-256; benchmark quantization fails closed with `--require-disjointness`. The former 959-row source-shaped artifact is marked invalid after 56 locked-split normalized collisions. |
+
+| data-fix | `review-c1048540` | `D300-source calibration builder` | source-mix construction excludes the union of development and locked D300 prompt hashes (exact and normalized). Regenerated output is 981 rows and passes `docs/experiments/disjointness-div300-sources-v2.json`. |
+
+| reporting-fix | `review-c1048540` | `evaluation snapshots` | checkpoint snapshots are now digest-qualified and append-only; legacy fixed filenames are compatibility aliases written only when absent, so prior evidence cannot be overwritten. |

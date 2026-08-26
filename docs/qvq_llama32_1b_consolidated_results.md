@@ -217,10 +217,13 @@ The authoritative per-arm machine-readable ledgers are in
 Calibration/evaluation separation is now enforced by
 `scripts/check_calibration_disjointness.py`. The YAQA-182 and full-reference
 292-row mixes both pass normalized user-question checks against the D300
-development split and all 1,209 GSM8K Platinum test rows; D300 and GSM8K also
-have no normalized collisions. Manifests: `docs/experiments/disjointness-yaqa182.json`
-and `docs/experiments/disjointness-full-reference.json`. Quantization can be
-made fail-closed with `--disjointness-manifest`; historical full-reference
+development and locked splits and all 1,209 GSM8K Platinum test rows; D300 and
+GSM8K also have no normalized collisions. Manifests:
+`docs/experiments/disjointness-yaqa182.json` and
+`docs/experiments/disjointness-full-reference.json`. Supplying a manifest now
+validates its selected-input bindings; benchmark wrappers additionally pass
+`--require-disjointness` so quantization fails closed when the manifest is
+missing. Historical full-reference
 GSM8K scores pass the available row-level audit and are valid on that evidence.
 Semantic similarity from derived datasets (for example OpenMathInstruct) is a
 separate, optional source-level audit and is not evidence of contamination.
