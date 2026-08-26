@@ -54,7 +54,11 @@ from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
 from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
-from ..quantization.swiglu import apply_swiglu_reparameterization, choose_swiglu_scales
+from ..quantization.swiglu import (
+    apply_swiglu_reparameterization,
+    choose_swiglu_scales,
+    select_swiglu_candidate_triplet,
+)
 from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.backend import BACKEND
@@ -171,6 +175,9 @@ class QVQProcessor(LoopProcessor):
         self._propagation_gates_lock = threading.RLock()
         self._smooth_swiglu_stats: Dict[str, Dict[str, Any]] = {}
         self._smooth_swiglu_prepared = False
+        self._atomic_swiglu_inputs: Dict[str, torch.Tensor] = {}
+        self._atomic_swiglu_candidates: Dict[str, Dict[str, Any]] = {}
+        self._atomic_swiglu_lock = threading.RLock()
 
     @property
     def smooth_swiglu_stats(self) -> Dict[str, Dict[str, Any]]:
@@ -189,7 +196,9 @@ class QVQProcessor(LoopProcessor):
         """
 
         smooth_config = self.qcfg.smooth_swiglu
-        if smooth_config is None or not smooth_config.enabled:
+        replay_config = self.qcfg.module_granular_replay
+        atomic_enabled = replay_config is not None and replay_config.strategy == "atomic_swiglu"
+        if (smooth_config is None or not smooth_config.enabled) and not atomic_enabled:
             return
         if self._smooth_swiglu_prepared:
             raise RuntimeError("QVQ Smooth-SwiGLU preparation was already completed.")
@@ -213,7 +222,7 @@ class QVQProcessor(LoopProcessor):
         if not self.calibration_dataset:
             raise ValueError("QVQ Smooth-SwiGLU requires a nonempty calibration dataset.")
 
-        max_tokens = smooth_config.max_calibration_tokens
+        max_tokens = 512 if smooth_config is None else smooth_config.max_calibration_tokens
         activations: Dict[str, list[torch.Tensor]] = {name: [] for name in mlps}
         retained_tokens = {name: 0 for name in mlps}
         mask_tls = threading.local()
@@ -271,12 +280,17 @@ class QVQProcessor(LoopProcessor):
         for module_name, (_, gate, up, down) in mlps.items():
             if not activations[module_name]:
                 raise RuntimeError(f"QVQ Smooth-SwiGLU captured no inputs for `{module_name}`.")
+            inputs = torch.cat(activations[module_name], dim=0)
+            if atomic_enabled:
+                self._atomic_swiglu_inputs[module_name] = inputs.contiguous()
+            if smooth_config is None or not smooth_config.enabled:
+                continue
             if up.bias is not None:
                 raise ValueError(
                     f"QVQ Smooth-SwiGLU requires a biasless `up_proj`; `{module_name}.up_proj` has a bias."
                 )
             weight_device = gate.weight.device
-            inputs = torch.cat(activations[module_name], dim=0).to(device=weight_device)
+            inputs = inputs.to(device=weight_device)
             scales, stats = choose_swiglu_scales(
                 inputs,
                 gate.weight,
@@ -318,10 +332,12 @@ class QVQProcessor(LoopProcessor):
             stats["module"] = module_name
             stats["scale_search"] = "jacobian_proxy"
             self._smooth_swiglu_stats[module_name] = stats
-        setattr(gptq_model, "qvq_smooth_swiglu_stats", self.smooth_swiglu_stats)
+        if smooth_config is not None and smooth_config.enabled:
+            setattr(gptq_model, "qvq_smooth_swiglu_stats", self.smooth_swiglu_stats)
         self._smooth_swiglu_prepared = True
         log.info(
-            "QVQ Smooth-SwiGLU: folded scales for %d MLPs using %d-token calibration slices",
+            "QVQ Smooth-SwiGLU: %s for %d MLPs using %d-token calibration slices",
+            "folded scales" if smooth_config is not None and smooth_config.enabled else "captured atomic candidates",
             len(mlps),
             max(retained_tokens.values()),
         )
@@ -619,15 +635,15 @@ class QVQProcessor(LoopProcessor):
         )
 
     @staticmethod
-    def _module_replay_qlinear(
+    def _module_replay_qlinear_from_tensors(
         original: torch.nn.Linear,
         module_full_name: str,
         module_qcfg: QVQConfig,
-        result,
+        serialized_tensors: Dict[str, torch.Tensor],
     ) -> QVQLinear:
         tensors = {
             name: value.detach().to(device=original.weight.device)
-            for name, value in result.serialized_tensors().items()
+            for name, value in serialized_tensors.items()
         }
         candidate = QVQLinear(
             bits=module_qcfg.bits,
@@ -646,6 +662,20 @@ class QVQProcessor(LoopProcessor):
         ).eval()
         candidate.post_init()
         return candidate
+
+    @staticmethod
+    def _module_replay_qlinear(
+        original: torch.nn.Linear,
+        module_full_name: str,
+        module_qcfg: QVQConfig,
+        result,
+    ) -> QVQLinear:
+        return QVQProcessor._module_replay_qlinear_from_tensors(
+            original,
+            module_full_name,
+            module_qcfg,
+            result.serialized_tensors(),
+        )
 
     def _select_module_granular_replay_candidate(
         self,
@@ -800,6 +830,270 @@ class QVQProcessor(LoopProcessor):
             finally:
                 setattr(parent, child_name, original)
 
+    def _is_atomic_swiglu_module(
+        self,
+        module: NamedModule,
+        subset: Optional[Dict[str, NamedModule]],
+    ) -> bool:
+        """Return whether ``module`` belongs to a complete atomic MLP subset."""
+
+        replay_config = self.qcfg.module_granular_replay
+        if replay_config is None or replay_config.strategy != "atomic_swiglu" or not subset:
+            return False
+        role = module.full_name.rsplit(".", 1)[-1]
+        if role not in {"gate_proj", "up_proj", "down_proj"}:
+            return False
+        parent_name = module.full_name.rpartition(".")[0]
+        roles = {
+            name.rsplit(".", 1)[-1]
+            for name in subset
+            if name.rpartition(".")[0] == parent_name
+        }
+        required = {"gate_proj", "up_proj", "down_proj"}
+        if roles != required:
+            raise RuntimeError(
+                "QVQ atomic_swiglu requires one complete gate/up/down subset; "
+                f"`{parent_name}` contains {sorted(roles)}."
+            )
+        return True
+
+    def _quantize_atomic_swiglu_candidates(
+        self,
+        module: NamedModule,
+        module_qcfg: QVQConfig,
+        canonical_weight: torch.Tensor,
+        quantization_hessian: torch.Tensor,
+        quantization_kwargs: Dict[str, Any],
+    ):
+        """Generate canonical plus complete fixed-family alternatives for one MLP leaf."""
+
+        replay_config = module_qcfg.module_granular_replay
+        assert replay_config is not None and replay_config.strategy == "atomic_swiglu"
+        candidate_results = {}
+        base_telemetry = quantization_kwargs.get("telemetry")
+        candidate_kwargs_base = dict(quantization_kwargs)
+        candidate_kwargs_base.pop("yaqa_v2b2_family_mode", None)
+        candidate_kwargs_base.pop("yaqa_v2b2_fixed_family_id", None)
+        for alternative_bank_id in (0, *replay_config.alternative_bank_ids):
+            candidate_kwargs = dict(candidate_kwargs_base)
+            candidate_kwargs["yaqa_v2b2_family_mode"] = "fixed_block_ldlq"
+            candidate_kwargs["yaqa_v2b2_fixed_family_id"] = alternative_bank_id
+            candidate_kwargs["telemetry"] = (
+                base_telemetry
+                if alternative_bank_id == 0
+                else QVQQuantizationTelemetry() if base_telemetry is not None else None
+            )
+            candidate_results[alternative_bank_id] = quantize_qvq_linear(
+                canonical_weight,
+                quantization_hessian,
+                bits=module_qcfg.bits,
+                **candidate_kwargs,
+            )
+        return candidate_results[0], candidate_results
+
+    def _remember_atomic_swiglu_candidates(
+        self,
+        module: NamedModule,
+        module_qcfg: QVQConfig,
+        canonical_weight: torch.Tensor,
+        candidate_results: Dict[int, Any],
+    ) -> None:
+        """Keep only CPU snapshots needed by the deferred nonlinear selector."""
+
+        candidates = {}
+        for alternative_bank_id, result in candidate_results.items():
+            candidates[int(alternative_bank_id)] = {
+                "weight": result.weight.detach().to(device="cpu", copy=True).contiguous(),
+                "serialized_tensors": {
+                    name: tensor.detach().to(device="cpu", copy=True).contiguous()
+                    for name, tensor in result.serialized_tensors().items()
+                },
+            }
+        with self._atomic_swiglu_lock:
+            self._atomic_swiglu_candidates[module.full_name] = {
+                "dense_weight": canonical_weight.detach().to(device="cpu", copy=True).contiguous(),
+                "candidates": candidates,
+                "module_qcfg": copy.deepcopy(module_qcfg),
+            }
+
+    def _select_atomic_swiglu_subset(
+        self,
+        subset: Dict[str, NamedModule],
+        *,
+        subset_index: Optional[int],
+        subset_total: Optional[int],
+    ) -> None:
+        """Select and stage one complete gate/up/down triplet by propagated replay."""
+
+        del subset_index, subset_total
+        replay_config = self.qcfg.module_granular_replay
+        if replay_config is None or replay_config.strategy != "atomic_swiglu" or not subset:
+            return
+        role_names = {}
+        for name in subset:
+            role = name.rsplit(".", 1)[-1]
+            if role in {"gate_proj", "up_proj", "down_proj"}:
+                role_names[role] = name
+        if set(role_names) != {"gate_proj", "up_proj", "down_proj"}:
+            return
+        parent_name = role_names["gate_proj"].rpartition(".")[0]
+        if any(name.rpartition(".")[0] != parent_name for name in role_names.values()):
+            raise RuntimeError(f"QVQ atomic_swiglu found mismatched MLP parents in {sorted(role_names.values())}.")
+        if self._module_replay_model is None:
+            raise RuntimeError("QVQ atomic_swiglu requires prepared final-logit replay targets.")
+        mlp_inputs = self._atomic_swiglu_inputs.get(parent_name)
+        if mlp_inputs is None:
+            raise RuntimeError(f"QVQ atomic_swiglu captured no inputs for `{parent_name}`.")
+        with self._atomic_swiglu_lock:
+            records = {role: self._atomic_swiglu_candidates.get(name) for role, name in role_names.items()}
+        if any(record is None for record in records.values()):
+            raise RuntimeError(f"QVQ atomic_swiglu candidate bank is incomplete for `{parent_name}`.")
+
+        gate_record = records["gate_proj"]
+        up_record = records["up_proj"]
+        down_record = records["down_proj"]
+        assert gate_record is not None and up_record is not None and down_record is not None
+        candidate_ids = (0, *replay_config.alternative_bank_ids)
+        preselector = select_swiglu_candidate_triplet(
+            mlp_inputs,
+            gate_record["dense_weight"],
+            up_record["dense_weight"],
+            down_record["dense_weight"],
+            [gate_record["candidates"][candidate_id]["weight"] for candidate_id in candidate_ids],
+            [up_record["candidates"][candidate_id]["weight"] for candidate_id in candidate_ids],
+            [down_record["candidates"][candidate_id]["weight"] for candidate_id in candidate_ids],
+            beam_size=min(4, len(candidate_ids)),
+        )
+        triplets = [
+            (
+                candidate_ids[item["gate_index"]],
+                candidate_ids[item["up_index"]],
+                candidate_ids[item["down_index"]],
+            )
+            for item in preselector["beam"]
+        ]
+        canonical_triplet = (0, 0, 0)
+        if canonical_triplet not in triplets:
+            triplets.append(canonical_triplet)
+
+        model = self._module_replay_model.model
+        self._ensure_module_replay_residency(model)
+        originals = {role: model.get_submodule(name) for role, name in role_names.items()}
+        parents = {role: name.rpartition(".")[0] for role, name in role_names.items()}
+        if any(not isinstance(original, torch.nn.Linear) for original in originals.values()):
+            raise RuntimeError(f"QVQ atomic_swiglu targets must be dense Linear modules: {role_names}.")
+        candidate_records = []
+
+        def install(triplet):
+            for role, candidate_id in zip(("gate_proj", "up_proj", "down_proj"), triplet, strict=True):
+                original = originals[role]
+                candidate = self._module_replay_qlinear_from_tensors(
+                    original,
+                    role_names[role],
+                    records[role]["module_qcfg"],
+                    records[role]["candidates"][candidate_id]["serialized_tensors"],
+                )
+                setattr(model.get_submodule(parents[role]), role_names[role].rsplit(".", 1)[-1], candidate)
+
+        def restore():
+            for role, original in originals.items():
+                setattr(model.get_submodule(parents[role]), role_names[role].rsplit(".", 1)[-1], original)
+
+        with self._module_replay_lock:
+            try:
+                install(canonical_triplet)
+                baseline_folds = [
+                    self._module_replay_metrics(
+                        "search", fold_index=fold_index, folds=replay_config.search_folds
+                    )
+                    for fold_index in range(replay_config.search_folds)
+                ]
+                for triplet in triplets:
+                    if triplet == canonical_triplet:
+                        folds = baseline_folds
+                        score = 1.0
+                    else:
+                        install(triplet)
+                        folds = [
+                            self._module_replay_metrics(
+                                "search", fold_index=fold_index, folds=replay_config.search_folds
+                            )
+                            for fold_index in range(replay_config.search_folds)
+                        ]
+                        score = self._module_replay_score(folds, baseline_folds)
+                    candidate_records.append(
+                        {
+                            "gate_alternative_bank_id": triplet[0],
+                            "up_alternative_bank_id": triplet[1],
+                            "down_alternative_bank_id": triplet[2],
+                            "score": score,
+                            "fold_kl_forward": [fold["kl_forward"] for fold in folds],
+                            "fold_metrics": folds,
+                            "selected": False,
+                        }
+                    )
+                    restore()
+
+                eligible = [
+                    record for record in candidate_records
+                    if (record["gate_alternative_bank_id"], record["up_alternative_bank_id"], record["down_alternative_bank_id"])
+                    != canonical_triplet
+                    and record["score"] < 1 - replay_config.minimum_relative_kl_improvement
+                ]
+                selected_triplet = canonical_triplet
+                if eligible:
+                    winner = min(eligible, key=lambda record: record["score"])
+                    selected_triplet = (
+                        winner["gate_alternative_bank_id"],
+                        winner["up_alternative_bank_id"],
+                        winner["down_alternative_bank_id"],
+                    )
+                install(canonical_triplet)
+                baseline_confirmation = self._module_replay_metrics("confirmation")
+                candidate_confirmation = baseline_confirmation
+                if selected_triplet != canonical_triplet:
+                    install(selected_triplet)
+                    candidate_confirmation = self._module_replay_metrics("confirmation")
+                    if not self._module_replay_confirmation_passes(
+                        candidate_confirmation, baseline_confirmation, replay_config
+                    ):
+                        selected_triplet = canonical_triplet
+                for record in candidate_records:
+                    record["selected"] = (
+                        record["gate_alternative_bank_id"],
+                        record["up_alternative_bank_id"],
+                        record["down_alternative_bank_id"],
+                    ) == selected_triplet
+                replay_stats = {
+                    "strategy": "atomic_swiglu",
+                    "selected_triplet": selected_triplet,
+                    "preselector": preselector,
+                    "candidates": candidate_records,
+                    "confirmation_baseline": baseline_confirmation,
+                    "confirmation_candidate": candidate_confirmation,
+                }
+                for name in role_names.values():
+                    self._module_replay_stats[name] = replay_stats
+            finally:
+                restore()
+
+        for role, name in role_names.items():
+            module = subset[name]
+            selected_id = selected_triplet[({"gate_proj": 0, "up_proj": 1, "down_proj": 2}[role])]
+            payload = records[role]["candidates"][selected_id]["serialized_tensors"]
+            module.stream_sync()
+            with parent_module_lock(name):
+                for key in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
+                    module.state.pop(key, None)
+            module.stream_state_payload_to_cpu(payload)
+            for stat in self.log:
+                if stat.get("full_name") == name:
+                    stat["module_granular_replay"] = self._module_replay_stats[name]
+
+        with self._atomic_swiglu_lock:
+            for name in role_names.values():
+                self._atomic_swiglu_candidates.pop(name, None)
+
     def refine_subset_module_groups(self, groups: list[list[str]]) -> list[list[str]]:
         """Match QTIP's projection-at-a-time installation when alignment is enabled."""
 
@@ -812,6 +1106,44 @@ class QVQProcessor(LoopProcessor):
                 sorted(group, key=lambda name: role_order.get(name.rsplit(".", 1)[-1], len(role_order)))
                 for group in groups
             ]
+            if replay_config.strategy == "atomic_swiglu":
+                # The model tree presents gate/up and down as separate sibling
+                # groups. Rejoin them before StageLayer creates plans so all
+                # three projections are processed and cleaned up atomically.
+                atomic_roles = {"gate_proj", "up_proj", "down_proj"}
+                atomic_names_by_parent: Dict[str, list[str]] = {}
+                for group in groups:
+                    for name in group:
+                        role = name.rsplit(".", 1)[-1]
+                        if role in atomic_roles:
+                            parent = name.rpartition(".")[0]
+                            atomic_names_by_parent.setdefault(parent, []).append(name)
+                merged_groups: list[list[str]] = []
+                emitted_parents: set[str] = set()
+                for group in groups:
+                    remaining = []
+                    parents_in_group = []
+                    for name in group:
+                        role = name.rsplit(".", 1)[-1]
+                        parent = name.rpartition(".")[0]
+                        if role in atomic_roles:
+                            if parent not in emitted_parents and parent not in parents_in_group:
+                                parents_in_group.append(parent)
+                        else:
+                            remaining.append(name)
+                    for parent in parents_in_group:
+                        merged_groups.append(
+                            sorted(
+                                atomic_names_by_parent[parent],
+                                key=lambda name: role_order.get(
+                                    name.rsplit(".", 1)[-1], len(role_order)
+                                ),
+                            )
+                        )
+                        emitted_parents.add(parent)
+                    if remaining:
+                        merged_groups.append(remaining)
+                groups = merged_groups
         ordered_groups = groups
         gptq_model = None if self._output_alignment is None else self._output_alignment.gptq_model
         if gptq_model is not None:
@@ -833,6 +1165,8 @@ class QVQProcessor(LoopProcessor):
                 return min(priorities, default=len(role_priority))
 
             ordered_groups = [sorted(group, key=priority) for group in ordered_groups]
+        if replay_config is not None and replay_config.strategy == "atomic_swiglu":
+            return ordered_groups
         return [[module_name] for group in ordered_groups for module_name in group]
 
     def _yaqa_target_modules(
@@ -1343,6 +1677,11 @@ class QVQProcessor(LoopProcessor):
     ) -> None:
         """Align once, after every worker in the final decoder-layer subset finishes."""
 
+        self._select_atomic_swiglu_subset(
+            subset or {},
+            subset_index=subset_index,
+            subset_total=subset_total,
+        )
         if self._output_alignment is None or not subset:
             return
         if subset_index is None or subset_total is None:
@@ -1462,7 +1801,7 @@ class QVQProcessor(LoopProcessor):
     ):
         """Quantize one module and stage its exact serialized QVQ tensors on CPU."""
 
-        del subset, previous_subset, subset_index, subset_total
+        del previous_subset, subset_index, subset_total
         self.draw_progress(f"Quantizing {module.name} in layer")
         task_entry = self.tasks[module.name]
         capture: GPTQ = task_entry["capture"]
@@ -1556,13 +1895,24 @@ class QVQProcessor(LoopProcessor):
                     else propagation_gate[3]
                 ),
             }
-            result = self._select_module_granular_replay_candidate(
-                module,
-                module_qcfg,
-                canonical_weight,
-                quantization_hessian,
-                quantization_kwargs,
-            )
+            atomic_swiglu = self._is_atomic_swiglu_module(module, subset)
+            if atomic_swiglu:
+                result, candidate_results = self._quantize_atomic_swiglu_candidates(
+                    module,
+                    module_qcfg,
+                    canonical_weight,
+                    quantization_hessian,
+                    quantization_kwargs,
+                )
+            else:
+                candidate_results = None
+                result = self._select_module_granular_replay_candidate(
+                    module,
+                    module_qcfg,
+                    canonical_weight,
+                    quantization_hessian,
+                    quantization_kwargs,
+                )
             duration = time.perf_counter() - started
 
             # Quantized replay temporarily overwrites the dense module. The
@@ -1572,6 +1922,14 @@ class QVQProcessor(LoopProcessor):
             original_weight = module.weight.detach().to(device="cpu", copy=True)
             with parent_module_lock(module.full_name):
                 module.state["_qvq_original_weight"] = original_weight
+            if atomic_swiglu:
+                assert candidate_results is not None
+                self._remember_atomic_swiglu_candidates(
+                    module,
+                    module_qcfg,
+                    canonical_weight,
+                    candidate_results,
+                )
             module.stream_state_payload_to_cpu(result.serialized_tensors())
             # LoopProcessor clears its per-subset task map before StageLayer drains
             # concurrent submodule finalizers. Keep the immutable decoder contract
@@ -1832,6 +2190,9 @@ class QVQProcessor(LoopProcessor):
         self._module_replay_rows.clear()
         self._module_replay_teacher_logits.clear()
         self._module_replay_model = None
+        with self._atomic_swiglu_lock:
+            self._atomic_swiglu_inputs.clear()
+            self._atomic_swiglu_candidates.clear()
         with self._yaqa_factor_lock:
             self._yaqa_input_hessians.clear()
             self._yaqa_output_hessians.clear()

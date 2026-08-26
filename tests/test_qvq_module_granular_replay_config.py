@@ -146,6 +146,48 @@ def test_module_granular_replay_round_trips_without_changing_inference_layout():
     assert configured.quant_linear_init_kwargs() == baseline.quant_linear_init_kwargs()
 
 
+def test_atomic_swiglu_replay_keeps_gate_up_down_in_one_subset():
+    processor = QVQProcessor(
+        tokenizer=None,
+        qcfg=_base_config(
+            module_granular_replay={
+                "strategy": "atomic_swiglu",
+                "subsets": ["mlp_gate_up_down"],
+            }
+        ),
+        calibration=_replay_rows(21),
+        prepare_dataset_func=_prepared_calibration,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        module_replay_search_calibration=_replay_rows(1, 5),
+        module_replay_confirmation_calibration=_replay_rows(9, 13),
+    )
+
+    groups = processor.refine_subset_module_groups(
+        [
+            ["model.layers.0.mlp.gate_proj", "model.layers.0.mlp.up_proj"],
+            ["model.layers.0.mlp.down_proj"],
+        ]
+    )
+
+    assert groups == [[
+        "model.layers.0.mlp.gate_proj",
+        "model.layers.0.mlp.up_proj",
+        "model.layers.0.mlp.down_proj",
+    ]]
+
+
+def test_atomic_swiglu_strategy_requires_complete_mlp_subset():
+    with pytest.raises(ValueError, match="mlp_gate_up_down"):
+        _base_config(
+            module_granular_replay={
+                "strategy": "atomic_swiglu",
+                "subsets": ["mlp_gate_up"],
+            }
+        )
+
+
 def test_live_prefix_driver_exposes_module_granular_replay_name_and_subset_scope():
     args = _parser().parse_args(
         [

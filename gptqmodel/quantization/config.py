@@ -409,8 +409,14 @@ class ModuleGranularReplayConfig:
         if not isinstance(self.strategy, str):
             raise TypeError("ModuleGranularReplayConfig: `strategy` must be a string.")
         self.strategy = self.strategy.strip().lower()
-        if self.strategy != "greedy":
-            raise ValueError("ModuleGranularReplayConfig: only the validated `greedy` strategy is supported.")
+        if self.strategy not in {"greedy", "atomic_swiglu"}:
+            raise ValueError(
+                "ModuleGranularReplayConfig: strategy must be `greedy` or `atomic_swiglu`."
+            )
+        if self.strategy == "atomic_swiglu" and "mlp_gate_up_down" not in self.subsets:
+            raise ValueError(
+                "ModuleGranularReplayConfig: `atomic_swiglu` requires the `mlp_gate_up_down` subset."
+            )
 
         if not isinstance(self.module_order, (tuple, list)) or not self.module_order:
             raise ValueError("ModuleGranularReplayConfig: `module_order` must be a nonempty sequence.")

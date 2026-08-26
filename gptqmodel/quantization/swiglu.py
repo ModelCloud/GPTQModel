@@ -146,7 +146,7 @@ def choose_swiglu_scales(
         down_error_weight = hidden.square().mean(dim=0) * down_energy
         epsilon = torch.finfo(torch.float32).eps
         scales = torch.ones_like(up_error_weight)
-        proxy_scores = torch.zeros_like(up_error_weight)
+        proxy_objective = torch.zeros((), device=scales.device, dtype=torch.float32)
         for start in range(0, up_error_weight.numel(), group_size):
             stop = min(start + group_size, up_error_weight.numel())
             # For one scale shared by a group, the proxy is
@@ -174,7 +174,7 @@ def choose_swiglu_scales(
                     + down_error_weight[start:stop, None] / candidates[None, :].square()
                 ).sum(dim=0)
                 selected = int(scores.argmin().item())
-                proxy_scores[start:stop] = scores[selected]
+                proxy_objective += scores[selected]
             else:
                 score_values = []
                 for candidate in candidates:
@@ -186,7 +186,7 @@ def choose_swiglu_scales(
                     )
                 scores = torch.stack(score_values)
                 selected = int(scores.argmin().item())
-                proxy_scores[start:stop] = scores[selected]
+                proxy_objective += scores[selected]
             scales[start:stop] = candidates[selected]
 
         salience = swiglu_jacobian_salience(gate, up, down_weight)
@@ -198,7 +198,7 @@ def choose_swiglu_scales(
             "scale_min": float(scales.min().item()),
             "scale_max": float(scales.max().item()),
             "scale_geomean": float(scales.clamp_min(epsilon).log().mean().exp().item()),
-            "proxy_objective": float(proxy_scores.sum().item()),
+            "proxy_objective": float(proxy_objective.item()),
             "gate_salience_sum": float(salience["gate"].sum().item()),
             "up_salience_sum": float(salience["up"].sum().item()),
             "down_salience_sum": float(salience["down"].sum().item()),

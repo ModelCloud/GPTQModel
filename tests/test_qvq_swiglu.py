@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -77,6 +78,39 @@ def test_swiglu_grouped_scale_uses_aggregate_optimum():
     group_b = (hidden.square().mean(0) * down.square().sum(0))[:4].sum()
     expected = (group_b / group_a).pow(0.25).clamp(0.5, 2.0)
     torch.testing.assert_close(scales[:4], torch.full((4,), expected))
+
+
+def test_swiglu_proxy_objective_counts_each_group_once():
+    gate, up, down, inputs = _weights()
+    _, stats = choose_swiglu_scales(
+        inputs,
+        gate,
+        up,
+        down,
+        group_size=4,
+        candidate_exponents=(0.0,),
+    )
+    gate_activation = inputs @ gate.T
+    up_activation = inputs @ up.T
+    silu_gate = F.silu(gate_activation)
+    hidden = silu_gate * up_activation
+    up_error_weight = silu_gate.square().mean(0) * up.square().mean(1)
+    down_error_weight = hidden.square().mean(0) * down.square().sum(0)
+    expected = 0.0
+    for start in range(0, 12, 4):
+        stop = start + 4
+        group_a = up_error_weight[start:stop].sum()
+        group_b = down_error_weight[start:stop].sum()
+        scale = (group_b / group_a).pow(0.25).clamp(0.5, 2.0)
+        expected += float(
+            (
+                up_error_weight[start:stop] * scale.square()
+                + down_error_weight[start:stop] / scale.square()
+            )
+            .sum()
+            .item()
+        )
+    assert stats["proxy_objective"] == pytest.approx(expected)
 
 
 def test_swiglu_jacobian_salience_matches_definition():
