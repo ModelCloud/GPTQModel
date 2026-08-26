@@ -563,3 +563,5 @@ That watcher was replaced with a non-self-matching `[q]vq_quantize.py` pattern;
 fixed-reg .020 and down-projection W2.5 are now running on GPUs 2 and 4, while
 fixed-reg .015 and .0225 wait behind the still-active alignment jobs on GPUs 1
 and 3.
+
+| monitor | `llama32-1b-w2-full-reference-reg020-main-5544143c` | `gsm8k_platinum_cot` | complete; metric=0.23325062034739455; report `/root/qvq-results/llama32-1b-w2-full-reference-reg020-main-5544143c-gsm8k-platinum-reverify-v2.json` |
