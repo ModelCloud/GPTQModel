@@ -890,4 +890,8 @@ and 3.
 
 | started | `0cd45d` / `llama32-1b-w2-reg015-v-w25-0cd45d` | `quantization` | started on physical GPU 1; YAQA Sketch-B capture in progress |
 
+| restarted | `bb0aa2` / `llama32-1b-w2-reg015-gate-down-w25-bb0aa2` | `quantization` | old wrapper was still using the pre-fix memory gate and remained waiting despite an idle GPU; restarted on physical GPU 3 with repaired valid JSON config |
+
+| restarted | `45a387` / `llama32-1b-w2-reg015-up-down-w25-45a387` | `quantization` | old wrapper was still using the pre-fix memory gate and remained waiting despite an idle GPU; restarted on physical GPU 5 with repaired valid JSON config |
+
 | failure+fix | `19d89a` / `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `atomic subset staging` | the first post-`dd089f8f` retry reached cleanup but failed because full replay paths were still used to index the layer-relative `StageSubset` dictionary (`KeyError: model.layers.0.mlp.gate_proj`). Fixed in `85d43bba` by resolving wrappers through `NamedModule.full_name`; regression coverage now exercises relative subset keys against a nested model tree. The Atomic arm was restarted on physical GPU 4 with the same disjoint replay rows. |
