@@ -775,3 +775,5 @@ and 3.
 | monitor | `llama32-1b-v2b2p32-yaqa322k-mlpdown-w25-main-ecf7081e` | `divergence300` | complete; metric=0.13572916666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-mlpdown-w25-main-ecf7081e-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg0025-main-54ccd365` | `divergence300` | complete; metric=0.16364583333333332; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0025-main-54ccd365-div300-dev-v1.json` |
+
+| validation | `3f17c40b` → `d68c9d00` | `SwiGLU/lifecycle test suite` | complete; `70 passed, 2 skipped`; command `pytest -q tests/test_qvq_swiglu.py tests/test_qvq_lifecycle.py tests/test_qvq_module_granular_replay_config.py`; CUDA guard changes included; log `/tmp/swiglu_latest_tests.log` |
