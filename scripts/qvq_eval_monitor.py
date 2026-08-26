@@ -17,7 +17,12 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass, asdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:  # Python 3.10 compatibility
+    UTC = timezone.utc
 from pathlib import Path
 from typing import Any
 

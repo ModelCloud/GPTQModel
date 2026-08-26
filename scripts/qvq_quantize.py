@@ -40,6 +40,7 @@ from gptqmodel.quantization import (
     ModuleGranularReplayConfig,
     OutputAlignConfig,
     QVQConfig,
+    SmoothSwiGLUConfig,
     YaqaConfig,
 )
 from gptqmodel.quantization.config import ChatTemplateConfig
@@ -67,6 +68,7 @@ QVQ_FORMATS = tuple(
         FORMAT.QVQ_V2B4_P64,
     )
 )
+DEFAULT_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 @dataclass(frozen=True)
@@ -102,7 +104,9 @@ def _add_dataset_args(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--model", required=True, help="Dense source checkpoint or Hub model ID."
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Dense source checkpoint or Hub model ID (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--output", type=Path, required=True, help="New quantized checkpoint directory."
@@ -221,6 +225,16 @@ def build_parser() -> argparse.ArgumentParser:
             "mlp_down",
             "mlp_gate_up_down",
         ),
+    )
+    parser.add_argument(
+        "--smooth-swiglu",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fold calibration-selected up/down SwiGLU channel scales before QVQ Hessian capture.",
+    )
+    parser.add_argument("--smooth-swiglu-group-size", type=int, default=16)
+    parser.add_argument(
+        "--smooth-swiglu-max-calibration-tokens", type=int, default=2048
     )
     return parser
 
@@ -375,6 +389,15 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         yaqa=yaqa,
         output_alignment=alignment,
         module_granular_replay=replay,
+        smooth_swiglu=(
+            SmoothSwiGLUConfig(
+                enabled=True,
+                group_size=args.smooth_swiglu_group_size,
+                max_calibration_tokens=args.smooth_swiglu_max_calibration_tokens,
+            )
+            if args.smooth_swiglu
+            else None
+        ),
         # YAQA preparation performs an exact full-model backward for Sketch-B.
         # A checkpoint-backed LazyTurtle shell cannot participate in autograd.
         offload_to_disk=args.rounding != "yaqa",
@@ -1081,6 +1104,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         ),
         "quantize_config": config.to_dict(),
+        "smooth_swiglu": getattr(model, "qvq_smooth_swiglu_stats", None),
         "datasets": {
             name: None if spec is None else dataset_slice_evidence(spec)
             for name, spec in {

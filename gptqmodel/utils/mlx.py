@@ -19,7 +19,19 @@ try:
     mx.set_default_device(mx.cpu)
 
     from mlx_lm import generate
-    from mlx_lm.utils import _get_classes, get_model_path, load_config, quantize_model
+    from mlx_lm.utils import _get_classes, load_config, quantize_model
+
+    try:
+        from mlx_lm.utils import get_model_path
+    except ImportError:
+        # mlx-lm 0.31 removed this helper.  GPTQModel has already resolved Hub
+        # identifiers to a local checkpoint before this bridge is called, so a
+        # Path wrapper is sufficient for the native QVQ conversion path.
+        from pathlib import Path
+
+        def get_model_path(model_id_or_path):
+            return Path(model_id_or_path), None
+
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False

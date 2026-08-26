@@ -1942,7 +1942,14 @@ def ModelLoader(cls):
             # TODO: Why are we using this custom function and not dispatch_model?
             model = simple_dispatch_model(model, device_map)
 
-        if format_code == FORMAT.EXL3:
+        if backend == BACKEND.MLX and qcfg.method == METHOD.QVQ:
+            # MLX QVQ keeps the format-native Torch shell until the conversion
+            # below replaces its QVQLinear modules with QVQMLXLinear.  MLX is
+            # intentionally not a Torch quant-linear backend, so asking the
+            # generic selector for `backend=mlx` here rejects a valid QVQ
+            # checkpoint before the native conversion can run.
+            qlinear_kernel = preload_qlinear_kernel
+        elif format_code == FORMAT.EXL3:
             qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
         else:
             qlinear_kernel = select_quant_linear(

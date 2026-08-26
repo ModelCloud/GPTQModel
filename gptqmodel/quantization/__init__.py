@@ -53,6 +53,7 @@ from .config import (
                      QVQConfig,
                      RTNConfig,
                      ScaleSearchConfig,
+                     SmoothSwiGLUConfig,
                      SmootherConfig,
                      SmoothLog,
                      SmoothMAD,
@@ -91,3 +92,11 @@ from .protocol import (
 )
 from .quantizer import Quantizer, quantize
 from .rtn import RTN
+from .swiglu import (
+                     apply_swiglu_reparameterization,
+                     choose_swiglu_scales,
+                     select_swiglu_candidate_triplet,
+                     silu_derivative,
+                     swiglu_error_diagnostics,
+                     swiglu_jacobian_salience,
+)

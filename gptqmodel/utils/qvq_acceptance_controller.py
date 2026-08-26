@@ -21,7 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
-from typing import Any, Self
+from typing import Any
+
+try:
+    from typing import Self
+except ImportError:  # Python 3.10 compatibility
+    from typing_extensions import Self
 
 CONTROLLER_SCHEMA = "qvq-acceptance-controller-v7"
 CONTROLLER_STAGES = ("quantization_producer", "fresh_process_reload", "acceptance_evaluation")
