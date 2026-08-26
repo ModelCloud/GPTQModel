@@ -449,6 +449,13 @@ GSM8K Platinum for the best YAQA reg .020 checkpoint is now running on the
 newly freed GPU0 (session `98290`); the earlier GPU2 waiter (`24963`) was
 superseded. It uses batch 16 with continuous batching and paged attention.
 
+That second-level verification is complete: the full report records
+`acc,num=0.17866004962779156` with Evalution `0.0.14`, batch 16,
+`paged|flash_attention_2`, and continuous batching/paged-attention required.
+The checkpoint's canonical D300 score remains `18.78125%` (6/300 exact
+prompts), so this confirms the current leader but does not meet the flat-W2
+`25%` D300 target.
+
 ### Queued full-subset final-logit replay control
 
 The prior `D05` attention replay was only a proxy evaluation and was rejected;
