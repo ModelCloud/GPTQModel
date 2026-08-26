@@ -47,6 +47,13 @@ context only and do not count toward the flat-W2 target.
 | `llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1` | YAQA reselect reg 0.15 + output alignment | 14.9271% | 5 | 22.9942% (278/1209) | complete |
 | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | YAQA reselect reg 0.15 + `mlp.down_proj` W2.5 | 17.8021% | 3 | 23.4078% (283/1209) | complete |
 
+| `llama32-1b-w2-reg015-mlpall-w25` | all MLP projections W2.5 | 19.0833% | 3 | 31.5964% (382/1209) | complete |
+| `llama32-1b-w2-reg015-attnall-w25` | all attention projections W2.5 | 20.4167% | 3 | 26.0546% (315/1209) | complete |
+| `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | gate/up projections W2.5 | 17.2813% | 2 | 25.0620% (303/1209) | complete |
+| `llama32-1b-w2-yaqa302k-reg015-qk-w25` | attention Q/K W2.5 | 16.1042% | 2 | 21.3400% (258/1209) | complete |
+| `llama32-1b-w2-reg015-smooth-swiglu` | analytical Smooth-SwiGLU | 17.3021% | 2 | 20.5128% (248/1209) | complete (pre-fix) |
+| `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | analytical Smooth-SwiGLU, latest native path | pending | pending | 20.5128% (248/1209) | D300 pending |
+
 ## Invalidated arms
 
 These arms produced numerical results but should not be used for leaderboard

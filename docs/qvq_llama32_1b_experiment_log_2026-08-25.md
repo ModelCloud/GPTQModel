@@ -790,6 +790,18 @@ and 3.
 
 | monitor | `llama32-1b-w2-reg015-smooth-swiglu` | `divergence300` | complete; D300 token top-1=0.1730208333; exact32=0.0066666667; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-div300-dev-v1.json`; GSM8K running on GPU 7 |
 
+| monitor | `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | `gsm8k_platinum_cot` | complete; acc=0.2506203474 (303/1209); report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-gateup-w25-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `gsm8k_platinum_cot` | complete; acc=0.2133995037 (258/1209); report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-qk-w25-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-mlpall-w25` | `gsm8k_platinum_cot` | complete; acc=0.3159636063 (382/1209); report `/root/qvq-results/llama32-1b-w2-reg015-mlpall-w25-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-attnall-w25` | `gsm8k_platinum_cot` | complete; acc=0.2605459057 (315/1209); report `/root/qvq-results/llama32-1b-w2-reg015-attnall-w25-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-smooth-swiglu` | `gsm8k_platinum_cot` | complete; acc=0.2051282051 (248/1209); report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | `gsm8k_platinum_cot` | complete; acc=0.2051282051 (248/1209); latest-code rerun; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00-gsm8k-platinum-v1.json` |
+
 | monitor | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `divergence300` | complete; metric=0.16104166666666667; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-qk-w25-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-mlpall-w25` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-mlpall-w25-div300-dev-v1.json` |
