@@ -466,6 +466,13 @@ running on GPU6 at checkpoint
 `/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-align-main-ff906097`, followed
 by canonical D300 using the unchanged manifest and protocol.
 
+An additional flat-W2 sensitivity arm is queued on GPU7 at
+`/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc`.
+It keeps reg .020 globally but sets YAQA regularization to `.4` for layers
+0, 6, 10, and 12, the sensitive-layer set used by earlier dynamic tests. Its
+config is `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020_sensitive_hi.json`
+and it is chained to canonical D300.
+
 GSM8K Platinum for the best YAQA reg .020 checkpoint is now running on the
 newly freed GPU0 (session `98290`); the earlier GPU2 waiter (`24963`) was
 superseded. It uses batch 16 with continuous batching and paged attention.
