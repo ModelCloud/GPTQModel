@@ -669,3 +669,29 @@ and 3.
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.19933829611248965; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-yaqa-optmix322k-main-de25f203` | `gsm8k_platinum_cot` | complete; metric=0.19272125723738626; report `/root/qvq-results/llama32-1b-w2-yaqa-optmix322k-main-de25f203-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa-main-de25f203` | `gsm8k_platinum_cot` | complete; metric=0.17038875103391232; report `/root/qvq-results/llama32-1b-w2-yaqa-main-de25f203-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-layerdamp-align-gpu2` | `gsm8k_platinum_cot` | complete; metric=0.22249793217535152; report `/root/qvq-results/llama32-1b-w2-yaqa302k-layerdamp-align-gpu2-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa-optmix551k-main-54ccd365` | `gsm8k_platinum_cot` | complete; metric=0.2787427626137304; report `/root/qvq-results/llama32-1b-w2-yaqa-optmix551k-main-54ccd365-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.2961124896608768; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.20678246484698098; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa-cal322k-main-de25f203` | `gsm8k_platinum_cot` | complete; metric=0.17038875103391232; report `/root/qvq-results/llama32-1b-w2-yaqa-cal322k-main-de25f203-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-layerdamp-align2e64-gpu3` | `gsm8k_platinum_cot` | complete; metric=0.22746071133167908; report `/root/qvq-results/llama32-1b-w2-yaqa302k-layerdamp-align2e64-gpu3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg020-align-main-ff906097` | `gsm8k_platinum_cot` | complete; metric=0.21836228287841192; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-align-main-ff906097-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg025-align-gpu4` | `gsm8k_platinum_cot` | complete; metric=0.24813895781637718; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg025-align-gpu4-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg0125-main-8ae2db25` | `gsm8k_platinum_cot` | complete; metric=0.22497932175351532; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0125-main-8ae2db25-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg010-align-gpu1` | `gsm8k_platinum_cot` | complete; metric=0.21670802315963605; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg010-align-gpu1-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc` | `gsm8k_platinum_cot` | complete; metric=0.22084367245657568; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.21670802315963605; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e-gsm8k-platinum-v1.json` |
