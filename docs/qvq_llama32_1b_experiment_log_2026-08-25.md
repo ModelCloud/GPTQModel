@@ -937,3 +937,17 @@ and 3.
 | monitor | `llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b` | `gsm8k_platinum_cot` | complete; metric=0.22249793217535152; report `/root/qvq-results/llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b` | `divergence300` | complete; metric=0.17614583333333333; report `/root/qvq-results/llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b-div300-dev-v1.json` |
+
+| queued | `0f642c` | `up-down-w30-0f642c` | Up+Down W3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w30.json`; physical GPU 0; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| queued | `569a95` | `up-down-w35-569a95` | Up+Down W3.5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w35.json`; physical GPU 1; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| queued | `cdfa75` | `up-down-w40-cdfa75` | Up+Down W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w40.json` (`format=qvq_v4`, model-wide W4-capable codec); physical GPU 2; clean YAQA/NM calibration; D300/GSM8K queued by monitor |
+
+| queued | `ef21af` | `vo-w30-ef21af` | V+O W3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w30.json`; physical GPU 3; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| queued | `60a68a` | `vo-w35-60a68a` | V+O W3.5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w35.json`; physical GPU 4; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| queued | `98daf5` | `vo-w40-98daf5` | V+O W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w40.json` (`format=qvq_v4`, model-wide W4-capable codec); physical GPU 5; clean YAQA/NM calibration; D300/GSM8K queued by monitor |
+
+| failed+requeued | `151a0a`, `c17e71` | `W4 initial launch` | Initial W4 configs used `qvq_v2b2_p32`, which correctly rejected rates above W3.5. Replaced with model-wide `qvq_v4` configs and requeued as `cdfa75` and `98daf5`; no checkpoint or benchmark result was produced by the failed attempts. |

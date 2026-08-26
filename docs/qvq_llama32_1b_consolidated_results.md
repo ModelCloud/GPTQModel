@@ -102,10 +102,16 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | complete; D300 **19.9583%**, exact 3/300, mean divergence 5.0200 | GSM8K complete: **28.1224%** |
 | 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | complete; D300 **16.5938%**, exact 1/300, mean divergence 4.2667 | GSM8K complete: **19.9338%** |
 | ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498%** |
+| 0f642c | Up + Down projections W3, reg .15 | **2.5749** | 0 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
+| 569a95 | Up + Down projections W3.5, reg .15 | **2.8508** | 1 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
+| cdfa75 | Up + Down projections W4, reg .15 | **~3.1266*** | 2 | quantizing with model-wide `qvq_v4` format; clean manifest | D300 + GSM8K Platinum pending |
+| ef21af | V + O projections W3, reg .15 | **2.1094** | 3 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
+| 60a68a | V + O projections W3.5, reg .15 | **2.1525** | 4 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
+| 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | quantizing with model-wide `qvq_v4` format; clean manifest | D300 + GSM8K Platinum pending |
 
-The live monitor also has three replay quantizations active at the time of
-this snapshot (2026-08-26 UTC), with evaluator wrappers already reserved for
-each output:
+For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
+listed three replay quantizations with evaluator wrappers reserved for each
+output. They are not current active jobs; current arms are listed above:
 
 | Artifact ID | Active checkpoint | Quantization | Evaluation queue |
 | --- | --- | --- | --- |
@@ -113,11 +119,14 @@ each output:
 | `d3eac8` | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | active (GPU 0) | D300 pending behind quantization |
 | `a9a4df` | `llama32-1b-w2-reg020-replay-256x256-tip-gpu2` | active (GPU 2) | D300 pending behind quantization |
 
-These rows are intentionally separate from the completed-arm leaderboard:
-they have no `qvq_quantize_run.json` completion marker yet. The monitor state
-file (`docs/experiments/qvq_eval_monitor_state.json`) is the source of truth
-for transitions from active/queued to complete/failed, while the artifact
-inventory above records the corresponding filesystem state.
+These historical rows remain separate from the completed-arm leaderboard.
+The monitor state file (`docs/experiments/qvq_eval_monitor_state.json`) is the
+source of truth for transitions from active/queued to complete/failed, while
+the artifact inventory above records the corresponding filesystem state.
+
+The W4 rows use the model-wide `qvq_v4` codec because `qvq_v2b2_p32` rejects
+dynamic rates above W3.5. Their starred BPW values are weighted payload
+estimates only and are not directly comparable to the segmented V2B2 rows.
 
 ## Complete artifact inventory (live reconciliation)
 
