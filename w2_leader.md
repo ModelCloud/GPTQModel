@@ -1,5 +1,24 @@
 # Llama 3.2 1B flat-W2 leader
 
+## Current corrected-D300 leader (updated 2026-08-26)
+
+The current flat-W2 leader is the YAQA 302k, regularization `.020` arm. It
+supersedes the older `.10` Q07 record described below; that older record is
+retained as a historical comparison, not as the current leader.
+
+| Field | Value |
+| --- | --- |
+| Checkpoint | `/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3` |
+| Config | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020.json` |
+| Canonical D300 aligned-token Top-1 through 32 | **18.7813% (1,803 / 9,600)** |
+| Exact D300 prompts at 32 | **6 / 300 (2.0000% trajectories)** |
+| Mean first divergence token | **5.3633** |
+| D300 manifest | `701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b` |
+
+The full ordinary/KL and downstream-task report for this arm remains in the
+machine-readable experiment ledgers; no metric from the historical `.10`
+record below is reused for this current-leader claim.
+
 This is the durable best-of-sweep record for Llama 3.2 1B Instruct at flat W2. “Leader” means the highest corrected
 Divergence-300 aligned-token agreement, not the lowest teacher-forced KL. The append-only campaign ledger is
 [`docs/qvq_llama32_1b_experiment_log_2026-08-25.md`](docs/qvq_llama32_1b_experiment_log_2026-08-25.md).
