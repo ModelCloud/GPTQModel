@@ -869,3 +869,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | `gsm8k_platinum_cot` | complete; metric=0.18610421836228289; report `/root/qvq-results/llama32-1b-w2-reg020-replay-aggressive-tip-gpu3-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | `divergence300` | complete; metric=0.17270833333333332; report `/root/qvq-results/llama32-1b-w2-reg020-replay-aggressive-tip-gpu3-div300-dev-v1.json` |
+
+| correction | `d71136`, `bb0aa2`, `45a387` | `effective BPW` | corrected payload-rate estimates: V+O W2.5 = 2.0663 BPW; Gate+Down and Up+Down W2.5 = 2.2990 BPW (including common 0.023168 auxiliary overhead) |
