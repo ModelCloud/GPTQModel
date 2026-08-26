@@ -979,3 +979,5 @@ and 3.
 | monitor | `llama32-1b-w2-vo-w25-smooth-atomic-b7d172` | `gsm8k_platinum_cot` | complete; metric=0.2531017369727047; report `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-vo-w20-smooth-atomic-d13602` | `divergence300` | complete; metric=0.17614583333333333; report `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w25-smooth-atomic-b7d172` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172-div300-dev-v1.json` |
