@@ -225,12 +225,14 @@ GSM8K scores pass the available row-level audit and are valid on that evidence.
 Semantic similarity from derived datasets (for example OpenMathInstruct) is a
 separate, optional source-level audit and is not evidence of contamination.
 
-The first D300-source-shaped 500k artifact failed this audit: calibration row
-165 matched D300 row 212 after normalization, and 33 additional duplicate
-groups were found within the candidate mix. That artifact is not eligible for
-quantization/evaluation. A filtered artifact retaining 959 unique rows passes
-the strict audit at
-`docs/experiments/disjointness-div300-sources-disjoint.json`.
+The first D300-source-shaped 500k artifacts failed this audit: the original
+993-row mix had a development collision and 33 internal duplicate groups, and
+the subsequently named 959-row filtered artifact still has 56 normalized
+collisions with the locked split. Neither is eligible for quantization or
+evaluation (`docs/experiments/disjointness-div300-sources-disjoint.json` is
+intentionally marked `fail`). The source builder now excludes both D300
+development and locked prompts; its regenerated 981-row output passes the
+strict audit at `docs/experiments/disjointness-div300-sources-v2.json`.
 Arm `4aa38f`, which used the ineligible 993-row artifact, is therefore listed
 in the "Invalidated arms" section above and should not be compared as a
 completed flat-W2 result.
