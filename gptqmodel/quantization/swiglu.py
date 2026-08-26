@@ -155,7 +155,7 @@ def choose_swiglu_scales(
         group_count = math.ceil(up_error_weight.numel() / group_size)
         padded = group_count * group_size - up_error_weight.numel()
         if padded:
-            pad = torch.zeros(padded, device=scales.device, dtype=torch.float32)
+            pad = torch.zeros(padded, device=up_error_weight.device, dtype=torch.float32)
             grouped_a = torch.cat((up_error_weight, pad)).reshape(group_count, group_size)
             grouped_b = torch.cat((down_error_weight, pad)).reshape(group_count, group_size)
         else:

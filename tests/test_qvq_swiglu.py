@@ -113,6 +113,17 @@ def test_swiglu_proxy_objective_counts_each_group_once():
     assert stats["proxy_objective"] == pytest.approx(expected)
 
 
+def test_swiglu_scale_search_supports_non_divisible_group_width():
+    gate, up, down, inputs = _weights()
+    gate, up, down = gate[:11], up[:11], down[:, :11]
+    scales, stats = choose_swiglu_scales(
+        inputs, gate, up, down, group_size=4, candidate_exponents=(0.0,)
+    )
+    assert scales.shape == (11,)
+    assert stats["groups"] == 3
+    assert torch.isfinite(scales).all()
+
+
 def test_swiglu_jacobian_salience_matches_definition():
     gate, up, down, inputs = _weights()
     gate_activation = inputs @ gate.T
