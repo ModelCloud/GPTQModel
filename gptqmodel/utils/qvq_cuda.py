@@ -29,7 +29,6 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 
-
 QVQ_CUDA_BITS = QVQ_BITS
 _QVQ_CUDA_OPS_NAME = "gptqmodel_qvq_cuda_ops"
 _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"
@@ -71,6 +70,7 @@ def _validate_viterbi_distance_range(
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
+_QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
 _PGC16_LEVELS: dict[tuple[torch.device, str], torch.Tensor] = {}
 _PGC16_LEVELS_LOCK = threading.Lock()
@@ -86,6 +86,7 @@ def _qvq_cuda_sources() -> list[str]:
         str(_qvq_cuda_root() / "qvq_viterbi_cuda.cu"),
         str(_qvq_cuda_root() / "qvq_hadamard_cuda.cu"),
         str(_qvq_cuda_root() / "qvq_yaqa_cuda.cu"),
+        str(_qvq_cuda_root() / "qvq_swiglu_cuda.cu"),
     ]
 
 
@@ -110,8 +111,10 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard",
         "yaqa_feedback",
         "yaqa_feedback_update_",
+        "norm_rank_telemetry_snapshot",
         "norm_rank_cache_size",
         "norm_cache_size",
+        "swiglu_proxy_scales",
     ),
     sources=_qvq_cuda_sources,
     build_root_env="GPTQMODEL_QVQ_CUDA_BUILD_ROOT",
@@ -140,6 +143,29 @@ def _extension_api():
     from gptqmodel import extension as extension_api
 
     return extension_api
+
+
+def qvq_cuda_norm_rank_telemetry_snapshot(device: torch.device | str | int) -> dict[str, int | float | bool | str]:
+    """Return cumulative exact-pruning work counters for one CUDA device."""
+
+    resolved = torch.device("cuda", device) if isinstance(device, int) else torch.device(device)
+    with torch.cuda.device(resolved):
+        values = _extension_api().op("qvq_cuda", "norm_rank_telemetry_snapshot")()
+        cache_entries = int(_extension_api().op("qvq_cuda", "norm_rank_cache_size")())
+    dispatches, baseline_fallbacks, evaluated, possible = (int(value) for value in values)
+    skipped = max(0, possible - evaluated)
+    reduction = 0.0 if possible == 0 else skipped / possible
+    return {
+        "strategy": "norm_band",
+        "exact": True,
+        "eligible_dispatches": dispatches,
+        "baseline_fallbacks": baseline_fallbacks,
+        "candidates_evaluated": evaluated,
+        "baseline_candidates_possible": possible,
+        "candidates_skipped": skipped,
+        "candidate_reduction": reduction,
+        "norm_rank_cache_entries": cache_entries,
+    }
 
 
 def _qvq_cuda_op() -> Callable:
@@ -221,6 +247,28 @@ def _qvq_cuda_yaqa_feedback_update_op() -> Callable:
                     "qvq_cuda", "yaqa_feedback_update_"
                 )
     return _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP
+
+
+def qvq_cuda_swiglu_proxy_scales(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    group_size: int,
+    scale_min: float,
+    scale_max: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run fused CUDA Smooth-SwiGLU statistics and analytical group solve."""
+    global _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP
+    if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
+                _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP = _extension_api().op(
+                    "qvq_cuda", "swiglu_proxy_scales"
+                )
+    return _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP(
+        gate, up, up_weight, down_weight, group_size, scale_min, scale_max
+    )
 
 
 def _qvq_cuda_viterbi_v4_op() -> Callable:

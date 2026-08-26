@@ -1848,6 +1848,10 @@ class BaseQModel(nn.Module):
                     calibration_concat_separator=None,
                 )
             qvq_processor = QVQProcessor(**qvq_args)
+            # Smooth-SwiGLU must precede every Hessian/YAQA capture.  It is an
+            # exact dense reparameterization, but it intentionally changes the
+            # activation geometry seen by the down projection.
+            qvq_processor.prepare_smooth_swiglu(self)
             qvq_processor.prepare_module_granular_replay(self)
             qvq_processor.prepare_yaqa(self)
             quantize_processor = preprocessors + [qvq_processor]

@@ -16,10 +16,30 @@ from .torch import torch_empty_cache
 try:
     import mlx.core as mx
 
-    mx.set_default_device(mx.cpu)
+    # MLX defaults to the Apple GPU when it is available.  Keep that choice
+    # explicit for the QVQ bridge; the previous unconditional CPU override
+    # silently made native MLX inference and generation CPU-bound on Apple
+    # silicon.  CPU remains the fallback for CPU-only MLX installations.
+    mx.set_default_device(mx.gpu if mx.is_available(mx.gpu) else mx.cpu)
 
     from mlx_lm import generate
-    from mlx_lm.utils import _get_classes, get_model_path, load_config, quantize_model
+    from mlx_lm.utils import _get_classes, load_config, quantize_model
+    try:
+        from mlx_lm.sample_utils import make_sampler
+    except ImportError:  # Older mlx-lm releases accepted `temp` directly.
+        make_sampler = None
+
+    try:
+        from mlx_lm.utils import get_model_path
+    except ImportError:
+        # mlx-lm 0.31 removed this helper.  GPTQModel has already resolved Hub
+        # identifiers to a local checkpoint before this bridge is called, so a
+        # Path wrapper is sufficient for the native QVQ conversion path.
+        from pathlib import Path
+
+        def get_model_path(model_id_or_path):
+            return Path(model_id_or_path), None
+
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False
@@ -206,8 +226,9 @@ def mlx_generate(model, tokenizer, **kwargs,):
 
     sampling_params = {}
     sampling_params["max_tokens"] = kwargs.pop("max_tokens", 256)
-    if "sampler" in kwargs:
-        sampling_params["sampler"] = kwargs.pop("sampler", None)
+    sampler = kwargs.pop("sampler", None)
+    if sampler is not None:
+        sampling_params["sampler"] = sampler
 
     if "logits_processors" in kwargs:
         sampling_params["logits_processors"] = kwargs.pop("logits_processors", None)
@@ -226,27 +247,41 @@ def mlx_generate(model, tokenizer, **kwargs,):
     sampling_params["kv_group_size"] = kwargs.pop("kv_group_size", 64)
     sampling_params["quantized_kv_start"] = kwargs.pop("quantized_kv_start", 0)
 
-    if "sampler" in kwargs:
+    if "prompt_progress_callback" in kwargs:
         sampling_params["prompt_progress_callback"] = kwargs.pop("prompt_progress_callback", None)
 
-    if kwargs.pop("temp", None) is not None:
-        sampling_params["temp"] = kwargs.pop("temp")
-    elif kwargs.pop("temperature", None) is not None:
-        sampling_params["temp"] = kwargs.pop("temperature")
+    temperature = kwargs.pop("temp", None)
+    if temperature is None:
+        temperature = kwargs.pop("temperature", None)
+    top_p = kwargs.pop("top_p", None)
+    min_p = kwargs.pop("min_p", None)
+    min_tokens_to_keep = kwargs.pop("min_tokens_to_keep", None)
+    if sampler is None and make_sampler is not None:
+        sampler_kwargs = {}
+        if temperature is not None:
+            sampler_kwargs["temp"] = temperature
+        if top_p is not None:
+            sampler_kwargs["top_p"] = top_p
+        if min_p is not None:
+            sampler_kwargs["min_p"] = min_p
+        if min_tokens_to_keep is not None:
+            sampler_kwargs["min_tokens_to_keep"] = min_tokens_to_keep
+        sampling_params["sampler"] = make_sampler(**sampler_kwargs)
+    elif sampler is None:
+        # Older mlx-lm releases accepted these sampling arguments directly.
+        if temperature is not None:
+            sampling_params["temp"] = temperature
+        if top_p is not None:
+            sampling_params["top_p"] = top_p
+        if min_p is not None:
+            sampling_params["min_p"] = min_p
+        if min_tokens_to_keep is not None:
+            sampling_params["min_tokens_to_keep"] = min_tokens_to_keep
 
     if "repetition_penalty" in kwargs:
         sampling_params["repetition_penalty"] = kwargs.pop("repetition_penalty", None)
 
     if "repetition_context_size" in kwargs:
         sampling_params["repetition_context_size"] = kwargs.pop("repetition_context_size", None)
-
-    if "top_p" in kwargs:
-        sampling_params["top_p"] = kwargs.pop("top_p", None)
-
-    if "min_p" in kwargs:
-        sampling_params["min_p"] = kwargs.pop("min_p", None)
-
-    if "min_tokens_to_keep" in kwargs:
-        sampling_params["min_tokens_to_keep"] = kwargs.pop("min_tokens_to_keep", None)
 
     return generate(model=model, tokenizer=tokenizer, prompt=prompt, verbose=verbose, **sampling_params)

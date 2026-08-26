@@ -230,7 +230,7 @@ def write_shards(rows, name: str, count: int, out_dir: Path):
     reference_tokens = 0
     while index < len(rows) and reference_tokens < REFERENCE_TOKENS_PER_SOURCE:
         messages, row_tokens = rows[index]
-        reference.append(messages)
+        reference.append({"messages": messages, "source": name})
         reference_tokens += row_tokens
         index += 1
     print(
@@ -343,9 +343,11 @@ def main() -> int:
     # Add a local-domain reference that is strictly between benchmark and YAQA ranges.
     local_reference = [to_messages(nm[i]["messages"]) for i in range(428, 512)]
     reference_rows.extend(
-        row for row in local_reference if content_hash(row) not in forbidden
+        {"messages": row, "source": "nm_local_reference"}
+        for row in local_reference
+        if content_hash(row) not in forbidden
     )
-    reference_hashes = {content_hash(row) for row in reference_rows}
+    reference_hashes = {content_hash(row["messages"]) for row in reference_rows}
     if reference_hashes & forbidden:
         raise RuntimeError(
             "Reference content overlaps locked benchmark or YAQA content"
@@ -364,7 +366,7 @@ def main() -> int:
         raise RuntimeError("Candidate content overlaps coverage-reference content")
 
     reference_path = shards_dir / "reference.parquet"
-    pd.DataFrame({"messages": reference_rows}).to_parquet(reference_path, index=False)
+    pd.DataFrame(reference_rows).to_parquet(reference_path, index=False)
 
     preparation = {
         "model": MODEL,

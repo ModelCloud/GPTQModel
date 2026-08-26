@@ -1,0 +1,17 @@
+{
+  "calibration_files": [
+    "dataset/calibration_mix_500k_llama3.2_1b/calibration_div300_sources_disjoint.parquet"
+  ],
+  "calibration_rows": 959,
+  "evaluation_splits": [
+    "d300",
+    "d300_locked",
+    "gsm8k_platinum"
+  ],
+  "internal_duplicate_groups": {},
+  "method": "user-turn-only; NFKC + casefold + whitespace/punctuation normalization; SHA256",
+  "overlap_groups": {},
+  "schema": "qvq.calibration_disjointness.v2",
+  "status": "fail",
+  "failure_reason": "This historical 959-row artifact contains normalized collisions with divergence300-locked.jsonl and is not eligible for quantization or benchmark claims. Regenerate with build_div300_source_mix.py after the locked-split exclusion fix."
+}

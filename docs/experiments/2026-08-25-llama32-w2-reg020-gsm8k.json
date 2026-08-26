@@ -1,0 +1,13 @@
+{
+  "experiment":"llama32-1b-flat-w2-reg020-gsm8k-platinum",
+  "git_commit":"210e8031",
+  "checkpoint":"/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3",
+  "d300_top1_at_32":0.1878125,
+  "task":"gsm8k_platinum_cot",
+  "queue":{"session":98290,"gpu":0,"previous_wait_session":24963,"status":"complete"},
+  "protocol":{"batch_size":16,"attn_implementation":"paged|flash_attention_2","continuous_batching":true,"paged_attention":true,"evalution":"0.0.14"},
+  "report":"/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3-gsm8k-platinum-v1.json",
+  "report_sha256":"52fbc453bdcd129e623172fcb76cca460115cbf4840ca81f3a1958f2c6e6a10e",
+  "gsm8k_acc_num":0.17866004962779156,
+  "completed_at_utc":"2026-08-25T23:55:43.201820+00:00"
+}

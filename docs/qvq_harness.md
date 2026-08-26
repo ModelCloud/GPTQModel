@@ -4,8 +4,8 @@ QVQ has two production-facing, model-agnostic command-line harnesses:
 
 - `scripts/qvq_quantize.py` loads a dense model, runs every required preparation stage through the normal
   GPTQModel lifecycle, quantizes, saves the checkpoint, and writes a reproducibility manifest.
-- `scripts/qvq_evaluate.py` loads an already saved checkpoint. Its `diagnostics` command compares final logits
-  with the dense source; its `tasks` command runs Evalution suites.
+- `scripts/qvq_evaluate.py` loads an already saved checkpoint. Its `diagnostics` command compares final logits,
+  `divergence300` runs the canonical independent-trajectory test, and `tasks` runs Evalution suites.
 
 Preparation and evaluation are deliberately separated. Sketch-B, activation Hessians, output alignment, and
 module-granular replay can affect quantization and therefore belong in the quantization process. Held-out final-logit
@@ -56,16 +56,77 @@ warmup**. It is the llama.cpp-style ``Same top p`` comparison over 32 positions 
 context: both models see the same source prefix at every position.
 `legacy_shared_prefix_first_32` retains the former position-0 measurement solely to interpret historical artifacts;
 it is not the headline because those predictions have almost no conditioning context.
-`divergence_300` separately runs independent fixed-horizon greedy continuations from each held-out prompt. Its
-`trajectory_survival` is the fraction of prompts whose full 32-token trajectories are identical; aligned-token
-agreement after the trajectories split is a secondary diagnostic and is not reported as shared-prefix Top-1.
+`divergence_300_at_32` separately runs independent fixed-horizon greedy continuations from each held-out prompt. It
+reports both aligned-token Top-1 after the trajectories split and the stricter fraction of prompts whose full
+32-token trajectories are identical. Neither is reported as shared-prefix Top-1.
 `--include-topn` additionally reports legacy Top-5 and Top-10 set overlap.
 
 This distinction also matters when comparing against [Unsloth's Divergence-300 @32](https://unsloth.ai/docs/basics/dynamic-3.0-ggufs#divergence-300-32).
-Unsloth uses 300 unseen task prompts and independently greedy-decodes BF16 and quantized trajectories for 32 tokens. It is conceptually
-closest to this harness's `divergence_300`, not `sp_top1_32_w50`. The Unsloth documentation does not currently
-specify its scalar aggregation precisely enough to claim numerical parity, so results should not be compared until
-the prompts, chat templates, decoding settings, and aggregation rule are identical.
+Unsloth uses 300 unseen task prompts and independently greedy-decodes BF16 and quantized trajectories for 32 tokens.
+It is conceptually closest to this harness's `divergence_300_at_32`, not `sp_top1_32_w50`.
+Unsloth does not publish the scalar reduction or executable grader. QVQ therefore reports both plausible reductions
+under unambiguous names rather than choosing one silently.
+
+For scale, Unsloth's published narrative describes UD-Q2_K_XL at roughly 25% and lower 1-bit quants at roughly
+8--10% on Divergence-300 @32, despite ordinary Top-1 around 77%. A 25% development target is therefore plausible for
+a strong two-bit result; an 80% shared-prefix score must not be reused as an independent-rollout target. These values
+are context, not directly comparable scores, because Unsloth has not released its exact prompts or scalar reducer.
+
+## Run Divergence-300 @32
+
+First download the named source datasets to a local immutable cache. Then construct both prompt splits together;
+the builder pins the cached Hub revisions and fails unless the development and locked sets are content-disjoint.
+
+```bash
+python scripts/prepare_divergence300.py \
+  --source-root /private/qvq-data/divergence300-sources \
+  --output-dir /private/qvq-data/divergence300-v1
+
+python scripts/qvq_evaluate.py divergence300 \
+  --dense-model /private/monster/data/model/DenseModel \
+  --checkpoint /private/monster/data/model/qvq-model \
+  --dataset /private/qvq-data/divergence300-v1/divergence300-locked.jsonl \
+  --max-prompt-tokens 16384 \
+  --dtype float16 \
+  --device cuda:0 \
+  --output artifacts/qvq-model-divergence300.json
+```
+
+The evaluator reports two explicit reductions because Unsloth has not published which scalar reduction its chart
+uses. `divergence_300_at_32.independent_token_top1_agreement_at_32` is
+
+```text
+number of aligned token positions whose independently generated token IDs match / (300 * 32)
+```
+
+`divergence_300_at_32.exact_trajectory_agreement_at_32` is
+
+```text
+number of prompts whose quantized token IDs equal the dense token IDs at every one of 32 steps / 300
+```
+
+Equivalently, for dense tokens `d[p,t]` and quantized tokens `q[p,t]`,
+
+```text
+A@h = (1 / 300) * sum_p product_(t=1..h) 1[d[p,t] = q[p,t]]
+```
+
+In plain language: both models start with the same prompt and write independently. A prompt remains alive at step
+`h` only if the two models have written the same token at every step so far. One mismatch makes that prompt zero for
+that horizon and every later horizon. This is why `A@32` is much lower than teacher-forced Top-1 agreement.
+
+`independent_token_top1_by_horizon` reports cumulative aligned-token agreement and
+`exact_prefix_survival_by_horizon` reports exact survival from 1 through 32 tokens. The evaluator also records each
+continuation, source-stratified scores, an exact-survival Wilson interval, prompt-manifest SHA-256, and decoding
+parameters.
+The compute dtype is explicit and is applied to both models. QVQ's historical comparisons use `float16`; use
+`--dtype bfloat16` for a separate BF16-reference experiment rather than silently mixing the two protocols.
+
+Unsloth has published the source families but not its exact 300 prompts, chat rendering, scalar reduction, executable
+grader, or result files. Its DeepSWE subset is also access-restricted. The QVQ v1 mix therefore uses pinned
+Terminal-Bench 2.1, MathArena
+2025--26, non-English Multi-IF, LongBench v2, and public SWE-bench Verified as a declared DeepSWE proxy. This is
+protocol-compatible, not a claim of dataset-identical comparability.
 
 ## Run Evalution tasks
 

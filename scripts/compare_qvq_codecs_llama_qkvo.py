@@ -1107,6 +1107,81 @@ def _divergence_metrics(
 
 
 @torch.inference_mode()
+def _literal_greedy_rollout(
+    model: torch.nn.Module,
+    row: dict[str, torch.Tensor],
+    *,
+    token_count: int,
+) -> torch.Tensor:
+    """Make exactly ``token_count`` argmax decisions, including EOS.
+
+    This deliberately avoids ``generate(min_new_tokens=...)`` because that
+    processor suppresses EOS and therefore is not an independent greedy
+    fixed-horizon trajectory.  KV caching is used when returned by the model.
+    """
+
+    input_ids = row["input_ids"]
+    if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        raise ValueError("independent greedy rollout requires a single sequence")
+    if token_count < 1:
+        raise ValueError("greedy rollout token_count must be positive")
+    generated = input_ids.clone()
+    attention_mask = row.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.clone()
+    position_ids = row.get("position_ids")
+    if position_ids is not None:
+        position_ids = position_ids.clone()
+    static_inputs = {
+        key: value
+        for key, value in row.items()
+        if key not in {"input_ids", "attention_mask", "position_ids", "past_key_values"}
+    }
+    past_key_values = None
+    for _ in range(token_count):
+        if past_key_values is None:
+            model_inputs = dict(static_inputs)
+            model_inputs["input_ids"] = generated
+            if attention_mask is not None:
+                model_inputs["attention_mask"] = attention_mask
+            if position_ids is not None:
+                model_inputs["position_ids"] = position_ids
+        else:
+            model_inputs = dict(static_inputs)
+            model_inputs["input_ids"] = generated[:, -1:]
+            model_inputs["past_key_values"] = past_key_values
+            if attention_mask is not None:
+                model_inputs["attention_mask"] = attention_mask
+            if position_ids is not None:
+                model_inputs["position_ids"] = position_ids[:, -1:]
+            for key, value in tuple(model_inputs.items()):
+                if isinstance(value, torch.Tensor) and value.ndim >= 2 and value.shape[1] > 1:
+                    model_inputs[key] = value[:, -1:]
+        output = model(**model_inputs, use_cache=True)
+        logits = getattr(output, "logits", None)
+        if logits is None and isinstance(output, Mapping):
+            logits = output.get("logits")
+        if logits is None and isinstance(output, (tuple, list)) and output:
+            logits = output[0]
+        if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
+            raise TypeError("model forward did not return [batch, sequence, vocab] logits")
+        generated = torch.cat((generated, logits[:, -1, :].argmax(dim=-1, keepdim=True)), dim=1)
+        if attention_mask is not None:
+            attention_mask = torch.cat(
+                (attention_mask, torch.ones_like(attention_mask[:, :1])), dim=1
+            )
+        if position_ids is not None:
+            position_ids = torch.cat((position_ids, position_ids[:, -1:] + 1), dim=1)
+        next_past = getattr(output, "past_key_values", None)
+        if next_past is None and isinstance(output, Mapping):
+            next_past = output.get("past_key_values")
+        if next_past is None and isinstance(output, (tuple, list)) and len(output) > 1:
+            next_past = output[1]
+        past_key_values = next_past
+    return generated[:, input_ids.shape[1] :]
+
+
+@torch.inference_mode()
 def _independent_greedy_divergence_metrics(
     dense_model: torch.nn.Module,
     quantized_model: torch.nn.Module,
@@ -1116,15 +1191,8 @@ def _independent_greedy_divergence_metrics(
 ) -> dict[str, torch.Tensor]:
     """Run independent fixed-horizon greedy continuations and compare trajectories."""
 
-    generation_kwargs = {
-        "do_sample": False,
-        "max_new_tokens": token_count,
-        "min_new_tokens": token_count,
-        "use_cache": True,
-    }
-    prompt_tokens = row["input_ids"].shape[1]
-    dense_tokens = dense_model.generate(**row, **generation_kwargs)[:, prompt_tokens:]
-    quantized_tokens = quantized_model.generate(**row, **generation_kwargs)[:, prompt_tokens:]
+    dense_tokens = _literal_greedy_rollout(dense_model, row, token_count=token_count)
+    quantized_tokens = _literal_greedy_rollout(quantized_model, row, token_count=token_count)
     return greedy_trajectory_metrics(dense_tokens, quantized_tokens, token_count=token_count)
 
 
@@ -2994,6 +3062,7 @@ def _streaming_compare_models_cpu(
     divergence_report["valid_sequences"] = divergence_accumulator.weight
     divergence_report["token_horizon"] = divergence_tokens
     divergence_report["protocol"] = "independent_greedy_rollout"
+    divergence_report["eos_policy"] = "EOS is an ordinary token; exactly token_horizon argmax steps"
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,
@@ -3202,6 +3271,7 @@ def _streaming_compare_models_cuda(
     divergence_report["valid_sequences"] = divergence_accumulator.weight
     divergence_report["token_horizon"] = divergence_tokens
     divergence_report["protocol"] = "independent_greedy_rollout"
+    divergence_report["eos_policy"] = "EOS is an ordinary token; exactly token_horizon argmax steps"
     result = {
         "local_modules": local_metrics,
         "live_modules": live_metrics,

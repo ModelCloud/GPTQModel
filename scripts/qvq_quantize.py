@@ -40,6 +40,7 @@ from gptqmodel.quantization import (
     ModuleGranularReplayConfig,
     OutputAlignConfig,
     QVQConfig,
+    SmoothSwiGLUConfig,
     YaqaConfig,
 )
 from gptqmodel.quantization.config import ChatTemplateConfig
@@ -67,6 +68,7 @@ QVQ_FORMATS = tuple(
         FORMAT.QVQ_V2B4_P64,
     )
 )
+DEFAULT_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 @dataclass(frozen=True)
@@ -102,7 +104,9 @@ def _add_dataset_args(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--model", required=True, help="Dense source checkpoint or Hub model ID."
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Dense source checkpoint or Hub model ID (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--output", type=Path, required=True, help="New quantized checkpoint directory."
@@ -111,6 +115,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--report",
         type=Path,
         help="Run manifest; defaults inside the output directory.",
+    )
+    parser.add_argument(
+        "--disjointness-manifest",
+        type=Path,
+        help=(
+            "Preflight manifest from check_calibration_disjointness.py; when supplied, "
+            "status and cryptographic bindings are validated."
+        ),
+    )
+    parser.add_argument(
+        "--require-disjointness",
+        action="store_true",
+        help=(
+            "Fail closed unless --disjointness-manifest is present, pass-status, and "
+            "cryptographically binds every local preparation input plus both D300 manifests."
+        ),
     )
     parser.add_argument(
         "--quant-config",
@@ -217,6 +237,16 @@ def build_parser() -> argparse.ArgumentParser:
             "mlp_gate_up_down",
         ),
     )
+    parser.add_argument(
+        "--smooth-swiglu",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fold calibration-selected up/down SwiGLU channel scales before QVQ Hessian capture.",
+    )
+    parser.add_argument("--smooth-swiglu-group-size", type=int, default=16)
+    parser.add_argument(
+        "--smooth-swiglu-max-calibration-tokens", type=int, default=2048
+    )
     return parser
 
 
@@ -233,11 +263,19 @@ def aggregate_qvq_process_telemetry(
     counters: Counter[str] = Counter()
     modules: list[dict[str, object]] = []
     shapes: dict[str, dict[str, object]] = {}
+    latest_pruning: dict[str, object] | None = None
     for row in _quant_log_rows(quant_log):
         telemetry = row.get("qvq_telemetry")
         if not isinstance(telemetry, dict):
             continue
         module_counters = telemetry.get("counters", {})
+        module_pruning = telemetry.get("viterbi_pruning")
+        if isinstance(module_pruning, dict) and (
+            latest_pruning is None
+            or int(module_pruning.get("baseline_candidates_possible", 0))
+            >= int(latest_pruning.get("baseline_candidates_possible", 0))
+        ):
+            latest_pruning = dict(module_pruning)
         counters.update(module_counters)
         input_features = int(module_counters.get("input_features", 0))
         output_features = int(module_counters.get("output_features", 0))
@@ -280,6 +318,7 @@ def aggregate_qvq_process_telemetry(
                 "process_quant_seconds": float(row.get("time", 0.0)),
                 "phases": module_phases,
                 "counters": dict(module_counters),
+                "viterbi_pruning": module_pruning,
             }
         )
     if not modules:
@@ -293,6 +332,7 @@ def aggregate_qvq_process_telemetry(
         ),
         "phases": phases,
         "counters": dict(counters),
+        "viterbi_pruning": latest_pruning,
         "shapes": shapes,
         "modules": modules,
     }
@@ -360,6 +400,15 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         yaqa=yaqa,
         output_alignment=alignment,
         module_granular_replay=replay,
+        smooth_swiglu=(
+            SmoothSwiGLUConfig(
+                enabled=True,
+                group_size=args.smooth_swiglu_group_size,
+                max_calibration_tokens=args.smooth_swiglu_max_calibration_tokens,
+            )
+            if args.smooth_swiglu
+            else None
+        ),
         # YAQA preparation performs an exact full-model backward for Sketch-B.
         # A checkpoint-backed LazyTurtle shell cannot participate in autograd.
         offload_to_disk=args.rounding != "yaqa",
@@ -802,6 +851,100 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_disjointness_manifest(
+    manifest_path: Path | None,
+    *,
+    required: bool,
+    datasets: dict[str, DatasetSlice | None],
+) -> tuple[Path, dict[str, Any]] | None:
+    """Validate a status manifest and, in strict mode, bind run inputs to it."""
+
+    if manifest_path is None:
+        if required:
+            raise RuntimeError(
+                "refusing benchmark quantization: --require-disjointness requires "
+                "a cryptographically bound --disjointness-manifest"
+            )
+        return None
+    resolved = manifest_path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"disjointness manifest not found: {resolved}")
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid disjointness manifest JSON: {resolved}") from exc
+    if data.get("status") != "pass":
+        raise RuntimeError(
+            "refusing quantization: calibration/evaluation disjointness preflight failed; "
+            f"see {resolved}"
+        )
+    if not required:
+        return resolved, data
+
+    calibration_bindings = data.get("calibration_bindings")
+    evaluation_bindings = data.get("evaluation_bindings")
+    if not isinstance(calibration_bindings, list) or not isinstance(evaluation_bindings, dict):
+        raise RuntimeError(
+            "refusing benchmark quantization: manifest lacks cryptographic input bindings; "
+            "regenerate it with the current check_calibration_disjointness.py"
+        )
+    bound_files = {
+        str(Path(item["path"]).expanduser().resolve()): item
+        for item in calibration_bindings
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for name, spec in datasets.items():
+        if spec is None:
+            continue
+        source = Path(spec.source).expanduser()
+        if not source.is_file():
+            raise RuntimeError(
+                f"refusing benchmark quantization: preparation input `{name}` is not a local file "
+                "and cannot be cryptographically bound"
+            )
+        canonical = str(source.resolve())
+        binding = bound_files.get(canonical)
+        if binding is None:
+            raise RuntimeError(
+                f"refusing benchmark quantization: manifest does not bind `{name}` source {canonical}"
+            )
+        actual_sha = _sha256_file(source.resolve())
+        if binding.get("sha256") != actual_sha:
+            raise RuntimeError(
+                f"refusing benchmark quantization: SHA-256 changed for `{name}` source {canonical}"
+            )
+        slices = binding.get("slices")
+        if not isinstance(slices, list):
+            raise RuntimeError(
+                f"refusing benchmark quantization: manifest does not bind the selected `{name}` row slice"
+            )
+        if not any(
+            isinstance(item, dict)
+            and item.get("row_start") == spec.row_start
+            and item.get("rows") == spec.rows
+            for item in slices
+        ):
+            raise RuntimeError(
+                f"refusing benchmark quantization: manifest slice does not match `{name}` "
+                f"[{spec.row_start}, {spec.row_stop})"
+            )
+    required_eval = {"d300", "d300_locked"}
+    if not required_eval.issubset(evaluation_bindings):
+        missing = ", ".join(sorted(required_eval - set(evaluation_bindings)))
+        raise RuntimeError(
+            "refusing benchmark quantization: manifest must bind both D300 development and locked manifests; "
+            f"missing {missing}"
+        )
+    for label in required_eval:
+        item = evaluation_bindings[label]
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise RuntimeError(f"refusing benchmark quantization: invalid {label} manifest binding")
+        path = Path(item["path"]).expanduser().resolve()
+        if not path.is_file() or item.get("sha256") != _sha256_file(path):
+            raise RuntimeError(f"refusing benchmark quantization: SHA-256 changed for {label} manifest {path}")
+    return resolved, data
+
+
 def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
     """Serialize slice identity and content authority for local frozen inputs."""
 
@@ -836,6 +979,10 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Freeze provenance before any long-running data preparation or quantization.
+    # Reading HEAD while writing the report can misattribute a run when a docs-only
+    # commit is made concurrently with GPU work.
+    run_commit = _git_commit()
     if args.batch_size < 1 or args.concat_size < 0:
         raise ValueError(
             "batch size must be positive and concat size must be nonnegative"
@@ -852,6 +999,21 @@ def main(argv: list[str] | None = None) -> int:
     validation_spec = _slice_from_args(args, "validation")
     replay_search_spec = _slice_from_args(args, "replay_search")
     replay_confirmation_spec = _slice_from_args(args, "replay_confirmation")
+    disjointness_binding = _validate_disjointness_manifest(
+        args.disjointness_manifest,
+        # Supplying a manifest is an assertion that this run is benchmark
+        # eligible, so validate its cryptographic bindings even without the
+        # explicit convenience flag.  ``--require-disjointness`` additionally
+        # rejects runs that omit the manifest entirely.
+        required=args.require_disjointness or args.disjointness_manifest is not None,
+        datasets={
+            "calibration": calibration_spec,
+            "yaqa": yaqa_spec,
+            "validation": validation_spec,
+            "replay_search": replay_search_spec,
+            "replay_confirmation": replay_confirmation_spec,
+        },
+    )
     config = build_quantize_config(args)
     controller = None
     dense_source_binding = None
@@ -1034,15 +1196,32 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "model": args.model,
         "output": str(output),
-        "commit": _git_commit(),
+        "commit": run_commit,
         "python": platform.python_version(),
         "python_gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
         "torch": torch.__version__,
-        "device": args.device,
-        "device_name": torch.cuda.get_device_name(torch.device(args.device))
-        if torch.device(args.device).type == "cuda"
+        # A complete --quant-config is authoritative; args.device remains at
+        # its parser default when convenience flags are intentionally ignored.
+        # Reporting args.device here can query CUDA on a CUDA-less MPS host
+        # after a successful quantization and mask the real result.
+        "device": str(config.device),
+        "device_name": torch.cuda.get_device_name(torch.device(config.device))
+        if torch.device(config.device).type == "cuda"
         else None,
+        "disjointness_manifest": (
+            None
+            if disjointness_binding is None
+            else {
+                "path": str(disjointness_binding[0]),
+                "sha256": _sha256_file(disjointness_binding[0]),
+                "status": disjointness_binding[1].get("status"),
+                "strict_required": args.require_disjointness or args.disjointness_manifest is not None,
+                "calibration_bindings": disjointness_binding[1].get("calibration_bindings"),
+                "evaluation_bindings": disjointness_binding[1].get("evaluation_bindings"),
+            }
+        ),
         "quantize_config": config.to_dict(),
+        "smooth_swiglu": getattr(model, "qvq_smooth_swiglu_stats", None),
         "datasets": {
             name: None if spec is None else dataset_slice_evidence(spec)
             for name, spec in {
@@ -1063,6 +1242,9 @@ def main(argv: list[str] | None = None) -> int:
             "save": save_seconds,
         },
         "quant_log_rows": len(_quant_log_rows(quant_log)),
+        # Preserve the complete per-module metric records so a snapshot is
+        # self-describing even when the controller/log stream is unavailable.
+        "quantization_metrics": _quant_log_rows(quant_log),
         "telemetry": {
             "qvq_process_quant": aggregate_qvq_process_telemetry(quant_log),
             "lifecycle": lifecycle_telemetry,

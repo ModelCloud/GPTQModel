@@ -12,16 +12,33 @@ never prepares or quantizes a model.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib
 import json
+import math
+import os
 import sys
 import time
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:  # Python 3.10 compatibility
+    UTC = timezone.utc
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# Evalution already maintains sample-level running metrics in progress titles.
+# LogBar otherwise suppresses them when it detects an agent or CI environment.
+os.environ["LOGBAR_FORCE_PROGRESS"] = "1"
 
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
@@ -49,8 +66,65 @@ TASKS = {
     "arc_challenge": ("arc_challenge", True, {}),
     "gsm8k_platinum_cot": ("gsm8k_platinum_cot", True, {}),
     "mmlu_stem": ("mmlu_stem", False, {}),
+    "mmlu_humanities": ("mmlu", False, {"subsets": "humanities"}),
     "mmlu_history": ("mmlu", False, {"subsets": MMLU_HISTORY_SUBSETS}),
 }
+
+
+class _ChoiceProgressAsRows:
+    """Expose four MMLU choice completions as one completed question row."""
+
+    def __init__(self, progress: Any, *, choices_per_row: int) -> None:
+        self._progress = progress
+        self._choices_per_row = choices_per_row
+        self._completed_choices = 0
+        self._row_advanced = False
+
+    def next(self) -> _ChoiceProgressAsRows:
+        self._completed_choices += 1
+        self._row_advanced = self._completed_choices % self._choices_per_row == 0
+        if self._row_advanced:
+            self._progress.next()
+        return self
+
+    def draw(self) -> _ChoiceProgressAsRows:
+        if self._row_advanced:
+            self._progress.draw()
+        return self
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._progress, name)
+
+
+@contextmanager
+def _mmlu_question_row_progress(enabled: bool) -> Generator[None]:
+    """Render MMLU progress in completed rows while preserving choice-level work."""
+
+    if not enabled:
+        yield
+        return
+
+    mmlu_module = importlib.import_module("evalution.benchmarks.mmlu")
+    original_manual_progress = mmlu_module.manual_progress
+    choices_per_row = len(mmlu_module._MMLU_LABELS)
+
+    def manual_row_progress(total: int, *, title: str, subtitle: str) -> Any:
+        if not title.endswith(": scoring answer choices"):
+            return original_manual_progress(total, title=title, subtitle=subtitle)
+        if total % choices_per_row:
+            raise ValueError(f"MMLU choice request total {total} is not divisible by {choices_per_row}")
+        progress = original_manual_progress(
+            total // choices_per_row,
+            title=title.removesuffix("scoring answer choices") + "completed question rows",
+            subtitle=f"{subtitle} choices_per_row={choices_per_row}",
+        )
+        return _ChoiceProgressAsRows(progress, choices_per_row=choices_per_row)
+
+    mmlu_module.manual_progress = manual_row_progress
+    try:
+        yield
+    finally:
+        mmlu_module.manual_progress = original_manual_progress
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,11 +155,48 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
     diagnostics.add_argument("--allow-calibration-overlap", action="store_true")
 
+    divergence = subparsers.add_parser(
+        "divergence300",
+        help="Run the canonical 300-prompt, 32-token independent greedy-trajectory comparison.",
+    )
+    divergence.add_argument("--dense-model", required=True)
+    divergence.add_argument("--checkpoint", type=Path, required=True)
+    divergence.add_argument("--dataset", type=Path, required=True, help="Pinned local 300-prompt JSONL manifest.")
+    divergence.add_argument("--device", default="cuda:0")
+    divergence.add_argument("--output", type=Path, required=True)
+    divergence.add_argument("--max-prompt-tokens", type=int, default=16384)
+    divergence.add_argument(
+        "--dtype",
+        choices=("float16", "bfloat16"),
+        default="float16",
+        help="Compute dtype used identically by the dense and quantized models.",
+    )
+    divergence.add_argument(
+        "--attn-implementation",
+        choices=("eager", "sdpa", "flash_attention_2"),
+        default="sdpa",
+        help="Attention implementation used identically by dense and quantized models.",
+    )
+    divergence.add_argument("--trust-remote-code", action="store_true")
+    divergence.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
+
     tasks = subparsers.add_parser("tasks", help="Run Evalution tasks on the quantized checkpoint.")
     tasks.add_argument("--checkpoint", type=Path, required=True)
     tasks.add_argument("--output", type=Path, required=True)
+    tasks.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append missing tasks to a compatible task report, publishing atomically after every task.",
+    )
     tasks.add_argument("--batch-size", type=int, default=16)
     tasks.add_argument("--backend", choices=(BACKEND.QVQ.value, BACKEND.EXL3_EXLLAMA_V3.value), default="qvq")
+    tasks.add_argument("--device", default="cuda:0")
+    tasks.add_argument(
+        "--attn-implementation",
+        default="paged|flash_attention_2",
+        choices=("paged|flash_attention_2", "paged|sdpa"),
+        help="Paged attention backend; paged mode also activates native continuous batching.",
+    )
     tasks.add_argument("--task", action="append", choices=tuple(TASKS), help="Repeat to select tasks.")
     return parser
 
@@ -93,6 +204,44 @@ def build_parser() -> argparse.ArgumentParser:
 def _canonical_source(source: str) -> str:
     path = Path(source).expanduser()
     return str(path.resolve()) if path.exists() else source
+
+
+def _publish_snapshot_evaluation(checkpoint: Path, result_path: Path, result: dict[str, Any], *, kind: str) -> None:
+    """Keep an immutable, discoverable copy of every post-quant evaluation in the checkpoint."""
+    checkpoint = checkpoint.expanduser().resolve()
+    if not checkpoint.is_dir():
+        return
+    serialized = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    result_digest = hashlib.sha256(
+        (serialized + f"\nsource:{result_path.expanduser().resolve()}\n").encode("utf-8")
+    ).hexdigest()[:12]
+    # A digest-qualified filename makes every snapshot append-only.  Keep the
+    # historical fixed filename as a compatibility alias only when it has not
+    # been used before; never overwrite a prior evaluation in-place.
+    stem = f"post_quant_eval_result_{kind}_{result_digest}"
+    snapshot_json = checkpoint / f"{stem}.json"
+    if not snapshot_json.exists():
+        snapshot_json.write_text(serialized, encoding="utf-8")
+    lines = [f"# Post-quantization evaluation: {kind}", "", f"Source report: `{result_path}`", ""]
+    if isinstance(result.get("metrics"), dict):
+        lines += ["## Metrics", "", *[f"- **{k}**: {v}" for k, v in result["metrics"].items()], ""]
+    if isinstance(result.get("divergence_300_at_32"), dict):
+        d = result["divergence_300_at_32"]
+        lines += ["## Divergence-300", "", f"- **D300 token top-1**: {d.get('independent_token_top1_agreement_at_32')}", f"- **Exact trajectory agreement**: {d.get('exact_trajectory_agreement_at_32')}", ""]
+    if isinstance(result.get("tasks"), dict):
+        lines += ["## Tasks", ""]
+        for label, task in result["tasks"].items():
+            lines.append(f"- **{label}**: {task.get('metrics', {})}")
+    snapshot_md = checkpoint / f"{stem}.md"
+    if not snapshot_md.exists():
+        snapshot_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    legacy_stem = f"post_quant_eval_result_{kind}"
+    legacy_json = checkpoint / f"{legacy_stem}.json"
+    legacy_md = checkpoint / f"{legacy_stem}.md"
+    if not legacy_json.exists():
+        legacy_json.write_text(serialized, encoding="utf-8")
+    if not legacy_md.exists():
+        legacy_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _ranges_overlap(left_start: int, left_rows: int, right_start: int, right_rows: int) -> bool:
@@ -133,6 +282,46 @@ def validate_evaluation_is_held_out(
             )
 
 
+def validate_divergence_manifest_binding(checkpoint: Path, dataset_path: Path) -> None:
+    """Require canonical D300 evaluations to use the manifest-bound file."""
+
+    run_manifest = checkpoint / "qvq_quantize_run.json"
+    if not run_manifest.is_file():
+        return
+    payload = json.loads(run_manifest.read_text(encoding="utf-8"))
+    binding = payload.get("disjointness_manifest")
+    if not isinstance(binding, dict) or not binding.get("strict_required"):
+        return
+    evaluations = binding.get("evaluation_bindings")
+    if not isinstance(evaluations, dict):
+        raise RuntimeError(
+            "checkpoint requires a strict disjointness manifest but has no evaluation bindings"
+        )
+    requested = dataset_path.expanduser().resolve()
+    digest = hashlib.sha256()
+    with requested.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    requested_sha = digest.hexdigest()
+    matches = []
+    for label in ("d300", "d300_locked"):
+        item = evaluations.get(label)
+        if isinstance(item, dict) and item.get("path"):
+            bound_path = Path(item["path"]).expanduser().resolve()
+            if bound_path == requested:
+                matches.append((label, item))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "canonical divergence evaluation dataset is not bound by the checkpoint's strict disjointness manifest: "
+            f"{requested}"
+        )
+    label, item = matches[0]
+    if item.get("sha256") != requested_sha:
+        raise RuntimeError(
+            f"checkpoint-bound {label} manifest changed on disk: {requested}"
+        )
+
+
 def _row_text(row: dict[str, Any], tokenizer, text_column: str | None) -> str:
     if text_column is not None:
         if text_column not in row:
@@ -148,6 +337,40 @@ def _row_text(row: dict[str, Any], tokenizer, text_column: str | None) -> str:
     if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
         return tokenizer.apply_chat_template(value, tokenize=False, add_generation_prompt=True)
     raise ValueError("Every evaluation row must provide nonempty text or a supported messages list")
+
+
+def _encode_prompt(row: dict[str, Any], tokenizer, *, max_prompt_tokens: int) -> dict[str, torch.Tensor]:
+    messages = row.get("messages")
+    if not isinstance(messages, list) or not messages or not all(isinstance(item, dict) for item in messages):
+        raise ValueError("Divergence-300 rows must contain a nonempty `messages` conversation")
+    previous_side = tokenizer.truncation_side
+    tokenizer.truncation_side = "left"
+    try:
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+            truncation=True,
+            max_length=max_prompt_tokens,
+        )
+    finally:
+        tokenizer.truncation_side = previous_side
+    if not isinstance(encoded, Mapping) or "input_ids" not in encoded:
+        raise TypeError("tokenizer chat template did not return an encoded input mapping")
+    return dict(encoded)
+
+
+def _wilson_interval(successes: int, total: int, *, z: float = 1.959963984540054) -> tuple[float, float]:
+    if total < 1 or successes < 0 or successes > total:
+        raise ValueError("Wilson interval requires 0 <= successes <= total and total > 0")
+    proportion = successes / total
+    z2 = z * z
+    denominator = 1.0 + z2 / total
+    center = (proportion + z2 / (2.0 * total)) / denominator
+    half_width = z * math.sqrt(proportion * (1.0 - proportion) / total + z2 / (4.0 * total * total)) / denominator
+    return center - half_width, center + half_width
 
 
 def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -166,19 +389,90 @@ def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
 
 @torch.inference_mode()
 def _greedy_rollout(model, encoded: dict[str, torch.Tensor], *, token_count: int, pad_token_id: int) -> torch.Tensor:
-    """Generate one independent fixed-horizon greedy continuation."""
+    """Generate one independent fixed-horizon greedy continuation.
+
+    ``generate(min_new_tokens=N)`` is not a literal greedy rollout: the
+    generation processor suppresses EOS until the minimum length is reached.
+    Divergence-300 treats EOS as an ordinary token and therefore must make
+    exactly ``N`` argmax decisions itself.  We still use the model KV cache
+    when the model provides one, but never install a stopping criterion.
+    """
 
     input_ids = encoded["input_ids"]
     if input_ids.shape[0] != 1:
         raise ValueError("Divergence-300 diagnostics require evaluation batch size 1")
-    generated = model.generate(
-        **encoded,
-        do_sample=False,
-        max_new_tokens=token_count,
-        min_new_tokens=token_count,
-        pad_token_id=pad_token_id,
-        use_cache=True,
-    )
+
+    if token_count < 1:
+        raise ValueError("greedy rollout token_count must be positive")
+    del pad_token_id  # EOS/PAD are intentionally not special in this metric.
+
+    generated = input_ids.clone()
+    attention_mask = encoded.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.clone()
+    position_ids = encoded.get("position_ids")
+    if position_ids is not None:
+        position_ids = position_ids.clone()
+    past_key_values = None
+
+    # Keep auxiliary model inputs (for example token_type_ids) but do not
+    # reuse the caller's input_ids/attention mask objects after appending.
+    static_inputs = {
+        key: value
+        for key, value in encoded.items()
+        if key not in {"input_ids", "attention_mask", "position_ids", "past_key_values"}
+    }
+    for _ in range(token_count):
+        if past_key_values is None:
+            model_inputs = dict(static_inputs)
+            model_inputs["input_ids"] = generated
+            if attention_mask is not None:
+                model_inputs["attention_mask"] = attention_mask
+            if position_ids is not None:
+                model_inputs["position_ids"] = position_ids
+        else:
+            model_inputs = dict(static_inputs)
+            model_inputs["input_ids"] = generated[:, -1:]
+            model_inputs["past_key_values"] = past_key_values
+            if attention_mask is not None:
+                model_inputs["attention_mask"] = attention_mask
+            if position_ids is not None:
+                model_inputs["position_ids"] = position_ids[:, -1:]
+            # Auxiliary per-token inputs must follow the one-token cached
+            # input, while scalar/global inputs are safe to reuse unchanged.
+            for key, value in tuple(model_inputs.items()):
+                if key in {"input_ids", "attention_mask", "position_ids", "past_key_values"}:
+                    continue
+                if isinstance(value, torch.Tensor) and value.ndim >= 2 and value.shape[1] > 1:
+                    model_inputs[key] = value[:, -1:]
+
+        output = model(**model_inputs, use_cache=True)
+        logits = getattr(output, "logits", None)
+        if logits is None and isinstance(output, Mapping):
+            logits = output.get("logits")
+        if logits is None and isinstance(output, (tuple, list)) and output:
+            logits = output[0]
+        if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
+            raise TypeError("model forward did not return [batch, sequence, vocab] logits")
+        next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated = torch.cat((generated, next_token), dim=1)
+
+        if attention_mask is not None:
+            attention_mask = torch.cat(
+                (attention_mask, torch.ones_like(attention_mask[:, :1])), dim=1
+            )
+        if position_ids is not None:
+            position_ids = torch.cat((position_ids, position_ids[:, -1:] + 1), dim=1)
+
+        next_past = getattr(output, "past_key_values", None)
+        if next_past is None and isinstance(output, Mapping):
+            next_past = output.get("past_key_values")
+        if next_past is None and isinstance(output, (tuple, list)) and len(output) > 1:
+            # Standard tuple causal-LM outputs place the cache immediately
+            # after logits when it is requested.
+            next_past = output[1]
+        past_key_values = next_past
+
     continuation = generated[:, input_ids.shape[1] :]
     if continuation.shape != (1, token_count):
         raise RuntimeError(
@@ -251,7 +545,9 @@ def _diagnostics(args: argparse.Namespace) -> int:
     token_total = 0
     divergence_sequences = 0
     divergence_aligned_token_sum = 0.0
+    divergence_aligned_match_sum = torch.zeros(args.divergence_tokens, dtype=torch.float64)
     divergence_survival_sum = 0.0
+    divergence_prefix_survival_sum = torch.zeros(args.divergence_tokens, dtype=torch.float64)
     divergence_first_sum = 0.0
     shared_prefix_sequences = 0
     shared_prefix_top1_sum = 0.0
@@ -303,7 +599,9 @@ def _diagnostics(args: argparse.Namespace) -> int:
             )
             divergence_sequences += 1
             divergence_aligned_token_sum += float(trajectory["aligned_token_agreement"].item())
+            divergence_aligned_match_sum += trajectory["aligned_token_matches"].double().cpu()
             divergence_survival_sum += float(trajectory["trajectory_survival"].item())
+            divergence_prefix_survival_sum += trajectory["prefix_survival"].double().cpu()
             divergence_first_sum += float(trajectory["first_divergence_token"].item())
 
         keep = attention_mask.to(dtype=torch.bool)
@@ -362,12 +660,49 @@ def _diagnostics(args: argparse.Namespace) -> int:
             "final_kl": float((kl_sum / token_total).item()),
             "top1_agreement": float((top1_sum / token_total).item()),
         },
-        "divergence_300": {
+        "divergence_300_at_32": {
+            "display_name": "Divergence-300 @32",
             "requested_sequences": min(args.divergence_rows, len(dataset)),
             "valid_sequences": divergence_sequences,
             "token_horizon": args.divergence_tokens,
             "protocol": "independent_greedy_rollout",
+            "published_aggregation_status": "Unsloth has not published its scalar reduction; report both reductions",
             "skipped": args.skip_independent_rollout,
+            "independent_token_top1_agreement_at_32": (
+                divergence_aligned_token_sum / divergence_sequences if divergence_sequences else None
+            ),
+            "independent_token_top1_by_position": (
+                {
+                    str(position): float(
+                        divergence_aligned_match_sum[position - 1].item() / divergence_sequences
+                    )
+                    for position in range(1, args.divergence_tokens + 1)
+                }
+                if divergence_sequences
+                else None
+            ),
+            "independent_token_top1_by_horizon": (
+                {
+                    str(horizon): float(
+                        divergence_aligned_match_sum[:horizon].sum().item()
+                        / (divergence_sequences * horizon)
+                    )
+                    for horizon in range(1, args.divergence_tokens + 1)
+                }
+                if divergence_sequences
+                else None
+            ),
+            "exact_trajectory_agreement_at_32": (
+                divergence_survival_sum / divergence_sequences if divergence_sequences else None
+            ),
+            "exact_prefix_survival_by_horizon": (
+                {
+                    str(horizon): float(divergence_prefix_survival_sum[horizon - 1].item() / divergence_sequences)
+                    for horizon in range(1, args.divergence_tokens + 1)
+                }
+                if divergence_sequences
+                else None
+            ),
             "trajectory_survival": divergence_survival_sum / divergence_sequences if divergence_sequences else None,
             "exact_sequence_agreement": (
                 divergence_survival_sum / divergence_sequences if divergence_sequences else None
@@ -418,7 +753,204 @@ def _diagnostics(args: argparse.Namespace) -> int:
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_snapshot_evaluation(checkpoint, args.output, result, kind="diagnostics")
     print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+    return 0
+
+
+@torch.inference_mode()
+def _divergence300(args: argparse.Namespace) -> int:
+    checkpoint = args.checkpoint.expanduser().resolve()
+    dataset_path = args.dataset.expanduser().resolve()
+    output_path = args.output.expanduser().resolve()
+    if not checkpoint.is_dir():
+        raise FileNotFoundError(f"Quantized checkpoint does not exist: {checkpoint}")
+    if not dataset_path.is_file() or dataset_path.suffix.lower() != ".jsonl":
+        raise FileNotFoundError(f"Pinned Divergence-300 JSONL does not exist: {dataset_path}")
+    validate_divergence_manifest_binding(checkpoint, dataset_path)
+    if output_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing result: {output_path}")
+    if args.max_prompt_tokens < 1:
+        raise ValueError("max prompt tokens must be positive")
+
+    evaluation_spec = DatasetSlice(str(dataset_path), None, "train", 0, 300)
+    validate_evaluation_is_held_out(checkpoint, evaluation_spec, allow_overlap=False)
+    dataset = load_dataset_slice(evaluation_spec)
+    if len(dataset) != 300:
+        raise RuntimeError(f"Divergence-300 requires exactly 300 prompts, got {len(dataset)}")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.dense_model,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
+    started = time.perf_counter()
+    dense = AutoModelForCausalLM.from_pretrained(
+        args.dense_model,
+        dtype=model_dtype,
+        device_map={"": args.device},
+        attn_implementation=args.attn_implementation,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    ).eval()
+    dense_load_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    quantized = GPTQModel.load(
+        str(checkpoint),
+        backend=BACKEND.QVQ,
+        dtype=model_dtype,
+        device_map={"": args.device},
+        attn_implementation=args.attn_implementation,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    quantized_load_seconds = time.perf_counter() - started
+
+    horizon = 32
+    prefix_successes = torch.zeros(horizon, dtype=torch.int64)
+    aligned_token_sum = 0.0
+    aligned_match_sum = torch.zeros(horizon, dtype=torch.int64)
+    first_divergence_sum = 0.0
+    prompt_token_total = 0
+    prompts_at_token_cap = 0
+    dense_generate_seconds = 0.0
+    quantized_generate_seconds = 0.0
+    per_source: dict[str, dict[str, int]] = {}
+    prompt_results = []
+    for row_index, raw_row in enumerate(dataset):
+        row = dict(raw_row)
+        encoded_cpu = _encode_prompt(row, tokenizer, max_prompt_tokens=args.max_prompt_tokens)
+        prompt_tokens = int(encoded_cpu["input_ids"].shape[1])
+        prompt_token_total += prompt_tokens
+        prompts_at_token_cap += int(prompt_tokens == args.max_prompt_tokens)
+        encoded = {name: value.to(args.device) for name, value in encoded_cpu.items()}
+
+        started = time.perf_counter()
+        dense_tokens = _greedy_rollout(
+            dense,
+            encoded,
+            token_count=horizon,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        dense_generate_seconds += time.perf_counter() - started
+
+        started = time.perf_counter()
+        quantized_tokens = _greedy_rollout(
+            quantized,
+            encoded,
+            token_count=horizon,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        quantized_generate_seconds += time.perf_counter() - started
+
+        metrics = greedy_trajectory_metrics(dense_tokens, quantized_tokens, token_count=horizon)
+        prefix = metrics["prefix_survival"].to(dtype=torch.int64).cpu()
+        prefix_successes += prefix
+        aligned_match_sum += metrics["aligned_token_matches"].to(dtype=torch.int64).cpu()
+        aligned_token_sum += float(metrics["aligned_token_agreement"].item())
+        first_divergence_sum += float(metrics["first_divergence_token"].item())
+        exact = int(metrics["trajectory_survival"].item())
+        source_group = str(row.get("source_group", "unknown"))
+        source_stats = per_source.setdefault(
+            source_group,
+            {"prompts": 0, "exact_at_32": 0, "aligned_token_matches": 0},
+        )
+        source_stats["prompts"] += 1
+        source_stats["exact_at_32"] += exact
+        source_stats["aligned_token_matches"] += int(metrics["aligned_token_matches"].sum().item())
+        prompt_results.append(
+            {
+                "manifest_index": row.get("manifest_index", row_index),
+                "source_group": source_group,
+                "source_id": row.get("source_id"),
+                "prompt_sha256": row.get("prompt_sha256"),
+                "prompt_tokens": prompt_tokens,
+                "exact_at_32": bool(exact),
+                "first_divergence_token": int(metrics["first_divergence_token"].item()),
+                "aligned_token_agreement": float(metrics["aligned_token_agreement"].item()),
+                "dense_token_ids": dense_tokens.tolist(),
+                "quantized_token_ids": quantized_tokens.tolist(),
+                "dense_text": tokenizer.decode(dense_tokens, skip_special_tokens=False),
+                "quantized_text": tokenizer.decode(quantized_tokens, skip_special_tokens=False),
+            }
+        )
+        if row_index == 0 or (row_index + 1) % 10 == 0:
+            print(
+                f"[Divergence-300 @32] prompts={row_index + 1}/300 "
+                f"exact={int(prefix_successes[-1])}/{row_index + 1}",
+                flush=True,
+            )
+
+    successes_at_32 = int(prefix_successes[-1].item())
+    confidence_low, confidence_high = _wilson_interval(successes_at_32, 300)
+    for stats in per_source.values():
+        stats["exact_trajectory_agreement_at_32"] = stats["exact_at_32"] / stats["prompts"]  # type: ignore[assignment]
+        stats["independent_token_top1_agreement_at_32"] = (  # type: ignore[assignment]
+            stats["aligned_token_matches"] / (stats["prompts"] * horizon)
+        )
+    result = {
+        "schema": "qvq.divergence300.result.v2",
+        "dense_model": args.dense_model,
+        "checkpoint": str(checkpoint),
+        "dataset": {
+            "path": str(dataset_path),
+            "sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+            "prompts": 300,
+            "max_prompt_tokens": args.max_prompt_tokens,
+            "prompt_tokens_total": prompt_token_total,
+            "prompts_at_token_cap": prompts_at_token_cap,
+        },
+        "decoding": {
+            "algorithm": "independent_greedy_argmax",
+            "do_sample": False,
+            "new_tokens": horizon,
+            "eos_policy": "EOS is an ordinary token; exactly 32 argmax steps are evaluated",
+            "chat_template": True,
+            "dtype": args.dtype,
+            "attn_implementation": args.attn_implementation,
+        },
+        "divergence_300_at_32": {
+            "display_name": "Divergence-300 @32",
+            "protocol": "independent_greedy_rollout",
+            "published_aggregation_status": (
+                "Unsloth has not published its scalar reduction; report both aligned-token top-1 and exact survival"
+            ),
+            "independent_token_top1_agreement_at_32": aligned_token_sum / 300,
+            "independent_token_top1_by_position": {
+                str(index + 1): int(value.item()) / 300 for index, value in enumerate(aligned_match_sum)
+            },
+            "independent_token_top1_by_horizon": {
+                str(index + 1): int(aligned_match_sum[: index + 1].sum().item()) / (300 * (index + 1))
+                for index in range(horizon)
+            },
+            "exact_trajectory_agreement_at_32": successes_at_32 / 300,
+            "exact_prompts_at_32": successes_at_32,
+            "exact_trajectory_wilson_95_percent": [confidence_low, confidence_high],
+            "exact_prefix_survival_by_horizon": {
+                str(index + 1): int(value.item()) / 300 for index, value in enumerate(prefix_successes)
+            },
+            "mean_first_divergence_token": first_divergence_sum / 300,
+            "per_source": dict(sorted(per_source.items())),
+        },
+        "seconds": {
+            "dense_load": dense_load_seconds,
+            "quantized_load": quantized_load_seconds,
+            "dense_generate": dense_generate_seconds,
+            "quantized_generate": quantized_generate_seconds,
+        },
+        "prompts": prompt_results,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_snapshot_evaluation(checkpoint, output_path, result, kind="divergence300")
+    print(json.dumps({key: value for key, value in result.items() if key != "prompts"}, indent=2, sort_keys=True))
     return 0
 
 
@@ -428,33 +960,74 @@ def _tasks(args: argparse.Namespace) -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_dir():
         raise FileNotFoundError(f"Quantized checkpoint does not exist: {checkpoint}")
-    if args.output.exists():
+    if args.output.exists() and not args.resume:
         raise FileExistsError(f"Refusing to overwrite existing result: {args.output}")
 
     from tests.eval import evaluate, format_eval_result_table, get_eval_task_results
 
     selected = args.task or list(TASKS)
-    payload: dict[str, Any] = {
+    expected_payload: dict[str, Any] = {
         "checkpoint": str(checkpoint),
         "backend": args.backend,
         "dtype": "float16",
         "batch_size": args.batch_size,
+        "device": args.device,
+        "attn_implementation": args.attn_implementation,
+        "continuous_batching_required": True,
+        "paged_attention_required": True,
+        "package_versions": {
+            "evalution": package_version("evalution"),
+            "gptqmodel": package_version("gptqmodel"),
+            "logbar": package_version("logbar"),
+            "torch": package_version("torch"),
+            "transformers": package_version("transformers"),
+        },
         "tasks": {},
     }
+    if args.output.exists():
+        payload = json.loads(args.output.read_text(encoding="utf-8"))
+        for key, expected in expected_payload.items():
+            if key == "tasks":
+                continue
+            if payload.get(key) != expected:
+                raise ValueError(
+                    f"Cannot resume incompatible task report: `{key}` is {payload.get(key)!r}, expected {expected!r}"
+                )
+        if not isinstance(payload.get("tasks"), dict):
+            raise ValueError("Cannot resume task report with a non-object `tasks` field")
+    else:
+        payload = expected_payload
+
+    def publish() -> None:
+        payload["updated_at_utc"] = datetime.now(UTC).isoformat()
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = args.output.with_name(f".{args.output.name}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(args.output)
+        _publish_snapshot_evaluation(checkpoint, args.output, payload, kind="tasks")
+
     for label in selected:
+        if label in payload["tasks"]:
+            print(f"Skipping completed task {label} from resumed report {args.output}", flush=True)
+            continue
         task, apply_chat_template, suite_kwargs = TASKS[label]
         started = time.perf_counter()
-        output = evaluate(
-            model_or_id_or_path=str(checkpoint),
-            tasks=[task],
-            backend=BACKEND(args.backend),
-            model_args={"dtype": "float16"},
-            batch_size=args.batch_size,
-            apply_chat_template=apply_chat_template,
-            gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
-            suite_kwargs=suite_kwargs,
-            trust_remote_code=False,
-        )
+        with _mmlu_question_row_progress(task.startswith("mmlu")):
+            output = evaluate(
+                model_or_id_or_path=str(checkpoint),
+                tasks=[task],
+                backend=BACKEND(args.backend),
+                model_args={
+                    "dtype": "float16",
+                    "device": args.device,
+                    "attn_implementation": args.attn_implementation,
+                },
+                batch_size=args.batch_size,
+                apply_chat_template=apply_chat_template,
+                gen_kwargs="do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
+                suite_kwargs=suite_kwargs,
+                trust_remote_code=False,
+            )
         print(format_eval_result_table(output), flush=True)
         metrics = get_eval_task_results(output)
         payload["tasks"][label] = {
@@ -462,14 +1035,20 @@ def _tasks(args: argparse.Namespace) -> int:
             "seconds": time.perf_counter() - started,
             "metrics": next(iter(metrics.values())) if metrics else {},
         }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        publish()
+        print(f"Published completed task {label} to {args.output}", flush=True)
+    if not args.output.exists():
+        publish()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return _diagnostics(args) if args.command == "diagnostics" else _tasks(args)
+    if args.command == "diagnostics":
+        return _diagnostics(args)
+    if args.command == "divergence300":
+        return _divergence300(args)
+    return _tasks(args)
 
 
 if __name__ == "__main__":

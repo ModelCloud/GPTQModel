@@ -74,7 +74,6 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_viterbi_v2_segment_banked,
 )
 
-
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(
@@ -4025,6 +4024,26 @@ def test_qvq_pruning_policy_default_argument_matches_auto():
     assert _norm_rank_dispatch_count() == before + 1
     explicit = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="auto"))
     assert all(torch.equal(a, b) for a, b in zip(legacy, explicit))
+
+
+def test_qvq_pruning_telemetry_reports_candidate_reduction(monkeypatch):
+    """Opt-in telemetry counts real candidate work, not a timing estimate."""
+
+    monkeypatch.setenv("GPTQMODEL_QVQ_TELEMETRY", "1")
+    sequences, codebooks = _norm_rank_case(20260915, 9, 3.0, 2)
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    snapshot = torch.ops.gptqmodel_qvq.norm_rank_telemetry_snapshot
+    before = tuple(int(value) for value in snapshot())
+    op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="auto"))
+    after = tuple(int(value) for value in snapshot())
+
+    dispatches = after[0] - before[0]
+    evaluated = after[2] - before[2]
+    possible = after[3] - before[3]
+    assert dispatches == 1
+    assert possible == 9 * 2 * 127 * (1 << 16)
+    assert 0 < evaluated < possible
+    assert possible - evaluated > 0
 
 
 @pytest.mark.parametrize(

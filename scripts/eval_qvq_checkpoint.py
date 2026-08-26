@@ -12,13 +12,15 @@ import sys
 import time
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from gptqmodel.utils.backend import BACKEND  # noqa: E402
-from tests.eval import evaluate, format_eval_result_table, get_eval_task_results  # noqa: E402
-
+from tests.eval import (  # noqa: E402
+    evaluate,
+    format_eval_result_table,
+    get_eval_task_results,
+)
 
 MMLU_HISTORY_SUBSETS = (
     "humanities.high_school_european_history",
@@ -36,6 +38,7 @@ TASKS = (
     ("arc_challenge", "arc_challenge", True, {}),
     ("gsm8k_platinum_cot", "gsm8k_platinum_cot", True, {}),
     ("mmlu_stem", "mmlu_stem", False, {}),
+    ("mmlu_humanities", "mmlu", False, {"subsets": "humanities"}),
     ("mmlu_history", "mmlu", False, {"subsets": MMLU_HISTORY_SUBSETS}),
 )
 

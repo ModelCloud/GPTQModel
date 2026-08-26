@@ -17,7 +17,10 @@ from gptqmodel.utils.qvq_validation import (
     validate_qvq_lifecycle_args,
 )
 from scripts.eval_qvq_checkpoint import TASKS, _select_tasks
-from scripts.validate_qvq_lifecycle import _calibration_controls, _install_semantic_attention_bits
+from scripts.validate_qvq_lifecycle import (
+    _calibration_controls,
+    _install_semantic_attention_bits,
+)
 
 
 class _TinyLlamaTree(nn.Module):
@@ -81,6 +84,7 @@ def test_qvq_checkpoint_evaluator_runs_all_full_row_llama_task_gates():
         "arc_challenge": ("arc_challenge", True, {}),
         "gsm8k_platinum_cot": ("gsm8k_platinum_cot", True, {}),
         "mmlu_stem": ("mmlu_stem", False, {}),
+        "mmlu_humanities": ("mmlu", False, {"subsets": "humanities"}),
         "mmlu_history": (
             "mmlu",
             False,

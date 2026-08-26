@@ -1269,6 +1269,70 @@ The following mechanisms are mathematically intentional approximations. They are
 their approximation error can dominate post-quantization quality. KLD/MSE improvements on an isolated module are not
 promotion criteria; every proposal below requires held-out replay, final-logit ranking, and task-level validation.
 
+### SwiGLU is a first-class W2 risk (2026-08-26)
+
+Do not treat the three Llama-style SwiGLU projections as interchangeable
+independent linear quantization problems. The gate and up branches are
+multiplied before `down_proj`:
+
+```text
+g = gate_proj(x)
+u = up_proj(x)
+h = SiLU(g) * u
+y = down_proj(h)
+```
+
+At W2, modest errors in `gate_proj` and `up_proj` can reinforce through the
+Hadamard product, and the resulting error is then mixed by `down_proj` and
+propagated through the residual stream. A good local linear reconstruction for
+each projection is therefore not evidence that the MLP is good. In particular,
+`down_proj` can be fed a damaged `h` even when its own local reconstruction
+loss is small.
+
+The offline Smooth-SwiGLU reparameterization is function-preserving in the
+dense model:
+
+```text
+up_proj'   = diag(s) @ up_proj
+down_proj' = down_proj @ diag(s)^-1
+```
+
+The transformed weights must be quantized and then evaluated as a nonlinear
+MLP. No runtime scale operation is permitted or required. The first matched
+Llama 3.2 1B W2/MLX experiment reduced propagated first-layer logit relative
+L2 from `0.1312788093` without Smooth-SwiGLU to `0.1197898642` with it, an
+8.7516% reduction at the same nominal 2.0 BPW. However, the one-prompt top-1
+guardrail was mixed, so this is escalation evidence rather than a default
+promotion. Full metrics are recorded in [swiglu.md](../swiglu.md).
+
+Any future low-rate QVQ work touching Llama-style MLPs must keep this issue
+visible and include, at minimum:
+
+1. a matched no-Smooth control;
+2. gate/up/down nonlinear MLP-output error, not only per-linear loss;
+3. propagated final-logit relative L2, RMSE, cosine, top-k agreement, and
+   finite-output checks;
+4. multiple prompts and representative early/late layers;
+5. a joint gate/up/down candidate selection experiment where alternatives are
+   retained long enough to measure error reinforcement or cancellation.
+
+Use the SwiGLU Jacobian-weighted sensitivities and post-SwiGLU activation-tail
+statistics to prioritize calibration and search, but keep them as offline
+metadata. They must never add inference operations, persistent scale tensors,
+or a hidden dense-weight cache. A local proxy improvement with a propagated
+guardrail regression is not sufficient for promotion.
+
+The follow-up implementation fixes the grouped proxy center to use the
+aggregate fourth-root optimum, removes arbitrary global geometric-mean scale
+normalization, enforces a configurable dense-parity relative-L2 tolerance, and
+evaluates all complete candidate triplets before beam pruning. Atomic replay now
+keeps the normal YAQA reselect result as the canonical candidate, adds fixed
+family alternatives, installs the winning reconstructed gate/up/down weights
+into live layer state before downstream replay, and fails soft on incomplete
+worker state. Scale search is still analytical rather than QVQ-aware; the
+reduced M4 MLX follow-up currently shows no gain from the proxy, so this remains
+an explicit optimization target rather than a default policy.
+
 ### Required QVQ propagation protocol
 
 Every QVQ change must be evaluated with the real quantized dataflow, not independent dense-input replays:

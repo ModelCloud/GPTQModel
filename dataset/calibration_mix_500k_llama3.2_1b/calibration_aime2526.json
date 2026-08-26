@@ -1,0 +1,146 @@
+{
+  "added_rows": 34,
+  "base": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
+  "base_rows": 182,
+  "excluded_count": 26,
+  "excluded_d300_overlap": [
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "9eca20ab242154e9dbccc64af57eff8b1e85a2ab47acccb662501217a1ad0086",
+      "problem_idx": 2
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "545d28086b36e5b498d7b73ab6cdca8a67d2dde4d9315e599d5e2c2aa738b2c2",
+      "problem_idx": 3
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "4e228057c2931d4d18d31aef6e69beee020ac6e0c2f9f19e8292afe112fd9e48",
+      "problem_idx": 4
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "c918e831294f024f14e2c3e1e2e2520954f44929c529262111129578461eeeeb",
+      "problem_idx": 6
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "5dcf83c0be1b05fda0bc3cedbaf271af71ebcac90d74af56f2951e6177729905",
+      "problem_idx": 7
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "d43132a26083590c37d14552bcba89e9dec3f0ce51c72564377fe3315c940886",
+      "problem_idx": 9
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "6369dc492284f15ad0fa974a27d1836e45378304e74f977aba9cc0cfa97cd6a8",
+      "problem_idx": 10
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "78c3fb928593dfe1c4a52e5ba28141ad6a7a9383f247b7e68d7834c3a08f50b7",
+      "problem_idx": 12
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "91c03fa5971061940457907ac9a7bcabd53282b4d2e62b182bd10ee6b986e130",
+      "problem_idx": 14
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "e651aa3a919f10529beea512bdaa849cefe6d36383c2d3e1fc81ab1b218ac60c",
+      "problem_idx": 15
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "afebee7cba6f02336fd244025aae6cfbd19b5b0fa50e1750bb2f1a383f7c9c6a",
+      "problem_idx": 17
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "5f49750329db529223549a3cdba274242673885bd3ccfa21f41a2e777b138e08",
+      "problem_idx": 20
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "2c2719dddde666b6c098e6bb5a33eb622deb5357266945f71517e503504695ce",
+      "problem_idx": 23
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "e9b68f44193dbf35e49ef908f5cf88e8eccef6acec9944585eb2647e0fe6ad15",
+      "problem_idx": 24
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "e4b7005cf452fa4e766cc1bba3b815c14e770ef0900e832eea4954fbab0dda40",
+      "problem_idx": 27
+    },
+    {
+      "dataset": "MathArena/aime_2025",
+      "hash": "47ff9eaf81c5a1675a1019b1f0b964c6c261163b913a62540f552252c12033be",
+      "problem_idx": 28
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "6558e1b28f89847b9bbd7d66c95a3fa09b8953d97de91e321dc0529d13dec26f",
+      "problem_idx": 1
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "215e66b0b3a721aa02931b01ff8b18beac189669f5f0400aeac11edb57ebfb9a",
+      "problem_idx": 4
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "c30ce9628157d3381d0920597ffbf95e9dfe307b5ee8aa95bc27563820ce6a89",
+      "problem_idx": 5
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "0f55bde6875f9edf9cdc01e97905fc7c5c5ba522a57132bad6018175d16c574c",
+      "problem_idx": 13
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "942df6341d190311f23647cd0c0471c0375140e7632cf6912fb53ee9d4839f7b",
+      "problem_idx": 15
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "7de4c925c0b0756a25f1f5ff2e92b6de3a471aa5a98bb7317de556ab5a92f0fc",
+      "problem_idx": 16
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "9310193483b942bd75fa6deb4b6fc50d01c006a3810f077b776015e47f7965f3",
+      "problem_idx": 17
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "b87b5b32b86db28e7d70ac8eef6e69945d57acdeb20379e661283a610237a259",
+      "problem_idx": 22
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "8971880f9bc3c88b296a4850d3cdae8f756b580f6056b459eaac8e85607edd10",
+      "problem_idx": 23
+    },
+    {
+      "dataset": "MathArena/aime_2026",
+      "hash": "4518b0f444788d2dc4e039e117fe93639bc2ae070b4c0cf2c02bc1d974ee6982",
+      "problem_idx": 27
+    }
+  ],
+  "output": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration_aime2526.parquet",
+  "output_rows": 216,
+  "prompt_hash_policy": "sha256(canonical JSON messages), exact D300 development prompt hashes excluded",
+  "sha256": "8c52bc923f4539143bf4d152530160f93d37a6c60f6ee79d6664bae7cf392073",
+  "sources": [
+    "MathArena/aime_2025",
+    "MathArena/aime_2026"
+  ]
+}

@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +12,16 @@ from torch import nn
 
 from gptqmodel.quantization import FORMAT
 from scripts.qvq_evaluate import (
+    TASKS as QVQ_EVALUATION_TASKS,
+)
+from scripts.qvq_evaluate import (
+    _encode_prompt,
     _greedy_rollout,
+    _mmlu_question_row_progress,
     _model_logits,
+    _publish_snapshot_evaluation,
     _row_text,
+    _wilson_interval,
     validate_evaluation_is_held_out,
 )
 from scripts.qvq_evaluate import build_parser as build_evaluate_parser
@@ -72,6 +81,22 @@ def test_qvq_quantize_parser_can_disable_nested_telemetry():
     assert args.qvq_telemetry is False
 
 
+def test_qvq_quantize_parser_exposes_fail_closed_disjointness_gate():
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--require-disjointness",
+        ]
+    )
+
+    assert args.require_disjointness is True
+
+
 def test_qvq_quantize_json_requires_explicit_rounding(tmp_path):
     config_path = tmp_path / "legacy.json"
     config_path.write_text('{"bits": 2, "format": "qvq"}', encoding="utf-8")
@@ -107,6 +132,10 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
                         }
                     },
                     "counters": {"input_features": 16, "output_features": 32, "yaqa_tiles": 2},
+                    "viterbi_pruning": {
+                        "baseline_candidates_possible": 100,
+                        "candidates_evaluated": 40,
+                    },
                 },
             },
             {
@@ -121,6 +150,10 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
                         }
                     },
                     "counters": {"input_features": 16, "output_features": 32, "yaqa_tiles": 4},
+                    "viterbi_pruning": {
+                        "baseline_candidates_possible": 250,
+                        "candidates_evaluated": 90,
+                    },
                 },
             },
         ]
@@ -136,6 +169,11 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
         "gpu_ms": 4700.0,
     }
     assert telemetry["counters"]["yaqa_tiles"] == 6
+    assert telemetry["viterbi_pruning"] == {
+        "baseline_candidates_possible": 250,
+        "candidates_evaluated": 90,
+    }
+    assert telemetry["modules"][0]["viterbi_pruning"]["baseline_candidates_possible"] == 100
     assert telemetry["shapes"]["32x16"]["modules"] == 2
     assert telemetry["shapes"]["32x16"]["process_quant_seconds"] == 6.0
     assert len(telemetry["modules"]) == 2
@@ -244,6 +282,96 @@ def test_qvq_evaluate_parser_keeps_quantization_out_of_evaluation():
     assert not hasattr(args, "bits")
 
 
+def test_qvq_evaluate_parser_has_canonical_divergence300_contract():
+    args = build_evaluate_parser().parse_args(
+        [
+            "divergence300",
+            "--dense-model",
+            "dense-model",
+            "--checkpoint",
+            "quantized-model",
+            "--dataset",
+            "locked.jsonl",
+            "--output",
+            "result.json",
+        ]
+    )
+
+    assert args.command == "divergence300"
+    assert args.max_prompt_tokens == 16384
+    assert args.dtype == "float16"
+    assert args.attn_implementation == "sdpa"
+
+
+def test_qvq_evaluate_exposes_full_mmlu_humanities_category():
+    assert QVQ_EVALUATION_TASKS["mmlu_humanities"] == (
+        "mmlu",
+        False,
+        {"subsets": "humanities"},
+    )
+
+
+def test_qvq_evaluate_forces_incremental_evalution_progress():
+    assert os.environ["LOGBAR_FORCE_PROGRESS"] == "1"
+
+
+def test_qvq_evaluate_tasks_require_paged_continuous_batching_defaults():
+    args = build_evaluate_parser().parse_args(
+        [
+            "tasks",
+            "--checkpoint",
+            "quantized-model",
+            "--output",
+            "result.json",
+            "--task",
+            "gsm8k_platinum_cot",
+        ]
+    )
+
+    assert args.device == "cuda:0"
+    assert args.attn_implementation == "paged|flash_attention_2"
+    assert args.resume is False
+
+
+def test_qvq_evaluate_reports_mmlu_choice_work_as_completed_rows(monkeypatch):
+    mmlu_module = importlib.import_module("evalution.benchmarks.mmlu")
+
+    class FakeProgress:
+        def __init__(self):
+            self.next_calls = 0
+            self.draw_calls = 0
+
+        def next(self):
+            self.next_calls += 1
+            return self
+
+        def draw(self):
+            self.draw_calls += 1
+            return self
+
+    captured = {}
+
+    def fake_manual_progress(total, *, title, subtitle):
+        captured.update(total=total, title=title, subtitle=subtitle, progress=FakeProgress())
+        return captured["progress"]
+
+    monkeypatch.setattr(mmlu_module, "manual_progress", fake_manual_progress)
+    with _mmlu_question_row_progress(True):
+        row_progress = mmlu_module.manual_progress(
+            12,
+            title="mmlu_stem: scoring answer choices",
+            subtitle="batch_size=16",
+        )
+        for _ in range(7):
+            row_progress.next().draw()
+
+    assert captured["total"] == 3
+    assert captured["title"] == "mmlu_stem: completed question rows"
+    assert captured["subtitle"] == "batch_size=16 choices_per_row=4"
+    assert captured["progress"].next_calls == 1
+    assert captured["progress"].draw_calls == 1
+
+
 class _BareDecoder(nn.Module):
     def forward(self, **_kwargs):
         return SimpleNamespace(last_hidden_state=torch.zeros(1, 2, 3))
@@ -281,18 +409,23 @@ def test_qvq_evaluate_rejects_output_without_logits():
         )
 
 
-class _GenerateRecorder:
+class _GreedyForwardRecorder:
     def __init__(self, continuation):
-        self.continuation = continuation
-        self.kwargs = None
+        self.continuation = list(continuation)
+        self.calls = []
 
-    def generate(self, **kwargs):
-        self.kwargs = kwargs
-        return torch.cat((kwargs["input_ids"], self.continuation), dim=1)
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        step = len(self.calls) - 1
+        logits = torch.full((1, kwargs["input_ids"].shape[1], 16), -100.0)
+        logits[:, -1, self.continuation[step]] = 1.0
+        # No cache is intentional: the rollout must remain correct for a
+        # model/backend that declines to return past_key_values.
+        return SimpleNamespace(logits=logits, past_key_values=None)
 
 
-def test_qvq_evaluate_greedy_rollout_uses_independent_fixed_horizon_generation():
-    model = _GenerateRecorder(torch.tensor([[7, 8, 9]]))
+def test_qvq_evaluate_greedy_rollout_uses_literal_fixed_horizon_argmax():
+    model = _GreedyForwardRecorder([7, 8, 9])
     encoded = {
         "input_ids": torch.tensor([[1, 2]]),
         "attention_mask": torch.ones((1, 2), dtype=torch.long),
@@ -301,10 +434,41 @@ def test_qvq_evaluate_greedy_rollout_uses_independent_fixed_horizon_generation()
     result = _greedy_rollout(model, encoded, token_count=3, pad_token_id=0)
 
     torch.testing.assert_close(result, torch.tensor([7, 8, 9]), rtol=0, atol=0)
-    assert model.kwargs["do_sample"] is False
-    assert model.kwargs["min_new_tokens"] == 3
-    assert model.kwargs["max_new_tokens"] == 3
-    assert model.kwargs["use_cache"] is True
+    assert len(model.calls) == 3
+    assert all("min_new_tokens" not in call for call in model.calls)
+    assert all("max_new_tokens" not in call for call in model.calls)
+    assert all(call.get("use_cache") is True for call in model.calls)
+
+
+def test_qvq_evaluate_greedy_rollout_does_not_suppress_eos():
+    # Token 0 is the model's EOS/PAD token in this synthetic setup.  It must
+    # be retained at step one and the fixed horizon must continue afterward.
+    model = _GreedyForwardRecorder([0, 8, 9])
+    encoded = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "attention_mask": torch.ones((1, 2), dtype=torch.long),
+    }
+
+    result = _greedy_rollout(model, encoded, token_count=3, pad_token_id=0)
+
+    torch.testing.assert_close(result, torch.tensor([0, 8, 9]), rtol=0, atol=0)
+    assert len(model.calls) == 3
+
+
+def test_qvq_evaluate_snapshot_publication_is_append_only(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    first = {"metrics": {"top1": 0.1}}
+    second = {"metrics": {"top1": 0.2}}
+
+    _publish_snapshot_evaluation(checkpoint, tmp_path / "first.json", first, kind="d300")
+    _publish_snapshot_evaluation(checkpoint, tmp_path / "second.json", second, kind="d300")
+
+    legacy = checkpoint / "post_quant_eval_result_d300.json"
+    assert json.loads(legacy.read_text(encoding="utf-8")) == first
+    digest_files = sorted(checkpoint.glob("post_quant_eval_result_d300_*.json"))
+    assert len(digest_files) == 2
+    assert {json.loads(path.read_text(encoding="utf-8"))["metrics"]["top1"] for path in digest_files} == {0.1, 0.2}
 
 
 def test_qvq_evaluate_chat_rows_end_with_generation_prompt():
@@ -315,3 +479,37 @@ def test_qvq_evaluate_chat_rows_end_with_generation_prompt():
 
     assert rendered_messages == messages
     assert kwargs == {"tokenize": False, "add_generation_prompt": True}
+
+
+def test_qvq_evaluate_encodes_chat_prompt_once_with_left_truncation():
+    class FakeTokenizer:
+        truncation_side = "right"
+
+        def apply_chat_template(self, messages, **kwargs):
+            assert self.truncation_side == "left"
+            assert messages == [{"role": "user", "content": "hello"}]
+            assert kwargs == {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "return_tensors": "pt",
+                "return_dict": True,
+                "truncation": True,
+                "max_length": 128,
+            }
+            return {"input_ids": torch.tensor([[1, 2, 3]])}
+
+    tokenizer = FakeTokenizer()
+    encoded = _encode_prompt(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        tokenizer,
+        max_prompt_tokens=128,
+    )
+
+    torch.testing.assert_close(encoded["input_ids"], torch.tensor([[1, 2, 3]]), rtol=0, atol=0)
+    assert tokenizer.truncation_side == "right"
+
+
+def test_qvq_evaluate_wilson_interval_contains_observed_rate():
+    low, high = _wilson_interval(246, 300)
+
+    assert low < 0.82 < high
