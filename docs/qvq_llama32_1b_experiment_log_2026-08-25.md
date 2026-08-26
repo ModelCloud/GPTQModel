@@ -779,3 +779,9 @@ and 3.
 | validation | `3f17c40b` → `d68c9d00` | `SwiGLU/lifecycle test suite` | complete; `70 passed, 2 skipped`; command `pytest -q tests/test_qvq_swiglu.py tests/test_qvq_lifecycle.py tests/test_qvq_module_granular_replay_config.py`; CUDA guard changes included; log `/tmp/swiglu_latest_tests.log` |
 
 | active | `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | `quantization + divergence300 + gsm8k_platinum_cot` | latest native Smooth-SwiGLU path; reg=0.15; clean YAQA/NM slices; CUDA physical GPU 6; session 18704 |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `divergence300` | complete; metric=0.16104166666666667; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-qk-w25-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-mlpall-w25` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-mlpall-w25-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-smooth-swiglu` | `divergence300` | complete; metric=0.17302083333333335; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-div300-dev-v1.json` |
