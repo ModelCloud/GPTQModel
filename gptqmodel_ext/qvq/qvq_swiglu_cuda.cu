@@ -79,12 +79,12 @@ std::tuple<at::Tensor, at::Tensor> swiglu_proxy_scales_cuda(
   const auto stream = at::cuda::getDefaultCUDAStream(gate.get_device());
   const dim3 blocks((intermediate + 255) / 256);
   const dim3 threads(256);
-#define LAUNCH(W) swiglu_channel_stats_kernel<W><<<blocks, threads, 0, stream>>>(gate.data_ptr<float>(), up.data_ptr<float>(), up_weight.data_ptr<W>(), down_weight.data_ptr<W>(), a.data_ptr<float>(), b.data_ptr<float>(), tokens, intermediate, hidden, output)
+#define LAUNCH(W) swiglu_channel_stats_kernel<W><<<blocks, threads, 0, stream>>>(reinterpret_cast<const float*>(gate.const_data_ptr()), reinterpret_cast<const float*>(up.const_data_ptr()), reinterpret_cast<const W*>(up_weight.const_data_ptr()), reinterpret_cast<const W*>(down_weight.const_data_ptr()), reinterpret_cast<float*>(a.mutable_data_ptr()), reinterpret_cast<float*>(b.mutable_data_ptr()), tokens, intermediate, hidden, output)
   if (up_weight.scalar_type() == at::kHalf) LAUNCH(half);
   else if (up_weight.scalar_type() == at::kBFloat16) LAUNCH(nv_bfloat16);
   else LAUNCH(float);
 #undef LAUNCH
-  swiglu_group_solve_kernel<<<(groups + 255) / 256, 256, 0, stream>>>(a.data_ptr<float>(), b.data_ptr<float>(), scales.data_ptr<float>(), proxy.data_ptr<float>(), intermediate, static_cast<int>(group_size), groups, static_cast<float>(scale_min), static_cast<float>(scale_max));
+  swiglu_group_solve_kernel<<<(groups + 255) / 256, 256, 0, stream>>>(reinterpret_cast<const float*>(a.const_data_ptr()), reinterpret_cast<const float*>(b.const_data_ptr()), reinterpret_cast<float*>(scales.mutable_data_ptr()), reinterpret_cast<float*>(proxy.mutable_data_ptr()), intermediate, static_cast<int>(group_size), groups, static_cast<float>(scale_min), static_cast<float>(scale_max));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {scales, proxy};
 }
