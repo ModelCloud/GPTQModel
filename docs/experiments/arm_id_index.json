@@ -35,6 +35,8 @@
     "37238d": {"report_row": "clean fixed-block LDLQ reg .0225 replica", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg0225.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu7"},
     "d71136": {"report_row": "V + O projections W2.5 reg .15", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w25.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-reg015-vo-w25-d71136"},
     "bb0aa2": {"report_row": "gate + down MLP projections W2.5 reg .15", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_gate_down_w25.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-reg015-gate-down-w25-bb0aa2"},
-    "45a387": {"report_row": "up + down MLP projections W2.5 reg .15", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w25.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-reg015-up-down-w25-45a387"}
+    "45a387": {"report_row": "up + down MLP projections W2.5 reg .15", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w25.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-reg015-up-down-w25-45a387"},
+    "19d89a": {"report_row": "Atomic SwiGLU triplet replay reg .15", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_atomic_swiglu.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b"},
+    "ebec00": {"report_row": "Smooth + Atomic SwiGLU triplet replay reg .15", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_smooth_atomic_swiglu.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b"}
   }
 }
