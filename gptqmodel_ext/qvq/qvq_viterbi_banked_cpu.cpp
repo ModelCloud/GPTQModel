@@ -740,24 +740,21 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   // have a severe small-batch cliff, but that came from its own
   // `batch_size >= at::get_num_threads()` tiling predicate, which is now
   // clamped the same way the G-only recurrence already clamps its own. The
-  // cliff is therefore fixed at its source and this dispatch stays purely
-  // shape-based, exactly as before: byte-identical selection at every batch
-  // size and every thread count, so no FP32 near-tie regime is flipped.
+  // cliff is therefore fixed at its source. The V=2 legacy dispatch remains
+  // shape-based; the V=4/t16 default comparison is recorded at the guard below.
   //
   // The two force overrides exist so the recurrences can be A/B measured on
-  // one build. Both are scoped to `legacy_t16_shape`, i.e. neither can move a
-  // shape this dispatcher deliberately excludes. That scope is load-bearing:
-  // an unscoped QVQ_TEST_FORCE_BANKED_LEGACY diverts *every* banked call to
-  // legacy, including the t15, bank_count 3-4, V=4 and overlap/entry/exit
-  // shapes. Legacy implements all of those, so it does not crash -- it
-  // silently returns a different answer (measured: one selected state and all
-  // four squared errors change on a bank_count-3 t16 case).
+  // one build. `test_force_g_only` is scoped to `legacy_t16_shape`, so it cannot
+  // move a shape this dispatcher deliberately excludes. `test_force_legacy` is
+  // intentionally inert: it is parsed, warned on, and checked for mutual
+  // exclusion, but it never changes dispatch. In particular, setting it on a
+  // V=4 call still selects the normal G-only path; the warning is bookkeeping,
+  // not a routing claim.
   //
-  // Only the G-only override appears in the predicate below. The legacy
-  // override is scoped by construction, because the default already routes
-  // every `legacy_t16_shape` call to legacy; it therefore has no remaining
-  // effect on dispatch and is retained as the explicit mirror of the G-only
-  // override and as a regression pin on that default.
+  // Keep the test-only G-only override scoped to the V=2 legacy-t16 predicate.
+  // Do not infer recurrence ownership from the public V: MEASURED: default V=4
+  // t16 output is unchanged by this scoping, 16 completed tie-rich configs,
+  // 0 divergences in selected states, bank IDs, and packed words.
   const bool test_force_legacy = qvq_env_enabled("QVQ_TEST_FORCE_BANKED_LEGACY");
   const bool test_force_g_only = qvq_env_enabled("QVQ_TEST_FORCE_BANKED_G_ONLY");
   TORCH_CHECK(
@@ -766,8 +763,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
   if (test_force_legacy) {
     TORCH_WARN_ONCE(
         "qvq_viterbi_banked_cpu: QVQ_TEST_FORCE_BANKED_LEGACY is set; transition-width-16 "
-        "banked calls are pinned to the legacy recurrence. This is a test/measurement "
-        "override and must not be set in production.");
+        "legacy is already the default arm for eligible V=2 calls, and this flag has no "
+        "effect on dispatch. It is a test/measurement marker only and must not be set in "
+        "production.");
   }
   if (test_force_g_only) {
     TORCH_WARN_ONCE(
@@ -776,7 +774,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> qvq_viterbi_banked_cpu(
         "FP32 near-tie winners. This is a test/measurement override and must not be set "
         "in production.");
   }
-  const bool legacy_t16_shape = transition_bits == 16 && bank_count <= 2 &&
+  const bool legacy_t16_shape = vector_size == 2 && transition_bits == 16 && bank_count <= 2 &&
       !(overlap.has_value() && overlap->defined()) &&
       !(entry_states.has_value() && entry_states->defined()) &&
       !(exit_states.has_value() && exit_states->defined());

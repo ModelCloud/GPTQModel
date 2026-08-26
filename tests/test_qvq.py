@@ -5245,6 +5245,59 @@ def test_native_banked_viterbi_v2_is_thread_count_invariant():
     for aligned_output, unaligned_output in zip(aligned, unaligned):
         assert torch.equal(aligned_output, unaligned_output)
 
+
+@pytest.mark.parametrize("transition_bits", (7, 16))
+def test_native_banked_viterbi_suffix_partition_is_thread_count_invariant(transition_bits):
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    state_count = 1 << 16
+    suffix_count = 1 << (16 - transition_bits)
+    prefix_count = state_count // suffix_count
+    suffix = torch.arange(suffix_count, dtype=torch.float32)
+    bank_zero = torch.stack((suffix.remainder(31) / 8, suffix.remainder(29) / 8), dim=-1)
+    bank_one = bank_zero + torch.tensor((0.75, -0.5), dtype=torch.float32)
+    codebooks = torch.stack((bank_zero.repeat((prefix_count, 1)), bank_one.repeat((prefix_count, 1))))
+
+    distinct_codewords = torch.unique(codebooks[0], dim=0).shape[0]
+    tie_density = 1.0 - distinct_codewords / state_count
+    assert tie_density >= 0.99
+
+    selected_suffix = min(37, suffix_count - 1)
+    sequences = torch.empty((1, 32, 2), dtype=torch.float32)
+    sequences[:, :16] = codebooks[0, selected_suffix]
+    sequences[:, 16:] = codebooks[1, selected_suffix]
+    original_threads = torch.get_num_threads()
+    outputs = {}
+
+    try:
+        for thread_count in (8, 16, 24, 32):
+            torch.set_num_threads(thread_count)
+            if torch.get_num_threads() != thread_count:
+                pytest.skip(f"cannot set torch thread count to {thread_count}")
+            states, squared_error, segment_bank_ids = qvq_cpu_viterbi_banked(
+                sequences,
+                codebooks,
+                transition_bits=transition_bits,
+                segment_steps=16,
+                overlap=torch.tensor([selected_suffix], dtype=torch.int64),
+            )
+            outputs[thread_count] = (
+                states,
+                squared_error,
+                segment_bank_ids,
+                pack_trellis_states(states, bits=transition_bits / 2),
+            )
+    finally:
+        torch.set_num_threads(original_threads)
+
+    reference = outputs[8]
+    for thread_count, actual in outputs.items():
+        for expected, observed in zip(reference, actual):
+            assert torch.equal(expected, observed), (
+                f"transition_bits={transition_bits} thread_count={thread_count} "
+                f"tie_density={tie_density:.6f} output diverged"
+            )
+
     # Legacy's row-parallel / tiled split must be bit-identical.
     #
     # qvq_viterbi_banked_cpu_legacy picks between a row-parallel leg and an
@@ -5357,6 +5410,73 @@ def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch
         monkeypatch.delenv(name, raising=False)
         for expected, actual in zip(unforced, forced):
             assert torch.equal(expected, actual), f"{name} escaped its dispatcher scope"
+
+    # Pin the no-env V=4/t16 default against the explicit G-only control. This
+    # is a regression net: the parent and the scoped branch produced the same
+    # exact output on this tie-rich fixture, so it is expected to pass on both.
+    generator = torch.Generator().manual_seed(2)
+    v4_sequences = torch.round(
+        torch.randn((4, 32, 4), generator=generator, dtype=torch.float32) * 2.0
+    ) / 2.0
+    v4_base = torch.round(torch.randn((128, 4), generator=generator, dtype=torch.float32) * 2.0) / 2.0
+    v4_codebooks = v4_base.repeat((1 << 16) // 128, 1).unsqueeze(0)
+    v4_tie_density = 1.0 - torch.unique(v4_codebooks[0], dim=0).shape[0] / (1 << 16)
+    assert v4_tie_density >= 0.99
+    v4_unforced = qvq_cpu_viterbi_banked(v4_sequences, v4_codebooks, transition_bits=16, segment_steps=16)
+    monkeypatch.setenv("QVQ_TEST_FORCE_BANKED_G_ONLY", "1")
+    v4_forced = qvq_cpu_viterbi_banked(v4_sequences, v4_codebooks, transition_bits=16, segment_steps=16)
+    for expected, actual in zip(v4_unforced, v4_forced):
+        assert torch.equal(expected, actual), (
+            "default V=4/t16 output changed under the G-only control: "
+            f"tie_density={v4_tie_density:.6f}"
+        )
+
+
+def test_native_banked_viterbi_v4_t16_default_output_is_pinned(monkeypatch):
+    """Pin output, not dispatch, with a 99.804688% tie-rich regression net.
+
+    This test passes if the ``vector_size == 2`` guard is reverted.
+    """
+
+    from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
+
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_LEGACY", raising=False)
+    monkeypatch.delenv("QVQ_TEST_FORCE_BANKED_G_ONLY", raising=False)
+
+    # One bank is within the legacy_t16_shape bank_count <= 2 predicate. The
+    # codebook has 128 repeated rows across 65536 states, making the default
+    # output sensitive to scan-order drift rather than a tie-free accident.
+    generator = torch.Generator().manual_seed(2 + 1000 + 100 + 32)
+    codebook_base = torch.round(torch.randn((128, 4), generator=generator) * 2.0) / 2.0
+    codebooks = codebook_base.repeat((1 << 16) // 128, 1).unsqueeze(0)
+    # Keep the fixture's generation order aligned with the two-bank sweep.
+    torch.round(torch.randn((128, 4), generator=generator) * 2.0) / 2.0
+    sequences = torch.round(torch.randn((1, 32, 4), generator=generator) * 2.0) / 2.0
+    tie_density = 1.0 - torch.unique(codebooks[0], dim=0).shape[0] / (1 << 16)
+    assert tie_density == pytest.approx(0.998046875)
+
+    states, _, segment_bank_ids = qvq_cpu_viterbi_banked(
+        sequences, codebooks, transition_bits=16, segment_steps=16
+    )
+    packed_words = pack_trellis_states(states, bits=8)
+
+    assert torch.equal(
+        states,
+        torch.tensor(
+            [[26, 38, 66, 103, 58, 91, 102, 78, 24, 81, 3, 5, 35, 20, 22, 81,
+              7, 78, 79, 1, 18, 40, 103, 56, 97, 82, 79, 25, 41, 61, 66, 2]],
+            dtype=torch.int64,
+        ),
+    )
+    assert torch.equal(segment_bank_ids, torch.tensor([[0, 0]], dtype=torch.uint8))
+    assert torch.equal(
+        packed_words,
+        torch.tensor(
+            [[2490394, 6750274, 5963834, 5111910, 5308440, 327683, 1310755, 5308438,
+              5111815, 65615, 2621458, 3670119, 5374049, 1638479, 3997737, 131138]],
+            dtype=torch.int64,
+        ),
+    )
 
 
 def _tail_biting_states(bits: float, *, tiles: int, seed: int) -> torch.Tensor:

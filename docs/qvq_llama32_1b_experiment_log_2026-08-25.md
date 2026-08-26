@@ -703,3 +703,73 @@ and 3.
 | monitor | `llama32-1b-w2-shiftcal128-yaqa302k-main-a12ce4e3` | `divergence300` | complete; metric=0.18427083333333333; report `/root/qvq-results/llama32-1b-w2-shiftcal128-yaqa302k-main-a12ce4e3-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-spectral-yaqa302k-main-a12ce4e3` | `divergence300` | complete; metric=0.181875; report `/root/qvq-results/llama32-1b-w2-spectral-yaqa302k-main-a12ce4e3-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa-cal322k-main-de25f203` | `divergence300` | complete; metric=0.13135416666666666; report `/root/qvq-results/llama32-1b-w2-yaqa-cal322k-main-de25f203-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-align2e64-e2e-susv-r128n300-v1` | `gsm8k_platinum_cot` | complete; metric=0.22167080231596362; report `/root/qvq-results/llama32-1b-v2b2p32-align2e64-e2e-susv-r128n300-v1-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-rolehybrid-qk010-rest005-dev32` | `gsm8k_platinum_cot` | complete; metric=0.17535153019023986; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-rolehybrid-qk010-rest005-dev32-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa-main-de25f203` | `divergence300` | complete; metric=0.13135416666666666; report `/root/qvq-results/llama32-1b-w2-yaqa-main-de25f203-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg020-align-main-ff906097` | `divergence300` | complete; metric=0.15072916666666666; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-align-main-ff906097-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc` | `divergence300` | complete; metric=0.1528125; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-sensitive-hi-main-39e26ebc-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-align2e64-e2e-susv-r128n300-v1` | `divergence300` | complete; metric=0.15520833333333334; report `/root/qvq-results/llama32-1b-v2b2p32-align2e64-e2e-susv-r128n300-v1-div300-dev-v1.json` |
+
+| queued | `llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1` | `quantization + gsm8k_platinum_cot + divergence300` | reg=0.15 reselect with output alignment; YAQA rows 0:182; NM rows 0:128; disjointness manifest `disjointness-yaqa182.json`; active session PID 3414890 |
+
+| queued | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | `quantization + gsm8k_platinum_cot + divergence300` | reg=0.15 reselect with `mlp.down_proj` W2.5; YAQA rows 0:182; NM rows 0:128; disjointness manifest `disjointness-yaqa182.json`; active session PID 3415015 |
+
+| queued-next | `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | `quantization + gsm8k_platinum_cot + divergence300` | reg=0.15 reselect; `mlp.gate_proj` + `mlp.up_proj` W2.5; same clean YAQA/NM slices; starts when a GPU frees |
+
+| queued-next | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `quantization + gsm8k_platinum_cot + divergence300` | reg=0.15 reselect; attention `q_proj` + `k_proj` W2.5; same clean YAQA/NM slices; starts when a GPU frees |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1` | `divergence300` | complete; D300 token top-1=0.1492708333; exact32=0.0166666667; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1` | `gsm8k_platinum_cot` | complete; acc=0.2299421009 (278/1209); report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | `divergence300` | complete; D300 token top-1=0.1780208333; exact32=0.01; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | `gsm8k_platinum_cot` | complete; acc=0.2340777502 (283/1209); report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7-gsm8k-platinum-v1.json` |
+
+| active | `llama32-1b-w2-reg015-atomic-swiglu` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; atomic SwiGLU gate/up/down replay; search rows 0:32, confirmation rows 32:64; physical GPU 4; session 69859 |
+
+| active | `llama32-1b-w2-reg015-smooth-swiglu` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; Smooth-SwiGLU only; physical GPU 5; session 33771 |
+
+| active | `llama32-1b-w2-reg015-smooth-atomic-swiglu` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; Smooth-SwiGLU plus atomic gate/up/down replay; search rows 0:32, confirmation rows 32:64; physical GPU 6; session 36247 |
+
+| queued | `llama32-1b-w2-reg015-mlpall-w25` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; all MLP gate/up/down W2.5; YAQA rows 0:182, NM rows 0:128; physical GPU 4 |
+
+| queued | `llama32-1b-w2-reg015-attnall-w25` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; attention Q/K/V/O W2.5; YAQA rows 0:182, NM rows 0:128; physical GPU 6 |
+
+| monitor | `llama32-1b-w2-reg020-all-subset-replay-disjoint-tip-gpu5` | `gsm8k_platinum_cot` | complete; metric=0.18031430934656742; report `/root/qvq-results/llama32-1b-w2-reg020-all-subset-replay-disjoint-tip-gpu5-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | `gsm8k_platinum_cot` | complete; metric=0.23407775020678245; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-align2e64-e2e-susv-yaqa182-v1` | `divergence300` | complete; metric=0.17114583333333333; report `/root/qvq-results/llama32-1b-v2b2p32-align2e64-e2e-susv-yaqa182-v1-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365` | `divergence300` | complete; metric=0.1753125; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1` | `gsm8k_platinum_cot` | complete; metric=0.22994210090984285; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1` | `divergence300` | complete; metric=0.14927083333333332; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-align-tip-gpu1-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | `divergence300` | complete; metric=0.17802083333333332; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-fixed-reg005-pr34-bb1c250e` | `divergence300` | complete; metric=0.15166666666666667; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-fixed-reg005-pr34-bb1c250e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-hybrid-attn005-mlp010` | `divergence300` | complete; metric=0.14583333333333334; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-hybrid-attn005-mlp010-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg020-all-subset-replay-disjoint-tip-gpu5` | `divergence300` | complete; metric=0.1771875; report `/root/qvq-results/llama32-1b-w2-reg020-all-subset-replay-disjoint-tip-gpu5-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-hybrid-attn010-mlp005` | `divergence300` | complete; metric=0.15072916666666666; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-hybrid-attn010-mlp005-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-layerdamp-align-main-f6375fa5` | `divergence300` | complete; metric=0.14479166666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align-main-f6375fa5-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-layerhybrid-r005-r010-dev32` | `divergence300` | complete; metric=0.13958333333333334; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerhybrid-r005-r010-dev32-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da` | `divergence300` | complete; metric=0.17489583333333333; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-mlpdown-w25-main-ecf7081e` | `divergence300` | complete; metric=0.13572916666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-mlpdown-w25-main-ecf7081e-div300-dev-v1.json` |
