@@ -824,6 +824,10 @@ and 3.
 
 | monitor | `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | `gsm8k_platinum_cot` | complete; metric=0.20512820512820512; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00-gsm8k-platinum-v1.json` |
 
+| queued | `llama32-1b-w2-reg015-atomic-swiglu-tip-3f17c40b` | `quantization + divergence300 + gsm8k_platinum_cot` | latest atomic SwiGLU implementation; reg=0.15; replay search rows 0:32, confirmation rows 32:64; clean disjoint manifest; waiting for GPU 4 |
+
+| queued | `llama32-1b-w2-reg015-smooth-atomic-swiglu-tip-3f17c40b` | `quantization + divergence300 + gsm8k_platinum_cot` | latest Smooth + atomic SwiGLU implementation; reg=0.15; replay search rows 0:32, confirmation rows 32:64; clean disjoint manifest; queued after atomic arm |
+
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-attention-only-main-ecf7081e` | `divergence300` | complete; metric=0.265; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-only-main-ecf7081e-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg005-main-54ccd365` | `divergence300` | complete; metric=0.120625; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg005-main-54ccd365-div300-dev-v1.json` |
