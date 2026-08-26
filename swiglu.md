@@ -86,3 +86,58 @@ multiple disjoint prompts and selected early/late layers, then a full-model
 teacher-forced logit and generation comparison. Report both propagated logit
 metrics and decision metrics; do not select Smooth-SwiGLU on local module loss
 alone.
+
+## Reduced YAQA follow-up on Apple M4 Max
+
+Date: 2026-08-26
+
+The first experiment above is a small proof-of-mechanism test. The following
+matched control is larger and uses the Llama 3.2 1B QVQ campaign configuration:
+
+- nominal rate: flat W2 (`2.0` BPW; the serialized QVQ estimate is `2.03125`
+  BPW including segmented-bank selector metadata);
+- YAQA regularization: `0.15` selected by an explicit rate override;
+- quantized scope: decoder layer 0 only, all seven attention/MLP projections;
+- calibration: rows `0:128`, with YAQA from rows `128:310` of the local
+  `calibration_mix_128k_qwen3_0.6b` parquet;
+- Smooth calibration statistics: 512 tokens per MLP, group size 16, candidate
+  exponents `[-1, -0.5, 0, 0.5, 1]`;
+- held-out evaluation: rows `438:503`, 65 rows, 15,062 tokens after truncating
+  each row to 256 tokens;
+- evaluation backend: native MLX teacher-forced forward, with a dense MLX
+  reference converted to FP16 so both paths use the same comparison dtype.
+
+| Metric | No Smooth | Smooth | Smooth minus control |
+|---|---:|---:|---:|
+| Relative logit L2 | **0.496045946** | 0.497333410 | +0.26% |
+| RMSE | **1.483024143** | 1.486873261 | +0.26% |
+| Maximum absolute error | **20.097656** | 20.548828 | +2.24% |
+| Cosine similarity | **0.886609399** | 0.885404371 | -0.001205 |
+| Top-1 agreement | **0.795379** | 0.792856 | -0.252 percentage points |
+
+This larger reduced test does not show an improvement from the current
+analytical Smooth proxy. In this run every selected group scale reached the
+configured upper bound (`scale_min = scale_max = 2.0`), so the result is also
+evidence that the proxy/search range is not yet well calibrated for this
+campaign. It is not evidence that the exact reparameterization is incorrect.
+The next meaningful test is QVQ-aware scale selection and the atomic
+gate/up/down candidate-search arm, followed by full-depth held-out replay.
+
+The Smooth checkpoint has a complete quantization manifest at
+`/tmp/qvq-swiglu-reg015-smooth-mps-95e206a4/qvq_quantize_run.json`. The
+no-Smooth payloads were written successfully, but its manifest write hit the
+pre-fix MPS device-reporting bug after quantization; therefore the no-Smooth
+numbers above come from a direct MLX reload/forward comparison and not from a
+published task-evaluation report. Both checkpoint payload directories remain
+available locally.
+
+### MLX/runtime status
+
+Native MLX QVQ reload and direct full-model forward pass both pass for the
+Smooth and no-Smooth payloads. The generic `mlx_generate` wrapper is not yet a
+clean E2E harness on this environment: `gptqmodel` currently double-pops the
+`temp` argument, and `mlx-lm 0.31.3` expects a working-set device-info key not
+present in the installed MLX `0.32.2`. These are runtime-harness issues, not
+quantization accuracy measurements. The public Torch/MPS evaluator also
+segfaulted while loading the quantized checkpoint, so no Torch/MPS quality
+number is being reported as valid.
