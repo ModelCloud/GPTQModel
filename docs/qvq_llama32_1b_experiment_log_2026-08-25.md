@@ -909,3 +909,11 @@ and 3.
 | invalidated+stopped | `llama32-1b-w2-reg020-replay-256x256-tip-gpu2` | `replay quantization` | this in-progress arm also consumed the historical 959-row replay artifact; its quantizer and waiting D300 workers were stopped before any completion marker or score was published. |
 
 | wording-correction | `review-c1048540` | `25% comparison target` | historical ledger references to a “25% target” are retained for traceability but mean an internal aligned-token development heuristic only; Unsloth's scalar aggregation is unpublished, so no numerical equivalence is claimed. |
+
+| monitor | `llama32-1b-w2-reg015-o-w25-09674b` | `gsm8k_platinum_cot` | complete; metric=0.22994210090984285; report `/root/qvq-results/llama32-1b-w2-reg015-o-w25-09674b-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w30-738a13` | `gsm8k_platinum_cot` | complete; metric=0.24731182795698925; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w30-738a13-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-v-w25-0cd45d` | `gsm8k_platinum_cot` | complete; metric=0.2142266335814723; report `/root/qvq-results/llama32-1b-w2-reg015-v-w25-0cd45d-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-gate-down-w25-bb0aa2` | `gsm8k_platinum_cot` | complete; metric=0.27956989247311825; report `/root/qvq-results/llama32-1b-w2-reg015-gate-down-w25-bb0aa2-gsm8k-platinum-v1.json` |
