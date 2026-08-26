@@ -865,7 +865,7 @@ class QVQProcessor(LoopProcessor):
         quantization_hessian: torch.Tensor,
         quantization_kwargs: Dict[str, Any],
     ):
-        """Generate canonical plus complete fixed-family alternatives for one MLP leaf."""
+        """Generate canonical reselect plus all fixed-family alternatives for one MLP leaf."""
 
         replay_config = module_qcfg.module_granular_replay
         assert replay_config is not None and replay_config.strategy == "atomic_swiglu"
@@ -874,9 +874,9 @@ class QVQProcessor(LoopProcessor):
         candidate_kwargs_base = dict(quantization_kwargs)
         candidate_kwargs_base.pop("yaqa_v2b2_family_mode", None)
         candidate_kwargs_base.pop("yaqa_v2b2_fixed_family_id", None)
-        for alternative_bank_id in (0, *replay_config.alternative_bank_ids):
+        for candidate_id, fixed_family_id in self._atomic_swiglu_candidate_specs(replay_config):
             candidate_kwargs = dict(candidate_kwargs_base)
-            if alternative_bank_id == 0:
+            if fixed_family_id is None:
                 # Candidate zero is the configured canonical YAQA result. In
                 # the atomic experiment this is normal V2B2-P32 reselect, not
                 # fixed family zero (which is only the independent V2
@@ -884,19 +884,34 @@ class QVQProcessor(LoopProcessor):
                 candidate_kwargs["yaqa_v2b2_family_mode"] = module_qcfg.yaqa.v2b2_family_mode
             else:
                 candidate_kwargs["yaqa_v2b2_family_mode"] = "fixed_block_ldlq"
-                candidate_kwargs["yaqa_v2b2_fixed_family_id"] = alternative_bank_id
+                candidate_kwargs["yaqa_v2b2_fixed_family_id"] = fixed_family_id
             candidate_kwargs["telemetry"] = (
                 base_telemetry
-                if alternative_bank_id == 0
+                if candidate_id == 0
                 else QVQQuantizationTelemetry() if base_telemetry is not None else None
             )
-            candidate_results[alternative_bank_id] = quantize_qvq_linear(
+            candidate_results[candidate_id] = quantize_qvq_linear(
                 canonical_weight,
                 quantization_hessian,
                 bits=module_qcfg.bits,
                 **candidate_kwargs,
             )
         return candidate_results[0], candidate_results
+
+    @staticmethod
+    def _atomic_swiglu_candidate_specs(replay_config) -> tuple[tuple[int, Optional[int]], ...]:
+        """Map stable candidate IDs to canonical reselect or fixed family IDs.
+
+        Candidate zero is reserved for the normal configured reselect result.
+        Candidate one is fixed family zero, while candidates two through four
+        correspond to configured fixed families one through three. Keeping
+        candidate IDs separate from family IDs prevents the independent V2
+        fallback from being confused with the canonical reselect artifact.
+        """
+
+        return ((0, None), (1, 0)) + tuple(
+            (family_id + 1, family_id) for family_id in replay_config.alternative_bank_ids
+        )
 
     def _remember_atomic_swiglu_candidates(
         self,
@@ -968,7 +983,9 @@ class QVQProcessor(LoopProcessor):
         up_record = records["up_proj"]
         down_record = records["down_proj"]
         assert gate_record is not None and up_record is not None and down_record is not None
-        candidate_ids = (0, *replay_config.alternative_bank_ids)
+        candidate_specs = self._atomic_swiglu_candidate_specs(replay_config)
+        candidate_ids = tuple(candidate_id for candidate_id, _ in candidate_specs)
+        candidate_family_ids = dict(candidate_specs)
         preselector = select_swiglu_candidate_triplet(
             mlp_inputs,
             gate_record["dense_weight"],
@@ -1038,9 +1055,12 @@ class QVQProcessor(LoopProcessor):
                         score = self._module_replay_score(folds, baseline_folds)
                     candidate_records.append(
                         {
-                            "gate_alternative_bank_id": triplet[0],
-                            "up_alternative_bank_id": triplet[1],
-                            "down_alternative_bank_id": triplet[2],
+                            "gate_candidate_id": triplet[0],
+                            "up_candidate_id": triplet[1],
+                            "down_candidate_id": triplet[2],
+                            "gate_fixed_family_id": candidate_family_ids[triplet[0]],
+                            "up_fixed_family_id": candidate_family_ids[triplet[1]],
+                            "down_fixed_family_id": candidate_family_ids[triplet[2]],
                             "score": score,
                             "fold_kl_forward": [fold["kl_forward"] for fold in folds],
                             "fold_metrics": folds,
@@ -1051,7 +1071,7 @@ class QVQProcessor(LoopProcessor):
 
                 eligible = [
                     record for record in candidate_records
-                    if (record["gate_alternative_bank_id"], record["up_alternative_bank_id"], record["down_alternative_bank_id"])
+                    if (record["gate_candidate_id"], record["up_candidate_id"], record["down_candidate_id"])
                     != canonical_triplet
                     and record["score"] < 1 - replay_config.minimum_relative_kl_improvement
                 ]
@@ -1059,9 +1079,9 @@ class QVQProcessor(LoopProcessor):
                 if eligible:
                     winner = min(eligible, key=lambda record: record["score"])
                     selected_triplet = (
-                        winner["gate_alternative_bank_id"],
-                        winner["up_alternative_bank_id"],
-                        winner["down_alternative_bank_id"],
+                        winner["gate_candidate_id"],
+                        winner["up_candidate_id"],
+                        winner["down_candidate_id"],
                     )
                 install(canonical_triplet)
                 baseline_confirmation = self._module_replay_metrics("confirmation")
@@ -1075,9 +1095,9 @@ class QVQProcessor(LoopProcessor):
                         selected_triplet = canonical_triplet
                 for record in candidate_records:
                     record["selected"] = (
-                        record["gate_alternative_bank_id"],
-                        record["up_alternative_bank_id"],
-                        record["down_alternative_bank_id"],
+                        record["gate_candidate_id"],
+                        record["up_candidate_id"],
+                        record["down_candidate_id"],
                     ) == selected_triplet
                 replay_stats = {
                     "strategy": "atomic_swiglu",

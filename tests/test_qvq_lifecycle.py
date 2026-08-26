@@ -1092,10 +1092,10 @@ def test_atomic_swiglu_candidate_zero_is_normal_reselect(monkeypatch):
         {"telemetry": None},
     )
 
-    assert set(candidates) == {0, 1, 2, 3}
+    assert set(candidates) == {0, 1, 2, 3, 4}
     assert calls[0]["yaqa_v2b2_family_mode"] == "reselect"
     assert "yaqa_v2b2_fixed_family_id" not in calls[0]
-    assert [call["yaqa_v2b2_fixed_family_id"] for call in calls[1:]] == [1, 2, 3]
+    assert [call["yaqa_v2b2_fixed_family_id"] for call in calls[1:]] == [0, 1, 2, 3]
     torch.testing.assert_close(canonical.weight, candidates[0].weight)
 
 
@@ -1130,7 +1130,7 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
         subset[name] = named
         dense_weight = named.module.weight.detach().clone()
         candidates = {}
-        for candidate_id in (0, 1, 2, 3):
+        for candidate_id in (0, 1, 2, 3, 4):
             weight = dense_weight + (candidate_id + 1) * 0.01
             candidates[candidate_id] = {
                 "weight": weight,
