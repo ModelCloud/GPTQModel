@@ -17,7 +17,10 @@ from gptqmodel.utils.qvq_validation import (
     validate_qvq_lifecycle_args,
 )
 from scripts.eval_qvq_checkpoint import TASKS, _select_tasks
-from scripts.validate_qvq_lifecycle import _calibration_controls, _install_semantic_attention_bits
+from scripts.validate_qvq_lifecycle import (
+    _calibration_controls,
+    _install_semantic_attention_bits,
+)
 
 
 class _TinyLlamaTree(nn.Module):

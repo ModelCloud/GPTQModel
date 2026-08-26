@@ -13,6 +13,8 @@ from torch import nn
 from gptqmodel.quantization import FORMAT
 from scripts.qvq_evaluate import (
     TASKS as QVQ_EVALUATION_TASKS,
+)
+from scripts.qvq_evaluate import (
     _encode_prompt,
     _greedy_rollout,
     _mmlu_question_row_progress,

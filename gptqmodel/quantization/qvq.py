@@ -49,7 +49,6 @@ from .qvq_rates import (
 from .qvq_yaqa import YAQA_DEFAULT_REGULARIZATION, YAQA_PAPER_REGULARIZATION
 from .rotation.hadamard_utils import matmul_hadU
 
-
 QVQ_BITS = _QVQ_BITS
 QVQ_V2B4_P64_SEGMENT_WEIGHTS = 64
 QVQ_V2B4_P64_SEGMENTS_PER_TILE = 4
@@ -4263,7 +4262,9 @@ def yaqa_inner(
                     if telemetry is not None:
                         telemetry.count("yaqa_segmented_v2_chunks")
                     if apple_host_feedback:
-                        from ..utils.qvq_mlx import qvq_mlx_tail_biting_v2_banked_from_torch_cpu
+                        from ..utils.qvq_mlx import (
+                            qvq_mlx_tail_biting_v2_banked_from_torch_cpu,
+                        )
 
                         assert host_segmented_bank_stack is not None and mlx_segmented_bank_stack is not None
                         states, segment_ids, squared_error = qvq_mlx_tail_biting_v2_banked_from_torch_cpu(
@@ -4334,7 +4335,9 @@ def yaqa_inner(
                 values, states_for_bank = [], []
                 with _qvq_phase(telemetry, "yaqa_viterbi", quantization_device):
                     if host_canonical_codebook_stack is not None:
-                        from ..utils.qvq_mlx import qvq_mlx_tail_biting_v2_banked_from_torch_cpu
+                        from ..utils.qvq_mlx import (
+                            qvq_mlx_tail_biting_v2_banked_from_torch_cpu,
+                        )
 
                         assert mlx_canonical_codebook_stack is not None
                         apple_auto_batch = 32 if bits <= 2 or bits == 3 else 128
@@ -4453,7 +4456,9 @@ def yaqa_inner(
                 # batched rank-16 updates directly into their strided cache
                 # tiles, avoiding temporary bmm outputs and indexed scatters.
                 if incremental_cpu_factored_feedback:
-                    from ..utils.qvq_cpu import qvq_cpu_yaqa_feedback_update as _yaqa_feedback_update
+                    from ..utils.qvq_cpu import (
+                        qvq_cpu_yaqa_feedback_update as _yaqa_feedback_update,
+                    )
                 else:
                     from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_update_op
 
@@ -4779,7 +4784,9 @@ def yaqa_inner_v2b2_p32(
                 for alt_id in (1, 2, 3)
             )
             if inner_weight.device.type == "cuda" and kwargs.get("tail_biting_candidates", 1) == 1:
-                from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+                from ..utils.qvq_cuda import (
+                    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+                )
 
                 family_codebooks = torch.stack(pair_stacks).contiguous()
                 family_sequences = (

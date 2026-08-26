@@ -29,7 +29,6 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 
-
 QVQ_CUDA_BITS = QVQ_BITS
 _QVQ_CUDA_OPS_NAME = "gptqmodel_qvq_cuda_ops"
 _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"

@@ -74,7 +74,6 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_viterbi_v2_segment_banked,
 )
 
-
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(

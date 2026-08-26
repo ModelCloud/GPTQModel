@@ -1,6 +1,8 @@
 """Build the larger disjoint YAQA mix by adding the held-out scan reference."""
+import hashlib
+import json
 from pathlib import Path
-import hashlib, json
+
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
