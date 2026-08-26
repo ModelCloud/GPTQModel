@@ -876,4 +876,10 @@ and 3.
 
 | monitor | `llama32-1b-w2-reg015-vo-w25-d71136` | `divergence300` | complete; metric=0.19177083333333333; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w25-d71136-div300-dev-v1.json` |
 
+| queued | `738a13` / `llama32-1b-w2-reg015-vo-w30-738a13` | `quantization + divergence300 + gsm8k_platinum_cot` | V+O W3 bitrate-matched against all-attention W2.5; reg=0.15; same clean YAQA/NM calibration and pinned disjointness manifest; queued on physical GPU 7 |
+
+| queued | `09674b` / `llama32-1b-w2-reg015-o-w25-09674b` | `quantization + divergence300 + gsm8k_platinum_cot` | O-only W2.5 attention control; reg=0.15; same clean YAQA/NM calibration and pinned disjointness manifest; queued on physical GPU 0 |
+
+| queued | `0cd45d` / `llama32-1b-w2-reg015-v-w25-0cd45d` | `quantization + divergence300 + gsm8k_platinum_cot` | V-only W2.5 attention control; reg=0.15; same clean YAQA/NM calibration and pinned disjointness manifest; queued on physical GPU 1 |
+
 | failure+fix | `19d89a` / `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `atomic subset staging` | the first post-`dd089f8f` retry reached cleanup but failed because full replay paths were still used to index the layer-relative `StageSubset` dictionary (`KeyError: model.layers.0.mlp.gate_proj`). Fixed in `85d43bba` by resolving wrappers through `NamedModule.full_name`; regression coverage now exercises relative subset keys against a nested model tree. The Atomic arm was restarted on physical GPU 4 with the same disjoint replay rows. |
