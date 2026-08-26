@@ -740,6 +740,10 @@ and 3.
 
 | active | `llama32-1b-w2-reg015-smooth-atomic-swiglu` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; Smooth-SwiGLU plus atomic gate/up/down replay; search rows 0:32, confirmation rows 32:64; physical GPU 6; session 36247 |
 
+| queued | `llama32-1b-w2-reg015-mlpall-w25` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; all MLP gate/up/down W2.5; YAQA rows 0:182, NM rows 0:128; physical GPU 4 |
+
+| queued | `llama32-1b-w2-reg015-attnall-w25` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15; attention Q/K/V/O W2.5; YAQA rows 0:182, NM rows 0:128; physical GPU 6 |
+
 | monitor | `llama32-1b-w2-reg020-all-subset-replay-disjoint-tip-gpu5` | `gsm8k_platinum_cot` | complete; metric=0.18031430934656742; report `/root/qvq-results/llama32-1b-w2-reg020-all-subset-replay-disjoint-tip-gpu5-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7` | `gsm8k_platinum_cot` | complete; metric=0.23407775020678245; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-mlpdown-w25-tip-gpu7-gsm8k-platinum-v1.json` |
