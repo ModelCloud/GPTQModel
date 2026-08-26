@@ -84,7 +84,7 @@ and YAQA rows 0--181 (302,193 valid tokens). Its canonical D300 score is
 18.7813% (1,803/9,600), with 6/300 exact trajectories and mean first
 divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 
-## In progress / queued
+## Active, queued, and recently completed follow-ups
 
 | Arm ID | Arm | Eff. BPW | GPU | State | Evaluation |
 | --- | ---: | ---: | --- | --- | --- |
@@ -95,13 +95,13 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 46d985 | clean fixed-block LDLQ reg .020 replica | 2.0232 | 6 | quantization in progress | canonical D300 |
 | 37238d | clean fixed-block LDLQ reg .0225 replica | 2.0232 | 7 | quantization in progress | canonical D300 |
 | d71136 | V + O projections W2.5, reg .15 | **2.0663** | 1 | D300 complete: **19.1771%**, exact 3/300, mean first divergence 5.0633 | GSM8K complete: **25.4756% (308/1209)** |
-| 738a13 | V + O projections W3, reg .15 | **2.1094** | 7 | **quantizing now**; bitrate-matched against all-attention W2.5 | D300 + GSM8K Platinum |
-| 09674b | O projection W2.5, reg .15 | **2.0447** | 2 | **quantizing now**; moved to idle GPU 2 | D300 + GSM8K Platinum |
-| 0cd45d | V projection W2.5, reg .15 | **2.0447** | 1 | **quantizing now**; single-family attention control | D300 + GSM8K Platinum |
-| bb0aa2 | gate + down MLP projections W2.5, reg .15 | **2.2990** | 3 | **quantizing now**; restarted with repaired JSON config | D300 + GSM8K Platinum |
-| 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | **quantizing now**; restarted with repaired JSON config | D300 + GSM8K Platinum |
-| 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | **quantizing now** on physical GPU 4 | D300 + GSM8K Platinum pending |
-| ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | queued after Atomic completion | D300 + GSM8K Platinum |
+| 738a13 | V + O projections W3, reg .15 | **2.1094** | 7 | complete; D300 **17.9271%**, exact 2/300, mean divergence 4.5933 | GSM8K complete: **24.7312%** |
+| 09674b | O projection W2.5, reg .15 | **2.0447** | 2 | complete; D300 **17.3021%**, exact 3/300, mean divergence 4.4500 | GSM8K complete: **22.9942%** |
+| 0cd45d | V projection W2.5, reg .15 | **2.0447** | 1 | complete; D300 **17.2917%**, exact 2/300, mean divergence 4.6133 | GSM8K complete: **21.4227%** |
+| bb0aa2 | gate + down MLP projections W2.5, reg .15 | **2.2990** | 3 | complete; D300 **19.4792%**, exact 7/300, mean divergence 5.4000 | GSM8K complete: **27.9570%** |
+| 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | complete; D300 **19.9583%**, exact 3/300, mean divergence 5.0200 | GSM8K complete: **28.1224%** |
+| 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | complete; D300 **16.5938%**, exact 1/300, mean divergence 4.2667 | GSM8K complete: **19.9338%** |
+| ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498%** |
 
 The live monitor also has three replay quantizations active at the time of
 this snapshot (2026-08-26 UTC), with evaluator wrappers already reserved for
