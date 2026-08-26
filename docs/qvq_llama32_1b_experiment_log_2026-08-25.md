@@ -665,3 +665,5 @@ and 3.
 | monitor | `llama32-1b-w2-shiftcal128-yaqa302k-main-a12ce4e3` | `gsm8k_platinum_cot` | complete; metric=0.21670802315963605; report `/root/qvq-results/llama32-1b-w2-shiftcal128-yaqa302k-main-a12ce4e3-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-spectral-yaqa302k-main-a12ce4e3` | `gsm8k_platinum_cot` | complete; metric=0.21670802315963605; report `/root/qvq-results/llama32-1b-w2-spectral-yaqa302k-main-a12ce4e3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.19933829611248965; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e-gsm8k-platinum-v1.json` |
