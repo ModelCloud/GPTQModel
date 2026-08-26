@@ -780,6 +780,16 @@ and 3.
 
 | active | `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | `quantization + divergence300 + gsm8k_platinum_cot` | latest native Smooth-SwiGLU path; reg=0.15; clean YAQA/NM slices; CUDA physical GPU 6; session 18704 |
 
+| monitor | `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | `divergence300` | complete; D300 token top-1=0.1728125; exact32=0.0066666667; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-gateup-w25-div300-dev-v1.json`; GSM8K running on GPU 1 |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `divergence300` | complete; D300 token top-1=0.1610416667; exact32=0.0066666667; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-qk-w25-div300-dev-v1.json`; GSM8K running on GPU 2 |
+
+| monitor | `llama32-1b-w2-reg015-mlpall-w25` | `divergence300` | complete; D300 token top-1=0.1908333333; exact32=0.01; report `/root/qvq-results/llama32-1b-w2-reg015-mlpall-w25-div300-dev-v1.json`; GSM8K running on GPU 4 |
+
+| monitor | `llama32-1b-w2-reg015-attnall-w25` | `divergence300` | complete; D300 token top-1=0.2041666667; exact32=0.01; report `/root/qvq-results/llama32-1b-w2-reg015-attnall-w25-div300-dev-v1.json`; GSM8K running on GPU 5 |
+
+| monitor | `llama32-1b-w2-reg015-smooth-swiglu` | `divergence300` | complete; D300 token top-1=0.1730208333; exact32=0.0066666667; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-div300-dev-v1.json`; GSM8K running on GPU 7 |
+
 | monitor | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `divergence300` | complete; metric=0.16104166666666667; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-qk-w25-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-mlpall-w25` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-mlpall-w25-div300-dev-v1.json` |
