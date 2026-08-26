@@ -27,6 +27,7 @@ agreement through horizon 32; exact counts are exact 32-token trajectories.
 | 62ba43 | YAQA + output alignment | W2 | 2.0232 | YAQA 302k, reg .05/.10 layers | 15.1667% | 2 | 4.5733 | not run | superseded |
 | d7ee8e | YAQA AIME mix | W2 | 2.0232 | AIME 2526, 216 rows | 14.9792% | 0 | 3.9967 | 17.37% | complete |
 | cd6559 | Full-reference | W2 | 2.0232 | full-reference mix, reg .10 | 14.5417% | 4 | 4.3300 | pending/ledger stale | D300 complete |
+| c763d1 | Fixed-block LDLQ | W2 | 2.0232 | YAQA 302k, reg .020 | 14.4583% | 5 | 4.7033 | pending | D300 complete |
 | f111c3 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .005 | 14.1042% | 2 | 4.5167 | not run | complete |
 | 1a635f | Full-reference | W2 | 2.0232 | full-reference mix, reg .20 | 14.0313% | 4 | 4.1467 | 23.16% | complete |
 | 0b4049 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .0175 | 13.9271% | 1 | 4.2433 | queued/recorded | D300 complete |
@@ -54,7 +55,6 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 66c46d | layer damping + output alignment | 2.0232 | 2 | quantization complete; D300 pending | canonical D300 |
 | 48252b | layer damping + 2-epoch alignment | 2.0232 | 3 | D300 evaluation in progress | canonical D300 |
 | 89c6b9 | YAQA reg .025 + output alignment | 2.0232 | 4 | quantization complete; D300 pending | canonical D300 |
-| c763d1 | fixed-block LDLQ reg .020 | 2.0232 | 2 | quantization complete; D300 pending | canonical D300 |
 | 6c2a99 | `mlp.down_proj` W2.5 reg .020 | ~2.5232 | 4 | quantization in progress | canonical D300 |
 | 4db5cf | fixed-block LDLQ reg .015 | 2.0232 | 1 | queued behind D300 | canonical D300 |
 | 5ac42a | fixed-block LDLQ reg .0225 | 2.0232 | 3 | queued behind D300 | canonical D300 |
