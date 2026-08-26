@@ -641,3 +641,7 @@ and 3.
 | monitor | `llama32-1b-w2-fixed-reg020-gpu6` | `gsm8k_platinum_cot` | complete; metric=0.23407775020678245; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu6-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-mlp-down-w25-reg020-gpu4` | `gsm8k_platinum_cot` | complete; metric=0.26881720430107525; report `/root/qvq-results/llama32-1b-w2-mlp-down-w25-reg020-gpu4-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-align-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.20595533498759305; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-align-main-ecf7081e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg015-gpu1` | `gsm8k_platinum_cot` | complete; metric=0.22332506203473945; report `/root/qvq-results/llama32-1b-w2-fixed-reg015-gpu1-gsm8k-platinum-v1.json` |
