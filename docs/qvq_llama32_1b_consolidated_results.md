@@ -83,7 +83,7 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 5ac42a | fixed-block LDLQ reg .0225 | 2.0232 | 3 | queued behind D300 | canonical D300 |
 | 46d985 | clean fixed-block LDLQ reg .020 replica | 2.0232 | 6 | quantization in progress | canonical D300 |
 | 37238d | clean fixed-block LDLQ reg .0225 replica | 2.0232 | 7 | quantization in progress | canonical D300 |
-| d71136 | V + O projections W2.5, reg .15 | **2.0663** | 1 | quantization complete; D300 running | GSM8K complete: **25.4756% (308/1209)** |
+| d71136 | V + O projections W2.5, reg .15 | **2.0663** | 1 | D300 complete: **19.1771%**, exact 3/300, mean first divergence 5.0633 | GSM8K complete: **25.4756% (308/1209)** |
 | bb0aa2 | gate + down MLP projections W2.5, reg .15 | **2.2990** | 3 | queued; waits for a free GPU | D300 + GSM8K Platinum |
 | 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | queued; waits for a free GPU | D300 + GSM8K Platinum |
 | 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | **quantizing now** on physical GPU 4 | D300 + GSM8K Platinum pending |
