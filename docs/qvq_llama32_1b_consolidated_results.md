@@ -25,7 +25,9 @@ agreement through horizon 32; exact counts are exact 32-token trajectories.
 | 7616fa | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .030 | 16.2188% | 5 | 4.4333 | queued/recorded | D300 complete |
 | 1a6f78 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .025 | 15.3854% | 2 | 4.2667 | queued/recorded | D300 complete |
 | 62ba43 | YAQA + output alignment | W2 | 2.0232 | YAQA 302k, reg .05/.10 layers | 15.1667% | 2 | 4.5733 | not run | superseded |
+| 48252b | layer damping + 2-epoch alignment | W2 | 2.0232 | YAQA 302k, layer-damped | 15.0729% | 2 | 4.6000 | pending | D300 complete |
 | d7ee8e | YAQA AIME mix | W2 | 2.0232 | AIME 2526, 216 rows | 14.9792% | 0 | 3.9967 | 17.37% | complete |
+| 6c2a99 | YAQA + `mlp.down_proj` W2.5 | W2 + W2.5 down | ~2.1898 | YAQA 302k, reg .020 | 14.8229% | 1 | 4.4267 | pending | mixed-rate diagnostic |
 | cd6559 | Full-reference | W2 | 2.0232 | full-reference mix, reg .10 | 14.5417% | 4 | 4.3300 | pending/ledger stale | D300 complete |
 | c763d1 | Fixed-block LDLQ | W2 | 2.0232 | YAQA 302k, reg .020 | 14.4583% | 5 | 4.7033 | pending | D300 complete |
 | f111c3 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .005 | 14.1042% | 2 | 4.5167 | not run | complete |
@@ -53,9 +55,7 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | Arm ID | Arm | Eff. BPW | GPU | State | Evaluation |
 | --- | ---: | ---: | --- | --- | --- |
 | 66c46d | layer damping + output alignment | 2.0232 | 2 | quantization complete; D300 pending | canonical D300 |
-| 48252b | layer damping + 2-epoch alignment | 2.0232 | 3 | D300 evaluation in progress | canonical D300 |
 | 89c6b9 | YAQA reg .025 + output alignment | 2.0232 | 4 | quantization complete; D300 pending | canonical D300 |
-| 6c2a99 | `mlp.down_proj` W2.5 reg .020 | ~2.5232 | 4 | quantization in progress | canonical D300 |
 | 4db5cf | fixed-block LDLQ reg .015 | 2.0232 | 1 | queued behind D300 | canonical D300 |
 | 5ac42a | fixed-block LDLQ reg .0225 | 2.0232 | 3 | queued behind D300 | canonical D300 |
 | 46d985 | clean fixed-block LDLQ reg .020 replica | 2.0232 | 6 | quantization in progress | canonical D300 |
