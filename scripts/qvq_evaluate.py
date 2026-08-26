@@ -212,7 +212,9 @@ def _publish_snapshot_evaluation(checkpoint: Path, result_path: Path, result: di
     if not checkpoint.is_dir():
         return
     serialized = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    result_digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+    result_digest = hashlib.sha256(
+        (serialized + f"\nsource:{result_path.expanduser().resolve()}\n").encode("utf-8")
+    ).hexdigest()[:12]
     # A digest-qualified filename makes every snapshot append-only.  Keep the
     # historical fixed filename as a compatibility alias only when it has not
     # been used before; never overwrite a prior evaluation in-place.
