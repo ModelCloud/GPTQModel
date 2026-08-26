@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from safetensors.torch import load_file, save_file
+from torch import nn
 
 from gptqmodel.nn_modules.qlinear.qvq import (
     QVQLinear,
@@ -268,7 +268,7 @@ def test_lr32_reconstruction_pins_k32_n8_abi_coordinates():
 
 
 def test_legacy_v2_cpu_dispatch_does_not_pass_lr_keyword(monkeypatch):
-    import gptqmodel.utils.qvq_cpu as qvq_cpu
+    from gptqmodel.utils import qvq_cpu
 
     calls = {}
 
@@ -445,3 +445,32 @@ def test_lr32_mlx_linear_inference_matches_torch_oracle(out_features):
         rtol=0,
         atol=2e-2,
     )
+
+
+@pytest.mark.parametrize("bits", LR_RATES)
+def test_lr32_mlx_single_row_split_inference_matches_torch_oracle(bits):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils.qvq_mlx import qvq_mlx_gemv
+
+    torch_layer = _make_torch_lr_layer(bits=bits, in_features=64, out_features=16)
+    x = torch.randn(1, 64, dtype=torch.float16)
+    expected = x.to(torch.float32) @ reconstruct_local_ring_inner_weight(
+        torch_layer.trellis,
+        bits=bits,
+        in_features=64,
+        out_features=16,
+        bank_ids=torch_layer.bank_ids,
+        bank_alt_id=torch_layer.bank_alt_id,
+    )
+    actual = qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(torch_layer.trellis.numpy()),
+        bits,
+        out_features=16,
+        bank_ids=mx.array(torch_layer.bank_ids.numpy()),
+        bank_alt_id=mx.array(torch_layer.bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+    )
+    mx.eval(actual)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)

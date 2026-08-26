@@ -680,6 +680,36 @@ backend contract.
 Do not split one fused LR32 linear between GPU decode and ANE GEMM as an initial optimization; the synchronization and
 materialization would defeat the design goal of keeping decode and accumulation in one execution group.
 
+### 11.3 Current MLX implementation and measured dispatch
+
+The first MLX implementation keeps the checkpoint ABI above but uses an N8 SIMD-group kernel: one 32-lane group
+decodes eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows. M>=4 uses the
+two-row form; small-M calls use an independent K split when it improves scheduler occupancy. W2 additionally loads the
+two packed words for each ring once before deriving its sixteen states, avoiding repeated packed-word loads in the
+state recurrence. No dense weight matrix is materialized.
+
+Run the paired public-path benchmark with:
+
+```text
+python scripts/benchmark_qvq_v2b2_p32_lr_mlx.py --warmup 12 --samples 35
+```
+
+The benchmark uses synthetic W2 payloads, FP16 activations, FP32 output, matched warmup/sample counts, and explicit
+GPU synchronization. On an Apple M4 Max, one representative run reported:
+
+| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| (1,2048,256) | 0.2377 | 0.2646 | 1.11x |
+| (1,2048,2048) | 0.1857 | 0.1921 | 1.03x |
+| (1,2048,8192) | 0.2069 | 0.2450 | 1.18x |
+| (1,8192,2048) | 0.2020 | 0.2656 | 1.32x |
+| (4,2048,8192) | 0.3325 | 0.4897 | 1.47x |
+| (8,2048,8192) | 0.3559 | 0.8248 | 2.32x |
+| (16,8192,8192) | 1.8951 | 5.1189 | 2.70x |
+
+This establishes the current MLX speedup for batched/prefill shapes and a smaller but positive M=1 improvement. It
+does not claim a universal 2x decode speedup; M=1 remains the next profiling target.
+
 ## 12. YAQA integration
 
 Current YAQA correction/feedback geometry is 16x16. LR32's hardware tile is 32x8. Do not rewrite YAQA before the local

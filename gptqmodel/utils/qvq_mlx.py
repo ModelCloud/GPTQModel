@@ -82,8 +82,10 @@ _SYMMETRIC_GRAM_KERNELS: dict[str, Any] = {}
 _SYMMETRIC_GRAM_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
-_LR_KERNELS: dict[bool, Any] = {}
-_LR_KERNEL_ERRORS: dict[bool, str] = {}
+_LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
+_LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
+_LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool], Any] = {}
+_LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
 
 _SYMMETRIC_GRAM_PACK_SOURCE = r"""
 uint index = thread_position_in_grid.x;
@@ -453,6 +455,41 @@ inline uint qstate_lr(device const int* tile,uint ring,uint pair,uint eb){
     s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}
   return s;
 }
+inline uint qpt_lr_fast(device const int* tile,uint edge,uint eb){
+  uint block=edge>>5,lane=edge&31u,base=block*eb;
+  if(eb==2u){uint word=as_type<uint>(tile[base+(lane>>4)]);return(word>>((lane&15u)<<1u))&3u;}
+  if(eb==3u){uint word=as_type<uint>(tile[base+(lane>>4)]);uint value=(word>>((lane&15u)<<1u))&3u;
+    uint extra=as_type<uint>(tile[base+2u]);return value|(((extra>>lane)&1u)<<2u);}
+  uint word=as_type<uint>(tile[base+(lane>>3)]);uint value=(word>>((lane&7u)<<2u))&15u;
+  if(eb==4u)return value;
+  uint extra=as_type<uint>(tile[base+4u+(eb>=6u?lane>>4:0u)]);
+  value|=((extra>>((eb>=6u?(lane&15u)<<1u:lane)))&((eb==5u)?1u:3u))<<4u;
+  if(eb==7u){uint last=as_type<uint>(tile[base+6u]);value|=((last>>lane)&1u)<<6u;}
+  return value;
+}
+inline uint qstate_lr_fast(device const int* tile,uint ring,uint pair,uint eb){
+  uint count=(15u+eb)/eb,first=(pair+16u-count+1u)&15u,s=0;
+  for(uint j=0;j<count;++j){uint edge=ring*16u+((first+j)&15u);
+    s=((s<<eb)|qpt_lr_fast(tile,edge,eb))&0xffffu;}
+  return s;
+}
+inline uint qpt_lr_w2(device const int* tile,uint ring,uint pair){
+  uint local=((ring&1u)<<4u)|(pair&15u);
+  uint word=as_type<uint>(tile[(ring>>1u)*4u+(local>>3u)]);
+  return(word>>((local&7u)<<2u))&15u;}
+inline uint qpt_lr_w2_packed(uint word0,uint word1,uint pair){
+  uint local=pair&15u,word=local<8u?word0:word1;
+  return(word>>((local&7u)<<2u))&15u;}
+inline uint qstate_lr_w2(device const int* tile,uint ring,uint pair){uint first=(pair+13u)&15u;
+  uint s0=qpt_lr_w2(tile,ring,first),s1=qpt_lr_w2(tile,ring,first+1u);
+  uint s2=qpt_lr_w2(tile,ring,first+2u),s3=qpt_lr_w2(tile,ring,first+3u);
+  return((s0<<12u)|(s1<<8u)|(s2<<4u)|s3)&0xffffu;
+}
+inline uint qstate_lr_w2_packed(uint word0,uint word1,uint pair){uint first=(pair+13u)&15u;
+  uint s0=qpt_lr_w2_packed(word0,word1,first),s1=qpt_lr_w2_packed(word0,word1,first+1u);
+  uint s2=qpt_lr_w2_packed(word0,word1,first+2u),s3=qpt_lr_w2_packed(word0,word1,first+3u);
+  return((s0<<12u)|(s1<<8u)|(s2<<4u)|s3)&0xffffu;
+}
 inline uint qstated(device const int* tile,uint pair,uint eb){uint chain=pair&1u,step=pair>>1;
   uint count=(15+eb)/eb,first=(step+64-count+1)&63,s=0;
   for(uint j=0;j<count;++j){uint edge=(((first+j)&63u)<<1)|chain;
@@ -475,6 +512,15 @@ __QVQ_V4_BANK_MASKS_METAL__
 __QVQ_V2_BANK_MASKS_METAL__
 inline float2 qlevelsv2b(device const half* levels,uint s,uint bank,uint eb){
   uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(levels[p>>8]),float(levels[p&255u]));}
+inline float2 qlevelsv2b(threadgroup const half* levels,uint s,uint bank,uint eb){
+  uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(levels[p>>8]),float(levels[p&255u]));}
+inline float2 qlevelsv2b_w2(device const half* levels,uint s,uint bank){
+  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(levels[p>>8]),float(levels[p&255u]));}
+inline float2 qlevelsv2b_w2(threadgroup const half* levels,uint s,uint bank){
+  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
   return float2(float(levels[p>>8]),float(levels[p&255u]));}
 inline uint qbank(constant const uchar* ids,uint tile){return(uint(ids[tile>>2])>>((tile&3u)<<1))&3u;}
 inline uint qbank(device const uchar* ids,uint tile){return(uint(ids[tile>>2])>>((tile&3u)<<1))&3u;}
@@ -665,22 +711,25 @@ _FP32_SOURCE = _SOURCE.replace(
     "out[m*N+n]=sum0;out[m*N+n+1]=sum1;",
 )
 _LR_SOURCE = r"""
+constexpr uint split_count=SplitK;
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
 uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,groups_n=(N+31u)>>5;
-uint m=group/groups_n,n=(group%groups_n)*32u+lane;
+uint split=group%split_count;
+uint logical_group=group/split_count;
+uint m=logical_group/groups_n,n=(logical_group%groups_n)*32u+lane;
 if(m>=M)return;
 bool active=n<N;
+uint k_begin=(K*split)/split_count,k_end=(K*(split+1u))/split_count;
 float sum=0.0f;
-for(uint k0=0;k0<K;k0+=32){
-  // One lane loads one value from the K32 activation tile.  All output
-  // lanes then read the needed pair through the Apple SIMD-group shuffle.
-  // Inactive lanes in a tail group still participate in the shuffle and use
-  // a valid tile/ring, but never write an output.
+for(uint k0=k_begin;k0<k_end;k0+=32){
+  // One lane loads one value from the K32 activation tile. All output lanes
+  // then read the needed pair through the Apple SIMD-group shuffle. Inactive
+  // tail lanes use output zero for valid address arithmetic and never write.
   float activation=float(x[m*K+k0+lane]);
   uint output_n=active?n:0u;
   uint tile=(k0>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
   device const int* tile_ptr=trellis+tile*(4*eb);
-  uint state=qstate_lr(tile_ptr,ring,0,eb);
+  uint state=qstate_lr_fast(tile_ptr,ring,0,eb);
   uint bank=((uint(bank_ids[tile])>>ring)&1u)*uint(bank_alt_id[0]);
   for(uint pair=0;pair<16;pair++){
     float2 value=qlevelsv2b(levels,state,bank,eb);
@@ -688,13 +737,135 @@ for(uint k0=0;k0<K;k0+=32){
     float a1=simd_shuffle(activation,ushort((pair<<1)+1u));
     sum+=a0*value.x+a1*value.y;
     if(pair!=15u){
-      state=((state<<eb)|qpt(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+      state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
     }
   }
 }
-if(active)out[m*N+n]=half(sum);
+if(active)out[(m*N+n)*split_count+split]=half(sum);
 """
-_LR_FP32_SOURCE = _LR_SOURCE.replace("out[m*N+n]=half(sum);", "out[m*N+n]=sum;")
+_LR_FP32_SOURCE = _LR_SOURCE.replace("out[(m*N+n)*split_count+split]=half(sum);", "out[(m*N+n)*split_count+split]=sum;")
+_LR_W2_SOURCE = (
+    _LR_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,0,eb)", "qstate_lr_w2(tile_ptr,ring,0)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b(levels,state,bank,eb)", "qlevelsv2b_w2(levels,state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,0);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
+        "uint state=qstate_lr_w2_packed(packed0,packed1,0);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_W2_FP32_SOURCE = _LR_W2_SOURCE.replace(
+    "out[(m*N+n)*split_count+split]=half(sum);", "out[(m*N+n)*split_count+split]=sum;"
+)
+
+_LR_MULTIROW_SOURCE = r"""
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint simd=simdgroup_index_in_threadgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,row_tile=dims[4],vc=(N+7u)>>3;
+uint row_block=group/vc,vector=group-row_block*vc,row_base=row_block*row_tile,n0=vector<<3;
+uint row_groups=(row_tile+1u)>>1,row0=row_base+simd,row1=row0+row_groups;
+threadgroup half decoded[8][32];
+threadgroup half level_cache[256];
+uint tid=thread_position_in_threadgroup.x,thread_count=row_groups*32u;
+for(uint i=tid;i<256u;i+=thread_count)level_cache[i]=levels[i];
+threadgroup_barrier(mem_flags::mem_threadgroup);
+float4 sum00=0.0f,sum01=0.0f,sum10=0.0f,sum11=0.0f;
+for(uint base=0;base<K;base+=32){
+  if(simd==0u){
+    uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u;
+    uint output_n=n0+output_lane,tile=(base>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
+    device const int* tile_ptr=trellis+tile*(4*eb);
+    uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+    uint bank=((uint(bank_ids[tile])>>ring)&1u)*uint(bank_alt_id[0]);
+    for(uint offset=0;offset<4u;offset++){
+      uint pair=first_pair+offset;
+      float2 value=qlevelsv2b(level_cache,state,bank,eb);
+      decoded[output_lane][pair*2u]=half(value.x);
+      decoded[output_lane][pair*2u+1u]=half(value.y);
+      if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint k=base+lane;
+  if(k<K){
+    float4 weights0=float4(decoded[0][lane],decoded[1][lane],decoded[2][lane],decoded[3][lane]);
+    float4 weights1=float4(decoded[4][lane],decoded[5][lane],decoded[6][lane],decoded[7][lane]);
+    if(row0<M){float input0=float(x[row0*K+k]);sum00+=input0*weights0;sum01+=input0*weights1;}
+    if(row1<M){float input1=float(x[row1*K+k]);sum10+=input1*weights0;sum11+=input1*weights1;}
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+sum00.x=simd_sum(sum00.x);sum00.y=simd_sum(sum00.y);sum00.z=simd_sum(sum00.z);sum00.w=simd_sum(sum00.w);
+sum01.x=simd_sum(sum01.x);sum01.y=simd_sum(sum01.y);sum01.z=simd_sum(sum01.z);sum01.w=simd_sum(sum01.w);
+sum10.x=simd_sum(sum10.x);sum10.y=simd_sum(sum10.y);sum10.z=simd_sum(sum10.z);sum10.w=simd_sum(sum10.w);
+sum11.x=simd_sum(sum11.x);sum11.y=simd_sum(sum11.y);sum11.z=simd_sum(sum11.z);sum11.w=simd_sum(sum11.w);
+if(lane==0u){
+  if(row0<M){out[row0*N+n0]=half(sum00.x);out[row0*N+n0+1u]=half(sum00.y);out[row0*N+n0+2u]=half(sum00.z);out[row0*N+n0+3u]=half(sum00.w);
+    out[row0*N+n0+4u]=half(sum01.x);out[row0*N+n0+5u]=half(sum01.y);out[row0*N+n0+6u]=half(sum01.z);out[row0*N+n0+7u]=half(sum01.w);}
+  if(row1<M){out[row1*N+n0]=half(sum10.x);out[row1*N+n0+1u]=half(sum10.y);out[row1*N+n0+2u]=half(sum10.z);out[row1*N+n0+3u]=half(sum10.w);
+    out[row1*N+n0+4u]=half(sum11.x);out[row1*N+n0+5u]=half(sum11.y);out[row1*N+n0+6u]=half(sum11.z);out[row1*N+n0+7u]=half(sum11.w);}
+}
+"""
+def _make_lr_multirow_fp32_source(source: str) -> str:
+    for value in ("sum00.x", "sum00.y", "sum00.z", "sum00.w", "sum01.x", "sum01.y", "sum01.z", "sum01.w",
+                  "sum10.x", "sum10.y", "sum10.z", "sum10.w", "sum11.x", "sum11.y", "sum11.z", "sum11.w"):
+        source = source.replace(f"half({value})", value)
+    return source
+
+
+_LR_MULTIROW_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SOURCE)
+
+
+def _make_lr_multirow_split_source(source: str) -> str:
+    """Add a compile-time K split and interleaved partial-output layout."""
+
+    source = source.replace(
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;",
+        "constexpr uint split_count=SplitK;\nuint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\nuint split=group%split_count;group/=split_count;",
+    ).replace(
+        "for(uint base=0;base<K;base+=32){",
+        "uint k_begin=(K*split)/split_count,k_end=(K*(split+1u))/split_count;\nfor(uint base=k_begin;base<k_end;base+=32){",
+    )
+    for row in ("row0", "row1"):
+        for offset in range(8):
+            suffix = "" if offset == 0 else f"+{offset}u"
+            source = source.replace(
+                f"out[{row}*N+n0{suffix}]=half",
+                f"out[({row}*N+n0{suffix})*split_count+split]=half",
+            )
+    return source
+
+
+_LR_MULTIROW_SPLIT_SOURCE = _make_lr_multirow_split_source(_LR_MULTIROW_SOURCE)
+_LR_MULTIROW_SPLIT_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SPLIT_SOURCE)
+_LR_MULTIROW_W2_SOURCE = (
+    _LR_MULTIROW_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b(level_cache,state,bank,eb)", "qlevelsv2b_w2(level_cache,state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
+        "uint state=qstate_lr_w2_packed(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_MULTIROW_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_W2_SOURCE)
+_LR_MULTIROW_SPLIT_W2_SOURCE = (
+    _LR_MULTIROW_SPLIT_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b(level_cache,state,bank,eb)", "qlevelsv2b_w2(level_cache,state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
+        "uint state=qstate_lr_w2_packed(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_MULTIROW_SPLIT_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SPLIT_W2_SOURCE)
 _DUAL_V2_SOURCE = _SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
 _DUAL_V2_FP32_SOURCE = _FP32_SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
 
@@ -1295,34 +1466,122 @@ def _v2_banked_kernel(kind: str, vector_width: int, *, output_fp32: bool):
         return kernel
 
 
-def _local_ring_kernel(*, output_fp32: bool):
-    """Build the LR32 GPU GEMV: one 32-lane SIMD group per output."""
+def _local_ring_kernel(*, output_fp32: bool, split_k: int = 1, w2: bool = False):
+    """Build the LR32 GPU GEMV, optionally splitting K across SIMD groups."""
 
-    kernel = _LR_KERNELS.get(output_fp32)
+    if split_k not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError(f"QVQ LR32 split_k must be a power of two from 1 through 64, got {split_k}")
+    key = (output_fp32, split_k, w2)
+    kernel = _LR_KERNELS.get(key)
     if kernel is not None:
         return kernel
     with _KERNEL_LOCK:
-        kernel = _LR_KERNELS.get(output_fp32)
+        kernel = _LR_KERNELS.get(key)
         if kernel is not None:
             return kernel
-        if output_fp32 in _LR_KERNEL_ERRORS:
-            raise RuntimeError(_LR_KERNEL_ERRORS[output_fp32])
+        if key in _LR_KERNEL_ERRORS:
+            raise RuntimeError(_LR_KERNEL_ERRORS[key])
         import mlx.core as mx
 
         try:
             kernel = mx.fast.metal_kernel(
-                name=f"gptqmodel_qvq_v2b2_p32_lr_{'fp32' if output_fp32 else 'fp16'}",
+                name=f"gptqmodel_qvq_v2b2_p32_lr_{'fp32' if output_fp32 else 'fp16'}_split{split_k}",
                 input_names=["x", "trellis", "bank_ids", "bank_alt_id", "levels", "dims"],
                 output_names=["out"],
                 header=_HEADER,
-                source=_LR_FP32_SOURCE if output_fp32 else _LR_SOURCE,
+                source=(
+                    _LR_W2_FP32_SOURCE
+                    if output_fp32 and w2
+                    else _LR_W2_SOURCE
+                    if w2
+                    else _LR_FP32_SOURCE
+                    if output_fp32
+                    else _LR_SOURCE
+                ),
                 ensure_row_contiguous=True,
             )
         except Exception as exc:
-            error = f"QVQ LR32 MLX kernel creation failed: {exc}"
-            _LR_KERNEL_ERRORS[output_fp32] = error
+            error = f"QVQ LR32 MLX kernel creation failed for split_k={split_k}: {exc}"
+            _LR_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
-        _LR_KERNELS[output_fp32] = kernel
+        _LR_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_split_k(m: int, k: int, n: int) -> int:
+    """Add independent K-slices until small LR dispatches expose the GPU."""
+
+    logical_groups = m * ((n + 31) // 32)
+    split_k = 1
+    while logical_groups * split_k < 128 and split_k < 64:
+        split_k <<= 1
+    while split_k > 1 and k % (32 * split_k):
+        split_k >>= 1
+    return split_k
+
+
+def _local_ring_multirow_split_k(m: int, k: int, n: int) -> int:
+    """Split tiny N8 multi-row dispatches without changing the output ABI."""
+
+    if m < 4:
+        split_k = 4
+    else:
+        logical_groups = m * (n // 8)
+        split_k = 1
+        while logical_groups * split_k < 16 and split_k < 16:
+            split_k <<= 1
+    while split_k > 1 and k % (32 * split_k):
+        split_k >>= 1
+    return split_k
+
+
+def _local_ring_multirow_kernel(*, output_fp32: bool, w2: bool = False, split_k: int = 1):
+    """Build the LR32 multi-row GEMV that shares one decode across rows."""
+
+    if split_k not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError(f"QVQ LR32 multi-row split_k must be a power of two from 1 through 64, got {split_k}")
+    key = (output_fp32, split_k, w2)
+    kernel = _LR_MULTIROW_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_MULTIROW_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        if key in _LR_MULTIROW_KERNEL_ERRORS:
+            raise RuntimeError(_LR_MULTIROW_KERNEL_ERRORS[key])
+        import mlx.core as mx
+
+        try:
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_multirow_{'fp32' if output_fp32 else 'fp16'}_split{split_k}",
+                input_names=["x", "trellis", "bank_ids", "bank_alt_id", "levels", "dims"],
+                output_names=["out"],
+                header=_HEADER,
+                source=(
+                    _LR_MULTIROW_SPLIT_W2_FP32_SOURCE
+                    if split_k > 1 and output_fp32 and w2
+                    else _LR_MULTIROW_SPLIT_W2_SOURCE
+                    if split_k > 1 and w2
+                    else _LR_MULTIROW_SPLIT_FP32_SOURCE
+                    if split_k > 1 and output_fp32
+                    else _LR_MULTIROW_SPLIT_SOURCE
+                    if split_k > 1
+                    else _LR_MULTIROW_W2_FP32_SOURCE
+                    if output_fp32 and w2
+                    else _LR_MULTIROW_W2_SOURCE
+                    if w2
+                    else _LR_MULTIROW_FP32_SOURCE
+                    if output_fp32
+                    else _LR_MULTIROW_SOURCE
+                ),
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX multi-row kernel creation failed: {exc}"
+            _LR_MULTIROW_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_MULTIROW_KERNELS[key] = kernel
         return kernel
 
 
@@ -2759,16 +3018,26 @@ def qvq_mlx_gemv(
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
     if v2b2_p32_lr:
-        kernel = _local_ring_kernel(output_fp32=output_fp32)
-        groups_n = (n + 31) // 32
-        return kernel(
-            inputs=[x, trellis, bank_ids, bank_alt_id, levels, _dims_array(m, k, n, transition_bits)],
-            template=[("EdgeBits", transition_bits)],
-            grid=(m * groups_n * 32, 1, 1),
-            threadgroup=(32, 1, 1),
-            output_shapes=[(m, n)],
+        row_tile = 16 if m >= 16 else 8 if m >= 4 else min(4, m)
+        split_k = _local_ring_multirow_split_k(m, k, n) if m < 4 else 1
+        group_size = ((row_tile + 1) // 2) * 32
+        row_blocks = (m + row_tile - 1) // row_tile
+        kernel = _local_ring_multirow_kernel(
+            output_fp32=output_fp32,
+            w2=transition_bits == 4,
+            split_k=split_k,
+        )
+        partials = kernel(
+            inputs=[x, trellis, bank_ids, bank_alt_id, levels, _dims_array(m, k, n, transition_bits, row_tile)],
+            template=[("EdgeBits", transition_bits)] + ([("SplitK", split_k)] if split_k > 1 else []),
+            grid=(row_blocks * (n // 8) * split_k * group_size, 1, 1),
+            threadgroup=(group_size, 1, 1),
+            output_shapes=[(m, n * split_k)],
             output_dtypes=[mx.float32 if output_fp32 else mx.float16],
         )[0]
+        if split_k == 1:
+            return partials
+        return mx.sum(partials.reshape(m, n, split_k), axis=-1)
     if output_fp32:
         if v2b4_p64 or v2b2_p32:
             return _run_v2_banked(
