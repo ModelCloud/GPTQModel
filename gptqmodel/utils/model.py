@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import collections
 import functools
+import hashlib
 import json
 import math
 import operator
@@ -203,6 +204,7 @@ class OffloadTensorRef:
     format: str  # 'dat' or 'safetensors'
     weight_name: Optional[str] = None
     data_offsets: Optional[Tuple[int, int]] = None
+    sha256: Optional[str] = None
 
     @property
     def num_bytes(self) -> int:
@@ -2613,7 +2615,9 @@ def _atomic_shard_file(path: str):
             os.unlink(temporary)
 
 
-def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
+def _safetensors_header(
+    entries: List[TensorSource], metadata: Dict[str, str]
+) -> tuple[Dict[str, Any], bytes, int]:
     header: Dict[str, Any] = {}
     if metadata:
         header["__metadata__"] = metadata
@@ -2633,6 +2637,96 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
     header_padding = (-len(header_bytes)) % 8
     if header_padding:
         header_bytes += b" " * header_padding
+    return header, header_bytes, offset
+
+class _Sha256Writer:
+    def __init__(self) -> None:
+        self.digest = hashlib.sha256()
+
+    def write(self, payload) -> int:
+        self.digest.update(payload)
+        return len(payload)
+
+def _tensor_payload_sha256(entry: TensorSource) -> str | None:
+    source = entry.source
+    if isinstance(source, OffloadTensorRef):
+        digest = source.sha256
+        if digest is not None:
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                return None
+            return digest
+
+        # Older offload indexes do not carry per-tensor digests. Comparing the
+        # completed shard against the exact current source bytes is equivalent
+        # to rewriting it from those bytes, without paying the second write.
+        if source.format == "dat":
+            offset = source.data_offsets[0] if source.data_offsets is not None else 0
+            writer = _Sha256Writer()
+            _copy_file_stream(source.path, writer, entry.num_bytes, offset=offset)
+            return writer.digest.hexdigest()
+        if source.format == "safetensors" and source.data_offsets is not None:
+            start, end = source.data_offsets
+            if end - start != entry.num_bytes:
+                return None
+            writer = _Sha256Writer()
+            _copy_file_stream(source.path, writer, entry.num_bytes, offset=start)
+            return writer.digest.hexdigest()
+        if source.format == "safetensors":
+            with safe_open(source.path, framework="pt", device="cpu") as handler:
+                tensor = handler.get_tensor(source.weight_name or entry.name)
+            writer = _Sha256Writer()
+            _write_tensor_bytes(writer, tensor.to(source.torch_dtype), entry.torch_dtype)
+            return writer.digest.hexdigest()
+        return None
+
+    writer = _Sha256Writer()
+    _write_tensor_bytes(writer, source.detach(), entry.torch_dtype)
+    return writer.digest.hexdigest()
+
+def _existing_shard_matches(
+    path: str, entries: List[TensorSource], metadata: Dict[str, str]
+) -> bool:
+    if not os.path.isfile(path) or os.path.islink(path):
+        return False
+    _, expected_header_bytes, payload_size = _safetensors_header(entries, metadata)
+    expected_size = 8 + len(expected_header_bytes) + payload_size
+    try:
+        if os.path.getsize(path) != expected_size:
+            return False
+        with ctx(open(path, "rb", buffering=0), _STREAM_BUFFER_LOCK) as (source, _):
+            raw_header_size = source.read(8)
+            if len(raw_header_size) != 8:
+                return False
+            header_size = struct.unpack("<Q", raw_header_size)[0]
+            if header_size != len(expected_header_bytes):
+                return False
+            if source.read(header_size) != expected_header_bytes:
+                return False
+
+        expected_digests = [_tensor_payload_sha256(entry) for entry in entries]
+        if any(digest is None for digest in expected_digests):
+            return False
+
+        with ctx(open(path, "rb", buffering=0), _STREAM_BUFFER_LOCK) as (source, _):
+            source.seek(8 + len(expected_header_bytes))
+            for entry, expected_sha256 in zip(entries, expected_digests):
+                digest = hashlib.sha256()
+                remaining = entry.num_bytes
+                while remaining > 0:
+                    chunk_size = min(_STREAM_BUFFER_SIZE, remaining)
+                    read = source.readinto(_STREAM_BUFFER[:chunk_size])
+                    if not read:
+                        return False
+                    digest.update(_STREAM_BUFFER[:read])
+                    remaining -= read
+                if digest.hexdigest() != expected_sha256:
+                    return False
+            return source.read(1) == b""
+    except (OSError, TypeError, ValueError, struct.error):
+        return False
+
+def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
+    _, header_bytes, _ = _safetensors_header(entries, metadata)
 
     with _atomic_shard_file(path) as out:
         out.write(struct.pack("<Q", len(header_bytes)))
@@ -2719,7 +2813,11 @@ def streaming_state_dict_to_shards(
             filename = f"{model_base_name}-{idx:05d}-of-{num_shards:05d}.safetensors"
 
         path = os.path.join(save_dir, filename)
-        size = _write_shard_file(path, shard_entries, metadata)
+        if _existing_shard_matches(path, shard_entries, metadata):
+            size = os.path.getsize(path)
+            log.info(f"Reusing authenticated safetensors shard: {filename}")
+        else:
+            size = _write_shard_file(path, shard_entries, metadata)
         total_size += size
         filenames.append(filename)
         for entry in shard_entries:
