@@ -248,10 +248,16 @@ propagated logit measurements, not task scores.
 
 The existing matched full-depth control remains D300 `17.9792%` (Exact32
 `3/300`) and GSM8K `23.8213%`, as recorded in the campaign ledger. The new
-V+O and Gate+Down arms have not received D300 or GSM8K scores: the configured
-remote GPU host was unreachable from this host (`Network is unreachable`).
-The local layer-0 arms therefore sharpen the projection interaction mechanism
-but do not replace the canonical full-model task evaluation.
+remote queue has since completed the canonical full-depth V+O recipe (arm
+`d71136`, effective `2.0663` BPW): D300 `19.1771%` (Exact32 `3/300`, mean
+first divergence `5.0633`) and GSM8K `25.4756%` (`308/1209`). Relative to
+the reg-0.15 flat-W2 control, that is `+1.1979` D300 percentage points and
+`+1.6543` GSM8K percentage points. The local layer-0 V+O checkpoint above is
+a separate MPS artifact used for mechanism metrics, while `d71136` is the
+full-depth CUDA task artifact. Gate+Down and Up+Down still have no full-depth
+task scores in the ledger; the configured remote host was unreachable from
+this host when those jobs were initially requested (`Network is
+unreachable`).
 
 ### Configuration files for the queued/full campaign
 
