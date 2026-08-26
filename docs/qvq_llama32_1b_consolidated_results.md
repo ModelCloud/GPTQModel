@@ -13,6 +13,7 @@ agreement through horizon 32; exact counts are exact 32-token trajectories.
 | C01 | Q07 uniform | W3 | 3.0232 | YAQA 302k, reg .10 | **33.6667%** | 16 | 9.9133 | 41.27%* | higher-rate reference |
 | C02 | Q07 uniform | W2.5 | 2.5232 | YAQA 302k, reg .10 | **25.1771%** | 5 | 7.5000 | 33.58%* | higher-rate reference |
 | C03 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .020 | **18.7813%** | **6** | **5.3633** | 17.87% | **current W2 leader** |
+| P01 | YAQA + output alignment | W2 | 2.0232 | YAQA 302k, reg .010 | 18.4063% | 4 | 5.1667 | pending | D300 complete; alignment arm |
 | C04 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .015 | 17.9792% | 3 | 5.3200 | queued/recorded | D300 complete |
 | C05 | Full-reference | W2 | 2.0232 | full-reference mix, reg .30 | 17.7292% | 3 | 4.5700 | pending/ledger stale | D300 complete |
 | C06 | Seed control | W2 | 2.0232 | YAQA 302k, seed 1 | 17.7083% | 2 | 4.9667 | not run | complete |
@@ -50,7 +51,6 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 
 | Arm ID | Arm | Eff. BPW | GPU | State | Evaluation |
 | --- | ---: | ---: | --- | --- | --- |
-| P01 | YAQA reg .010 + output alignment | 2.0232 | 1 | D300 evaluation in progress | canonical D300 |
 | P02 | layer damping + output alignment | 2.0232 | 2 | quantization complete; D300 pending | canonical D300 |
 | P03 | layer damping + 2-epoch alignment | 2.0232 | 3 | D300 evaluation in progress | canonical D300 |
 | P04 | YAQA reg .025 + output alignment | 2.0232 | 4 | quantization complete; D300 pending | canonical D300 |
@@ -74,7 +74,8 @@ locations are indexed here.
 | C08 | Source-shaped 500k ledger in `docs/experiments/`; checkpoint under `/root/qvq-results/`. |
 | C10, C15 | AIME/precision ledger in `docs/experiments/`; checkpoints under `/root/qvq-results/`. |
 | C11 | Fixed-block LDLQ ledger in `docs/experiments/`; checkpoint under `/root/qvq-results/`. |
-| P01--P04 | Alignment sweep ledger `docs/experiments/2026-08-26-llama32-w2-alignment-sweep.json`. |
+| P01 | Checkpoint `/root/qvq-results/llama32-1b-w2-yaqa302k-reg010-align-gpu1`; metrics `/root/qvq-results/llama32-1b-w2-yaqa302k-reg010-align-gpu1-div300-dev-v1.json`. |
+| P02--P04 | Alignment sweep ledger `docs/experiments/2026-08-26-llama32-w2-alignment-sweep.json`. |
 | P05--P08 | Follow-up ledger `docs/experiments/2026-08-26-llama32-w2-fixed-down-followup.json`; configs `scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg015.json`, `...reg020.json`, `...reg0225.json`, and `...yaqa_mlp_down_w25_reg020.json`. |
 
 The authoritative per-arm machine-readable ledgers are in
