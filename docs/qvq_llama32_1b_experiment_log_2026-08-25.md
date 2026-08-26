@@ -619,3 +619,13 @@ and 3.
 | monitor | `llama32-1b-w2-yaqa302k-reg030-main-5cfb8314` | `gsm8k_platinum_cot` | complete; metric=0.19106699751861042; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg030-main-5cfb8314-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-yaqa302k-reg030-main-5cfb8314` | `divergence300` | complete; metric=0.1621875; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg030-main-5cfb8314-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-layerdamp-align-main-f6375fa5` | `gsm8k_platinum_cot` | complete; metric=0.21257237386269645; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align-main-f6375fa5-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg0225-gpu3` | `gsm8k_platinum_cot` | complete; metric=0.22580645161290322; report `/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg0225-gpu7` | `gsm8k_platinum_cot` | complete; metric=0.22580645161290322; report `/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu7-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixedreg005-yaqa302k-main-a12ce4e3` | `gsm8k_platinum_cot` | complete; metric=0.20264681555004135; report `/root/qvq-results/llama32-1b-w2-fixedreg005-yaqa302k-main-a12ce4e3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da` | `gsm8k_platinum_cot` | complete; metric=0.20926385442514475; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da-gsm8k-platinum-v1.json` |
