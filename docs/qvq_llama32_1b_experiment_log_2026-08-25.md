@@ -841,3 +841,11 @@ and 3.
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e` | `divergence300` | complete; metric=0.16447916666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-main-d7eae64a` | `divergence300` | complete; metric=0.15260416666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-main-d7eae64a-div300-dev-v1.json` |
+
+| queued | `d71136` / `llama32-1b-w2-reg015-vo-w25-d71136` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15 reselect; self-attention `v_proj` + `o_proj` W2.5; same clean YAQA/NM slices and disjoint manifest; waits for a free GPU |
+
+| queued | `bb0aa2` / `llama32-1b-w2-reg015-gate-down-w25-bb0aa2` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15 reselect; MLP `gate_proj` + `down_proj` W2.5; same clean YAQA/NM slices and disjoint manifest; waits for a free GPU |
+
+| queued | `45a387` / `llama32-1b-w2-reg015-up-down-w25-45a387` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15 reselect; MLP `up_proj` + `down_proj` W2.5; same clean YAQA/NM slices and disjoint manifest; waits for a free GPU |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e` | `divergence300` | complete; metric=0.19916666666666666; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e-div300-dev-v1.json` |
