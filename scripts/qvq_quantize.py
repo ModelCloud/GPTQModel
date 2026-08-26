@@ -1125,6 +1125,9 @@ def main(argv: list[str] | None = None) -> int:
             "save": save_seconds,
         },
         "quant_log_rows": len(_quant_log_rows(quant_log)),
+        # Preserve the complete per-module metric records so a snapshot is
+        # self-describing even when the controller/log stream is unavailable.
+        "quantization_metrics": _quant_log_rows(quant_log),
         "telemetry": {
             "qvq_process_quant": aggregate_qvq_process_telemetry(quant_log),
             "lifecycle": lifecycle_telemetry,

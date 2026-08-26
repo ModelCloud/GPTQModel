@@ -206,6 +206,28 @@ def _canonical_source(source: str) -> str:
     return str(path.resolve()) if path.exists() else source
 
 
+def _publish_snapshot_evaluation(checkpoint: Path, result_path: Path, result: dict[str, Any], *, kind: str) -> None:
+    """Keep an immutable, discoverable copy of every post-quant evaluation in the checkpoint."""
+    checkpoint = checkpoint.expanduser().resolve()
+    if not checkpoint.is_dir():
+        return
+    stem = f"post_quant_eval_result_{kind}"
+    (checkpoint / f"{stem}.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    lines = [f"# Post-quantization evaluation: {kind}", "", f"Source report: `{result_path}`", ""]
+    if isinstance(result.get("metrics"), dict):
+        lines += ["## Metrics", "", *[f"- **{k}**: {v}" for k, v in result["metrics"].items()], ""]
+    if isinstance(result.get("divergence_300_at_32"), dict):
+        d = result["divergence_300_at_32"]
+        lines += ["## Divergence-300", "", f"- **D300 token top-1**: {d.get('independent_token_top1_agreement_at_32')}", f"- **Exact trajectory agreement**: {d.get('exact_trajectory_agreement_at_32')}", ""]
+    if isinstance(result.get("tasks"), dict):
+        lines += ["## Tasks", ""]
+        for label, task in result["tasks"].items():
+            lines.append(f"- **{label}**: {task.get('metrics', {})}")
+    (checkpoint / f"{stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _ranges_overlap(left_start: int, left_rows: int, right_start: int, right_rows: int) -> bool:
     return max(left_start, right_start) < min(left_start + left_rows, right_start + right_rows)
 
@@ -604,6 +626,7 @@ def _diagnostics(args: argparse.Namespace) -> int:
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_snapshot_evaluation(checkpoint, args.output, result, kind="diagnostics")
     print(json.dumps(result, indent=2, sort_keys=True), flush=True)
     return 0
 
@@ -797,6 +820,7 @@ def _divergence300(args: argparse.Namespace) -> int:
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_snapshot_evaluation(checkpoint, output_path, result, kind="divergence300")
     print(json.dumps({key: value for key, value in result.items() if key != "prompts"}, indent=2, sort_keys=True))
     return 0
 
@@ -851,6 +875,7 @@ def _tasks(args: argparse.Namespace) -> int:
         temporary = args.output.with_name(f".{args.output.name}.tmp")
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temporary.replace(args.output)
+        _publish_snapshot_evaluation(checkpoint, args.output, payload, kind="tasks")
 
     for label in selected:
         if label in payload["tasks"]:

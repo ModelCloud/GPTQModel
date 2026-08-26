@@ -145,49 +145,55 @@ def choose_swiglu_scales(
         ).square().mean(dim=1)
         down_error_weight = hidden.square().mean(dim=0) * down_energy
         epsilon = torch.finfo(torch.float32).eps
-        scales = torch.ones_like(up_error_weight)
-        proxy_objective = torch.zeros((), device=scales.device, dtype=torch.float32)
-        for start in range(0, up_error_weight.numel(), group_size):
-            stop = min(start + group_size, up_error_weight.numel())
-            # For one scale shared by a group, the proxy is
-            #
-            #   L_G(s) = s^2 * sum(A_i) + s^-2 * sum(B_i).
-            #
-            # Its unconstrained minimizer is the fourth root of the ratio of
-            # the group sums.  Averaging per-channel optima (especially in
-            # log space) is not equivalent when a few channels dominate.
-            group_a = up_error_weight[start:stop].sum()
-            group_b = down_error_weight[start:stop].sum()
-            group_base = (group_b.clamp_min(epsilon) / group_a.clamp_min(epsilon)).pow(0.25)
-            group_base = group_base.clamp(min=scale_min, max=scale_max)
-            candidates = torch.as_tensor(
-                [
-                    group_base.item() * (2.0 ** float(exponent))
-                    for exponent in candidate_exponents
-                ],
-                device=scales.device,
-                dtype=torch.float32,
-            ).clamp(min=scale_min, max=scale_max)
-            if fake_quant_objective is None:
-                scores = (
-                    up_error_weight[start:stop, None] * candidates[None, :].square()
-                    + down_error_weight[start:stop, None] / candidates[None, :].square()
-                ).sum(dim=0)
-                selected = int(scores.argmin().item())
-                proxy_objective += scores[selected]
-            else:
+        # For the analytical proxy, the per-group objective is
+        #   L_G(s) = A_G*s**2 + B_G/s**2,
+        # whose constrained minimizer is clamp((B_G/A_G)**0.25).  The old
+        # implementation searched candidates around this exact solution and
+        # synchronised the host once per group.  Reduce all groups in one
+        # tensor operation; this preserves the mathematical result while
+        # avoiding hundreds of tiny launches and CPU/GPU synchronisations.
+        group_count = math.ceil(up_error_weight.numel() / group_size)
+        padded = group_count * group_size - up_error_weight.numel()
+        if padded:
+            pad = torch.zeros(padded, device=scales.device, dtype=torch.float32)
+            grouped_a = torch.cat((up_error_weight, pad)).reshape(group_count, group_size)
+            grouped_b = torch.cat((down_error_weight, pad)).reshape(group_count, group_size)
+        else:
+            grouped_a = up_error_weight.reshape(group_count, group_size)
+            grouped_b = down_error_weight.reshape(group_count, group_size)
+        group_a = grouped_a.sum(dim=1)
+        group_b = grouped_b.sum(dim=1)
+        group_base = (group_b.clamp_min(epsilon) / group_a.clamp_min(epsilon)).pow(0.25)
+        group_base = group_base.clamp(min=scale_min, max=scale_max)
+
+        if fake_quant_objective is None:
+            scales = group_base.repeat_interleave(group_size)[: up_error_weight.numel()]
+            proxy_objective = (group_a * group_base.square() + group_b / group_base.square()).sum()
+        else:
+            # Keep the arbitrary-objective path as a reference/future hook;
+            # only it needs the candidate loop because the closed form no
+            # longer describes the objective.
+            scales = torch.ones_like(up_error_weight)
+            proxy_objective = torch.zeros((), device=scales.device, dtype=torch.float32)
+            for group_index in range(group_count):
+                start = group_index * group_size
+                stop = min(start + group_size, up_error_weight.numel())
+                base = group_base[group_index]
+                candidates = torch.stack(
+                    [(base * (2.0 ** float(exponent))).clamp(min=scale_min, max=scale_max)
+                     for exponent in candidate_exponents]
+                )
                 score_values = []
                 for candidate in candidates:
                     candidate_scales = torch.ones_like(scales)
                     candidate_scales[start:stop] = candidate
-                    score = fake_quant_objective(candidate_scales)
-                    score_values.append(
-                        torch.as_tensor(score, device=scales.device, dtype=torch.float32)
-                    )
+                    score_values.append(torch.as_tensor(
+                        fake_quant_objective(candidate_scales), device=scales.device, dtype=torch.float32
+                    ))
                 scores = torch.stack(score_values)
                 selected = int(scores.argmin().item())
+                scales[start:stop] = candidates[selected]
                 proxy_objective += scores[selected]
-            scales[start:stop] = candidates[selected]
 
         salience = swiglu_jacobian_salience(gate, up, down_weight)
         stats = {
