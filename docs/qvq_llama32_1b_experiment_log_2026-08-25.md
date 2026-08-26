@@ -538,3 +538,21 @@ percentage point of the current 18.7813% leader:
 
 No result is treated as a gain until canonical D300 completes on the exact
 same manifest/protocol.
+
+### Queued fixed-block LDLQ and down-projection capacity follow-up
+
+Based on the observed fixed-block LDLQ gain at reg .005 and the strong
+down-projection W2.5 signal, the next same-protocol factorial follow-up is
+queued behind the current alignment jobs. It uses the same ordinary 128 rows,
+YAQA 182 rows, and disjoint canonical D300 manifest:
+
+| GPU | Arm | Config | Status |
+| --- | --- | --- | --- |
+| 1 | fixed-block LDLQ, reg .15 | `llama32_1b_v2b2_p32_yaqa_fixed_reg015.json` | queued |
+| 2 | fixed-block LDLQ, reg .20 | `llama32_1b_v2b2_p32_yaqa_fixed_reg020.json` | queued |
+| 3 | fixed-block LDLQ, reg .225 | `llama32_1b_v2b2_p32_yaqa_fixed_reg0225.json` | queued |
+| 4 | `mlp.down_proj` W2.5, reg .20 | `llama32_1b_v2b2_p32_yaqa_mlp_down_w25_reg020.json` | queued |
+
+Each watcher starts only after its current GPU's alignment quantizer exits,
+then runs canonical D300 automatically. These arms isolate the two highest
+priority controls from the review before any combination is attempted.

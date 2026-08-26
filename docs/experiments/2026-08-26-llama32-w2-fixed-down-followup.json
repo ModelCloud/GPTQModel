@@ -1,0 +1,13 @@
+{
+  "experiment": "llama32-1b-flat-w2-fixed-block-and-down-capacity-followup",
+  "git_commit": "pending-after-queue",
+  "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "calibration": {"ordinary_rows": "0:128", "yaqa_rows": "0:182", "yaqa_tokens": 302193, "d300_overlap": 0},
+  "d300_manifest_sha256": "701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b",
+  "arms": [
+    {"gpu": 1, "name": "fixed-reg015", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg015.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg015-gpu1", "status": "queued"},
+    {"gpu": 2, "name": "fixed-reg020", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg020.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu2", "status": "queued"},
+    {"gpu": 3, "name": "fixed-reg0225", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg0225.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu3", "status": "queued"},
+    {"gpu": 4, "name": "mlp-down-w25-reg020", "config": "scripts/configs/llama32_1b_v2b2_p32_yaqa_mlp_down_w25_reg020.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-mlp-down-w25-reg020-gpu4", "status": "queued"}
+  ]
+}
