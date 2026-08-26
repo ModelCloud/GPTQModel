@@ -839,3 +839,5 @@ and 3.
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-align-main-ecf7081e` | `divergence300` | complete; metric=0.17864583333333334; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-align-main-ecf7081e-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e` | `divergence300` | complete; metric=0.16447916666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-replay-main-ecf7081e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-main-d7eae64a` | `divergence300` | complete; metric=0.15260416666666668; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-chatw97-main-d7eae64a-div300-dev-v1.json` |
