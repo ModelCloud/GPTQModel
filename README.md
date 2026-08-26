@@ -21,7 +21,7 @@
 
 ## Latest News 🗞️🚀
 
-* 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` multimodal perception and OCR quantization support.
+* 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
 * 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
 * 08/24/2026 7.4.0-dev `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
 * 08/20/2026 7.4.0-dev `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2; `muse_glimmer` / Muse Glimmer multimodal; `mage_vl` / Mage-VL; Cohere `North Micro Vision` (`cohere_compass`); `axk2` (A.X-K2) model support.
