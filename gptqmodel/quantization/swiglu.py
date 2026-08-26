@@ -137,11 +137,12 @@ def choose_swiglu_scales(
         up = inputs @ up_weight.to(torch.float32).transpose(0, 1)
         native_scales = None
         native_proxy = None
+        native_salience = None
         if fake_quant_objective is None and inputs.is_cuda:
             try:
                 from gptqmodel.utils.qvq_cuda import qvq_cuda_swiglu_proxy_scales
 
-                native_scales, native_proxy = qvq_cuda_swiglu_proxy_scales(
+                native_scales, native_proxy, native_gate_salience, native_up_salience, native_down_salience = qvq_cuda_swiglu_proxy_scales(
                     gate,
                     up,
                     up_weight,
@@ -150,75 +151,59 @@ def choose_swiglu_scales(
                     scale_min,
                     scale_max,
                 )
+                native_salience = (native_gate_salience, native_up_salience, native_down_salience)
             except (ImportError, RuntimeError, TypeError, ValueError):
                 # CUDA extensions are optional; the exact PyTorch path remains
                 # the correctness fallback when compilation or dispatch is unavailable.
                 native_scales = None
                 native_proxy = None
-        silu_gate = F.silu(gate)
-        hidden = silu_gate * up
-        down_energy = down_weight.to(torch.float32).square().sum(dim=0)
-        # A and B are the leading-order up/down error weights.  The fourth
-        # root of their group-sum ratio minimizes the shared-scale proxy.
-        up_error_weight = silu_gate.square().mean(dim=0) * up_weight.to(
-            torch.float32
-        ).square().mean(dim=1)
-        down_error_weight = hidden.square().mean(dim=0) * down_energy
         epsilon = torch.finfo(torch.float32).eps
-        # For the analytical proxy, the per-group objective is
-        #   L_G(s) = A_G*s**2 + B_G/s**2,
-        # whose constrained minimizer is clamp((B_G/A_G)**0.25).  The old
-        # implementation searched candidates around this exact solution and
-        # synchronised the host once per group.  Reduce all groups in one
-        # tensor operation; this preserves the mathematical result while
-        # avoiding hundreds of tiny launches and CPU/GPU synchronisations.
-        group_count = math.ceil(up_error_weight.numel() / group_size)
-        padded = group_count * group_size - up_error_weight.numel()
-        if padded:
-            pad = torch.zeros(padded, device=up_error_weight.device, dtype=torch.float32)
-            grouped_a = torch.cat((up_error_weight, pad)).reshape(group_count, group_size)
-            grouped_b = torch.cat((down_error_weight, pad)).reshape(group_count, group_size)
-        else:
-            grouped_a = up_error_weight.reshape(group_count, group_size)
-            grouped_b = down_error_weight.reshape(group_count, group_size)
-        group_a = grouped_a.sum(dim=1)
-        group_b = grouped_b.sum(dim=1)
-        group_base = (group_b.clamp_min(epsilon) / group_a.clamp_min(epsilon)).pow(0.25)
-        group_base = group_base.clamp(min=scale_min, max=scale_max)
-
         if native_scales is not None:
             scales = native_scales
             proxy_objective = native_proxy.sum()
-        elif fake_quant_objective is None:
-            scales = group_base.repeat_interleave(group_size)[: up_error_weight.numel()]
-            proxy_objective = (group_a * group_base.square() + group_b / group_base.square()).sum()
+            salience_sums = tuple(value.sum() for value in native_salience)
         else:
-            # Keep the arbitrary-objective path as a reference/future hook;
-            # only it needs the candidate loop because the closed form no
-            # longer describes the objective.
-            scales = torch.ones_like(up_error_weight)
-            proxy_objective = torch.zeros((), device=scales.device, dtype=torch.float32)
-            for group_index in range(group_count):
-                start = group_index * group_size
-                stop = min(start + group_size, up_error_weight.numel())
-                base = group_base[group_index]
-                candidates = torch.stack(
-                    [(base * (2.0 ** float(exponent))).clamp(min=scale_min, max=scale_max)
-                     for exponent in candidate_exponents]
-                )
-                score_values = []
-                for candidate in candidates:
-                    candidate_scales = torch.ones_like(scales)
-                    candidate_scales[start:stop] = candidate
-                    score_values.append(torch.as_tensor(
-                        fake_quant_objective(candidate_scales), device=scales.device, dtype=torch.float32
-                    ))
-                scores = torch.stack(score_values)
-                selected = int(scores.argmin().item())
-                scales[start:stop] = candidates[selected]
-                proxy_objective += scores[selected]
-
-        salience = swiglu_jacobian_salience(gate, up, down_weight)
+            silu_gate = F.silu(gate)
+            hidden = silu_gate * up
+            down_energy = down_weight.to(torch.float32).square().sum(dim=0)
+            # A and B are the leading-order up/down error weights.  The fourth
+            # root of their group-sum ratio minimizes the shared-scale proxy.
+            up_error_weight = silu_gate.square().mean(dim=0) * up_weight.to(torch.float32).square().mean(dim=1)
+            down_error_weight = hidden.square().mean(dim=0) * down_energy
+            group_count = math.ceil(up_error_weight.numel() / group_size)
+            padded = group_count * group_size - up_error_weight.numel()
+            if padded:
+                pad = torch.zeros(padded, device=up_error_weight.device, dtype=torch.float32)
+                grouped_a = torch.cat((up_error_weight, pad)).reshape(group_count, group_size)
+                grouped_b = torch.cat((down_error_weight, pad)).reshape(group_count, group_size)
+            else:
+                grouped_a = up_error_weight.reshape(group_count, group_size)
+                grouped_b = down_error_weight.reshape(group_count, group_size)
+            group_a = grouped_a.sum(dim=1)
+            group_b = grouped_b.sum(dim=1)
+            group_base = (group_b.clamp_min(epsilon) / group_a.clamp_min(epsilon)).pow(0.25).clamp(min=scale_min, max=scale_max)
+            if fake_quant_objective is None:
+                scales = group_base.repeat_interleave(group_size)[: up_error_weight.numel()]
+                proxy_objective = (group_a * group_base.square() + group_b / group_base.square()).sum()
+            else:
+                scales = torch.ones_like(up_error_weight)
+                proxy_objective = torch.zeros((), device=scales.device, dtype=torch.float32)
+                for group_index in range(group_count):
+                    start = group_index * group_size
+                    stop = min(start + group_size, up_error_weight.numel())
+                    base = group_base[group_index]
+                    candidates = torch.stack([(base * (2.0 ** float(exponent))).clamp(min=scale_min, max=scale_max) for exponent in candidate_exponents])
+                    score_values = []
+                    for candidate in candidates:
+                        candidate_scales = torch.ones_like(scales)
+                        candidate_scales[start:stop] = candidate
+                        score_values.append(torch.as_tensor(fake_quant_objective(candidate_scales), device=scales.device, dtype=torch.float32))
+                    scores = torch.stack(score_values)
+                    selected = int(scores.argmin().item())
+                    scales[start:stop] = candidates[selected]
+                    proxy_objective += scores[selected]
+            salience = swiglu_jacobian_salience(gate, up, down_weight)
+            salience_sums = (salience["gate"].sum(), salience["up"].sum(), salience["down"].sum())
         stats = {
             "tokens": int(inputs.shape[0]),
             "intermediate_channels": int(scales.numel()),
@@ -228,9 +213,9 @@ def choose_swiglu_scales(
             "scale_max": float(scales.max().item()),
             "scale_geomean": float(scales.clamp_min(epsilon).log().mean().exp().item()),
             "proxy_objective": float(proxy_objective.item()),
-            "gate_salience_sum": float(salience["gate"].sum().item()),
-            "up_salience_sum": float(salience["up"].sum().item()),
-            "down_salience_sum": float(salience["down"].sum().item()),
+            "gate_salience_sum": float(salience_sums[0].item()),
+            "up_salience_sum": float(salience_sums[1].item()),
+            "down_salience_sum": float(salience_sums[2].item()),
         }
     return scales, stats
 

@@ -257,7 +257,7 @@ def qvq_cuda_swiglu_proxy_scales(
     group_size: int,
     scale_min: float,
     scale_max: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run fused CUDA Smooth-SwiGLU statistics and analytical group solve."""
     global _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP
     if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
