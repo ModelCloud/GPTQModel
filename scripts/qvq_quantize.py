@@ -1090,9 +1090,13 @@ def main(argv: list[str] | None = None) -> int:
         "python": platform.python_version(),
         "python_gil_enabled": getattr(sys, "_is_gil_enabled", lambda: True)(),
         "torch": torch.__version__,
-        "device": args.device,
-        "device_name": torch.cuda.get_device_name(torch.device(args.device))
-        if torch.device(args.device).type == "cuda"
+        # A complete --quant-config is authoritative; args.device remains at
+        # its parser default when convenience flags are intentionally ignored.
+        # Reporting args.device here can query CUDA on a CUDA-less MPS host
+        # after a successful quantization and mask the real result.
+        "device": str(config.device),
+        "device_name": torch.cuda.get_device_name(torch.device(config.device))
+        if torch.device(config.device).type == "cuda"
         else None,
         "disjointness_manifest": (
             None
