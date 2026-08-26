@@ -227,6 +227,7 @@ The flat-W2 control is the preserved artifact
   restarted after a monitor interruption and completed successfully)
 - O-only W2.5: `/tmp/qvq-mechanism-o-w25-mps-0011250f`
 - V-only W2.5: `/tmp/qvq-mechanism-v-w25-mps-0011250f`
+- Atomic SwiGLU: `/tmp/qvq-mechanism-atomic-mps-8bdec24e`
 
 ### Local layer-0 held-out logits
 
@@ -264,6 +265,31 @@ claim is made for mean absolute error. Each new report contains the exact
 row/token counts (`65` rows, `14,938` tokens, `1,915,888,128` logit elements),
 the MLX device (`Device(gpu, 0)`), dense/compare dtypes (`bfloat16`/`float32`),
 and the reproducible checkpoint path under `/tmp` listed above.
+
+### Local layer-0 Atomic replay
+
+The layer-0 Atomic run used the pulled implementation at commit `8bdec24e`,
+normal `reselect` as candidate `0`, fixed families `0--3` as candidates
+`1--4`, and two disjoint replay folds: search rows `310:342` (`14,059`
+tokens) and confirmation rows `342:374` (`13,790` tokens). The nonlinear
+preselector evaluated all `125` complete gate/up/down triplets. Its best local
+triplet was `(4,2,4)` with MLP-output loss `4.953694588e-05`, but propagated
+search scored it at `1.009263208` relative to canonical; the other retained
+alternatives scored `1.052012031`, `1.046918477`, and `1.046918477`. Therefore
+the final selected triplet was the canonical `(0,0,0)`. Search baseline and
+candidate KL were `0.0286011547` and `0.0286011547` (token-weighted over
+`14,027` search tokens), while confirmation baseline and candidate KL were
+both `0.0597958579` over `13,758` tokens; confirmation Top-1 was `89.1554%`,
+Top-5 overlap `88.1131%`, and Top-10 overlap `88.7258%` for both.
+
+On the independent held-out MLX slice, Atomic measured relative L2
+`0.522794286`, RMSE `1.546181154`, mean absolute error `1.141937852`, maximum
+absolute error `18.734375`, cosine `0.875322169`, and Top-1 agreement
+`80.8274%`. The pass used `65` rows / `14,938` tokens / `1,915,888,128`
+logit elements, dense MLX bfloat16 versus float32 reductions, and
+`Device(gpu, 0)`. Since canonical was selected, this run demonstrates the
+fail-safe behavior of the propagated Atomic selector on this layer-0 slice;
+it is not evidence of an Atomic accuracy gain.
 
 ### Canonical task-score status
 
