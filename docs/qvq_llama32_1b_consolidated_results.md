@@ -18,7 +18,6 @@ agreement through horizon 32; exact counts are exact 32-token trajectories.
 | 6a0ee7 | Full-reference | W2 | 2.0232 | full-reference mix, reg .30 | 17.7292% | 3 | 4.5700 | pending/ledger stale | D300 complete |
 | 64876c | Seed control | W2 | 2.0232 | YAQA 302k, seed 1 | 17.7083% | 2 | 4.9667 | not run | complete |
 | d64c9f | YAQA + 2-epoch alignment | W2 | 2.0232 | YAQA 302k, reg .05/.10 layers | 17.0938% | 3 | 4.5733 | 20.68% | teacher-forced control |
-| 4aa38f | D300-source-shaped | W2 | 2.0232 | source-shaped 500k, reg .20 | 17.0729% | 5 | 4.9933 | 11.91% | complete |
 | 7661a7 | YAQA regularization | W2 | 2.0232 | YAQA 302k, reg .0225 | 16.9271% | 6 | 4.6667 | queued/recorded | D300 complete |
 | 702443 | YAQA + `mlp.down_proj` W3 | W2 + W3 down | ~2.3565 | AIME mix | 16.7396% | 2 | 4.8267 | 27.79% | mixed-rate diagnostic |
 | 048f31 | Fixed-block LDLQ | W2 | 2.0232 | YAQA 302k, reg .005 | 16.3021% | 5 | 4.9133 | not run | complete |
@@ -40,6 +39,16 @@ overhead. The mixed W2 + W3-down estimate assumes one-third of projection
 weights use W3. GSM8K values for Q07 W2.5/W3 are reported in the existing Q07 ledger;
 they are not flat-W2 results. The W2.5/W3 rows are included for rate/fidelity
 context only and do not count toward the flat-W2 target.
+
+## Invalidated arms
+
+These arms produced numerical results but should not be used for leaderboard
+or comparison purposes because the calibration artifact failed the strict
+row-level contamination preflight.
+
+| Arm ID | Family / arm | Rate | Eff. BPW* | Calibration | D300 Top-1 | Exact / 300 | Mean first divergence | GSM8K Platinum | Status |
+| --- | ---: | --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 4aa38f | D300-source-shaped | W2 | 2.0232 | source-shaped 500k, reg .20 | 17.0729% | 5 | 4.9933 | 11.91% | **invalid / contaminated** — calibration artifact `calibration_div300_sources.parquet` failed the disjointness audit (1 normalized D300 overlap, 33 internal duplicate groups) |
 
 ## Current leader and protocol
 
@@ -73,7 +82,7 @@ locations are indexed here.
 | 94710c, b5283c, 64876c, 7661a7, 7616fa, 1a6f78, 62ba43, f111c3, 0b4049, b12aa6 | YAQA regularization configs/checkpoints under `scripts/configs/` and `/root/qvq-results/`. |
 | 6a0ee7, cd6559, 1a635f | Full-reference sweep ledger in `docs/experiments/`; checkpoints under `/root/qvq-results/`. |
 | d64c9f | Alignment sweep ledger `docs/experiments/2026-08-26-llama32-w2-alignment-sweep.json`. |
-| 4aa38f | Source-shaped 500k ledger in `docs/experiments/`; checkpoint under `/root/qvq-results/`. |
+| 4aa38f | Source-shaped 500k ledger in `docs/experiments/`; checkpoint under `/root/qvq-results/`. **Invalidated**: the 993-row `calibration_div300_sources.parquet` artifact used by this arm failed the row-level disjointness audit and is not eligible for quantization/evaluation. |
 | 702443, d7ee8e | AIME/precision ledger in `docs/experiments/`; checkpoints under `/root/qvq-results/`. |
 | 048f31 | Fixed-block LDLQ ledger in `docs/experiments/`; checkpoint under `/root/qvq-results/`. |
 | 2d08b1 | Checkpoint `/root/qvq-results/llama32-1b-w2-yaqa302k-reg010-align-gpu1`; metrics `/root/qvq-results/llama32-1b-w2-yaqa302k-reg010-align-gpu1-div300-dev-v1.json`. |
@@ -105,3 +114,6 @@ groups were found within the candidate mix. That artifact is not eligible for
 quantization/evaluation. A filtered artifact retaining 959 unique rows passes
 the strict audit at
 `docs/experiments/disjointness-div300-sources-disjoint.json`.
+Arm `4aa38f`, which used the ineligible 993-row artifact, is therefore listed
+in the "Invalidated arms" section above and should not be compared as a
+completed flat-W2 result.
