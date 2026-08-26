@@ -1114,19 +1114,29 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
         offload_to_disk=False,
     )
     processor = _processor(qcfg=qcfg)
+    # Mirror the production model tree: subset keys are layer-relative while
+    # NamedModule.full_name contains the complete path used by replay.
     root = torch.nn.Module()
-    root.mlp = torch.nn.Module()
-    root.mlp.gate_proj = torch.nn.Linear(4, 4, bias=False)
-    root.mlp.up_proj = torch.nn.Linear(4, 4, bias=False)
-    root.mlp.down_proj = torch.nn.Linear(4, 4, bias=False)
+    root.model = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    root.model.layers[0].mlp = torch.nn.Module()
+    root.model.layers[0].mlp.gate_proj = torch.nn.Linear(4, 4, bias=False)
+    root.model.layers[0].mlp.up_proj = torch.nn.Linear(4, 4, bias=False)
+    root.model.layers[0].mlp.down_proj = torch.nn.Linear(4, 4, bias=False)
     processor._module_replay_model = SimpleNamespace(model=root)
-    processor._atomic_swiglu_inputs["mlp"] = torch.randn(4, 4)
+    processor._atomic_swiglu_inputs["model.layers.0.mlp"] = torch.randn(4, 4)
 
     subset = {}
     records = {}
     for role in ("gate_proj", "up_proj", "down_proj"):
         name = f"mlp.{role}"
-        named = NamedModule(root.mlp.__getattr__(role), name=role, full_name=name, layer_index=0)
+        full_name = f"model.layers.0.{name}"
+        named = NamedModule(
+            root.model.layers[0].mlp.__getattr__(role),
+            name=name,
+            full_name=full_name,
+            layer_index=0,
+        )
         subset[name] = named
         dense_weight = named.module.weight.detach().clone()
         candidates = {}
@@ -1136,7 +1146,7 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
                 "weight": weight,
                 "serialized_tensors": {"weight": weight},
             }
-        records[name] = {
+        records[full_name] = {
             "dense_weight": dense_weight,
             "candidates": candidates,
             "module_qcfg": qcfg,
@@ -1174,8 +1184,9 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
     expected_ids = {"gate_proj": 1, "up_proj": 2, "down_proj": 3}
     for role, candidate_id in expected_ids.items():
         name = f"mlp.{role}"
-        expected = records[name]["candidates"][candidate_id]["weight"]
-        torch.testing.assert_close(root.mlp.__getattr__(role).weight, expected)
+        full_name = f"model.layers.0.{name}"
+        expected = records[full_name]["candidates"][candidate_id]["weight"]
+        torch.testing.assert_close(root.model.layers[0].mlp.__getattr__(role).weight, expected)
 
 
 def test_atomic_swiglu_resolves_layer_relative_subset_keys_against_full_names():
