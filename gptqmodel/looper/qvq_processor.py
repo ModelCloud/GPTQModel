@@ -223,6 +223,12 @@ class QVQProcessor(LoopProcessor):
             raise ValueError("QVQ Smooth-SwiGLU requires a nonempty calibration dataset.")
 
         max_tokens = 512 if smooth_config is None else smooth_config.max_calibration_tokens
+        input_device = input_embeddings.weight.device
+        # On a CUDA-resident model, keep the small calibration activation cache
+        # on the accelerator.  The previous path forced every hook through a
+        # blocking GPU->CPU FP32 copy and later copied the same tensor back to
+        # the weight device before scale selection.
+        capture_device = input_device if input_device.type == "cuda" else torch.device("cpu")
         activations: Dict[str, list[torch.Tensor]] = {name: [] for name in mlps}
         retained_tokens = {name: 0 for name in mlps}
         mask_tls = threading.local()
@@ -249,7 +255,11 @@ class QVQProcessor(LoopProcessor):
                 else:
                     source = source.reshape(-1, source.shape[-1])
                 remaining = max_tokens - retained_tokens[module_name]
-                source = source[:remaining].to(device="cpu", dtype=torch.float32)
+                source = source[:remaining].to(
+                    device=capture_device,
+                    dtype=torch.float32,
+                    non_blocking=capture_device.type == "cuda",
+                )
                 activations[module_name].append(source)
                 retained_tokens[module_name] += int(source.shape[0])
 
@@ -259,7 +269,6 @@ class QVQProcessor(LoopProcessor):
             hooks.append(module.register_forward_pre_hook(capture_mlp_input(module_name)))
         was_training = model.training
         model.eval()
-        input_device = input_embeddings.weight.device
         try:
             with torch.no_grad():
                 for row in self.calibration_dataset:
@@ -290,7 +299,7 @@ class QVQProcessor(LoopProcessor):
                     f"QVQ Smooth-SwiGLU requires a biasless `up_proj`; `{module_name}.up_proj` has a bias."
                 )
             weight_device = gate.weight.device
-            inputs = inputs.to(device=weight_device)
+            inputs = inputs.to(device=weight_device, non_blocking=weight_device.type == "cuda")
             scales, stats = choose_swiglu_scales(
                 inputs,
                 gate.weight,
