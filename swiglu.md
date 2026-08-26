@@ -135,10 +135,66 @@ numbers above come from a direct MLX reload/forward comparison and not from a
 published task-evaluation report. Both checkpoint payload directories remain
 available locally.
 
+## Post-MLX-bridge rerun
+
+Date: 2026-08-26
+
+The following measurements were rerun after the MLX bridge was changed to use
+`mx.gpu` when available. They use the same dense Llama 3.2 1B Instruct source
+and native MLX GPU teacher-forced comparison, but are reported separately
+because the current calibration/tokenization path does not reproduce the old
+2,722-token tiny artifact or the old 15,062-token reduced slice exactly.
+
+### Tiny one-layer proof
+
+- fresh artifacts: `/tmp/qvq-swiglu-tiny-nosmooth-87f97f04` and
+  `/tmp/qvq-swiglu-tiny-smooth-87f97f04`;
+- QVQ W2 `block_ldlq`, first decoder layer, seven projections;
+- 8 calibration rows, 2,970 non-padding calibration tokens reported by the
+  current run;
+- Smooth group size 16 and 64-token scale-search limit;
+- prompt: `Explain in one sentence why unit tests are useful.`;
+- output shape: `[1, 12, 128256]`.
+
+| Metric | No Smooth | Smooth-SwiGLU | Smooth minus control |
+|---|---:|---:|---:|
+| Relative L2 | 0.123125224 | 0.125049626 | +1.56% |
+| RMSE | 0.374812615 | 0.380670801 | +1.56% |
+| Maximum absolute error | 3.718750000 | 3.531250000 | **-5.04%** |
+| Cosine similarity | 0.992489318 | 0.992296272 | -0.000193 |
+| Last-token top-1 | match | match | unchanged |
+
+The corrected Smooth run completed through lazy-source materialization,
+function-parity checking, QVQ save, native MLX reload, and GPU forward. The
+current tiny run therefore validates the corrected offline path, but its
+relative-L2 result is not an improvement. The historical 0.131278809 to
+0.119789864 improvement remains valid for its original artifact/protocol and
+is retained above as historical evidence rather than mixed into this rerun.
+
+### Reduced 65-row MLX slice
+
+This is a fresh native-MLX-GPU evaluation of the preserved matched YAQA
+artifacts `/tmp/qvq-swiglu-reg015-nosmooth-mps-95e206a4` and
+`/tmp/qvq-swiglu-reg015-smooth-mps-95e206a4`. The current tokenizer produced
+65 held-out rows and 14,969 truncated tokens (maximum 256 tokens per row).
+
+| Metric | No Smooth | Smooth-SwiGLU | Smooth minus control |
+|---|---:|---:|---:|
+| Relative logit L2 | 0.380534681 | 0.382467134 | +0.51% |
+| RMSE | 1.201429318 | 1.207530485 | +0.51% |
+| Maximum absolute error | 18.085449219 | 16.311523438 | **-9.81%** |
+| Cosine similarity | 0.930606950 | 0.929755969 | -0.000851 |
+| Top-1 agreement | 81.2412% | 81.2680% | **+0.0267 pp** |
+
+Both artifacts loaded with the public QVQ MLX backend on `Device(gpu, 0)` and
+completed all 65 teacher-forced forwards. These numbers supersede neither the
+historical 15,062-token table nor the tiny historical proof; they are the
+post-bridge rerun to use when assessing the current MLX path.
+
 ### MLX/runtime status
 
 Native MLX QVQ reload, GPU full-model forward, and short deterministic
-generation now pass for both the Smooth and no-Smooth payloads. The MLX bridge
+generation pass for both the Smooth and no-Smooth payloads. The MLX bridge
 selects `Device(gpu, 0)` on this Apple host and falls back to CPU only when no
 MLX GPU is available. The public Torch/MPS evaluator still segfaulted while
 loading the quantized checkpoint, so no Torch/MPS quality number is being
