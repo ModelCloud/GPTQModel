@@ -70,6 +70,7 @@ def _validate_viterbi_distance_range(
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
+_QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
 _PGC16_LEVELS: dict[tuple[torch.device, str], torch.Tensor] = {}
 _PGC16_LEVELS_LOCK = threading.Lock()
@@ -85,6 +86,7 @@ def _qvq_cuda_sources() -> list[str]:
         str(_qvq_cuda_root() / "qvq_viterbi_cuda.cu"),
         str(_qvq_cuda_root() / "qvq_hadamard_cuda.cu"),
         str(_qvq_cuda_root() / "qvq_yaqa_cuda.cu"),
+        str(_qvq_cuda_root() / "qvq_swiglu_cuda.cu"),
     ]
 
 
@@ -112,6 +114,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "norm_rank_telemetry_snapshot",
         "norm_rank_cache_size",
         "norm_cache_size",
+        "swiglu_proxy_scales",
     ),
     sources=_qvq_cuda_sources,
     build_root_env="GPTQMODEL_QVQ_CUDA_BUILD_ROOT",
@@ -244,6 +247,28 @@ def _qvq_cuda_yaqa_feedback_update_op() -> Callable:
                     "qvq_cuda", "yaqa_feedback_update_"
                 )
     return _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP
+
+
+def qvq_cuda_swiglu_proxy_scales(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    group_size: int,
+    scale_min: float,
+    scale_max: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run fused CUDA Smooth-SwiGLU statistics and analytical group solve."""
+    global _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP
+    if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
+                _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP = _extension_api().op(
+                    "qvq_cuda", "swiglu_proxy_scales"
+                )
+    return _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP(
+        gate, up, up_weight, down_weight, group_size, scale_min, scale_max
+    )
 
 
 def _qvq_cuda_viterbi_v4_op() -> Callable:

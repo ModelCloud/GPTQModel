@@ -135,6 +135,26 @@ def choose_swiglu_scales(
     with torch.no_grad():
         gate = inputs @ gate_weight.to(torch.float32).transpose(0, 1)
         up = inputs @ up_weight.to(torch.float32).transpose(0, 1)
+        native_scales = None
+        native_proxy = None
+        if fake_quant_objective is None and inputs.is_cuda:
+            try:
+                from gptqmodel.utils.qvq_cuda import qvq_cuda_swiglu_proxy_scales
+
+                native_scales, native_proxy = qvq_cuda_swiglu_proxy_scales(
+                    gate,
+                    up,
+                    up_weight,
+                    down_weight,
+                    group_size,
+                    scale_min,
+                    scale_max,
+                )
+            except (ImportError, RuntimeError, TypeError, ValueError):
+                # CUDA extensions are optional; the exact PyTorch path remains
+                # the correctness fallback when compilation or dispatch is unavailable.
+                native_scales = None
+                native_proxy = None
         silu_gate = F.silu(gate)
         hidden = silu_gate * up
         down_energy = down_weight.to(torch.float32).square().sum(dim=0)
@@ -166,7 +186,10 @@ def choose_swiglu_scales(
         group_base = (group_b.clamp_min(epsilon) / group_a.clamp_min(epsilon)).pow(0.25)
         group_base = group_base.clamp(min=scale_min, max=scale_max)
 
-        if fake_quant_objective is None:
+        if native_scales is not None:
+            scales = native_scales
+            proxy_objective = native_proxy.sum()
+        elif fake_quant_objective is None:
             scales = group_base.repeat_interleave(group_size)[: up_error_weight.numel()]
             proxy_objective = (group_a * group_base.square() + group_b / group_base.square()).sum()
         else:
