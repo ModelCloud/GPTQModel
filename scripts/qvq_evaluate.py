@@ -22,7 +22,12 @@ import time
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:  # Python 3.10 compatibility
+    UTC = timezone.utc
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
