@@ -104,10 +104,10 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498%** |
 | 0f642c | Up + Down projections W3, reg .15 | **2.5749** | 0 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
 | 569a95 | Up + Down projections W3.5, reg .15 | **2.8508** | 1 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
-| cdfa75 | Up + Down projections W4, reg .15 | **~3.1266*** | 2 | quantizing with model-wide `qvq_v4` format; clean manifest | D300 + GSM8K Platinum pending |
+| cdfa75 | Up + Down projections W4, reg .15 | **~3.1266*** | 2 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
 | ef21af | V + O projections W3, reg .15 | **2.1094** | 3 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
 | 60a68a | V + O projections W3.5, reg .15 | **2.1525** | 4 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
-| 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | quantizing with model-wide `qvq_v4` format; clean manifest | D300 + GSM8K Platinum pending |
+| 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
 | d13602 | V + O projections W2 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0232** | 6 | quantizing; clean YAQA/NM and disjoint replay manifests | D300 + GSM8K Platinum pending |
 | b7d172 | V + O projections W2.5 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0663** | 7 | quantizing; clean YAQA/NM and disjoint replay manifests | D300 + GSM8K Platinum pending |
 

@@ -942,13 +942,13 @@ and 3.
 
 | queued | `569a95` | `up-down-w35-569a95` | Up+Down W3.5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w35.json`; physical GPU 1; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
 
-| queued | `cdfa75` | `up-down-w40-cdfa75` | Up+Down W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w40.json` (`format=qvq_v4`, model-wide W4-capable codec); physical GPU 2; clean YAQA/NM calibration; D300/GSM8K queued by monitor |
+| failed | `cdfa75` | `up-down-w40-cdfa75` | Up+Down W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w40.json` (`format=qvq_v4`); physical GPU 2; failed in `gptqmodel/quantization/qvq.py:1327` because trusted CUDA Viterbi supports only V2 sequences; no checkpoint or benchmark result. |
 
 | queued | `ef21af` | `vo-w30-ef21af` | V+O W3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w30.json`; physical GPU 3; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
 
 | queued | `60a68a` | `vo-w35-60a68a` | V+O W3.5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w35.json`; physical GPU 4; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
 
-| queued | `98daf5` | `vo-w40-98daf5` | V+O W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w40.json` (`format=qvq_v4`, model-wide W4-capable codec); physical GPU 5; clean YAQA/NM calibration; D300/GSM8K queued by monitor |
+| failed | `98daf5` | `vo-w40-98daf5` | V+O W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w40.json` (`format=qvq_v4`); physical GPU 5; failed in `gptqmodel/quantization/qvq.py:1327` because trusted CUDA Viterbi supports only V2 sequences; no checkpoint or benchmark result. |
 
 | failed+requeued | `151a0a`, `c17e71` | `W4 initial launch` | Initial W4 configs used `qvq_v2b2_p32`, which correctly rejected rates above W3.5. Replaced with model-wide `qvq_v4` configs and requeued as `cdfa75` and `98daf5`; no checkpoint or benchmark result was produced by the failed attempts. |
 
