@@ -113,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run manifest; defaults inside the output directory.",
     )
     parser.add_argument(
+        "--disjointness-manifest",
+        type=Path,
+        help="Strict preflight manifest from check_calibration_disjointness.py; status must be pass.",
+    )
+    parser.add_argument(
         "--quant-config",
         type=Path,
         help="Complete QVQConfig JSON; convenience flags are ignored.",
@@ -846,6 +851,16 @@ def dataset_slice_evidence(spec: DatasetSlice) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.disjointness_manifest is not None:
+        manifest_path = args.disjointness_manifest.expanduser().resolve()
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"disjointness manifest not found: {manifest_path}")
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest_data.get("status") != "pass":
+            raise RuntimeError(
+                "refusing quantization: calibration/evaluation disjointness preflight failed; "
+                f"see {manifest_path}"
+            )
     # Freeze provenance before any long-running data preparation or quantization.
     # Reading HEAD while writing the report can misattribute a run when a docs-only
     # commit is made concurrently with GPU work.
@@ -1056,6 +1071,15 @@ def main(argv: list[str] | None = None) -> int:
         "device_name": torch.cuda.get_device_name(torch.device(args.device))
         if torch.device(args.device).type == "cuda"
         else None,
+        "disjointness_manifest": (
+            None
+            if args.disjointness_manifest is None
+            else {
+                "path": str(args.disjointness_manifest.expanduser().resolve()),
+                "sha256": _sha256_file(args.disjointness_manifest.expanduser().resolve()),
+                "status": "pass",
+            }
+        ),
         "quantize_config": config.to_dict(),
         "datasets": {
             name: None if spec is None else dataset_slice_evidence(spec)
