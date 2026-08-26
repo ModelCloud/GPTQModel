@@ -13,6 +13,9 @@ The table is a descriptive ranking on one fixed 300-prompt manifest. The 9,600
 token positions are clustered within prompts, so small deltas are not treated
 as independent-sample significance; promotion decisions should use paired
 prompt-level bootstrap (and paired GSM8K tests where available).
+Rows generated before the literal-EOS rollout fix (`55adb7e1`) use the former
+EOS-suppressing decoder and are historical until rerun under the corrected
+protocol; teacher-forced metrics are unaffected.
 
 ## Completed arms (ordered by D300 Top-1, descending)
 
