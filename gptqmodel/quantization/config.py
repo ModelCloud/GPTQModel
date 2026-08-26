@@ -495,6 +495,7 @@ class SmoothSwiGLUConfig:
     scale_min: float = 0.5
     scale_max: float = 2.0
     max_calibration_tokens: int = 2048
+    dense_parity_relative_l2_tolerance: float = 1e-4
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -524,6 +525,18 @@ class SmoothSwiGLUConfig:
             or self.max_calibration_tokens < 1
         ):
             raise ValueError("SmoothSwiGLUConfig: `max_calibration_tokens` must be a positive integer.")
+        if (
+            isinstance(self.dense_parity_relative_l2_tolerance, bool)
+            or not isinstance(self.dense_parity_relative_l2_tolerance, (int, float))
+        ):
+            raise TypeError(
+                "SmoothSwiGLUConfig: `dense_parity_relative_l2_tolerance` must be a real scalar."
+            )
+        self.dense_parity_relative_l2_tolerance = float(self.dense_parity_relative_l2_tolerance)
+        if not math.isfinite(self.dense_parity_relative_l2_tolerance) or self.dense_parity_relative_l2_tolerance <= 0:
+            raise ValueError(
+                "SmoothSwiGLUConfig: `dense_parity_relative_l2_tolerance` must be finite and positive."
+            )
 
 
 class _SharedTemporaryDirectory:

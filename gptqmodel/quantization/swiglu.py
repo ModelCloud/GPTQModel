@@ -139,29 +139,33 @@ def choose_swiglu_scales(
         hidden = silu_gate * up
         down_energy = down_weight.to(torch.float32).square().sum(dim=0)
         # A and B are the leading-order up/down error weights.  The fourth
-        # root is the minimizer of A*s^2 + B/s^2 for each channel.
+        # root of their group-sum ratio minimizes the shared-scale proxy.
         up_error_weight = silu_gate.square().mean(dim=0) * up_weight.to(
             torch.float32
         ).square().mean(dim=1)
         down_error_weight = hidden.square().mean(dim=0) * down_energy
         epsilon = torch.finfo(torch.float32).eps
-        raw = (
-            down_error_weight.clamp_min(epsilon) / up_error_weight.clamp_min(epsilon)
-        ).pow(0.25)
-        raw = raw / raw.clamp_min(epsilon).log().mean().exp()
-
-        scales = torch.ones_like(raw)
-        proxy_scores = torch.zeros_like(raw)
-        for start in range(0, raw.numel(), group_size):
-            stop = min(start + group_size, raw.numel())
-            base = raw[start:stop].clamp(min=scale_min, max=scale_max)
-            group_base = base.clamp_min(epsilon).log().mean().exp()
+        scales = torch.ones_like(up_error_weight)
+        proxy_scores = torch.zeros_like(up_error_weight)
+        for start in range(0, up_error_weight.numel(), group_size):
+            stop = min(start + group_size, up_error_weight.numel())
+            # For one scale shared by a group, the proxy is
+            #
+            #   L_G(s) = s^2 * sum(A_i) + s^-2 * sum(B_i).
+            #
+            # Its unconstrained minimizer is the fourth root of the ratio of
+            # the group sums.  Averaging per-channel optima (especially in
+            # log space) is not equivalent when a few channels dominate.
+            group_a = up_error_weight[start:stop].sum()
+            group_b = down_error_weight[start:stop].sum()
+            group_base = (group_b.clamp_min(epsilon) / group_a.clamp_min(epsilon)).pow(0.25)
+            group_base = group_base.clamp(min=scale_min, max=scale_max)
             candidates = torch.as_tensor(
                 [
                     group_base.item() * (2.0 ** float(exponent))
                     for exponent in candidate_exponents
                 ],
-                device=raw.device,
+                device=scales.device,
                 dtype=torch.float32,
             ).clamp(min=scale_min, max=scale_max)
             if fake_quant_objective is None:
@@ -174,11 +178,11 @@ def choose_swiglu_scales(
             else:
                 score_values = []
                 for candidate in candidates:
-                    candidate_scales = torch.ones_like(raw)
+                    candidate_scales = torch.ones_like(scales)
                     candidate_scales[start:stop] = candidate
                     score = fake_quant_objective(candidate_scales)
                     score_values.append(
-                        torch.as_tensor(score, device=raw.device, dtype=torch.float32)
+                        torch.as_tensor(score, device=scales.device, dtype=torch.float32)
                     )
                 scores = torch.stack(score_values)
                 selected = int(scores.argmin().item())
@@ -188,9 +192,9 @@ def choose_swiglu_scales(
         salience = swiglu_jacobian_salience(gate, up, down_weight)
         stats = {
             "tokens": int(inputs.shape[0]),
-            "intermediate_channels": int(raw.numel()),
+            "intermediate_channels": int(scales.numel()),
             "group_size": group_size,
-            "groups": math.ceil(raw.numel() / group_size),
+            "groups": math.ceil(scales.numel() / group_size),
             "scale_min": float(scales.min().item()),
             "scale_max": float(scales.max().item()),
             "scale_geomean": float(scales.clamp_min(epsilon).log().mean().exp().item()),
@@ -232,16 +236,38 @@ def swiglu_jacobian_salience(
 def _distribution_summary(values: torch.Tensor) -> dict[str, float]:
     flattened = values.detach().to(torch.float32).flatten()
     if flattened.numel() == 0:
-        return {name: 0.0 for name in ("mean", "p50", "p95", "p99", "max")}
+        return {
+            name: 0.0
+            for name in (
+                "mean",
+                "mean_abs",
+                "min",
+                "p01",
+                "p05",
+                "p50",
+                "p95",
+                "p99",
+                "max",
+                "negative_fraction",
+                "positive_fraction",
+            )
+        }
     quantiles = torch.quantile(
-        flattened, torch.tensor((0.5, 0.95, 0.99), device=flattened.device)
+        flattened,
+        torch.tensor((0.01, 0.05, 0.5, 0.95, 0.99), device=flattened.device),
     )
     return {
         "mean": float(flattened.mean().item()),
-        "p50": float(quantiles[0].item()),
-        "p95": float(quantiles[1].item()),
-        "p99": float(quantiles[2].item()),
+        "mean_abs": float(flattened.abs().mean().item()),
+        "min": float(flattened.min().item()),
+        "p01": float(quantiles[0].item()),
+        "p05": float(quantiles[1].item()),
+        "p50": float(quantiles[2].item()),
+        "p95": float(quantiles[3].item()),
+        "p99": float(quantiles[4].item()),
         "max": float(flattened.max().item()),
+        "negative_fraction": float((flattened < 0).to(torch.float32).mean().item()),
+        "positive_fraction": float((flattened > 0).to(torch.float32).mean().item()),
     }
 
 
@@ -328,8 +354,10 @@ def select_swiglu_candidate_triplet(
     Candidate tensors are reconstructed dense weights, not packed payloads.
     The QVQ caller can therefore generate a small bank of exact candidates,
     call this selector, and commit the corresponding serialized payloads.
-    The search is bounded by ``beam_size`` after gate/up pairing and then
-    evaluates the surviving pairs against every down candidate.
+    Every gate/up/down combination is evaluated before pruning.  This keeps a
+    down candidate in the search even when its best partner is not the best
+    pair under the dense down projection, which is necessary to preserve
+    nonlinear error cancellation opportunities.
     """
 
     if isinstance(beam_size, bool) or not isinstance(beam_size, int) or beam_size < 1:
@@ -356,29 +384,22 @@ def select_swiglu_candidate_triplet(
             F.silu(inputs @ dense_gate.float().transpose(0, 1))
             * (inputs @ dense_up.float().transpose(0, 1))
         ) @ dense_down.float().transpose(0, 1)
-        pair_scores = []
-        for gate_index, gate_weight in enumerate(gate_candidates):
-            gate_output = inputs @ gate_weight.float().transpose(0, 1)
-            for up_index, up_weight in enumerate(up_candidates):
-                hidden = F.silu(gate_output) * (
-                    inputs @ up_weight.float().transpose(0, 1)
-                )
-                output = hidden @ dense_down.float().transpose(0, 1)
-                pair_scores.append(
-                    ((output - target).square().mean(), gate_index, up_index)
-                )
-        pair_scores.sort(key=lambda item: float(item[0].item()))
-        surviving_pairs = pair_scores[: min(beam_size, len(pair_scores))]
-
         triplets = []
-        for _, gate_index, up_index in surviving_pairs:
-            gate_output = inputs @ gate_candidates[gate_index].float().transpose(0, 1)
-            up_output = inputs @ up_candidates[up_index].float().transpose(0, 1)
-            hidden = F.silu(gate_output) * up_output
-            for down_index, down_weight in enumerate(down_candidates):
-                output = hidden @ down_weight.float().transpose(0, 1)
-                loss = (output - target).square().mean()
-                triplets.append((loss, gate_index, up_index, down_index))
+        gate_outputs = [
+            inputs @ gate_weight.float().transpose(0, 1)
+            for gate_weight in gate_candidates
+        ]
+        up_outputs = [
+            inputs @ up_weight.float().transpose(0, 1)
+            for up_weight in up_candidates
+        ]
+        for gate_index, gate_output in enumerate(gate_outputs):
+            for up_index, up_output in enumerate(up_outputs):
+                hidden = F.silu(gate_output) * up_output
+                for down_index, down_weight in enumerate(down_candidates):
+                    output = hidden @ down_weight.float().transpose(0, 1)
+                    loss = (output - target).square().mean()
+                    triplets.append((loss, gate_index, up_index, down_index))
         triplets.sort(key=lambda item: float(item[0].item()))
         best_loss, gate_index, up_index, down_index = triplets[0]
         return {
@@ -386,6 +407,7 @@ def select_swiglu_candidate_triplet(
             "up_index": int(up_index),
             "down_index": int(down_index),
             "loss": float(best_loss.item()),
+            "evaluated_triplets": len(triplets),
             "beam": [
                 {
                     "gate_index": int(item[1]),

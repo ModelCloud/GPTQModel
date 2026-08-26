@@ -1322,6 +1322,14 @@ metadata. They must never add inference operations, persistent scale tensors,
 or a hidden dense-weight cache. A local proxy improvement with a propagated
 guardrail regression is not sufficient for promotion.
 
+The follow-up implementation fixes the grouped proxy center to use the
+aggregate fourth-root optimum, removes arbitrary global geometric-mean scale
+normalization, enforces a configurable dense-parity relative-L2 tolerance, and
+evaluates all complete candidate triplets before beam pruning. The scale search
+is still analytical rather than QVQ-aware, and the complete triplet selector is
+still an offline helper rather than an atomic production replay stage; those
+remain explicit follow-up work.
+
 ### Required QVQ propagation protocol
 
 Every QVQ change must be evaluated with the real quantized dataflow, not independent dense-input replays:

@@ -271,6 +271,10 @@ class QVQProcessor(LoopProcessor):
         for module_name, (_, gate, up, down) in mlps.items():
             if not activations[module_name]:
                 raise RuntimeError(f"QVQ Smooth-SwiGLU captured no inputs for `{module_name}`.")
+            if up.bias is not None:
+                raise ValueError(
+                    f"QVQ Smooth-SwiGLU requires a biasless `up_proj`; `{module_name}.up_proj` has a bias."
+                )
             weight_device = gate.weight.device
             inputs = torch.cat(activations[module_name], dim=0).to(device=weight_device)
             scales, stats = choose_swiglu_scales(
@@ -303,6 +307,12 @@ class QVQProcessor(LoopProcessor):
                     raise RuntimeError(f"QVQ Smooth-SwiGLU produced non-finite dense parity for `{module_name}`.")
                 stats["dense_parity_max_abs"] = float(parity_error.abs().max().item())
                 stats["dense_parity_relative_l2"] = float(parity_relative_l2.item())
+                parity_tolerance = smooth_config.dense_parity_relative_l2_tolerance
+                if parity_relative_l2.item() > parity_tolerance:
+                    raise RuntimeError(
+                        f"QVQ Smooth-SwiGLU dense parity exceeded tolerance for `{module_name}`: "
+                        f"relative_l2={parity_relative_l2.item():.8g}, tolerance={parity_tolerance:.8g}."
+                    )
                 up.weight.copy_(transformed_up)
                 down.weight.copy_(transformed_down)
             stats["module"] = module_name

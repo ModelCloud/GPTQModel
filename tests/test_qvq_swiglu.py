@@ -60,6 +60,25 @@ def test_swiglu_scale_search_is_grouped_and_serializable():
     assert QVQConfig.from_quant_config(config.to_dict()).to_dict() == config.to_dict()
 
 
+def test_swiglu_grouped_scale_uses_aggregate_optimum():
+    gate, up, down, inputs = _weights()
+    scales, _ = choose_swiglu_scales(
+        inputs,
+        gate,
+        up,
+        down,
+        group_size=4,
+        candidate_exponents=(0.0,),
+    )
+    gate_activation = inputs @ gate.T
+    up_activation = inputs @ up.T
+    hidden = F.silu(gate_activation) * up_activation
+    group_a = (F.silu(gate_activation).square().mean(0) * up.square().mean(1))[:4].sum()
+    group_b = (hidden.square().mean(0) * down.square().sum(0))[:4].sum()
+    expected = (group_b / group_a).pow(0.25).clamp(0.5, 2.0)
+    torch.testing.assert_close(scales[:4], torch.full((4,), expected))
+
+
 def test_swiglu_jacobian_salience_matches_definition():
     gate, up, down, inputs = _weights()
     gate_activation = inputs @ gate.T
@@ -92,6 +111,7 @@ def test_swiglu_triplet_selection_scores_nonlinear_output():
     assert result["up_index"] == 0
     assert result["down_index"] == 1
     assert result["loss"] == 0.0
+    assert result["evaluated_triplets"] == 8
     assert len(result["beam"]) == 2
 
 
@@ -109,4 +129,16 @@ def test_swiglu_error_diagnostics_exposes_amplification_distributions():
     assert metrics["post_swiglu_relative_error"]["max"] > 0
     assert metrics["A_swiglu"]["p95"] > 0
     assert metrics["A_down"]["p50"] > 0
-    assert set(metrics["cross_error"]) == {"mean", "p50", "p95", "p99", "max"}
+    assert set(metrics["cross_error"]) == {
+        "mean",
+        "mean_abs",
+        "min",
+        "p01",
+        "p05",
+        "p50",
+        "p95",
+        "p99",
+        "max",
+        "negative_fraction",
+        "positive_fraction",
+    }
