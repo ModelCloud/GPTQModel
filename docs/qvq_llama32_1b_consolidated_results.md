@@ -52,7 +52,7 @@ context only and do not count toward the flat-W2 target.
 | `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | gate/up projections W2.5 | 17.2813% | 2 | 25.0620% (303/1209) | complete |
 | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | attention Q/K W2.5 | 16.1042% | 2 | 21.3400% (258/1209) | complete |
 | `llama32-1b-w2-reg015-smooth-swiglu` | analytical Smooth-SwiGLU | 17.3021% | 2 | 20.5128% (248/1209) | complete (pre-fix) |
-| `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | analytical Smooth-SwiGLU, latest native path | pending | pending | 20.5128% (248/1209) | D300 pending |
+| `llama32-1b-w2-reg015-smooth-swiglu-tip-d68c9d00` | analytical Smooth-SwiGLU, latest native path | 17.3021% | 2 | 20.5128% (248/1209) | complete; latest-code rerun matches pre-fix metrics |
 
 ## Invalidated arms
 
