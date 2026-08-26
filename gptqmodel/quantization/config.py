@@ -6321,6 +6321,9 @@ class QVQConfig(BaseQuantizeConfig):
     # Block-LDLQ. False is an explicit opt-out for A/B comparisons; True is an
     # explicit request and still requires a supplied/derived gate.
     propagated_bank_selection: Optional[bool] = field(default=None)
+    # These fields describe YAQA/Hessian processing geometry and remain 16x16
+    # for LR32. The serialized LR32 codec geometry is fixed independently at
+    # K32 x N8 by FORMAT.QVQ_V2B2_P32_LR.
     tile_rows: int = field(default=16)
     tile_cols: int = field(default=16)
     # YAQA is the production QVQ lifecycle default; callers that need the

@@ -202,6 +202,10 @@ class QVQLinear(BaseQuantLinear):
         FORMAT.QVQ_DUAL_V2: FormatSupport(priority=100, bits=QVQ_BITS),
         FORMAT.QVQ_V2B4_P64: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 3.5)),
         FORMAT.QVQ_V2B2_P32: FormatSupport(priority=100, bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 3.5)),
+        FORMAT.QVQ_V2B2_P32_LR: FormatSupport(
+            priority=100,
+            bits=tuple(bit for bit in QVQ_BITS if float(bit) <= 3.5),
+        ),
     }
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
@@ -979,7 +983,6 @@ class QVQLinear(BaseQuantLinear):
                 bank_ids=cuda_bank_ids,
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
-                v2b2_p32_lr=self.v2b2_p32_lr,
                 bank_alt_id=cuda_bank_alt_id,
             )
         if x.device.type == "cpu":
@@ -1007,7 +1010,6 @@ class QVQLinear(BaseQuantLinear):
                 bank_ids=self.bank_ids,
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
-                v2b2_p32_lr=self.v2b2_p32_lr,
                 bank_alt_id=bank_alt_id,
                 use_dense_cache=False,
             )

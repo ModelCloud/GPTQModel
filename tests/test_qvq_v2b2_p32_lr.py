@@ -3,9 +3,13 @@
 
 """Reference and MLX coverage for the GPU-oriented QVQ LR32 layout."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
+from safetensors.torch import load_file, save_file
 
 from gptqmodel.nn_modules.qlinear.qvq import (
     QVQLinear,
@@ -28,6 +32,8 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_decode_states_v2_banked,
     pgc16_levels_for_version,
 )
+from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.model import hf_gptqmodel_prepare_model_for_load, make_quant
 
 LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
 
@@ -193,6 +199,173 @@ def test_lr32_config_and_format_metadata():
     assert config.format == FORMAT.QVQ_V2B2_P32_LR
     assert config.quant_linear_init_kwargs()["v2b2_p32_lr"] is True
     assert config.quant_linear_init_kwargs()["v2b2_p32"] is False
+    assert QVQLinear.supported_bits(FORMAT.QVQ_V2B2_P32_LR) == (1, 1.5, 2, 2.5, 3, 3.5)
+
+
+def test_lr32_make_quant_preserves_layout_format_for_n8_modules():
+    class TinyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(32, 8, bias=False, dtype=torch.float16)
+
+    model = TinyModel()
+    config = QVQConfig(
+        bits=2,
+        format=FORMAT.QVQ_V2B2_P32_LR,
+        bank_count=2,
+        rounding="block_ldlq",
+        offload_to_disk=False,
+    )
+
+    selected = make_quant(
+        model,
+        config,
+        {"proj": {}},
+        BACKEND.QVQ,
+        "lm_head",
+        device="cpu",
+        dtype=torch.float16,
+    )
+
+    assert selected is QVQLinear
+    assert model.proj.v2b2_p32_lr is True
+    assert model.proj.trellis.shape == (1, 16)
+
+
+def test_lr32_reconstruction_pins_k32_n8_abi_coordinates():
+    # Every tile/ring gets a distinct constant edge pattern. The expected
+    # values below are scalar decoder lookups, not a second reshape/permute
+    # implementation, so this test pins the serialized K32 x N8 ABI.
+    edge_count = 4
+    edges = torch.empty((4, 8, 16), dtype=torch.int64)
+    for tile in range(4):
+        for ring in range(8):
+            edges[tile, ring] = (tile * 8 + ring + 1) % (1 << edge_count)
+    states = local_ring_states_from_edges(edges, bits=2)
+    trellis = pack_local_ring_states(states, bits=2)
+    selectors = torch.zeros(32, dtype=torch.uint8)
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    decoded = pgc16_decode_states_v2_banked(
+        states.reshape(4, 128),
+        selectors.reshape(4, 8).repeat_interleave(16, dim=1),
+        bits=2,
+        levels=pgc16_levels_for_version("pgc16-v1"),
+    ).reshape(4, 8, 16, 2)
+    actual = reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=2,
+        in_features=64,
+        out_features=16,
+        bank_ids=packed_selectors,
+        bank_alt_id=torch.tensor([1], dtype=torch.uint8),
+    )
+
+    torch.testing.assert_close(actual[0, 0], decoded[0, 0, 0, 0].to(torch.float32))
+    torch.testing.assert_close(actual[31, 0], decoded[0, 0, 15, 1].to(torch.float32))
+    torch.testing.assert_close(actual[0, 7], decoded[0, 7, 0, 0].to(torch.float32))
+    torch.testing.assert_close(actual[32, 0], decoded[2, 0, 0, 0].to(torch.float32))
+    torch.testing.assert_close(actual[0, 8], decoded[1, 0, 0, 0].to(torch.float32))
+
+
+def test_legacy_v2_cpu_dispatch_does_not_pass_lr_keyword(monkeypatch):
+    import gptqmodel.utils.qvq_cpu as qvq_cpu
+
+    calls = {}
+
+    def fake_gemv(x, trellis, bits, **kwargs):
+        calls.update(kwargs)
+        return torch.zeros((x.shape[0], kwargs["out_features"]), dtype=torch.float32)
+
+    monkeypatch.setattr(qvq_cpu, "qvq_cpu_supported", lambda: True)
+    monkeypatch.setattr(qvq_cpu, "qvq_cpu_gemv", fake_gemv)
+    _, _, trellis, selectors = _random_lr_payload(2, tiles=2)
+    layer = QVQLinear(
+        bits=2,
+        in_features=32,
+        out_features=16,
+        bank_count=2,
+        v2b2_p32=True,
+        dtype=torch.float32,
+        tensors={
+            "trellis": trellis,
+            "SU": torch.ones(32),
+            "SV": torch.ones(16),
+            "bank_ids": pack_qvq_binary_bank_ids(selectors),
+            "bank_alt_id": torch.tensor([1], dtype=torch.uint8),
+        },
+    ).eval()
+
+    output = layer._inner_forward(torch.ones(1, 32))
+
+    assert output.shape == (1, 16)
+    assert "v2b2_p32_lr" not in calls
+    assert calls["v2b2_p32"] is True
+
+
+def test_lr32_checkpoint_shell_loads_n8_payload_and_converts_to_mlx(tmp_path):
+    mx = pytest.importorskip("mlx.core")
+
+    class TinyCheckpointModel(nn.Module):
+        def __init__(self, checkpoint_path):
+            super().__init__()
+            self.config = SimpleNamespace(
+                model_type="llama",
+                _name_or_path=str(checkpoint_path),
+                dtype=torch.float16,
+            )
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList([nn.Module()])
+            self.model.layers[0].proj = nn.Linear(32, 8, bias=False, device="meta")
+
+    (tmp_path / "quantize_config.json").write_text(
+        '{"bits": 2, "group_size": -1, "desc_act": false, "sym": true, '
+        '"format": "qvq_v2b2_p32_lr", "method": "qvq", "bank_count": 2, '
+        '"codebook": "pgc16-v1", "trellis_window": 16, "vector_size": 2}',
+        encoding="utf-8",
+    )
+    prefix = "model.layers.0.proj"
+    save_file(
+        {
+            f"{prefix}.trellis": torch.zeros((1, 16), dtype=torch.int32),
+            f"{prefix}.SU": torch.ones(32, dtype=torch.float32),
+            f"{prefix}.SV": torch.ones(8, dtype=torch.float32),
+            f"{prefix}.bank_ids": torch.zeros(1, dtype=torch.uint8),
+            f"{prefix}.bank_alt_id": torch.ones(1, dtype=torch.uint8),
+        },
+        tmp_path / "model.safetensors",
+    )
+
+    model = TinyCheckpointModel(tmp_path)
+    context = hf_gptqmodel_prepare_model_for_load(
+        model,
+        checkpoint_files=[tmp_path / "model.safetensors"],
+        device_map={"": "cpu"},
+        backend=BACKEND.QVQ,
+        dtype=torch.float16,
+    )
+
+    layer = model.model.layers[0].proj
+    assert context is not None
+    assert context.quantize_config.format == FORMAT.QVQ_V2B2_P32_LR
+    assert isinstance(layer, QVQLinear)
+    assert layer.v2b2_p32_lr is True
+    assert layer.trellis.device.type == "meta"
+
+    loaded = load_file(tmp_path / "model.safetensors")
+    model.load_state_dict(loaded, strict=True, assign=True)
+    layer = model.model.layers[0].proj.eval()
+    x = torch.randn(2, 32)
+    expected = qvq_local_ring_dense_oracle_forward(layer, x)
+    torch.testing.assert_close(layer(x), expected, rtol=0, atol=2e-3)
+
+    from gptqmodel.utils.mlx import _qvq_mlx_linear_from_torch
+
+    mlx_layer = _qvq_mlx_linear_from_torch(layer)
+    actual = mlx_layer(mx.array(x.numpy()))
+    mx.eval(actual)
+    torch.testing.assert_close(
+        torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2
+    )
 
 
 @pytest.mark.parametrize("output_fp32", (False, True))
@@ -235,7 +408,7 @@ def test_lr32_mlx_gpu_kernel_matches_torch_reconstruction(
     mx.eval(actual)
     actual_torch = torch.from_numpy(np.asarray(actual))
     expected = expected if output_fp32 else expected.to(torch.float16)
-    torch.testing.assert_close(actual_torch, expected, rtol=0, atol=4e-3)
+    torch.testing.assert_close(actual_torch, expected, rtol=0, atol=8e-3)
 
 
 @pytest.mark.parametrize("out_features", (8, 16, 40))

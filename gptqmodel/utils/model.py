@@ -572,7 +572,11 @@ def make_quant(
     bits = qcfg.runtime_bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
-    format = resolve_quant_format(qcfg.format, qcfg.method)
+    # Backend selection may intentionally collapse METHOD.QVQ to the generic
+    # QVQ family, but module validation must retain the serialized layout ID.
+    # LR32 has a K32 x N8 ABI that cannot be validated as legacy QVQ/P32.
+    backend_format = resolve_quant_format(qcfg.format, qcfg.method)
+    format = qcfg.format if isinstance(qcfg.format, FORMAT) else FORMAT(str(qcfg.format).lower())
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
@@ -584,7 +588,7 @@ def make_quant(
 
     # BitBLAS-native checkpoints can load directly. Other formats need a compatible preload kernel first.
     if not pack and backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
-        if format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+        if backend_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
             backend = BACKEND.GPTQ_TORCH
         elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
             backend = BACKEND.AWQ_TORCH
@@ -596,7 +600,7 @@ def make_quant(
         desc_act=desc_act,
         sym=sym,
         backend=backend,
-        format=format,
+        format=backend_format,
         quant_method=export_quant_method,
         pack=pack,
         dynamic=dynamic,
@@ -965,6 +969,7 @@ def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
             FORMAT.QVQ_V2B2_P32,
+            FORMAT.QVQ_V2B2_P32_LR,
         )
     )
 
@@ -982,6 +987,7 @@ def _quantized_weight_suffix(qcfg: QuantizeConfig) -> str:
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
             FORMAT.QVQ_V2B2_P32,
+            FORMAT.QVQ_V2B2_P32_LR,
         )
         else ".qweight"
     )
