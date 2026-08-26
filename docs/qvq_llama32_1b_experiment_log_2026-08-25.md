@@ -933,3 +933,5 @@ and 3.
 | monitor | `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `gsm8k_platinum_cot` | complete; metric=0.19933829611248965; report `/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `divergence300` | complete; metric=0.1659375; report `/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b` | `gsm8k_platinum_cot` | complete; metric=0.22249793217535152; report `/root/qvq-results/llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b-gsm8k-platinum-v1.json` |
