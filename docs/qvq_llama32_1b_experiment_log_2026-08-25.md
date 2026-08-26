@@ -867,3 +867,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-vo-w25-d71136` | `gsm8k_platinum_cot` | complete; metric=0.2547559966914806; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w25-d71136-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | `gsm8k_platinum_cot` | complete; metric=0.18610421836228289; report `/root/qvq-results/llama32-1b-w2-reg020-replay-aggressive-tip-gpu3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | `divergence300` | complete; metric=0.17270833333333332; report `/root/qvq-results/llama32-1b-w2-reg020-replay-aggressive-tip-gpu3-div300-dev-v1.json` |
