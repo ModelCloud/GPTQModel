@@ -82,6 +82,8 @@ _SYMMETRIC_GRAM_KERNELS: dict[str, Any] = {}
 _SYMMETRIC_GRAM_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
+_LR_KERNELS: dict[bool, Any] = {}
+_LR_KERNEL_ERRORS: dict[bool, str] = {}
 
 _SYMMETRIC_GRAM_PACK_SOURCE = r"""
 uint index = thread_position_in_grid.x;
@@ -445,6 +447,12 @@ inline uint qpt(device const int* p,uint edge,uint eb){uint block=edge>>5,lane=e
     v|=code<<off;rem-=w;row+=w;off+=w;}return v;}
 inline uint qstate(device const int* tile,uint pair,uint eb){uint count=(15+eb)/eb,first=(pair+128-count+1)&127,s=0;
   for(uint j=0;j<count;++j){uint edge=(first+j)&127;s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}return s;}
+inline uint qstate_lr(device const int* tile,uint ring,uint pair,uint eb){
+  uint count=(15+eb)/eb,first=(pair+16-count+1)&15u,s=0;
+  for(uint j=0;j<count;++j){uint edge=ring*16u+((first+j)&15u);
+    s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}
+  return s;
+}
 inline uint qstated(device const int* tile,uint pair,uint eb){uint chain=pair&1u,step=pair>>1;
   uint count=(15+eb)/eb,first=(step+64-count+1)&63,s=0;
   for(uint j=0;j<count;++j){uint edge=(((first+j)&63u)<<1)|chain;
@@ -499,6 +507,38 @@ inline float2 qpairv2b2(device const int* t,device const uchar* ids,constant con
     device const half* levels,uint k,uint n,uint N,uint eb){
   uint tile=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),pair=local>>1;
   uint s=qstate(t+tile*(4*eb),pair,eb);return qlevelsv2b(levels,s,qv2b2(ids,alt,tile,pair),eb);}
+inline float2 qpairv2b2lr(device const int* t,device const uchar* ids,constant const uchar* alt,
+    device const half* levels,uint k,uint n,uint N,uint eb){
+  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
+  device const int* tile_ptr=t+tile*(4*eb);
+  uint s=qstate_lr(tile_ptr,ring,pair,eb);
+  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
+  return qlevelsv2b(levels,s,bank,eb);
+}
+inline float2 qpairv2b2lr(device const int* t,device const uchar* ids,device const uchar* alt,
+    device const half* levels,uint k,uint n,uint N,uint eb){
+  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
+  device const int* tile_ptr=t+tile*(4*eb);
+  uint s=qstate_lr(tile_ptr,ring,pair,eb);
+  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
+  return qlevelsv2b(levels,s,bank,eb);
+}
+inline float2 qpairv2b2lr(device const int* t,constant const uchar* ids,constant const uchar* alt,
+    device const half* levels,uint k,uint n,uint N,uint eb){
+  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
+  device const int* tile_ptr=t+tile*(4*eb);
+  uint s=qstate_lr(tile_ptr,ring,pair,eb);
+  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
+  return qlevelsv2b(levels,s,bank,eb);
+}
+inline float2 qpairv2b2lr(device const int* t,constant const uchar* ids,device const uchar* alt,
+    device const half* levels,uint k,uint n,uint N,uint eb){
+  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
+  device const int* tile_ptr=t+tile*(4*eb);
+  uint s=qstate_lr(tile_ptr,ring,pair,eb);
+  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
+  return qlevelsv2b(levels,s,bank,eb);
+}
 inline float2 qpaird(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
   uint tile=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),s=qstated(t+tile*(4*eb),local>>1,eb);
   return qlevels(levels,s);}
@@ -656,6 +696,19 @@ _FP32_SOURCE = _SOURCE.replace(
     "out[m*N+n]=half(sum0);out[m*N+n+1]=half(sum1);",
     "out[m*N+n]=sum0;out[m*N+n+1]=sum1;",
 )
+_LR_SOURCE = r"""
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits;
+uint groups_n=(N+31u)>>5,m=group/groups_n,n=(group%groups_n)*32u+lane;
+if(m>=M || n>=N)return;
+float sum=0.0f;
+for(uint k=0;k<K;k+=2){
+  float2 value=qpairv2b2lr(trellis,bank_ids,bank_alt_id,levels,k,n,N,eb);
+  sum+=float(x[m*K+k])*value.x+float(x[m*K+k+1])*value.y;
+}
+out[m*N+n]=half(sum);
+"""
+_LR_FP32_SOURCE = _LR_SOURCE.replace("out[m*N+n]=half(sum);", "out[m*N+n]=sum;")
 _DUAL_V2_SOURCE = _SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
 _DUAL_V2_FP32_SOURCE = _FP32_SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
 
@@ -1253,6 +1306,37 @@ def _v2_banked_kernel(kind: str, vector_width: int, *, output_fp32: bool):
             _V2_BANKED_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
         _V2_BANKED_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_kernel(*, output_fp32: bool):
+    """Build the LR32 GPU GEMV: one 32-lane SIMD group per output."""
+
+    kernel = _LR_KERNELS.get(output_fp32)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_KERNELS.get(output_fp32)
+        if kernel is not None:
+            return kernel
+        if output_fp32 in _LR_KERNEL_ERRORS:
+            raise RuntimeError(_LR_KERNEL_ERRORS[output_fp32])
+        import mlx.core as mx
+
+        try:
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_{'fp32' if output_fp32 else 'fp16'}",
+                input_names=["x", "trellis", "bank_ids", "bank_alt_id", "levels", "dims"],
+                output_names=["out"],
+                header=_HEADER,
+                source=_LR_FP32_SOURCE if output_fp32 else _LR_SOURCE,
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX kernel creation failed: {exc}"
+            _LR_KERNEL_ERRORS[output_fp32] = error
+            raise RuntimeError(error) from exc
+        _LR_KERNELS[output_fp32] = kernel
         return kernel
 
 
@@ -2608,6 +2692,7 @@ def qvq_mlx_gemv(
     bank_ids=None,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
+    v2b2_p32_lr: bool = False,
     bank_alt_id=None,
     output_fp32: bool = False,
     _prepared_compander: _QVQMLXPreparedCompander | None = None,
@@ -2621,10 +2706,10 @@ def qvq_mlx_gemv(
         raise TypeError("QVQ MLX output_fp32 must be a bool")
     if not isinstance(dual_v2, bool):
         raise TypeError("QVQ MLX dual_v2 must be a bool")
-    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
+    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool) or not isinstance(v2b2_p32_lr, bool):
         raise TypeError("QVQ MLX banked-V2 format flags must be bools")
-    if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
-        raise ValueError("QVQ MLX Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive")
+    if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
+        raise ValueError("QVQ MLX Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive")
     if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
         raise ValueError("QVQ MLX vector_size must be 2, or 4 for rates W1 through W4")
     trellis_window = _integer_argument(trellis_window, "trellis_window")
@@ -2636,17 +2721,17 @@ def qvq_mlx_gemv(
         raise ValueError("QVQ MLX L18 supports only rates W1 through W2.5")
     if trellis_window == 18 and bank_ids is not None:
         raise ValueError("QVQ MLX L18 uses implicit history-selected banks and rejects bank_ids")
-    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32):
+    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32 or v2b2_p32_lr):
         raise ValueError("QVQ MLX bank selectors require vector_size=4")
     if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
         raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
-    if (v2b4_p64 or v2b2_p32) and (
+    if (v2b4_p64 or v2b2_p32 or v2b2_p32_lr) and (
         vector_size != 2 or trellis_window != 16 or bits > 3.5 or bank_ids is None
     ):
         raise ValueError("QVQ MLX banked-V2 formats require L16/V2, packed selectors, and W1 through W3.5")
-    if v2b2_p32:
+    if v2b2_p32 or v2b2_p32_lr:
         if bank_alt_id is None or bank_alt_id.dtype != mx.uint8 or bank_alt_id.shape != (1,):
-            raise ValueError("QVQ MLX V2B2-P32 requires one uint8 alternative-bank ID")
+            raise ValueError("QVQ MLX V2B2-P32 formats require one uint8 alternative-bank ID")
         alt_id = int(bank_alt_id.item())
         if not 1 <= alt_id <= 3:
             raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
@@ -2659,16 +2744,22 @@ def qvq_mlx_gemv(
         raise TypeError("QVQ MLX requires float16 x and int32 planar trellis words")
     m, k = x.shape
     n = _integer_argument(out_features, "out_features")
-    if k <= 0 or n <= 0 or k % 16 or n % 16:
-        raise ValueError(f"QVQ MLX requires positive K/N divisible by 16, got K={k}, N={n}")
+    if v2b2_p32_lr:
+        if k <= 0 or n <= 0 or k % 32 or n % 8:
+            raise ValueError(f"QVQ MLX LR32 requires positive K/N divisible by K32/N8, got K={k}, N={n}")
+        tile_count = (k // 32) * (n // 8)
+    else:
+        if k <= 0 or n <= 0 or k % 16 or n % 16:
+            raise ValueError(f"QVQ MLX requires positive K/N divisible by 16, got K={k}, N={n}")
+        tile_count = (k // 16) * (n // 16)
     expected = (
-        (k // 16) * (n // 16),
+        tile_count,
         qvq_words_per_tile(bits, vector_size=vector_size),
     )
     if trellis.shape != expected:
         raise ValueError(f"QVQ planar trellis must have shape {expected}, got {trellis.shape}")
     if bank_ids is not None:
-        packed_count = expected[0] if v2b4_p64 or v2b2_p32 else (expected[0] + 3) // 4
+        packed_count = expected[0] if v2b4_p64 or v2b2_p32 or v2b2_p32_lr else (expected[0] + 3) // 4
         if bank_ids.dtype != mx.uint8:
             raise TypeError("QVQ MLX bank selectors must use packed uint8 storage")
         if bank_ids.ndim != 1 or bank_ids.size != packed_count:
@@ -2681,6 +2772,17 @@ def qvq_mlx_gemv(
     selector_size = 0 if bank_ids is None else bank_ids.size
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
+    if v2b2_p32_lr:
+        kernel = _local_ring_kernel(output_fp32=output_fp32)
+        groups_n = (n + 31) // 32
+        return kernel(
+            inputs=[x, trellis, bank_ids, bank_alt_id, levels, _dims_array(m, k, n, transition_bits)],
+            template=[("EdgeBits", transition_bits)],
+            grid=(m * groups_n * 32, 1, 1),
+            threadgroup=(32, 1, 1),
+            output_shapes=[(m, n)],
+            output_dtypes=[mx.float32 if output_fp32 else mx.float16],
+        )[0]
     if output_fp32:
         if v2b4_p64 or v2b2_p32:
             return _run_v2_banked(
@@ -2910,6 +3012,7 @@ if _mlx_nn is not None:
             bank_ids=None,
             v2b4_p64: bool = False,
             v2b2_p32: bool = False,
+            v2b2_p32_lr: bool = False,
             bank_alt_id=None,
         ):
             super().__init__()
@@ -2924,12 +3027,13 @@ if _mlx_nn is not None:
             if not isinstance(dual_v2, bool):
                 raise TypeError("QVQ MLX dual_v2 must be a bool")
             self.dual_v2 = dual_v2
-            if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
+            if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool) or not isinstance(v2b2_p32_lr, bool):
                 raise TypeError("QVQ MLX banked-V2 format flags must be bools")
-            if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
-                raise ValueError("QVQ MLX Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive")
+            if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
+                raise ValueError("QVQ MLX Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive")
             self.v2b4_p64 = v2b4_p64
             self.v2b2_p32 = v2b2_p32
+            self.v2b2_p32_lr = v2b2_p32_lr
             if self.trellis_window not in (16, 18):
                 raise ValueError("QVQ MLX trellis_window must be 16 or 18")
             if self.trellis_window == 18 and self.vector_size != 4:
@@ -2940,10 +3044,12 @@ if _mlx_nn is not None:
                 raise ValueError("QVQ MLX L18 uses implicit history-selected banks and rejects bank_ids")
             if self.dual_v2 and (self.vector_size != 2 or self.trellis_window != 16 or bank_ids is not None):
                 raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
-            if (self.v2b4_p64 or self.v2b2_p32) and (
+            if (self.v2b4_p64 or self.v2b2_p32 or self.v2b2_p32_lr) and (
                 self.vector_size != 2 or self.trellis_window != 16 or self.bits > 3.5 or bank_ids is None
             ):
                 raise ValueError("QVQ MLX banked-V2 formats require L16/V2, selectors, and W1 through W3.5")
+            if self.v2b2_p32_lr and (self.in_features % 32 or self.out_features % 8):
+                raise ValueError("QVQ MLX LR32 requires in_features divisible by 32 and out_features divisible by 8")
             self.trellis = trellis.astype(mx.int32)
             self.SU = SU.astype(mx.float32)
             self.SV = SV.astype(mx.float32)
@@ -2954,7 +3060,11 @@ if _mlx_nn is not None:
             self._output_hadamard = _qvq_mlx_hadamard_matrix(self.out_features)
 
             expected_trellis = (
-                (self.in_features // 16) * (self.out_features // 16),
+                (
+                    (self.in_features // 32) * (self.out_features // 8)
+                    if self.v2b2_p32_lr
+                    else (self.in_features // 16) * (self.out_features // 16)
+                ),
                 qvq_words_per_tile(self.bits, vector_size=self.vector_size),
             )
             if self.trellis.shape != expected_trellis:
@@ -2965,6 +3075,19 @@ if _mlx_nn is not None:
                 raise ValueError("QVQ MLX SU/SV shapes must match the linear dimensions")
             if self.bias is not None and self.bias.shape != (self.out_features,):
                 raise ValueError("QVQ MLX bias shape must match out_features")
+            if self.v2b4_p64 or self.v2b2_p32 or self.v2b2_p32_lr:
+                if self.bank_ids is None or self.bank_ids.ndim != 1:
+                    raise ValueError("QVQ MLX banked formats require one-dimensional packed selectors")
+                expected_selectors = expected_trellis[0]
+                if self.bank_ids.size != expected_selectors:
+                    raise ValueError(
+                        f"QVQ MLX bank selectors must have packed shape {(expected_selectors,)}, got {self.bank_ids.shape}"
+                    )
+            if self.v2b2_p32 or self.v2b2_p32_lr:
+                if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
+                    raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
+            elif self.bank_alt_id is not None:
+                raise ValueError("QVQ MLX bank_alt_id is valid only for V2B2-P32 formats")
 
         def __call__(self, x):
             import mlx.core as mx
@@ -2992,6 +3115,7 @@ if _mlx_nn is not None:
                 bank_ids=self.bank_ids,
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
+                v2b2_p32_lr=self.v2b2_p32_lr,
                 bank_alt_id=self.bank_alt_id,
                 output_fp32=True,
             )

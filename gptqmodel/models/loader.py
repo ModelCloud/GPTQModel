@@ -130,6 +130,7 @@ def _external_preload_backend(backend: BACKEND, method: METHOD, format_code: FOR
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
         FORMAT.QVQ_V2B2_P32,
+        FORMAT.QVQ_V2B2_P32_LR,
     ):
         return BACKEND.QVQ
     return backend
@@ -517,6 +518,7 @@ def _checkpoint_load_dtype(*, format_code: FORMAT, dtype):
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
         FORMAT.QVQ_V2B2_P32,
+        FORMAT.QVQ_V2B2_P32_LR,
     ):
         # QVQ checkpoints intentionally mix FP32 SU/SV codec auxiliaries with
         # model-dtype dense tensors and bias. Passing one global dtype to
@@ -2063,6 +2065,7 @@ def ModelLoader(cls):
                 FORMAT.QVQ_DUAL_V2,
                 FORMAT.QVQ_V2B4_P64,
                 FORMAT.QVQ_V2B2_P32,
+                FORMAT.QVQ_V2B2_P32_LR,
             ):
                 model = convert_qvq_to_mlx_model(model_id_or_path, model, cls.lm_head)
             else:

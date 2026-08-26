@@ -688,10 +688,13 @@ class QVQProcessor(LoopProcessor):
             dtype=original.weight.dtype,
             tensors=tensors,
             codebook_version=module_qcfg.codebook,
-            vector_size=2,
-            trellis_window=16,
-            bank_count=2,
-            v2b2_p32=True,
+            vector_size=module_qcfg.vector_size,
+            trellis_window=module_qcfg.trellis_window,
+            bank_count=module_qcfg.bank_count,
+            dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
+            v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
+            v2b2_p32=module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+            v2b2_p32_lr=module_qcfg.format == FORMAT.QVQ_V2B2_P32_LR,
         ).eval()
         candidate.post_init()
         return candidate
@@ -1959,6 +1962,7 @@ class QVQProcessor(LoopProcessor):
                 "dual_v2": module_qcfg.format == FORMAT.QVQ_DUAL_V2,
                 "v2b4_p64": module_qcfg.format == FORMAT.QVQ_V2B4_P64,
                 "v2b2_p32": module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+                "v2b2_p32_lr": module_qcfg.format == FORMAT.QVQ_V2B2_P32_LR,
                 "module_scale_search": module_qcfg.module_scale_search,
                 "output_channel_scale_optimization": module_qcfg.output_channel_scale_optimization,
                 "viterbi_objective": module_qcfg.viterbi_objective,
@@ -2041,6 +2045,7 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.format == FORMAT.QVQ_DUAL_V2,
                     module_qcfg.format == FORMAT.QVQ_V2B4_P64,
                     module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+                    module_qcfg.format == FORMAT.QVQ_V2B2_P32_LR,
                 )
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
@@ -2201,6 +2206,7 @@ class QVQProcessor(LoopProcessor):
                 dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
                 v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
                 v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
+                v2b2_p32_lr = runtime_config[8] if len(runtime_config) > 8 else False
                 for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
@@ -2229,6 +2235,7 @@ class QVQProcessor(LoopProcessor):
                 dual_v2=dual_v2,
                 v2b4_p64=v2b4_p64,
                 v2b2_p32=v2b2_p32,
+                v2b2_p32_lr=v2b2_p32_lr,
             )
             # Materialized layer leaves may be freshly constructed with
             # ``training=True`` even while the authoritative model is in eval
@@ -2305,6 +2312,8 @@ class QVQProcessor(LoopProcessor):
         # distinguishable from the default V2 format after lifecycle finalization.
         if model.quantize_config.format == FORMAT.QVQ_V2B2_P32:
             model.quantize_config.format = FORMAT.QVQ_V2B2_P32
+        elif model.quantize_config.format == FORMAT.QVQ_V2B2_P32_LR:
+            model.quantize_config.format = FORMAT.QVQ_V2B2_P32_LR
         elif model.quantize_config.format == FORMAT.QVQ_V2B4_P64:
             model.quantize_config.format = FORMAT.QVQ_V2B4_P64
         elif model.quantize_config.format == FORMAT.QVQ_DUAL_V2:
