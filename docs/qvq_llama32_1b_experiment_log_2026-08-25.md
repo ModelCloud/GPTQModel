@@ -785,3 +785,7 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-mlpall-w25` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-mlpall-w25-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-smooth-swiglu` | `divergence300` | complete; metric=0.17302083333333335; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-attnall-w25` | `divergence300` | complete; metric=0.20416666666666666; report `/root/qvq-results/llama32-1b-w2-reg015-attnall-w25-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | `divergence300` | complete; metric=0.1728125; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-gateup-w25-div300-dev-v1.json` |
