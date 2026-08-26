@@ -455,6 +455,17 @@ the chained GSM8K checks are still running:
 The best remains the prior reg .020 arm at 18.7813%; no flat-W2 bracket arm
 has reached the 25% D300 target.
 
+### Queued aligned flat-W2 YAQA arm
+
+To test whether post-quant output alignment can recover the remaining gap
+without increasing bits, a new flat-W2 arm combines the best YAQA 302k mix and
+reg .020 with one epoch of pristine-Hessian output alignment (32 train and 16
+validation batches). Its config is
+`scripts/configs/llama32_1b_v2b2_p32_yaqa_reg020_align.json`; quantization is
+running on GPU6 at checkpoint
+`/root/qvq-results/llama32-1b-w2-yaqa302k-reg020-align-main-ff906097`, followed
+by canonical D300 using the unchanged manifest and protocol.
+
 GSM8K Platinum for the best YAQA reg .020 checkpoint is now running on the
 newly freed GPU0 (session `98290`); the earlier GPU2 waiter (`24963`) was
 superseded. It uses batch 16 with continuous batching and paged attention.
