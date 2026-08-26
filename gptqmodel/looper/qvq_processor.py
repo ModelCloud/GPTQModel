@@ -877,10 +877,17 @@ class QVQProcessor(LoopProcessor):
         if role not in {"gate_proj", "up_proj", "down_proj"}:
             return False
         parent_name = module.full_name.rpartition(".")[0]
+        # StageSubset dictionaries are keyed by layer-relative names (for
+        # example ``mlp.gate_proj``), while ``NamedModule.full_name`` is the
+        # authoritative path inside the model (``model.layers.0.mlp.gate_proj``).
+        # Use the latter when checking sibling roles; otherwise production
+        # quantization incorrectly sees an empty subset even though all three
+        # projections are present.
         roles = {
-            name.rsplit(".", 1)[-1]
-            for name in subset
-            if name.rpartition(".")[0] == parent_name
+            full_name.rsplit(".", 1)[-1]
+            for name, named_module in subset.items()
+            for full_name in (getattr(named_module, "full_name", None) or name,)
+            if full_name.rpartition(".")[0] == parent_name
         }
         required = {"gate_proj", "up_proj", "down_proj"}
         if roles != required:
@@ -985,10 +992,14 @@ class QVQProcessor(LoopProcessor):
         if replay_config is None or replay_config.strategy != "atomic_swiglu" or not subset:
             return
         role_names = {}
-        for name in subset:
-            role = name.rsplit(".", 1)[-1]
+        for name, named_module in subset.items():
+            # ``name`` is layer-relative in the real StageSubset path; use the
+            # NamedModule's full model path for replay lookup and candidate
+            # caches. Tests that pass full-name keys continue to work.
+            full_name = getattr(named_module, "full_name", None) or name
+            role = full_name.rsplit(".", 1)[-1]
             if role in {"gate_proj", "up_proj", "down_proj"}:
-                role_names[role] = name
+                role_names[role] = full_name
         if set(role_names) != {"gate_proj", "up_proj", "down_proj"}:
             return
         parent_name = role_names["gate_proj"].rpartition(".")[0]

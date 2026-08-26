@@ -1176,3 +1176,33 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
         name = f"mlp.{role}"
         expected = records[name]["candidates"][candidate_id]["weight"]
         torch.testing.assert_close(root.mlp.__getattr__(role).weight, expected)
+
+
+def test_atomic_swiglu_resolves_layer_relative_subset_keys_against_full_names():
+    """Production StageSubset keys are relative; role validation must use full names."""
+
+    qcfg = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        rounding="yaqa",
+        yaqa={"v2b2_family_mode": "reselect", "minimum_sequences": 1},
+        module_granular_replay={
+            "strategy": "atomic_swiglu",
+            "subsets": ["mlp_gate_up_down"],
+        },
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    subset = {}
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        relative_name = f"mlp.{role}"
+        full_name = f"model.layers.0.{relative_name}"
+        subset[relative_name] = NamedModule(
+            torch.nn.Linear(4, 4, bias=False),
+            name=relative_name,
+            full_name=full_name,
+            layer_index=0,
+        )
+
+    assert processor._is_atomic_swiglu_module(subset["mlp.gate_proj"], subset)
