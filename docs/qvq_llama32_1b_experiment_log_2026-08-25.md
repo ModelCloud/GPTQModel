@@ -929,3 +929,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-o-w25-09674b` | `divergence300` | complete; metric=0.17302083333333335; report `/root/qvq-results/llama32-1b-w2-reg015-o-w25-09674b-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-up-down-w25-45a387` | `divergence300` | complete; metric=0.19958333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w25-45a387-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `gsm8k_platinum_cot` | complete; metric=0.19933829611248965; report `/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b-gsm8k-platinum-v1.json` |
