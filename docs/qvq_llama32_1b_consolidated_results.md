@@ -97,3 +97,10 @@ and `docs/experiments/disjointness-full-reference.json`. Quantization can be
 made fail-closed with `--disjointness-manifest`; historical full-reference
 GSM8K scores remain marked as contamination-risk until semantic/source audits
 of derived datasets (for example OpenMathInstruct) are complete.
+
+The first D300-source-shaped 500k artifact failed this audit: calibration row
+165 matched D300 row 212 after normalization, and 33 additional duplicate
+groups were found within the candidate mix. That artifact is not eligible for
+quantization/evaluation. A filtered artifact retaining 959 unique rows passes
+the strict audit at
+`docs/experiments/disjointness-div300-sources-disjoint.json`.
