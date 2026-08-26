@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gptqmodel.models._const import normalize_device
+from gptqmodel.models._const import DEVICE, normalize_device
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -37,6 +37,7 @@ from gptqmodel.utils.model import (
     convert_gptq_v1_to_v2_format_module,
     convert_gptq_v2_to_v1_format_module,
     find_modules,
+    make_quant,
 )
 
 
@@ -79,6 +80,24 @@ class _TinyQModel(BaseQModel):
             "mlp": ("up_proj:0", "down_proj:1"),
         },
     ]
+
+
+def test_make_quant_keeps_non_enum_gguf_subtype_out_of_format_enum_coercion():
+    model = _TinyModel(hidden_size=32, layers=1)
+    qcfg = GGUFConfig(bits=4, offload_to_disk=False, device="cpu")
+
+    selected = make_quant(
+        model,
+        qcfg,
+        {"model.layers.0.mlp.up_proj": {}},
+        BACKEND.AUTO,
+        "lm_head",
+        device=DEVICE.CPU,
+        dtype=torch.float16,
+    )
+
+    assert selected is GGUFTorchLinear
+    assert isinstance(model.model.layers[0].mlp.up_proj, GGUFTorchLinear)
 
 
 def _reference_rtn_quantized_weight(weight: torch.Tensor, device: torch.device, smooth: SmoothMAD) -> tuple[torch.Tensor, torch.Tensor]:

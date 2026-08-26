@@ -576,7 +576,11 @@ def make_quant(
     # QVQ family, but module validation must retain the serialized layout ID.
     # LR32 has a K32 x N8 ABI that cannot be validated as legacy QVQ/P32.
     backend_format = resolve_quant_format(qcfg.format, qcfg.method)
-    format = qcfg.format if isinstance(qcfg.format, FORMAT) else FORMAT(str(qcfg.format).lower())
+    # QVQ layout IDs are FORMAT enum members and must remain specific for
+    # module validation. Other methods intentionally use string subtypes
+    # (e.g. GGUF q_0 or FP8 float8_e4m3fn), so keep their resolved backend
+    # family instead of coercing those strings through FORMAT.
+    module_format = qcfg.format if qcfg.method == METHOD.QVQ else backend_format
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
@@ -590,7 +594,7 @@ def make_quant(
     if not pack and backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
         if backend_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
             backend = BACKEND.GPTQ_TORCH
-        elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
+        elif qcfg.quant_method == METHOD.AWQ and module_format == FORMAT.GEMM:
             backend = BACKEND.AWQ_TORCH
 
     # returns multiple validated kernels across all effective dynamic contracts
@@ -628,7 +632,7 @@ def make_quant(
         pack_dtype=pack_dtype,
         backend=backend,
         adapter=qcfg.adapter,
-        format=format,
+        format=module_format,
         init_kwargs=init_kwargs,
         dtype=dtype,
     )
