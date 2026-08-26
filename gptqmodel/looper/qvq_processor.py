@@ -877,10 +877,17 @@ class QVQProcessor(LoopProcessor):
         if role not in {"gate_proj", "up_proj", "down_proj"}:
             return False
         parent_name = module.full_name.rpartition(".")[0]
+        # StageSubset dictionaries are keyed by layer-relative names (for
+        # example ``mlp.gate_proj``), while ``NamedModule.full_name`` is the
+        # authoritative path inside the model (``model.layers.0.mlp.gate_proj``).
+        # Use the latter when checking sibling roles; otherwise production
+        # quantization incorrectly sees an empty subset even though all three
+        # projections are present.
         roles = {
-            name.rsplit(".", 1)[-1]
-            for name in subset
-            if name.rpartition(".")[0] == parent_name
+            full_name.rsplit(".", 1)[-1]
+            for name, named_module in subset.items()
+            for full_name in (getattr(named_module, "full_name", None) or name,)
+            if full_name.rpartition(".")[0] == parent_name
         }
         required = {"gate_proj", "up_proj", "down_proj"}
         if roles != required:
@@ -985,10 +992,16 @@ class QVQProcessor(LoopProcessor):
         if replay_config is None or replay_config.strategy != "atomic_swiglu" or not subset:
             return
         role_names = {}
-        for name in subset:
-            role = name.rsplit(".", 1)[-1]
+        modules_by_full_name = {}
+        for name, named_module in subset.items():
+            # ``name`` is layer-relative in the real StageSubset path; use the
+            # NamedModule's full model path for replay lookup and candidate
+            # caches. Tests that pass full-name keys continue to work.
+            full_name = getattr(named_module, "full_name", None) or name
+            modules_by_full_name[full_name] = named_module
+            role = full_name.rsplit(".", 1)[-1]
             if role in {"gate_proj", "up_proj", "down_proj"}:
-                role_names[role] = name
+                role_names[role] = full_name
         if set(role_names) != {"gate_proj", "up_proj", "down_proj"}:
             return
         parent_name = role_names["gate_proj"].rpartition(".")[0]
@@ -1152,7 +1165,12 @@ class QVQProcessor(LoopProcessor):
         # runtime module, so leaving candidate zero here would propagate stale
         # data into later layers and output alignment.
         for role, name in role_names.items():
-            module = subset[name]
+            # ``subset`` is keyed by layer-relative names in the production
+            # StageSubset path.  ``role_names`` deliberately contains full
+            # model paths for replay/candidate caches, so resolve the wrapper
+            # through the map built from ``NamedModule.full_name`` instead of
+            # indexing the subset dictionary with a full path.
+            module = modules_by_full_name[name]
             selected_id = selected_triplet[({"gate_proj": 0, "up_proj": 1, "down_proj": 2}[role])]
             selected_weight = records[role]["candidates"][selected_id]["weight"]
             restored_weight = self._restore_module_weight(module, selected_weight)
