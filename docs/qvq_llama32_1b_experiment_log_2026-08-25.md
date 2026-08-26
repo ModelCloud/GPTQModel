@@ -629,3 +629,15 @@ and 3.
 | monitor | `llama32-1b-w2-fixedreg005-yaqa302k-main-a12ce4e3` | `gsm8k_platinum_cot` | complete; metric=0.20264681555004135; report `/root/qvq-results/llama32-1b-w2-fixedreg005-yaqa302k-main-a12ce4e3-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da` | `gsm8k_platinum_cot` | complete; metric=0.20926385442514475; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerdamp-align2e64-main-2f34e1da-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg0025-main-54ccd365` | `gsm8k_platinum_cot` | complete; metric=0.21257237386269645; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg0025-main-54ccd365-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg020-tip-gpu0` | `gsm8k_platinum_cot` | complete; metric=0.23407775020678245; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-tip-gpu0-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-mlpdown-w25-main-ecf7081e` | `gsm8k_platinum_cot` | complete; metric=0.23986765922249792; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-mlpdown-w25-main-ecf7081e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg020-gpu2` | `gsm8k_platinum_cot` | complete; metric=0.23407775020678245; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu2-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg020-gpu6` | `gsm8k_platinum_cot` | complete; metric=0.23407775020678245; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu6-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-mlp-down-w25-reg020-gpu4` | `gsm8k_platinum_cot` | complete; metric=0.26881720430107525; report `/root/qvq-results/llama32-1b-w2-mlp-down-w25-reg020-gpu4-gsm8k-platinum-v1.json` |
