@@ -104,16 +104,20 @@ matched control is larger and uses the Llama 3.2 1B QVQ campaign configuration:
   exponents `[-1, -0.5, 0, 0.5, 1]`;
 - held-out evaluation: rows `438:503`, 65 rows, 15,062 tokens after truncating
   each row to 256 tokens;
-- evaluation backend: native MLX teacher-forced forward, with a dense MLX
+- evaluation backend: native MLX GPU teacher-forced forward, with a dense MLX
   reference converted to FP16 so both paths use the same comparison dtype.
+
+The first reduced numbers were collected before the bridge stopped forcing MLX
+to CPU. They are retained in the execution notes only as a CPU reference; the
+GPU rerun below is the authoritative result for this protocol.
 
 | Metric | No Smooth | Smooth | Smooth minus control |
 |---|---:|---:|---:|
-| Relative logit L2 | **0.496045946** | 0.497333410 | +0.26% |
-| RMSE | **1.483024143** | 1.486873261 | +0.26% |
-| Maximum absolute error | **20.097656** | 20.548828 | +2.24% |
-| Cosine similarity | **0.886609399** | 0.885404371 | -0.001205 |
-| Top-1 agreement | **0.795379** | 0.792856 | -0.252 percentage points |
+| Relative logit L2 | **0.496332398** | 0.497496762 | +0.23% |
+| RMSE | **1.483880545** | 1.487361633 | +0.23% |
+| Maximum absolute error | **20.027344** | 20.501953 | +2.37% |
+| Cosine similarity | **0.886480202** | 0.885346320 | -0.001134 |
+| Top-1 agreement | **0.795578** | 0.792989 | -0.259 percentage points |
 
 This larger reduced test does not show an improvement from the current
 analytical Smooth proxy. In this run every selected group scale reached the
@@ -133,11 +137,9 @@ available locally.
 
 ### MLX/runtime status
 
-Native MLX QVQ reload and direct full-model forward pass both pass for the
-Smooth and no-Smooth payloads. The generic `mlx_generate` wrapper is not yet a
-clean E2E harness on this environment: `gptqmodel` currently double-pops the
-`temp` argument, and `mlx-lm 0.31.3` expects a working-set device-info key not
-present in the installed MLX `0.32.2`. These are runtime-harness issues, not
-quantization accuracy measurements. The public Torch/MPS evaluator also
-segfaulted while loading the quantized checkpoint, so no Torch/MPS quality
-number is being reported as valid.
+Native MLX QVQ reload, GPU full-model forward, and short deterministic
+generation now pass for both the Smooth and no-Smooth payloads. The MLX bridge
+selects `Device(gpu, 0)` on this Apple host and falls back to CPU only when no
+MLX GPU is available. The public Torch/MPS evaluator still segfaulted while
+loading the quantized checkpoint, so no Torch/MPS quality number is being
+reported as valid.

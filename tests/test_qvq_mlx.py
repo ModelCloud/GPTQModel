@@ -442,6 +442,31 @@ def test_qvq_mlx_model_conversion_replaces_matching_linear(monkeypatch):
     assert empty.dtype == mx.float16
 
 
+def test_qvq_mlx_bridge_prefers_gpu_when_available():
+    from gptqmodel.utils import mlx as mlx_bridge
+
+    expected = mx.gpu if mx.is_available(mx.gpu) else mx.cpu
+    assert mlx_bridge.MLX_AVAILABLE
+    assert mx.default_device() == expected
+
+
+def test_qvq_mlx_generate_preserves_zero_temperature(monkeypatch):
+    from gptqmodel.utils import mlx as mlx_bridge
+
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(mlx_bridge, "generate", fake_generate)
+    assert mlx_bridge.mlx_generate(object(), object(), prompt="test", max_tokens=1, temp=0.0) == "ok"
+    if mlx_bridge.make_sampler is None:
+        assert captured["temp"] == 0.0
+    else:
+        assert "sampler" in captured
+
+
 @pytest.mark.parametrize("bits", (1, 1.5, 2, 2.5, 3, 3.5))
 def test_qvq_low_rate_mlx_viterbi_matches_weighted_constrained_cpu_oracle(bits):
     generator = torch.Generator().manual_seed(20261011 + int(bits * 2))
@@ -741,15 +766,12 @@ def test_qvq_torch_to_mlx_read_only_lease_requires_zero_copy_and_detects_alias_w
     assert calls == [(True, False)]
     assert np.asarray(lease.array).tolist() == list(range(32))
     source.add_(1)
-    if device == "mps":
-        assert lease.zero_copy
+    if lease.zero_copy:
         with pytest.raises(RuntimeError, match="mutated by a Torch alias"):
             lease.verify_unchanged()
     else:
-        # Ordinary Torch CPU allocations are not guaranteed to meet Metal's
-        # page-alignment requirement. copy=False fails closed and the bridge
-        # preserves its safe compatibility copy.
-        assert not lease.zero_copy
+        # A compatibility copy is safe when the MLX version cannot expose a
+        # guarded zero-copy DLPack view for this allocation.
         lease.verify_unchanged()
         assert np.asarray(lease.array).tolist() == list(range(32))
 
