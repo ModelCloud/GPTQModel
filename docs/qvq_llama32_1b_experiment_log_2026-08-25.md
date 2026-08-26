@@ -963,3 +963,9 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-vo-w35-60a68a` | `gsm8k_platinum_cot` | complete; metric=0.2663358147229115; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w35-60a68a-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-up-down-w30-0f642c` | `gsm8k_platinum_cot` | complete; metric=0.3068651778329198; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w30-0f642c-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w35-569a95` | `gsm8k_platinum_cot` | complete; metric=0.31679073614557485; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w35-569a95-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w30-ef21af` | `divergence300` | complete; metric=0.17927083333333332; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w30-ef21af-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w35-60a68a` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w35-60a68a-div300-dev-v1.json` |
