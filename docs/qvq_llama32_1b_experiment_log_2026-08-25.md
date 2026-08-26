@@ -973,3 +973,7 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-up-down-w30-0f642c` | `divergence300` | complete; metric=0.21739583333333334; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w30-0f642c-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-up-down-w35-569a95` | `divergence300` | complete; metric=0.21302083333333333; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w35-569a95-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w20-smooth-atomic-d13602` | `gsm8k_platinum_cot` | complete; metric=0.22249793217535152; report `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w25-smooth-atomic-b7d172` | `gsm8k_platinum_cot` | complete; metric=0.2531017369727047; report `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172-gsm8k-platinum-v1.json` |
