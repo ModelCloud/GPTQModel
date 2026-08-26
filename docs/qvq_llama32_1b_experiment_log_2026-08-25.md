@@ -907,3 +907,5 @@ and 3.
 | invalidated+restarted | `19d89a`, `ebec00` | `Atomic/Smooth+Atomic replay` | prior workers used the 959-row replay artifact that collides with locked D300 prompts; those processes were stopped before completion. Atomic was relaunched with regenerated 981-row source mix, strict bound manifest `disjointness-llama32-benchmark-replay-v2.json`, and corrected literal-greedy code; Smooth+Atomic is waiting on that clean checkpoint. |
 
 | invalidated+stopped | `llama32-1b-w2-reg020-replay-256x256-tip-gpu2` | `replay quantization` | this in-progress arm also consumed the historical 959-row replay artifact; its quantizer and waiting D300 workers were stopped before any completion marker or score was published. |
+
+| wording-correction | `review-c1048540` | `25% comparison target` | historical ledger references to a “25% target” are retained for traceability but mean an internal aligned-token development heuristic only; Unsloth's scalar aggregation is unpublished, so no numerical equivalence is claimed. |
