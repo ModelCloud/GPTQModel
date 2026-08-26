@@ -565,3 +565,57 @@ fixed-reg .015 and .0225 wait behind the still-active alignment jobs on GPUs 1
 and 3.
 
 | monitor | `llama32-1b-w2-full-reference-reg020-main-5544143c` | `gsm8k_platinum_cot` | complete; metric=0.23325062034739455; report `/root/qvq-results/llama32-1b-w2-full-reference-reg020-main-5544143c-gsm8k-platinum-reverify-v2.json` |
+
+| monitor | `llama32-1b-v2b2p32-align2e64-e2e-susv-yaqa182-v1` | `gsm8k_platinum_cot` | complete; metric=0.23325062034739455; report `/root/qvq-results/llama32-1b-v2b2p32-align2e64-e2e-susv-yaqa182-v1-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365` | `gsm8k_platinum_cot` | complete; metric=0.23490488006617039; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-effective-reg010-main-54ccd365-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-fixed-reg005-pr34-bb1c250e` | `gsm8k_platinum_cot` | complete; metric=0.20678246484698098; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-fixed-reg005-pr34-bb1c250e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-hybrid-attn005-mlp010` | `gsm8k_platinum_cot` | complete; metric=0.2109181141439206; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-hybrid-attn005-mlp010-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-hybrid-attn010-mlp005` | `gsm8k_platinum_cot` | complete; metric=0.20926385442514475; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-hybrid-attn010-mlp005-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-layerhybrid-r005-r010-dev32` | `gsm8k_platinum_cot` | complete; metric=0.19768403639371382; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-layerhybrid-r005-r010-dev32-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg015-gpu1` | `divergence300` | complete; metric=0.16739583333333333; report `/root/qvq-results/llama32-1b-w2-fixed-reg015-gpu1-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg020-gpu2` | `divergence300` | complete; metric=0.14458333333333334; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu2-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg020-gpu6` | `divergence300` | complete; metric=0.14458333333333334; report `/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu6-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg0225-gpu3` | `divergence300` | complete; metric=0.1709375; report `/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu3-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-fixed-reg0225-gpu7` | `divergence300` | complete; metric=0.1709375; report `/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu7-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-full-reference-reg010-main-5544143c` | `gsm8k_platinum_cot` | complete; metric=0.2142266335814723; report `/root/qvq-results/llama32-1b-w2-full-reference-reg010-main-5544143c-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-full-reference-reg030-main-5544143c` | `gsm8k_platinum_cot` | complete; metric=0.19602977667493796; report `/root/qvq-results/llama32-1b-w2-full-reference-reg030-main-5544143c-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-mlp-down-w25-reg020-gpu4` | `divergence300` | complete; metric=0.14822916666666666; report `/root/qvq-results/llama32-1b-w2-mlp-down-w25-reg020-gpu4-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3` | `gsm8k_platinum_cot` | complete; metric=0.17866004962779156; report `/root/qvq-results/llama32-1b-w2-reg020-yaqa302k-main-a12ce4e3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-layerdamp-align2e64-gpu3` | `divergence300` | complete; metric=0.15072916666666666; report `/root/qvq-results/llama32-1b-w2-yaqa302k-layerdamp-align2e64-gpu3-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg010-align-gpu1` | `divergence300` | complete; metric=0.1840625; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg010-align-gpu1-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-main-5cfb8314` | `gsm8k_platinum_cot` | complete; metric=0.23821339950372208; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-main-5cfb8314-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-main-5cfb8314` | `divergence300` | complete; metric=0.17979166666666666; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-main-5cfb8314-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg0175-main-5cfb8314` | `gsm8k_platinum_cot` | complete; metric=0.19189412737799835; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg0175-main-5cfb8314-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg0175-main-5cfb8314` | `divergence300` | complete; metric=0.13927083333333334; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg0175-main-5cfb8314-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg0225-main-5cfb8314` | `gsm8k_platinum_cot` | complete; metric=0.21257237386269645; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg0225-main-5cfb8314-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg0225-main-5cfb8314` | `divergence300` | complete; metric=0.16927083333333334; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg0225-main-5cfb8314-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg025-main-5cfb8314` | `gsm8k_platinum_cot` | complete; metric=0.20595533498759305; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg025-main-5cfb8314-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg025-main-5cfb8314` | `divergence300` | complete; metric=0.15385416666666665; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg025-main-5cfb8314-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg030-main-5cfb8314` | `gsm8k_platinum_cot` | complete; metric=0.19106699751861042; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg030-main-5cfb8314-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg030-main-5cfb8314` | `divergence300` | complete; metric=0.1621875; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg030-main-5cfb8314-div300-dev-v1.json` |
