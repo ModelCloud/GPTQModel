@@ -108,6 +108,8 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | ef21af | V + O projections W3, reg .15 | **2.1094** | 3 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
 | 60a68a | V + O projections W3.5, reg .15 | **2.1525** | 4 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
 | 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | quantizing with model-wide `qvq_v4` format; clean manifest | D300 + GSM8K Platinum pending |
+| d13602 | V + O projections W2 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0232** | 6 | queued; clean YAQA/NM and disjoint replay manifests | D300 + GSM8K Platinum pending |
+| b7d172 | V + O projections W2.5 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0663** | 7 | queued; clean YAQA/NM and disjoint replay manifests | D300 + GSM8K Platinum pending |
 
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
