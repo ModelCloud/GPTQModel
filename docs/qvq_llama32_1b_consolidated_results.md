@@ -86,6 +86,8 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | d71136 | V + O projections W2.5, reg .15 | ~2.1094 | 1/3/5 | queued; waits for a free GPU | D300 + GSM8K Platinum |
 | bb0aa2 | gate + down MLP projections W2.5, reg .15 | ~2.2750 | 3/5/7 | queued; waits for a free GPU | D300 + GSM8K Platinum |
 | 45a387 | up + down MLP projections W2.5, reg .15 | ~2.2750 | 1/3/7 | queued; waits for a free GPU | D300 + GSM8K Platinum |
+| 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | queued/restarting after prior worker exit | D300 + GSM8K Platinum |
+| ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | queued after Atomic completion | D300 + GSM8K Platinum |
 
 The live monitor also has three replay quantizations active at the time of
 this snapshot (2026-08-26 UTC), with evaluator wrappers already reserved for

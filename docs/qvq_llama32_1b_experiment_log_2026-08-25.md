@@ -828,6 +828,10 @@ and 3.
 
 | queued | `llama32-1b-w2-reg015-smooth-atomic-swiglu-tip-3f17c40b` | `quantization + divergence300 + gsm8k_platinum_cot` | latest Smooth + atomic SwiGLU implementation; reg=0.15; replay search rows 0:32, confirmation rows 32:64; clean disjoint manifest; queued after atomic arm |
 
+| restarted-queued | `19d89a` / `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `quantization + divergence300 + gsm8k_platinum_cot` | prior worker exited before checkpoint publication; durable wrapper requeued on physical GPU 4 using the latest atomic config and clean disjoint replay rows 0:32 / 32:64 |
+
+| restarted-queued | `ebec00` / `llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b` | `quantization + divergence300 + gsm8k_platinum_cot` | durable wrapper waits for Atomic arm `19d89a` and then runs the latest Smooth + atomic config on physical GPU 6; clean disjoint replay rows 0:32 / 32:64 |
+
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-attention-only-main-ecf7081e` | `divergence300` | complete; metric=0.265; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-attention-only-main-ecf7081e-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg005-main-54ccd365` | `divergence300` | complete; metric=0.120625; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg005-main-54ccd365-div300-dev-v1.json` |
@@ -849,3 +853,7 @@ and 3.
 | queued | `45a387` / `llama32-1b-w2-reg015-up-down-w25-45a387` | `quantization + divergence300 + gsm8k_platinum_cot` | reg=0.15 reselect; MLP `up_proj` + `down_proj` W2.5; same clean YAQA/NM slices and disjoint manifest; waits for a free GPU |
 
 | monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e` | `divergence300` | complete; metric=0.19916666666666666; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-mlp-only-main-ecf7081e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e` | `divergence300` | complete; metric=0.16864583333333333; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-seed1-main-ecf7081e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e` | `divergence300` | complete; metric=0.190625; report `/root/qvq-results/llama32-1b-v2b2p32-yaqa322k-reg010-spectral-main-ecf7081e-div300-dev-v1.json` |
