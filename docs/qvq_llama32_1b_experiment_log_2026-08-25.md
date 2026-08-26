@@ -441,9 +441,19 @@ results should be appended to this table before being reported in PR notes.
 | AIME 2025/26 | Flat W2 | AIME mix | 14.9792% | 0 | 3.9967 | Below leader |
 | AIME + MLP down W3 | W2 + W3 down | AIME mix | 16.7396% | 2 | 4.8267 | Mixed-rate diagnostic |
 
-The focused `.15/.175/.225/.25/.30` bracket and the 500k mixed-rate/source
-arms are still running; their rows will be appended here when canonical D300
-reports complete.
+The focused `.15/.175/.225/.25/.30` bracket has now completed canonical D300;
+the chained GSM8K checks are still running:
+
+| Arm | D300 top-1 @32 | Exact / 300 | Mean first divergence | Status |
+| --- | ---: | ---: | ---: | --- |
+| YAQA reg .015 | 17.9792% | 3 | 5.3200 | GSM8K running |
+| YAQA reg .0175 | 13.9271% | 1 | 4.2433 | GSM8K running |
+| YAQA reg .0225 | 16.9271% | 6 | 4.6667 | GSM8K running |
+| YAQA reg .025 | 15.3854% | 2 | 4.2667 | GSM8K running |
+| YAQA reg .030 | 16.2188% | 5 | 4.4333 | GSM8K running |
+
+The best remains the prior reg .020 arm at 18.7813%; no flat-W2 bracket arm
+has reached the 25% D300 target.
 
 GSM8K Platinum for the best YAQA reg .020 checkpoint is now running on the
 newly freed GPU0 (session `98290`); the earlier GPU2 waiter (`24963`) was
