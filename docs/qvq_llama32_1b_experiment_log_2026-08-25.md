@@ -799,3 +799,9 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-attnall-w25` | `divergence300` | complete; metric=0.20416666666666666; report `/root/qvq-results/llama32-1b-w2-reg015-attnall-w25-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-yaqa302k-reg015-gateup-w25` | `divergence300` | complete; metric=0.1728125; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-gateup-w25-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-smooth-swiglu` | `gsm8k_platinum_cot` | complete; metric=0.20512820512820512; report `/root/qvq-results/llama32-1b-w2-reg015-smooth-swiglu-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-attnall-w25` | `gsm8k_platinum_cot` | complete; metric=0.26054590570719605; report `/root/qvq-results/llama32-1b-w2-reg015-attnall-w25-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg015-qk-w25` | `gsm8k_platinum_cot` | complete; metric=0.21339950372208435; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg015-qk-w25-gsm8k-platinum-v1.json` |
