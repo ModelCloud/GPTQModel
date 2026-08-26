@@ -871,3 +871,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | `divergence300` | complete; metric=0.17270833333333332; report `/root/qvq-results/llama32-1b-w2-reg020-replay-aggressive-tip-gpu3-div300-dev-v1.json` |
 
 | correction | `d71136`, `bb0aa2`, `45a387` | `effective BPW` | corrected payload-rate estimates: V+O W2.5 = 2.0663 BPW; Gate+Down and Up+Down W2.5 = 2.2990 BPW (including common 0.023168 auxiliary overhead) |
+
+| status | `19d89a` / `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `quantization` | started successfully on physical GPU 4 after queue gate changed to require low utilization plus >70 GiB free; D300/GSM8K remain pending |
