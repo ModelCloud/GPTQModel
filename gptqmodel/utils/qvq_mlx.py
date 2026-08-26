@@ -507,38 +507,6 @@ inline float2 qpairv2b2(device const int* t,device const uchar* ids,constant con
     device const half* levels,uint k,uint n,uint N,uint eb){
   uint tile=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),pair=local>>1;
   uint s=qstate(t+tile*(4*eb),pair,eb);return qlevelsv2b(levels,s,qv2b2(ids,alt,tile,pair),eb);}
-inline float2 qpairv2b2lr(device const int* t,device const uchar* ids,constant const uchar* alt,
-    device const half* levels,uint k,uint n,uint N,uint eb){
-  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
-  device const int* tile_ptr=t+tile*(4*eb);
-  uint s=qstate_lr(tile_ptr,ring,pair,eb);
-  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
-  return qlevelsv2b(levels,s,bank,eb);
-}
-inline float2 qpairv2b2lr(device const int* t,device const uchar* ids,device const uchar* alt,
-    device const half* levels,uint k,uint n,uint N,uint eb){
-  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
-  device const int* tile_ptr=t+tile*(4*eb);
-  uint s=qstate_lr(tile_ptr,ring,pair,eb);
-  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
-  return qlevelsv2b(levels,s,bank,eb);
-}
-inline float2 qpairv2b2lr(device const int* t,constant const uchar* ids,constant const uchar* alt,
-    device const half* levels,uint k,uint n,uint N,uint eb){
-  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
-  device const int* tile_ptr=t+tile*(4*eb);
-  uint s=qstate_lr(tile_ptr,ring,pair,eb);
-  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
-  return qlevelsv2b(levels,s,bank,eb);
-}
-inline float2 qpairv2b2lr(device const int* t,constant const uchar* ids,device const uchar* alt,
-    device const half* levels,uint k,uint n,uint N,uint eb){
-  uint tile=(k>>5)*(N>>3)+(n>>3),ring=n&7u,pair=(k&31u)>>1;
-  device const int* tile_ptr=t+tile*(4*eb);
-  uint s=qstate_lr(tile_ptr,ring,pair,eb);
-  uint bank=((uint(ids[tile])>>ring)&1u)*uint(alt[0]);
-  return qlevelsv2b(levels,s,bank,eb);
-}
 inline float2 qpaird(device const int* t,device const half* levels,uint k,uint n,uint N,uint eb){
   uint tile=(k>>4)*(N>>4)+(n>>4),local=(k&15)*16+(n&15),s=qstated(t+tile*(4*eb),local>>1,eb);
   return qlevels(levels,s);}
@@ -698,15 +666,33 @@ _FP32_SOURCE = _SOURCE.replace(
 )
 _LR_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
-uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits;
-uint groups_n=(N+31u)>>5,m=group/groups_n,n=(group%groups_n)*32u+lane;
-if(m>=M || n>=N)return;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,groups_n=(N+31u)>>5;
+uint m=group/groups_n,n=(group%groups_n)*32u+lane;
+if(m>=M)return;
+bool active=n<N;
 float sum=0.0f;
-for(uint k=0;k<K;k+=2){
-  float2 value=qpairv2b2lr(trellis,bank_ids,bank_alt_id,levels,k,n,N,eb);
-  sum+=float(x[m*K+k])*value.x+float(x[m*K+k+1])*value.y;
+for(uint k0=0;k0<K;k0+=32){
+  // One lane loads one value from the K32 activation tile.  All output
+  // lanes then read the needed pair through the Apple SIMD-group shuffle.
+  // Inactive lanes in a tail group still participate in the shuffle and use
+  // a valid tile/ring, but never write an output.
+  float activation=float(x[m*K+k0+lane]);
+  uint output_n=active?n:0u;
+  uint tile=(k0>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
+  device const int* tile_ptr=trellis+tile*(4*eb);
+  uint state=qstate_lr(tile_ptr,ring,0,eb);
+  uint bank=((uint(bank_ids[tile])>>ring)&1u)*uint(bank_alt_id[0]);
+  for(uint pair=0;pair<16;pair++){
+    float2 value=qlevelsv2b(levels,state,bank,eb);
+    float a0=simd_shuffle(activation,ushort(pair<<1));
+    float a1=simd_shuffle(activation,ushort((pair<<1)+1u));
+    sum+=a0*value.x+a1*value.y;
+    if(pair!=15u){
+      state=((state<<eb)|qpt(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+    }
+  }
 }
-out[m*N+n]=half(sum);
+if(active)out[m*N+n]=half(sum);
 """
 _LR_FP32_SOURCE = _LR_SOURCE.replace("out[m*N+n]=half(sum);", "out[m*N+n]=sum;")
 _DUAL_V2_SOURCE = _SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
