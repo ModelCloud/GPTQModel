@@ -2726,3 +2726,31 @@ These measurements are not directly interchangeable with the earlier AC
 tables: the host still exhibits substantial p50/p95 variation. They establish
 a new comparison point only; all future candidates must be interleaved with
 the committed route in the same process and session.
+
+## 63. W2 half2 codebook values for long-K M1/N32
+
+The long-K M1/N32 W2 kernel now returns the two PGC16 values as native
+`half2` values. The accumulator remains FP32, so this changes the conversion
+path without changing the serialized codebook values or the arithmetic
+contract. The optimization is restricted to the specialized N32 fused route;
+other LR32 rates and layouts retain their existing helpers.
+
+The route passed the Torch oracle and the full LR32/MLX suites (`168` and
+`326` tests). On AC/high-performance M4 Max, a randomized/interleaved inner
+kernel sweep with 30 warmups and 160 synchronized samples per arm measured:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.43200` | `0.51838` | `1.200x` |
+| `(M=1,K=2048,N=2048)` | `0.46081` | `0.50077` | `1.087x` |
+| `(M=1,K=2048,N=8192)` | `0.67225` | `0.81135` | `1.207x` |
+| `(M=1,K=8192,N=2048)` | `0.58883` | `0.87881` | `1.492x` |
+| `(M=4,K=2048,N=8192)` | `1.05894` | `2.06604` | `1.951x` |
+| `(M=8,K=2048,N=8192)` | `0.77715` | `1.60194` | `2.061x` |
+| `(M=16,K=8192,N=8192)` | `2.52923` | `5.46473` | `2.161x` |
+
+The corresponding complete-module sweep with 30 warmups and 160 samples
+measured `1.664x` at `(M=1,K=8192,N=2048)`, `2.020x` at
+`(M=4,K=2048,N=8192)`, `2.692x` at `(M=8,K=2048,N=8192)`, and `2.232x` at
+`(M=16,K=8192,N=8192)`. The M1 result remains below the universal 2x target
+because Hadamard and module-boundary work are outside the LR kernel.

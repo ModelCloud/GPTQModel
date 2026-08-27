@@ -1584,6 +1584,14 @@ inline float2 qlevelsv2b_lr_const_w2_small_mask(uint s,uint bank_bit){{
   uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
   return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));
 }}
+// The long-K M1/N32 W2 path accumulates in FP32, but the PGC16 table is
+// already FP16.  Returning the pair in its native width avoids two explicit
+// half-to-float conversions per decoded pair; the consuming expression still
+// promotes the operands for the FP32 accumulation.
+inline half2 qlevelsv2b_lr_const_w2_small_half(uint s,uint bank_bit){{
+  uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return half2(qpgc16_lr(p>>8),qpgc16_lr(p&255u));
+}}
 """
 
 _LR_MMA_SOURCE = r"""
@@ -2810,7 +2818,10 @@ def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int)
                 "uint bank_bit=(selector>>ring)&1u;",
             ).replace(
                 "qlevelsv2b_lr_const_w2(state,bank)",
-                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
             )
             kernel = mx.fast.metal_kernel(
                 name=(
