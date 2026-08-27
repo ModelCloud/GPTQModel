@@ -4695,3 +4695,23 @@ governing production metric because it includes the transforms and epilogue.
 The separate inner and module sweeps should not be compared by absolute
 latency because they were separate synchronized runs with different MLX
 graph materialization and scheduling histories.
+
+## 135. M1 N64 `uint2` split-policy recheck
+
+The promoted aligned-`uint2` M1/N64 route was explicitly compared with the
+wide-N split-2 policy. The route currently enters before the half2 fallback,
+so this check verified whether it should override the generic M1 split-4
+policy. Both variants used the same complete `QVQMLXLinear`, payload, input,
+and randomized/interleaved 100-sample protocol on the plugged-in,
+performance-mode M4 Max.
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| `uint2`, split-4 (current) | `0.75517` | `0.93471` | `0.78151` |
+| `uint2`, split-2 candidate | `0.77658` | `1.29551` | `0.82184` |
+| Non-local P32 | `1.13427` | `1.30944` | `1.14744` |
+
+Split-2 was slower by `0.972x` at p50 and `0.951x` by mean relative to the
+current split-4 route, with a `0.01563` maximum output difference from the
+changed reduction grouping. The experiment was rejected; the production
+dispatch intentionally retains split-4 for the promoted `uint2` path.
