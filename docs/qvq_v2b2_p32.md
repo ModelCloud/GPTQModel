@@ -3639,6 +3639,30 @@ for the second row pair costs more than the removed shared-memory barriers, so
 the cooperative M4 route remains enabled and the universal `2x` target remains
 open.
 
+## 99. M4 transposed decoded-tile probe rejected
+
+The M4 cooperative W2 decoder was re-laid out from threadgroup
+`decoded[8][32]` to `decoded[32][8]`, allowing each consumer lane to access its
+eight output weights contiguously. Decode ownership and all arithmetic were
+otherwise unchanged. The candidate was bit-exact at `(M=4,K=2048,N=8192)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+The complete-module A/B used 150 randomized/interleaved samples per arm, 30
+warmups, and seed `20261104` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 cooperative | `0.75413` | `0.88379` | `0.77906` | `0.50800` | `1.94250` |
+| Transposed decoded tile | `0.75498` | `0.90514` | `0.79133` | `0.49363` | `1.87296` |
+
+The candidate measured `0.999x` at p50 and `0.984x` by mean. The original
+decoded layout remains in production; the universal `2x` target remains open.
+
 ## 95. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
