@@ -1058,3 +1058,9 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | `gsm8k_platinum_cot` | complete; metric=0.4052936311000827; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | `gsm8k_platinum_cot` | complete; metric=0.3970223325062035; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | `gsm8k_platinum_cot` | complete; metric=0.3705541770057899; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | `gsm8k_platinum_cot` | complete; metric=0.43010752688172044; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | `gsm8k_platinum_cot` | complete; metric=0.39950372208436724; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c-gsm8k-platinum-v1.json` |
