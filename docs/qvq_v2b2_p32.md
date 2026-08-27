@@ -2446,3 +2446,46 @@ performance host:
 | `(M=4,K=2048,N=8192)` | `0.31833` | `0.56538` | `1.776x` | `0.34323` | `0.64130` |
 | `(M=8,K=2048,N=8192)` | `0.38069` | `0.91967` | `2.416x` | `0.40314` | `0.97938` |
 | `(M=16,K=8192,N=8192)` | `2.11610` | `5.18644` | `2.451x` | `2.22576` | `5.44122` |
+
+## 54. AC/high-performance recheck and Metal System Trace
+
+The post-promotion benchmark was repeated at commit `f0eeded5` on the
+Apple M4 Max (`applegpu_g16s`) while connected to AC power with macOS
+performance mode enabled. The complete-module benchmark used identical
+randomized payloads for LR/P32, 30 warmups, 100 synchronized samples per
+arm, and `mx.eval` plus `mx.synchronize` for every sample.
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.25785` | `0.40346` | `1.565x` | `0.28354` | `0.46649` |
+| `(M=1,K=2048,N=2048)` | `0.24777` | `0.31460` | `1.270x` | `0.32112` | `0.41774` |
+| `(M=1,K=2048,N=8192)` | `0.23346` | `0.30819` | `1.320x` | `0.27138` | `0.35585` |
+| `(M=1,K=8192,N=2048)` | `0.26248` | `0.33235` | `1.266x` | `0.28650` | `0.35868` |
+| `(M=4,K=2048,N=8192)` | `0.32040` | `0.56600` | `1.767x` | `0.38185` | `0.63398` |
+| `(M=8,K=2048,N=8192)` | `0.37533` | `0.91175` | `2.429x` | `0.40914` | `0.98205` |
+| `(M=16,K=8192,N=8192)` | `2.61088` | `5.73431` | `2.196x` | `4.28625` | `6.78877` |
+
+The fresh recheck continues to show a strong LR32 advantage for M8/M16,
+while M1/M4 remain below the universal `2x` target. Absolute timing is
+machine-state dependent, so these values should be compared only with
+measurements taken under the same AC/high-performance state.
+
+A bounded Xcode Metal System Trace was also captured with Xcode 26.6 using
+the same benchmark harness (`--warmup 5 --samples 2`). The artifacts are
+kept outside the repository at
+`/tmp/qvq-metal-profile-f0eeded5-rerun/system.trace` (57 MB), with exported
+tables in the same directory. The trace contains 195 Python-owned Metal
+command-buffer intervals for the all-shape run; custom MLX kernel names are
+not preserved in the exported System Trace table. Source-backed topology
+identifies one in-kernel barrier for the M1 fused split-16 reduction, one
+barrier per K64 activation batch in the wide M1/N64 staged path, and the
+existing two per-K32-tile barriers in the M4 cooperative multirow path.
+The M8 MMA route uses one SIMD group and no threadgroup barriers.
+
+The installed Xcode template list did not contain `Metal GPU Counters`; an
+attempt to run that template failed with `Cannot find template matching name:
+Metal GPU Counters`. Consequently this trace provides scheduling and
+dependency evidence only, not hardware occupancy, cache, bandwidth, or
+stall percentages. The most credible remaining overlap opportunity is still
+the M4/M8 decode-to-compute mapping; M1's promoted route already avoids the
+shared decoded tile and external split reduction.
