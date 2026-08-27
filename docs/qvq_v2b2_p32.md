@@ -4515,3 +4515,41 @@ source-backed audit remains the valid structural evidence: the M1 N64 route
 uses four SIMD groups, stages a shared K64 activation tile, and requires a
 threadgroup barrier per staged K64 tile; the promoted alternatives were
 already rejected by synchronized complete-module A/B tests.
+
+## 129. M1 literal W2 K64 decode rejected at module boundary
+
+The fixed eight-pair W2 loop inside the M1/N64 K64 half2 source was expanded
+into literal code blocks. The candidate retained the production shared K64
+activation, half2 codebook values, K64 staging, split-2 reduction, and output
+ordering; only the pair loop and packed-nibble state updates were
+literalized.
+
+The candidate was bit-exact against the public LR32 kernel:
+
+```text
+max_abs = 0
+relative_l2 = 0
+rmse = 0
+```
+
+At the direct inner-kernel boundary, a same-process randomized A/B with 10
+warmups and 50 samples per arm on the AC/performance-mode M4 Max measured:
+
+```text
+production p50/p95/mean = 0.93381 / 2.15358 / 1.06892 ms
+literal    p50/p95/mean = 0.76696 / 1.68532 / 0.92252 ms
+inner speedup            = 1.218x
+```
+
+The corresponding complete-module A/B used the same payload, input, output
+Hadamard, and `SV` scale, with 10 warmups and 50 randomized samples per arm:
+
+```text
+production p50/p95/mean = 0.44169 / 0.59030 / 0.42922 ms
+literal    p50/p95/mean = 0.45992 / 0.70667 / 0.46173 ms
+module speedup           = 0.960x
+```
+
+Although the inner kernel improved by `1.218x`, the candidate lost at the
+complete-module boundary. It was not promoted; production dispatch remains
+the existing K64 half2 source.
