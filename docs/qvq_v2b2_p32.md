@@ -4186,3 +4186,35 @@ arm on the plugged-in AC/performance-mode M4 Max:
 The candidate improved p50 by `1.093x` but regressed mean to `0.823x` and had
 a worse p95. It was not promoted; the existing M1 W2 recurrence remains in
 production.
+
+## 118. AC/performance-mode recheck and compiled-module control
+
+The current production tree (`cb8a0057`) was rechecked after confirming the
+Apple M4 Max was on AC power with `pmset powermode=2`. The synchronized
+inner-kernel benchmark used 30 warmups and 100 randomized samples per arm;
+the complete-module benchmark used the same input/payload policy and sample
+count. The complete-module result is the deployment-relevant table:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | p50 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.23567` | `0.38167` | `1.620x` | `0.26975` | `0.40442` |
+| `(1,2048,2048)` | `0.26350` | `0.40471` | `1.536x` | `0.29249` | `0.47287` |
+| `(1,2048,8192)` | `0.43285` | `0.70006` | `1.617x` | `0.48299` | `0.75950` |
+| `(1,8192,2048)` | `0.38300` | `0.73069` | `1.908x` | `0.42563` | `0.80417` |
+| `(4,2048,8192)` | `0.37842` | `0.76992` | `2.035x` | `0.42512` | `0.89534` |
+| `(8,2048,8192)` | `0.44063` | `1.17604` | `2.669x` | `0.49571` | `1.42361` |
+| `(16,8192,8192)` | `2.11387` | `5.14552` | `2.434x` | `2.32386` | `5.41156` |
+
+An optional shape-specialized `mx.compile` control (10 warmups, 50 randomized
+samples) measured `1.427x` at `(M=1,K=2048,N=2048)`, `1.561x` at
+`(1,2048,8192)`, `1.869x` at `(1,8192,2048)`, `2.059x` at
+`(4,2048,8192)`, `2.699x` at `(8,2048,8192)`, and `2.444x` at
+`(16,8192,8192)`. Compilation therefore does not close the M1 gap and remains
+benchmark-only; it is not enabled in the loadable module path.
+
+The current evidence establishes that LR32 is faster than non-local P32 on all
+tested complete-module shapes and exceeds `2x` for the M4/M8/M16 regimes. It
+does not establish a universal `2x` guarantee: M1 remains below target. A
+fresh Xcode 26.6 System Trace retry was also attempted, but the host reported
+`_lockKPerf: could not lock kperf` and an unsupported GPU counter profile; no
+occupancy, stall, or barrier percentages are claimed from that run.
