@@ -3475,3 +3475,18 @@ The candidate measured `0.991x` at p50 and `0.946x` by mean. The additional
 shared-output barrier and outer transform outweighed the saved native-H work,
 so no production fusion was promoted. The universal `2x` target remains open
 for M1; larger-row LR32 paths continue to clear it.
+
+## 91. M1 selector single-load probe rejected by tile layout
+
+The M1/N64 W2 source was audited for the apparent duplicate selector loads:
+lanes `0..15` load and broadcast one selector, while lanes `16..31` load and
+broadcast another. These loads are required because the two lane halves own
+different adjacent N8 weight tiles; the same ring number in the two halves
+does not imply the same serialized tile or selector byte.
+
+Two in-memory one-load variants were tested using either a lane-0
+`simd_shuffle` or `simd_broadcast_first`. Both produced large oracle errors
+(`max_abs` approximately `108`) because the primitive does not broadcast lane
+0 across the two tile-owning halves in this kernel mapping. The apparent
+single-load timing improvement is therefore invalid. The production two-load
+selector mapping remains unchanged.
