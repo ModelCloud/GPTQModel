@@ -17,6 +17,16 @@ Rows generated before the literal-EOS rollout fix (`55adb7e1`) use the former
 EOS-suppressing decoder and are historical until rerun under the corrected
 protocol; teacher-forced metrics are unaffected.
 
+Every new checkpoint with a passing strict disjointness contract is also
+screened by the fast, task-matched Mini-GSM protocol documented in
+[`docs/qvq_micro_math_metrics.md`](qvq_micro_math_metrics.md).  Its immutable
+JSON report records numeric-answer rollout accuracy, reasoning ΔCE/ΔKL,
+answer-token log-probability and margin retention, critical numeric/operator
+Top-1, invalid-answer rate, and paired dense→quantized correctness transitions.
+The 128-row Mini-GSM train slice is cryptographically bound and disjoint from
+calibration, replay, D300 development/locked, and GSM8K Platinum test rows.
+These are screening proxies; full GSM8K Platinum remains the promotion metric.
+
 ## Completed arms (ordered by D300 Top-1, descending)
 
 | Arm ID | Family / arm | Rate | Eff. BPW* | Calibration | D300 Top-1 | Exact / 300 | Mean first divergence | GSM8K Platinum | Status |
@@ -84,7 +94,7 @@ and YAQA rows 0--181 (302,193 valid tokens). Its canonical D300 score is
 18.7813% (1,803/9,600), with 6/300 exact trajectories and mean first
 divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 
-## In progress / queued
+## Active, queued, and recently completed follow-ups
 
 | Arm ID | Arm | Eff. BPW | GPU | State | Evaluation |
 | --- | ---: | ---: | --- | --- | --- |
@@ -95,17 +105,96 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 46d985 | clean fixed-block LDLQ reg .020 replica | 2.0232 | 6 | quantization in progress | canonical D300 |
 | 37238d | clean fixed-block LDLQ reg .0225 replica | 2.0232 | 7 | quantization in progress | canonical D300 |
 | d71136 | V + O projections W2.5, reg .15 | **2.0663** | 1 | D300 complete: **19.1771%**, exact 3/300, mean first divergence 5.0633 | GSM8K complete: **25.4756% (308/1209)** |
-| 738a13 | V + O projections W3, reg .15 | **2.1094** | 7 | **quantizing now**; bitrate-matched against all-attention W2.5 | D300 + GSM8K Platinum |
-| 09674b | O projection W2.5, reg .15 | **2.0447** | 2 | **quantizing now**; moved to idle GPU 2 | D300 + GSM8K Platinum |
-| 0cd45d | V projection W2.5, reg .15 | **2.0447** | 1 | **quantizing now**; single-family attention control | D300 + GSM8K Platinum |
-| bb0aa2 | gate + down MLP projections W2.5, reg .15 | **2.2990** | 3 | **quantizing now**; restarted with repaired JSON config | D300 + GSM8K Platinum |
-| 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | **quantizing now**; restarted with repaired JSON config | D300 + GSM8K Platinum |
-| 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | **quantizing now** on physical GPU 4 | D300 + GSM8K Platinum pending |
-| ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | queued after Atomic completion | D300 + GSM8K Platinum |
+| 738a13 | V + O projections W3, reg .15 | **2.1094** | 7 | complete; D300 **17.9271%**, exact 2/300, mean divergence 4.5933 | GSM8K complete: **24.7312%** |
+| 09674b | O projection W2.5, reg .15 | **2.0447** | 2 | complete; D300 **17.3021%**, exact 3/300, mean divergence 4.4500 | GSM8K complete: **22.9942%** |
+| 0cd45d | V projection W2.5, reg .15 | **2.0447** | 1 | complete; D300 **17.2917%**, exact 2/300, mean divergence 4.6133 | GSM8K complete: **21.4227%** |
+| bb0aa2 | gate + down MLP projections W2.5, reg .15 | **2.2990** | 3 | complete; D300 **19.4792%**, exact 7/300, mean divergence 5.4000 | GSM8K complete: **27.9570%** |
+| 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | complete; D300 **19.9583%**, exact 3/300, mean divergence 5.0200 | GSM8K complete: **28.1224%** |
+| 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | complete; D300 **16.5938%**, exact 1/300, mean divergence 4.2667 | GSM8K complete: **19.9338%** |
+| ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498%** |
+| 0f642c | Up + Down projections W3, reg .15 | **2.5749** | 0 | complete; D300 **21.7396%**, exact 7/300, mean divergence 5.6300 | GSM8K complete: **30.6865% (371/1209)** |
+| 569a95 | Up + Down projections W3.5, reg .15 | **2.8508** | 1 | complete; D300 **21.3021%**, exact 6/300, mean divergence 5.7000 | GSM8K complete: **31.6791% (383/1209)** |
+| cdfa75 | Up + Down projections W4, reg .15 | **~3.1266*** | 2 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
+| ef21af | V + O projections W3, reg .15 | **2.1094** | 3 | complete; D300 **17.9271%**, exact 2/300, mean divergence 4.5933 | GSM8K complete: **24.7312% (299/1209)** |
+| 60a68a | V + O projections W3.5, reg .15 | **2.1525** | 4 | complete; D300 **19.0833%**, exact 4/300, mean divergence 5.0133 | GSM8K complete: **26.6336% (322/1209)** |
+| 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
+| d13602 | V + O projections W2 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0232** | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498% (269/1209)** |
+| b7d172 | V + O projections W2.5 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0663** | 7 | complete; D300 **19.0833%**, exact 4/300, mean divergence 5.9333 | GSM8K complete: **25.3102% (306/1209)** |
 
-The live monitor also has three replay quantizations active at the time of
-this snapshot (2026-08-26 UTC), with evaluator wrappers already reserved for
-each output:
+### Current 8-GPU mixed-rate matrix (started 2026-08-27 UTC)
+
+All eight arms use the same clean 182-row YAQA mix, ordinary NM rows 0:128,
+`qvq_v2b2_p32`/P32 with two banks, reg `.15`, seed 0, and strict benchmark
+disjointness. Atomic arms additionally use replay search rows 0:32 and
+confirmation rows 32:64 from the disjoint replay source. Paths below are the
+authoritative config and checkpoint locations; the six-character Arm ID is
+stable across JSON/Markdown logs and evaluator artifacts.
+
+| Arm ID | GPU | Exact configuration | Output checkpoint | Atomic/Smooth | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | --- | --- | --- | --- | --- |
+| 595f38 | 0 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38` | — | **complete** | **23.7604% (exact 7/300; mean div 7.263)** | **37.3863% (452/1209)** |
+| bf96be | 1 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be` | Atomic | **complete** | **24.3125% (exact 13/300; mean div 7.260)** | **36.6419% (443/1209)** |
+| bf272e | 2 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | Smooth + Atomic | **complete** | **24.3750% (exact 7/300; mean div 7.463)** | **36.5591% (442/1209)** |
+| 56c940 | 3 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940` | — | **complete** | **21.1458% (exact 9/300; mean div 6.440)** | **34.6567% (419/1209)** |
+| e5ca9f | 4 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | — | **complete** | **25.5521% (exact 9/300; mean div 7.327)** | **40.2812% (487/1209)** |
+| baeb18 | 5 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18` | — | **complete** | **21.8750% (exact 8/300; mean div 6.443)** | **35.2357% (426/1209)** |
+| 95ef88 | 6 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88` | Atomic | **complete** | **17.3750% (exact 4/300; mean div 5.357)** | **31.6791% (383/1209)** |
+| 4e4d0d | 7 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | Smooth + Atomic | **complete** | **19.6354% (exact 6/300; mean div 6.157)** | **31.5964% (382/1209)** |
+
+### Current Pareto-frontier allocation sweep (started 2026-08-27 UTC)
+
+These eight arms use the same clean YAQA/NM calibration and strict benchmark
+disjointness manifest as the completed matrix above. They are plain
+V2B2/P32 reselect quantizations (no Atomic/Smooth). D300 and GSM8K Platinum
+are queued automatically after each checkpoint is published. Eff. BPW values
+are weighted payload estimates.
+
+| Arm ID | GPU | Precision allocation | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |
+| 1fee11 | 0 | V+O W2.5 + all MLP W2.5 | **2.4801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | **complete** | **22.7917% (exact 8/300; mean div 6.680)** | **35.6493% (431/1209)** |
+| b2dee2 | 1 | V+O W3 + all MLP W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo30_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | **complete** | **23.2813% (exact 10/300; mean div 6.680)** | **36.3110% (439/1209)** |
+| dc38d2 | 2 | Q+K W2.5 + V+O W3.5 + all MLP W2.5 | **2.6094** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | **complete** | **24.9063% (exact 11/300; mean div 7.580)** | **37.0554% (448/1209)** |
+| 8dd86a | 3 | V+O W3.5 + Gate W2.5 + Up/Down W3 | **2.8421** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | **complete** | **27.6250% (exact 17/300; mean div 8.187)** | **40.5294% (490/1209)** |
+| 5fddf5 | 4 | V+O W3.5 + all MLP W3 | **2.9801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | **complete** | **32.3854% (exact 19/300; mean div 9.870)** | **40.8602% (494/1209)** |
+| 83b60c | 5 | Q+K W2.5 + V+O W3.5 + Up/Down W3.5 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | **complete** | **28.9167% (exact 12/300; mean div 8.480)** | **39.9504% (483/1209)** |
+| 4f018a | 6 | V+O W3.5 + Gate W2.5 + Up/Down W3.5 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | **complete** | **31.9896% (exact 20/300; mean div 9.097)** | **43.0108% (520/1209)** |
+| 8e67f6 | 7 | V+O W3.5 + Gate W3.5 + Up/Down W3 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | **complete** | **31.3021% (exact 17/300; mean div 9.523)** | **39.7022% (480/1209)** |
+
+### Flat-rate projection baselines (queued 2026-08-27 UTC)
+
+These controls quantize all attention projections (Q/K/V/O) and all MLP
+projections (gate/up/down) at one common V2B2/P32 rate. They use the same
+clean YAQA/NM slices, reg `.15`, seed 0, and strict benchmark disjointness.
+W1.5 is within the V2B2 supported W1--W3.5 rate range. Evaluations are
+scheduled automatically after each checkpoint completes.
+
+| Arm ID | GPU | Flat rate | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- | --- |
+| 88be04 | 0 | W2 | **2.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json` | `/root/qvq-results/llama32-1b-flat-flat-w20-88be04` | **complete** | **12.9063% (exact 2/300; mean div 3.793)** | **19.9338% (241/1209)** |
+| 509b7f | 1 | W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json` | `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f` | **complete** | **25.7917% (exact 13/300; mean div 7.383)** | **34.9876% (423/1209)** |
+| 1040a5 | 2 | W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json` | `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5` | **complete** | **28.7292% (exact 13/300; mean div 8.580)** | **42.9280% (519/1209)** |
+| b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **complete** | **39.5521% (exact 40/300; mean div 12.080)** | **45.2440% (547/1209)** |
+| 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **complete** | **5.1354% (exact 0/300; mean div 1.703)** | **3.4739% (42/1209)** |
+
+### W3-anchor reallocation sweep (queued 2026-08-27 UTC)
+
+These six plain V2B2/P32 reselect arms keep the total rate near the flat-W3
+anchor while moving bits between Q/K, V/O, and the SwiGLU projections. They
+use the same clean YAQA/NM slices, reg `.15`, seed 0, and strict benchmark
+disjointness. D300 and GSM8K Platinum are scheduled after quantization.
+
+| Arm ID | GPU | Precision allocation | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |
+| add422 | 0 | Q/K W2.5, V/O W3.5, Gate/Up/Down W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp3.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | **quantizing** | pending | pending |
+| 3151c6 | 1 | Q/K W3, V/O W3.5, Gate/Up/Down W3 | **3.0663** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp3.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | **quantizing** | pending | pending |
+| 2ae00f | 4 | Q/K W2.5, V/O W3.5, Gate W3, Up W3.5, Down W3 | **3.1611** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up35_down3.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | **quantizing** | pending | pending |
+| 457643 | 5 | Q/K W2.5, V/O W3.5, Gate/Up W3, Down W3.5 | **3.1611** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up3_down35.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643` | **quantizing** | pending | pending |
+| b3bdcd | 6 | Q/K W2.5, V/O W3.5, Gate/Up/Down W3.5 | **3.2990** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp35.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd` | **quantizing** | pending | pending |
+| 370e9f | 7 | Q/K W3, V/O W3.5, Gate/Up/Down W3.5 | **3.3421** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp35.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | **queued (GPU busy)** | pending | pending |
+
+For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
+listed three replay quantizations with evaluator wrappers reserved for each
+output. They are not current active jobs; current arms are listed above:
 
 | Artifact ID | Active checkpoint | Quantization | Evaluation queue |
 | --- | --- | --- | --- |
@@ -113,11 +202,14 @@ each output:
 | `d3eac8` | `llama32-1b-w2-reg020-replay-aggressive-tip-gpu3` | active (GPU 0) | D300 pending behind quantization |
 | `a9a4df` | `llama32-1b-w2-reg020-replay-256x256-tip-gpu2` | active (GPU 2) | D300 pending behind quantization |
 
-These rows are intentionally separate from the completed-arm leaderboard:
-they have no `qvq_quantize_run.json` completion marker yet. The monitor state
-file (`docs/experiments/qvq_eval_monitor_state.json`) is the source of truth
-for transitions from active/queued to complete/failed, while the artifact
-inventory above records the corresponding filesystem state.
+These historical rows remain separate from the completed-arm leaderboard.
+The monitor state file (`docs/experiments/qvq_eval_monitor_state.json`) is the
+source of truth for transitions from active/queued to complete/failed, while
+the artifact inventory above records the corresponding filesystem state.
+
+The W4 rows use the model-wide `qvq_v4` codec because `qvq_v2b2_p32` rejects
+dynamic rates above W3.5. Their starred BPW values are weighted payload
+estimates only and are not directly comparable to the segmented V2B2 rows.
 
 ## Complete artifact inventory (live reconciliation)
 
@@ -218,6 +310,7 @@ locations are indexed here.
 | c763d1, 6c2a99, 4db5cf, 5ac42a | Follow-up ledger `docs/experiments/2026-08-26-llama32-w2-fixed-down-followup.json`; configs under `scripts/configs/`. |
 | 46d985 | Clean GPU6 fixed-block LDLQ reg .020 replica; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg020.json`; checkpoint `/root/qvq-results/llama32-1b-w2-fixed-reg020-gpu6`. |
 | 37238d | Clean GPU7 fixed-block LDLQ reg .0225 replica; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_fixed_reg0225.json`; checkpoint `/root/qvq-results/llama32-1b-w2-fixed-reg0225-gpu7`. |
+| d13602, b7d172 | V+O W2/W2.5 + Smooth + Atomic follow-up arms; configs `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w20_smooth_atomic.json` and `...vo_w25_smooth_atomic.json`; checkpoints `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602` and `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172`. |
 
 The authoritative per-arm machine-readable ledgers are in
 `docs/experiments/`; the append-only chronology is

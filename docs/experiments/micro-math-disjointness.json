@@ -1,0 +1,21 @@
+{
+  "dataset": {
+    "path": "/root/QvQ/dataset/micro_math_llama3.2_1b.jsonl",
+    "rows": 128,
+    "sha256": "a7ca5aadcc2332a5a0431541f36c9ba5c101341dc8bff614fb992f076a6ea2ec",
+    "source": "local mirror of openai/gsm8k main train split",
+    "source_file": "/monster/data/model/dataset/gsm8k/main/train-00000-of-00001.parquet",
+    "source_sha256": "ea82612ea9582142387730c793eb67d3b12849002bc0b7fa6f8efafa7351419d"
+  },
+  "excluded_files": [
+    "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
+    "/root/qvq-data/divergence300-v1/divergence300-development.jsonl",
+    "/root/qvq-data/divergence300-v1/divergence300-locked.jsonl",
+    "/monster/data/model/dataset/gsm8k/main/test-00000-of-00001.parquet"
+  ],
+  "method": "question-only NFKC+casefold+whitespace/punctuation normalization; excluded calibration, D300 development+locked, and local GSM8K test rows",
+  "schema": "qvq.micro_math.v1",
+  "skipped_source_rows": 0,
+  "status": "pass"
+}

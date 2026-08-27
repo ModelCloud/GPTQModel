@@ -17,12 +17,14 @@ import importlib
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 try:
     from datetime import UTC
@@ -179,6 +181,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     divergence.add_argument("--trust-remote-code", action="store_true")
     divergence.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
+
+    micro_math = subparsers.add_parser(
+        "micro_math",
+        help="Run the fast, held-out math capability proxy suite.",
+    )
+    micro_math.add_argument("--dense-model", required=True)
+    micro_math.add_argument("--checkpoint", type=Path, required=True)
+    micro_math.add_argument("--dataset", type=Path, required=True, help="Pinned disjoint Mini-GSM JSONL.")
+    micro_math.add_argument("--manifest", type=Path, required=True, help="Dataset binding manifest.")
+    micro_math.add_argument("--output", type=Path, required=True)
+    micro_math.add_argument("--rows", type=int, default=64)
+    micro_math.add_argument("--rollout-tokens", type=int, default=48)
+    micro_math.add_argument("--max-prompt-tokens", type=int, default=2048)
+    micro_math.add_argument("--device", default="cuda:0")
+    micro_math.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
+    micro_math.add_argument(
+        "--attn-implementation",
+        choices=("eager", "sdpa", "flash_attention_2"),
+        default="sdpa",
+    )
+    micro_math.add_argument("--trust-remote-code", action="store_true")
+    micro_math.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
+    micro_math.add_argument("--allow-calibration-overlap", action="store_true")
 
     tasks = subparsers.add_parser("tasks", help="Run Evalution tasks on the quantized checkpoint.")
     tasks.add_argument("--checkpoint", type=Path, required=True)
@@ -385,6 +410,138 @@ def _model_logits(model, encoded: dict[str, torch.Tensor]) -> torch.Tensor:
     if not isinstance(logits, torch.Tensor):
         raise TypeError(f"Model forward did not return tensor logits (output type: {type(output).__name__})")
     return logits
+
+
+_MICRO_STRICT_ANSWER = re.compile(r"####\s*([-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+))")
+_MICRO_NUMBER = re.compile(r"[-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)")
+
+
+def _micro_normalize_answer(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.replace(",", "").replace("$", "").strip().rstrip(".")
+    return value or None
+
+
+def _micro_answer(text: str) -> str | None:
+    strict = _MICRO_STRICT_ANSWER.findall(text)
+    if strict:
+        return _micro_normalize_answer(strict[-1])
+    values = _MICRO_NUMBER.findall(text)
+    return _micro_normalize_answer(values[-1]) if values else None
+
+
+def _micro_equal(left: str | None, right: str | None) -> bool:
+    left, right = _micro_normalize_answer(left), _micro_normalize_answer(right)
+    if left is None or right is None:
+        return False
+    try:
+        return Decimal(left) == Decimal(right)
+    except InvalidOperation:
+        return left == right
+
+
+def _micro_question_text(row: Mapping[str, Any]) -> str:
+    value = row.get("question")
+    if isinstance(value, str) and value.strip():
+        return value
+    messages = row.get("messages")
+    if isinstance(messages, str):
+        try:
+            messages = json.loads(messages)
+        except json.JSONDecodeError:
+            messages = None
+    if isinstance(messages, (list, tuple)):
+        return "\n".join(
+            str(item.get("content", ""))
+            for item in messages
+            if isinstance(item, Mapping) and item.get("role") == "user"
+        )
+    raise ValueError("micro-math rows require a non-empty question or user messages")
+
+
+def _micro_chat_ids(tokenizer, messages: list[dict[str, str]], *, add_generation_prompt: bool) -> list[int]:
+    encoded = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=add_generation_prompt,
+        return_tensors="pt",
+    )
+    if isinstance(encoded, Mapping):
+        encoded = encoded["input_ids"]
+    if not isinstance(encoded, torch.Tensor):
+        raise TypeError("chat template must return token IDs")
+    return [int(token) for token in encoded.reshape(-1).tolist()]
+
+
+def _micro_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _micro_validate_inputs(
+    checkpoint: Path,
+    dataset_path: Path,
+    manifest_path: Path,
+    *,
+    rows: int,
+    allow_calibration_overlap: bool,
+) -> list[dict[str, Any]]:
+    if not dataset_path.is_file():
+        raise FileNotFoundError(dataset_path)
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    binding = manifest.get("dataset", {})
+    if manifest.get("schema") != "qvq.micro_math.v1" or manifest.get("status") != "pass":
+        raise RuntimeError("micro-math manifest is missing its passing v1 contract")
+    if Path(str(binding.get("path", ""))).expanduser().resolve() != dataset_path.resolve():
+        raise RuntimeError("micro-math dataset path does not match its manifest")
+    if binding.get("sha256") != _micro_file_sha256(dataset_path):
+        raise RuntimeError("micro-math dataset changed after its manifest was generated")
+    raw_rows = []
+    with dataset_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                raw_rows.append(json.loads(line))
+    if len(raw_rows) < rows:
+        raise ValueError(f"micro-math dataset has {len(raw_rows)} rows, requested {rows}")
+    selected = raw_rows[:rows]
+    from scripts.check_calibration_disjointness import digest, normalize
+
+    own_hashes: set[str] = set()
+    for index, row in enumerate(selected):
+        normalized_hash = digest(normalize(_micro_question_text(row)))
+        if normalized_hash in own_hashes:
+            raise RuntimeError(f"micro-math dataset contains a duplicate question at row {index}")
+        own_hashes.add(normalized_hash)
+
+    if allow_calibration_overlap:
+        return selected
+    run_manifest = checkpoint / "qvq_quantize_run.json"
+    if not run_manifest.is_file():
+        raise RuntimeError("checkpoint has no quantization manifest for micro-math disjointness")
+    run = json.loads(run_manifest.read_text(encoding="utf-8"))
+    disjoint = run.get("disjointness_manifest")
+    if not isinstance(disjoint, Mapping) or not disjoint.get("strict_required") or disjoint.get("status") != "pass":
+        raise RuntimeError("micro-math requires a passing strict disjointness manifest on the checkpoint")
+    calibration_hashes: set[str] = set()
+    for raw in run.get("datasets", {}).values():
+        if not isinstance(raw, Mapping) or not raw.get("source") or int(raw.get("rows", 0)) < 1:
+            continue
+        spec = DatasetSlice(
+            str(raw["source"]), raw.get("config"), str(raw.get("split", "train")),
+            int(raw.get("row_start", 0)), int(raw["rows"]),
+        )
+        for item in load_dataset_slice(spec):
+            calibration_hashes.add(digest(normalize(_micro_question_text(dict(item)))))
+    overlap = sorted(own_hashes & calibration_hashes)
+    if overlap:
+        raise RuntimeError(f"micro-math calibration overlap detected ({len(overlap)} normalized questions)")
+    return selected
 
 
 @torch.inference_mode()
@@ -759,6 +916,309 @@ def _diagnostics(args: argparse.Namespace) -> int:
 
 
 @torch.inference_mode()
+def _micro_math(args: argparse.Namespace) -> int:
+    checkpoint = args.checkpoint.expanduser().resolve()
+    dataset_path = args.dataset.expanduser().resolve()
+    manifest_path = args.manifest.expanduser().resolve()
+    output_path = args.output.expanduser().resolve()
+    if not checkpoint.is_dir():
+        raise FileNotFoundError(f"Quantized checkpoint does not exist: {checkpoint}")
+    if output_path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing result: {output_path}")
+    if args.rows < 1 or args.rollout_tokens < 1 or args.max_prompt_tokens < 1:
+        raise ValueError("micro-math rows, rollout tokens, and max prompt tokens must be positive")
+    rows = _micro_validate_inputs(
+        checkpoint,
+        dataset_path,
+        manifest_path,
+        rows=args.rows,
+        allow_calibration_overlap=args.allow_calibration_overlap,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.dense_model,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[args.dtype]
+    started = time.perf_counter()
+    dense = AutoModelForCausalLM.from_pretrained(
+        args.dense_model,
+        dtype=model_dtype,
+        device_map={"": args.device},
+        attn_implementation=args.attn_implementation,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    ).eval()
+    dense_load_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    quantized = GPTQModel.load(
+        str(checkpoint),
+        backend=BACKEND.QVQ,
+        dtype=model_dtype,
+        device_map={"": args.device},
+        attn_implementation=args.attn_implementation,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    quantized_load_seconds = time.perf_counter() - started
+
+    dense_ce_sum = 0.0
+    quant_ce_sum = 0.0
+    delta_kl_sum = 0.0
+    dense_answer_logprob_sum = 0.0
+    quant_answer_logprob_sum = 0.0
+    dense_answer_margin_sum = 0.0
+    quant_answer_margin_sum = 0.0
+    answer_token_count = 0
+    critical_dense_target = 0
+    critical_quant_target = 0
+    critical_quant_dense = 0
+    critical_count = 0
+    dense_rollout_correct = 0
+    quant_rollout_correct = 0
+    dense_rollout_invalid = 0
+    quant_rollout_invalid = 0
+    dense_wrong_quant_right = 0
+    dense_right_quant_wrong = 0
+    teacher_forced_tokens = 0
+    dense_forward_seconds = 0.0
+    quantized_forward_seconds = 0.0
+    dense_rollout_seconds = 0.0
+    quantized_rollout_seconds = 0.0
+    per_row: list[dict[str, Any]] = []
+
+    for row_index, raw in enumerate(rows):
+        row = dict(raw)
+        question = _micro_question_text(row)
+        answer = str(row.get("answer", ""))
+        if "####" not in answer:
+            raise ValueError(f"micro-math row {row_index} answer has no #### delimiter")
+        gold = _micro_normalize_answer(answer.rsplit("####", 1)[1])
+        if gold is None:
+            raise ValueError(f"micro-math row {row_index} has an empty numeric answer")
+        prompt_messages = [{"role": "user", "content": question}]
+        prompt_ids = _micro_chat_ids(tokenizer, prompt_messages, add_generation_prompt=True)
+        target_ids = tokenizer(answer, add_special_tokens=False).input_ids
+        if not target_ids:
+            raise ValueError(f"micro-math row {row_index} has an empty target")
+        if len(prompt_ids) + len(target_ids) > args.max_prompt_tokens:
+            raise ValueError(f"micro-math row {row_index} exceeds --max-prompt-tokens")
+        full_ids = prompt_ids + [int(token) for token in target_ids]
+        encoded = {
+            "input_ids": torch.tensor([full_ids], dtype=torch.long, device=args.device),
+            "attention_mask": torch.ones((1, len(full_ids)), dtype=torch.long, device=args.device),
+        }
+        target = encoded["input_ids"][:, len(prompt_ids):]
+        started = time.perf_counter()
+        dense_logits = _model_logits(dense, encoded)
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        dense_forward_seconds += time.perf_counter() - started
+        started = time.perf_counter()
+        quant_logits = _model_logits(quantized, encoded)
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        quantized_forward_seconds += time.perf_counter() - started
+
+        start = len(prompt_ids) - 1
+        dense_scores = dense_logits[:, start:-1, :].float()
+        quant_scores = quant_logits[:, start:-1, :].float()
+        if dense_scores.shape[1] != target.shape[1]:
+            raise RuntimeError("micro-math target/logit alignment mismatch")
+        dense_logp = F.log_softmax(dense_scores, dim=-1)
+        quant_logp = F.log_softmax(quant_scores, dim=-1)
+        dense_gold = dense_logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        quant_gold = quant_logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+        dense_ce = float((-dense_gold.mean()).item())
+        quant_ce = float((-quant_gold.mean()).item())
+        token_count = int(target.shape[1])
+        dense_ce_sum += dense_ce * token_count
+        quant_ce_sum += quant_ce * token_count
+        delta_kl_sum += float(
+            (dense_logp.exp() * (dense_logp - quant_logp)).sum(dim=-1).mean().item()
+        ) * token_count
+        teacher_forced_tokens += token_count
+
+        suffix_ids = [int(token) for token in tokenizer(answer.rsplit("####", 1)[1], add_special_tokens=False).input_ids]
+        suffix_len = min(len(suffix_ids), token_count)
+        suffix_slice = slice(token_count - suffix_len, token_count)
+        dense_answer_logprob = float(dense_gold[:, suffix_slice].sum().item())
+        quant_answer_logprob = float(quant_gold[:, suffix_slice].sum().item())
+        dense_answer_logprob_sum += dense_answer_logprob
+        quant_answer_logprob_sum += quant_answer_logprob
+        dense_answer_margins = dense_scores[:, suffix_slice, :].topk(2, dim=-1).values
+        quant_answer_margins = quant_scores[:, suffix_slice, :].topk(2, dim=-1).values
+        dense_answer_margin = dense_gold[:, suffix_slice] - torch.where(
+            dense_scores[:, suffix_slice, :].argmax(dim=-1).eq(target[:, suffix_slice]),
+            dense_answer_margins[..., 1],
+            dense_answer_margins[..., 0],
+        )
+        quant_answer_margin = quant_gold[:, suffix_slice] - torch.where(
+            quant_scores[:, suffix_slice, :].argmax(dim=-1).eq(target[:, suffix_slice]),
+            quant_answer_margins[..., 1],
+            quant_answer_margins[..., 0],
+        )
+        dense_answer_margin_sum += float(dense_answer_margin.sum().item())
+        quant_answer_margin_sum += float(quant_answer_margin.sum().item())
+        answer_token_count += suffix_len
+
+        critical_mask = torch.tensor(
+            [bool(re.search(r"[0-9+\-*/=<>%]", tokenizer.decode([token], skip_special_tokens=False))) for token in target_ids],
+            dtype=torch.bool,
+            device=args.device,
+        ).unsqueeze(0)
+        if bool(critical_mask.any()):
+            dense_pred = dense_scores.argmax(dim=-1)
+            quant_pred = quant_scores.argmax(dim=-1)
+            critical_dense_target += int((dense_pred.eq(target) & critical_mask).sum().item())
+            critical_quant_target += int((quant_pred.eq(target) & critical_mask).sum().item())
+            critical_quant_dense += int((quant_pred.eq(dense_pred) & critical_mask).sum().item())
+            critical_count += int(critical_mask.sum().item())
+
+        prompt_encoded = {
+            "input_ids": torch.tensor([prompt_ids], dtype=torch.long, device=args.device),
+            "attention_mask": torch.ones((1, len(prompt_ids)), dtype=torch.long, device=args.device),
+        }
+        started = time.perf_counter()
+        dense_cont = _greedy_rollout(
+            dense, prompt_encoded, token_count=args.rollout_tokens, pad_token_id=tokenizer.pad_token_id
+        )
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        dense_rollout_seconds += time.perf_counter() - started
+        started = time.perf_counter()
+        quant_cont = _greedy_rollout(
+            quantized, prompt_encoded, token_count=args.rollout_tokens, pad_token_id=tokenizer.pad_token_id
+        )
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.synchronize(args.device)
+        quantized_rollout_seconds += time.perf_counter() - started
+        dense_text = tokenizer.decode(dense_cont, skip_special_tokens=True)
+        quant_text = tokenizer.decode(quant_cont, skip_special_tokens=True)
+        dense_answer = _micro_answer(dense_text)
+        quant_answer = _micro_answer(quant_text)
+        dense_ok = _micro_equal(dense_answer, gold)
+        quant_ok = _micro_equal(quant_answer, gold)
+        dense_rollout_correct += int(dense_ok)
+        quant_rollout_correct += int(quant_ok)
+        dense_wrong_quant_right += int(not dense_ok and quant_ok)
+        dense_right_quant_wrong += int(dense_ok and not quant_ok)
+        dense_rollout_invalid += int(dense_answer is None)
+        quant_rollout_invalid += int(quant_answer is None)
+        per_row.append(
+            {
+                "id": row.get("id", f"row-{row_index}"),
+                "gold_answer": gold,
+                "dense_answer": dense_answer,
+                "quantized_answer": quant_answer,
+                "dense_correct": dense_ok,
+                "quantized_correct": quant_ok,
+                "dense_ce": dense_ce,
+                "quantized_ce": quant_ce,
+                "delta_ce": quant_ce - dense_ce,
+                "dense_answer_logprob": dense_answer_logprob,
+                "quantized_answer_logprob": quant_answer_logprob,
+                "dense_answer_margin": float(dense_answer_margin.mean().item()),
+                "quantized_answer_margin": float(quant_answer_margin.mean().item()),
+                "critical_tokens": int(critical_mask.sum().item()),
+                "dense_text": dense_text,
+                "quantized_text": quant_text,
+            }
+        )
+        if row_index == 0 or (row_index + 1) % 16 == 0 or row_index + 1 == len(rows):
+            print(
+                f"[micro-math] rows={row_index + 1}/{len(rows)} "
+                f"quant_answer={quant_rollout_correct}/{row_index + 1} "
+                f"invalid={quant_rollout_invalid}",
+                flush=True,
+            )
+
+    if teacher_forced_tokens < 1 or answer_token_count < 1:
+        raise RuntimeError("micro-math produced no teacher-forced or answer-suffix tokens")
+
+    result = {
+        "schema": "qvq.micro_math.result.v1",
+        "dense_model": args.dense_model,
+        "checkpoint": str(checkpoint),
+        "dataset": {
+            "path": str(dataset_path),
+            "sha256": _micro_file_sha256(dataset_path),
+            "manifest": str(manifest_path),
+            "manifest_sha256": _micro_file_sha256(manifest_path),
+            "rows": len(rows),
+            "protocol": "GSM8K main train rows, disjoint from checkpoint preparation and benchmark manifests",
+        },
+        "protocol": {
+            "teacher_forced": "reference reasoning answer tokens after a chat-template prompt",
+            "rollout": "independent greedy argmax with EOS ordinary and fixed horizon",
+            "rollout_tokens": args.rollout_tokens,
+            "critical_token_regex": r"[0-9+\-*/=<>%]",
+        },
+        "metrics": {
+            "mini_math_exact_answer_accuracy": quant_rollout_correct / len(rows),
+            "mini_math_dense_exact_answer_accuracy": dense_rollout_correct / len(rows),
+            "short_rollout_semantic_success": quant_rollout_correct / len(rows),
+            "short_rollout_invalid": quant_rollout_invalid / len(rows),
+            "dense_short_rollout_invalid": dense_rollout_invalid / len(rows),
+            "reasoning_delta_ce": (quant_ce_sum - dense_ce_sum) / teacher_forced_tokens,
+            "reasoning_dense_ce": dense_ce_sum / teacher_forced_tokens,
+            "reasoning_quantized_ce": quant_ce_sum / teacher_forced_tokens,
+            "reasoning_delta_kl": delta_kl_sum / teacher_forced_tokens,
+            "answer_token_logprob_dense": dense_answer_logprob_sum / answer_token_count,
+            "answer_token_logprob_quantized": quant_answer_logprob_sum / answer_token_count,
+            "answer_token_logprob_delta": (quant_answer_logprob_sum - dense_answer_logprob_sum) / answer_token_count,
+            "answer_token_logprob_retention": (
+                quant_answer_logprob_sum / dense_answer_logprob_sum
+                if dense_answer_logprob_sum != 0.0 else None
+            ),
+            "answer_token_logprob_dense_per_example": dense_answer_logprob_sum / len(rows),
+            "answer_token_logprob_quantized_per_example": quant_answer_logprob_sum / len(rows),
+            "answer_token_margin_dense": dense_answer_margin_sum / answer_token_count,
+            "answer_token_margin_quantized": quant_answer_margin_sum / answer_token_count,
+            "answer_token_margin_delta": (quant_answer_margin_sum - dense_answer_margin_sum) / answer_token_count,
+            "answer_token_margin_retention": (
+                quant_answer_margin_sum / dense_answer_margin_sum
+                if dense_answer_margin_sum != 0.0 else None
+            ),
+            "critical_token_top1_dense_target": critical_dense_target / critical_count if critical_count else None,
+            "critical_token_top1_quantized_target": critical_quant_target / critical_count if critical_count else None,
+            "critical_token_top1_quantized_vs_dense": critical_quant_dense / critical_count if critical_count else None,
+            "critical_token_top1_delta_vs_dense_target": (
+                (critical_quant_target - critical_dense_target) / critical_count
+                if critical_count else None
+            ),
+            "critical_token_count": critical_count,
+            "mini_math_accuracy_delta_vs_dense": (quant_rollout_correct - dense_rollout_correct) / len(rows),
+            "paired_dense_wrong_quantized_right": dense_wrong_quant_right,
+            "paired_dense_right_quantized_wrong": dense_right_quant_wrong,
+        },
+        "counts": {
+            "rows": len(rows),
+            "teacher_forced_tokens": teacher_forced_tokens,
+            "answer_tokens": answer_token_count,
+            "dense_rollout_correct": dense_rollout_correct,
+            "quantized_rollout_correct": quant_rollout_correct,
+        },
+        "seconds": {
+            "dense_load": dense_load_seconds,
+            "quantized_load": quantized_load_seconds,
+            "dense_forward": dense_forward_seconds,
+            "quantized_forward": quantized_forward_seconds,
+            "dense_rollout": dense_rollout_seconds,
+            "quantized_rollout": quantized_rollout_seconds,
+        },
+        "rows": per_row,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_snapshot_evaluation(checkpoint, output_path, result, kind="micro_math")
+    print(json.dumps({"metrics": result["metrics"], "counts": result["counts"]}, indent=2, sort_keys=True), flush=True)
+    return 0
+
+
+@torch.inference_mode()
 def _divergence300(args: argparse.Namespace) -> int:
     checkpoint = args.checkpoint.expanduser().resolve()
     dataset_path = args.dataset.expanduser().resolve()
@@ -1046,6 +1506,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "diagnostics":
         return _diagnostics(args)
+    if args.command == "micro_math":
+        return _micro_math(args)
     if args.command == "divergence300":
         return _divergence300(args)
     return _tasks(args)

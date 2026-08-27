@@ -929,3 +929,275 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-o-w25-09674b` | `divergence300` | complete; metric=0.17302083333333335; report `/root/qvq-results/llama32-1b-w2-reg015-o-w25-09674b-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-up-down-w25-45a387` | `divergence300` | complete; metric=0.19958333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w25-45a387-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `gsm8k_platinum_cot` | complete; metric=0.19933829611248965; report `/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-atomic-swiglu-tip-3f17c40b` | `divergence300` | complete; metric=0.1659375; report `/root/qvq-results/llama32-1b-w2-atomic-swiglu-tip-3f17c40b-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b` | `gsm8k_platinum_cot` | complete; metric=0.22249793217535152; report `/root/qvq-results/llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b` | `divergence300` | complete; metric=0.17614583333333333; report `/root/qvq-results/llama32-1b-w2-smooth-atomic-swiglu-tip-3f17c40b-div300-dev-v1.json` |
+
+| queued | `0f642c` | `up-down-w30-0f642c` | Up+Down W3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w30.json`; physical GPU 0; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| queued | `569a95` | `up-down-w35-569a95` | Up+Down W3.5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w35.json`; physical GPU 1; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| failed | `cdfa75` | `up-down-w40-cdfa75` | Up+Down W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_up_down_w40.json` (`format=qvq_v4`); physical GPU 2; failed in `gptqmodel/quantization/qvq.py:1327` because trusted CUDA Viterbi supports only V2 sequences; no checkpoint or benchmark result. |
+
+| queued | `ef21af` | `vo-w30-ef21af` | V+O W3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w30.json`; physical GPU 3; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| queued | `60a68a` | `vo-w35-60a68a` | V+O W3.5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w35.json`; physical GPU 4; clean YAQA/NM calibration with `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued by monitor |
+
+| failed | `98daf5` | `vo-w40-98daf5` | V+O W4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w40.json` (`format=qvq_v4`); physical GPU 5; failed in `gptqmodel/quantization/qvq.py:1327` because trusted CUDA Viterbi supports only V2 sequences; no checkpoint or benchmark result. |
+
+| failed+requeued | `151a0a`, `c17e71` | `W4 initial launch` | Initial W4 configs used `qvq_v2b2_p32`, which correctly rejected rates above W3.5. Replaced with model-wide `qvq_v4` configs and requeued as `cdfa75` and `98daf5`; no checkpoint or benchmark result was produced by the failed attempts. |
+
+| queued | `d13602` | `V+O W2 + Smooth + Atomic SwiGLU replay` | config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w20_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602`; physical GPU 6; base W2 with explicit V/O W2 override, Smooth-SwiGLU enabled, atomic gate/up/down replay; clean NM rows 0:128, YAQA rows 0:182, replay search rows 0:32 and confirmation rows 32:64; strict manifest `disjointness-llama32-benchmark-replay-v2.json`; D300 and GSM8K Platinum queued after quantization. |
+
+| queued | `b7d172` | `V+O W2.5 + Smooth + Atomic SwiGLU replay` | config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo_w25_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172`; physical GPU 7; V/O W2.5 dynamic override, Smooth-SwiGLU enabled, atomic gate/up/down replay; clean NM rows 0:128, YAQA rows 0:182, replay search rows 0:32 and confirmation rows 32:64; strict manifest `disjointness-llama32-benchmark-replay-v2.json`; D300 and GSM8K Platinum queued after quantization. |
+
+| started | `d13602`, `b7d172` | `V+O Smooth + Atomic quantization` | both queue wrappers passed the atomic-checkpoint gate and started successfully on physical GPUs 6 and 7 at commit `9f2246d5`; output directories are `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602` and `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172`. D300 and GSM8K Platinum remain pending until each `qvq_quantize_run.json` is published; the 120-second evaluation watcher will schedule them automatically. |
+
+| monitor | `llama32-1b-w2-reg015-vo-w30-ef21af` | `gsm8k_platinum_cot` | complete; metric=0.24731182795698925; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w30-ef21af-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w35-60a68a` | `gsm8k_platinum_cot` | complete; metric=0.2663358147229115; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w35-60a68a-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w30-0f642c` | `gsm8k_platinum_cot` | complete; metric=0.3068651778329198; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w30-0f642c-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w35-569a95` | `gsm8k_platinum_cot` | complete; metric=0.31679073614557485; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w35-569a95-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w30-ef21af` | `divergence300` | complete; metric=0.17927083333333332; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w30-ef21af-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo-w35-60a68a` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-vo-w35-60a68a-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w30-0f642c` | `divergence300` | complete; metric=0.21739583333333334; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w30-0f642c-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-up-down-w35-569a95` | `divergence300` | complete; metric=0.21302083333333333; report `/root/qvq-results/llama32-1b-w2-reg015-up-down-w35-569a95-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w20-smooth-atomic-d13602` | `gsm8k_platinum_cot` | complete; metric=0.22249793217535152; report `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w25-smooth-atomic-b7d172` | `gsm8k_platinum_cot` | complete; metric=0.2531017369727047; report `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w20-smooth-atomic-d13602` | `divergence300` | complete; metric=0.17614583333333333; report `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo-w25-smooth-atomic-b7d172` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172-div300-dev-v1.json` |
+
+| queued | `595f38` | `V+O W3.5 + Up+Down W3` | GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38`; flat `qvq_v2b2_p32`, two banks, reg .15; clean NM rows 0:128 + YAQA rows 0:182; strict manifest `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued after quantization |
+
+| queued | `bf96be` | `V+O W3.5 + Up+Down W3 + Atomic` | GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json`; output `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be`; clean NM/YAQA slices; replay search rows 0:32 and confirmation rows 32:64; strict replay manifest `disjointness-llama32-benchmark-replay-v2.json`; D300/GSM8K queued after quantization |
+
+| queued | `bf272e` | `V+O W3.5 + Up+Down W3 + Smooth+Atomic` | GPU 2; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e`; Smooth group size 16 / max 512 tokens plus atomic replay; clean disjoint slices and replay rows; D300/GSM8K queued after quantization |
+
+| queued | `56c940` | `V+O W2.5 + Up+Down W3` | GPU 3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_updown30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940`; flat V2B2/P32 controls and clean disjoint calibration; D300/GSM8K queued after quantization |
+
+| queued | `e5ca9f` | `V+O W3.5 + Up+Down W3.5` | GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f`; flat V2B2/P32 controls and clean disjoint calibration; D300/GSM8K queued after quantization |
+
+| queued | `baeb18` | `V+O W3.5 + all MLP W2.5` | GPU 5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall25.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18`; flat V2B2/P32 controls and clean disjoint calibration; D300/GSM8K queued after quantization |
+
+| queued | `95ef88` | `Up+Down W3 + Atomic` | GPU 6; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_atomic.json`; output `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88`; clean NM/YAQA slices; replay search rows 0:32 and confirmation rows 32:64; strict replay manifest; D300/GSM8K queued after quantization |
+
+| queued | `4e4d0d` | `Up+Down W3 + Smooth+Atomic` | GPU 7; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d`; Smooth group size 16 / max 512 tokens plus atomic replay; clean disjoint slices and replay rows; D300/GSM8K queued after quantization |
+
+| started | `595f38`, `bf96be`, `bf272e`, `56c940`, `e5ca9f`, `baeb18`, `95ef88`, `4e4d0d` | `8-GPU mixed-rate matrix` | queue wrappers launched on physical GPUs 0--7; all eight quantizers passed the low-utilization/free-memory gate and are loading/capturing the 302,193-token YAQA mix (atomic arms also load 13,147-token search and 22,609-token confirmation slices); D300 and GSM8K Platinum remain pending until each checkpoint marker is published; monitor will schedule both automatically |
+
+| queued | `1fee11` | `V+O W2.5 + all MLP W2.5` | GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_mlpall25.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `b2dee2` | `V+O W3 + all MLP W2.5` | GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo30_mlpall25.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `dc38d2` | `Q+K W2.5 + V+O W3.5 + all MLP W2.5` | GPU 2; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_mlpall25.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `8dd86a` | `V+O W3.5 + Gate W2.5 + Up/Down W3` | GPU 3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `5fddf5` | `V+O W3.5 + all MLP W3` | GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `83b60c` | `Q+K W2.5 + V+O W3.5 + Up/Down W3.5` | GPU 5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_updown35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `4f018a` | `V+O W3.5 + Gate W2.5 + Up/Down W3.5` | GPU 6; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+| queued | `8e67f6` | `V+O W3.5 + Gate W3.5 + Up/Down W3` | GPU 7; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate35_updown30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6`; plain V2B2/P32 reselect, reg .15, clean NM/YAQA calibration, strict benchmark manifest; D300/GSM8K queued after quantization |
+
+| started | `1fee11`, `b2dee2`, `dc38d2`, `8dd86a`, `5fddf5`, `83b60c`, `4f018a`, `8e67f6` | `Pareto allocation sweep` | all eight queue wrappers launched with `setsid` on physical GPUs 0--7 at 03:20 UTC; quantizers are active and loading the 302,193-token YAQA mix; monitor will schedule D300 and GSM8K Platinum after each checkpoint marker |
+
+| queued | `88be04` | `flat W2 (Q/K/V/O + gate/up/down)` | GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json`; output `/root/qvq-results/llama32-1b-flat-flat-w20-88be04`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `509b7f` | `flat W2.5 (Q/K/V/O + gate/up/down)` | GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json`; output `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `1040a5` | `flat W3 (Q/K/V/O + gate/up/down)` | GPU 2; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json`; output `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `b72667` | `flat W3.5 (Q/K/V/O + gate/up/down)` | GPU 3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json`; output `/root/qvq-results/llama32-1b-flat-flat-w35-b72667`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `862367` | `flat W1.5 (Q/K/V/O + gate/up/down)` | GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json`; output `/root/qvq-results/llama32-1b-flat-flat-w15-862367`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+
+| started | `88be04`, `509b7f`, `1040a5`, `b72667`, `862367` | `flat-rate baseline sweep` | five detached queue wrappers launched with `setsid` at 03:35 UTC on physical GPUs 0--4; all are waiting for their assigned GPU to become idle, then will quantize and trigger D300/GSM8K automatically |
+
+| started | `862367` | `flat W1.5` | GPU 4 became available and quantization started; W2/W2.5/W3/W3.5 wrappers remain queued behind active work |
+
+| queued | `add422` | `W3 anchor: Q/K W2.5 + V/O W3.5 + MLP W3` | assigned idle GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp3.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `3151c6` | `W3 anchor: Q/K W3 + V/O W3.5 + MLP W3` | assigned idle GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp3.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `2ae00f` | `W3 anchor: Q/K W2.5 + V/O W3.5 + Gate W3 + Up W3.5 + Down W3` | assigned idle GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up35_down3.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `457643` | `W3 anchor: Q/K W2.5 + V/O W3.5 + Gate/Up W3 + Down W3.5` | assigned idle GPU 5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up3_down35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `b3bdcd` | `W3 anchor: Q/K W2.5 + V/O W3.5 + MLP W3.5` | assigned idle GPU 6; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `370e9f` | `W3 anchor: Q/K W3 + V/O W3.5 + MLP W3.5` | assigned GPU 7; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f`; queued until GPU 7 is idle |
+
+| started | `add422`, `3151c6`, `2ae00f`, `457643`, `b3bdcd`, `370e9f` | `W3-anchor reallocation sweep` | six detached queue wrappers launched at 06:19 UTC; five are quantizing on currently idle GPUs and one is waiting on GPU 7; monitor will schedule D300/GSM8K after each checkpoint |
+
+| monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `gsm8k_platinum_cot` | complete; metric=0.3465674110835401; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `gsm8k_platinum_cot` | complete; metric=0.3738626964433416; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | `gsm8k_platinum_cot` | complete; metric=0.40281224152191897; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-mlpall25-baeb18` | `gsm8k_platinum_cot` | complete; metric=0.3523573200992556; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `divergence300` | complete; metric=0.21145833333333333; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-mlpall25-baeb18` | `divergence300` | complete; metric=0.21875; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `divergence300` | complete; metric=0.23760416666666667; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | `divergence300` | complete; metric=0.2555208333333333; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-updown30-atomic-95ef88` | `gsm8k_platinum_cot` | complete; metric=0.31679073614557485; report `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | `gsm8k_platinum_cot` | complete; metric=0.3159636062861869; report `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | `gsm8k_platinum_cot` | complete; metric=0.3655913978494624; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-updown30-atomic-95ef88` | `divergence300` | complete; metric=0.17375; report `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | `divergence300` | complete; metric=0.19635416666666666; report `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | `divergence300` | complete; metric=0.24375; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo35-updown30-atomic-bf96be` | `gsm8k_platinum_cot` | complete; metric=0.3664185277088503; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-vo35-updown30-atomic-bf96be` | `divergence300` | complete; metric=0.243125; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | `gsm8k_platinum_cot` | complete; metric=0.3564929693961952; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | `gsm8k_platinum_cot` | complete; metric=0.4052936311000827; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | `gsm8k_platinum_cot` | complete; metric=0.3970223325062035; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | `gsm8k_platinum_cot` | complete; metric=0.3705541770057899; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | `gsm8k_platinum_cot` | complete; metric=0.43010752688172044; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | `gsm8k_platinum_cot` | complete; metric=0.39950372208436724; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | `gsm8k_platinum_cot` | complete; metric=0.3631100082712986; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | `divergence300` | complete; metric=0.2490625; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | `divergence300` | complete; metric=0.2891666666666667; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | `divergence300` | complete; metric=0.22791666666666666; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | `divergence300` | complete; metric=0.2328125; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | `divergence300` | complete; metric=0.27625; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | `gsm8k_platinum_cot` | complete; metric=0.40860215053763443; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w15-862367` | `gsm8k_platinum_cot` | complete; metric=0.034739454094292806; report `/root/qvq-results/llama32-1b-flat-flat-w15-862367-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w30-1040a5` | `gsm8k_platinum_cot` | complete; metric=0.4292803970223325; report `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | `divergence300` | complete; metric=0.3198958333333333; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | `divergence300` | complete; metric=0.31302083333333336; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | `divergence300` | complete; metric=0.32385416666666667; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w15-862367` | `divergence300` | complete; metric=0.051354166666666666; report `/root/qvq-results/llama32-1b-flat-flat-w15-862367-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w35-b72667` | `gsm8k_platinum_cot` | complete; metric=0.45244003308519437; report `/root/qvq-results/llama32-1b-flat-flat-w35-b72667-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w35-b72667` | `divergence300` | complete; metric=0.3955208333333333; report `/root/qvq-results/llama32-1b-flat-flat-w35-b72667-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w30-1040a5` | `divergence300` | complete; metric=0.28729166666666667; report `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w20-88be04` | `gsm8k_platinum_cot` | complete; metric=0.19933829611248965; report `/root/qvq-results/llama32-1b-flat-flat-w20-88be04-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w25-509b7f` | `gsm8k_platinum_cot` | complete; metric=0.34987593052109184; report `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w20-88be04` | `divergence300` | complete; metric=0.1290625; report `/root/qvq-results/llama32-1b-flat-flat-w20-88be04-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w25-509b7f` | `divergence300` | complete; metric=0.2579166666666667; report `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | `gsm8k_platinum_cot` | complete; metric=0.42597187758478083; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643` | `gsm8k_platinum_cot` | complete; metric=0.43837882547559964; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | `gsm8k_platinum_cot` | complete; metric=0.44086021505376344; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd` | `gsm8k_platinum_cot` | complete; metric=0.43755169561621177; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-reg025-align-gpu4` | `divergence300` | complete; metric=0.1821875; report `/root/qvq-results/llama32-1b-w2-yaqa302k-reg025-align-gpu4-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | `gsm8k_platinum_cot` | complete; metric=0.42431761786600497; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643` | `micro_math` | complete; metric='mini_exact=0.03125; delta_ce=-0.021742815628470705; delta_kl=0.04003602080551533; answer_logprob_delta=-0.0032508871448573783; answer_margin_delta=0.1560306833751166; critical_top1=0.965484180249281'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd` | `micro_math` | complete; metric='mini_exact=0.015625; delta_ce=-0.0019490177405047313; delta_kl=0.03215443051687906; answer_logprob_delta=0.13036983671473035; answer_margin_delta=0.5176714142756675; critical_top1=0.9712368168744008'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.018630105641725028; delta_kl=0.04573368571885855; answer_logprob_delta=-0.5056118564819222; answer_margin_delta=-0.061873649483296406; critical_top1=0.968040907638223'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=-0.03405955619913879; delta_kl=0.041724604708176904; answer_logprob_delta=0.12168091535568237; answer_margin_delta=1.0290966887972248; critical_top1=0.9677213167146053'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | `gsm8k_platinum_cot` | complete; metric=0.4317617866004963; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.03384144711139347; delta_kl=0.04752059730350729; answer_logprob_delta=-0.21475686422034876; answer_margin_delta=0.3830740345058157; critical_top1=0.9661233620965165'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=0.012403984347447177; delta_kl=0.03044081982059848; answer_logprob_delta=-0.03612032755097346; answer_margin_delta=0.12432724682252798; critical_top1=0.9725151805688719'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-yaqa302k-layerdamp-align-gpu2` | `divergence300` | complete; metric=0.15739583333333335; report `/root/qvq-results/llama32-1b-w2-yaqa302k-layerdamp-align-gpu2-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643` | `divergence300` | complete; metric=0.37666666666666665; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | `divergence300` | complete; metric=0.35885416666666664; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | `divergence300` | complete; metric=0.3509375; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd` | `divergence300` | complete; metric=0.381875; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | `divergence300` | complete; metric=0.35125; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | `divergence300` | complete; metric=0.3958333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3` | `micro_math` | complete; metric='mini_exact=0.03125; delta_ce=0.0032523682427008167; delta_kl=0.07477968862095022; answer_logprob_delta=-0.2800725244764072; answer_margin_delta=0.7598060494038597; critical_top1=0.9562160434643656'; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate25-up35-down3-3126a8` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.02336849823058306; delta_kl=0.0560215421343802; answer_logprob_delta=0.038635078205991144; answer_margin_delta=1.143054221993062; critical_top1=0.9613294982422499'; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate25-up35-down3-3126a8-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-early-bc35b5` | `micro_math` | complete; metric='mini_exact=0.015625; delta_ce=-0.036543823703529425; delta_kl=0.043611477800716815; answer_logprob_delta=-0.07279278805006796; answer_margin_delta=0.9263907475257988; critical_top1=0.9651645893256632'; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-early-bc35b5-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk15-vo35-gate3-up35-down3-365c2d` | `micro_math` | complete; metric='mini_exact=0.015625; delta_ce=-0.015307418543610589; delta_kl=0.0692426967201299; answer_logprob_delta=-0.09730607716005239; answer_margin_delta=0.8060869530065736; critical_top1=0.95845317992969'; report `/root/qvq-results/llama32-1b-w2-w3front-qk15-vo35-gate3-up35-down3-365c2d-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.02336849823058306; delta_kl=0.0560215421343802; answer_logprob_delta=0.038635078205991144; answer_margin_delta=1.143054221993062; critical_top1=0.9613294982422499'; report `/root/qvq-results/llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0` | `micro_math` | complete; metric='mini_exact=0.03125; delta_ce=0.08307256123096723; delta_kl=0.17377319535635927; answer_logprob_delta=-0.13578394099847593; answer_margin_delta=1.3621755286828796; critical_top1=0.9258549057206775'; report `/root/qvq-results/llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.0333439450398843; delta_kl=0.046058909400929916; answer_logprob_delta=0.12845530705665476; answer_margin_delta=0.7590521342718779; critical_top1=0.966762543943752'; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.02336849823058306; delta_kl=0.0560215421343802; answer_logprob_delta=0.038635078205991144; answer_margin_delta=1.143054221993062; critical_top1=0.9613294982422499'; report `/root/qvq-results/llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0` | `gsm8k_platinum_cot` | complete; metric=0.22084367245657568; report `/root/qvq-results/llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3` | `gsm8k_platinum_cot` | complete; metric=0.39950372208436724; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate25-up35-down3-3126a8` | `gsm8k_platinum_cot` | complete; metric=0.42349048800661704; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate25-up35-down3-3126a8-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk15-vo35-gate3-up35-down3-365c2d` | `gsm8k_platinum_cot` | complete; metric=0.3945409429280397; report `/root/qvq-results/llama32-1b-w2-w3front-qk15-vo35-gate3-up35-down3-365c2d-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-early-bc35b5` | `gsm8k_platinum_cot` | complete; metric=0.4119106699751861; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-early-bc35b5-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085` | `gsm8k_platinum_cot` | complete; metric=0.42349048800661704; report `/root/qvq-results/llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830` | `gsm8k_platinum_cot` | complete; metric=0.4325889164598842; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad` | `gsm8k_platinum_cot` | complete; metric=0.42349048800661704; report `/root/qvq-results/llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0` | `divergence300` | complete; metric=0.19302083333333334; report `/root/qvq-results/llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3` | `divergence300` | complete; metric=0.2891666666666667; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk15-vo35-gate3-up35-down3-365c2d` | `divergence300` | complete; metric=0.2755208333333333; report `/root/qvq-results/llama32-1b-w2-w3front-qk15-vo35-gate3-up35-down3-365c2d-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate25-up35-down3-3126a8` | `divergence300` | complete; metric=0.30604166666666666; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate25-up35-down3-3126a8-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-early-bc35b5` | `divergence300` | complete; metric=0.35739583333333336; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-early-bc35b5-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830` | `divergence300` | complete; metric=0.3302083333333333; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085` | `divergence300` | complete; metric=0.30604166666666666; report `/root/qvq-results/llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad` | `divergence300` | complete; metric=0.30604166666666666; report `/root/qvq-results/llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad-div300-dev-v1.json` |
