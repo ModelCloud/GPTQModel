@@ -2386,3 +2386,22 @@ benchmark still randomized LR/P32 order and synchronized every sample. With
 Compiled and eager timings are separate measurements because compilation
 changes the graph and launch behavior; neither table should be mixed with
 the other when evaluating a kernel change.
+
+## 52. M1 compile-time shape specialization rejected
+
+A W2 M1/N16 fused split-8 variant was tested with `K`, `N`, both, or neither
+as Metal compile-time constants. The candidate preserved the exact output
+mapping and Torch-oracle parity, but a same-process randomized 120-sample
+inner-kernel A/B found no useful compiler gain on the AC/high-performance M4
+Max. Relative to the dynamic production source, the constant variants had
+M1 p50 ratios of:
+
+| Shape | N constant | K constant | K+N constant |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `1.006x` | `0.998x` | `1.020x` |
+| `(M=1,K=2048,N=2048)` | `1.001x` | `1.004x` | `1.011x` |
+| `(M=1,K=2048,N=8192)` | `0.997x` | `1.000x` | `1.002x` |
+
+The candidate was therefore rejected and no shape-specialized M1 code is
+enabled. The production fused source remains dynamic and is preferred for
+its simpler kernel cache and equivalent performance.
