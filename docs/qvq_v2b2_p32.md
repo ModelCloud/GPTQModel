@@ -3663,6 +3663,32 @@ warmups, and seed `20261104` on the AC/performance-mode M4 Max:
 The candidate measured `0.999x` at p50 and `0.984x` by mean. The original
 decoded layout remains in production; the universal `2x` target remains open.
 
+## 100. M4 FP16-output boundary probe rejected
+
+The cooperative M4 W2 decoder was tested with FP32 accumulation followed by
+FP16 output storage, then an explicit FP32 cast before the production output
+transform. This matches the module's final FP16 output dtype more closely but
+changes the internal production boundary. At `(M=4,K=2048,N=8192)`, compared
+with the FP32-output production route:
+
+```text
+max_abs = 0.125
+differing elements = 13948
+relative_l2 = 0
+```
+
+The complete-module A/B used 150 randomized/interleaved samples per arm, 30
+warmups, and seed `20261105` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production FP32 output | `0.35929` | `0.52663` | `0.37723` | `0.28008` | `0.76108` |
+| FP16 output + FP32 cast | `0.34435` | `0.53835` | `0.37560` | `0.27850` | `0.90937` |
+
+The candidate measured only `1.043x` at p50 and `1.004x` by mean, while
+introducing FP16 boundary drift and worse tails. The production FP32 output
+path remains unchanged; the universal `2x` target remains open.
+
 ## 95. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
