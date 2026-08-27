@@ -1306,6 +1306,18 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         if not hasattr(config, "sliding_window") and hasattr(config, "sliding_window_size"):
             config.sliding_window = config.sliding_window_size
 
+    if model_type_lower == "locateanything":
+        # Transformers 5 migrates Qwen2's legacy rope_theta field into
+        # rope_parameters, while LocateAnything's bundled Qwen2 implementation
+        # still reads config.rope_theta directly.
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None and not hasattr(text_config, "rope_theta"):
+            rope_parameters = getattr(text_config, "rope_parameters", None)
+            if isinstance(rope_parameters, dict):
+                rope_theta = rope_parameters.get("rope_theta")
+                if rope_theta is not None:
+                    text_config.rope_theta = rope_theta
+
     if model_type_lower == "hymba":
         # hymba uses Flex by default;
         # however, `modeling_hymba` has not yet been adapted to support the latest version of PyTorch Flex.
@@ -1469,6 +1481,8 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
 
     auto_map = getattr(config, "auto_map", None) or {}
     class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(class_ref, str) and getattr(config, "model_type", None) == "locateanything":
+        class_ref = auto_map.get("AutoModel")
     if not isinstance(class_ref, str):
         return
 
@@ -1491,6 +1505,25 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     with _MONKEY_PATCH_LOCK:
         if outer_model_cls is not None:
             try_patch_legacy_flash_attn_flag(outer_model_cls)
+
+        if getattr(config, "model_type", None) == "locateanything":
+            # LocateAnything bundles a second remote Qwen model class. Patch
+            # both the outer wrapper and nested decoder bases before either is
+            # instantiated by AutoModel.from_config/from_pretrained.
+            try_patch_legacy_attn_adjust_kwargs(outer_model_cls)
+            for module_name, module in list(sys.modules.items()):
+                if not (
+                    module_name == module_root
+                    or module_name.startswith(f"{module_root}.")
+                ):
+                    continue
+                for candidate in vars(module).values():
+                    if (
+                        isinstance(candidate, type)
+                        and candidate.__module__.startswith(module_root)
+                    ):
+                        try_patch_legacy_flash_attn_flag(candidate)
+                        try_patch_legacy_attn_adjust_kwargs(candidate)
 
         if getattr(config, "model_type", None) == "internvl_chat" and intern_vit_module is not None:
             encoder_cls = getattr(intern_vit_module, "InternVisionEncoder", None)
@@ -1791,6 +1824,65 @@ def try_patch_legacy_flash_attn_flag(model_cls):
 
         flash_attn_2_val = base_with_flag.__dict__["_supports_flash_attn_2"]
         setattr(base_with_flag, "_supports_flash_attn", bool(flash_attn_2_val))
+
+def try_patch_legacy_attn_adjust_kwargs(model_cls):
+    with _MONKEY_PATCH_LOCK:
+        if model_cls is None or not isinstance(model_cls, type):
+            return
+        if model_cls.__dict__.get("_gptqmodel_attn_adjust_kwargs_patch", False):
+            return
+
+        attn_adjust = getattr(model_cls, "_check_and_adjust_attn_implementation", None)
+        if not callable(attn_adjust):
+            return
+
+        try:
+            attn_adjust_sig = inspect.signature(attn_adjust)
+        except (TypeError, ValueError):
+            return
+
+        params = attn_adjust_sig.parameters.values()
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params)
+        if accepts_kwargs or "allow_all_kernels" in attn_adjust_sig.parameters:
+            return
+
+        original_attn_adjust = attn_adjust
+
+        def attn_adjust_compat(self, *args, **kwargs):
+            kwargs.pop("allow_all_kernels", None)
+            from transformers import utils as transformers_utils
+
+            config = getattr(self, "config", None)
+            is_locateanything = getattr(config, "model_type", None) == "locateanything"
+            flash_available = transformers_utils.is_flash_attn_2_available()
+            if is_locateanything:
+                if args and args[0] not in ("magi", "sdpa"):
+                    args = ("sdpa", *args[1:])
+                elif kwargs.get("attn_implementation") not in (None, "magi", "sdpa"):
+                    kwargs["attn_implementation"] = "sdpa"
+            elif not flash_available:
+                if args and args[0] == "flash_attention_2":
+                    args = ("sdpa", *args[1:])
+                elif kwargs.get("attn_implementation") == "flash_attention_2":
+                    kwargs["attn_implementation"] = "sdpa"
+
+            if is_locateanything:
+                # Transformers recursively propagates the top-level Flash
+                # override to composite sub-configs. MoonViT does not support
+                # it, and LocateAnything's bundled Qwen forward only implements
+                # its mask path for `magi` and `sdpa` despite registering Flash
+                # attention layers. Keep the complete checkpoint on SDPA.
+                for sub_config_name in ("vision_config", "text_config"):
+                    sub_config = getattr(config, sub_config_name, None)
+                    if sub_config is not None:
+                        sub_config._attn_implementation = "sdpa"
+
+            adjusted = original_attn_adjust(self, *args, **kwargs)
+
+            return adjusted
+
+        model_cls._check_and_adjust_attn_implementation = attn_adjust_compat
+        model_cls._gptqmodel_attn_adjust_kwargs_patch = True
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):

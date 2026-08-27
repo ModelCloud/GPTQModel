@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
 * 08/25/2026 7.4.0-dev `main`: ✨ Added Tencent `HunyuanOCR` quantization support.
 * 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
 * 08/24/2026 7.4.0-dev `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
@@ -270,7 +271,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE                | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview             | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HY-V3                           | ✅ | Inkling           | ✅ | Solar Open / Open 2                    | ✅ | North Micro Vision | ✅ |
-| Mage-VL                       | ✅ | Unlimited-OCR                   | ✅ | HunyuanOCR                 | ✅ |                                 |    |                        |    |
+| Mage-VL                       | ✅ | Unlimited-OCR                   | ✅ | HunyuanOCR                 | ✅ | LocateAnything             | ✅ |                        |    |
 | Muse Glimmer                  | ✅ |                                 |    |                            |    |                                 |    |                        |    |
 | SmolLM3                       | ✅ |                                 |    |                            |    |                                 |    |                        |    |
 
