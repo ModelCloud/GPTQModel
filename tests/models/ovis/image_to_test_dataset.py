@@ -9,6 +9,7 @@ from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
+from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
 from gptqmodel.models.definitions.inkling import InklingMMQModel
 from gptqmodel.models.definitions.interns1 import InternS1QModel
@@ -126,6 +127,25 @@ def format_locateanything_dataset(image, assistant):
     ]
 
 
+def format_hunyuan_ocr_dataset(image, assistant):
+    del assistant
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {
+                    "type": "text",
+                    "text": (
+                        "提取文档图片中正文的所有信息用markdown格式表示，其中页眉、页脚部分忽略，"
+                        "表格用html格式表达，文档中公式用latex格式表示，按照阅读顺序组织进行解析。"
+                    ),
+                },
+            ],
+        }
+    ]
+
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -178,6 +198,10 @@ def prepare_locateanything_dataset(n_sample: int = 20) -> list[list[dict]]:
     return prepare_dataset(format_locateanything_dataset, n_sample=n_sample)
 
 
+def prepare_hunyuan_ocr_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_hunyuan_ocr_dataset, n_sample=n_sample)
+
+
 def get_calib_dataset(model):
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
@@ -224,5 +248,9 @@ def get_calib_dataset(model):
 
     if isinstance(model, LocateAnythingQModel):
         return prepare_locateanything_dataset(n_sample=20)
+
+    if isinstance(model, HunYuanVLQModel):
+        return prepare_hunyuan_ocr_dataset(n_sample=20)
+
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")

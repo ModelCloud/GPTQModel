@@ -32,11 +32,17 @@ from ...utils.marlin import (
     _marlin_capability_supported,
     _transform_param,
     apply_gptq_marlin_linear,
+    apply_gptq_marlin_linear_padded,
     gptq_marlin_repack,
     marlin_import_exception,
+    marlin_is_tile_aligned,
     marlin_is_k_full,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
+    marlin_pad_dim,
+    marlin_pad_qweight,
+    marlin_pad_scales,
+    marlin_padded_nk,
     marlin_permute_bias,
     marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks,
@@ -62,9 +68,10 @@ class MarlinLinear(GPTQQuantLinear):
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
+    # Tile padding is handled below; group boundaries must still divide K.
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
@@ -105,10 +112,21 @@ class MarlinLinear(GPTQQuantLinear):
         # self.original_in_features = in_features
         # self.original_out_features = out_features
 
-        if desc_act and group_size == -1:
+        if desc_act and group_size in (-1, in_features):
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
+
+        selected_backend = kwargs.pop("backend", BACKEND.GPTQ_MARLIN)
+        # Padding adds work to every forward, so automatic selection stays conservative.
+        if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
+            out_features, in_features
+        ):
+            raise NotImplementedError(
+                "Automatic Marlin selection keeps tile-misaligned shapes on "
+                "the next compatible backend; request GPTQ_MARLIN explicitly "
+                "to enable runtime tile padding."
+            )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
         self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
@@ -122,7 +140,7 @@ class MarlinLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GPTQ_MARLIN),
+            backend=selected_backend,
             adapter=adapter,
             register_buffers=False, # do not register buffers in super()
             **kwargs)
@@ -225,6 +243,40 @@ class MarlinLinear(GPTQQuantLinear):
             return False, ImportError(marlin_import_exception)
         return True, None
 
+    @classmethod
+    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        bits = args.get("bits", 4)
+        in_features = args.get("in_features")
+        out_features = args.get("out_features")
+        desc_act = args.get("desc_act", False)
+        group_size = args.get("group_size", -1)
+        if in_features is None or out_features is None:
+            return True, None
+
+        pack_factor = 32 // bits
+        # Tile padding cannot repair a partially packed int32 row or column.
+        if in_features % pack_factor != 0 or out_features % pack_factor != 0:
+            return False, NotImplementedError(
+                "Marlin packed dimensions must be divisible by "
+                f"pack_factor={pack_factor}; got K={in_features}, "
+                f"N={out_features}."
+            )
+
+        effective_desc_act = desc_act and group_size not in (-1, in_features)
+        # Act-order indices only describe the original K dimension.
+        if effective_desc_act and not marlin_is_tile_aligned(
+            out_features, in_features
+        ):
+            return False, NotImplementedError(
+                "Marlin activation-order weights require an aligned thread "
+                f"tile; got K={in_features}, N={out_features}."
+            )
+
+        return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):
@@ -257,20 +309,59 @@ class MarlinLinear(GPTQQuantLinear):
         # Allocate marlin workspace.
         self.workspace = marlin_make_workspace_new(device)
 
+        # GPTQModel also accepts group_size=K as channelwise quantization.
+        marlin_group_size = (
+            -1
+            if self.requested_group_size == self.in_features
+            else self.requested_group_size
+        )
+        # Validation keeps act-order shapes aligned; other shapes may use zero padding.
+        if self.desc_act:
+            padded_n, padded_k = self.out_features, self.in_features
+        else:
+            padded_n, padded_k = marlin_padded_nk(
+                self.out_features,
+                self.in_features,
+                marlin_group_size,
+            )
+        self._marlin_tile_padding = (
+            None
+            if (padded_n, padded_k) == (self.out_features, self.in_features)
+            else (padded_n, padded_k)
+        )
+
         def transform_w_q(x):
-            x.data = gptq_marlin_repack(x.data.contiguous(),
+            # Pad in GPTQ layout before converting to Marlin layout.
+            padded = marlin_pad_qweight(
+                x.data.contiguous(),
+                self.out_features,
+                self.in_features,
+                padded_n,
+                padded_k,
+            )
+            x.data = gptq_marlin_repack(padded,
                                         perm=self.g_idx_sort_indices,
-                                        size_k=self.in_features,
-                                        size_n=self.out_features,
+                                        size_k=padded_k,
+                                        size_n=padded_n,
                                         num_bits=self.bits,
                                         dtype=self.compute_dtype)
             return x
 
         def transform_w_s(x):
-            x.data = marlin_permute_scales(x.data.contiguous(),
-                                           size_k=self.in_features,
-                                           size_n=self.out_features,
-                                           group_size=self.group_size)
+            padded = marlin_pad_scales(
+                x.data.contiguous(),
+                self.out_features,
+                self.in_features,
+                padded_n,
+                padded_k,
+                marlin_group_size,
+            )
+            x.data = marlin_permute_scales(
+                padded,
+                size_k=padded_k,
+                size_n=padded_n,
+                group_size=marlin_group_size,
+            )
             return x
 
         # Handle sorting for activation reordering if needed.
@@ -288,7 +379,9 @@ class MarlinLinear(GPTQQuantLinear):
         _transform_param(self, "scales", transform_w_s)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(self.bias)
+            self.bias.data = marlin_permute_bias(
+                marlin_pad_dim(self.bias, self.out_features, padded_n)
+            )
 
         super().post_init()
 
@@ -314,22 +407,42 @@ class MarlinLinear(GPTQQuantLinear):
         if self.bias is not None and self.bias.dtype != x.dtype:
             self.bias.data = self.bias.data.to(dtype=x.dtype)
 
-        out = apply_gptq_marlin_linear(
-            input=x.contiguous() if self.is_lm_head else x,
-            weight=self.qweight,
-            weight_scale=self.scales,
-            weight_zp=self.qzeros,
-            g_idx=self.g_idx,
-            g_idx_sort_indices=self.g_idx_sort_indices,
-            workspace=self.workspace,
-            wtype=self.weight_type,
-            output_size_per_partition=self.out_features,
-            input_size_per_partition=self.in_features,
-            is_k_full=self.is_k_full,
-            bias=self.bias,
-            use_fp32_reduce=self.fp32,
-            use_atomics=False, # reduces accuracy with slightly faster performance
-        )
+        # Keep aligned layers on the original decode-sensitive call path.
+        if self._marlin_tile_padding is None:
+            out = apply_gptq_marlin_linear(
+                input=x.contiguous() if self.is_lm_head else x,
+                weight=self.qweight,
+                weight_scale=self.scales,
+                weight_zp=self.qzeros,
+                g_idx=self.g_idx,
+                g_idx_sort_indices=self.g_idx_sort_indices,
+                workspace=self.workspace,
+                wtype=self.weight_type,
+                output_size_per_partition=self.out_features,
+                input_size_per_partition=self.in_features,
+                is_k_full=self.is_k_full,
+                bias=self.bias,
+                use_fp32_reduce=self.fp32,
+                use_atomics=False, # reduces accuracy with slightly faster performance
+            )
+        else:
+            out = apply_gptq_marlin_linear_padded(
+                tile_padding=self._marlin_tile_padding,
+                input=x.contiguous() if self.is_lm_head else x,
+                weight=self.qweight,
+                weight_scale=self.scales,
+                weight_zp=self.qzeros,
+                g_idx=self.g_idx,
+                g_idx_sort_indices=self.g_idx_sort_indices,
+                workspace=self.workspace,
+                wtype=self.weight_type,
+                output_size_per_partition=self.out_features,
+                input_size_per_partition=self.in_features,
+                is_k_full=self.is_k_full,
+                bias=self.bias,
+                use_fp32_reduce=self.fp32,
+                use_atomics=False,
+            )
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
