@@ -3134,3 +3134,19 @@ ms; mean `0.30562` versus `0.30614` ms), so no policy change was promoted.
 
 This confirms the present status: `2x+` is repeatable for larger-row regimes,
 but the universal `2x` target remains unmet for M1.
+
+## 77. Current wide-N M1 N64 versus N16 recheck
+
+The wide-N N64 route was rechecked against the barrier-minimal N16 route at
+`(M=1,K=2048,N=8192)` on the same plugged-in AC/high-performance M4 Max
+host. Both arms used the same module payload and input, with `30` warmups and
+`200` randomized synchronized samples per route:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| N64 | `0.25590` | `0.44051` | `0.27757` |
+| N16 | `0.27419` | `0.49684` | `0.30501` |
+
+N64 was `1.071x` faster by p50 and `1.099x` faster by mean, so the existing
+wide-N N64 dispatch remains enabled. This is a negative control for the
+N16-wide-N hypothesis; it does not close the M1 complete-module gap.
