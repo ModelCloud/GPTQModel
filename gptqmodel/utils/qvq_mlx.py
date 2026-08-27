@@ -96,7 +96,13 @@ _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
-_USE_LR_M1_N64_SPLIT2 = True
+# The fused M1/N64 split-2 route is retained for targeted experiments and
+# very-small N shapes, but is not the default for production M1 dispatch.
+# On the M4 Max, the barrier-free M1/N16 path is faster for the model's
+# narrow-N down projections (N=2048) and for N=256.  Keep this toggle so the
+# grouped implementation remains directly benchmarkable without making it
+# the default again by accident.
+_USE_LR_M1_N64_SPLIT2 = False
 _USE_LR_M1_N64_SHARED_SPLIT2 = True
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
 _LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool, bool], str] = {}

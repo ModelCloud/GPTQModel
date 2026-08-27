@@ -843,6 +843,10 @@ def test_lr32_mlx_m1_n64_split2_kernel_matches_torch_oracle(monkeypatch, out_fea
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
 
+    # This is an opt-in grouped-kernel oracle test.  Production dispatch keeps
+    # the barrier-free M1/N16 route for ordinary narrow-N projections after
+    # the M4 Max A/B showed it is faster there.
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_SPLIT2", True)
     # The fused two-way path requires each split to contain at least one
     # complete K32 pair tile.
     in_features = 128

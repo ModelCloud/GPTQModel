@@ -2241,3 +2241,43 @@ complete-module A/B against the prior unshared split-2 path measured:
 This A/B includes both shared activation reuse and the launch-boundary
 change; it is not an isolated wrapper-only measurement. The long-K route
 remains exact against the Torch oracle and is retained.
+
+## 50. M1 grouped N64 route versus barrier-free N16
+
+With the host on AC power and performance mode, a synchronized randomized
+same-process A/B compared the existing fused M1/N64 split-2 implementation
+against the barrier-free single-row N16 implementation. Both arms used the
+same FP32 activation, W2 payload, selectors, alternative bank, and Torch
+oracle. The N16 arm was exact within the existing FP32 kernel tolerance:
+
+| Shape | N64 split-2 p50 (ms) | N16 p50 (ms) | N64/N16 | Parity max |
+|---|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.31154` | `0.21881` | `1.424x` | `8.39e-5` |
+| `(M=1,K=2048,N=2048)` | `0.31413` | `0.26519` | `1.185x` | `9.92e-5` |
+| `(M=1,K=8192,N=256)` | `0.73571` | `0.32723` | `2.248x` | `3.05e-4` |
+| `(M=1,K=8192,N=2048)` | `0.39871` | `0.32233` | `1.237x` | `2.90e-4` |
+| `(M=1,K=4096,N=2048)` | `0.23708` | `0.20754` | `1.142x` | `1.45e-4` |
+
+The grouped N64 split-2 route is therefore disabled by default for M1. It
+remains available as an opt-in implementation and is still covered by its
+dedicated oracle tests. This is a dispatch decision, not a codec change: the
+N16 output is numerically equivalent to the grouped output and both match the
+Torch LOCAL-RING reconstruction.
+
+A fresh 100-sample synchronized randomized complete-module benchmark after
+the dispatch change measured the following LR/P32 ratios on the AC-powered,
+performance-mode M4 Max:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.26025` | `0.39985` | `1.536x` |
+| `(M=1,K=2048,N=2048)` | `0.33088` | `0.43902` | `1.327x` |
+| `(M=1,K=2048,N=8192)` | `0.26094` | `0.33648` | `1.290x` |
+| `(M=1,K=8192,N=2048)` | `0.24954` | `0.31044` | `1.244x` |
+| `(M=4,K=2048,N=8192)` | `0.30452` | `0.55213` | `1.813x` |
+| `(M=8,K=2048,N=8192)` | `0.40825` | `0.85662` | `2.098x` |
+| `(M=16,K=8192,N=8192)` | `2.46883` | `5.59754` | `2.267x` |
+
+The benchmark uses identical input/payload data per arm, randomized LR/P32
+order within each sample, 20 warmups, 100 timed samples, and complete
+`QVQMLXLinear` calls. Universal M1 2x remains an open optimization target.
