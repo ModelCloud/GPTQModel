@@ -2850,3 +2850,57 @@ and two barriers per K32 tile; the promoted M1 fused split routes avoid that
 architecture. A direct MLX `mx.metal.start_capture()` attempt was also
 unsupported on this host (`Capture layer is not inserted`), so no `.gputrace`
 artifact is committed.
+
+## 67. Narrow M1 short-K N32 promotion
+
+The corrected, literal-unrolled one-lane-per-output N32 W2 source was
+retested after the later split-16 and half2 changes. It is now enabled only
+for the measured short-K shape `M=1,K=2048,N=2048`; the N16 route remains the
+default for other short-K M1 shapes because the N256 result was neutral.
+
+The candidate was Torch-oracle safe. At the complete-module boundary, a
+same-process randomized/interleaved A/B with `30` warmups and `200`
+synchronized samples at `(M=1,K=2048,N=2048)` measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| N16 | `0.33496` | `0.39642` | `0.34369` |
+| N32 short | `0.29144` | `0.32544` | `0.31174` |
+
+This is `1.149x` faster by p50 and `1.103x` by mean. The complete FP16
+outputs differed by `max_abs=7.8125e-3`, within the existing `2e-2` module
+oracle tolerance. A second repeat produced `1.117x` p50 speedup. At
+`(M=1,K=2048,N=256)`, the candidate was only `1.011x` by p50, so it was not
+enabled there.
+
+The post-promotion complete-module LR/P32 recheck (`30` warmups, `100`
+randomized synchronized samples per arm) measured:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.26150` | `0.40971` | `1.567x` |
+| `(M=1,K=2048,N=2048)` | `0.23248` | `0.32540` | `1.400x` |
+| `(M=1,K=2048,N=8192)` | `0.24231` | `0.31727` | `1.309x` |
+| `(M=1,K=8192,N=2048)` | `0.22138` | `0.32169` | `1.453x` |
+| `(M=4,K=2048,N=8192)` | `0.30406` | `0.54785` | `1.802x` |
+| `(M=8,K=2048,N=8192)` | `0.35835` | `0.85458` | `2.385x` |
+| `(M=16,K=8192,N=8192)` | `2.11660` | `5.17321` | `2.444x` |
+
+The route-selection regression and full LR suite pass (`169 passed`). This
+is a targeted M1 improvement, not a universal `2x` claim.
+
+## 68. M4 Metal System Trace capture
+
+A second bounded `Metal System Trace` was captured for
+`M=4,K=2048,N=8192` after the M4 MMA rejection:
+
+```text
+/tmp/qvq_lr_metal_20260828_m4k2048n8192.trace
+```
+
+The target exited normally; the trace duration was `15.710230 s` and the
+bundle size was approximately `47 MB`. As with the M1 capture, Xcode reports
+`Counter Set: (null)` and `Shader Timeline: Disabled`, so it provides no
+numeric shader occupancy, cache, or stall counters. It confirms the bounded
+MLX Metal workload but leaves source-level barrier accounting as the usable
+evidence for the cooperative M4 route.
