@@ -166,6 +166,22 @@ scheduled automatically after each checkpoint completes.
 | b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **complete** | **39.5521% (exact 40/300; mean div 12.080)** | **45.2440% (547/1209)** |
 | 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **complete** | **5.1354% (exact 0/300; mean div 1.703)** | **3.4739% (42/1209)** |
 
+### W3-anchor reallocation sweep (queued 2026-08-27 UTC)
+
+These six plain V2B2/P32 reselect arms keep the total rate near the flat-W3
+anchor while moving bits between Q/K, V/O, and the SwiGLU projections. They
+use the same clean YAQA/NM slices, reg `.15`, seed 0, and strict benchmark
+disjointness. D300 and GSM8K Platinum are scheduled after quantization.
+
+| Arm ID | GPU | Precision allocation | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |
+| add422 | 0 | Q/K W2.5, V/O W3.5, Gate/Up/Down W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp3.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | **quantizing** | pending | pending |
+| 3151c6 | 1 | Q/K W3, V/O W3.5, Gate/Up/Down W3 | **3.0663** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp3.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | **quantizing** | pending | pending |
+| 2ae00f | 4 | Q/K W2.5, V/O W3.5, Gate W3, Up W3.5, Down W3 | **3.1611** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up35_down3.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | **quantizing** | pending | pending |
+| 457643 | 5 | Q/K W2.5, V/O W3.5, Gate/Up W3, Down W3.5 | **3.1611** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up3_down35.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643` | **quantizing** | pending | pending |
+| b3bdcd | 6 | Q/K W2.5, V/O W3.5, Gate/Up/Down W3.5 | **3.2990** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp35.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd` | **quantizing** | pending | pending |
+| 370e9f | 7 | Q/K W3, V/O W3.5, Gate/Up/Down W3.5 | **3.3421** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp35.json` | `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | **queued (GPU busy)** | pending | pending |
+
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
 output. They are not current active jobs; current arms are listed above:

@@ -1021,6 +1021,15 @@ and 3.
 
 | started | `862367` | `flat W1.5` | GPU 4 became available and quantization started; W2/W2.5/W3/W3.5 wrappers remain queued behind active work |
 
+| queued | `add422` | `W3 anchor: Q/K W2.5 + V/O W3.5 + MLP W3` | assigned idle GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp3.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `3151c6` | `W3 anchor: Q/K W3 + V/O W3.5 + MLP W3` | assigned idle GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp3.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `2ae00f` | `W3 anchor: Q/K W2.5 + V/O W3.5 + Gate W3 + Up W3.5 + Down W3` | assigned idle GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up35_down3.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `457643` | `W3 anchor: Q/K W2.5 + V/O W3.5 + Gate/Up W3 + Down W3.5` | assigned idle GPU 5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_gate3_up3_down35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `b3bdcd` | `W3 anchor: Q/K W2.5 + V/O W3.5 + MLP W3.5` | assigned idle GPU 6; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk25_vo35_mlp35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd`; clean YAQA/NM calibration and strict benchmark manifest |
+| queued | `370e9f` | `W3 anchor: Q/K W3 + V/O W3.5 + MLP W3.5` | assigned GPU 7; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_w3anchor_qk3_vo35_mlp35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f`; queued until GPU 7 is idle |
+
+| started | `add422`, `3151c6`, `2ae00f`, `457643`, `b3bdcd`, `370e9f` | `W3-anchor reallocation sweep` | six detached queue wrappers launched at 06:19 UTC; five are quantizing on currently idle GPUs and one is waiting on GPU 7; monitor will schedule D300/GSM8K after each checkpoint |
+
 | monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `gsm8k_platinum_cot` | complete; metric=0.3465674110835401; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `gsm8k_platinum_cot` | complete; metric=0.3738626964433416; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-gsm8k-platinum-v1.json` |
