@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Apple Metal Profiling"
+  short_description: "Profile and tune MLX Metal kernels on Apple silicon"
+  default_prompt: "Use $gptqmodel-metal-profiling to profile and optimize this MLX Metal kernel on Apple silicon."
