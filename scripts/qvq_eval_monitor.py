@@ -33,6 +33,8 @@ STATE_DEFAULT = REPO_ROOT / "docs/experiments/qvq_eval_monitor_state.json"
 LEDGER_DEFAULT = REPO_ROOT / "docs/qvq_llama32_1b_experiment_log_2026-08-25.md"
 DENSE_MODEL = "/monster/data/model/Llama-3.2-1B-Instruct"
 D300_DATASET = "/root/qvq-data/divergence300-v1/divergence300-development.jsonl"
+MICRO_MATH_DATASET = REPO_ROOT / "dataset/micro_math_llama3.2_1b.jsonl"
+MICRO_MATH_MANIFEST = REPO_ROOT / "docs/experiments/micro-math-disjointness.json"
 
 
 @dataclass
@@ -63,6 +65,8 @@ def discover_checkpoints(root: Path = RESULTS_ROOT) -> list[Path]:
 
 
 def report_path(checkpoint: Path, task: str) -> Path:
+    if task == "micro_math":
+        return Path(f"{checkpoint}-micro-math-v1.json")
     if task == "gsm8k_platinum_cot" and "full-reference-reg020" in checkpoint.name:
         return Path(f"{checkpoint}-gsm8k-platinum-reverify-v2.json")
     suffix = "gsm8k-platinum-v1" if task == "gsm8k_platinum_cot" else "div300-dev-v1"
@@ -70,18 +74,30 @@ def report_path(checkpoint: Path, task: str) -> Path:
 
 
 def process_table() -> str:
-    return subprocess.run(["ps", "-eo", "pid=,args="], check=True, capture_output=True, text=True).stdout
+    # Include the executable name so shell queue wrappers that merely contain
+    # ``scripts/qvq_evaluate.py`` in their wait command are not mistaken for
+    # live evaluator processes.
+    return subprocess.run(["ps", "-eo", "pid=,comm=,args="], check=True, capture_output=True, text=True).stdout
 
 
 def active_jobs() -> set[tuple[str, str]]:
     jobs: set[tuple[str, str]] = set()
     for line in process_table().splitlines():
-        if "scripts/qvq_evaluate.py" not in line:
+        match = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)$", line)
+        if not match or not match.group(2).startswith("python"):
             continue
-        checkpoint = re.search(r"--checkpoint\s+(\S+)", line)
+        args = match.group(3)
+        if "scripts/qvq_evaluate.py" not in args:
+            continue
+        checkpoint = re.search(r"--checkpoint\s+(\S+)", args)
         if not checkpoint:
             continue
-        task = "gsm8k_platinum_cot" if " tasks " in line else "divergence300" if " divergence300 " in line else None
+        task = (
+            "micro_math" if " micro_math " in args
+            else "gsm8k_platinum_cot" if " tasks " in args
+            else "divergence300" if " divergence300 " in args
+            else None
+        )
         if task:
             jobs.add((str(Path(checkpoint.group(1)).resolve()), task))
     return jobs
@@ -121,12 +137,25 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
 def requested_jobs(state: dict[str, Any], checkpoints: list[Path]) -> list[Job]:
     jobs: list[Job] = []
     for checkpoint in checkpoints:
-        for task in ("gsm8k_platinum_cot", "divergence300"):
+        for task in ("micro_math", "gsm8k_platinum_cot", "divergence300"):
             output = report_path(checkpoint, task)
             key = f"{checkpoint}|{task}"
             existing = state["jobs"].get(key)
-            if output.is_file() or (existing and existing.get("status") in {"queued", "running", "complete"}):
+            if output.is_file() or (existing and existing.get("status") in {"queued", "running", "complete", "skipped_legacy", "skipped_no_contract"}):
                 continue
+            if task == "micro_math":
+                run_manifest = checkpoint / "qvq_quantize_run.json"
+                try:
+                    run_payload = json.loads(run_manifest.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                contract = run_payload.get("disjointness_manifest")
+                if not isinstance(contract, dict) or not contract.get("strict_required") or contract.get("status") != "pass":
+                    state["jobs"][key] = asdict(Job(
+                        str(checkpoint), task, str(output), status="skipped_no_contract",
+                        error="checkpoint lacks a passing strict disjointness contract",
+                    ))
+                    continue
             attempts = int(existing.get("attempts", 0)) if existing else 0
             if attempts >= 3:
                 continue
@@ -134,12 +163,65 @@ def requested_jobs(state: dict[str, Any], checkpoints: list[Path]) -> list[Job]:
     def priority(job: Job) -> tuple[int, int, str]:
         name = Path(job.checkpoint).name
         checkpoint_priority = 0 if "full-reference-reg020" in name else 1 if "-w2-" in name else 2
-        task_priority = 0 if job.task == "gsm8k_platinum_cot" else 1
+        task_priority = {"micro_math": 0, "gsm8k_platinum_cot": 1, "divergence300": 2}[job.task]
         return checkpoint_priority, task_priority, name
     return sorted(jobs, key=priority)
 
 
+def initialize_micro_math_state(state: dict[str, Any], checkpoints: list[Path], *, dry_run: bool) -> None:
+    """Avoid flooding the queue with retroactive micro-math jobs for old arms."""
+
+    if state.get("micro_math_migration_v1"):
+        return
+    if not dry_run:
+        for checkpoint in checkpoints:
+            key = f"{checkpoint}|micro_math"
+            if key not in state["jobs"]:
+                state["jobs"][key] = asdict(Job(
+                    str(checkpoint), "micro_math", str(report_path(checkpoint, "micro_math")),
+                    status="skipped_legacy", error="micro-math instrumentation added after this arm completed",
+                ))
+        state["micro_math_migration_v1"] = datetime.now(UTC).isoformat()
+
+
+def promote_current_micro_math(state: dict[str, Any], checkpoints: list[Path], *, dry_run: bool) -> None:
+    """Promote the arm family created with the new proxy contract.
+
+    The first migration intentionally marked all pre-existing checkpoints as
+    ``skipped_legacy`` so enabling the proxy could not flood the GPU queue.
+    The W3-anchor campaign was still the active experiment batch at that point,
+    so those checkpoints must be evaluated under the new protocol.  New
+    checkpoints are not placed in state by the migration and are queued by
+    :func:`requested_jobs` normally.
+    """
+
+    if state.get("micro_math_migration_v2"):
+        return
+    if not dry_run:
+        promoted = 0
+        for checkpoint in checkpoints:
+            if "w3anchor" not in checkpoint.name:
+                continue
+            key = f"{checkpoint}|micro_math"
+            raw = state["jobs"].get(key)
+            if isinstance(raw, dict) and raw.get("status") == "skipped_legacy":
+                state["jobs"].pop(key, None)
+                promoted += 1
+        state["micro_math_migration_v2"] = {
+            "at": datetime.now(UTC).isoformat(),
+            "promoted_w3anchor_jobs": promoted,
+        }
+
+
 def command(job: Job) -> list[str]:
+    if job.task == "micro_math":
+        return [
+            "python", "scripts/qvq_evaluate.py", "micro_math", "--dense-model", DENSE_MODEL,
+            "--checkpoint", job.checkpoint, "--dataset", str(MICRO_MATH_DATASET),
+            "--manifest", str(MICRO_MATH_MANIFEST), "--rows", "64", "--rollout-tokens", "48",
+            "--max-prompt-tokens", "2048", "--device", "cuda:0", "--dtype", "float16",
+            "--attn-implementation", "sdpa", "--output", job.output,
+        ]
     if job.task == "gsm8k_platinum_cot":
         return [
             "python", "scripts/qvq_evaluate.py", "tasks", "--checkpoint", job.checkpoint,
@@ -157,7 +239,9 @@ def command(job: Job) -> list[str]:
 def append_ledger(ledger: Path, job: Job, payload: dict[str, Any]) -> None:
     task_payload = payload.get("gsm8k_platinum_cot", payload.get("tasks", {}).get("gsm8k_platinum_cot", {}))
     metric = task_payload.get("metrics", {}).get("acc,num")
-    if job.task == "divergence300":
+    if job.task == "micro_math":
+        metric = payload.get("metrics", {}).get("mini_math_exact_answer_accuracy")
+    elif job.task == "divergence300":
         metric = payload.get("divergence_300_at_32", {}).get("independent_token_top1_agreement_at_32")
     line = (
         f"\n| monitor | `{Path(job.checkpoint).name}` | `{job.task}` | "
@@ -193,6 +277,8 @@ def adopt_recent_reports(state: dict[str, Any], ledger: Path, checkpoints: list[
 def run_once(state_path: Path, ledger: Path, gpus: list[int], dry_run: bool = False) -> dict[str, Any]:
     state = load_state(state_path)
     checkpoints = discover_checkpoints()
+    initialize_micro_math_state(state, checkpoints, dry_run=dry_run)
+    promote_current_micro_math(state, checkpoints, dry_run=dry_run)
     active = active_jobs()
     adopted = adopt_recent_reports(state, ledger, checkpoints, dry_run)
     # Adopt the separately-run fresh verification of the historically surprising

@@ -17,6 +17,16 @@ Rows generated before the literal-EOS rollout fix (`55adb7e1`) use the former
 EOS-suppressing decoder and are historical until rerun under the corrected
 protocol; teacher-forced metrics are unaffected.
 
+Every new checkpoint with a passing strict disjointness contract is also
+screened by the fast, task-matched Mini-GSM protocol documented in
+[`docs/qvq_micro_math_metrics.md`](qvq_micro_math_metrics.md).  Its immutable
+JSON report records numeric-answer rollout accuracy, reasoning ΔCE/ΔKL,
+answer-token log-probability and margin retention, critical numeric/operator
+Top-1, invalid-answer rate, and paired dense→quantized correctness transitions.
+The 128-row Mini-GSM train slice is cryptographically bound and disjoint from
+calibration, replay, D300 development/locked, and GSM8K Platinum test rows.
+These are screening proxies; full GSM8K Platinum remains the promotion metric.
+
 ## Completed arms (ordered by D300 Top-1, descending)
 
 | Arm ID | Family / arm | Rate | Eff. BPW* | Calibration | D300 Top-1 | Exact / 300 | Mean first divergence | GSM8K Platinum | Status |
