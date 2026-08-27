@@ -465,6 +465,56 @@ def test_lr32_mlx_gpu_kernel_accepts_fp32_activation():
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)
 
 
+def test_lr32_mlx_linear_validates_missing_alt_bank_before_scalar_access():
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils.qvq_mlx import QVQMLXLinear
+
+    with pytest.raises(ValueError, match="bank_alt_id"):
+        QVQMLXLinear(
+            bits=2,
+            in_features=32,
+            out_features=8,
+            trellis=mx.zeros((1, 16), dtype=mx.int32),
+            SU=mx.ones((32,), dtype=mx.float32),
+            SV=mx.ones((8,), dtype=mx.float32),
+            bank_ids=mx.zeros((1,), dtype=mx.uint8),
+            v2b2_p32_lr=True,
+        )
+
+
+@pytest.mark.parametrize("output_fp32", (False, True))
+def test_lr32_mlx_small_row_kernel_handles_two_rows(output_fp32):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils.qvq_mlx import qvq_mlx_gemv
+
+    bits = 2
+    in_features = 64
+    out_features = 16
+    torch_layer = _make_torch_lr_layer(bits=bits, in_features=in_features, out_features=out_features)
+    x = torch.randn(2, in_features, dtype=torch.float16)
+    expected = x.to(torch.float32) @ reconstruct_local_ring_inner_weight(
+        torch_layer.trellis,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=torch_layer.bank_ids,
+        bank_alt_id=torch_layer.bank_alt_id,
+    )
+    actual = qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(torch_layer.trellis.numpy()),
+        bits,
+        out_features=out_features,
+        bank_ids=mx.array(torch_layer.bank_ids.numpy()),
+        bank_alt_id=mx.array(torch_layer.bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=output_fp32,
+    )
+    mx.eval(actual)
+    expected = expected if output_fp32 else expected.to(torch.float16)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)
+
+
 @pytest.mark.parametrize("output_fp32", (False, True))
 @pytest.mark.parametrize("bits", LR_RATES)
 def test_lr32_mlx_m4_row_tile_matches_torch_reconstruction(bits, output_fp32):

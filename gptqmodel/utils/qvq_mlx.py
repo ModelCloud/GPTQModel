@@ -84,6 +84,8 @@ _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
 _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
+_LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int | None], Any] = {}
+_LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None], str] = {}
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None], Any] = {}
 _LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None], str] = {}
 
@@ -784,6 +786,67 @@ _LR_W2_SOURCE = (
 )
 _LR_W2_FP32_SOURCE = _LR_W2_SOURCE.replace(
     "out[(m*N+n)*split_count+split]=half(sum);", "out[(m*N+n)*split_count+split]=sum;"
+)
+
+_LR_SMALL_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,vc=(N+7u)>>3;
+uint split=group%split_count;group/=split_count;
+uint row_tile=dims[4],row_block=group/vc,vector=group-row_block*vc;
+uint row_base=row_block*row_tile,n0=vector<<3,row0=row_base,row1=row0+1u;
+uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u,output_n=n0+output_lane;
+if(row0>=M)return;
+uint ring=output_n&7u,ring_lane=lane&~3u;
+float sum0=0.0f,sum1=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5)*(N>>3)+(output_n>>3);
+  device const int* tile_ptr=trellis+tile*(4*eb);
+  uint selector=(lane&3u)==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(ring_lane));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  for(uint offset=0;offset<4u;offset++){
+    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    sum0+=float(x[row0*K+k0])*value.x+float(x[row0*K+k0+1u])*value.y;
+    if(row1<M)sum1+=float(x[row1*K+k0])*value.x+float(x[row1*K+k0+1u])*value.y;
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+sum0+=simd_shuffle(sum0,ushort(lane^2u));
+sum1+=simd_shuffle(sum1,ushort(lane^1u));
+sum1+=simd_shuffle(sum1,ushort(lane^2u));
+if((lane&3u)==0u&&output_n<N){
+  out[(row0*N+output_n)*split_count+split]=half(sum0);
+  if(row1<M)out[(row1*N+output_n)*split_count+split]=half(sum1);
+}
+"""
+_LR_SMALL_FP32_SOURCE = _LR_SMALL_SOURCE.replace(
+    "=half(sum0);", "=sum0;"
+).replace(
+    "=half(sum1);", "=sum1;"
+)
+_LR_SMALL_W2_SOURCE = (
+    _LR_SMALL_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
+        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
+        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_SMALL_W2_FP32_SOURCE = _LR_SMALL_W2_SOURCE.replace(
+    "=half(sum0);", "=sum0;"
+).replace(
+    "=half(sum1);", "=sum1;"
 )
 
 _LR_MULTIROW_SOURCE = r"""
@@ -1536,6 +1599,65 @@ def _local_ring_kernel(*, output_fp32: bool, split_k: int = 1, w2: bool = False)
             _LR_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
         _LR_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_small_kernel(
+    *,
+    output_fp32: bool,
+    w2: bool = False,
+    split_k: int = 1,
+    alt_bank_id: int | None = None,
+):
+    """Build the barrier-free N8 LR32 kernel for one or two input rows."""
+
+    if split_k not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError(f"QVQ LR32 small split_k must be a power of two from 1 through 64, got {split_k}")
+    if alt_bank_id is not None and alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    key = (output_fp32, split_k, w2, alt_bank_id)
+    kernel = _LR_SMALL_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_SMALL_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        if key in _LR_SMALL_KERNEL_ERRORS:
+            raise RuntimeError(_LR_SMALL_KERNEL_ERRORS[key])
+        import mlx.core as mx
+
+        try:
+            source = (
+                _LR_SMALL_W2_FP32_SOURCE
+                if output_fp32 and w2
+                else _LR_SMALL_W2_SOURCE
+                if w2
+                else _LR_SMALL_FP32_SOURCE
+                if output_fp32
+                else _LR_SMALL_SOURCE
+            )
+            specialized_alt_bank = alt_bank_id is not None
+            if specialized_alt_bank:
+                source = source.replace("uint(bank_alt_id[0])", "AltBank")
+            input_names = ["x", "trellis", "bank_ids", "dims"]
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_small_"
+                    f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
+                    f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
+                ),
+                input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
+                output_names=["out"],
+                header=_HEADER,
+                source=source,
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX small-row kernel creation failed: {exc}"
+            _LR_SMALL_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_SMALL_KERNELS[key] = kernel
         return kernel
 
 
@@ -3090,19 +3212,33 @@ def qvq_mlx_gemv(
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
     if v2b2_p32_lr:
-        row_tile = 16 if m >= 16 else 8 if m >= 5 else 4 if m == 4 else min(4, m)
         split_k = _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32)
-        group_size = ((row_tile + 1) // 2) * 32
+        if m <= 2:
+            # One or two rows fit in one SIMD group.  Decode four pairs
+            # per lane and reduce the four lanes belonging to each N8
+            # output; this avoids the shared decoded tile and its
+            # barriers at the latency-sensitive small-M end of GEMV.
+            row_tile = 1 if m == 1 else 2
+            group_size = 32
+            kernel = _local_ring_small_kernel(
+                output_fp32=output_fp32,
+                w2=transition_bits == 4,
+                split_k=split_k,
+                alt_bank_id=alt_id,
+            )
+        else:
+            row_tile = 16 if m >= 16 else 8 if m >= 5 else 4
+            group_size = ((row_tile + 1) // 2) * 32
+            kernel = _local_ring_multirow_kernel(
+                output_fp32=output_fp32,
+                w2=transition_bits == 4,
+                split_k=split_k,
+                alt_bank_id=alt_id,
+            )
         row_blocks = (m + row_tile - 1) // row_tile
-        kernel = _local_ring_multirow_kernel(
-            output_fp32=output_fp32,
-            w2=transition_bits == 4,
-            split_k=split_k,
-            alt_bank_id=alt_id,
-        )
         inputs = [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
-        if split_k > 1:
+        if split_k > 1 or m <= 2:
             template.append(("SplitK", split_k))
         partials = kernel(
             inputs=inputs,
@@ -3390,6 +3526,8 @@ if _mlx_nn is not None:
             self.bank_alt_id = None if bank_alt_id is None else bank_alt_id.astype(mx.uint8)
             self._bank_alt_id_value = None
             if self.v2b2_p32 or self.v2b2_p32_lr:
+                if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
+                    raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
                 # This is immutable checkpoint metadata.  Resolve it once at
                 # construction so every forward can stay on the MLX graph.
                 self._bank_alt_id_value = int(self.bank_alt_id.item())
@@ -3423,6 +3561,8 @@ if _mlx_nn is not None:
                         f"QVQ MLX bank selectors must have packed shape {(expected_selectors,)}, got {self.bank_ids.shape}"
                     )
             if self.v2b2_p32 or self.v2b2_p32_lr:
+                # Presence and shape are validated before the one-time scalar
+                # extraction above; keep this branch as a defensive invariant.
                 if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
                     raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
             elif self.bank_alt_id is not None:

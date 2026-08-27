@@ -682,9 +682,10 @@ materialization would defeat the design goal of keeping decode and accumulation 
 
 ### 11.3 Current MLX implementation and measured dispatch
 
-The first MLX implementation keeps the checkpoint ABI above but uses an N8 SIMD-group kernel: one 32-lane group
-decodes eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows. M>=4 uses the
-two-row form, with a dedicated row-tile boundary at M=4. W2 combines each ring's two packed words into one circular
+The first MLX implementation keeps the checkpoint ABI above but uses N8 SIMD-group kernels. M<=2 uses a barrier-free
+small-row path where four lanes cooperate on each output and accumulate directly from the activation; M>=4 decodes
+eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows, with a dedicated row-tile
+boundary at M=4. W2 combines each ring's two packed words into one circular
 64-bit window to derive its sixteen states, avoiding four separate state-start extractions; the split-W2 variants use
 the same fast state-start path. The LR production kernel specializes the immutable alternate-bank ID as a Metal
 template value, broadcasts selector metadata within each ring's SIMD lanes, and reads the fixed PGC16-v1 FP16 level
@@ -705,17 +706,17 @@ GPU synchronization. On an Apple M4 Max, one representative run from the optimiz
 
 | Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| (1,2048,256) | 0.23327 | 0.19050 | 0.82x | 0.40756 | 0.25711 |
-| (1,2048,2048) | 0.24840 | 0.16269 | 0.65x | 0.31420 | 0.21950 |
-| (1,2048,8192) | 0.26046 | 0.37002 | 1.42x | 0.32222 | 0.57388 |
-| (1,8192,2048) | 0.24562 | 0.32092 | 1.31x | 0.34321 | 0.39170 |
-| (4,2048,8192) | 0.39421 | 0.67854 | 1.72x | 0.49328 | 0.79195 |
-| (8,2048,8192) | 0.40027 | 0.83996 | 2.10x | 0.44644 | 0.91333 |
-| (16,8192,8192) | 2.17681 | 5.18504 | 2.38x | 2.34593 | 5.42967 |
+| (1,2048,256) | 0.16577 | 0.15235 | 0.92x | 0.24159 | 0.20949 |
+| (1,2048,2048) | 0.14827 | 0.15385 | 1.04x | 0.23270 | 0.17360 |
+| (1,2048,8192) | 0.20294 | 0.21963 | 1.08x | 0.21484 | 0.22845 |
+| (1,8192,2048) | 0.19883 | 0.23765 | 1.20x | 0.22059 | 0.30323 |
+| (4,2048,8192) | 0.26715 | 0.47335 | 1.77x | 0.29449 | 0.53406 |
+| (8,2048,8192) | 0.35233 | 0.89319 | 2.54x | 0.37780 | 1.56849 |
+| (16,8192,8192) | 2.09275 | 5.13540 | 2.45x | 2.15454 | 5.36052 |
 
-This run establishes at least 2x speedup for the representative M=8 and M=16 wide projection shapes, while keeping
-the same public inference graph and checkpoint rate. M=4 remains a substantial 1.72x win in this run but is below the
-2x target; tiny M=1 dispatches remain launch-bound, and narrow M=1 cases can be slower than selector-aware P32.
+This run establishes at least 2x speedup for the representative M=8 and M=16 wide projection shapes, while keeping the
+same public inference graph and checkpoint rate. M=4 is a substantial 1.77x win in this run. The small-row path brings
+common M=1 shapes to parity or better, although the narrow 2048x256 case remains launch-bound at 0.92x.
 These numbers measure the public inner-GEMV path, not end-to-end model latency. Full `QVQMLXLinear` timing also includes
 the input/output Hadamard transforms, scale/bias epilogue, and MLX graph overhead. Measurements are host-dependent
 and should be repeated on each target Apple GPU.

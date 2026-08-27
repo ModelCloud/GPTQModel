@@ -54,6 +54,10 @@ def _measure(
     warmup: int,
     samples: int,
 ):
+    # Mirror QVQMLXLinear: this immutable metadata is resolved once during
+    # setup so the timed inner loop contains no MLX ``array.item()`` boundary.
+    bank_alt_id_value = int(bank_alt_id.item())
+
     def run():
         output = qvq_mlx_gemv(
             x,
@@ -65,6 +69,7 @@ def _measure(
             v2b2_p32=not lr,
             v2b2_p32_lr=lr,
             output_fp32=True,
+            _bank_alt_id_value=bank_alt_id_value,
         )
         mx.eval(output)
         mx.synchronize()
