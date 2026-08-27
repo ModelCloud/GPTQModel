@@ -94,6 +94,8 @@ _LR_M1_N64_SHARED_SPLIT2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
+_LR_M1_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 # The fused M1/N64 split-2 route is retained for targeted experiments and
@@ -1120,6 +1122,20 @@ def _make_lr_m1_fused_split_source(source: str) -> str:
 
 _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_fused_split_source(
     _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
+_LR_M1_FUSED_SPLIT16_W2_FP32_SOURCE = (
+    _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE
+    .replace("constexpr uint split_count=8u;", "constexpr uint split_count=16u;", 1)
+    .replace("threadgroup float split_outputs[128];", "threadgroup float split_outputs[256];", 1)
+    .replace("for(uint s=0u;s<8u;s++)", "for(uint s=0u;s<16u;s++)", 1)
+    # Derive the SIMD-group ordinal explicitly for the 512-thread launch.
+    # This keeps split assignment stable on Apple devices where the implicit
+    # simdgroup-index builtin is not reliable for this larger threadgroup.
+    .replace(
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;",
+        "uint simd=thread_index_in_threadgroup/32u,split=simd;",
+        1,
+    )
 )
 
 
@@ -2576,6 +2592,54 @@ def _local_ring_m1_fused_split_kernel(*, alt_bank_id: int):
         return kernel
 
 
+def _local_ring_m1_fused_split16_kernel(*, alt_bank_id: int):
+    """Build the barrier-minimal fixed M1/N16 W2 split-16 kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_FUSED_SPLIT16_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_FUSED_SPLIT16_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_FUSED_SPLIT16_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+            )
+            kernel = mx.fast.metal_kernel(
+                # Keep a distinct MLX kernel name while the split ordinal is
+                # derived from the explicit thread index below.  MLX/Metal
+                # may retain compiled artifacts by name across calls.
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_fused_split16_tid_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 fused M1 split-16 kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_FUSED_SPLIT16_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
 def _local_ring_m1_n64_split2_kernel(*, alt_bank_id: int):
     """Build the fused two-split kernel for four adjacent N16 tiles."""
 
@@ -2800,13 +2864,16 @@ def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = 
         return 1
     if m < 4:
         # M1 exposes enough independent output work that eight slices win for
-        # both short and long K on the M4 Max.  Very-wide short-K M1 is
-        # handled by the separate unsplit N64 route below. Keep M2 on the
-        # previously measured four-slice policy until it has its own sweep.
+        # both short and long K on the M4 Max.  Sixteen slices further reduce
+        # the latency of the fused M1/N16 path when K is divisible by 512;
+        # the divisibility guard below falls back to eight for other K.
+        # Very-wide short-K M1 is handled by the separate N64 route below.
+        # Keep M2 on the previously measured four-slice policy until it has
+        # its own sweep.
         if m == 1 and k >= 2048 and n <= 2048:
-            split_k = 8
+            split_k = 16
         else:
-            split_k = 8 if k >= 8192 and n <= 2048 else 4
+            split_k = 16 if m == 1 and k >= 8192 and n <= 2048 else 4
     elif m == 8 and k <= 2048 and n >= 8192:
         # The unsplit path avoids partial materialization/reduction.  The
         # matrix variant is separately gated by _USE_LR_MMA after profiling.
@@ -4442,6 +4509,16 @@ def qvq_mlx_gemv(
             and not m1_n64_split2
             and not m1_n64_shared_split2
         )
+        m1_fused_split16 = (
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 16
+            and n % 16 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+        )
         if m1_n64_shared_split2:
             # Eight SIMD groups cover four N16 tiles and both K splits in
             # one threadgroup.  Each split has its own staged K64 tile, so
@@ -4462,6 +4539,15 @@ def qvq_mlx_gemv(
             group_size = 256
             output_width = 64
             kernel = _local_ring_m1_n64_split2_kernel(alt_bank_id=alt_id)
+        elif m1_fused_split16:
+            # Sixteen FP32 split results are reduced inside one 512-thread
+            # threadgroup.  This exposes more independent K work than the
+            # split-8 route while retaining one deterministic in-kernel
+            # reduction and no materialized MLX partial tensor.
+            row_tile = 1
+            group_size = 512
+            output_width = 16
+            kernel = _local_ring_m1_fused_split16_kernel(alt_bank_id=alt_id)
         elif m1_fused_split:
             # The eight FP32 split results are reduced inside one 256-thread
             # threadgroup.  This removes eight separate M1/N16 launches and
@@ -4565,6 +4651,7 @@ def qvq_mlx_gemv(
         if (
             (split_k > 1 or small_rows)
             and not m1_fused_split
+            and not m1_fused_split16
             and not m1_n64_split2
             and not m1_n64_shared_split2
         ):
@@ -4578,7 +4665,7 @@ def qvq_mlx_gemv(
         )
         launch_split = (
             1
-            if m1_fused_split or m1_n64_split2 or m1_n64_shared_split2
+            if m1_fused_split or m1_fused_split16 or m1_n64_split2 or m1_n64_shared_split2
             else split_k
         )
         partials = kernel(
@@ -4590,7 +4677,10 @@ def qvq_mlx_gemv(
                 (
                     m,
                     n
-                    if m1_fused_split or m1_n64_split2 or m1_n64_shared_split2
+                    if m1_fused_split
+                    or m1_fused_split16
+                    or m1_n64_split2
+                    or m1_n64_shared_split2
                     else n * split_k,
                 )
             ],
@@ -4599,6 +4689,7 @@ def qvq_mlx_gemv(
         if (
             split_k == 1
             or m1_fused_split
+            or m1_fused_split16
             or m1_n64_split2
             or m1_n64_shared_split2
         ):

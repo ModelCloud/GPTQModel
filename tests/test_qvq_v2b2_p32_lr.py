@@ -42,10 +42,11 @@ LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
     "m,k,n,output_fp32,expected",
     (
         (1, 2048, 256, False, 1),
-        (1, 2048, 256, True, 8),
+        (1, 2048, 256, True, 16),
+        (1, 2304, 256, True, 8),
         (1, 2048, 8192, True, 4),
         (2, 2048, 8192, True, 4),
-        (1, 8192, 2048, True, 8),
+        (1, 8192, 2048, True, 16),
         (3, 64, 16, False, 1),
         (4, 2048, 8192, False, 1),
         (4, 2048, 8192, True, 1),
@@ -74,12 +75,18 @@ def test_lr32_m1_n64_split_policy(k, expected):
     assert _local_ring_m1_n64_split_k(k) == expected
 
 
-def test_lr32_m1_fused_split8_route_matches_torch_oracle(monkeypatch):
+@pytest.mark.parametrize(
+    "in_features, kernel_name",
+    (
+        (2048, "_local_ring_m1_fused_split16_kernel"),
+        (2304, "_local_ring_m1_fused_split_kernel"),
+    ),
+)
+def test_lr32_m1_fused_split_route_matches_torch_oracle(monkeypatch, in_features, kernel_name):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
 
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_SPLIT2", False)
-    in_features = 2048
     out_features = 256
     _, _, trellis, selectors = _random_lr_payload(
         2,
@@ -97,13 +104,13 @@ def test_lr32_m1_fused_split8_route_matches_torch_oracle(monkeypatch):
         bank_alt_id=bank_alt_id,
     )
     selected = {"called": False}
-    original = qvq_mlx._local_ring_m1_fused_split_kernel
+    original = getattr(qvq_mlx, kernel_name)
 
     def observed(**kwargs):
         selected["called"] = True
         return original(**kwargs)
 
-    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_fused_split_kernel", observed)
+    monkeypatch.setattr(qvq_mlx, kernel_name, observed)
     actual = qvq_mlx.qvq_mlx_gemv(
         mx.array(x.numpy()),
         mx.array(trellis.numpy()),

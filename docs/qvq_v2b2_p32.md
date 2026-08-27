@@ -2405,3 +2405,44 @@ M1 p50 ratios of:
 The candidate was therefore rejected and no shape-specialized M1 code is
 enabled. The production fused source remains dynamic and is preferred for
 its simpler kernel cache and equivalent performance.
+
+## 53. M1 fused split-16 K reduction
+
+The W2 FP32 M1/N16 fused route was extended from eight to sixteen K slices
+when `K` is divisible by `512` and the shape is not handled by the wide M1/N64
+routes. The split ordinal is derived explicitly from the thread index for the
+512-thread launch, and the fused kernel retains one deterministic threadgroup
+barrier and in-kernel FP32 reduction; it does not materialize MLX partial
+outputs. Shapes whose K dimension is not divisible by `32*16` fall back to the
+existing split-8 route.
+
+The route passed the Torch LOCAL-RING reconstruction oracle for W2 and the
+full LR32 suite. A same-process randomized complete-module A/B on the
+AC-powered, high-performance M4 Max used identical input/payloads, 20
+warmups, and 80 synchronized samples per arm:
+
+| Shape | split-8 p50 (ms) | split-16 p50 (ms) | split-8/split-16 |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.25856` | `0.24925` | `1.037x` |
+| `(M=1,K=2048,N=2048)` | `0.32713` | `0.31590` | `1.036x` |
+| `(M=1,K=8192,N=2048)` | `0.32469` | `0.31483` | `1.031x` |
+
+The split-16 route is retained as a modest, shape-specific M1 improvement.
+It does not close the universal M1 `2x` objective; current complete-module
+LR/P32 speedups remain approximately `1.25--1.54x` for the tested M1 shapes,
+with larger-row paths still providing above-`2x` wins in the measured M8/M16
+cases.
+
+A fresh randomized complete-module LR/P32 sweep after this change used 30
+warmups and 100 synchronized samples per arm on the same powered/high-
+performance host:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.26702` | `0.41198` | `1.543x` | `0.36781` | `0.52008` |
+| `(M=1,K=2048,N=2048)` | `0.26552` | `0.33094` | `1.246x` | `0.36007` | `0.47408` |
+| `(M=1,K=2048,N=8192)` | `0.23737` | `0.31492` | `1.327x` | `0.27372` | `0.35598` |
+| `(M=1,K=8192,N=2048)` | `0.26492` | `0.33712` | `1.273x` | `0.28846` | `0.35567` |
+| `(M=4,K=2048,N=8192)` | `0.31833` | `0.56538` | `1.776x` | `0.34323` | `0.64130` |
+| `(M=8,K=2048,N=8192)` | `0.38069` | `0.91967` | `2.416x` | `0.40314` | `0.97938` |
+| `(M=16,K=8192,N=8192)` | `2.11610` | `5.18644` | `2.451x` | `2.22576` | `5.44122` |
