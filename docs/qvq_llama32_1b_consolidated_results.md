@@ -160,8 +160,8 @@ scheduled automatically after each checkpoint completes.
 
 | Arm ID | GPU | Flat rate | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
 | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- |
-| 88be04 | 0 | W2 | **2.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json` | `/root/qvq-results/llama32-1b-flat-flat-w20-88be04` | **queued (GPU busy)** | pending | pending |
-| 509b7f | 1 | W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json` | `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f` | **queued (GPU busy)** | pending | pending |
+| 88be04 | 0 | W2 | **2.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json` | `/root/qvq-results/llama32-1b-flat-flat-w20-88be04` | **complete** | **12.9063% (exact 2/300; mean div 3.793)** | **19.9338% (241/1209)** |
+| 509b7f | 1 | W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json` | `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f` | **complete** | **25.7917% (exact 13/300; mean div 7.383)** | **34.9876% (423/1209)** |
 | 1040a5 | 2 | W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json` | `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5` | **complete** | **28.7292% (exact 13/300; mean div 8.580)** | **42.9280% (519/1209)** |
 | b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **complete** | **39.5521% (exact 40/300; mean div 12.080)** | **45.2440% (547/1209)** |
 | 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **complete** | **5.1354% (exact 0/300; mean div 1.703)** | **3.4739% (42/1209)** |
