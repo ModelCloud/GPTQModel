@@ -4057,3 +4057,26 @@ The candidate improved p50 by only `1.026x`, regressed mean to `0.939x`, and
 had a substantially worse p95. It was removed rather than promoted. The
 production K64 source and dispatch are unchanged; the universal `2x` target
 remains open.
+
+## 113. Corrected barrier-free M1/N64 direct-activation probe rejected
+
+The previously withdrawn direct-activation idea was reimplemented as an
+isolated two-split N64 probe. Each of eight SIMD groups loaded its own K32
+activation tile through SIMD shuffles, removing the shared activation tile and
+threadgroup barriers. The candidate was compared against the existing K64
+decoder using the same payload, input, and split layout; this avoided the
+earlier module-monkeypatch error.
+
+At `(M=1,K=2048,N=2048)`, the candidate was numerically equivalent within the
+existing FP32 contract (`max_abs=1.5259e-5`, relative L2 `1.21e-7`). A
+randomized same-process direct-kernel A/B used 6 warmups and 20 samples per
+arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing shared K64 | `0.32998` | `0.41291` | `0.34391` |
+| Direct activation | `0.33417` | `0.55762` | `0.36100` |
+
+The barrier-free mapping measured `0.987x` at p50 and `0.952x` by mean, with
+worse tail latency, so it was removed and not promoted. The production M1
+dispatch remains unchanged.
