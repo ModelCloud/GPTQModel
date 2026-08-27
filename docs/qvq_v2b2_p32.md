@@ -3568,6 +3568,12 @@ M8/M16, but the universal `2x` objective remains unmet for M1 and M4. The
 focused LR32 suite remains green at `173 passed in 22.75s` on commit
 `e9f228f3`.
 
+The inner-kernel table below supersedes the earlier inner-kernel numbers in
+this section: the original direct harness omitted the production
+`_inputs_contiguous=True` flag and therefore measured an avoidable LR
+contiguity path. The complete-module table above already uses the production
+module path and is unaffected.
+
 The corresponding inner-kernel benchmark, using the same AC/performance-mode
 host and 30 warmups/100 interleaved samples with seed `20261030`, was:
 
@@ -3584,6 +3590,28 @@ host and 30 warmups/100 interleaved samples with seed `20261030`, was:
 The inner-kernel results confirm that LR32 is already a greater-than-2x
 kernel win for M8/M16, while M1 remains the limiting regime even before the
 full-module transform and epilogue are included.
+
+## 97. Corrected AC inner-kernel benchmark
+
+The direct inner-kernel benchmark was corrected to pass
+`_inputs_contiguous=True` for LR, matching `QVQMLXLinear`, which stages the
+immutable LR buffers once during construction. With 30 warmups, 100
+randomized/interleaved samples, seed `20261102`, and the AC/performance-mode
+M4 Max:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | p50 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.19427` | `0.27846` | `1.433x` | `0.21371` | `0.31293` |
+| `(1,2048,2048)` | `0.22152` | `0.29404` | `1.327x` | `0.25980` | `0.31409` |
+| `(1,2048,8192)` | `0.24190` | `0.29006` | `1.199x` | `0.29806` | `0.37718` |
+| `(1,8192,2048)` | `0.18304` | `0.26506` | `1.448x` | `0.20216` | `0.28530` |
+| `(4,2048,8192)` | `0.29502` | `0.49190` | `1.667x` | `0.33929` | `0.54755` |
+| `(8,2048,8192)` | `0.64498` | `1.38994` | `2.155x` | `1.28905` | `3.29066` |
+| `(16,8192,8192)` | `2.47681` | `5.39163` | `2.177x` | `3.03725` | `5.70016` |
+
+This corrected measurement confirms the production-comparable inner LR path
+is faster than P32 for every shape and clears `2x` for M8/M16. M1 and M4
+remain below the universal `2x` target.
 
 ## 95. M1 N32 shared-activation geometry AC recheck
 

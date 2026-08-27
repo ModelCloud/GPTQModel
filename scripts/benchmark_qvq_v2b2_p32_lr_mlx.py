@@ -71,6 +71,11 @@ def _measure_pair(
             v2b2_p32_lr=use_lr,
             output_fp32=True,
             _bank_alt_id_value=bank_alt_id_value,
+            # QVQMLXLinear stages the LR buffers as contiguous at construction
+            # time.  Keep the direct inner-kernel benchmark on the same path;
+            # otherwise every LR sample measures a compatibility contiguity
+            # check/copy that production inference does not pay.
+            _inputs_contiguous=use_lr,
         )
         mx.eval(output)
         mx.synchronize()
