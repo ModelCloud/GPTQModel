@@ -2227,3 +2227,17 @@ but the 1024-threadgroup cost outweighed that reduction on the M4 Max:
 relative to shared split-2, complete-module p50 was `0.985x` at
 `K=8192,N=8192` and `0.986x` at `K=16384,N=8192`. It was rejected and is not
 included in the production kernel.
+
+The shared kernel was then moved to the same explicit contiguous-input
+boundary as the existing shape-specialized path (`ensure_row_contiguous=False`
+with `mx.contiguous` before dispatch). A synchronized randomized 100-sample
+complete-module A/B against the prior unshared split-2 path measured:
+
+| Shape | Prior p50 (ms) | Shared + contiguous p50 (ms) | Speedup |
+|---|---:|---:|---:|
+| `(M=1,K=4096,N=8192)` | `1.23015` | `1.02979` | `1.195x` |
+| `(M=1,K=8192,N=8192)` | `1.84483` | `1.46681` | `1.258x` |
+
+This A/B includes both shared activation reuse and the launch-boundary
+change; it is not an isolated wrapper-only measurement. The long-K route
+remains exact against the Torch oracle and is retained.

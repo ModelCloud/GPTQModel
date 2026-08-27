@@ -2643,7 +2643,7 @@ def _local_ring_m1_n64_shared_split2_kernel(*, alt_bank_id: int):
                 output_names=["out"],
                 header=_lr_small_w2_mask_header(alt_bank_id),
                 source=source,
-                ensure_row_contiguous=True,
+                ensure_row_contiguous=False,
                 compile_options={"math_mode": "fast"},
             )
         except Exception as exc:
@@ -4440,6 +4440,9 @@ def qvq_mlx_gemv(
             # Eight SIMD groups cover four N16 tiles and both K splits in
             # one threadgroup.  Each split has its own staged K64 tile, so
             # activation loads are shared without a cross-split race.
+            x = mx.contiguous(x)
+            trellis = mx.contiguous(trellis)
+            bank_ids = mx.contiguous(bank_ids)
             row_tile = 1
             group_size = 256
             output_width = 64
