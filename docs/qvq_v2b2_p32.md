@@ -2045,3 +2045,39 @@ promotion measured:
 
 The full relevant suite remains `482 passed`; the M1/N16 unroll is retained,
 but the universal M1 `2x` objective is still open.
+
+### 45. Post-unroll AC/performance-mode benchmark and Metal trace
+
+After the host was connected to AC power with macOS `powermode=2`, the
+randomized/interleaved complete-module benchmark was rerun from the current
+post-unroll source with `40` warmups and `80` synchronized samples per arm.
+LR and P32 used the same input, trellis payload, and selector bytes for each
+shape; each sample randomized which arm ran first. The benchmark measures the
+complete `QVQMLXLinear` module, including the Hadamard transforms and MLX
+dispatch overhead, rather than only the inner GEMV.
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.66725 / 1.76953` | `0.87815 / 1.91376` | `1.316x` |
+| `(M=1,K=2048,N=2048)` | `0.67898 / 1.42792` | `0.87185 / 1.30361` | `1.284x` |
+| `(M=1,K=2048,N=8192)` | `0.90990 / 1.59839` | `1.24712 / 2.21909` | `1.371x` |
+| `(M=1,K=8192,N=2048)` | `0.83515 / 1.27989` | `1.14825 / 2.01475` | `1.375x` |
+| `(M=4,K=2048,N=8192)` | `0.32256 / 0.37384` | `0.58444 / 0.75438` | `1.812x` |
+| `(M=8,K=2048,N=8192)` | `0.43077 / 0.47024` | `0.91815 / 0.97638` | `2.131x` |
+| `(M=16,K=8192,N=8192)` | `2.12048 / 2.34253` | `5.19325 / 5.44892` | `2.449x` |
+
+The run confirms that LR32 remains faster in every tested production shape,
+but the M1 complete-module speedup is currently `1.284x` to `1.375x`, not a
+universal `2x`. The M8/M16 paths remain above `2x`. Absolute timings continue
+to vary with GPU state even on AC/high-performance mode, so these paired
+tables—not isolated LR or P32 runs—are the comparison record.
+
+A post-unroll Xcode 26.6 Metal System Trace was also captured for
+`(M=1,K=2048,N=8192)` at:
+`/tmp/qvq-metal-profile-post-unroll-20260827-1849.trace`.
+The trace contains the launched Python target and Metal application
+command-buffer/encoder records. This host/Xcode combination reports
+`Counter Set: (null)` and `Shader Timeline: Disabled`, so it cannot provide
+hardware occupancy, cache-miss, or stall percentages. It is therefore useful
+for submission/barrier sequencing only; no profiler bundle is checked into
+the repository.
