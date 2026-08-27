@@ -3764,7 +3764,7 @@ The candidate measured `1.044x` at p50 but only `0.976x` by mean and had a
 worse maximum sample. Shape specialization is not a reliable module-level
 win, so no production dispatch changed.
 
-## 95. M1 N32 shared-activation geometry AC recheck
+## 104. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
 current production N64 W2 half2 route at `(M=1,K=2048,N=8192)` with 200
@@ -3787,7 +3787,7 @@ The candidate measured `1.109x` at p50 and `1.102x` by mean, with a worse
 maximum sample. This is not a reliable module-level improvement and was not
 promoted. The universal M1 `2x` target remains open.
 
-## 96. M1 N64 half2 split-K sweep rejected
+## 105. M1 N64 half2 split-K sweep rejected
 
 The current shape-specialized M1/N64 W2 half2 decoder was benchmarked with
 split-2, split-4, and split-8 at `(M=1,K=2048,N=8192)`. Each arm used the same
@@ -3806,3 +3806,28 @@ Relative to split-2, split-4 improved p50 by only `1.017x` and mean by
 `1.014x`; split-8 was neutral at p50 (`0.999x`) and improved mean by `1.012x`.
 The small timing gains do not justify introducing reduction-order drift, so
 the production split-2 policy remains unchanged.
+
+## 106. M4 legacy split-2 control rejected
+
+The M4 cooperative split-1 route was compared with the legacy multirow
+split-2 route at `(M=4,K=2048,N=8192)`. Split-2 materializes two FP32 partial
+outputs and reduces them with MLX, exposing more independent K work but
+changing the reduction grouping. The candidate differed from production by:
+
+```text
+max_abs = 0.03125
+relative_l2 = 0
+differing elements = 70
+```
+
+The complete-module A/B used 150 randomized/interleaved samples per arm, 30
+warmups, and seed `20261109` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 cooperative split-1 | `0.97992` | `3.04112` | `1.47856` | `0.82829` | `21.86833` |
+| Legacy M4 split-2 | `0.92594` | `3.80003` | `1.31416` | `0.78658` | `7.82692` |
+
+Split-2 measured `1.058x` at p50 and `1.125x` by mean, but the result is
+far below the `2x` target, changes reduction order, and has a worse p95. The
+production cooperative split-1 route remains unchanged.
