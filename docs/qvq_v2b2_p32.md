@@ -885,6 +885,11 @@ graph. Relative to N16, complete-module p50 was `1.133x` at `(1,2048,8192)` and 
 therefore remains the small-row policy. These probes are recorded to prevent treating an inner-kernel result as an
 end-to-end module win.
 
+A W2-only M1/N16 decode-loop unroll that processes two adjacent pairs per iteration was also oracle-correct, but the
+complete-module gain was too small and shape-specific to retain. An interleaved 220-sample comparison at
+`(M=1,K=2048,N=8192)` changed p50 from `0.32552 ms` to `0.32260 ms` (`0.991x`), while a separate long-K probe at
+`(M=1,K=8192,N=2048)` regressed to `1.128x` of the baseline. The production loop remains unchanged.
+
 A corrected barrier-free M4 register-only probe was also oracle-correct, but did not improve the complete module. At
 `(M=4,K=2048,N=8192)`, inner p50 was `0.43950 ms` for the current decoder versus `0.43948 ms` for the register probe,
 while complete-module p50 was `0.31408 ms` versus `0.40544 ms`. At `(M=4,K=8192,N=2048)`, inner p50 was `0.28675 ms`
