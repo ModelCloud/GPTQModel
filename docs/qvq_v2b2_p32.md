@@ -2933,3 +2933,24 @@ The supported regression suite after this source specialization is
 `612 passed, 9 skipped`; the focused LR suite is `169 passed`. The measured
 `2x` target is reached for the M4/M8/M16 complete-module shapes, but remains
 universal only for the larger-row regimes rather than every M1 shape.
+
+## 70. M1 short-K route probes retained as negative controls
+
+Two additional M1 probes were run on the AC/high-performance M4 Max host
+with randomized synchronized ordering and `200` samples. At
+`(M=1,K=2048,N=2048)`, replacing the promoted N32 split-16 route with the
+existing N64 split-2 grouping preserved the expected FP32 result
+(`max_abs=1.14e-4`, relative L2 `4.46e-7`) but was slower:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| N32 split-16 | `0.46196` | `1.13347` | `0.58976` |
+| N64 split-2 | `0.54060` | `1.03762` | `0.61987` |
+
+A second probe replaced the dynamic outer K loop in the N32 split-16 source
+with four fixed K32 bodies specialized for `K=2048`, again with exact output
+parity (`max_abs=0`). It was also rejected: current p50 `0.39858 ms` versus
+fixed-K p50 `0.46215 ms`, with means `0.56764 ms` versus `0.57467 ms`.
+These results leave the promoted N32 source unchanged and shift further work
+toward reducing complete-module graph overhead or a measured fusion
+opportunity rather than additional M1 decoder-loop specialization.
