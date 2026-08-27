@@ -843,6 +843,25 @@ calls and 160 synchronized samples per format on the same AC/performance-mode M4
 This comparison is between the current native-Hadamard checkout and the same MLX implementation's P32 control. Both
 formats receive the graph optimization; it changes neither BPW nor the LR32 kernel ABI.
 
+#### AC/performance-mode rejected probes
+
+Two additional same-process probes were run on the plugged-in M4 Max and were not promoted to production. Metal
+`math_mode="fast"` was numerically exact in the tested W2 module comparisons (`max relative output difference = 0`) but
+was effectively neutral at M1--M8 and slower at M16:
+
+| Shape (M,K,N) | Safe p50 (ms) | Fast p50 (ms) | Fast/Safe |
+|---|---:|---:|---:|
+| (1,2048,8192) | 0.37896 | 0.37723 | 0.995x |
+| (4,2048,8192) | 0.29606 | 0.29454 | 0.995x |
+| (8,2048,8192) | 0.40692 | 0.40571 | 0.997x |
+| (16,8192,8192) | 2.13598 | 2.24817 | 1.053x |
+
+An isolated W2 N32 M1 kernel briefly improved the inner `K=2048,N=8192` dispatch by about 4.7%, but complete-module
+paired timing regressed because the wider tile increased register/local-ring work and did not amortize the surrounding
+graph. Relative to N16, complete-module p50 was `1.133x` at `(1,2048,8192)` and `1.183x` at `(1,8192,8192)`. N16
+therefore remains the small-row policy. These probes are recorded to prevent treating an inner-kernel result as an
+end-to-end module win.
+
 ### 11.4 Metal profiling findings
 
 The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's
