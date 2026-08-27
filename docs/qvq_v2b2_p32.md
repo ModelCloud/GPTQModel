@@ -3982,3 +3982,52 @@ The candidate was removed rather than shipping a non-repeatable specialization.
 The production M4 K32 cooperative decoder remains enabled. This result also
 reinforces that exact decode parity alone is insufficient for promotion: the
 acceptance gate is complete-module latency under randomized same-process A/B.
+
+## 111. Xcode Metal System Trace on AC/performance-mode M4 Max
+
+The host was verified in AC/high-performance mode (`pmset powermode=2`) before
+profiling. A bounded Xcode 26.6 Metal System Trace was captured for the current
+M1 LR32 W2 workload:
+
+```text
+xcrun xctrace record --no-prompt --template 'Metal System Trace' \\
+  --output /tmp/qvq-metal.RJ3SyS/m1.trace --time-limit 15s --launch -- \\
+  /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \\
+  scripts/profile_qvq_mlx_metal.py --m 1 --k 2048 --n 8192 \\
+  --bits 2 --warmup 2 --active-calls 4
+```
+
+The capture completed and produced a 95 MB trace bundle. Xcode reported no
+GPU counter set and no shader timeline for this M4 Max configuration
+(`Counter Set: (null)`, `Shader Timeline: Disabled`). Its exporter also
+returned `Document Missing Template Error` for the table-of-contents query,
+so this environment cannot provide numeric occupancy, cache, stall, or
+barrier-wait percentages. The trace is therefore useful for dispatch
+structure/timing only, not for quantitative stall attribution. A second M8
+capture hung in the recorder after the target exited and was terminated; no
+M8 trace is used as evidence.
+
+Source-level inspection of the production routes remains consistent with the
+observed performance split: M1/N64 uses repeated K64 activation staging and
+split/reduction work, while M8 uses row-shared decode and the matrix path when
+the shape predicate matches. The current optimization acceptance rule remains
+an exact Torch/MLX oracle plus randomized same-process complete-module A/B;
+Xcode trace structure alone is not sufficient to promote a kernel.
+
+A fresh AC/performance-mode spot check after the capture used the existing
+randomized/interleaved complete-module benchmark with 10 warmups and 10
+samples per arm, seed `20260828`. It reproduced the current regime:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | p50 speedup |
+|---|---:|---:|---:|
+| `(1,2048,256)` | `0.44760` | `0.72406` | `1.618x` |
+| `(1,2048,2048)` | `0.51848` | `0.75617` | `1.458x` |
+| `(1,2048,8192)` | `0.80915` | `1.24496` | `1.539x` |
+| `(1,8192,2048)` | `0.84219` | `1.25419` | `1.489x` |
+| `(4,2048,8192)` | `1.29371` | `2.65917` | `2.055x` |
+| `(8,2048,8192)` | `1.49619` | `3.95900` | `2.646x` |
+| `(16,8192,8192)` | `2.54125` | `5.83413` | `2.296x` |
+
+These 10-sample values are a spot check, not a replacement for the 80/100+
+sample tables above. They again show M1 below the universal `2x` target and
+M8/M16 above it; no production code was changed from the profiler run.
