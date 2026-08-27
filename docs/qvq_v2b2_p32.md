@@ -1664,3 +1664,32 @@ The M1 path is faster than P32 in every current production shape, but the
 universal 2x target remains unmet. Because the host's GPU clocks and background
 load move absolute latency, paired same-process A/B measurements remain the
 promotion gate for incremental changes.
+
+### 31. Shape-specialized no-dims production sweep
+
+The shape-specialized K64 M1 route now also removes the unused dimensions buffer
+from its MLX launch. The specialized source embeds validated `K` and `N` as
+Metal constants, so the launch binds only `x`, `trellis`, and `bank_ids`; all
+other LR32 routes retain the dimensions input. This preserves exact Torch/MLX
+parity and keeps the optimization isolated to the guarded M1 W2 FP32 path.
+
+The LR32 test module passed `149` tests, and `ruff` plus `git diff --check`
+passed. A fresh synchronized 80-sample module sweep on the plugged-in M4 Max
+in AC/performance mode measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.29812 / 0.41301` | `0.40658 / 0.54463` | `1.364x` |
+| `(M=1,K=2048,N=2048)` | `0.43033 / 0.62819` | `0.41867 / 0.54928` | `0.973x` |
+| `(M=1,K=2048,N=8192)` | `0.26144 / 0.33772` | `0.33404 / 0.44167` | `1.278x` |
+| `(M=1,K=8192,N=2048)` | `0.26079 / 0.36322` | `0.32908 / 0.43945` | `1.262x` |
+| `(M=4,K=2048,N=8192)` | `0.30733 / 0.37386` | `0.55710 / 0.70781` | `1.813x` |
+| `(M=8,K=2048,N=8192)` | `0.41810 / 0.48887` | `0.90938 / 1.01639` | `2.175x` |
+| `(M=16,K=8192,N=8192)` | `2.25225 / 2.41326` | `5.31083 / 5.44159` | `2.358x` |
+
+This run is directionally consistent with the earlier post-integration
+measurements, but absolute latency moved with GPU state. M1 remains shape
+dependent: the current K64/no-dims route is clearly ahead at `N=256` and
+`N=8192`, effectively tied/slightly behind at `N=2048`, and nowhere near a
+universal `2x`. The next optimization should therefore target the remaining
+M1 decode/transform graph cost rather than add more launch constants.
