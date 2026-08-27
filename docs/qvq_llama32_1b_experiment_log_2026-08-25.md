@@ -1231,3 +1231,5 @@ and 3.
 | monitor | `llama32-1b-w2-w35-qk30-f0276c` | `gsm8k_platinum_cot` | complete; metric=0.4317617866004963; report `/root/qvq-results/llama32-1b-w2-w35-qk30-f0276c-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-w37-qk30-fp16-down15-41ce2f` | `gsm8k_platinum_cot` | complete; metric=0.4292803970223325; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-down15-41ce2f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w37-qk30-fp16-up15-d53e87` | `gsm8k_platinum_cot` | complete; metric=0.43507030603804797; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-up15-d53e87-gsm8k-platinum-v1.json` |
