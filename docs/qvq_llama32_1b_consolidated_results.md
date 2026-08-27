@@ -120,16 +120,16 @@ confirmation rows 32:64 from the disjoint replay source. Paths below are the
 authoritative config and checkpoint locations; the six-character Arm ID is
 stable across JSON/Markdown logs and evaluator artifacts.
 
-| Arm ID | GPU | Exact configuration | Output checkpoint | Atomic/Smooth |
-| --- | ---: | --- | --- | --- |
-| 595f38 | 0 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38` | — |
-| bf96be | 1 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be` | Atomic |
-| bf272e | 2 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | Smooth + Atomic |
-| 56c940 | 3 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940` | — |
-| e5ca9f | 4 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | — |
-| baeb18 | 5 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18` | — |
-| 95ef88 | 6 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88` | Atomic |
-| 4e4d0d | 7 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | Smooth + Atomic |
+| Arm ID | GPU | Exact configuration | Output checkpoint | Atomic/Smooth | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | --- | --- | --- | --- | --- |
+| 595f38 | 0 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38` | — | quant complete; D300 running | pending | **37.3863% (452/1209)** |
+| bf96be | 1 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be` | Atomic | quantizing (layer 11/16) | pending | pending |
+| bf272e | 2 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | Smooth + Atomic | quantizing (layer 11/16) | pending | pending |
+| 56c940 | 3 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940` | — | quant complete; D300 running | pending | **34.6567% (419/1209)** |
+| e5ca9f | 4 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | — | quant complete; D300 running | pending | **40.2812% (487/1209)** |
+| baeb18 | 5 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18` | — | quant complete; D300 running | pending | **35.2357% (426/1209)** |
+| 95ef88 | 6 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88` | Atomic | quantizing (layer 11/16) | pending | pending |
+| 4e4d0d | 7 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | Smooth + Atomic | quantizing (layer 11/16) | pending | pending |
 
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
