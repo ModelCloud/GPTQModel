@@ -1201,3 +1201,11 @@ and 3.
 | monitor | `llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085` | `divergence300` | complete; metric=0.30604166666666666; report `/root/qvq-results/llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad` | `divergence300` | complete; metric=0.30604166666666666; report `/root/qvq-results/llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-late-gate-down35-5d19be` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=-0.02976131507359323; delta_kl=0.041087277049774044; answer_logprob_delta=0.19963203081444128; answer_margin_delta=1.1970082041042953; critical_top1=0.968040907638223'; report `/root/qvq-results/llama32-1b-w2-w32-late-gate-down35-5d19be-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-late-down35-7a3d91` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.03254310226949764; delta_kl=0.04110309593289826; answer_logprob_delta=0.15748406079278063; answer_margin_delta=0.9660776622259795; critical_top1=0.9674017257909875'; report `/root/qvq-results/llama32-1b-w2-w32-late-down35-7a3d91-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w37-qk30-fp16-down15-41ce2f` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=0.01148309132129927; delta_kl=0.03015698138352613; answer_logprob_delta=-0.032177195620180954; answer_margin_delta=0.1338091323624796; critical_top1=0.9728347714924896'; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-down15-41ce2f-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w37-qk30-fp16-up15-d53e87` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=0.012660188873638798; delta_kl=0.030178287042420045; answer_logprob_delta=-0.03787105474899064; answer_margin_delta=0.1218185709483588; critical_top1=0.9734739533397252'; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-up15-d53e87-micro-math-v1.json` |
