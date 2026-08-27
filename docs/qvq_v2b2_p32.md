@@ -4483,3 +4483,35 @@ samples per arm on the AC/performance-mode M4 Max:
 The candidate neither approaches the missing M1 `2x` improvement nor
 preserves the production numerical contract. The FP32 output transform and
 final cast remain enabled.
+
+## 128. Bounded Metal profiling capture
+
+A bounded MLX Metal capture was taken for the production M1 W2 shape
+`(M=1,K=2048,N=8192)` on the AC/performance-mode M4 Max at commit
+`0c4534c9`. The workload used 20 warmups and 3 captured calls. The MLX
+capture required `MTL_CAPTURE_ENABLED=1` and completed successfully:
+
+```text
+/tmp/qvq-capture-enabled.Cjyr2b/m1.gputrace
+size = 178 MB
+```
+
+The capture bundle is intentionally not committed because it contains device
+resources and workload data. It can be opened in Xcode GPU Frame Capture for
+per-dispatch inspection.
+
+A matching Xcode 26.6 Metal System Trace was also recorded with an absolute
+Python interpreter and exported to:
+
+```text
+/tmp/qvq-system-trace.np41D1/system.trace
+```
+
+The trace TOC reports `Counter Set: (null)` and `Shader Timeline: Disabled`.
+The exported GPU interval table contained host display activity but no
+usable target shader-counter or target-kernel timing rows. Consequently this
+run provides no numeric occupancy, cache, stall, or utilization claims. The
+source-backed audit remains the valid structural evidence: the M1 N64 route
+uses four SIMD groups, stages a shared K64 activation tile, and requires a
+threadgroup barrier per staged K64 tile; the promoted alternatives were
+already rejected by synchronized complete-module A/B tests.
