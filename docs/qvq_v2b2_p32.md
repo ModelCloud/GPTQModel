@@ -923,6 +923,11 @@ complete-module gain was too small and shape-specific to retain. An interleaved 
 `(M=1,K=2048,N=8192)` changed p50 from `0.32552 ms` to `0.32260 ms` (`0.991x`), while a separate long-K probe at
 `(M=1,K=8192,N=2048)` regressed to `1.128x` of the baseline. The production loop remains unchanged.
 
+A clean-room W2 N32 M1 prototype was also tested after the current activation-sharing and packed-word changes. It
+passed the current LR oracle (`3.3e-7` relative error at `(M=1,K=2048,N=8192)` and `4.7e-7` at
+`(M=1,K=8192,N=2048)`), but one output per lane increased register/decode work: interleaved inner p50 was `1.428x`
+of N16 for `K=2048,N=8192` and `1.174x` for `K=8192,N=2048`. N16 remains the production small-row tile.
+
 A corrected barrier-free M4 register-only probe was also oracle-correct, but did not improve the complete module. At
 `(M=4,K=2048,N=8192)`, inner p50 was `0.43950 ms` for the current decoder versus `0.43948 ms` for the register probe,
 while complete-module p50 was `0.31408 ms` versus `0.40544 ms`. At `(M=4,K=8192,N=2048)`, inner p50 was `0.28675 ms`
