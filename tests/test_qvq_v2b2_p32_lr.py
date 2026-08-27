@@ -45,7 +45,7 @@ LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
         (1, 2048, 256, True, 4),
         (3, 64, 16, False, 2),
         (4, 2048, 8192, False, 1),
-        (4, 2048, 8192, True, 2),
+        (4, 2048, 8192, True, 1),
         (8, 2048, 8192, True, 4),
         (16, 8192, 2048, True, 8),
         (16, 8192, 8192, True, 4),
@@ -421,6 +421,44 @@ def test_lr32_mlx_gpu_kernel_matches_torch_reconstruction(
         out_features=out_features,
         bank_ids=mx.array(packed_selectors.numpy()),
         bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=output_fp32,
+    )
+    mx.eval(actual)
+    actual_torch = torch.from_numpy(np.asarray(actual))
+    expected = expected if output_fp32 else expected.to(torch.float16)
+    torch.testing.assert_close(actual_torch, expected, rtol=0, atol=8e-3)
+
+
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("bits", LR_RATES)
+def test_lr32_mlx_m4_row_tile_matches_torch_reconstruction(bits, output_fp32):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils.qvq_mlx import qvq_mlx_gemv
+
+    in_features = 64
+    out_features = 16
+    torch_layer = _make_torch_lr_layer(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    x = torch.randn(4, in_features, dtype=torch.float16)
+    expected = x.to(torch.float32) @ reconstruct_local_ring_inner_weight(
+        torch_layer.trellis,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=torch_layer.bank_ids,
+        bank_alt_id=torch_layer.bank_alt_id,
+    )
+    actual = qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(torch_layer.trellis.numpy()),
+        bits,
+        out_features=out_features,
+        bank_ids=mx.array(torch_layer.bank_ids.numpy()),
+        bank_alt_id=mx.array(torch_layer.bank_alt_id.numpy()),
         v2b2_p32_lr=True,
         output_fp32=output_fp32,
     )

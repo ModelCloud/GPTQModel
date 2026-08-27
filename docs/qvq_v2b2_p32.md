@@ -684,14 +684,16 @@ materialization would defeat the design goal of keeping decode and accumulation 
 
 The first MLX implementation keeps the checkpoint ABI above but uses an N8 SIMD-group kernel: one 32-lane group
 decodes eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows. M>=4 uses the
-two-row form. W2 combines each ring's two packed words into one circular 64-bit window to derive its sixteen states,
-avoiding four separate state-start extractions. FP32 production GEMVs use measured shape-specific split-K dispatch for
-wide FFN and down-projection shapes; FP16 keeps the original reduction order. No dense weight matrix is materialized.
+two-row form, with a dedicated row-tile boundary at M=4. W2 combines each ring's two packed words into one circular
+64-bit window to derive its sixteen states, avoiding four separate state-start extractions. FP32 production GEMVs use
+measured shape-specific split-K dispatch for wide FFN and down-projection shapes; the M=4, K<=2048, N>=8192 case
+uses the unsplit row-tile-4 path because it is faster on the M4 Max. FP16 keeps the original reduction order. No dense
+weight matrix is materialized.
 
 Run the paired public-path benchmark with:
 
 ```text
-python scripts/benchmark_qvq_v2b2_p32_lr_mlx.py --warmup 12 --samples 35
+python scripts/benchmark_qvq_v2b2_p32_lr_mlx.py --warmup 30 --samples 100
 ```
 
 The benchmark uses synthetic W2 payloads, FP16 activations, FP32 output, matched warmup/sample counts, and explicit
@@ -699,17 +701,18 @@ GPU synchronization. On an Apple M4 Max, one representative run from the optimiz
 
 | Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR |
 |---|---:|---:|---:|
-| (1,2048,256) | 0.2474 | 0.2916 | 1.18x |
-| (1,2048,2048) | 0.1669 | 0.1725 | 1.03x |
-| (1,2048,8192) | 0.2188 | 0.2330 | 1.07x |
-| (1,8192,2048) | 0.2162 | 0.2721 | 1.26x |
-| (4,2048,8192) | 0.3297 | 0.4670 | 1.42x |
-| (8,2048,8192) | 0.3503 | 0.8339 | 2.38x |
-| (16,8192,8192) | 1.8020 | 5.2135 | 2.89x |
+| (1,2048,256) | 0.2337 | 0.1866 | 0.80x |
+| (1,2048,2048) | 0.1781 | 0.1571 | 0.88x |
+| (1,2048,8192) | 0.1990 | 0.2184 | 1.10x |
+| (1,8192,2048) | 0.1901 | 0.2502 | 1.32x |
+| (4,2048,8192) | 0.2295 | 0.4651 | 2.03x |
+| (8,2048,8192) | 0.3328 | 0.8293 | 2.49x |
+| (16,8192,8192) | 1.8285 | 5.2256 | 2.86x |
 
-This establishes the current MLX speedup for batched/prefill shapes and a smaller but positive M=1 improvement. It
-does not claim a universal 2x decode speedup; M=1 and the narrow M=4 shapes remain below the target and should be
-profiled independently from the wide FFN path.
+This establishes at least 2x speedup for the representative M=4, M=8, and M=16 wide projection shapes, while keeping
+the same public inference graph and checkpoint rate. It does not claim a universal 2x decode speedup: tiny M=1
+dispatches remain launch-bound, and the narrow M=1 cases can be slower than selector-aware P32. Measurements are
+host-dependent and should be repeated on each target Apple GPU.
 
 ## 12. YAQA integration
 

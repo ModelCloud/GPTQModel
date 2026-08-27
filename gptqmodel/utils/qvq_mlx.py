@@ -1540,7 +1540,7 @@ def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = 
     elif k >= 8192 and n <= 2048:
         split_k = 8
     elif k <= 2048 and n >= 8192:
-        split_k = 4 if m >= 8 else 2
+        split_k = 4 if m >= 8 else 1
     elif m >= 16 and k >= 4096 and n >= 4096:
         split_k = 4
     else:
@@ -3033,7 +3033,7 @@ def qvq_mlx_gemv(
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
     if v2b2_p32_lr:
-        row_tile = 16 if m >= 16 else 8 if m >= 4 else min(4, m)
+        row_tile = 16 if m >= 16 else 8 if m >= 5 else 4 if m == 4 else min(4, m)
         split_k = _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32)
         group_size = ((row_tile + 1) // 2) * 32
         row_blocks = (m + row_tile - 1) // row_tile
