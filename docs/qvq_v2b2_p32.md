@@ -862,6 +862,17 @@ graph. Relative to N16, complete-module p50 was `1.133x` at `(1,2048,8192)` and 
 therefore remains the small-row policy. These probes are recorded to prevent treating an inner-kernel result as an
 end-to-end module win.
 
+A corrected barrier-free M4 register-only probe was also oracle-correct, but did not improve the complete module. At
+`(M=4,K=2048,N=8192)`, inner p50 was `0.43950 ms` for the current decoder versus `0.43948 ms` for the register probe,
+while complete-module p50 was `0.31408 ms` versus `0.40544 ms`. At `(M=4,K=8192,N=2048)`, inner p50 was `0.28675 ms`
+versus `0.40150 ms`, and complete-module p50 was `0.31742 ms` versus `0.31123 ms`; the latter small difference is not
+enough to justify a second M4 path. The probe was not retained.
+
+Finally, a fixed Metal split-K reduction was compared with MLX's `mx.sum` on the partial buffer. Inner p50 ratios
+`custom/generic` were `1.015x` for `(M=1,K=2048,N=8192)`, `0.984x` for `(M=1,K=8192,N=2048)`, and `0.925x` for
+`(M=2,K=2048,N=8192)`. Because the result is shape-dependent and was not yet measured at complete-module level, the
+generic reduction remains the production choice.
+
 ### 11.4 Metal profiling findings
 
 The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's
