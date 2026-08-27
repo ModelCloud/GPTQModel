@@ -1185,3 +1185,5 @@ and 3.
 | monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830` | `gsm8k_platinum_cot` | complete; metric=0.4325889164598842; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad` | `gsm8k_platinum_cot` | complete; metric=0.42349048800661704; report `/root/qvq-results/llama32-1b-w2-w3front-reg020-qk25-vo35-gate25-up35-down3-f9a5ad-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0` | `divergence300` | complete; metric=0.19302083333333334; report `/root/qvq-results/llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0-div300-dev-v1.json` |
