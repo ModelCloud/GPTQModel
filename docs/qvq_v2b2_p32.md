@@ -1432,3 +1432,9 @@ shapes with relative L2 error about `8.4e-7` to `8.6e-7` and maximum absolute
 error below `3e-4`. The candidate is a meaningful M1 improvement, but it does
 not by itself establish a universal 2x result: the strongest M1 case here is
 `1.477x`, while M4/M8/M16 remain above 2x.
+
+Two follow-up probes were rejected by the oracle gate. Replacing the scalar
+shared activation buffer with `float4` storage produced `4.1–4.4%` relative
+error at `(M=1,K=2048,N=8192)`, and extending the grouping from N64 to N128
+produced `2.9%` relative error. Neither change was promoted; the scalar N64
+layout remains the verified implementation.
