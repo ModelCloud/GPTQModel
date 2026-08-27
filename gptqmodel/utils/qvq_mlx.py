@@ -1529,6 +1529,9 @@ def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = 
     """Choose a conservative K split for the multi-row LR dispatch."""
 
     if m < 4:
+        # Keep the established split for the small-M path.  Its timing is
+        # already close to the dispatch floor and larger splits are not a
+        # stable win across the Llama projection shapes.
         split_k = 4
     elif not output_fp32:
         # Keep FP16 reduction order stable; the FP32 production path can use
