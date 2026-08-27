@@ -3192,3 +3192,22 @@ warmups, and `200` randomized samples and measured:
 The wider grouping does not amortize its larger threadgroup/register cost on
 M4 Max and was not promoted. This leaves the verified N64 route as the
 wide-N M1 production choice; the universal `2x` target remains open.
+
+## 80. M1 W2 value-LUT decoder probe rejected
+
+The W2 M1/N64 decoder was also tested with a specialized constant-memory
+table containing the final `half2` PGC16 values for both bank choices. This
+replaced the per-pair integer mixer and two codebook-index operations with one
+state-indexed lookup. At `(M=1,K=2048,N=8192)`, the candidate matched the
+Torch oracle (`max_abs=3.6621e-4`, relative L2 `8.9762e-7`) but was much
+slower in a synchronized direct-kernel A/B with `30` warmups and `100`
+randomized samples:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Arithmetic mixer | `0.22029` | `0.24414` | `0.22194` |
+| Constant value LUT | `0.42408` | `0.49819` | `0.43317` |
+
+The random constant-memory access and larger table outweigh the removed ALU
+work on M4 Max. The arithmetic W2 mixer remains production; this probe was
+not promoted.
