@@ -3211,3 +3211,23 @@ randomized samples:
 The random constant-memory access and larger table outweigh the removed ALU
 work on M4 Max. The arithmetic W2 mixer remains production; this probe was
 not promoted.
+
+## 81. M1 N64 vectorized activation staging rejected
+
+The scalar `threadgroup float[64]` activation staging in the M1/N64 K64
+source was changed in an in-memory probe to aligned `threadgroup float4[16]`
+storage, with vector writes and component-selecting reads. The candidate
+preserved FP32 semantics and was close to the current direct-kernel result,
+but the complete-module boundary regressed. At `(M=1,K=2048,N=8192)`, an
+identical-payload A/B used `30` warmups and `200` randomized synchronized
+samples:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Current scalar staging | `0.26233` | `0.44591` | `0.28936` |
+| Vectorized `float4` staging | `0.27481` | `0.48517` | `0.31545` |
+
+Module output remained within the existing contract (`relative delta=0`,
+`max_abs=0.01563`), but the candidate was not promoted because complete
+`QVQMLXLinear` latency is the governing metric. The scalar activation layout
+remains production.
