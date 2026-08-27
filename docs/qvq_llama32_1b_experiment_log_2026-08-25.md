@@ -1027,3 +1027,5 @@ and 3.
 | monitor | `llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | `divergence300` | complete; metric=0.19635416666666666; report `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | `divergence300` | complete; metric=0.24375; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo35-updown30-atomic-bf96be` | `gsm8k_platinum_cot` | complete; metric=0.3664185277088503; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be-gsm8k-platinum-v1.json` |
