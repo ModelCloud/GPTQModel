@@ -911,6 +911,8 @@ calls. Artifacts were kept outside the repository:
 | `/tmp/qvq-metal-profile-c2edaec9-m8-current-system.trace` | 66 MB | M8 System Trace |
 | `/tmp/qvq-metal-profile-c2edaec9-m8-current2.gputrace` | 183 MB | M8 Xcode GPU Frame Capture bundle |
 | `/tmp/qvq-metal-profile-c2edaec9-m8-counters2.trace` | 73 MB | Counter attempt with System Trace |
+| `/tmp/qvq-metal-profile-ac2-m1-system.trace` | 105 MB | AC/performance-mode M1 System Trace |
+| `/tmp/qvq-metal-profile-ac2-m8-system.trace` | 66 MB | AC/performance-mode M8 System Trace |
 
 The System Trace command used an absolute interpreter:
 
@@ -949,6 +951,13 @@ The GPU counter profile was unavailable on this host. `xctrace` accepted the add
 but reported `Selected counter profile is not supported on target device`; the standalone template name was also not
 available in this Xcode installation. Therefore this report does not claim hardware occupancy, register, cache, or
 stall-counter percentages. The trace and source support these structural conclusions:
+
+The corrected AC/performance-mode captures completed successfully with Xcode 26.6: the M1 trace ran for `9.46 s` and
+the M8 trace for `23.28 s`, both with eight active calls after warmup. The M1 trace contains separate compute submissions
+for the small-row LR kernel and its split-K reduction, confirming that the remaining M1 opportunity is a fused
+reduction/epilogue or graph-boundary optimization rather than another decode-barrier removal. The M8 trace keeps the
+multirow LR work in the expected single-kernel path. These captures are structural evidence only; the absent supported
+counter profile means they do not provide occupancy, cache, register-spill, or hardware stall percentages.
 
 | Opportunity | Dependency/evidence | Next action |
 |---|---|---|
