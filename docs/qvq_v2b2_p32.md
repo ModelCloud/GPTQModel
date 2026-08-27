@@ -3567,3 +3567,20 @@ The production LR path beats P32 on every tested shape and clears `2x` for
 M8/M16, but the universal `2x` objective remains unmet for M1 and M4. The
 focused LR32 suite remains green at `173 passed in 22.75s` on commit
 `e9f228f3`.
+
+The corresponding inner-kernel benchmark, using the same AC/performance-mode
+host and 30 warmups/100 interleaved samples with seed `20261030`, was:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | p50 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.45069` | `0.54248` | `1.204x` | `1.00901` | `0.98968` |
+| `(1,2048,2048)` | `0.44173` | `0.52921` | `1.198x` | `0.79838` | `0.77876` |
+| `(1,2048,8192)` | `0.66037` | `0.80323` | `1.216x` | `1.32746` | `1.01472` |
+| `(1,8192,2048)` | `0.57290` | `0.86965` | `1.518x` | `0.73229` | `1.41848` |
+| `(4,2048,8192)` | `0.97654` | `1.94490` | `1.992x` | `1.76757` | `3.08382` |
+| `(8,2048,8192)` | `0.83742` | `1.94315` | `2.320x` | `1.72662` | `2.62503` |
+| `(16,8192,8192)` | `2.45246` | `5.37658` | `2.192x` | `2.98645` | `5.75130` |
+
+The inner-kernel results confirm that LR32 is already a greater-than-2x
+kernel win for M8/M16, while M1 remains the limiting regime even before the
+full-module transform and epilogue are included.
