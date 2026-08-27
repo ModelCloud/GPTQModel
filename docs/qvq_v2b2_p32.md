@@ -3967,3 +3967,18 @@ snapshot is therefore fixed in the current PR head. These measurements do not
 establish a universal 2x result: the M1 ratios remain below 2x, while larger
 row tiles exceed 2x. The focused MLX/LR suite also passed all `493` tests in
 `135.16s` on this host.
+
+## 110. M4 K64 batching production-promotion rejection
+
+The exact K64-batched M4 W2 decoder was promoted temporarily behind the M4
+architecture and `(M=4,K>=2048,N>=8192)` guard to test it at the production
+`QVQMLXLinear` boundary. Its direct Torch oracle and shape-gating tests passed,
+but a same-process randomized A/B with the production K32 decoder did not show
+a repeatable gain. With 100 samples per arm at `(M=4,K=2048,N=8192)` on the
+AC/performance-mode M4 Max, the K64 candidate measured `1.046x` at p50 but
+`0.740x` by mean because of large candidate outliers.
+
+The candidate was removed rather than shipping a non-repeatable specialization.
+The production M4 K32 cooperative decoder remains enabled. This result also
+reinforces that exact decode parity alone is insufficient for promotion: the
+acceptance gate is complete-module latency under randomized same-process A/B.
