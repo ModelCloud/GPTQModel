@@ -1026,6 +1026,12 @@ _LR_SMALL_M1_N16_W2_SOURCE = (
         "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+    # M1/N16 W2 always decodes eight pairs per local ring.  Keep the loop
+    # unrolled for both scalar and vector-activation variants derived below.
+    .replace(
+        "  for(uint offset=0u;offset<8u;offset++){",
+        "  #pragma unroll\n  for(uint offset=0u;offset<8u;offset++){",
+    )
 )
 _LR_SMALL_M1_N16_W2_FP32_SOURCE = _LR_SMALL_M1_N16_W2_SOURCE.replace("=half(sum0);", "=sum0;")
 

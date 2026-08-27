@@ -2010,3 +2010,38 @@ scheme rather than a local compiler flag. A one-SIMD-group, two-accumulator
 N64 prototype was tested as that alternative; it failed complete-module
 parity (`relative L2` about `1.3`, maximum error above `259` for the wide
 shape) and was slower at `(M=1,K=2048,N=8192)`. It was rejected.
+
+### 44. M1/N16 W2 fixed-pair-loop unrolling
+
+The barrier-free M1/N16 W2 source now fully unrolls its fixed eight-pair
+decode loop. This source feeds both scalar and vector-activation M1/N16
+variants; the K64/N64 specialization already has the same optimization. The
+change is W2-only and leaves generic rates, multi-row kernels, and the LR32
+serialized ABI unchanged.
+
+The focused MLX probe was exact (`relative L2=0`, `max_abs=0`). A same-process
+100-sample inner-kernel A/B at `(M=1,K=2048,N=2048)` measured p50
+`0.75121 ms` before and `0.62006 ms` after, or `1.211x`. Complete-module
+probes were also exact and measured:
+
+| Shape | Baseline p50 (ms) | Unrolled p50 (ms) | Baseline/unrolled |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.72598` | `0.60679` | `1.196x` |
+| `(M=1,K=2048,N=2048)` | `0.92765` | `0.81185` | `1.143x` |
+| `(M=1,K=8192,N=2048)` | `0.98910` | `0.88702` | `1.115x` |
+
+A fresh 80-sample synchronized complete-module LR/P32 sweep after
+promotion measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.28796 / 0.36500` | `0.42206 / 0.54476` | `1.466x` |
+| `(M=1,K=2048,N=2048)` | `0.27442 / 0.38257` | `0.33821 / 0.47986` | `1.232x` |
+| `(M=1,K=2048,N=8192)` | `0.23015 / 0.30202` | `0.30690 / 0.36634` | `1.333x` |
+| `(M=1,K=8192,N=2048)` | `0.25956 / 0.28370` | `0.31854 / 0.34148` | `1.227x` |
+| `(M=4,K=2048,N=8192)` | `0.32052 / 0.34600` | `0.57098 / 0.64730` | `1.781x` |
+| `(M=8,K=2048,N=8192)` | `0.41756 / 0.51225` | `0.90946 / 1.01901` | `2.178x` |
+| `(M=16,K=8192,N=8192)` | `2.12317 / 2.27605` | `5.19750 / 5.47485` | `2.448x` |
+
+The full relevant suite remains `482 passed`; the M1/N16 unroll is retained,
+but the universal M1 `2x` objective is still open.
