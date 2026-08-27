@@ -1644,3 +1644,23 @@ same-process complete-module comparisons, it improved p50 from `0.30779` to
 on the same AC/performance-mode host measured `1.444x` P32/LR at `N=8192` and
 `1.363x` at `(M=1,K=8192,N=2048)`; Apple timing variance is larger than this
 small shape-constant effect. The LR32 suite remains `149 passed`.
+
+### 30. Post-integration production sweep
+
+A post-integration 100-sample synchronized sweep confirmed the current
+production comparison on the AC/performance-mode M4 Max:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.63310 / 0.86580` | `0.84567 / 1.15464` | `1.336x` |
+| `(M=1,K=2048,N=2048)` | `0.75410 / 0.87717` | `0.83758 / 1.02434` | `1.111x` |
+| `(M=1,K=2048,N=8192)` | `0.83490 / 1.22324` | `1.17490 / 1.59594` | `1.407x` |
+| `(M=1,K=8192,N=2048)` | `0.86625 / 1.11274` | `1.16579 / 1.41447` | `1.346x` |
+| `(M=4,K=2048,N=8192)` | `1.06587 / 1.17848` | `2.22885 / 2.39810` | `2.091x` |
+| `(M=8,K=2048,N=8192)` | `1.48244 / 1.84392` | `3.63167 / 3.93177` | `2.450x` |
+| `(M=16,K=8192,N=8192)` | `2.41737 / 2.66335` | `5.54708 / 5.94554` | `2.295x` |
+
+The M1 path is faster than P32 in every current production shape, but the
+universal 2x target remains unmet. Because the host's GPU clocks and background
+load move absolute latency, paired same-process A/B measurements remain the
+promotion gate for incremental changes.
