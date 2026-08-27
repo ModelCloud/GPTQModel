@@ -4873,7 +4873,9 @@ def qvq_mlx_gemv(
             # K=2048 shape: it removes the materialized MLX split reduction
             # while retaining the same two-way K parallelism.
             and k >= 2048
-            and n >= 8192
+            # At N=16384 the larger threadgroup cost outweighs the saved MLX
+            # reduction, so keep this specialization at the validated width.
+            and n == 8192
             and n % 64 == 0
         )
         m1_n64_n32pair_split8 = (

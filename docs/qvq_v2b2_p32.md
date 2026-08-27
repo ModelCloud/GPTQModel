@@ -3277,7 +3277,7 @@ revisiting this idea.
 ## 85. Promote shared-split-2 for M1 K2048 wide-N
 
 The existing fused shared-split-2 LR32 kernel was extended to the short-K
-wide-N M1 case `(M=1,K=2048,N>=8192)`. Previously this shape used two
+wide-N M1 case `(M=1,K=2048,N=8192)`. Previously this shape used two
 independent K64 launches per output tile followed by an MLX split reduction.
 The shared route keeps two K splits in one 256-threadgroup launch, stages one
 activation tile per split, and performs the deterministic split reduction in
@@ -3299,3 +3299,15 @@ relative L2 `0`) and improved p50 by `1.081x` and mean by `1.156x` in this
 run. The production dispatch now uses the fused route for this shape. The
 universal `2x` target remains unmet for M1; M4/M8/M16 continue to meet or
 exceed `2x` in the post-change complete-module benchmark.
+
+A same-process negative control at `(M=1,K=2048,N=16384)` preserved exact
+parity but regressed because the larger fused threadgroup outweighed the
+reduction savings:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous K64 split path | `0.62402` | `0.74751` | `0.63102` |
+| Shared split-2 fused | `0.71371` | `0.80147` | `0.69923` |
+
+The production predicate is therefore intentionally limited to `N=8192`
+rather than generalized to all larger widths.
