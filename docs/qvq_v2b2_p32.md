@@ -1853,3 +1853,16 @@ randomized LR/P32 samples per shape:
 The corrected kernel remains Torch-oracle tested and faster than P32 for every
 shape. The result confirms the race fix did not regress production behavior,
 but also confirms that a universal M1 `2x` speedup has not yet been reached.
+
+### 38. Rejected M1/N64 32-bit state-start specialization
+
+The W2 M1/N64 path was also tested with a specialized 32-bit nibble extractor
+for its only two state-start positions, pair `0` and pair `8`, instead of the
+general 64-bit circular-window helper. The extractor was exact against the
+existing implementation and the Torch output oracle, but its timing was not
+stable enough to promote. In a same-process alternating 80-sample inner-kernel
+comparison on the AC/performance-mode M4 Max, the new/old p50 values were
+`0.25267/0.24148 ms` at `K=512` (`0.956x`), `0.23806/0.24517 ms` at `K=1024`
+(`1.030x`), and `0.20715/0.19652 ms` at `K=2048` (`0.949x`). The mixed result
+does not justify changing the verified production source; the generic packed
+state helper remains in use.
