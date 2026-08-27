@@ -4064,7 +4064,11 @@ def qvq_mlx_gemv(
             x = mx.contiguous(x)
             trellis = mx.contiguous(trellis)
             bank_ids = mx.contiguous(bank_ids)
-            split_k = 1
+            # Two K64 batches per split expose more independent threadgroups
+            # for long-enough wide M1 GEMVs.  The half-K boundary must itself
+            # be K64-aligned because the source consumes two K32 subtiles at
+            # a time; retain one slice for the K128-only and K<256 cases.
+            split_k = 2 if k >= 256 and k % 128 == 0 else 1
             row_tile = 1
             group_size = 128
             output_width = 64

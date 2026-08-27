@@ -1792,3 +1792,20 @@ randomized LR/P32 order, 50 warmups, and 80 synchronized samples per arm.
 No claim is made for hardware stall or occupancy percentages: the available
 Xcode Metal System Trace configuration reported no GPU counter set and had
 shader timeline disabled.
+
+### 35. Aligned split-2 for wide M1 LR32
+
+The wide M1/N64 W2 path now uses two FP32 K slices when `K >= 256` and
+`K % 128 == 0`. The split boundary is K64-aligned because the specialized
+kernel consumes two K32 subtiles per batch. K128-only and non-aligned/smaller
+shapes remain on one slice; split-4 and split-8 were not promoted because
+their direct outputs failed the Torch oracle on this kernel path.
+
+The public split-2 path is covered by the K128/reuse and K2048 Torch-oracle
+regression test. The complete LR32 suite passes `152/152` tests. In a paired,
+randomized 120-sample complete-module comparison at `(M=1,K=2048,N=8192)` on
+the plugged-in AC/performance-mode M4 Max, split-1 measured `0.48383 ms` p50
+and `0.66980 ms` p95; split-2 measured `0.44460 ms` p50 and `0.77028 ms` p95.
+That is a `1.088x` p50 improvement, with higher p95 variance, while retaining
+exact Torch-oracle parity. This is a narrow latency optimization and does not
+claim the unresolved universal M1 `2x` target.

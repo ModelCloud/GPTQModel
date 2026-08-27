@@ -955,8 +955,8 @@ def test_lr32_m1_w2_n64_k128_grouped_kernel_matches_torch_oracle(monkeypatch):
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
 
 
-def test_lr32_m1_w2_n64_k128_grouped_kernel_matches_torch_oracle_across_k_tiles(monkeypatch):
-    """Exercise more than one K128 batch to catch shared-tile reuse races."""
+def test_lr32_m1_w2_n64_k128_and_split2_match_torch_oracle():
+    """Exercise K128 reuse and the production split-2 path against Torch."""
 
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
@@ -984,17 +984,23 @@ def test_lr32_m1_w2_n64_k128_grouped_kernel_matches_torch_oracle_across_k_tiles(
         bank_alt_id=bank_alt_id,
     )
 
-    # Keep exercising the multi-batch K128 source even though production
-    # dispatch currently selects K64 for K>128 after the synchronization A/B.
-    original = qvq_mlx._local_ring_m1_n64_kernel
+    # Exercise the multi-batch K128 source directly. Production dispatch uses
+    # K64 for K>128 because K128 needs the reuse hand-off barrier.
+    kernel = qvq_mlx._local_ring_m1_n64_kernel(alt_bank_id=2, k=in_features, n=out_features, k_tile=128)
+    actual_k128 = kernel(
+        inputs=[mx.array(x.numpy()), mx.array(trellis.numpy()), mx.array(packed_selectors.numpy())],
+        template=[("EdgeBits", 4), ("AltBank", 2), ("SplitK", 1)],
+        grid=(out_features // 64 * 128, 1, 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[(1, out_features)],
+        output_dtypes=[mx.float32],
+    )[0]
+    mx.eval(actual_k128)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual_k128)), expected, rtol=0, atol=2e-2)
 
-    def force_k128(**kwargs):
-        kwargs["k_tile"] = 128
-        return original(**kwargs)
-
-    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_n64_kernel", force_k128)
-
-    actual = qvq_mlx.qvq_mlx_gemv(
+    # The public path now uses two K64 slices for sufficiently large wide M1
+    # shapes and reduces the interleaved partial output on the MLX side.
+    actual_split2 = qvq_mlx.qvq_mlx_gemv(
         mx.array(x.numpy()),
         mx.array(trellis.numpy()),
         2,
@@ -1005,5 +1011,5 @@ def test_lr32_m1_w2_n64_k128_grouped_kernel_matches_torch_oracle_across_k_tiles(
         output_fp32=True,
         _bank_alt_id_value=2,
     )
-    mx.eval(actual)
-    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
+    mx.eval(actual_split2)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual_split2)), expected, rtol=0, atol=2e-2)
