@@ -131,6 +131,25 @@ stable across JSON/Markdown logs and evaluator artifacts.
 | 95ef88 | 6 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88` | Atomic | **complete** | **17.3750% (exact 4/300; mean div 5.357)** | **31.6791% (383/1209)** |
 | 4e4d0d | 7 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | Smooth + Atomic | **complete** | **19.6354% (exact 6/300; mean div 6.157)** | **31.5964% (382/1209)** |
 
+### Current Pareto-frontier allocation sweep (started 2026-08-27 UTC)
+
+These eight arms use the same clean YAQA/NM calibration and strict benchmark
+disjointness manifest as the completed matrix above. They are plain
+V2B2/P32 reselect quantizations (no Atomic/Smooth). D300 and GSM8K Platinum
+are queued automatically after each checkpoint is published. Eff. BPW values
+are weighted payload estimates.
+
+| Arm ID | GPU | Precision allocation | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | --- | --- | --- | --- |
+| 1fee11 | 0 | V+O W2.5 + all MLP W2.5 | **2.4801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | **quantizing** | pending | pending |
+| b2dee2 | 1 | V+O W3 + all MLP W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo30_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | **quantizing** | pending | pending |
+| dc38d2 | 2 | Q+K W2.5 + V+O W3.5 + all MLP W2.5 | **2.6094** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | **quantizing** | pending | pending |
+| 8dd86a | 3 | V+O W3.5 + Gate W2.5 + Up/Down W3 | **2.8421** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | **quantizing** | pending | pending |
+| 5fddf5 | 4 | V+O W3.5 + all MLP W3 | **2.9801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | **quantizing** | pending | pending |
+| 83b60c | 5 | Q+K W2.5 + V+O W3.5 + Up/Down W3.5 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | **quantizing** | pending | pending |
+| 4f018a | 6 | V+O W3.5 + Gate W2.5 + Up/Down W3.5 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | **quantizing** | pending | pending |
+| 8e67f6 | 7 | V+O W3.5 + Gate W3.5 + Up/Down W3 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | **quantizing** | pending | pending |
+
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
 output. They are not current active jobs; current arms are listed above:
