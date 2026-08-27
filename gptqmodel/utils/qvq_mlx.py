@@ -4751,6 +4751,7 @@ def qvq_mlx_gemv(
     bank_alt_id=None,
     output_fp32: bool = False,
     _bank_alt_id_value: int | None = None,
+    _inputs_contiguous: bool = False,
     _prepared_compander: _QVQMLXPreparedCompander | None = None,
 ):
     """Multiply transformed MLX activations by planar PGC16 tiles."""
@@ -4760,6 +4761,8 @@ def qvq_mlx_gemv(
     bits = normalize_qvq_rate(bits)
     if not isinstance(output_fp32, bool):
         raise TypeError("QVQ MLX output_fp32 must be a bool")
+    if not isinstance(_inputs_contiguous, bool):
+        raise TypeError("QVQ MLX _inputs_contiguous must be a bool")
     if not isinstance(dual_v2, bool):
         raise TypeError("QVQ MLX dual_v2 must be a bool")
     if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool) or not isinstance(v2b2_p32_lr, bool):
@@ -5020,9 +5023,10 @@ def qvq_mlx_gemv(
             # replace four independent groups.  A single K slice avoids the
             # separate split-K reduction; on M4 Max this is faster for the
             # targeted short-K, wide-N M1 shapes.
-            x = mx.contiguous(x)
-            trellis = mx.contiguous(trellis)
-            bank_ids = mx.contiguous(bank_ids)
+            if not _inputs_contiguous:
+                x = mx.contiguous(x)
+                trellis = mx.contiguous(trellis)
+                bank_ids = mx.contiguous(bank_ids)
             # Two K64 batches per split expose more independent threadgroups
             # for long-enough wide M1 GEMVs.  The half-K boundary must itself
             # be K64-aligned because the source consumes two K32 subtiles at
@@ -5455,6 +5459,13 @@ if _mlx_nn is not None:
             self.SV = SV.astype(mx.float32)
             self.bias = None if bias is None else bias.astype(mx.float32)
             self.bank_ids = None if bank_ids is None else bank_ids.astype(mx.uint8)
+            if self.v2b2_p32_lr:
+                # The specialized wide-N M1 kernel deliberately disables
+                # MLX's per-call contiguous-input preparation.  Checkpoint
+                # metadata is immutable, so make these two buffers contiguous
+                # once at module construction instead of at every forward.
+                self.trellis = mx.contiguous(self.trellis)
+                self.bank_ids = mx.contiguous(self.bank_ids)
             self.bank_alt_id = None if bank_alt_id is None else bank_alt_id.astype(mx.uint8)
             self._bank_alt_id_value = None
             if self.v2b2_p32 or self.v2b2_p32_lr:
@@ -5537,6 +5548,7 @@ if _mlx_nn is not None:
                 bank_alt_id=self.bank_alt_id,
                 output_fp32=True,
                 _bank_alt_id_value=self._bank_alt_id_value,
+                _inputs_contiguous=self.v2b2_p32_lr,
             )
             if row_scale is not None:
                 output = output * row_scale

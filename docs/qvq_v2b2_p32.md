@@ -3150,3 +3150,24 @@ host. Both arms used the same module payload and input, with `30` warmups and
 N64 was `1.071x` faster by p50 and `1.099x` faster by mean, so the existing
 wide-N N64 dispatch remains enabled. This is a negative control for the
 N16-wide-N hypothesis; it does not close the M1 complete-module gap.
+
+## 78. Constructor-staged M1 contiguous inputs
+
+The specialized wide-N M1 kernel requires flat contiguous inputs. Previously
+`qvq_mlx_gemv()` called `mx.contiguous()` for the activation, trellis, and
+selectors on every wide-N M1 forward. LR `QVQMLXLinear` now stages its
+immutable trellis and selector buffers once during construction and marks its
+transformed activation as prepared for the guarded M1 dispatch. Direct
+`qvq_mlx_gemv()` callers retain the old safe preparation path by default.
+
+The complete-module A/B at `(M=1,K=2048,N=8192)` used the same payload and
+input, `30` warmups, and `200` randomized synchronized samples per arm. The
+outputs were exactly equal (`max_abs=0`, relative L2 `0`):
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Per-forward contiguous preparation | `0.45140` | `1.15180` | `0.59517` |
+| Constructor-staged inputs | `0.45058` | `1.15655` | `0.57312` |
+
+This is a small and shape-specific boundary improvement, not evidence for the
+universal `2x` target.
