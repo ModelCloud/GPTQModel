@@ -3067,3 +3067,32 @@ these values should be treated as a separate variance sample:
 
 After the state-mask correction, the focused LR suite remains `169 passed`
 and the supported QVQ/MLX suite remains `612 passed, 9 skipped`.
+
+## 75. M1 short-K N256 N32 promotion
+
+The M1 W2 N32 fused route is now promoted for the additional short-K shape
+`(M=1,K=2048,N=256)`. The route is shape-gated because its measured benefit
+does not generalize to every small-N case; other short-K M1 shapes retain
+their existing specialized routes. The route uses the literal packed-pair
+LR recurrence and fused split-32 reduction, and its output is exact against
+the Torch dense LR oracle within the existing MLX tolerance.
+
+The complete-module A/B was run on the plugged-in AC/high-performance M4 Max
+host with `30` warmups, `100` randomized synchronized samples per arm, and
+seed `20261006`:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.55648` | `0.79750` | `1.433x` | `1.11366` | `1.35864` |
+| `(M=1,K=2048,N=2048)` | `0.62194` | `0.86800` | `1.396x` | `0.97048` | `1.27200` |
+| `(M=1,K=2048,N=8192)` | `0.83229` | `1.20246` | `1.445x` | `1.48010` | `1.87426` |
+| `(M=1,K=8192,N=2048)` | `0.74402` | `1.21515` | `1.633x` | `0.97737` | `2.22687` |
+| `(M=4,K=2048,N=8192)` | `1.09706` | `2.35198` | `2.144x` | `2.08265` | `3.44157` |
+| `(M=8,K=2048,N=8192)` | `1.41104` | `3.81265` | `2.702x` | `1.93408` | `5.04070` |
+| `(M=16,K=8192,N=8192)` | `2.55454` | `5.72223` | `2.240x` | `3.21590` | `6.54780` |
+
+The focused LR suite passed (`169 passed`) and the supported QVQ/MLX suite
+passed (`612 passed, 9 skipped`) after the promotion. The change is safe and
+improves the targeted short-K N256 route, but the complete-module result is
+still only `1.433x` there. The universal `2x` target therefore remains
+unproven; current `2x+` results are confined to larger-row regimes.

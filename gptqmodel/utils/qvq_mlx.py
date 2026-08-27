@@ -4907,9 +4907,9 @@ def qvq_mlx_gemv(
             and transition_bits == 4
             and m == 1
             and split_k == 16
-            # N32 is promoted for the measured K2048/N2048 attention-shaped
-            # case; long-K N32 remains enabled for the existing N<=2048 path.
-            and (k >= 8192 or (k == 2048 and n == 2048))
+            # N32 is promoted for the measured short-K N2048 and N256 cases;
+            # long-K N32 remains enabled for the existing N<=2048 path.
+            and (k >= 8192 or (k == 2048 and n in (256, 2048)))
             and n <= 2048
             and n % 32 == 0
             and not m1_n64
@@ -4923,7 +4923,7 @@ def qvq_mlx_gemv(
             output_fp32
             and transition_bits == 4
             and m == 1
-            and k >= 8192
+            and (k >= 8192 or (k == 2048 and n == 256))
             and k % 1024 == 0
             and n <= 2048
             and n % 32 == 0
