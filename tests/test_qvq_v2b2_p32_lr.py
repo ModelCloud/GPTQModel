@@ -76,18 +76,20 @@ def test_lr32_m1_n64_split_policy(k, expected):
 
 
 @pytest.mark.parametrize(
-    "in_features, kernel_name",
+    "in_features, out_features, kernel_name",
     (
-        (2048, "_local_ring_m1_fused_split16_kernel"),
-        (2304, "_local_ring_m1_fused_split_kernel"),
+        (2048, 256, "_local_ring_m1_fused_split16_kernel"),
+        (2048, 240, "_local_ring_m1_fused_split16_kernel"),
+        (2304, 256, "_local_ring_m1_fused_split_kernel"),
     ),
 )
-def test_lr32_m1_fused_split_route_matches_torch_oracle(monkeypatch, in_features, kernel_name):
+def test_lr32_m1_fused_split_route_matches_torch_oracle(
+    monkeypatch, in_features, out_features, kernel_name
+):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
 
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_SPLIT2", False)
-    out_features = 256
     _, _, trellis, selectors = _random_lr_payload(
         2,
         tiles=(in_features // 32) * (out_features // 8),
