@@ -1086,3 +1086,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | `divergence300` | complete; metric=0.3198958333333333; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | `divergence300` | complete; metric=0.31302083333333336; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | `divergence300` | complete; metric=0.32385416666666667; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5-div300-dev-v1.json` |
