@@ -3432,3 +3432,23 @@ M1 path has a repeated dispatch/reduction boundary; source inspection still
 shows the expected shared activation and synchronization topology. The next
 optimization must therefore pass a synchronized complete-module A/B rather
 than relying on inferred counter metrics.
+
+## 89. M1 reduced-precision transform-boundary probes rejected
+
+Several in-memory probes attempted to reduce the FP32 activation/output
+boundary around the existing M1 W2 half2 decoder. A specialized FP16-output
+kernel retained FP32 accumulation and was oracle-close, but only improved the
+complete-module A/B by `1.066x` at p50 and `1.093x` by mean; its maximum
+module-output difference from the production FP32 path was `0.125`. A
+half-input decoder including the conversion was only `1.082x` at p50 and
+`1.032x` by mean, with the same `0.125` maximum difference. A full FP16
+Hadamard/scale-input variant was unstable across samples, reached only
+`1.023x` at p50, and showed up to `0.25` absolute difference.
+
+The generic FP16-output route was slower because it disabled the shape-
+specialized M1 decoder. None of these variants approaches the required `2x`
+M1 speedup, and the reduced-precision transform variants add numerical drift,
+so no production dispatch or checkpoint behavior was changed. The remaining
+M1 opportunity is a genuinely fused full-module transform/epilogue design,
+which must be benchmarked at the `QVQMLXLinear` boundary and checked against
+the dense/original FP32 path.
