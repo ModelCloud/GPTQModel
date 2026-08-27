@@ -2762,3 +2762,22 @@ oracle agreement within the existing tolerance (`max_abs=3.05e-5` for
 `1.076x` and `1.069x`, respectively. These are modest gains, but they are
 consistent with the long-K result and justify retaining the common half2
 helper in the small-row W2 builders.
+
+## 64. Short-N M1 N64 recheck rejected
+
+The grouped M1/N64 route was rechecked against the production barrier-free
+N16 route at `(M=1,K=2048,N=2048)` on the AC/high-performance M4 Max. A
+same-process randomized/interleaved run used the same FP16 activation and
+identical synchronized 160-sample timing for both LR routes and the P32
+control:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| LR N16 | `0.20485` | `0.30591` | `0.21973` |
+| LR N64 | `0.23283` | `0.40147` | `0.25868` |
+| P32 | `0.22081` | `0.35825` | `0.23749` |
+
+N64 was `0.880x` the N16 speed by p50 (12.0% slower) and was also slower
+than P32 (`0.948x` P32/N64). The temporary short-N dispatch override was
+therefore reverted; production keeps grouped N64 restricted to the measured
+very-wide M1 shapes.
