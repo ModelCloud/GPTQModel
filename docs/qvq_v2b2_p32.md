@@ -2781,3 +2781,72 @@ N64 was `0.880x` the N16 speed by p50 (12.0% slower) and was also slower
 than P32 (`0.948x` P32/N64). The temporary short-N dispatch override was
 therefore reverted; production keeps grouped N64 restricted to the measured
 very-wide M1 shapes.
+
+## 65. Fresh AC/performance-mode recheck and rejected M4 MMA probe
+
+The committed tree was rechecked on the plugged-in Apple M4 Max in
+high-performance mode after removing a temporary M4 `simdgroup_matrix` A/B.
+The inner-kernel benchmark used randomized LR/P32 order, synchronized samples,
+and the immutable alternative-bank value resolved outside the timed loop. The
+complete-module benchmark used the same policy and included both Hadamard
+transforms and MLX graph overhead.
+
+Fresh inner-kernel results (`30` warmups, `100` samples per arm) were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.20396` | `0.28246` | `1.385x` | `0.24476` | `0.30898` |
+| `(M=1,K=2048,N=2048)` | `0.26535` | `0.29498` | `1.112x` | `0.29736` | `0.32331` |
+| `(M=1,K=2048,N=8192)` | `0.23546` | `0.29504` | `1.253x` | `0.28824` | `0.35357` |
+| `(M=1,K=8192,N=2048)` | `0.58456` | `0.87348` | `1.494x` | `1.53179` | `1.60707` |
+| `(M=4,K=2048,N=8192)` | `0.95610` | `1.95446` | `2.044x` | `1.35620` | `3.07791` |
+| `(M=8,K=2048,N=8192)` | `0.87733` | `2.07929` | `2.370x` | `1.47262` | `3.08605` |
+| `(M=16,K=8192,N=8192)` | `2.49456` | `5.40746` | `2.168x` | `3.11191` | `5.93705` |
+
+The corresponding complete-module results were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.57792` | `0.82160` | `1.422x` | `1.45711` | `1.59709` |
+| `(M=1,K=2048,N=2048)` | `0.66250` | `0.88785` | `1.340x` | `1.01324` | `1.68604` |
+| `(M=1,K=2048,N=8192)` | `0.89387` | `1.25221` | `1.401x` | `2.16190` | `2.52980` |
+| `(M=1,K=8192,N=2048)` | `0.75598` | `1.21808` | `1.611x` | `1.11753` | `2.15313` |
+| `(M=4,K=2048,N=8192)` | `1.15023` | `2.38485` | `2.073x` | `1.97925` | `3.45983` |
+| `(M=8,K=2048,N=8192)` | `1.45969` | `3.77665` | `2.587x` | `2.53926` | `5.16118` |
+| `(M=16,K=8192,N=8192)` | `2.56021` | `5.69238` | `2.223x` | `2.99778` | `6.21053` |
+
+The M4 matrix-kernel experiment was measured separately at
+`(M=4,K=2048,N=8192)` with identical tensors and randomized synchronized
+ordering. The existing cooperative decoder was faster than the temporary
+8x8 matrix route: cooperative p50 `0.95573 ms` versus MMA p50 `1.20721 ms`
+(`0.792x` candidate/current), with means `1.09981 ms` versus `1.32298 ms`.
+The candidate was oracle-close (`max_abs=3.81e-4`) but is rejected and no M4
+MMA dispatch remains in production.
+
+The focused Metal/QVQ suite after the revert is `611 passed, 9 skipped`.
+The current production result is therefore still above `2x` for the M4/M8/M16
+inner shapes and for M4/M8/M16 complete modules, but not for every M1 shape.
+
+## 66. Bounded Metal System Trace after the AC/performance-mode recheck
+
+The M1 long-K workload was captured with Xcode 26.6 `xctrace` using the
+`Metal System Trace` template:
+
+```text
+xcrun xctrace record --template 'Metal System Trace' \
+  --output /tmp/qvq_lr_metal_20260828_m1k8192n2048.trace --launch -- \
+  /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+  scripts/profile_qvq_mlx_metal.py --m 1 --k 8192 --n 2048 \
+  --warmup 30 --active-calls 20
+```
+
+The target exited normally; the trace duration was `9.526450 s` and the
+bundle size was approximately `47 MB`. It shows the expected MLX Metal
+activity and LR32 dispatches, but this macOS/Xcode/device combination reports
+`Counter Set: (null)` and `Shader Timeline: Disabled`. No numeric occupancy,
+cache, or stall percentage is inferred from this trace. Source-level evidence
+continues to identify the generic multirow route's level-table setup barrier
+and two barriers per K32 tile; the promoted M1 fused split routes avoid that
+architecture. A direct MLX `mx.metal.start_capture()` attempt was also
+unsupported on this host (`Capture layer is not inserted`), so no `.gputrace`
+artifact is committed.
