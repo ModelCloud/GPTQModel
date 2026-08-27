@@ -2633,3 +2633,29 @@ The focused LR32 suite is `168 passed` and the broader MLX suite is
 `326 passed`. M1 complete-module speedup is still below the universal `2x`
 goal because transform and epilogue work remains outside the Metal kernel;
 the kernel-level long-K M1 result is materially improved.
+
+## 59. Output-H32 fusion probe rejected on AC/high-performance M4 Max
+
+An offline prototype fused a normalized local H32 transform into the long-K
+M1/N32 W2 split-32 kernel, followed by an outer transform intended to recover
+the full-width output Hadamard. The candidate was compared with the current
+full-H module path at `(M=1,K=8192,N=2048)` using identical tensors and
+synchronized MLX execution.
+
+The candidate was marginally faster at the complete-module boundary, but it
+was not functionally equivalent:
+
+| Metric | Current full-H | Fused local-H32 + outer-H |
+|---|---:|---:|
+| p50 latency (ms) | `0.30752` | `0.30492` |
+| p95 latency (ms) | `0.44333` | `0.44864` |
+| mean latency (ms) | `0.33603` | `0.34007` |
+| output max absolute error | — | `650.4410` |
+| output relative L2 | — | `1.3898` |
+
+The apparent p50 improvement is therefore invalid and the prototype is not
+promoted. The likely issue is an output-Hadamard factorization/permutation
+mismatch between the kernel's N32 lane ordering and the MLX outer reshape;
+the existing full-width transform semantics remain unchanged. Any future H32
+fusion must first pass an explicit coordinate-level permutation oracle before
+being benchmarked for speed.
