@@ -705,7 +705,7 @@ def test_qvq_dynamic_bits_allow_only_supported_rates():
         QVQConfig(dynamic={r".*q_proj": {"bits": 9}}, offload_to_disk=False)
     with pytest.raises(ValueError, match="half-integer"):
         QVQConfig(dynamic={r".*q_proj": {"bits": 2.25}}, offload_to_disk=False)
-    with pytest.raises(ValueError, match="only supports `bits` and `yaqa_regularization` overrides"):
+    with pytest.raises(ValueError, match="only supports `bits`, `format`, and `yaqa_regularization` overrides"):
         QVQConfig(dynamic={r".*q_proj": {"group_size": 128}}, offload_to_disk=False)
 
     with pytest.raises(ValueError, match="format=qvq_v4.*W1 through W4"):
@@ -713,6 +713,24 @@ def test_qvq_dynamic_bits_allow_only_supported_rates():
             bits=2,
             format="qvq_v4",
             dynamic={r".*q_proj": {"bits": 4.5}},
+            offload_to_disk=False,
+        )
+
+    mixed = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        bank_count=2,
+        dynamic={r".*up_proj": {"bits": 5, "format": "qvq"}},
+        offload_to_disk=False,
+    )
+    assert mixed.dynamic[r".*up_proj"] == {"bits": 5, "format": "qvq"}
+
+    with pytest.raises(ValueError, match="format=qvq_v4.*W1 through W4"):
+        QVQConfig(
+            bits=2,
+            format="qvq_v2b2_p32",
+            bank_count=2,
+            dynamic={r".*up_proj": {"bits": 4.5, "format": "qvq_v4"}},
             offload_to_disk=False,
         )
 

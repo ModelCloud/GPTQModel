@@ -83,6 +83,16 @@ def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optio
     qcfg_clone = copy.deepcopy(qcfg)
     if dynamic_overrides:
         qcfg_clone.bits = dynamic_overrides.get("bits", qcfg_clone.bits)
+        if "format" in dynamic_overrides:
+            qcfg_clone.format = FORMAT(str(dynamic_overrides["format"]).strip().lower())
+            # Format controls the serialized geometry; reset inherited bank
+            # state when a module switches away from the global format.
+            if qcfg_clone.format in (FORMAT.QVQ, FORMAT.QVQ_DUAL_V2, FORMAT.QVQ_V4, FORMAT.QVQ_V4_L18):
+                qcfg_clone.bank_count = 1
+            elif qcfg_clone.format == FORMAT.QVQ_V2B4_P64:
+                qcfg_clone.bank_count = 4
+            elif qcfg_clone.format == FORMAT.QVQ_V2B2_P32:
+                qcfg_clone.bank_count = 2
     if qcfg_clone.rounding == "yaqa":
         # Materialize the effective rate-specific damping on the per-module
         # clone consumed by ``process``.  Keeping this only in

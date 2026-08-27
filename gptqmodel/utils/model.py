@@ -704,6 +704,7 @@ def create_quant_module(
     tmp_desc_act = desc_act
     tmp_sym = sym
     tmp_pack_dtype = pack_dtype
+    tmp_format = format
     tmp_init_kwargs = dict(init_kwargs or {})
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
@@ -721,6 +722,9 @@ def create_quant_module(
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
+            if FORMAT_FIELD_CODE in overrides or "format" in overrides:
+                raw_format = overrides.get(FORMAT_FIELD_CODE, overrides.get("format"))
+                tmp_format = raw_format if isinstance(raw_format, FORMAT) else FORMAT(str(raw_format).strip().lower())
 
             if format == FORMAT.FP8:
                 fp8_format_override = overrides.get(FORMAT_FIELD_CODE, overrides.get("fmt"))
@@ -765,10 +769,31 @@ def create_quant_module(
     validate_bits = tmp_bits if preserve_rate else quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if preserve_rate else validate_bits
 
+    # QVQ's format selects its serialized geometry.  A dynamic format override
+    # must therefore update the constructor flags inherited from the global
+    # config (otherwise a normal V2 W5 module could be instantiated as V2B2).
+    if getattr(linear_cls, "QUANT_TYPE", None) == "qvq":
+        tmp_init_kwargs["format"] = tmp_format
+        if tmp_format in (FORMAT.QVQ, FORMAT.QVQ_DUAL_V2):
+            tmp_init_kwargs.update(vector_size=2, trellis_window=16, bank_count=1)
+        elif tmp_format == FORMAT.QVQ_V4:
+            tmp_init_kwargs.update(vector_size=4, trellis_window=16, bank_count=1)
+        elif tmp_format == FORMAT.QVQ_V4_L18:
+            tmp_init_kwargs.update(vector_size=4, trellis_window=18, bank_count=1)
+        elif tmp_format == FORMAT.QVQ_V2B4_P64:
+            tmp_init_kwargs.update(vector_size=2, trellis_window=16, bank_count=4)
+        elif tmp_format == FORMAT.QVQ_V2B2_P32:
+            tmp_init_kwargs.update(vector_size=2, trellis_window=16, bank_count=2)
+        tmp_init_kwargs.update(
+            dual_v2=tmp_format == FORMAT.QVQ_DUAL_V2,
+            v2b4_p64=tmp_format == FORMAT.QVQ_V2B4_P64,
+            v2b2_p32=tmp_format == FORMAT.QVQ_V2B2_P32,
+        )
+
     # GPTQ modules need the checkpoint format to select between the continuous
     # (gptq/gptq_v2) and planar (gptq_p) packed layouts.
     if issubclass(linear_cls, GPTQQuantLinear):
-        tmp_init_kwargs.setdefault("format", format)
+        tmp_init_kwargs.setdefault("format", tmp_format)
 
     # when loading a quantized model, device is the target passed through the GPT-QModel load path
     # check in_features and out_features validate
@@ -783,7 +808,7 @@ def create_quant_module(
         out_features=out_features,
         device=DEVICE(device) if isinstance(device, str) else device,
         adapter=adapter, # TODO FIX ME..need to pass Lora if loaded
-        format=format,
+        format=tmp_format,
     )
     if err is not None:
         raise err
