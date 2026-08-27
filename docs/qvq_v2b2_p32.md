@@ -3613,6 +3613,32 @@ This corrected measurement confirms the production-comparable inner LR path
 is faster than P32 for every shape and clears `2x` for M8/M16. M1 and M4
 remain below the universal `2x` target.
 
+## 98. M4 barrier-free two-row register probe rejected
+
+The M4 cooperative shared-decode route was compared with a different mapping
+that assigns one barrier-free register/SIMD kernel to each two-row pair. The
+candidate decodes each K32xN8 tile twice instead of publishing one decoded tile
+through threadgroup memory. At `(M=4,K=2048,N=8192)`, the candidate showed
+small FP16 output drift relative to production:
+
+```text
+max_abs = 0.0625
+differing elements = 119
+```
+
+The complete-module A/B used 150 randomized/interleaved samples per arm, 30
+warmups, and seed `20261103` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 cooperative | `1.13456` | `1.87601` | `1.23070` | `0.90508` | `3.95567` |
+| Two-row register candidate | `1.50431` | `2.09289` | `1.57543` | `1.28812` | `2.65683` |
+
+The candidate measured `0.754x` at p50 and `0.781x` by mean. Repeating decode
+for the second row pair costs more than the removed shared-memory barriers, so
+the cooperative M4 route remains enabled and the universal `2x` target remains
+open.
+
 ## 95. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
