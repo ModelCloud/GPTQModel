@@ -1215,3 +1215,5 @@ and 3.
 | monitor | `llama32-1b-w2-w35-qk30-f0276c` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=0.012403984347447177; delta_kl=0.03044081982059848; answer_logprob_delta=-0.03612032755097346; answer_margin_delta=0.12432724682252798; critical_top1=0.9725151805688719'; report `/root/qvq-results/llama32-1b-w2-w35-qk30-f0276c-micro-math-v1.json` |
 
 | monitor | `llama32-1b-w2-w32-mid-down35-c84f7a` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.0446749097048761; delta_kl=0.04016066288985497; answer_logprob_delta=0.2123295553584597; answer_margin_delta=1.018183010727612; critical_top1=0.968040907638223'; report `/root/qvq-results/llama32-1b-w2-w32-mid-down35-c84f7a-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-late-gate35-e6b204` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.03310974608763225; delta_kl=0.04098139690999987; answer_logprob_delta=0.12644648907789544; answer_margin_delta=1.1331510116804893; critical_top1=0.9705976350271652'; report `/root/qvq-results/llama32-1b-w2-w32-late-gate35-e6b204-micro-math-v1.json` |
