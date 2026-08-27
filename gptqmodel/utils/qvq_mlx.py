@@ -3905,10 +3905,10 @@ def qvq_mlx_gemv(
         if m1_n64:
             # Four N16 SIMD tiles share one K32 activation tile in a
             # 128-thread group.  The shared activation load and one barrier
-            # replace four independent groups.  W2 FP32 uses two K slices;
-            # this preserves the complete K reduction while reducing the
-            # M1-wide launch count substantially.
-            split_k = 2
+            # replace four independent groups.  A single K slice avoids the
+            # separate split-K reduction; on M4 Max this is faster for the
+            # targeted short-K, wide-N M1 shapes.
+            split_k = 1
             row_tile = 1
             group_size = 128
             output_width = 64

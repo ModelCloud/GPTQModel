@@ -1383,6 +1383,9 @@ corrected compiled complete-module run used 80 synchronized samples per arm.
 The table reports p50 because the N64 dispatch changed the production path
 after the older p95 table was recorded:
 
+These compiled measurements predate the split-K removal described in section
+23 and are retained as the preceding N64 baseline.
+
 | Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
 |---|---:|---:|---:|
 | `(M=1,K=2048,N=256)` | `0.27840` | `0.34929` | `1.255x` |
@@ -1405,7 +1408,7 @@ The M1 W2 FP32 path now groups four existing N16 SIMD tiles into one 128-thread
 launch. SIMD group 0 loads each K32 activation tile once into a 32-float
 threadgroup buffer; the four SIMD groups then reuse it while decoding their
 independent N16 output tiles. This reduces the launch count for wide output
-matrices and preserves the existing W2 state decoder and split-K reduction.
+matrices and preserves the existing W2 state decoder.
 
 The specialization is deliberately narrow: `M=1`, W2, FP32 output,
 `K<=2048`, `K%64==0`, `N>=2048`, and `N%64==0`. Other shapes retain the
@@ -1416,6 +1419,9 @@ reconstruction oracle passed for the new route, and the complete LR suite was
 On the AC/performance-mode M4 Max, using the same payload and selector bytes,
 randomized LR/P32 ordering, and 80 synchronized samples per arm, the updated
 uncompiled complete-module p50 results were:
+
+These measurements use the preceding split-2 N64 policy; the split-1 update
+and its focused A/B result are recorded in section 23.
 
 | Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
 |---|---:|---:|---:|
@@ -1439,3 +1445,26 @@ error at `(M=1,K=2048,N=8192)`. Two N128 extensions were also rejected: the
 original extension produced `2.9%` relative error, while a 128-thread
 two-output-tile variant produced `7.2%`. Neither change was promoted; the
 scalar N64 layout remains the verified implementation.
+
+### 23. M1 N64 split-K removal
+
+The N64 M1 specialization initially used two K slices so that the short-K
+wide-N case could use more threadgroups. A same-process A/B/C measurement showed
+that its separate MLX reduction outweighed that occupancy benefit on the M4
+Max. The production specialization therefore uses one K slice and no split
+reduction for the targeted `M=1`, W2, `K<=2048`, wide-N route.
+
+On AC/performance mode, with identical payloads and randomized ordering, 120
+samples per arm measured the complete module as follows:
+
+| Shape | LR N64 split-1 p50 / p95 (ms) | Previous LR N64 split-2 p50 / p95 (ms) | P32 p50 / p95 (ms) |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=2048)` | `0.62235 / 0.83012` | `0.63165 / 0.88406` | `0.75183 / 1.04434` |
+| `(M=1,K=2048,N=8192)` | `0.68408 / 0.94072` | `0.76160 / 1.09384` | `1.10202 / 1.44340` |
+
+This is a `1.113x` improvement over the previous LR policy at `N=8192` and
+`1.611x` versus P32 in the same measurement. An explicitly unrolled two-N16
+tile variant was oracle-exact but slower (`0.63644` versus `0.62398` ms inner
+p50), so it was not promoted. The universal M1 2x target is still not met;
+the remaining gap is now in the LR decoder/launch path rather than split-K
+reduction.
