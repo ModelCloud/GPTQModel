@@ -2241,9 +2241,12 @@ def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = 
 def _local_ring_small_output_width(n: int) -> int:
     """Choose the small-row output tile from measured M4 Max occupancy."""
 
-    # N16 wins for the common N=2048 projection.  The wide N=8192 projection
-    # benefits from twice as many N8 groups, which better fills the GPU.
-    return 8 if n >= 8192 else 16
+    # N16 reduces the number of threadgroups and repeated LR decode work.  On
+    # the AC/performance-mode M4 Max recheck it wins for both narrow and wide
+    # M1/M2 projection shapes, including N=8192.  Keep this centralized so a
+    # future GPU-specific policy can replace it without touching dispatch.
+    del n
+    return 16
 
 
 def _local_ring_multirow_kernel(
@@ -3817,7 +3820,7 @@ def qvq_mlx_gemv(
                 alt_bank_id=alt_id,
                 single_row=m == 1,
                 # The four-at-a-time producer layout pays off once there are
-                # enough output tiles to amortize its vector loads.  Keep the
+                # enough output tiles to amortize its vector loads. Keep the
                 # smallest projection on the scalar-shuffle source, which is
                 # measurably closer to the M4 Max launch floor there.
                 vector_activation=m == 1 and n >= 2048,

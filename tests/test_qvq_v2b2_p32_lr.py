@@ -58,7 +58,7 @@ def test_lr32_multirow_split_policy(m, k, n, output_fp32, expected):
     assert _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32) == expected
 
 
-@pytest.mark.parametrize("n,expected", ((2048, 16), (8192, 8)))
+@pytest.mark.parametrize("n,expected", ((256, 16), (2048, 16), (8192, 16)))
 def test_lr32_small_row_output_width_policy(n, expected):
     from gptqmodel.utils.qvq_mlx import _local_ring_small_output_width
 

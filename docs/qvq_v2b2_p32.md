@@ -691,8 +691,8 @@ boundary at M=4. W2 combines each ring's two packed words into one circular
 the same fast state-start path. The W2 N8 kernels load each compressed word once per SIMD group and distribute it to the
 four decoder lanes with SIMD shuffles. The LR production kernel specializes the immutable alternate-bank ID as a Metal
 template value, broadcasts selector metadata once per N8 tile, and reads the fixed PGC16-v1 FP16 level table from Metal
-constant memory. For small M, N16 is used for the common N=2048 projection while wide N=8192 uses N8 to expose more
-independent groups. `QVQMLXLinear` keeps the transformed LR activation in FP32, avoiding the legacy
+constant memory. For small M, N16 is used to reduce threadgroup count and repeated local-ring decode work; this was
+revalidated on an AC/performance-mode M4 Max for both N=2048 and N=8192. `QVQMLXLinear` keeps the transformed LR activation in FP32, avoiding the legacy
 FP16 row-range/narrow/rescale graph. FP32 production GEMVs use measured shape-specific split-K dispatch for wide FFN
 and down-projection shapes; the M=4, K<=2048, N>=8192 case uses the unsplit row-tile-4 path. FP16 output disables
 split-K so its reduction preserves the original full-K rounding semantics. No dense weight matrix is materialized.
@@ -786,6 +786,28 @@ The corresponding complete-module recheck used 50 warmup calls and 80 synchroniz
 
 These latest numbers are timing evidence for this AC/power-mode state, not universal device guarantees. The inner LR
 kernel exceeds 2x on representative wide M4/M8/M16 shapes; complete-module LR exceeds 2x only at M16 in this recheck.
+
+#### AC/performance-mode M1 N16 dispatch recheck
+
+The previous table predates the small-row N16 policy update. With AC power and performance mode enabled, a paired
+M1/M2 sweep found N16 faster than N8 for every tested small-row shape. The production complete-module benchmark used
+50 warmup calls and 120 synchronized samples per format:
+
+| Shape (M,K,N) | Full LR p50 (ms) | Full P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| (1,2048,256) | 0.70656 | 0.81794 | 1.16x |
+| (1,2048,2048) | 0.77479 | 0.82725 | 1.07x |
+| (1,2048,8192) | 0.49392 | 0.56488 | 1.14x |
+| (1,8192,2048) | 0.59487 | 0.62975 | 1.06x |
+| (4,2048,8192) | 0.56729 | 0.80917 | 1.43x |
+| (8,2048,8192) | 0.70498 | 1.18560 | 1.68x |
+| (16,8192,8192) | 2.62131 | 5.57840 | 2.13x |
+
+The M1 kernel recheck matched the prior output within relative L2 below `5e-7` while changing only the small-row
+output grouping. An M1 K2048 N8192 Metal System Trace captured the specialized
+`...lr_small_fp32_split2_n16_m1_vec_alt2...` kernel. The trace shows the expected small-row path; it does not expose
+Apple hardware stall/occupancy counters on this target. `xctrace` listed Metal GPU Counters, but the counter profile
+returned “Selected counter profile is not supported on target device”.
 
 ### 11.4 Metal profiling findings
 
