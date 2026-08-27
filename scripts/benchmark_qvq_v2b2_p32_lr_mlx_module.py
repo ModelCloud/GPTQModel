@@ -28,11 +28,16 @@ DEFAULT_SHAPES = (
 )
 
 
-def _module(rng: np.random.Generator, m: int, k: int, n: int, *, lr: bool):
-    tile_count = (k // 32) * (n // 8) if lr else (k // 16) * (n // 16)
-    trellis = mx.array(rng.integers(-2**31, 2**31, (tile_count, 16), dtype=np.int32))
-    bank_ids = mx.array(rng.integers(0, 256, tile_count, dtype=np.uint8))
-    bank_alt_id = mx.array(np.array([1], dtype=np.uint8))
+def _module(
+    m: int,
+    k: int,
+    n: int,
+    *,
+    lr: bool,
+    trellis,
+    bank_ids,
+    bank_alt_id,
+):
     return QVQMLXLinear(
         bits=2,
         in_features=k,
@@ -49,23 +54,46 @@ def _module(rng: np.random.Generator, m: int, k: int, n: int, *, lr: bool):
     )
 
 
-def _measure(module, x, *, warmup: int, samples: int, compile_module: bool):
-    runner = mx.compile(module) if compile_module else module
+def _measure_pair(
+    lr_module,
+    p32_module,
+    x,
+    *,
+    warmup: int,
+    samples: int,
+    compile_module: bool,
+    rng: np.random.Generator,
+):
+    runners = [
+        mx.compile(lr_module) if compile_module else lr_module,
+        mx.compile(p32_module) if compile_module else p32_module,
+    ]
 
-    def run():
+    def run(runner):
         output = runner(x)
         mx.eval(output)
         mx.synchronize()
 
+    # Compilation/materialization is never part of a timed sample.  This also
+    # keeps --compile --warmup 0 from recording the first specialization cost.
+    if compile_module:
+        for runner in runners:
+            run(runner)
     for _ in range(warmup):
-        run()
-    elapsed = []
+        order = [0, 1]
+        rng.shuffle(order)
+        for index in order:
+            run(runners[index])
+    elapsed = [[], []]
     for _ in range(samples):
-        start = time.perf_counter()
-        run()
-        elapsed.append((time.perf_counter() - start) * 1e3)
-    values = np.asarray(elapsed)
-    return float(np.median(values)), float(np.percentile(values, 95))
+        order = [0, 1]
+        rng.shuffle(order)
+        for index in order:
+            start = time.perf_counter()
+            run(runners[index])
+            elapsed[index].append((time.perf_counter() - start) * 1e3)
+    values = [np.asarray(samples) for samples in elapsed]
+    return tuple((float(np.median(value)), float(np.percentile(value, 95))) for value in values)
 
 
 def main() -> None:
@@ -86,19 +114,39 @@ def main() -> None:
     print("shape | LR p50 ms | P32 p50 ms | speedup | LR p95 ms | P32 p95 ms")
     for m, k, n in DEFAULT_SHAPES:
         x = mx.array(rng.standard_normal((m, k)).astype(np.float16))
-        lr = _measure(
-            _module(rng, m, k, n, lr=True),
-            x,
-            warmup=args.warmup,
-            samples=args.samples,
-            compile_module=args.compile,
+        tile_count = (k // 32) * (n // 8)
+        # LR32 K32xN8 and P32 K16xN16 have the same number of W2 payload
+        # tiles.  Sharing the exact payload and selector bytes removes a
+        # benchmark confounder while preserving each format's decoder.
+        trellis = mx.array(rng.integers(-2**31, 2**31, (tile_count, 16), dtype=np.int32))
+        bank_ids = mx.array(rng.integers(0, 256, tile_count, dtype=np.uint8))
+        bank_alt_id = mx.array(np.array([1], dtype=np.uint8))
+        lr_module = _module(
+            m,
+            k,
+            n,
+            lr=True,
+            trellis=trellis,
+            bank_ids=bank_ids,
+            bank_alt_id=bank_alt_id,
         )
-        p32 = _measure(
-            _module(rng, m, k, n, lr=False),
+        p32_module = _module(
+            m,
+            k,
+            n,
+            lr=False,
+            trellis=trellis,
+            bank_ids=bank_ids,
+            bank_alt_id=bank_alt_id,
+        )
+        (lr, p32) = _measure_pair(
+            lr_module,
+            p32_module,
             x,
             warmup=args.warmup,
             samples=args.samples,
             compile_module=args.compile,
+            rng=rng,
         )
         print(
             f"({m},{k},{n}) | {lr[0]:.5f} | {p32[0]:.5f} | {p32[0] / lr[0]:.3f} "
