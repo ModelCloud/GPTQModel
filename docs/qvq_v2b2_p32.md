@@ -2971,3 +2971,20 @@ latency but did not change the M1 conclusion:
 Compilation therefore does not provide the missing M1 `2x` result. Further
 work should target a new fused module/epilogue or a different M1 data-reuse
 mapping, not simply additional MLX graph compilation.
+
+## 72. M1 N32 split-count sweep
+
+The fixed N32 M1 route was swept at `(M=1,K=2048,N=2048)` on the
+AC/high-performance M4 Max host with `30` warmups and `200` randomized
+synchronized samples per route. All routes matched within the expected
+FP32 reduction tolerance (`max_abs <= 6.9e-5`):
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| N32 split-8 | `0.21242` | `0.24048` | `0.22419` |
+| N32 split-16 | `0.21015` | `0.23611` | `0.21358` |
+| N32 split-32 | `0.21333` | `0.23713` | `0.21595` |
+
+Split-16 remains the production choice. The result reinforces that the
+remaining M1 gap is not solved by changing split count; future work should
+target module-level fusion or a different data-reuse strategy.
