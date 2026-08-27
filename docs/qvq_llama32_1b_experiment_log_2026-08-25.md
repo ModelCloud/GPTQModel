@@ -1169,3 +1169,5 @@ and 3.
 | monitor | `llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.0333439450398843; delta_kl=0.046058909400929916; answer_logprob_delta=0.12845530705665476; answer_margin_delta=0.7590521342718779; critical_top1=0.966762543943752'; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-mlp3-up35-late-032830-micro-math-v1.json` |
 
 | monitor | `llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.02336849823058306; delta_kl=0.0560215421343802; answer_logprob_delta=0.038635078205991144; answer_margin_delta=1.143054221993062; critical_top1=0.9613294982422499'; report `/root/qvq-results/llama32-1b-w2-w3front-reg010-qk25-vo35-gate25-up35-down3-d20085-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0` | `gsm8k_platinum_cot` | complete; metric=0.22084367245657568; report `/root/qvq-results/llama32-1b-w2-w3front-qk10-vo35-gate3-up35-down3-a96ce0-gsm8k-platinum-v1.json` |
