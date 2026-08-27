@@ -1003,3 +1003,7 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `gsm8k_platinum_cot` | complete; metric=0.3465674110835401; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `gsm8k_platinum_cot` | complete; metric=0.3738626964433416; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | `gsm8k_platinum_cot` | complete; metric=0.40281224152191897; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-mlpall25-baeb18` | `gsm8k_platinum_cot` | complete; metric=0.3523573200992556; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18-gsm8k-platinum-v1.json` |
