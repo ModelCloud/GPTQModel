@@ -1133,3 +1133,7 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.018630105641725028; delta_kl=0.04573368571885855; answer_logprob_delta=-0.5056118564819222; answer_margin_delta=-0.061873649483296406; critical_top1=0.968040907638223'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6-micro-math-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=-0.03405955619913879; delta_kl=0.041724604708176904; answer_logprob_delta=0.12168091535568237; answer_margin_delta=1.0290966887972248; critical_top1=0.9677213167146053'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | `gsm8k_platinum_cot` | complete; metric=0.4317617866004963; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.03384144711139347; delta_kl=0.04752059730350729; answer_logprob_delta=-0.21475686422034876; answer_margin_delta=0.3830740345058157; critical_top1=0.9661233620965165'; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422-micro-math-v1.json` |
