@@ -41,9 +41,10 @@ LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
 @pytest.mark.parametrize(
     "m,k,n,output_fp32,expected",
     (
-        (1, 2048, 256, False, 4),
+        (1, 2048, 256, False, 1),
         (1, 2048, 256, True, 4),
-        (3, 64, 16, False, 2),
+        (1, 2048, 8192, True, 2),
+        (3, 64, 16, False, 1),
         (4, 2048, 8192, False, 1),
         (4, 2048, 8192, True, 1),
         (8, 2048, 8192, True, 4),

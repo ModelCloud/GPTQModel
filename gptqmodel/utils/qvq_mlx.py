@@ -84,8 +84,8 @@ _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
 _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
-_LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool], Any] = {}
-_LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
+_LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None], Any] = {}
+_LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None], str] = {}
 
 _SYMMETRIC_GRAM_PACK_SOURCE = r"""
 uint index = thread_position_in_grid.x;
@@ -866,7 +866,7 @@ _LR_MULTIROW_SPLIT_W2_SOURCE = (
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
         "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
         "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
-        "uint state=qstate_lr_w2_packed(packed0,packed1,first_pair);",
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
 )
@@ -1528,15 +1528,17 @@ def _local_ring_split_k(m: int, k: int, n: int) -> int:
 def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = False) -> int:
     """Choose a conservative K split for the multi-row LR dispatch."""
 
+    if not output_fp32:
+        # Splitting and storing FP16 partials changes the public reduction
+        # semantics: each K slice would be rounded before the final sum.
+        # Keep one FP32 accumulation/reduction for the FP16 contract and only
+        # split the production FP32-output path.
+        return 1
     if m < 4:
-        # Keep the established split for the small-M path.  Its timing is
-        # already close to the dispatch floor and larger splits are not a
+        # Keep the established split for the small-M FP32 path.  Its timing
+        # is already close to the dispatch floor and larger splits are not a
         # stable win across the Llama projection shapes.
-        split_k = 4
-    elif not output_fp32:
-        # Keep FP16 reduction order stable; the FP32 production path can use
-        # shape-specific splits without changing the public FP16 contract.
-        split_k = 1
+        split_k = 2 if k <= 2048 and n >= 8192 else 4
     elif k >= 8192 and n <= 2048:
         split_k = 8
     elif k <= 2048 and n >= 8192:
@@ -1550,12 +1552,20 @@ def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = 
     return split_k
 
 
-def _local_ring_multirow_kernel(*, output_fp32: bool, w2: bool = False, split_k: int = 1):
+def _local_ring_multirow_kernel(
+    *,
+    output_fp32: bool,
+    w2: bool = False,
+    split_k: int = 1,
+    alt_bank_id: int | None = None,
+):
     """Build the LR32 multi-row GEMV that shares one decode across rows."""
 
     if split_k not in (1, 2, 4, 8, 16, 32, 64):
         raise ValueError(f"QVQ LR32 multi-row split_k must be a power of two from 1 through 64, got {split_k}")
-    key = (output_fp32, split_k, w2)
+    if alt_bank_id is not None and alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    key = (output_fp32, split_k, w2, alt_bank_id)
     kernel = _LR_MULTIROW_KERNELS.get(key)
     if kernel is not None:
         return kernel
@@ -1568,28 +1578,40 @@ def _local_ring_multirow_kernel(*, output_fp32: bool, w2: bool = False, split_k:
         import mlx.core as mx
 
         try:
+            source = (
+                _LR_MULTIROW_SPLIT_W2_FP32_SOURCE
+                if split_k > 1 and output_fp32 and w2
+                else _LR_MULTIROW_SPLIT_W2_SOURCE
+                if split_k > 1 and w2
+                else _LR_MULTIROW_SPLIT_FP32_SOURCE
+                if split_k > 1 and output_fp32
+                else _LR_MULTIROW_SPLIT_SOURCE
+                if split_k > 1
+                else _LR_MULTIROW_W2_FP32_SOURCE
+                if output_fp32 and w2
+                else _LR_MULTIROW_W2_SOURCE
+                if w2
+                else _LR_MULTIROW_FP32_SOURCE
+                if output_fp32
+                else _LR_MULTIROW_SOURCE
+            )
+            specialized_alt_bank = alt_bank_id is not None
+            if specialized_alt_bank:
+                # The bank family is immutable checkpoint metadata.  Keep it
+                # out of the MLX input graph so every production linear avoids
+                # a host scalar extraction and a device buffer load.
+                source = source.replace("uint(bank_alt_id[0])", "AltBank")
+            input_names = ["x", "trellis", "bank_ids", "levels", "dims"]
             kernel = mx.fast.metal_kernel(
-                name=f"gptqmodel_qvq_v2b2_p32_lr_multirow_{'fp32' if output_fp32 else 'fp16'}_split{split_k}",
-                input_names=["x", "trellis", "bank_ids", "bank_alt_id", "levels", "dims"],
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_multirow_"
+                    f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
+                    f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
+                ),
+                input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
                 output_names=["out"],
                 header=_HEADER,
-                source=(
-                    _LR_MULTIROW_SPLIT_W2_FP32_SOURCE
-                    if split_k > 1 and output_fp32 and w2
-                    else _LR_MULTIROW_SPLIT_W2_SOURCE
-                    if split_k > 1 and w2
-                    else _LR_MULTIROW_SPLIT_FP32_SOURCE
-                    if split_k > 1 and output_fp32
-                    else _LR_MULTIROW_SPLIT_SOURCE
-                    if split_k > 1
-                    else _LR_MULTIROW_W2_FP32_SOURCE
-                    if output_fp32 and w2
-                    else _LR_MULTIROW_W2_SOURCE
-                    if w2
-                    else _LR_MULTIROW_FP32_SOURCE
-                    if output_fp32
-                    else _LR_MULTIROW_SOURCE
-                ),
+                source=source,
                 ensure_row_contiguous=True,
             )
         except Exception as exc:
@@ -2955,6 +2977,7 @@ def qvq_mlx_gemv(
     v2b2_p32_lr: bool = False,
     bank_alt_id=None,
     output_fp32: bool = False,
+    _bank_alt_id_value: int | None = None,
     _prepared_compander: _QVQMLXPreparedCompander | None = None,
 ):
     """Multiply transformed MLX activations by planar PGC16 tiles."""
@@ -2992,7 +3015,13 @@ def qvq_mlx_gemv(
     if v2b2_p32 or v2b2_p32_lr:
         if bank_alt_id is None or bank_alt_id.dtype != mx.uint8 or bank_alt_id.shape != (1,):
             raise ValueError("QVQ MLX V2B2-P32 formats require one uint8 alternative-bank ID")
-        alt_id = int(bank_alt_id.item())
+        if _bank_alt_id_value is None:
+            # Compatibility path for direct callers that have not wrapped the
+            # payload in QVQMLXLinear.  The loadable MLX module resolves this
+            # immutable metadata once in __init__ and passes the Python value.
+            alt_id = int(bank_alt_id.item())
+        else:
+            alt_id = _integer_argument(_bank_alt_id_value, "bank_alt_id")
         if not 1 <= alt_id <= 3:
             raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
     elif bank_alt_id is not None:
@@ -3041,10 +3070,15 @@ def qvq_mlx_gemv(
             output_fp32=output_fp32,
             w2=transition_bits == 4,
             split_k=split_k,
+            alt_bank_id=alt_id,
         )
+        inputs = [x, trellis, bank_ids, levels, _dims_array(m, k, n, transition_bits, row_tile)]
+        template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
+        if split_k > 1:
+            template.append(("SplitK", split_k))
         partials = kernel(
-            inputs=[x, trellis, bank_ids, bank_alt_id, levels, _dims_array(m, k, n, transition_bits, row_tile)],
-            template=[("EdgeBits", transition_bits)] + ([("SplitK", split_k)] if split_k > 1 else []),
+            inputs=inputs,
+            template=template,
             grid=(row_blocks * (n // 8) * split_k * group_size, 1, 1),
             threadgroup=(group_size, 1, 1),
             output_shapes=[(m, n * split_k)],
@@ -3326,6 +3360,13 @@ if _mlx_nn is not None:
             self.bias = None if bias is None else bias.astype(mx.float32)
             self.bank_ids = None if bank_ids is None else bank_ids.astype(mx.uint8)
             self.bank_alt_id = None if bank_alt_id is None else bank_alt_id.astype(mx.uint8)
+            self._bank_alt_id_value = None
+            if self.v2b2_p32 or self.v2b2_p32_lr:
+                # This is immutable checkpoint metadata.  Resolve it once at
+                # construction so every forward can stay on the MLX graph.
+                self._bank_alt_id_value = int(self.bank_alt_id.item())
+                if not 1 <= self._bank_alt_id_value <= 3:
+                    raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
             self._input_hadamard = _qvq_mlx_hadamard_matrix(self.in_features)
             self._output_hadamard = _qvq_mlx_hadamard_matrix(self.out_features)
 
@@ -3388,6 +3429,7 @@ if _mlx_nn is not None:
                 v2b2_p32_lr=self.v2b2_p32_lr,
                 bank_alt_id=self.bank_alt_id,
                 output_fp32=True,
+                _bank_alt_id_value=self._bank_alt_id_value,
             )
             output = _qvq_mlx_hadamard(output * row_scale, self._output_hadamard)
             output = output * self.SV
