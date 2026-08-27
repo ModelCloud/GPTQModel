@@ -2654,7 +2654,10 @@ def _local_ring_small_kernel(
                     "uint bank_bit=(selector>>ring)&1u;",
                 ).replace(
                     "qlevelsv2b_lr_const_w2(state,bank)",
-                    "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+                    "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+                ).replace(
+                    "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                    "half2 value=qlevelsv2b_lr_const_w2_small_half",
                 )
                 header = _lr_small_w2_mask_header(alt_bank_id)
             if specialized_alt_bank and not literal_w2_mask:
@@ -2707,7 +2710,10 @@ def _local_ring_m1_fused_split_kernel(*, alt_bank_id: int):
                 "uint bank_bit=(selector>>ring)&1u;",
             ).replace(
                 "qlevelsv2b_lr_const_w2(state,bank)",
-                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
             )
             kernel = mx.fast.metal_kernel(
                 name=f"gptqmodel_qvq_v2b2_p32_lr_m1_fused_split8_alt{alt_bank_id}",
@@ -2752,7 +2758,10 @@ def _local_ring_m1_fused_split16_kernel(*, alt_bank_id: int):
                 "uint bank_bit=(selector>>ring)&1u;",
             ).replace(
                 "qlevelsv2b_lr_const_w2(state,bank)",
-                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
             )
             kernel = mx.fast.metal_kernel(
                 # Keep a distinct MLX kernel name while the split ordinal is

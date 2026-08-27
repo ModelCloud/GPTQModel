@@ -2727,13 +2727,14 @@ tables: the host still exhibits substantial p50/p95 variation. They establish
 a new comparison point only; all future candidates must be interleaved with
 the committed route in the same process and session.
 
-## 63. W2 half2 codebook values for long-K M1/N32
+## 63. W2 half2 codebook values for LR32 small-row routes
 
-The long-K M1/N32 W2 kernel now returns the two PGC16 values as native
+The LR32 small-row W2 kernels now return the two PGC16 values as native
 `half2` values. The accumulator remains FP32, so this changes the conversion
 path without changing the serialized codebook values or the arithmetic
-contract. The optimization is restricted to the specialized N32 fused route;
-other LR32 rates and layouts retain their existing helpers.
+contract. The optimization covers the specialized N16/fused small-row and
+long-K N32 routes; other LR32 rates and wide N64 layouts retain their existing
+helpers.
 
 The route passed the Torch oracle and the full LR32/MLX suites (`168` and
 `326` tests). On AC/high-performance M4 Max, a randomized/interleaved inner
@@ -2754,3 +2755,10 @@ measured `1.664x` at `(M=1,K=8192,N=2048)`, `2.020x` at
 `(M=4,K=2048,N=8192)`, `2.692x` at `(M=8,K=2048,N=8192)`, and `2.232x` at
 `(M=16,K=8192,N=8192)`. The M1 result remains below the universal 2x target
 because Hadamard and module-boundary work are outside the LR kernel.
+
+Additional N16-only microbenchmarks at 160 paired samples showed exact
+oracle agreement within the existing tolerance (`max_abs=3.05e-5` for
+`K=2048,N=2048`, `2.29e-5` for `K=2048,N=256`) and p50 improvements of
+`1.076x` and `1.069x`, respectively. These are modest gains, but they are
+consistent with the long-K result and justify retaining the common half2
+helper in the small-row W2 builders.
