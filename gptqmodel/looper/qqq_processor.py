@@ -162,7 +162,10 @@ class QQQProcessor(LoopProcessor):
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         q = qqq[module.name]
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+        try:
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+        finally:
+            q.free()
 
         q_scales = q_scales.to(CPU)
         q_zeros = q_zeros.to(CPU)
