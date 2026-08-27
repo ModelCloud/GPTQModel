@@ -4100,3 +4100,25 @@ arm:
 
 The candidate improved p50 by `1.059x` but regressed mean to `0.969x` and had
 worse p95. It was removed and not promoted; no M4 production dispatch changed.
+
+## 115. M4 double-buffered decoded-tile pipeline probe rejected
+
+An isolated M4 W2 probe double-buffered the decoded `K32xN8` tile. It retained
+the decode-publish barrier but removed the post-compute barrier, alternating
+between two shared decoded buffers so the next tile could be written while the
+other SIMD group consumed the current tile.
+
+The candidate was exactly equal to the production M4 cooperative decoder at
+`(M=4,K=2048,N=2048)` (`max_abs=0`, zero differing elements, relative L2
+`0`). A randomized same-process direct-kernel A/B used 6 warmups and 20 samples
+per arm on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production cooperative | `0.44654` | `0.75069` | `0.49410` |
+| Double-buffered pipeline | `0.44285` | `0.76265` | `0.50870` |
+
+The candidate improved p50 by only `1.008x`, regressed mean to `0.971x`, and
+had a slightly worse p95. It was removed rather than promoted. This does not
+support overlapping M4 decode and compute with the current MLX/Apple execution
+mapping; the production M4 K32 cooperative decoder remains enabled.

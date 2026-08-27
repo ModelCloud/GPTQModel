@@ -1984,7 +1984,6 @@ _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE = (
 _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_FP32_SOURCE = _make_lr_multirow_fp32_source(
     _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE
 )
-
 _LR_MULTIROW_COOPERATIVE_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
 _LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE = _make_lr_multirow_split_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
 _LR_MULTIROW_COOPERATIVE_SPLIT_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE)
@@ -3452,8 +3451,6 @@ def _local_ring_multirow_kernel(
             raise RuntimeError(error) from exc
         _LR_MULTIROW_KERNELS[key] = kernel
         return kernel
-
-
 def _v4_kernel():
     global _V4_KERNEL, _V4_KERNEL_ERROR
     if _V4_KERNEL is None:
