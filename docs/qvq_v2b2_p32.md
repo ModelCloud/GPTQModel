@@ -3607,3 +3607,23 @@ differing elements = 0
 The candidate measured `1.109x` at p50 and `1.102x` by mean, with a worse
 maximum sample. This is not a reliable module-level improvement and was not
 promoted. The universal M1 `2x` target remains open.
+
+## 96. M1 N64 half2 split-K sweep rejected
+
+The current shape-specialized M1/N64 W2 half2 decoder was benchmarked with
+split-2, split-4, and split-8 at `(M=1,K=2048,N=8192)`. Each arm used the same
+complete `QVQMLXLinear` module, payload, input, and 150 randomized samples;
+the split-2 arm is the production reference. Split-4 and split-8 change the
+FP32 partial-reduction grouping, so their module outputs were checked against
+the production result before timing.
+
+| Split | max abs vs production | p50 (ms) | p95 (ms) | mean (ms) |
+|---:|---:|---:|---:|---:|
+| 2 (production) | `0` | `0.73217` | `1.29357` | `0.81661` |
+| 4 | `0.03125` | `0.72021` | `1.53556` | `0.80530` |
+| 8 | `0.015625` | `0.73298` | `1.50759` | `0.80671` |
+
+Relative to split-2, split-4 improved p50 by only `1.017x` and mean by
+`1.014x`; split-8 was neutral at p50 (`0.999x`) and improved mean by `1.012x`.
+The small timing gains do not justify introducing reduction-order drift, so
+the production split-2 policy remains unchanged.
