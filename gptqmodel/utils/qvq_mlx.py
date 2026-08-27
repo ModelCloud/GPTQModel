@@ -1120,7 +1120,6 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
     """Decode two adjacent K32 tiles per barrier in the M1/N64 source."""
 
     source = source.replace("threadgroup float shared_activation[32];", "threadgroup float shared_activation[64];")
-    source = source.replace("simd == 0u && lane < 8u", "simd == 0u && lane < 16u")
     source = source.replace("base+=32u){", "base+=64u){")
     tile_block = (
         "  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);\n"
@@ -1134,6 +1133,28 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
     if tile_block not in source:
         raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its tile marker")
     source = source.replace(tile_block, tile_replacement)
+    activation_block = (
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(lane<<2u)] = float(x[base+(lane<<2u)]);\n"
+        "    shared_activation[(lane<<2u)+1u] = float(x[base+(lane<<2u)+1u]);\n"
+        "    shared_activation[(lane<<2u)+2u] = float(x[base+(lane<<2u)+2u]);\n"
+        "    shared_activation[(lane<<2u)+3u] = float(x[base+(lane<<2u)+3u]);\n"
+        "  }"
+    )
+    activation_replacement = (
+        "  // Stage only the active K32 half.  The next outer K64 iteration can\n"
+        "  // therefore reuse the other half while sibling SIMD groups finish\n"
+        "  // consuming this one, without overlapping shared-memory writes.\n"
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)] = float(x[base+(sub<<5u)+(lane<<2u)]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+1u] = float(x[base+(sub<<5u)+(lane<<2u)+1u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+2u] = float(x[base+(sub<<5u)+(lane<<2u)+2u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+3u] = float(x[base+(sub<<5u)+(lane<<2u)+3u]);\n"
+        "  }"
+    )
+    if activation_block not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its activation marker")
+    source = source.replace(activation_block, activation_replacement, 1)
     source = source.replace(
         "shared_activation[pair<<1u]", "shared_activation[(sub<<5u)+(pair<<1u)]"
     ).replace(
@@ -1142,9 +1163,6 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
     source = source.replace(
         "  for(uint sub=0u;sub<2u;sub++){",
         "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){",
-    ).replace(
-        "    for(uint offset=0u;offset<8u;offset++){",
-        "    #pragma unroll\n    for(uint offset=0u;offset<8u;offset++){",
     )
     close_marker = "  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     close_replacement = "    }\n  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
@@ -1166,13 +1184,14 @@ def _make_lr_m1_n64_k128_source(source: str) -> str:
     loop_end_marker = "\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     loop_end = source.find(loop_end_marker, loop_start)
     activation_block = (
-        "  // Share the K32 activation tile across all output lanes in this SIMD\n"
-        "  // group; the LR decode remains lane-local while inputs are broadcast.\n"
-        "  if (simd == 0u && lane < 16u) {\n"
-        "    shared_activation[(lane<<2u)] = float(x[base+(lane<<2u)]);\n"
-        "    shared_activation[(lane<<2u)+1u] = float(x[base+(lane<<2u)+1u]);\n"
-        "    shared_activation[(lane<<2u)+2u] = float(x[base+(lane<<2u)+2u]);\n"
-        "    shared_activation[(lane<<2u)+3u] = float(x[base+(lane<<2u)+3u]);\n"
+        "  // Stage only the active K32 half.  The next outer K64 iteration can\n"
+        "  // therefore reuse the other half while sibling SIMD groups finish\n"
+        "  // consuming this one, without overlapping shared-memory writes.\n"
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)] = float(x[base+(sub<<5u)+(lane<<2u)]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+1u] = float(x[base+(sub<<5u)+(lane<<2u)+1u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+2u] = float(x[base+(sub<<5u)+(lane<<2u)+2u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+3u] = float(x[base+(sub<<5u)+(lane<<2u)+3u]);\n"
         "  }\n"
         "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
     )

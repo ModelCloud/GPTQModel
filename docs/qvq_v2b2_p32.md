@@ -1809,3 +1809,26 @@ and `0.66980 ms` p95; split-2 measured `0.44460 ms` p50 and `0.77028 ms` p95.
 That is a `1.088x` p50 improvement, with higher p95 variance, while retaining
 exact Torch-oracle parity. This is a narrow latency optimization and does not
 claim the unresolved universal M1 `2x` target.
+
+### 36. K64 M1 staged-activation race correction
+
+The K64/N64 M1 source originally widened the activation staging predicate from
+8 to 16 lanes and wrote both K32 halves on every sub-iteration. That reduced
+the apparent staging overhead, but it allowed the next K64 batch to overwrite
+the other half of the shared activation tile while sibling SIMD groups were
+still consuming it. A K2048 run could therefore match the oracle for the first
+batch and then diverge nondeterministically. Measurements made with that source
+are invalid as performance evidence.
+
+The corrected source stages only the active K32 half, using eight producer lanes
+and the existing barrier between sub-tiles. This removes the overlapping writes
+and halves the activation staging work while preserving the required hand-off
+ordering. A direct Torch-oracle check at `(M=1,K=2048,N=8192)` measured relative
+L2 `8.6e-7` and max absolute error `2e-4`; the public split-2 oracle test now
+runs three times to expose reuse races. The full LR32 suite passes `152/152`.
+
+In a same-process probe against the old full-staging source, corrected K64 was
+`0.38571 ms` p50 versus `0.38685 ms` for the old source (`1.003x`). The old
+source is not a valid baseline because of the race, so this result is recorded
+as a correctness/stability fix rather than a promoted speed claim. The
+unresolved universal M1 `2x` target remains open.

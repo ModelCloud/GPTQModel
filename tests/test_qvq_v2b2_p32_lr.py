@@ -1000,16 +1000,17 @@ def test_lr32_m1_w2_n64_k128_and_split2_match_torch_oracle():
 
     # The public path now uses two K64 slices for sufficiently large wide M1
     # shapes and reduces the interleaved partial output on the MLX side.
-    actual_split2 = qvq_mlx.qvq_mlx_gemv(
-        mx.array(x.numpy()),
-        mx.array(trellis.numpy()),
-        2,
-        out_features=out_features,
-        bank_ids=mx.array(packed_selectors.numpy()),
-        bank_alt_id=mx.array(bank_alt_id.numpy()),
-        v2b2_p32_lr=True,
-        output_fp32=True,
-        _bank_alt_id_value=2,
-    )
-    mx.eval(actual_split2)
-    torch.testing.assert_close(torch.from_numpy(np.asarray(actual_split2)), expected, rtol=0, atol=2e-2)
+    for _ in range(3):
+        actual_split2 = qvq_mlx.qvq_mlx_gemv(
+            mx.array(x.numpy()),
+            mx.array(trellis.numpy()),
+            2,
+            out_features=out_features,
+            bank_ids=mx.array(packed_selectors.numpy()),
+            bank_alt_id=mx.array(bank_alt_id.numpy()),
+            v2b2_p32_lr=True,
+            output_fp32=True,
+            _bank_alt_id_value=2,
+        )
+        mx.eval(actual_split2)
+        torch.testing.assert_close(torch.from_numpy(np.asarray(actual_split2)), expected, rtol=0, atol=2e-2)
