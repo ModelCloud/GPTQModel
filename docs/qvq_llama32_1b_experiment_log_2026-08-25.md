@@ -1247,3 +1247,5 @@ and 3.
 | monitor | `llama32-1b-w2-w37-qk30-fp16-down15-41ce2f` | `divergence300` | complete; metric=0.3965625; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-down15-41ce2f-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-w35-qk30-f0276c` | `divergence300` | complete; metric=0.3958333333333333; report `/root/qvq-results/llama32-1b-w2-w35-qk30-f0276c-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w37-qk30-fp16-up15-d53e87` | `divergence300` | complete; metric=0.39447916666666666; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-up15-d53e87-div300-dev-v1.json` |
