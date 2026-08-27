@@ -1209,3 +1209,9 @@ and 3.
 | monitor | `llama32-1b-w2-w37-qk30-fp16-down15-41ce2f` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=0.01148309132129927; delta_kl=0.03015698138352613; answer_logprob_delta=-0.032177195620180954; answer_margin_delta=0.1338091323624796; critical_top1=0.9728347714924896'; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-down15-41ce2f-micro-math-v1.json` |
 
 | monitor | `llama32-1b-w2-w37-qk30-fp16-up15-d53e87` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=0.012660188873638798; delta_kl=0.030178287042420045; answer_logprob_delta=-0.03787105474899064; answer_margin_delta=0.1218185709483588; critical_top1=0.9734739533397252'; report `/root/qvq-results/llama32-1b-w2-w37-qk30-fp16-up15-d53e87-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w35-qk25-9ab413` | `micro_math` | complete; metric='mini_exact=0.015625; delta_ce=-0.0019490177405047313; delta_kl=0.03215443051687906; answer_logprob_delta=0.13036983671473035; answer_margin_delta=0.5176714142756675; critical_top1=0.9712368168744008'; report `/root/qvq-results/llama32-1b-w2-w35-qk25-9ab413-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w35-qk30-f0276c` | `micro_math` | complete; metric='mini_exact=0.0625; delta_ce=0.012403984347447177; delta_kl=0.03044081982059848; answer_logprob_delta=-0.03612032755097346; answer_margin_delta=0.12432724682252798; critical_top1=0.9725151805688719'; report `/root/qvq-results/llama32-1b-w2-w35-qk30-f0276c-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-mid-down35-c84f7a` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.0446749097048761; delta_kl=0.04016066288985497; answer_logprob_delta=0.2123295553584597; answer_margin_delta=1.018183010727612; critical_top1=0.968040907638223'; report `/root/qvq-results/llama32-1b-w2-w32-mid-down35-c84f7a-micro-math-v1.json` |
