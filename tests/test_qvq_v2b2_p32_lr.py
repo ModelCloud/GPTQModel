@@ -944,6 +944,9 @@ def test_lr32_mlx_m1_n64_shared_split2_kernel_matches_torch_oracle(monkeypatch, 
     from gptqmodel.utils import qvq_mlx
 
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_SHARED_SPLIT2", True)
+    # This test targets the shared-split implementation explicitly; the
+    # production K=2048/N=8192 dispatch may prefer the half2 candidate.
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_HALF2", False)
     out_features = 8192
     _, _, trellis, selectors = _random_lr_payload(
         2,
@@ -978,6 +981,52 @@ def test_lr32_mlx_m1_n64_shared_split2_kernel_matches_torch_oracle(monkeypatch, 
         v2b2_p32_lr=True,
         output_fp32=True,
         _bank_alt_id_value=3,
+    )
+    mx.eval(actual)
+    assert selected["called"]
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
+
+
+@pytest.mark.parametrize("bank_alt_value", [1, 2, 3])
+def test_lr32_mlx_m1_n64_half2_kernel_matches_torch_oracle(monkeypatch, bank_alt_value):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    in_features = 2048
+    out_features = 8192
+    _, _, trellis, selectors = _random_lr_payload(
+        2,
+        tiles=(in_features // 32) * (out_features // 8),
+    )
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([bank_alt_value], dtype=torch.uint8)
+    x = torch.randn(1, in_features, dtype=torch.float32)
+    expected = x @ reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=2,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=packed_selectors,
+        bank_alt_id=bank_alt_id,
+    )
+    selected = {"called": False}
+    original = qvq_mlx._local_ring_m1_n64_half2_kernel
+
+    def observed(**kwargs):
+        selected["called"] = True
+        return original(**kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_n64_half2_kernel", observed)
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(trellis.numpy()),
+        2,
+        out_features=out_features,
+        bank_ids=mx.array(packed_selectors.numpy()),
+        bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=bank_alt_value,
     )
     mx.eval(actual)
     assert selected["called"]

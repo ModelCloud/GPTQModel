@@ -92,6 +92,8 @@ _LR_M1_N64_SPLIT2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N64_SHARED_SPLIT2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_HALF2_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_HALF2_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
@@ -114,6 +116,9 @@ _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 # the default again by accident.
 _USE_LR_M1_N64_SPLIT2 = False
 _USE_LR_M1_N64_SHARED_SPLIT2 = True
+# The half2 codebook path is specialized to the measured short-K wide-N
+# shape.  Other M1/N64 shapes retain their existing fused or generic route.
+_USE_LR_M1_N64_HALF2 = True
 # One-lane-per-output N32 is retained only for the measured long-K M1 regime;
 # short-K shapes were neutral or slower than the promoted N16 route.
 _USE_LR_M1_N32_FUSED = True
@@ -3084,6 +3089,60 @@ def _local_ring_m1_n64_shared_split2_kernel(*, alt_bank_id: int):
         return kernel
 
 
+def _local_ring_m1_n64_half2_kernel(*, alt_bank_id: int):
+    """Build the fixed M1/N64 W2 kernel retaining PGC16 pairs as half2."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_HALF2_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_HALF2_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_HALF2_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = (
+                _lr_m1_n64_shape_source(
+                    2048,
+                    8192,
+                    source=_LR_M1_N64_K64_W2_FP32_SOURCE,
+                )
+                .replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                )
+                .replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+                )
+                .replace(
+                    "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                    "half2 value=qlevelsv2b_lr_const_w2_small_half",
+                )
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_half2_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 M1/N64 half2 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
+            _LR_M1_N64_HALF2_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_HALF2_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
 def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int, k_tile: int = 64):
     """Build the W2 M1/N64 kernel with a shape-specialized K tile batch."""
 
@@ -4878,6 +4937,14 @@ def qvq_mlx_gemv(
             and n == 8192
             and n % 64 == 0
         )
+        m1_n64_half2 = (
+            _USE_LR_M1_N64_HALF2
+            and output_fp32
+            and transition_bits == 4
+            and m1_n64
+            and k == 2048
+            and n == 8192
+        )
         m1_n64_n32pair_split8 = (
             _USE_LR_M1_N64_N32PAIR_SPLIT8
             and output_fp32
@@ -4963,6 +5030,20 @@ def qvq_mlx_gemv(
             group_size = 512
             output_width = 64
             kernel = _local_ring_m1_n64_n32pair_split8_kernel(alt_bank_id=alt_id)
+        elif m1_n64_half2:
+            # The fixed short-K wide-N source keeps each decoded PGC16 pair
+            # in native half2 form while the dot product remains FP32.  It
+            # uses the original two-split launch shape; unlike the shared
+            # route below, the MLX reduction remains the measured winner.
+            if not _inputs_contiguous:
+                x = mx.contiguous(x)
+                trellis = mx.contiguous(trellis)
+                bank_ids = mx.contiguous(bank_ids)
+            split_k = _local_ring_m1_n64_split_k(k)
+            row_tile = 1
+            group_size = 128
+            output_width = 64
+            kernel = _local_ring_m1_n64_half2_kernel(alt_bank_id=alt_id)
         elif m1_n64_shared_split2:
             # Eight SIMD groups cover four N16 tiles and both K splits in
             # one threadgroup.  Each split has its own staged K64 tile, so
@@ -5102,14 +5183,14 @@ def qvq_mlx_gemv(
         row_blocks = (m + row_tile - 1) // row_tile
         inputs = (
             [x, trellis, bank_ids]
-            if m1_n64 and not m1_n64_shared_split2
+            if (m1_n64 and not m1_n64_shared_split2) or m1_n64_half2
             else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         )
         literal_w2_mask = (
             v2b2_p32_lr
             and transition_bits == 4
             and small_rows
-            and (not m1_n64 or m1_n64_shared_split2)
+            and (not m1_n64 or m1_n64_shared_split2 or m1_n64_half2)
         )
         template = [("EdgeBits", transition_bits)]
         if not literal_w2_mask:
@@ -5123,12 +5204,12 @@ def qvq_mlx_gemv(
             and not m1_n32_fused_split32
             and not m1_n64_n32pair_split8
             and not m1_n64_split2
-            and not m1_n64_shared_split2
+            and (not m1_n64_shared_split2 or m1_n64_half2)
         ):
             template.append(("SplitK", split_k))
         output_width = (
             64
-            if m1_n64_split2 or m1_n64_shared_split2 or m1_n64
+            if m1_n64_split2 or (m1_n64_shared_split2 and not m1_n64_half2) or m1_n64
             or m1_n64_n32pair_split8
             else 32
             if m1_n32_fused_split or m1_n32_fused_split16 or m1_n32_fused_split32
@@ -5146,7 +5227,7 @@ def qvq_mlx_gemv(
                 or m1_n32_fused_split32
                 or m1_n64_n32pair_split8
                 or m1_n64_split2
-                or m1_n64_shared_split2
+                or (m1_n64_shared_split2 and not m1_n64_half2)
             )
             else split_k
         )
@@ -5166,7 +5247,8 @@ def qvq_mlx_gemv(
                     or m1_n32_fused_split32
                     or m1_n64_n32pair_split8
                     or m1_n64_split2
-                    or m1_n64_shared_split2
+                    or (m1_n64_shared_split2 and not m1_n64_half2)
+                    or (m1_n64 and not m1_n64_half2)
                     else n * split_k,
                 )
             ],
@@ -5181,7 +5263,8 @@ def qvq_mlx_gemv(
             or m1_n32_fused_split32
             or m1_n64_n32pair_split8
             or m1_n64_split2
-            or m1_n64_shared_split2
+            or (m1_n64_shared_split2 and not m1_n64_half2)
+            or (m1_n64 and not m1_n64_half2)
         ):
             return partials
         return mx.sum(partials.reshape(m, n, split_k), axis=-1)

@@ -3311,3 +3311,41 @@ reduction savings:
 
 The production predicate is therefore intentionally limited to `N=8192`
 rather than generalized to all larger widths.
+
+## 86. M1/N64 W2 half2 decoder candidate
+
+The short-K wide-N M1 route was tested with a shape-specialized W2 decoder
+that retains each PGC16 pair as native `half2` while keeping the dot product
+accumulator in FP32. The route is limited to `(M=1,K=2048,N=8192)` and uses
+the existing K64/two-split layout; all other shapes retain their established
+dispatch paths.
+
+The candidate passed the Torch reconstruction oracle for alternative-bank IDs
+1, 2, and 3. The complete LR32 test file passed with `173` tests. A corrected
+same-process complete-module A/B against the promoted shared-split-2 route
+used identical payloads and input and measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Shared split-2 fused | `0.47952` | `0.57811` | `0.47162` |
+| W2 half2 candidate | `0.44444` | `0.51343` | `0.41636` |
+
+The candidate therefore improved this A/B by `1.079x` at p50 and `1.133x` by
+mean, with exact output parity. A fresh randomized/interleaved complete-module
+LR/P32 sweep after promotion on the plugged-in AC/high-performance M4 Max
+(`30` warmups, `100` samples, seed `20261021`) measured:
+
+| Shape | LR p50 | P32 p50 | LR speedup | LR p95 | P32 p95 |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.58056` | `0.86094` | `1.483x` | `0.82037` | `1.31040` |
+| `(1,2048,2048)` | `0.61873` | `0.82892` | `1.340x` | `1.30531` | `1.95244` |
+| `(1,2048,8192)` | `0.81942` | `1.18648` | `1.448x` | `1.42455` | `1.83802` |
+| `(1,8192,2048)` | `0.75006` | `1.23400` | `1.645x` | `1.38794` | `1.92145` |
+| `(4,2048,8192)` | `1.13585` | `2.38069` | `2.096x` | `2.28834` | `3.40406` |
+| `(8,2048,8192)` | `1.37152` | `3.55985` | `2.596x` | `2.55909` | `4.99274` |
+| `(16,8192,8192)` | `2.55560` | `5.76165` | `2.255x` | `3.45570` | `6.68112` |
+
+These timings are complete-module measurements with randomized LR/P32 order,
+not inner-kernel-only timings. The half2 specialization is a valid targeted
+improvement, but the universal `2x` objective remains unmet: the M1 shapes
+remain below `2x` while M4/M8/M16 exceed it in this sample.
