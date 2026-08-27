@@ -3171,3 +3171,24 @@ outputs were exactly equal (`max_abs=0`, relative L2 `0`):
 
 This is a small and shape-specific boundary improvement, not evidence for the
 universal `2x` target.
+
+## 79. M1 N128 output-grouping probe rejected
+
+An in-memory N128 extension of the verified K64/N64 W2 decoder was tested at
+`(M=1,K=2048,N=8192)`. It reused the same staged K64 activation tile across
+eight SIMD groups, halving the output-tile count relative to N64. The Torch
+LOCAL-RING oracle check passed (`max_abs=3.6621e-4`, relative L2
+`8.9762e-7`), within the existing FP32 kernel contract.
+
+However, the synchronized direct-kernel A/B used identical payloads, `30`
+warmups, and `200` randomized samples and measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Current N64 split-2 | `0.25660` | `0.40244` | `0.27706` |
+| N128 split-2 candidate | `0.25842` | `0.42512` | `0.28775` |
+| N128 split-1 candidate | `0.41967` | `0.53273` | `0.43880` |
+
+The wider grouping does not amortize its larger threadgroup/register cost on
+M4 Max and was not promoted. This leaves the verified N64 route as the
+wide-N M1 production choice; the universal `2x` target remains open.
