@@ -3232,28 +3232,28 @@ Module output remained within the existing contract (`relative delta=0`,
 `QVQMLXLinear` latency is the governing metric. The scalar activation layout
 remains production.
 
-## 82. M1 serial-N128 output grouping: exact but only a small positive
+## 82. M1 serial-N128 output grouping rejected at module boundary
 
 An in-memory W2 probe kept the proven four-SIMD-group occupancy of the M1/N64
 route while computing two adjacent N64 output tiles sequentially per group.
 The candidate reused the staged K64 activation tile and used a 128-output
-shape-specialized launch at `(M=1,K=2048,N=8192)`. The complete-module output
-was exactly equal to the current production output (`max_abs=0`, relative L2
-`0`).
+shape-specialized launch at `(M=1,K=2048,N=8192)`. A corrected complete-module
+A/B used the true production GEMV function for the current arm and a patched
+function only for the candidate arm; the candidate output was exactly equal to
+production (`max_abs=0`, relative L2 `0`).
 
-The synchronized complete-module A/B used identical payloads and input, `30`
-warmups, and `100` randomized samples per arm:
+The synchronized A/B used identical payloads and input, `30` warmups, and `100`
+randomized samples per arm:
 
 | Route | p50 (ms) | p95 (ms) | mean (ms) |
 |---|---:|---:|---:|
-| Current N64 | `0.72960` | `1.39615` | `0.82959` |
-| Serial N128 candidate | `0.71700` | `1.04853` | `0.78083` |
+| Current N64 | `0.43527` | `0.50075` | `0.43229` |
+| Serial N128 candidate | `0.45108` | `0.50803` | `0.44238` |
 
-This is `1.018x` faster at p50 and `1.063x` faster by mean, with a larger p95
-improvement in this run. It is a useful shape-specific positive probe, but it
-does not establish the universal `2x` target and was not promoted without
-broader-shape and alternate-bank validation. The production M1/N64 route
-remains unchanged.
+The candidate is `3.63%` slower at p50 and `2.34%` slower by mean, so it was
+not promoted. An earlier in-memory result reported a small gain, but it used a
+module monkeypatch that caused both arms to call the candidate; those numbers
+are superseded by this corrected A/B.
 
 ## 83. M1 one-barrier K64 staging probe rejected by oracle
 
@@ -3265,18 +3265,11 @@ detected the race (`max_abs=58.40625`, non-finite relative comparison), so its
 timing was discarded. Any attempt to reduce the barrier count must include an
 explicit producer/consumer handoff or a double-buffered activation tile.
 
-## 84. M1 direct-activation/no-shared-memory probe rejected
+## 84. Direct-activation probe withdrawn
 
-An in-memory M1/N64 W2 kernel probe removed `shared_activation` and all
-activation barriers. Each of the four SIMD groups loaded the K32 activation
-directly and used SIMD shuffles for its pair reads. The complete-module result
-was exactly equal to production (`max_abs=0`, relative L2 `0`), but duplicated
-activation loads outweighed the synchronization savings. The synchronized A/B
-at `(M=1,K=2048,N=8192)` used `30` warmups and `100` randomized samples:
-
-| Route | p50 (ms) | p95 (ms) | mean (ms) |
-|---|---:|---:|---:|
-| Current shared-activation N64 | `0.73904` | `0.82707` | `0.65654` |
-| Direct-activation candidate | `0.74362` | `0.84484` | `0.69023` |
-
-The production shared-activation N64 route remains enabled.
+The first complete-module harness for the direct-activation/no-shared-memory
+probe used the same module monkeypatch mistake later found in the serial-N128
+probe: both module arms could resolve the patched GEMV function. Its reported
+module timing and parity are therefore not evidence and are intentionally not
+used for a production decision. A corrected boundary A/B is required before
+revisiting this idea.
