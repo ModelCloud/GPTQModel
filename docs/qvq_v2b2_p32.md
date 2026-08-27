@@ -2659,3 +2659,28 @@ mismatch between the kernel's N32 lane ordering and the MLX outer reshape;
 the existing full-width transform semantics remain unchanged. Any future H32
 fusion must first pass an explicit coordinate-level permutation oracle before
 being benchmarked for speed.
+
+## 60. Metal System Trace on AC/high-performance M4 Max
+
+The committed inner-kernel benchmark was recorded with Xcode 26.6
+`xctrace`'s `Metal System Trace` template on the plugged-in M4 Max in
+high-performance mode. The target exited normally after `7.128 s` of trace
+time and produced a readable trace at
+`/tmp/qvq_lr_metal_20260827_run2.trace` (local profiling artifact, not a
+checkpoint input).
+
+The trace confirms that the benchmark reaches the MLX Metal path and exposes
+the expected command-buffer/encoder activity, including the LR32 specialized
+kernel names through Metal signposts. It does **not** expose shader-level
+barrier, occupancy, cache, or stall counters on this host: the trace reports
+`Counter Set: (null)` and `Shader Timeline: Disabled`. Consequently, no
+numeric stall or occupancy claim is made from this capture. The source-level
+barrier accounting remains the actionable evidence: the promoted long-K M1
+split-32 route has one deterministic reduction barrier, while the generic
+multirow route has a level-table setup barrier plus two barriers per K32 tile.
+
+The next profiling capture should use an available GPU-counter configuration
+or an Instruments GUI-created package with shader timeline enabled. Until
+then, the highest-confidence overlap opportunity is still removing the
+multirow M1 barrier/shared-tile architecture, not tuning an unobserved stall
+counter.
