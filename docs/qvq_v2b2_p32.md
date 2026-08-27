@@ -3584,3 +3584,26 @@ host and 30 warmups/100 interleaved samples with seed `20261030`, was:
 The inner-kernel results confirm that LR32 is already a greater-than-2x
 kernel win for M8/M16, while M1 remains the limiting regime even before the
 full-module transform and epilogue are included.
+
+## 95. M1 N32 shared-activation geometry AC recheck
+
+The previously promising two-SIMD-group N32 geometry was rechecked against the
+current production N64 W2 half2 route at `(M=1,K=2048,N=8192)` with 200
+randomized/interleaved complete-module samples per arm, 30 warmups, and seed
+`20261031` on the AC/performance-mode M4 Max. The candidate remained exactly
+equal to production:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | max (ms) |
+|---|---:|---:|---:|---:|
+| Production N64 W2 half2 | `0.87510` | `2.11833` | `1.04605` | `4.39354` |
+| N32 shared K64 candidate | `0.78902` | `1.76770` | `0.94892` | `5.26204` |
+
+The candidate measured `1.109x` at p50 and `1.102x` by mean, with a worse
+maximum sample. This is not a reliable module-level improvement and was not
+promoted. The universal M1 `2x` target remains open.
