@@ -1502,3 +1502,9 @@ latency, so the same-process A/B/C result is the primary decision gate:
 | `(M=4,K=2048,N=8192)` | `1.11081 / 1.53555` | `2.25188 / 2.74342` | `2.027x` |
 | `(M=8,K=2048,N=8192)` | `1.50421 / 2.10942` | `3.64323 / 4.12524` | `2.422x` |
 | `(M=16,K=8192,N=8192)` | `2.47219 / 3.38199` | `5.64046 / 6.54650` | `2.282x` |
+
+The kernel also computes the selector bit once per output ring and reuses it
+for all eight W2 pair decodes. In a follow-up same-process comparison at the
+same shape, this reduced complete-module p50 from `0.27896` to `0.27015` ms
+(`1.033x`) while preserving exact parity; the inner-kernel p50 was `0.50483`
+versus `0.56358` ms.

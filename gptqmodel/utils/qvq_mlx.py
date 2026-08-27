@@ -2233,9 +2233,14 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
                 output_names=["out"],
                 header=_lr_m1_n64_w2_mask_header(alt_bank_id),
                 source=_LR_M1_N64_W2_FP32_SOURCE.replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                )
+                .replace(
                     "qlevelsv2b_lr_const_w2(state,bank)",
-                    "qlevelsv2b_lr_const_w2_m1_mask(state,(selector>>ring)&1u)",
-                ).replace("uint(bank_alt_id[0])", "AltBank"),
+                    "qlevelsv2b_lr_const_w2_m1_mask(state,bank_bit)",
+                )
+                .replace("uint(bank_alt_id[0])", "AltBank"),
                 ensure_row_contiguous=True,
             )
         except Exception as exc:
