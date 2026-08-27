@@ -4670,3 +4670,28 @@ exceeds `2x` for the batched M8/M16 cases, but the universal `2x` M1 target
 remains open. The host power state is recorded because Apple GPU scheduling
 and thermal state materially affect absolute latency; paired same-process
 comparisons remain the preferred evidence for individual promotions.
+
+## 134. AC/performance-mode inner-kernel refresh
+
+The public `qvq_mlx_gemv` benchmark was also rerun on the plugged-in,
+performance-mode M4 Max with randomized/interleaved LR/P32 order, shared
+inputs, 30 warmups, and 100 synchronized samples per arm. This is a
+kernel-only measurement; it excludes the complete module's input/output
+Hadamard transforms and epilogue.
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.41704` | `0.52106` | `1.249x` | `0.89633` | `0.81956` |
+| `(1,2048,2048)` | `0.43173` | `0.52010` | `1.205x` | `0.63604` | `0.71442` |
+| `(1,2048,8192)` | `0.61288` | `0.79265` | `1.293x` | `0.74503` | `0.94562` |
+| `(1,8192,2048)` | `0.56540` | `0.85937` | `1.520x` | `0.71299` | `1.10350` |
+| `(4,2048,8192)` | `0.92319` | `1.86615` | `2.021x` | `1.12655` | `2.14876` |
+| `(8,2048,8192)` | `0.83379` | `1.99400` | `2.391x` | `1.40883` | `2.94043` |
+| `(16,8192,8192)` | `2.33867` | `5.27825` | `2.257x` | `2.45786` | `5.40695` |
+
+The kernel remains faster than P32 for every tested shape and exceeds `2x`
+for M4/M8/M16. M1 remains below `2x`; the complete-module boundary is the
+governing production metric because it includes the transforms and epilogue.
+The separate inner and module sweeps should not be compared by absolute
+latency because they were separate synchronized runs with different MLX
+graph materialization and scheduling histories.
