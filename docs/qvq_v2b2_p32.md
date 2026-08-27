@@ -1326,3 +1326,10 @@ L2 on the wide production shape, but was slower than MLX's native `mx.sum` at
 the complete-module boundary: candidate/baseline p50 ratios were `1.021x`
 for `(M=1,K=2048,N=8192)`, `1.127x` for `(M=1,K=8192,N=2048)`, and `1.053x`
 for `(M=2,K=2048,N=8192)`. The native reduction remains enabled.
+
+An additional wide-generation check used `(M=1,K=8192,N=8192)` with 100
+randomized samples per arm on the same host. Complete-module p50 was
+`0.61600 ms` for LR32 versus `0.90858 ms` for P32 (`1.475x` faster), with
+p95 values of `0.74687 ms` and `1.17481 ms`, respectively. LR32 remains
+faster, but this confirms that a universal 2x M1 claim would require fusing
+the full-Hadamard/dispatch graph, not another LR decode or split-K tweak.
