@@ -3387,3 +3387,48 @@ randomized/interleaved LR/P32 order, `30` warmups, `100` samples, and seed
 
 Power-management state was verified as `powermode 2` before this sweep. The
 large p95 spread remains a reason to treat p50/mean as the primary comparison.
+
+## 88. M1 split-1 control and Xcode Metal profiling
+
+The production M1/N64 W2 half2 route was compared with the same kernel forced
+to use one full-K split at `(M=1,K=2048,N=8192)`. The complete-module output
+remained within the existing FP32 tolerance (`max_abs=0.03125`, relative L2
+`0`), but split-1 was slower:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production split-2 | `0.45552` | `0.59884` | `0.47418` |
+| Forced split-1 | `0.48433` | `0.52725` | `0.48239` |
+
+The forced split-1 route was `0.941x` at p50 and `0.983x` by mean, so split-2
+remains the production policy.
+
+An Xcode 26.6 Metal System Trace was captured on the AC/high-performance
+Apple M4 Max (`Device(gpu,0)`, `applegpu_g16s`, `powermode=2`) using:
+
+```text
+xcrun xctrace record --template 'Metal System Trace' \
+  --output /tmp/qvq_m1_20261025_run4.trace --launch -- \
+  /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+  scripts/profile_qvq_mlx_metal.py --m 1 --k 2048 --n 8192 \
+  --warmup 20 --active-calls 20
+```
+
+The trace bundle is `/tmp/qvq_m1_20261025_run4.trace` (42 MB). A separate
+bounded MLX GPU Frame Capture is `/tmp/qvq_m1_20261025_run5.gputrace` (178 MB).
+Neither artifact is committed because captures can contain inputs and device
+resources.
+
+The warmed system trace recorded `40` Python-owned compute intervals across
+`20` active calls, consistent with the current split-2 kernel plus materialized
+MLX reduction. GPU interval duration was `205.46 us` median, `245.33 us` p95,
+with a `235.75 us` median gap between consecutive Python-owned compute
+intervals. These are coarse scheduling measurements, not shader stall data.
+
+This host exposes `Counter Set: (null)` and `Shader Timeline: Disabled` for
+Metal System Trace, so Xcode could not provide hardware occupancy, cache,
+barrier-stall, or utilization percentages. The trace does establish that the
+M1 path has a repeated dispatch/reduction boundary; source inspection still
+shows the expected shared activation and synchronization topology. The next
+optimization must therefore pass a synchronized complete-module A/B rather
+than relying on inferred counter metrics.
