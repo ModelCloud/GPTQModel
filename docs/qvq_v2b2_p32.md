@@ -3903,3 +3903,27 @@ differing elements) but measured only `1.030x` at p50 and `1.048x` by mean.
 The results indicate that K64/K128 are the practical batching range; larger
 shared decoded tiles do not continue improving latency. None reaches the
 `2x` promotion gate, so production dispatch remains unchanged.
+
+## 108. M4 K64 batching plus half2 decode composition
+
+The best M4 barrier-amortization candidate was combined with native `half2`
+PGC16 pair handling in the cooperative decoder. The candidate retained FP32
+accumulation/output and was bit-exact at `(M=4,K=2048,N=8192)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+The complete-module A/B used 300 randomized/interleaved samples per arm, 50
+warmups, and seed `20261116` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Production M4 K32 cooperative | `0.54994` | `1.55291` | `2.20002` | `0.77157` | `0.28454` | `4.26996` |
+| K64-batched + half2 candidate | `0.51598` | `1.35299` | `2.12494` | `0.68690` | `0.25771` | `2.93471` |
+
+The composition measured `1.066x` at p50 and `1.123x` by mean. The two
+optimizations do not multiply into a 2x result, so production dispatch remains
+unchanged.
