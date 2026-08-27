@@ -1147,3 +1147,7 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | `divergence300` | complete; metric=0.35885416666666664; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | `divergence300` | complete; metric=0.3509375; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd` | `divergence300` | complete; metric=0.381875; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp35-b3bdcd-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | `divergence300` | complete; metric=0.35125; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6-div300-dev-v1.json` |
