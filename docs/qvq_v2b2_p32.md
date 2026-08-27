@@ -2220,3 +2220,10 @@ wide M1 W2 projections. The universal M1 `2x` objective remains open.
 The same shared candidate was also tested for narrower N=2048 outputs. It
 was neutral at `K=4096` (`1.005x`) and slower at `K=8192` (`0.964x`), so the
 production route remains restricted to wide `N>=8192` projections.
+
+An eight-way version of the same fused split was also prototyped for the
+K>=8192 wide-M1 regime. It reduced the nominal K64 synchronization count,
+but the 1024-threadgroup cost outweighed that reduction on the M4 Max:
+relative to shared split-2, complete-module p50 was `0.985x` at
+`K=8192,N=8192` and `0.986x` at `K=16384,N=8192`. It was rejected and is not
+included in the production kernel.
