@@ -981,3 +981,21 @@ and 3.
 | monitor | `llama32-1b-w2-vo-w20-smooth-atomic-d13602` | `divergence300` | complete; metric=0.17614583333333333; report `/root/qvq-results/llama32-1b-w2-vo-w20-smooth-atomic-d13602-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-vo-w25-smooth-atomic-b7d172` | `divergence300` | complete; metric=0.19083333333333333; report `/root/qvq-results/llama32-1b-w2-vo-w25-smooth-atomic-b7d172-div300-dev-v1.json` |
+
+| queued | `595f38` | `V+O W3.5 + Up+Down W3` | GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38`; flat `qvq_v2b2_p32`, two banks, reg .15; clean NM rows 0:128 + YAQA rows 0:182; strict manifest `disjointness-llama32-benchmark-v2.json`; D300/GSM8K queued after quantization |
+
+| queued | `bf96be` | `V+O W3.5 + Up+Down W3 + Atomic` | GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json`; output `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be`; clean NM/YAQA slices; replay search rows 0:32 and confirmation rows 32:64; strict replay manifest `disjointness-llama32-benchmark-replay-v2.json`; D300/GSM8K queued after quantization |
+
+| queued | `bf272e` | `V+O W3.5 + Up+Down W3 + Smooth+Atomic` | GPU 2; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e`; Smooth group size 16 / max 512 tokens plus atomic replay; clean disjoint slices and replay rows; D300/GSM8K queued after quantization |
+
+| queued | `56c940` | `V+O W2.5 + Up+Down W3` | GPU 3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_updown30.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940`; flat V2B2/P32 controls and clean disjoint calibration; D300/GSM8K queued after quantization |
+
+| queued | `e5ca9f` | `V+O W3.5 + Up+Down W3.5` | GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown35.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f`; flat V2B2/P32 controls and clean disjoint calibration; D300/GSM8K queued after quantization |
+
+| queued | `baeb18` | `V+O W3.5 + all MLP W2.5` | GPU 5; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall25.json`; output `/root/qvq-results/llama32-1b-w2-reg015-vo35-mlpall25-baeb18`; flat V2B2/P32 controls and clean disjoint calibration; D300/GSM8K queued after quantization |
+
+| queued | `95ef88` | `Up+Down W3 + Atomic` | GPU 6; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_atomic.json`; output `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88`; clean NM/YAQA slices; replay search rows 0:32 and confirmation rows 32:64; strict replay manifest; D300/GSM8K queued after quantization |
+
+| queued | `4e4d0d` | `Up+Down W3 + Smooth+Atomic` | GPU 7; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d`; Smooth group size 16 / max 512 tokens plus atomic replay; clean disjoint slices and replay rows; D300/GSM8K queued after quantization |
+
+| started | `595f38`, `bf96be`, `bf272e`, `56c940`, `e5ca9f`, `baeb18`, `95ef88`, `4e4d0d` | `8-GPU mixed-rate matrix` | queue wrappers launched on physical GPUs 0--7; all eight quantizers passed the low-utilization/free-memory gate and are loading/capturing the 302,193-token YAQA mix (atomic arms also load 13,147-token search and 22,609-token confirmation slices); D300 and GSM8K Platinum remain pending until each checkpoint marker is published; monitor will schedule both automatically |
