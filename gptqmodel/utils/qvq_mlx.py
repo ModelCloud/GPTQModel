@@ -88,6 +88,8 @@ _LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool, bool], Any
 _LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool, bool], str] = {}
 _LR_M1_N64_KERNELS: dict[tuple[int, int, int, int], Any] = {}
 _LR_M1_N64_KERNEL_ERRORS: dict[tuple[int, int, int, int], str] = {}
+_LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
+_LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
@@ -1068,6 +1070,45 @@ _LR_SMALL_M1_N16_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_
 _LR_SMALL_M1_N16_VECTOR_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
 _LR_SMALL_M1_N16_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_W2_SOURCE)
 _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+
+def _make_lr_m1_fused_split_source(source: str) -> str:
+    """Fuse the fixed M1/N16 W2 split-8 epilogue into one threadgroup."""
+
+    layout = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;"
+    )
+    replacement = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;\n"
+        "threadgroup float split_outputs[128];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 fused M1 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1).replace(
+        "constexpr uint split_count=SplitK;", "constexpr uint split_count=8u;", 1
+    )
+    output = "if((lane&1u)==0u)out[output_n*split_count+split]=sum0;"
+    fused_output = (
+        "if((lane&1u)==0u)split_outputs[split*16u+output_lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "if(simd==0u&&lane<16u){\n"
+        "  float total=0.0f;\n"
+        "  for(uint s=0u;s<8u;s++)total+=split_outputs[s*16u+lane];\n"
+        "  out[n0+lane]=total;\n"
+        "}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 fused M1 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_fused_split_source(
+    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
 
 
 def _make_lr_m1_n64_shared_activation_source(source: str) -> str:
@@ -2356,6 +2397,47 @@ def _local_ring_small_kernel(
             _LR_SMALL_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
         _LR_SMALL_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_m1_fused_split_kernel(*, alt_bank_id: int):
+    """Build the barrier-minimal fixed M1/N16 W2 split-8 kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_FUSED_SPLIT_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_FUSED_SPLIT_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_FUSED_SPLIT_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE.replace(
+                "uint(bank_alt_id[0])", "AltBank"
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_fused_split8_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_HEADER,
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 fused M1 split kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_FUSED_SPLIT_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_FUSED_SPLIT_KERNELS[alt_bank_id] = kernel
         return kernel
 
 
@@ -4109,7 +4191,24 @@ def qvq_mlx_gemv(
             and n >= 8192
             and n % 64 == 0
         )
-        if m1_n64:
+        m1_fused_split = (
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 8
+            and n % 16 == 0
+            and not m1_n64
+        )
+        if m1_fused_split:
+            # The eight FP32 split results are reduced inside one 256-thread
+            # threadgroup.  This removes eight separate M1/N16 launches and
+            # the materialized MLX reduction while retaining the same
+            # per-split FP32 accumulation and deterministic split order.
+            row_tile = 1
+            group_size = 256
+            output_width = 16
+            kernel = _local_ring_m1_fused_split_kernel(alt_bank_id=alt_id)
+        elif m1_n64:
             # Four N16 SIMD tiles share one K32 activation tile in a
             # 128-thread group.  The shared activation load and one barrier
             # replace four independent groups.  A single K slice avoids the
@@ -4192,7 +4291,7 @@ def qvq_mlx_gemv(
             else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         )
         template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
-        if split_k > 1 or small_rows:
+        if (split_k > 1 or small_rows) and not m1_fused_split:
             template.append(("SplitK", split_k))
         output_width = (
             64
@@ -4201,15 +4300,16 @@ def qvq_mlx_gemv(
             if small_rows and m <= 2 and n % 16 == 0
             else 8
         )
+        launch_split = 1 if m1_fused_split else split_k
         partials = kernel(
             inputs=inputs,
             template=template,
-            grid=(row_blocks * (n // output_width) * split_k * group_size, 1, 1),
+            grid=(row_blocks * (n // output_width) * launch_split * group_size, 1, 1),
             threadgroup=(group_size, 1, 1),
-            output_shapes=[(m, n * split_k)],
+            output_shapes=[(m, n if m1_fused_split else n * split_k)],
             output_dtypes=[mx.float32 if output_fp32 else mx.float16],
         )[0]
-        if split_k == 1:
+        if split_k == 1 or m1_fused_split:
             return partials
         return mx.sum(partials.reshape(m, n, split_k), axis=-1)
     if output_fp32:

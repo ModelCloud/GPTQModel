@@ -2100,3 +2100,41 @@ within every sample:
 Compilation changes absolute latency substantially, especially for wide M1
 shapes, but does not produce a universal `2x` LR advantage. Eager and compiled
 tables should not be mixed when judging kernel changes.
+
+### 46. Fused M1/N16 split-8 reduction
+
+The M1 W2 FP32 path now fuses its fixed split-8 epilogue into one 256-thread
+threadgroup for non-N64 shapes. Each SIMD group owns one K slice and writes 16
+FP32 outputs into a small threadgroup buffer; one barrier publishes those
+partials, after which SIMD group 0 performs the deterministic split-order
+reduction and writes the final `(M,N)` output. This removes eight separate
+M1/N16 launches and the external MLX `sum` graph while leaving the LR32 decode,
+FP32 accumulation, and serialized checkpoint layout unchanged.
+
+The new kernel matched the Torch reconstruction oracle for
+`(M=1,K=2048,N=256)` with maximum absolute error below `2e-2`. A same-process,
+randomized 80-sample complete-module A/B measured the fused path against the
+pre-fusion path as follows:
+
+| Shape | Before p50 (ms) | Fused p50 (ms) | Speedup |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=2048)` | `0.59756` | `0.52508` | `1.138x` |
+| `(M=1,K=8192,N=2048)` | `0.94662` | `0.85346` | `1.109x` |
+
+The A/B outputs were exact at the FP16 module boundary for those two probes
+(maximum difference `0`). A fresh synchronized 80-sample LR/P32 complete-module
+sweep after promotion measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.25844 / 0.29862` | `0.40000 / 0.48676` | `1.548x` |
+| `(M=1,K=2048,N=2048)` | `0.31419 / 0.39732` | `0.41846 / 0.45763` | `1.332x` |
+| `(M=1,K=2048,N=8192)` | `0.46710 / 0.51020` | `0.78944 / 0.84609` | `1.690x` |
+| `(M=1,K=8192,N=2048)` | `0.29896 / 0.33680` | `0.36790 / 0.43194` | `1.231x` |
+| `(M=4,K=2048,N=8192)` | `0.30883 / 0.36316` | `0.55375 / 0.64406` | `1.793x` |
+| `(M=8,K=2048,N=8192)` | `0.41517 / 0.45034` | `0.87254 / 0.97145` | `2.102x` |
+| `(M=16,K=8192,N=8192)` | `2.12833 / 2.16912` | `5.18675 / 5.26051` | `2.437x` |
+
+The fused reduction is retained because its exactness and M1 A/B gain are
+clear, but the universal M1 `2x` target remains open; the current best M1
+complete-module result is `1.690x` on the tested table.
