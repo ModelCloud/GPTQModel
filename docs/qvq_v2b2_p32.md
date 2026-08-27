@@ -2517,3 +2517,39 @@ passes the full LR32 suite (`168 passed`) and the broader MLX suites
 narrowed route measured `1.563x` at `(M=1,K=8192,N=2048)` and `2.129x` at
 `(M=4,K=2048,N=8192)`; the M8/M16 results were `2.418x` and `2.430x`.
 These are same-host p50 ratios, not a claim of a universal `2x` result.
+
+## 56. AC M1 N32 follow-up A/B results
+
+The committed tree was rechecked on the Apple M4 Max with AC power and
+high-performance mode enabled using the randomized/interleaved complete-module
+benchmark, 30 warmups, and 120 synchronized samples per arm. The post-revert
+baseline was:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.60727` | `0.85823` | `1.413x` |
+| `(M=1,K=2048,N=2048)` | `0.65871` | `0.89940` | `1.365x` |
+| `(M=1,K=2048,N=8192)` | `0.84656` | `1.22248` | `1.444x` |
+| `(M=1,K=8192,N=2048)` | `0.86210` | `1.27225` | `1.476x` |
+| `(M=4,K=2048,N=8192)` | `1.16304` | `2.39967` | `2.063x` |
+| `(M=8,K=2048,N=8192)` | `1.51396` | `3.83594` | `2.534x` |
+| `(M=16,K=8192,N=8192)` | `2.59871` | `5.84046` | `2.247x` |
+
+Two M1 W2 FP32 alternatives were then tested in same-process randomized
+kernel A/Bs with 160 synchronized samples, identical tensors, and the Torch
+oracle:
+
+* Loading one shared K32 activation per SIMD lane and broadcasting it with
+  `simd_shuffle` was exact but slower: candidate `0.55800 ms` p50 versus the
+  committed direct-load N32 source `0.39969 ms` p50 (`0.716x` direct/candidate).
+  The candidate is rejected; cached/coalesced activation loads beat the extra
+  shuffle traffic on this M4 Max.
+* A dual-output N64 source, with two output accumulators per lane and half the
+  output-tile launches, was exact (`max_abs=0`) but slower: `0.43627 ms` p50
+  versus committed N32 `0.40579 ms` p50 (`0.930x` N32/candidate). It is not
+  promoted.
+
+These results reinforce the current dispatch boundary: retain the direct
+one-output N32 route only for long-K M1 W2 FP32 shapes, and avoid widening the
+tile or replacing cached activation loads with SIMD broadcasts without a
+measured full-module win.
