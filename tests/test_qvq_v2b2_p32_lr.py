@@ -526,6 +526,47 @@ def test_lr32_mlx_gpu_kernel_accepts_fp32_activation():
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)
 
 
+@pytest.mark.parametrize("bank_alt_value", (1, 2, 3))
+def test_lr32_mlx_small_w2_literal_alt_bank_masks_match_torch(bank_alt_value):
+    """Exercise the small-row W2 literal-mask specialization for every bank."""
+
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils.qvq_mlx import qvq_mlx_gemv
+
+    bits = 2
+    in_features = 64
+    out_features = 16
+    _, _, trellis, selectors = _random_lr_payload(
+        bits,
+        tiles=(in_features // 32) * (out_features // 8),
+    )
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([bank_alt_value], dtype=torch.uint8)
+    x = torch.randn(1, in_features, dtype=torch.float32)
+    expected = x @ reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=packed_selectors,
+        bank_alt_id=bank_alt_id,
+    )
+
+    actual = qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(trellis.numpy()),
+        bits,
+        out_features=out_features,
+        bank_ids=mx.array(packed_selectors.numpy()),
+        bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=bank_alt_value,
+    )
+    mx.eval(actual)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
+
+
 def test_lr32_mlx_linear_validates_missing_alt_bank_before_scalar_access():
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils.qvq_mlx import QVQMLXLinear

@@ -1321,6 +1321,22 @@ inline float2 qlevelsv2b_lr_const_w2_m1_mask(uint s,uint bank_bit){{
 }}
 """
 
+
+def _lr_small_w2_mask_header(alt_bank_id: int) -> str:
+    """Add a literal W2 alternate-bank mask to small-row LR kernels."""
+
+    masks = {1: 0x5A5A, 2: 0x3C3C, 3: 0xC3C3}
+    try:
+        mask = masks[alt_bank_id]
+    except KeyError as exc:
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}") from exc
+    return _HEADER + f"""
+inline float2 qlevelsv2b_lr_const_w2_small_mask(uint s,uint bank_bit){{
+  uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));
+}}
+"""
+
 _LR_MMA_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
 uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,nb=N>>3;
@@ -2373,7 +2389,18 @@ def _local_ring_small_kernel(
                 else _LR_SMALL_SOURCE
             )
             specialized_alt_bank = alt_bank_id is not None
-            if specialized_alt_bank:
+            literal_w2_mask = w2 and specialized_alt_bank
+            header = _HEADER
+            if literal_w2_mask:
+                source = source.replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                ).replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+                )
+                header = _lr_small_w2_mask_header(alt_bank_id)
+            if specialized_alt_bank and not literal_w2_mask:
                 source = source.replace("uint(bank_alt_id[0])", "AltBank")
             input_names = ["x", "trellis", "bank_ids", "dims"]
             kernel = mx.fast.metal_kernel(
@@ -2387,7 +2414,7 @@ def _local_ring_small_kernel(
                 ),
                 input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
                 output_names=["out"],
-                header=_HEADER,
+                header=header,
                 source=source,
                 ensure_row_contiguous=True,
                 compile_options={"math_mode": "fast"},
@@ -2419,13 +2446,17 @@ def _local_ring_m1_fused_split_kernel(*, alt_bank_id: int):
 
         try:
             source = _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE.replace(
-                "uint(bank_alt_id[0])", "AltBank"
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
             )
             kernel = mx.fast.metal_kernel(
                 name=f"gptqmodel_qvq_v2b2_p32_lr_m1_fused_split8_alt{alt_bank_id}",
                 input_names=["x", "trellis", "bank_ids", "dims"],
                 output_names=["out"],
-                header=_HEADER,
+                header=_lr_small_w2_mask_header(alt_bank_id),
                 source=source,
                 ensure_row_contiguous=True,
                 compile_options={"math_mode": "fast"},
@@ -4290,7 +4321,15 @@ def qvq_mlx_gemv(
             if m1_n64
             else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         )
-        template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
+        literal_w2_mask = (
+            v2b2_p32_lr
+            and transition_bits == 4
+            and small_rows
+            and not m1_n64
+        )
+        template = [("EdgeBits", transition_bits)]
+        if not literal_w2_mask:
+            template.append(("AltBank", alt_id))
         if (split_k > 1 or small_rows) and not m1_fused_split:
             template.append(("SplitK", split_k))
         output_width = (

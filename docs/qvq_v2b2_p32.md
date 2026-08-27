@@ -2138,3 +2138,32 @@ sweep after promotion measured:
 The fused reduction is retained because its exactness and M1 A/B gain are
 clear, but the universal M1 `2x` target remains open; the current best M1
 complete-module result is `1.690x` on the tested table.
+
+### 47. Literal W2 alternate-bank masks for small-row LR32
+
+The W2 small-row LR32 kernels now specialize the immutable alternate-bank
+metadata into a literal 16-bit mask. The selector bit is still read from the
+serialized per-tile bank byte, but the alternate-bank selection no longer
+requires a bank-table lookup or an `AltBank` template value in this path. The
+existing wide M1/N64 specialization is unchanged. The three supported
+alternate-bank IDs map to the codec masks `0x5a5a`, `0x3c3c`, and `0xc3c3`.
+
+The implementation was checked against the Torch K32xN8 reconstruction oracle
+for all three alternate-bank IDs, with exact output parity in the focused W2
+small-row test. The focused MLX/QVQ suite remained green at `483 passed` before
+the three additional bank-ID cases were added.
+
+A same-process randomized 80-sample complete-module A/B on AC power with
+macOS high-power mode (`powermode=2`) measured the literal-mask candidate
+against the prior small-row W2 source:
+
+| Shape | Before p50 (ms) | Literal-mask p50 (ms) | Speedup |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.59408` | `0.54358` | `1.093x` |
+| `(M=1,K=2048,N=2048)` | `0.70744` | `0.63690` | `1.111x` |
+| `(M=1,K=8192,N=2048)` | `0.87871` | `0.83133` | `1.057x` |
+
+The A/B outputs were exactly equal at the complete-module boundary. These
+are paired within-process measurements; absolute Apple GPU latency remains
+host-state dependent. The improvement is retained as a low-risk W2 dispatch
+specialization, but it does not by itself close the universal M1 `2x` target.
