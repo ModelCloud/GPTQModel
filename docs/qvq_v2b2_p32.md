@@ -4456,3 +4456,30 @@ LR remains faster than non-local P32 for every tested shape. The complete
 module clears `2x` for M4, M8, and M16, but not for any M1 shape; the universal
 `2x` objective therefore remains open. The focused LR/SwiGLU/threadgroup
 correctness suite passed `19` tests, and `qvq_mlx.py` passed `py_compile`.
+
+## 127. M1 FP16 output-epilogue probe rejected
+
+The LR GEMV was kept in FP32, but its result was cast to FP16 before the
+output Hadamard and `SV` scale. This tests whether the output-transform
+bandwidth can be reduced while leaving the LR accumulation unchanged.
+
+Compared with the production FP32 output-transform path, the candidate had:
+
+| Shape `(M,K,N)` | max absolute output difference | RMSE | relative L2 |
+|---|---:|---:|---:|
+| `(1,2048,2048)` | `0.125` | `0.026457` | `5.529e-4` |
+| `(1,2048,8192)` | `0.125` | `0.028451` | `5.879e-4` |
+| `(1,8192,2048)` | `0.25` | `0.053795` | `5.469e-4` |
+
+A same-process randomized complete-module A/B used 10 warmups and 40
+samples per arm on the AC/performance-mode M4 Max:
+
+| Shape | FP32-output LR p50 (ms) | FP16-output candidate p50 (ms) | Candidate/current |
+|---|---:|---:|---:|
+| `(1,2048,2048)` | `0.60135` | `0.61940` | `0.971x` |
+| `(1,2048,8192)` | `0.78333` | `0.80525` | `0.973x` |
+| `(1,8192,2048)` | `0.68227` | `0.67560` | `1.010x` |
+
+The candidate neither approaches the missing M1 `2x` improvement nor
+preserves the production numerical contract. The FP32 output transform and
+final cast remain enabled.
