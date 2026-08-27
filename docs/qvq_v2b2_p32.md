@@ -3254,3 +3254,13 @@ improvement in this run. It is a useful shape-specific positive probe, but it
 does not establish the universal `2x` target and was not promoted without
 broader-shape and alternate-bank validation. The production M1/N64 route
 remains unchanged.
+
+## 83. M1 one-barrier K64 staging probe rejected by oracle
+
+An in-memory synchronization probe staged both K32 activation halves before
+decoding and removed the per-half barrier. This is not safe by itself: the
+next K64 iteration can begin overwriting `shared_activation` while sibling
+SIMD groups are still reading the preceding tile. The exact output check
+detected the race (`max_abs=58.40625`, non-finite relative comparison), so its
+timing was discarded. Any attempt to reduce the barrier count must include an
+explicit producer/consumer handoff or a double-buffered activation tile.
