@@ -3856,3 +3856,31 @@ warmups, and seed `20261110` on the AC/performance-mode M4 Max:
 The candidate measured `0.525x` at p50 and `0.595x` by mean. Duplicate decode
 work outweighed the reduced launch count, so the production cooperative route
 remains unchanged.
+
+## 106. M4 K64-batched cooperative decode recheck
+
+The cooperative M4 W2 decoder was restructured to stage and decode two
+consecutive K32 tiles before the shared compute phase. The candidate retained
+the N8 output mapping, FP32 accumulation, and K-order summation, but reduced
+the number of decode/consume barrier pairs by approximately two. After fixing
+the probe's sub-tile indexing, the candidate was bit-exact at
+`(M=4,K=2048,N=8192)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+A longer complete-module A/B used 300 randomized/interleaved samples per arm,
+50 warmups, and seed `20261112` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Production M4 K32 cooperative | `1.12867` | `1.85887` | `2.31430` | `1.21877` | `0.83012` | `2.81637` |
+| K64-batched candidate | `1.00352` | `1.62090` | `2.22783` | `1.09319` | `0.74604` | `3.96733` |
+
+The candidate measured `1.125x` at p50 and `1.115x` by mean. This is a
+repeatable partial improvement, but it does not meet the `2x` promotion gate
+and has a slightly worse maximum sample; production dispatch remains
+unchanged.
