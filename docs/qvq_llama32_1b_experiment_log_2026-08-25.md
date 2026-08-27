@@ -1066,3 +1066,9 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | `gsm8k_platinum_cot` | complete; metric=0.39950372208436724; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | `gsm8k_platinum_cot` | complete; metric=0.3631100082712986; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | `divergence300` | complete; metric=0.2490625; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | `divergence300` | complete; metric=0.2891666666666667; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | `divergence300` | complete; metric=0.22791666666666666; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11-div300-dev-v1.json` |
