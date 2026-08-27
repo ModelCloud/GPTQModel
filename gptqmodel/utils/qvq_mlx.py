@@ -2281,7 +2281,11 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
                     "qlevelsv2b_lr_const_w2_m1_mask(state,bank_bit)",
                 )
                 .replace("uint(bank_alt_id[0])", "AltBank"),
-                ensure_row_contiguous=True,
+                # qvq_mlx_gemv explicitly makes the three flat inputs
+                # contiguous for this guarded path.  Avoid the generic MLX
+                # preparation wrapper, which otherwise adds a per-launch
+                # row-contiguity check/copy boundary.
+                ensure_row_contiguous=False,
             )
         except Exception as exc:
             error = f"QVQ LR32 MLX M1/N64 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
@@ -3972,6 +3976,9 @@ def qvq_mlx_gemv(
             # replace four independent groups.  A single K slice avoids the
             # separate split-K reduction; on M4 Max this is faster for the
             # targeted short-K, wide-N M1 shapes.
+            x = mx.contiguous(x)
+            trellis = mx.contiguous(trellis)
+            bank_ids = mx.contiguous(bank_ids)
             split_k = 1
             row_tile = 1
             group_size = 128

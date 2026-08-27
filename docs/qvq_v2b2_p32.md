@@ -1600,3 +1600,18 @@ The wider sweep is noisy in absolute latency, but agrees with the paired
 promotion result that unrolling is a modest M1 improvement. It does not close
 the remaining M1 gap to 2x; N128 grouping was also oracle-exact but neutral at
 the complete-module boundary (`0.995x`) and was not promoted.
+
+### 27. K64 launch contiguity specialization
+
+The guarded K64 route now explicitly applies `mx.contiguous` to its flat
+activation, trellis, and selector inputs before launching a Metal kernel with
+`ensure_row_contiguous=False`. This preserves the public behavior for strided
+MLX views while avoiding the generic per-launch preparation wrapper for the
+normal contiguous module tensors. The new strided-input regression case passes,
+and the LR32 suite is now `149 passed`.
+
+In a same-process 120-sample complete-module comparison at
+`(M=1,K=2048,N=8192)`, this reduced p50 from `0.83269` to `0.77106 ms`
+(`1.080x`) and p95 from `1.63559` to `1.26313 ms`, with exact output parity.
+This is a guarded M1 improvement; it does not change the K64 codec or tensor
+ABI.
