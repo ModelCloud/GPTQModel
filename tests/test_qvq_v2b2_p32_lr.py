@@ -67,6 +67,13 @@ def test_lr32_small_row_output_width_policy(n, expected):
     assert _local_ring_small_output_width(n) == expected
 
 
+@pytest.mark.parametrize("k,expected", ((256, 1), (512, 1), (1024, 1), (2048, 2)))
+def test_lr32_m1_n64_split_policy(k, expected):
+    from gptqmodel.utils.qvq_mlx import _local_ring_m1_n64_split_k
+
+    assert _local_ring_m1_n64_split_k(k) == expected
+
+
 def _random_lr_payload(bits: float, tiles: int = 2):
     transition_bits = int(bits * 2)
     edges = torch.randint(

@@ -1866,3 +1866,29 @@ comparison on the AC/performance-mode M4 Max, the new/old p50 values were
 (`1.030x`), and `0.20715/0.19652 ms` at `K=2048` (`0.949x`). The mixed result
 does not justify changing the verified production source; the generic packed
 state helper remains in use.
+
+### 39. Wide-M1 split policy narrowed by K size
+
+The wide-M1/N64 split-2 policy was rechecked after the K64 race correction on
+the AC/performance-mode M4 Max. A same-process alternating 120-sample inner
+kernel comparison showed split-1 faster at `K=256`, `512`, and `1024`, while
+split-2 remained faster at `K=2048`. The production policy is therefore now
+split-1 for smaller wide-M1 K values and split-2 only for the model-sized
+`K=2048` case. The policy is centralized and covered by four regression cases.
+
+The full LR32 suite passes `156/156`. A fresh 80-sample synchronized
+complete-module sweep after the policy change measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.21467 / 0.22659` | `0.26406 / 0.29339` | `1.230x` |
+| `(M=1,K=2048,N=2048)` | `0.22256 / 0.23758` | `0.26077 / 0.28096` | `1.172x` |
+| `(M=1,K=2048,N=8192)` | `0.24098 / 0.26208` | `0.31677 / 0.40325` | `1.315x` |
+| `(M=1,K=8192,N=2048)` | `0.26617 / 0.30296` | `0.32981 / 0.35285` | `1.239x` |
+| `(M=4,K=2048,N=8192)` | `0.31175 / 0.39520` | `0.55712 / 0.60685` | `1.787x` |
+| `(M=8,K=2048,N=8192)` | `0.42835 / 0.46802` | `0.92408 / 1.01149` | `2.157x` |
+| `(M=16,K=8192,N=8192)` | `2.13265 / 2.31289` | `5.18531 / 5.48116` | `2.431x` |
+
+This improves the smaller-K policy without changing the primary Llama M1
+`K=2048,N=8192` route, which remains faster than P32 but below the universal
+`2x` target.

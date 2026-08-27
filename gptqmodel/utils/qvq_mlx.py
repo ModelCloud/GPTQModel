@@ -2510,6 +2510,16 @@ def _local_ring_small_output_width(n: int) -> int:
     return 16
 
 
+def _local_ring_m1_n64_split_k(k: int) -> int:
+    """Choose the wide-M1 split from measured K64 launch/reduction costs."""
+
+    # The K64 grouped source exposes enough independent work at the model's
+    # K=2048 wide projection shape for split-2 to win.  At smaller K, the
+    # fixed partial-output materialization and MLX reduction cost more than
+    # the extra occupancy, so keep one full-K accumulation.
+    return 2 if k == 2048 else 1
+
+
 def _local_ring_multirow_kernel(
     *,
     output_fp32: bool,
@@ -4087,7 +4097,7 @@ def qvq_mlx_gemv(
             # for long-enough wide M1 GEMVs.  The half-K boundary must itself
             # be K64-aligned because the source consumes two K32 subtiles at
             # a time; retain one slice for the K128-only and K<256 cases.
-            split_k = 2 if k >= 256 and k % 128 == 0 else 1
+            split_k = _local_ring_m1_n64_split_k(k)
             row_tile = 1
             group_size = 128
             output_width = 64
