@@ -1209,6 +1209,17 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
 
 
 def _normalize_rope_parameters_config_compat(config: Any) -> None:
+    # HunYuanVL is a composite config: RoPE belongs exclusively to its text
+    # sub-config. Adding a synthetic top-level rope_parameters value is not
+    # harmless here because HunYuanVLConfig treats flat text fields as legacy
+    # overrides when the config is serialized and loaded again. That would
+    # replace the nested multimodal mrope_section with a default RoPE config.
+    if getattr(config, "model_type", None) == "hunyuan_vl":
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None:
+            _normalize_rope_parameters_config_compat(text_config)
+        return
+
     rope_parameters = getattr(config, "rope_parameters", None)
     if (
         isinstance(rope_parameters, dict)
