@@ -84,12 +84,12 @@ _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
 _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
-_LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool], Any] = {}
-_LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool], str] = {}
+_LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool, bool], Any] = {}
+_LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool, bool], str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
-_LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool], Any] = {}
-_LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool], str] = {}
+_LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
+_LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool, bool], str] = {}
 
 _SYMMETRIC_GRAM_PACK_SOURCE = r"""
 uint index = thread_position_in_grid.x;
@@ -810,11 +810,22 @@ uint selector=lane==0u?uint(bank_ids[tile]):0u;
 selector=simd_shuffle(selector,ushort(0));
   uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
   uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  // Every output lane in this SIMD group consumes the same K32 activation
+  // tile.  Load each activation once and broadcast it to the lanes that own
+  // the corresponding output pair instead of rereading x for every output.
+  float activation0=float(x[row0*K+base+lane]);
+  float activation1=row1<M?float(x[row1*K+base+lane]):0.0f;
   for(uint offset=0;offset<4u;offset++){
-    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    uint pair=first_pair+offset;
     float2 value=qlevelsv2b_lr_const(state,bank,eb);
-    sum0+=float(x[row0*K+k0])*value.x+float(x[row0*K+k0+1u])*value.y;
-    if(row1<M)sum1+=float(x[row1*K+k0])*value.x+float(x[row1*K+k0+1u])*value.y;
+    float a0=simd_shuffle(activation0,ushort(pair<<1u));
+    float a1=simd_shuffle(activation0,ushort((pair<<1u)+1u));
+    sum0+=a0*value.x+a1*value.y;
+    if(row1<M){
+      float b0=simd_shuffle(activation1,ushort(pair<<1u));
+      float b1=simd_shuffle(activation1,ushort((pair<<1u)+1u));
+      sum1+=b0*value.x+b1*value.y;
+    }
     if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
   }
 }
@@ -872,10 +883,15 @@ for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
   selector=simd_shuffle(selector,ushort(0));
   uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
   uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  // Share the K32 activation tile across all output lanes in this SIMD
+  // group; the LR decode remains lane-local while inputs are broadcast.
+  float activation=float(x[base+lane]);
   for(uint offset=0;offset<4u;offset++){
-    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    uint pair=first_pair+offset;
     float2 value=qlevelsv2b_lr_const(state,bank,eb);
-    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;
+    float a0=simd_shuffle(activation,ushort(pair<<1u));
+    float a1=simd_shuffle(activation,ushort((pair<<1u)+1u));
+    sum0+=a0*value.x+a1*value.y;
     if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
   }
 }
@@ -978,10 +994,15 @@ for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
   selector=simd_shuffle(selector,ushort(lane&16u));
   uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
   uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  // Share the K32 activation tile across all output lanes in this SIMD
+  // group; the LR decode remains lane-local while inputs are broadcast.
+  float activation=float(x[base+lane]);
   for(uint offset=0;offset<8u;offset++){
-    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    uint pair=first_pair+offset;
     float2 value=qlevelsv2b_lr_const(state,bank,eb);
-    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;
+    float a0=simd_shuffle(activation,ushort(pair<<1u));
+    float a1=simd_shuffle(activation,ushort((pair<<1u)+1u));
+    sum0+=a0*value.x+a1*value.y;
     if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
   }
 }
@@ -1005,6 +1026,40 @@ _LR_SMALL_M1_N16_W2_SOURCE = (
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
 )
 _LR_SMALL_M1_N16_W2_FP32_SOURCE = _LR_SMALL_M1_N16_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+
+def _make_lr_small_m1_vector_activation_source(source: str) -> str:
+    """Broadcast four K32 activations per producer lane for an M=1 source."""
+
+    marker = "  float activation=float(x[base+lane]);"
+    body = (
+        "    float a0=simd_shuffle(activation,ushort(pair<<1u));\n"
+        "    float a1=simd_shuffle(activation,ushort((pair<<1u)+1u));\n"
+        "    sum0+=a0*value.x+a1*value.y;"
+    )
+    if marker not in source or body not in source:
+        raise RuntimeError("QVQ LR32 M=1 source is missing the scalar activation broadcast pattern")
+    return source.replace(
+        marker,
+        "  float4 activation=lane<8u?float4("
+        "float(x[base+(lane<<2u)]),float(x[base+(lane<<2u)+1u]),"
+        "float(x[base+(lane<<2u)+2u]),float(x[base+(lane<<2u)+3u])):float4(0.0f);",
+    ).replace(
+        body,
+        "    float4 pair_values=simd_shuffle(activation,ushort(pair>>1u));\n"
+        "    uint component=(pair<<1u)&3u;\n"
+        "    sum0+=pair_values[component]*value.x+pair_values[component+1u]*value.y;",
+    )
+
+
+_LR_SMALL_M1_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_SOURCE)
+_LR_SMALL_M1_VECTOR_FP32_SOURCE = _LR_SMALL_M1_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_W2_SOURCE)
+_LR_SMALL_M1_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_N16_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_SOURCE)
+_LR_SMALL_M1_N16_VECTOR_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_N16_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_W2_SOURCE)
+_LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
 
 _LR_MMA_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -1070,11 +1125,28 @@ _LR_MMA_HEADER = "#include <metal_simdgroup_matrix>\n" + _HEADER
 # because one SIMD group does not provide enough occupancy.
 _USE_LR_MMA = False
 
-# Cooperative ring decode is retained as an oracle-tested experiment.  On the
-# M4 Max its extra per-ring state setup did not beat the SIMD0 decoder
-# consistently (and was slower for M8), so keep the measured legacy path in
-# production until a device-specific benchmark justifies enabling it.
+# Cooperative ring decode remains disabled for M8/M16: its extra state setup
+# did not beat the SIMD0 decoder consistently on the M4 Max.  M4 is separate:
+# two SIMD groups can split the eight rings evenly, and its measured path is
+# enabled independently below after removing the decode bottleneck.
 _USE_LR_COOPERATIVE_DECODE = False
+_USE_LR_M4_COOPERATIVE_DECODE = True
+_LR_M4_COOPERATIVE_SUPPORTED: bool | None = None
+
+
+def _lr_m4_cooperative_supported() -> bool:
+    """Use the M4-tuned decoder only on the Apple GPU family it was measured on."""
+
+    global _LR_M4_COOPERATIVE_SUPPORTED
+    if _LR_M4_COOPERATIVE_SUPPORTED is None:
+        try:
+            import mlx.core as mx
+
+            architecture = str(mx.metal.device_info().get("architecture", ""))
+        except (AttributeError, KeyError, RuntimeError, TypeError):
+            architecture = ""
+        _LR_M4_COOPERATIVE_SUPPORTED = architecture.startswith("applegpu_g16")
+    return _LR_M4_COOPERATIVE_SUPPORTED
 
 _LR_MULTIROW_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -1124,6 +1196,21 @@ if(lane==0u){
     out[row1*N+n0+4u]=half(sum11.x);out[row1*N+n0+5u]=half(sum11.y);out[row1*N+n0+6u]=half(sum11.z);out[row1*N+n0+7u]=half(sum11.w);}
 }
 """
+
+
+def _make_lr_m4_cooperative_source(source: str) -> str:
+    """Distribute four decoded rings to each of M4's two SIMD groups."""
+
+    needle = "  if(simd==0u){\n    uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u;"
+    replacement = "  if(lane<16u){\n    uint output_lane=(simd<<2u)+(lane>>2u),first_pair=(lane&3u)<<2u;"
+    if needle not in source:
+        raise RuntimeError("QVQ LR32 multirow source is missing the legacy decoder pattern")
+    return source.replace(needle, replacement)
+
+
+_LR_MULTIROW_M4_COOPERATIVE_SOURCE = _make_lr_m4_cooperative_source(_LR_MULTIROW_SOURCE)
+
+
 def _make_lr_multirow_fp32_source(source: str) -> str:
     for value in ("sum00.x", "sum00.y", "sum00.z", "sum00.w", "sum01.x", "sum01.y", "sum01.z", "sum01.w",
                   "sum10.x", "sum10.y", "sum10.z", "sum10.w", "sum11.x", "sum11.y", "sum11.z", "sum11.w"):
@@ -1132,6 +1219,9 @@ def _make_lr_multirow_fp32_source(source: str) -> str:
 
 
 _LR_MULTIROW_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SOURCE)
+_LR_MULTIROW_M4_COOPERATIVE_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_M4_COOPERATIVE_SOURCE
+)
 
 
 # Experimental cooperative decoder for row tiles with at least four SIMD
@@ -1240,6 +1330,25 @@ _LR_MULTIROW_SPLIT_W2_SOURCE = (
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
 )
 _LR_MULTIROW_SPLIT_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SPLIT_W2_SOURCE)
+
+_LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE = (
+    _LR_MULTIROW_M4_COOPERATIVE_SOURCE.replace(
+        "qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)"
+    )
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+)
 
 _LR_MULTIROW_COOPERATIVE_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
 _LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE = _make_lr_multirow_split_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
@@ -1924,6 +2033,7 @@ def _local_ring_small_kernel(
     output_width: int = 8,
     alt_bank_id: int | None = None,
     single_row: bool = False,
+    vector_activation: bool = False,
 ):
     """Build the barrier-free LR32 kernel for one or two input rows."""
 
@@ -1935,7 +2045,11 @@ def _local_ring_small_kernel(
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
     if not isinstance(single_row, bool):
         raise TypeError("QVQ LR32 single_row must be a bool")
-    key = (output_fp32, split_k, w2, output_width, alt_bank_id, single_row)
+    if not isinstance(vector_activation, bool):
+        raise TypeError("QVQ LR32 vector_activation must be a bool")
+    if vector_activation and not single_row:
+        raise ValueError("QVQ LR32 vector_activation requires single_row=True")
+    key = (output_fp32, split_k, w2, output_width, alt_bank_id, single_row, vector_activation)
     kernel = _LR_SMALL_KERNELS.get(key)
     if kernel is not None:
         return kernel
@@ -1949,6 +2063,23 @@ def _local_ring_small_kernel(
 
         try:
             source = (
+                _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+                if vector_activation and output_width == 16 and output_fp32 and w2
+                else _LR_SMALL_M1_N16_VECTOR_W2_SOURCE
+                if vector_activation and output_width == 16 and w2
+                else _LR_SMALL_M1_N16_VECTOR_FP32_SOURCE
+                if vector_activation and output_width == 16 and output_fp32
+                else _LR_SMALL_M1_N16_VECTOR_SOURCE
+                if vector_activation and output_width == 16
+                else _LR_SMALL_M1_VECTOR_W2_FP32_SOURCE
+                if vector_activation and output_fp32 and w2
+                else _LR_SMALL_M1_VECTOR_W2_SOURCE
+                if vector_activation and w2
+                else _LR_SMALL_M1_VECTOR_FP32_SOURCE
+                if vector_activation and output_fp32
+                else _LR_SMALL_M1_VECTOR_SOURCE
+                if vector_activation
+                else
                 _LR_SMALL_M1_N16_W2_FP32_SOURCE
                 if single_row and output_width == 16 and output_fp32 and w2
                 else _LR_SMALL_M1_N16_W2_SOURCE
@@ -1991,6 +2122,7 @@ def _local_ring_small_kernel(
                     f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
                     f"_n{output_width}"
                     f"{'_m1' if single_row else ''}"
+                    f"{'_vec' if vector_activation else ''}"
                     f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
                 ),
                 input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
@@ -2121,6 +2253,7 @@ def _local_ring_multirow_kernel(
     split_k: int = 1,
     alt_bank_id: int | None = None,
     cooperative_decode: bool = False,
+    m4_cooperative_decode: bool = False,
 ):
     """Build the LR32 multi-row GEMV that shares one decode across rows."""
 
@@ -2130,7 +2263,13 @@ def _local_ring_multirow_kernel(
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
     if not isinstance(cooperative_decode, bool):
         raise TypeError("QVQ LR32 cooperative_decode must be a bool")
-    key = (output_fp32, split_k, w2, alt_bank_id, cooperative_decode)
+    if not isinstance(m4_cooperative_decode, bool):
+        raise TypeError("QVQ LR32 m4_cooperative_decode must be a bool")
+    if cooperative_decode and m4_cooperative_decode:
+        raise ValueError("QVQ LR32 cooperative decode modes are mutually exclusive")
+    if m4_cooperative_decode and split_k != 1:
+        raise ValueError("QVQ LR32 M4 cooperative decode requires split_k=1")
+    key = (output_fp32, split_k, w2, alt_bank_id, cooperative_decode, m4_cooperative_decode)
     kernel = _LR_MULTIROW_KERNELS.get(key)
     if kernel is not None:
         return kernel
@@ -2143,7 +2282,17 @@ def _local_ring_multirow_kernel(
         import mlx.core as mx
 
         try:
-            if cooperative_decode:
+            if m4_cooperative_decode:
+                source = (
+                    _LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE
+                    if split_k > 1 and output_fp32 and w2
+                    else _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+                    if split_k > 1 and w2
+                    else _LR_MULTIROW_M4_COOPERATIVE_FP32_SOURCE
+                    if output_fp32
+                    else _LR_MULTIROW_M4_COOPERATIVE_SOURCE
+                )
+            elif cooperative_decode:
                 source = (
                     _LR_MULTIROW_COOPERATIVE_SPLIT_W2_FP32_SOURCE
                     if split_k > 1 and output_fp32 and w2
@@ -2191,6 +2340,7 @@ def _local_ring_multirow_kernel(
                     f"gptqmodel_qvq_v2b2_p32_lr_multirow_"
                     f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
                     f"{'_coop' if cooperative_decode else ''}"
+                    f"{'_m4coop' if m4_cooperative_decode else ''}"
                     f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
                 ),
                 input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
@@ -3666,6 +3816,11 @@ def qvq_mlx_gemv(
                 output_width=output_width,
                 alt_bank_id=alt_id,
                 single_row=m == 1,
+                # The four-at-a-time producer layout pays off once there are
+                # enough output tiles to amortize its vector loads.  Keep the
+                # smallest projection on the scalar-shuffle source, which is
+                # measurably closer to the M4 Max launch floor there.
+                vector_activation=m == 1 and n >= 2048,
             )
         elif _USE_LR_MMA and m == 8 and k <= 2048 and n >= 8192 and split_k == 1:
             # Four K8 matrix operations cover one K32 local-ring tile.  A
@@ -3687,6 +3842,12 @@ def qvq_mlx_gemv(
                 split_k=split_k,
                 alt_bank_id=alt_id,
                 cooperative_decode=_USE_LR_COOPERATIVE_DECODE and m >= 8,
+                m4_cooperative_decode=(
+                    _USE_LR_M4_COOPERATIVE_DECODE
+                    and m == 4
+                    and split_k == 1
+                    and _lr_m4_cooperative_supported()
+                ),
             )
         row_blocks = (m + row_tile - 1) // row_tile
         inputs = [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]

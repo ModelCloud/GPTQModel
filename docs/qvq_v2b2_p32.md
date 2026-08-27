@@ -755,23 +755,80 @@ On the same AC/performance-mode host, one 50-warmup/200-sample run measured:
 These full-module numbers include the Hadamard/scale/epilogue graph and use independent synthetic payloads per format;
 they are a sanity check rather than a model-level throughput claim.
 
+#### Latest AC/performance-mode recheck
+
+After enabling AC performance mode, the current implementation was remeasured with the same synthetic payload in one
+process. This run used 50 warmup calls and 100 synchronized samples per arm, with immutable `AltBank=2` specialization:
+
+| Shape (M,K,N) | LR p50 (ms) | LR p95 (ms) | LR mean (ms) | LR sd (ms) | P32 p50 (ms) | P32 p95 (ms) | P32 mean (ms) | P32 sd (ms) | P32/LR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.2421 | 0.3024 | 0.2526 | 0.0528 | 0.1740 | 0.2107 | 0.1789 | 0.0209 | 0.72x |
+| (1,2048,2048) | 0.2484 | 0.3073 | 0.2409 | 0.0610 | 0.1723 | 0.2089 | 0.1778 | 0.0230 | 0.69x |
+| (1,2048,8192) | 0.2342 | 0.2817 | 0.2414 | 0.0478 | 0.2406 | 0.2989 | 0.2466 | 0.0225 | 1.03x |
+| (1,8192,2048) | 0.2319 | 0.2896 | 0.2420 | 0.0357 | 0.2811 | 0.3167 | 0.2868 | 0.0261 | 1.21x |
+| (4,2048,8192) | 0.2693 | 0.3497 | 0.2865 | 0.0697 | 0.6843 | 0.9781 | 0.6915 | 0.1351 | 2.54x |
+| (4,8192,2048) | 0.2945 | 0.3471 | 0.3021 | 0.0396 | 0.5147 | 0.5789 | 0.5226 | 0.0286 | 1.75x |
+| (8,2048,8192) | 0.3924 | 0.4647 | 0.4007 | 0.0398 | 1.1733 | 1.5632 | 1.1884 | 0.2047 | 2.99x |
+| (16,8192,8192) | 2.1793 | 2.2950 | 2.1907 | 0.0611 | 5.2263 | 5.3720 | 5.2299 | 0.0724 | 2.40x |
+
+The corresponding complete-module recheck used 50 warmup calls and 80 synchronized samples:
+
+| Shape (M,K,N) | Full LR p50 (ms) | Full LR p95 (ms) | Full P32 p50 (ms) | Full P32 p95 (ms) | P32/LR |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.4259 | 0.7061 | 0.6012 | 0.8232 | 1.41x |
+| (1,2048,2048) | 0.4633 | 0.8036 | 0.6232 | 0.8760 | 1.35x |
+| (1,2048,8192) | 0.5865 | 1.0950 | 0.5629 | 1.2338 | 0.96x |
+| (1,8192,2048) | 0.5637 | 1.1088 | 0.5843 | 1.3053 | 1.04x |
+| (4,2048,8192) | 0.5984 | 1.3258 | 0.8069 | 0.8998 | 1.35x |
+| (4,8192,2048) | 0.5864 | 1.3130 | 0.8267 | 0.8839 | 1.41x |
+| (8,2048,8192) | 0.6809 | 0.7996 | 1.1681 | 1.2699 | 1.72x |
+| (16,8192,8192) | 2.7584 | 2.9628 | 5.7320 | 5.8428 | 2.08x |
+
+These latest numbers are timing evidence for this AC/power-mode state, not universal device guarantees. The inner LR
+kernel exceeds 2x on representative wide M4/M8/M16 shapes; complete-module LR exceeds 2x only at M16 in this recheck.
+
 ### 11.4 Metal profiling findings
 
-The M4 Max was plugged into AC power with performance mode enabled for the current measurements. Profiling used MLX's
+The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's
 Metal GPU capture (`MTL_CAPTURE_ENABLED=1`, producing a `.gputrace`) and Xcode Instruments' **Metal System Trace**.
+The bounded workload is reproducible with [`scripts/profile_qvq_mlx_metal.py`](../scripts/profile_qvq_mlx_metal.py).
+Captures were made for M1 K2048 N8192, M4 K2048 N8192, and M8 K2048 N8192 after 20–30 warmup calls and 8 active
+calls. Artifacts were kept outside the repository:
+
+| Artifact | Size | Purpose |
+|---|---:|---|
+| `/tmp/qvq-metal-profile-c2edaec9-m1-system.trace` | 105 MB | M1 System Trace |
+| `/tmp/qvq-metal-profile-c2edaec9-m4-system.trace` | 67 MB | M4 System Trace |
+| `/tmp/qvq-metal-profile-c2edaec9-m8-current-system.trace` | 66 MB | M8 System Trace |
+| `/tmp/qvq-metal-profile-c2edaec9-m8-current2.gputrace` | 183 MB | M8 Xcode GPU Frame Capture bundle |
+| `/tmp/qvq-metal-profile-c2edaec9-m8-counters2.trace` | 73 MB | Counter attempt with System Trace |
+
+The System Trace command used an absolute interpreter:
+
+```text
+xctrace record --template 'Metal System Trace' --output /tmp/qvq-metal-profile-<shape>-system.trace --launch -- \
+  /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+  /Users/diego/tmp-omni-workspace/QvQ/scripts/profile_qvq_mlx_metal.py \
+  --m <M> --k <K> --n <N> --warmup 20 --active-calls 8
+```
+
 The trace confirmed the production dispatches and exposed the following execution costs:
 
 | Path | Trace/source observation | Decision |
 |---|---|---|
-| M=1/2 small-row | no `threadgroup_barrier`, direct activation reads, SIMD reductions only; M=1 now removes dormant second-row work | keep in production |
-| M=4/8/16 multirow | two threadgroup barriers per K32 decode/consume iteration; decode is performed by SIMD group 0 while sibling groups wait | next cooperative-decode target |
+| M=1/2 small-row | no `threadgroup_barrier`; M1 vector/scalar activation-sharing sources use SIMD shuffles and direct reductions | keep in production |
+| M=4 | M4 cooperative source uses both SIMD groups for the eight-ring decode; two barriers remain per K32 decode/consume iteration | enabled only for `split_k=1` on `applegpu_g16*` |
+| M=8/16 legacy multirow | two `threadgroup_barrier` calls per K32 decode/consume iteration; legacy decode is performed by SIMD group 0 while sibling groups wait | keep legacy on M4 Max after cooperative A/B lost/was neutral |
 | M8 MMA experiment | no threadgroup barriers, but one SIMD group and matrix setup underfill the GPU | kept oracle-tested but disabled in production |
-| selector metadata | one selector byte is shared by every ring in an N8 tile | broadcast from lane 0 |
-| W2 N8 compressed words | each packed word is shared by four decoder lanes | one load per word plus SIMD shuffle |
+| selector metadata | one selector byte is shared by every ring in an N8 tile | implemented as one lane-0 load plus SIMD broadcast |
+| W2 N8 compressed words | each packed word is shared by four decoder lanes | implemented as one load per word plus SIMD shuffle |
+| PGC16 levels | fixed 256-entry FP16 codebook is reused by every decoder | embedded in Metal constant memory; no per-threadgroup LUT copy |
 
 The controlled same-process M8 A/B measured the MMA experiment at approximately 0.495 ms versus 0.234 ms for the existing
-multirow path, so removing barriers alone was not sufficient. The opt-in barrier-free M4 experiment was also slower
-(0.533 ms versus 0.463 ms), indicating that duplicated decode costs more than the saved barriers at M=4.
+multirow path, so removing barriers alone was not sufficient. The current M4 cooperative decoder is exact and measured
+at `1.01–1.23x` legacy speed across representative K/N shapes; the wide K2048 N8192 case was the strongest. It is
+architecture-gated to `applegpu_g16*`. A valid M4 K8192 N2048 shape selects split-K=8, so production dispatch explicitly
+falls back to the legacy decoder rather than attempting the M4 cooperative source, which requires split-K=1.
 
 An additional oracle-tested cooperative decoder distributed the eight independent rings across the available SIMD groups
 while preserving the sequential per-ring state recurrence. It passed 24 M8/M16 tests covering W1 through W3.5 and both
@@ -779,13 +836,21 @@ output dtypes, but a synchronized same-process A/B on this M4 Max measured legac
 M8 (cooperative slower) and `0.99x` for M16 (parity). It is therefore retained behind `_USE_LR_COOPERATIVE_DECODE` and
 disabled in production; its result does not justify replacing the current decoder on this device.
 
-The GPU counter profile was unavailable on this host (`Selected counter profile is not supported on target device`),
-so the run does not claim hardware occupancy, register, cache, or stall-counter values. The remaining actionable overlap
-opportunities are structural: distribute LR state decode across SIMD groups for M>=8 and fuse the fixed split-K
-reduction/epilogue when full-module profiling shows that materialized partials are on the critical path. The W2
-load-once/shuffle optimization is now implemented in the N8 kernels and covered by the LR oracle tests. The capture
-bundle is intended for manual inspection in Xcode GPU
-Frame Capture; it is not a checkpoint artifact.
+The GPU counter profile was unavailable on this host. `xctrace` accepted the additional **Metal GPU Counters** instrument
+but reported `Selected counter profile is not supported on target device`; the standalone template name was also not
+available in this Xcode installation. Therefore this report does not claim hardware occupancy, register, cache, or
+stall-counter percentages. The trace and source support these structural conclusions:
+
+| Opportunity | Dependency/evidence | Next action |
+|---|---|---|
+| M1 launch/reduction overhead | M1 K2048 N8192 emits the LR split-K dispatch followed by a separate reduction dispatch; M1 source has no barriers | test a fixed split-2 reduction/epilogue kernel; preserve current path until it wins end-to-end |
+| M8/M16 decode overlap | legacy source gates decode on `simd==0`; sibling SIMD groups wait at two barriers per K32 tile | cooperative decode was oracle-correct but slower/neutral in prior A/B; keep as opt-in experiment |
+| M4 decode overlap | two SIMD groups can split four rings each; current source is exact and faster on wide K2048 N8192 | retain architecture/shape gate; benchmark split-K fallback separately |
+| full-module graph boundaries | inner kernel gains are reduced by Hadamard/epilogue work at M1–M4 | profile/fuse outer-H/H32 and fixed reduction only after full-module A/B |
+
+The W2 load-once/shuffle optimization, selector broadcast, PGC16 constant table, M1 activation sharing, and M4
+cooperative decode are implemented and covered by the LR oracle tests. The `.gputrace` bundle is intended for manual
+inspection in Xcode GPU Frame Capture; it is not a checkpoint artifact.
 
 ## 12. YAQA integration
 

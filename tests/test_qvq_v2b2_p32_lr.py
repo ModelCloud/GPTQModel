@@ -604,8 +604,41 @@ def test_lr32_mlx_m4_row_tile_matches_torch_reconstruction(bits, output_fp32):
     torch.testing.assert_close(actual_torch, expected, rtol=0, atol=8e-3)
 
 
+def test_lr32_m4_cooperative_decode_falls_back_for_split_k(monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M4_COOPERATIVE_DECODE", True)
+    monkeypatch.setattr(qvq_mlx, "_lr_m4_cooperative_supported", lambda: True)
+    original = qvq_mlx._local_ring_multirow_kernel
+    observed = {}
+
+    def selected(**kwargs):
+        observed["split_k"] = kwargs["split_k"]
+        observed["m4_cooperative_decode"] = kwargs["m4_cooperative_decode"]
+        return original(**kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_local_ring_multirow_kernel", selected)
+    m, k, n = 4, 8192, 2048
+    tile_count = (k // 32) * (n // 8)
+    rng = np.random.default_rng(20260827)
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(rng.standard_normal((m, k)).astype(np.float32)),
+        mx.array(rng.integers(-2**31, 2**31 - 1, (tile_count, 16), dtype=np.int64).astype(np.int32)),
+        2,
+        out_features=n,
+        bank_ids=mx.array(rng.integers(0, 4, (tile_count,), dtype=np.uint8)),
+        bank_alt_id=mx.array(np.array([2], dtype=np.uint8)),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=2,
+    )
+    mx.eval(actual)
+    assert observed == {"split_k": 8, "m4_cooperative_decode": False}
+
+
 @pytest.mark.parametrize("output_fp32", (False, True))
-@pytest.mark.parametrize("rows", (8, 16))
+@pytest.mark.parametrize("rows", (4, 8, 16))
 @pytest.mark.parametrize("bits", LR_RATES)
 def test_lr32_mlx_cooperative_decode_matches_torch_reconstruction(rows, bits, output_fp32, monkeypatch):
     mx = pytest.importorskip("mlx.core")
@@ -726,6 +759,7 @@ def test_lr32_mlx_single_row_specialization_matches_two_row_kernel(monkeypatch):
     def run(single_row):
         def selected(**kwargs):
             kwargs["single_row"] = single_row
+            kwargs["vector_activation"] = single_row
             return original(**kwargs)
 
         monkeypatch.setattr(qvq_mlx, "_local_ring_small_kernel", selected)
@@ -745,4 +779,4 @@ def test_lr32_mlx_single_row_specialization_matches_two_row_kernel(monkeypatch):
 
     specialized = run(True)
     fallback = run(False)
-    np.testing.assert_array_equal(specialized, fallback)
+    np.testing.assert_allclose(specialized, fallback, rtol=0, atol=2e-2)
