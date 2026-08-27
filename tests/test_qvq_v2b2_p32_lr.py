@@ -784,7 +784,8 @@ def test_lr32_mlx_single_row_specialization_matches_two_row_kernel(monkeypatch):
     np.testing.assert_allclose(specialized, fallback, rtol=0, atol=2e-2)
 
 
-def test_lr32_m1_w2_n64_grouped_kernel_matches_torch_oracle(monkeypatch):
+@pytest.mark.parametrize("bank_alt_value", [1, 2, 3])
+def test_lr32_m1_w2_n64_grouped_kernel_matches_torch_oracle(monkeypatch, bank_alt_value):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
 
@@ -795,7 +796,7 @@ def test_lr32_m1_w2_n64_grouped_kernel_matches_torch_oracle(monkeypatch):
         tiles=(in_features // 32) * (out_features // 8),
     )
     packed_selectors = pack_qvq_binary_bank_ids(selectors)
-    bank_alt_id = torch.tensor([2], dtype=torch.uint8)
+    bank_alt_id = torch.tensor([bank_alt_value], dtype=torch.uint8)
     x = torch.randn(1, in_features, dtype=torch.float32)
     expected = x @ reconstruct_local_ring_inner_weight(
         trellis,
@@ -822,7 +823,7 @@ def test_lr32_m1_w2_n64_grouped_kernel_matches_torch_oracle(monkeypatch):
         bank_alt_id=mx.array(bank_alt_id.numpy()),
         v2b2_p32_lr=True,
         output_fp32=True,
-        _bank_alt_id_value=2,
+        _bank_alt_id_value=bank_alt_value,
     )
     mx.eval(actual)
     assert selected["called"]

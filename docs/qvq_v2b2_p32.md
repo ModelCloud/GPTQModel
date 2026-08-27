@@ -1468,3 +1468,37 @@ tile variant was oracle-exact but slower (`0.63644` versus `0.62398` ms inner
 p50), so it was not promoted. The universal M1 2x target is still not met;
 the remaining gap is now in the LR decoder/launch path rather than split-K
 reduction.
+
+### 24. M1 W2 literal bank-mask specialization
+
+The M1/N64 W2 decoder now specializes the nonzero bank mask per immutable
+`bank_alt_id` (1, 2, or 3), while retaining the runtime selector bit and the
+same scalar PGC16 lookup. This removes the data-dependent two-dimensional bank
+mask-table access from the hot W2 loop without changing the serialized format.
+The new route is covered for all three alternate-bank IDs; the LR suite is
+`148 passed`.
+
+In a same-process complete-module A/B/C run at `(M=1,K=2048,N=8192)`, with
+identical payloads, randomized ordering, and 120 synchronized samples per arm:
+
+| Arm | p50 / p95 (ms) |
+|---|---:|
+| LR literal bank mask | `0.70017 / 0.94476` |
+| LR table bank mask | `0.76485 / 1.01632` |
+| P32 | `1.10110 / 1.46189` |
+
+Thus the literal-mask specialization was `1.092x` faster than the preceding LR
+implementation and `1.573x` faster than P32 in this run. A fresh 80-sample
+randomized module sweep after integration produced the following p50/p95
+results; Apple GPU clock and background-load variance is visible in absolute
+latency, so the same-process A/B/C result is the primary decision gate:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.67744 / 1.17732` | `0.88969 / 2.10444` | `1.313x` |
+| `(M=1,K=2048,N=2048)` | `0.75719 / 0.99902` | `0.83492 / 0.92741` | `1.103x` |
+| `(M=1,K=2048,N=8192)` | `0.79208 / 1.40192` | `1.14096 / 1.57649` | `1.440x` |
+| `(M=1,K=8192,N=2048)` | `0.82210 / 0.96079` | `1.12048 / 1.26699` | `1.363x` |
+| `(M=4,K=2048,N=8192)` | `1.11081 / 1.53555` | `2.25188 / 2.74342` | `2.027x` |
+| `(M=8,K=2048,N=8192)` | `1.50421 / 2.10942` | `3.64323 / 4.12524` | `2.422x` |
+| `(M=16,K=8192,N=8192)` | `2.47219 / 3.38199` | `5.64046 / 6.54650` | `2.282x` |

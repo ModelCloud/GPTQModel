@@ -1115,6 +1115,22 @@ _LR_M1_N64_W2_FP32_SOURCE = _make_lr_m1_n64_shared_activation_source(
     _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
 )
 
+
+def _lr_m1_n64_w2_mask_header(alt_bank_id: int) -> str:
+    """Add the fixed W2 bank mask to the M1/N64 specialized header."""
+
+    masks = {1: 0x5A5A, 2: 0x3C3C, 3: 0xC3C3}
+    try:
+        mask = masks[alt_bank_id]
+    except KeyError as exc:
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}") from exc
+    return _HEADER + f"""
+inline float2 qlevelsv2b_lr_const_w2_m1_mask(uint s,uint bank_bit){{
+  uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));
+}}
+"""
+
 _LR_MMA_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
 uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,nb=N>>3;
@@ -2215,8 +2231,11 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
                 name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_fp32_alt{alt_bank_id}",
                 input_names=["x", "trellis", "bank_ids", "dims"],
                 output_names=["out"],
-                header=_HEADER,
-                source=_LR_M1_N64_W2_FP32_SOURCE.replace("uint(bank_alt_id[0])", "AltBank"),
+                header=_lr_m1_n64_w2_mask_header(alt_bank_id),
+                source=_LR_M1_N64_W2_FP32_SOURCE.replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_m1_mask(state,(selector>>ring)&1u)",
+                ).replace("uint(bank_alt_id[0])", "AltBank"),
                 ensure_row_contiguous=True,
             )
         except Exception as exc:
