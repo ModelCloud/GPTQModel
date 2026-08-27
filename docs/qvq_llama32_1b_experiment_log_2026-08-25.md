@@ -1143,3 +1143,7 @@ and 3.
 | monitor | `llama32-1b-w2-yaqa302k-layerdamp-align-gpu2` | `divergence300` | complete; metric=0.15739583333333335; report `/root/qvq-results/llama32-1b-w2-yaqa302k-layerdamp-align-gpu2-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643` | `divergence300` | complete; metric=0.37666666666666665; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up3-down35-457643-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f` | `divergence300` | complete; metric=0.35885416666666664; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-gate3-up35-down3-2ae00f-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422` | `divergence300` | complete; metric=0.3509375; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk25-vo35-mlp3-add422-div300-dev-v1.json` |
