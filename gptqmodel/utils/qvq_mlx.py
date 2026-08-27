@@ -2328,6 +2328,7 @@ def _local_ring_small_kernel(
                 header=_HEADER,
                 source=source,
                 ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
             )
         except Exception as exc:
             error = f"QVQ LR32 MLX small-row kernel creation failed: {exc}"
@@ -2387,6 +2388,7 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int, k_tile: int =
                 # preparation wrapper, which otherwise adds a per-launch
                 # row-contiguity check/copy boundary.
                 ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
             )
         except Exception as exc:
             error = f"QVQ LR32 MLX M1/N64 kernel creation failed for alt_bank_id={alt_bank_id}, K={k}, N={n}: {exc}"
@@ -2443,6 +2445,7 @@ def _local_ring_mma_kernel(
                 header=_LR_MMA_HEADER,
                 source=source,
                 ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
             )
         except Exception as exc:
             error = f"QVQ LR32 MLX MMA kernel creation failed: {exc}"
@@ -2622,6 +2625,7 @@ def _local_ring_multirow_kernel(
                 header=_HEADER,
                 source=source,
                 ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
             )
         except Exception as exc:
             error = f"QVQ LR32 MLX multi-row kernel creation failed: {exc}"

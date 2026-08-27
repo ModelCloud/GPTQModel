@@ -1867,6 +1867,32 @@ comparison on the AC/performance-mode M4 Max, the new/old p50 values were
 does not justify changing the verified production source; the generic packed
 state helper remains in use.
 
+### 40. LR32 Metal fast-math compilation
+
+All LR32 MLX kernel constructors now request Metal `math_mode="fast"`. The
+LR32 kernels perform integer state/packing decode, finite PGC16 lookup, and
+FP32 accumulation; they do not depend on IEEE special-value behavior. The
+change does not alter the serialized ABI or inference graph. All `156` LR32
+tests, including Torch-oracle comparisons, pass with the specialized compiler
+mode.
+
+A paired 120-sample complete-module sweep on the plugged-in AC/performance-mode
+M4 Max measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.65419 / 1.36657` | `0.87648 / 1.47237` | `1.340x` |
+| `(M=1,K=2048,N=2048)` | `0.67792 / 1.05091` | `0.88083 / 1.59097` | `1.299x` |
+| `(M=1,K=2048,N=8192)` | `0.84654 / 1.65609` | `1.24421 / 2.20153` | `1.470x` |
+| `(M=1,K=8192,N=2048)` | `1.05752 / 2.40646` | `1.38102 / 2.96097` | `1.306x` |
+| `(M=4,K=2048,N=8192)` | `1.20494 / 2.11865` | `2.49446 / 3.92775` | `2.070x` |
+| `(M=8,K=2048,N=8192)` | `1.13169 / 1.69425` | `2.40037 / 3.75822` | `2.121x` |
+| `(M=16,K=8192,N=8192)` | `2.53773 / 2.94830` | `5.71875 / 6.26986` | `2.253x` |
+
+This is a compiler-level gain rather than a claim that the universal M1 `2x`
+target is solved. The M1 route remains faster than P32 but is still limited by
+its transform/launch/decode overhead.
+
 ### 39. Wide-M1 split policy narrowed by K size
 
 The wide-M1/N64 split-2 policy was rechecked after the K64 race correction on
