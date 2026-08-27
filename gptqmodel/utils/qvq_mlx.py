@@ -1116,6 +1116,39 @@ _LR_M1_N64_W2_FP32_SOURCE = _make_lr_m1_n64_shared_activation_source(
 )
 
 
+def _make_lr_m1_n64_k64_source(source: str) -> str:
+    """Decode two adjacent K32 tiles per barrier in the M1/N64 source."""
+
+    source = source.replace("threadgroup float shared_activation[32];", "threadgroup float shared_activation[64];")
+    source = source.replace("simd == 0u && lane < 8u", "simd == 0u && lane < 16u")
+    source = source.replace("base+=32u){", "base+=64u){")
+    tile_block = (
+        "  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);\n"
+        "  device const int* tile_ptr=trellis+tile*(4u*eb);"
+    )
+    tile_replacement = (
+        "  for(uint sub=0u;sub<2u;sub++){\n"
+        "    uint tile=((base>>5u)+sub)*(N>>3u)+(output_n>>3u);\n"
+        "    device const int* tile_ptr=trellis+tile*(4u*eb);"
+    )
+    if tile_block not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its tile marker")
+    source = source.replace(tile_block, tile_replacement)
+    source = source.replace(
+        "shared_activation[pair<<1u]", "shared_activation[(sub<<5u)+(pair<<1u)]"
+    ).replace(
+        "shared_activation[(pair<<1u)+1u]", "shared_activation[(sub<<5u)+(pair<<1u)+1u]"
+    )
+    close_marker = "  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
+    close_replacement = "    }\n  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
+    if close_marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its loop terminator")
+    return source.replace(close_marker, close_replacement, 1)
+
+
+_LR_M1_N64_K64_W2_FP32_SOURCE = _make_lr_m1_n64_k64_source(_LR_M1_N64_W2_FP32_SOURCE)
+
+
 def _lr_m1_n64_w2_mask_header(alt_bank_id: int) -> str:
     """Add the fixed W2 bank mask to the M1/N64 specialized header."""
 
@@ -2210,7 +2243,7 @@ def _local_ring_small_kernel(
 
 
 def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
-    """Build the W2 M1 kernel that shares one K32 activation across four N16 tiles."""
+    """Build the W2 M1 kernel that shares two K32 activations per barrier."""
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
@@ -2228,11 +2261,11 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
 
         try:
             kernel = mx.fast.metal_kernel(
-                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_fp32_alt{alt_bank_id}",
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k64_fp32_alt{alt_bank_id}",
                 input_names=["x", "trellis", "bank_ids", "dims"],
                 output_names=["out"],
                 header=_lr_m1_n64_w2_mask_header(alt_bank_id),
-                source=_LR_M1_N64_W2_FP32_SOURCE.replace(
+                source=_LR_M1_N64_K64_W2_FP32_SOURCE.replace(
                     "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
                     "uint bank_bit=(selector>>ring)&1u;",
                 )

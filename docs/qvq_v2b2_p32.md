@@ -1508,3 +1508,37 @@ for all eight W2 pair decodes. In a follow-up same-process comparison at the
 same shape, this reduced complete-module p50 from `0.27896` to `0.27015` ms
 (`1.033x`) while preserving exact parity; the inner-kernel p50 was `0.50483`
 versus `0.56358` ms.
+
+### 25. M1 W2 K64 barrier tiling
+
+The M1/N64 W2 FP32 specialization now processes two adjacent K32 tiles per
+threadgroup barrier. The 128-thread launch stages 64 activation values, then
+decodes the two local-ring tiles sequentially before reducing the accumulated
+output. This halves the activation-staging barrier count for the targeted
+short-K path while preserving the literal bank-mask specialization and exact
+Torch-oracle reconstruction. It is selected only for `M=1`, W2, FP32 output,
+`K<=2048`, `K%64==0`, `N>=2048`, and `N%64==0`; other shapes retain their
+existing dispatch.
+
+The full LR32 test module passes `148` tests, including the K64 route and all
+three alternate-bank IDs. A same-process prototype comparison at
+`(M=1,K=2048,N=8192)` measured K64-tiled LR32 p50 `0.73056 ms` versus K32
+LR32 p50 `0.80717 ms` (`1.105x`), with p95 values `1.31143` and `1.19870` ms,
+respectively. Both were exact against the Torch reconstruction oracle. In a
+fresh synchronized 80-sample complete-module sweep on the AC/performance-mode
+M4 Max, the integrated production path measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.49775 / 1.00407` | `0.67792 / 1.74183` | `1.362x` |
+| `(M=1,K=2048,N=2048)` | `0.75148 / 1.04955` | `0.85950 / 1.41248` | `1.144x` |
+| `(M=1,K=2048,N=8192)` | `0.81085 / 1.33908` | `1.18792 / 1.62311` | `1.465x` |
+| `(M=1,K=8192,N=2048)` | `0.94408 / 1.82996` | `1.27083 / 1.95536` | `1.346x` |
+| `(M=4,K=2048,N=8192)` | `1.08588 / 1.43730` | `2.23823 / 3.15917` | `2.061x` |
+| `(M=8,K=2048,N=8192)` | `1.48685 / 1.94061` | `3.66925 / 4.08045` | `2.468x` |
+| `(M=16,K=8192,N=8192)` | `2.45831 / 2.81763` | `5.59271 / 6.18352` | `2.275x` |
+
+The K64 route is a real M1 improvement, but the universal 2x goal remains
+unmet: the best fresh M1 ratio is `1.465x`. The remaining M1 cost is now
+primarily complete-module launch/transform overhead and the scalar LR decode,
+not the removed split-K reduction or the K32 activation barrier count.
