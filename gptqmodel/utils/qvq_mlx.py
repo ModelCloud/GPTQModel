@@ -1100,6 +1100,38 @@ _LR_SMALL_M1_N16_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_
 _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
 
 
+def _make_lr_m1_n16_literal_pair_source(source: str) -> str:
+    """Expand the fixed W2 N16 pair loop and packed-nibble updates."""
+
+    blocks = ["  uint packed_next=first_pair==0u?packed0:packed1;"]
+    for offset in range(8):
+        block = [
+            "  {",
+            "    float2 value=qlevelsv2b_lr_const_w2(state,bank);",
+            f"    float4 pair_values=simd_shuffle(activation,ushort(({offset}+first_pair)>>1u));",
+            f"    uint component=(({offset}+first_pair)<<1u)&3u;",
+            "    sum0+=pair_values[component]*value.x+pair_values[component+1u]*value.y;",
+        ]
+        if offset != 7:
+            block.append(
+                f"    state=((state<<4u)|((packed_next>>{(offset + 1) * 4}u)&15u))&0xffffu;"
+            )
+        block.append("  }")
+        blocks.append("\n".join(block))
+    expanded = "\n".join(blocks)
+    loop_start = source.find("  #pragma unroll\n  for(uint offset=0;offset<8u;offset++){")
+    loop_end = source.find("\n  }\n}", loop_start)
+    if loop_start < 0 or loop_end < 0:
+        raise RuntimeError("QVQ LR32 M1/N16 source is missing its W2 pair loop")
+    loop_end += len("\n  }")
+    return source[:loop_start] + expanded + source[loop_end:]
+
+
+_LR_SMALL_M1_N16_LITERAL_W2_FP32_SOURCE = _make_lr_m1_n16_literal_pair_source(
+    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
+
+
 # One SIMD lane per output channel.  N32 spans four logical K32xN8 tiles;
 # each lane therefore owns one ring in one tile and can consume all sixteen
 # W2 pairs directly, avoiding the two-lane-per-output reduction used by the
@@ -1296,7 +1328,7 @@ def _make_lr_m1_fused_split_source(source: str) -> str:
 
 
 _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_fused_split_source(
-    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+    _LR_SMALL_M1_N16_LITERAL_W2_FP32_SOURCE
 )
 _LR_M1_FUSED_SPLIT16_W2_FP32_SOURCE = (
     _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE
@@ -2661,7 +2693,7 @@ def _local_ring_small_kernel(
 
         try:
             source = (
-                _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+                _LR_SMALL_M1_N16_LITERAL_W2_FP32_SOURCE
                 if vector_activation and output_width == 16 and output_fp32 and w2
                 else _LR_SMALL_M1_N16_VECTOR_W2_SOURCE
                 if vector_activation and output_width == 16 and w2

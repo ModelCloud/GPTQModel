@@ -3029,3 +3029,41 @@ The focused LR suite passed (`169 passed`) and the supported QVQ/MLX suite
 passed (`612 passed, 9 skipped`). This is a targeted M1 improvement: larger
 row regimes still exceed `2x`, but the universal `2x` target remains
 unproven.
+
+## 74. M1 W2 literal packed-pair recurrence
+
+The M1/N16 W2 FP32 source now expands its fixed eight-pair recurrence into
+literal packed-nibble updates. Each update preserves the LR codec's 16-bit
+state mask (`&0xffffu`); the expansion changes instruction shape only and does
+not change the serialized ABI. The focused oracle tests cover all alternate
+bank masks and M1 routes.
+
+The direct synchronized A/B at `(M=1,K=2048,N=256)` used `30` warmups and
+`160` samples. The literal source was parity-exact (`max_abs=0`, relative
+L2 `0`) and measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Dynamic packed-pair recurrence | `0.57046` | `1.00645` | `0.60196` |
+| Literal packed-pair recurrence | `0.56562` | `0.95841` | `0.59921` |
+
+This is a modest improvement, so it is retained only for the existing M1/N16
+W2 routes; it is not evidence for a universal `2x` result.
+
+A post-fix complete-module LR/P32 rerun on the AC/high-performance M4 Max
+host used `30` warmups, `100` randomized synchronized samples per arm, and
+seed `20260930`. Absolute latency varied materially from earlier AC runs, so
+these values should be treated as a separate variance sample:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.61212` | `0.87452` | `1.429x` | `1.18395` | `1.67487` |
+| `(M=1,K=2048,N=2048)` | `0.60600` | `0.88033` | `1.453x` | `0.92368` | `1.62793` |
+| `(M=1,K=2048,N=8192)` | `0.77898` | `1.14240` | `1.467x` | `1.18886` | `1.80370` |
+| `(M=1,K=8192,N=2048)` | `0.77535` | `1.24252` | `1.603x` | `1.34923` | `2.19196` |
+| `(M=4,K=2048,N=8192)` | `1.19740` | `2.43296` | `2.032x` | `2.37524` | `4.10682` |
+| `(M=8,K=2048,N=8192)` | `1.01508` | `2.27908` | `2.245x` | `2.36070` | `4.24210` |
+| `(M=16,K=8192,N=8192)` | `2.51767` | `5.70450` | `2.266x` | `2.90755` | `6.02964` |
+
+After the state-mask correction, the focused LR suite remains `169 passed`
+and the supported QVQ/MLX suite remains `612 passed, 9 skipped`.
