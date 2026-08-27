@@ -141,14 +141,14 @@ are weighted payload estimates.
 
 | Arm ID | GPU | Precision allocation | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
 | --- | ---: | --- | ---: | --- | --- | --- | --- | --- |
-| 1fee11 | 0 | V+O W2.5 + all MLP W2.5 | **2.4801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | quant complete; D300 running | running | **35.6493% (431/1209)** |
-| b2dee2 | 1 | V+O W3 + all MLP W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo30_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | quant complete; D300 running | running | **36.3110% (439/1209)** |
-| dc38d2 | 2 | Q+K W2.5 + V+O W3.5 + all MLP W2.5 | **2.6094** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | quant complete; D300 running | running | **37.0554% (448/1209)** |
-| 8dd86a | 3 | V+O W3.5 + Gate W2.5 + Up/Down W3 | **2.8421** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | quant complete; D300 running | running | **40.5294% (490/1209)** |
-| 5fddf5 | 4 | V+O W3.5 + all MLP W3 | **2.9801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | quant complete; evaluations pending | pending | pending |
-| 83b60c | 5 | Q+K W2.5 + V+O W3.5 + Up/Down W3.5 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | quant complete; D300 running | running | **39.9504% (483/1209)** |
-| 4f018a | 6 | V+O W3.5 + Gate W2.5 + Up/Down W3.5 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | quant complete; D300 queued | pending | **43.0108% (520/1209)** |
-| 8e67f6 | 7 | V+O W3.5 + Gate W3.5 + Up/Down W3 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | quant complete; D300 queued | pending | **39.7022% (480/1209)** |
+| 1fee11 | 0 | V+O W2.5 + all MLP W2.5 | **2.4801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | **complete** | **22.7917% (exact 8/300; mean div 6.680)** | **35.6493% (431/1209)** |
+| b2dee2 | 1 | V+O W3 + all MLP W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo30_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | **complete** | **23.2813% (exact 10/300; mean div 6.680)** | **36.3110% (439/1209)** |
+| dc38d2 | 2 | Q+K W2.5 + V+O W3.5 + all MLP W2.5 | **2.6094** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_mlpall25.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-mlpall25-dc38d2` | **complete** | **24.9063% (exact 11/300; mean div 7.580)** | **37.0554% (448/1209)** |
+| 8dd86a | 3 | V+O W3.5 + Gate W2.5 + Up/Down W3 | **2.8421** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown30-8dd86a` | **complete** | **27.6250% (exact 17/300; mean div 8.187)** | **40.5294% (490/1209)** |
+| 5fddf5 | 4 | V+O W3.5 + all MLP W3 | **2.9801** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_mlpall30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | **complete** | **32.3854% (exact 19/300; mean div 9.870)** | **40.8602% (494/1209)** |
+| 83b60c | 5 | Q+K W2.5 + V+O W3.5 + Up/Down W3.5 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_qk25_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | **complete** | **28.9167% (exact 12/300; mean div 8.480)** | **39.9504% (483/1209)** |
+| 4f018a | 6 | V+O W3.5 + Gate W2.5 + Up/Down W3.5 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | **complete** | **31.9896% (exact 20/300; mean div 9.097)** | **43.0108% (520/1209)** |
+| 8e67f6 | 7 | V+O W3.5 + Gate W3.5 + Up/Down W3 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | **complete** | **31.3021% (exact 17/300; mean div 9.523)** | **39.7022% (480/1209)** |
 
 ### Flat-rate projection baselines (queued 2026-08-27 UTC)
 
@@ -162,9 +162,9 @@ scheduled automatically after each checkpoint completes.
 | --- | ---: | ---: | ---: | --- | --- | --- | --- | --- |
 | 88be04 | 0 | W2 | **2.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json` | `/root/qvq-results/llama32-1b-flat-flat-w20-88be04` | **queued (GPU busy)** | pending | pending |
 | 509b7f | 1 | W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json` | `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f` | **queued (GPU busy)** | pending | pending |
-| 1040a5 | 2 | W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json` | `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5` | **queued (GPU busy)** | pending | pending |
-| b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **quantizing** | pending | pending |
-| 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **quantizing** | pending | pending |
+| 1040a5 | 2 | W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json` | `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5` | **complete** | **28.7292% (exact 13/300; mean div 8.580)** | **42.9280% (519/1209)** |
+| b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **complete** | **39.5521% (exact 40/300; mean div 12.080)** | **45.2440% (547/1209)** |
+| 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **complete** | **5.1354% (exact 0/300; mean div 1.703)** | **3.4739% (42/1209)** |
 
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
