@@ -2167,3 +2167,19 @@ The A/B outputs were exactly equal at the complete-module boundary. These
 are paired within-process measurements; absolute Apple GPU latency remains
 host-state dependent. The improvement is retained as a low-risk W2 dispatch
 specialization, but it does not by itself close the universal M1 `2x` target.
+
+### 48. Rejected M1 micro-optimizations after literal-mask specialization
+
+Two follow-up probes were measured and rejected on the same AC/high-power M4
+Max host. Folding fixed K/N dimensions into the single-row Metal source made
+the actual small-row paths slower: complete-module A/B speedups were `0.955x`
+for `(M=1,K=2048,N=256)`, `0.938x` for `(M=1,K=2048,N=2048)`, and `0.979x`
+for `(M=1,K=8192,N=2048)`. The change was reverted; no extra shape-specialized
+kernel variants are retained.
+
+A branchless replacement for the literal bank-mask conditional was also
+tested against the current implementation using randomized, interleaved
+80-sample complete-module A/B measurements. The p50 speedups were `0.999x`,
+`0.987x`, and `1.006x` for the same three shapes, respectively. It was
+neutral within device variance and was not promoted. Both probes preserved
+the existing Torch-oracle output contract.
