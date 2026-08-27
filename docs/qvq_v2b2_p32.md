@@ -2281,3 +2281,11 @@ performance-mode M4 Max:
 The benchmark uses identical input/payload data per arm, randomized LR/P32
 order within each sample, 20 warmups, 100 timed samples, and complete
 `QVQMLXLinear` calls. Universal M1 2x remains an open optimization target.
+
+An additional 100-sample M1 A/B compared the current fused split-8 epilogue
+with the ordinary barrier-free N16 kernel forced to split-4. The fused route
+remained faster at the shapes where the two routes differ: `0.41623 ms` versus
+`0.48796 ms` at `K=2048,N=256` (`1.172x`) and `0.41940 ms` versus `0.47400 ms`
+at `K=2048,N=2048` (`1.130x`), with parity below `6.5e-5` absolute. The
+fused split-8 route is retained. The `K=8192,N=2048` probe does not exercise
+this choice because its dedicated M1/N64 shape route takes precedence.
