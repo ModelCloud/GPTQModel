@@ -928,6 +928,12 @@ passed the current LR oracle (`3.3e-7` relative error at `(M=1,K=2048,N=8192)` a
 `(M=1,K=8192,N=2048)`), but one output per lane increased register/decode work: interleaved inner p50 was `1.428x`
 of N16 for `K=2048,N=8192` and `1.174x` for `K=8192,N=2048`. N16 remains the production small-row tile.
 
+A W2 lookup-register probe kept PGC16 values as `half2` until the FP32 multiply. It was oracle-exact and reduced
+isolated inner p50 to `0.981x` of the current path at `(M=1,K=2048,N=8192)` and `0.969x` at
+`(M=1,K=8192,N=2048)`, but complete-module p50 changed to `1.228x` and `0.983x`, respectively. The wide-module
+regression shows that the apparent lookup win does not survive the surrounding MLX graph, so the existing float2
+lookup remains production.
+
 A corrected barrier-free M4 register-only probe was also oracle-correct, but did not improve the complete module. At
 `(M=4,K=2048,N=8192)`, inner p50 was `0.43950 ms` for the current decoder versus `0.43948 ms` for the register probe,
 while complete-module p50 was `0.31408 ms` versus `0.40544 ms`. At `(M=4,K=8192,N=2048)`, inner p50 was `0.28675 ms`
