@@ -3912,6 +3912,34 @@ The candidate measured `1.088x` against current LR and `1.605x` against P32,
 with reduction-order drift. It was not promoted; the production scalar-FMA
 path remains unchanged.
 
+## 124. M1 N32 no-contiguity-preparation probe rejected
+
+The long-K M1/N32 fused split-32 source was rebuilt with MLX
+`ensure_row_contiguous=False`, relying on the production module's already
+contiguous transformed row. Decode, layout, arithmetic, and launch geometry
+were otherwise unchanged. The candidate was bit-exact at
+`(M=1,K=8192,N=2048)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+rmse = 0
+```
+
+A same-process three-way complete-module A/B used identical payloads and
+inputs, 15 warmups, 60 randomized samples per arm, and the AC/performance-
+mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N32 fused split-32 | `0.30196` | `0.44975` | `0.32566` |
+| `ensure_row_contiguous=False` | `0.29154` | `0.44441` | `0.31377` |
+| Non-local P32 | `0.49850` | `0.84135` | `0.53239` |
+
+The candidate measured `1.036x` against current LR and `1.710x` against P32.
+The small exact gain does not approach the `2x` target, so the production
+contiguity contract remains unchanged.
+
 ## 106. M4 K64-batched cooperative decode recheck
 
 The cooperative M4 W2 decoder was restructured to stage and decode two
