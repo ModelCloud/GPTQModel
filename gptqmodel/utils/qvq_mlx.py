@@ -1192,6 +1192,17 @@ def _make_lr_m1_n64_k128_source(source: str) -> str:
         "  }\n"
         "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
     )
+    # The barrier before the decode loop publishes the staged activation.
+    # A second barrier is required before the next outer K128 iteration can
+    # overwrite shared_activation: the other SIMD groups may still be
+    # reading the previous batch while SIMD 0 starts staging the next one.
+    # Without this hand-off barrier the first K128 batch is correct but later
+    # batches have a data race for K > 128.
+    loop = loop.replace(
+        "    }\n  }\n}",
+        "    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n}",
+        1,
+    )
     return source[:loop_start] + stage + loop + source[loop_end:]
 
 
@@ -4061,7 +4072,12 @@ def qvq_mlx_gemv(
                 alt_bank_id=alt_id,
                 k=k,
                 n=n,
-                k_tile=128 if k >= 128 and k % 128 == 0 else 64,
+                # K128 needs a hand-off barrier before reusing the shared
+                # activation tile.  That makes multi-batch K128 slower than
+                # K64 on the M4 Max, so keep the production fast path on K64;
+                # the K128 source remains covered by its oracle test for a
+                # future double-buffered implementation.
+                k_tile=128 if k == 128 else 64,
             )
         elif small_rows:
             # One or two rows fit in one SIMD group.  Decode four pairs

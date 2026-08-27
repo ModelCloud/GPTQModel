@@ -953,3 +953,57 @@ def test_lr32_m1_w2_n64_k128_grouped_kernel_matches_torch_oracle(monkeypatch):
     mx.eval(actual)
     assert selected["k_tile"] == 128
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
+
+
+def test_lr32_m1_w2_n64_k128_grouped_kernel_matches_torch_oracle_across_k_tiles(monkeypatch):
+    """Exercise more than one K128 batch to catch shared-tile reuse races."""
+
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    in_features = 2048
+    out_features = 8192
+    torch.manual_seed(2048)
+    tile_count = (in_features // 32) * (out_features // 8)
+    trellis = torch.randint(
+        -(1 << 31),
+        1 << 31,
+        (tile_count, 16),
+        dtype=torch.int32,
+    )
+    selectors = torch.randint(0, 2, (tile_count * 8,), dtype=torch.uint8)
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([2], dtype=torch.uint8)
+    x = torch.randn(1, in_features, dtype=torch.float32)
+    expected = x @ reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=2,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=packed_selectors,
+        bank_alt_id=bank_alt_id,
+    )
+
+    # Keep exercising the multi-batch K128 source even though production
+    # dispatch currently selects K64 for K>128 after the synchronization A/B.
+    original = qvq_mlx._local_ring_m1_n64_kernel
+
+    def force_k128(**kwargs):
+        kwargs["k_tile"] = 128
+        return original(**kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_n64_kernel", force_k128)
+
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(trellis.numpy()),
+        2,
+        out_features=out_features,
+        bank_ids=mx.array(packed_selectors.numpy()),
+        bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=2,
+    )
+    mx.eval(actual)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)

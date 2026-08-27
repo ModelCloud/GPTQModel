@@ -1756,38 +1756,39 @@ It reduces the remaining short-row latency by exposing more independent work,
 at the cost of the fixed partial-output reduction. Exact output parity is
 covered by the existing split-inference oracle tests.
 
-### 34. M1 K128 activation batching
+### 34. M1 K128 activation batching and reuse-race correction
 
-The wide short-K M1/N64 route now batches four adjacent K32 decode tiles per
-activation-staging barrier (K128) when K>=128 and divisible by 128. The K64
-source remains the fallback for smaller divisible K. The K128 source uses the
-same W2 packed-state decoder, bank-mask specialization, shape constants, and
-exact output mapping as K64; it only enlarges the shared activation tile and
-reduces the number of staging barriers from two per K64 batch to one per K128
-batch.
+The wide short-K M1/N64 experiment batches four adjacent K32 decode tiles in a
+128-element shared activation tile. The first implementation used one barrier
+after staging, but that was insufficient: SIMD groups could still read the
+previous batch while SIMD 0 overwrote the shared tile for the next batch. It
+matched the Torch oracle at K=128 but failed for subsequent batches, reaching
+about 0.1 relative L2 error at K=2048. Those one-barrier measurements are
+invalid and must not be used for performance comparisons.
 
-The K128 candidate matched the direct LR GEMV baseline within atol=2e-2 and
-the dedicated (K=128,N=8192) Torch-oracle test passed. In a same-process
-120-sample complete-module comparison at (M=1,K=2048,N=8192), K64 measured
-0.24948 / 0.30694 ms p50/p95 and K128 measured 0.24765 / 0.31931 ms; P32
-measured 0.32492 / 0.43323 ms. The p50 ratios were 1.007x K64/K128 and
-1.312x P32/K128. The p95 result was noisier and did not improve, so this
-specialization remains restricted to the measured short-K wide-N shape family.
+The corrected K128 source adds a hand-off barrier after each decode batch. It
+now passes both the K=128 and production-size K=2048,N=8192 Torch-oracle tests;
+the LR32 suite passes 152/152. A same-process 80-sample complete-module A/B at
+(M=1,K=2048,N=8192) measured corrected K64 at `0.82660 / 1.16894` ms p50/p95
+and corrected K128 at `0.85556 / 1.28366` ms. K128 was therefore not promoted
+for multi-batch production dispatch; K64 is selected for K>128, while K128
+remains covered for future double-buffered work.
 
-A fresh synchronized 80-sample production sweep after the corrected
-one-barrier implementation measured:
+The current synchronized 80-sample complete-module sweep, with K64 production
+dispatch for this M1 family, measured:
 
 | Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
 |---|---:|---:|---:|
-| (M=1,K=2048,N=256) | 0.47631 / 0.92391 | 0.63608 / 2.13259 | 1.335x |
-| (M=1,K=2048,N=2048) | 0.63342 / 0.94692 | 0.84296 / 1.35796 | 1.331x |
-| (M=1,K=2048,N=8192) | 0.79604 / 1.36820 | 1.21194 / 1.62331 | 1.522x |
-| (M=1,K=8192,N=2048) | 0.73194 / 1.05847 | 0.96556 / 1.32044 | 1.319x |
-| (M=4,K=2048,N=8192) | 1.07140 / 1.24462 | 2.21206 / 2.39033 | 2.065x |
-| (M=8,K=2048,N=8192) | 1.02088 / 1.64221 | 2.23960 / 3.72596 | 2.194x |
-| (M=16,K=8192,N=8192) | 2.49148 / 2.66023 | 5.64148 / 6.01134 | 2.264x |
+| (M=1,K=2048,N=256) | 0.38458 / 0.62541 | 0.55198 / 1.01459 | 1.435x |
+| (M=1,K=2048,N=2048) | 0.48323 / 0.83773 | 0.63469 / 1.30548 | 1.313x |
+| (M=1,K=2048,N=8192) | 0.65902 / 0.92945 | 0.97717 / 1.37736 | 1.483x |
+| (M=1,K=8192,N=2048) | 0.75231 / 1.08105 | 1.01167 / 1.36997 | 1.345x |
+| (M=4,K=2048,N=8192) | 0.65021 / 1.12075 | 1.24067 / 2.56118 | 1.908x |
+| (M=8,K=2048,N=8192) | 0.40648 / 0.53120 | 0.88869 / 1.02562 | 2.186x |
+| (M=16,K=8192,N=8192) | 2.32210 / 2.48477 | 5.38123 / 5.55072 | 2.317x |
 
-The K128 route is a real p50 improvement for the targeted wide M1 shape, but
-the universal 2x target remains unmet. No claim is made for hardware stall or
-occupancy percentages: the available Xcode Metal System Trace configuration
-reported no GPU counter set and had shader timeline disabled.
+These measurements were taken on the AC/performance-mode M4 Max with
+randomized LR/P32 order, 50 warmups, and 80 synchronized samples per arm.
+No claim is made for hardware stall or occupancy percentages: the available
+Xcode Metal System Trace configuration reported no GPU counter set and had
+shader timeline disabled.
