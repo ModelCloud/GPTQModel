@@ -1726,3 +1726,32 @@ production sweep after this change measured:
 This improves the current M1 `N=2048` case materially, but it is still not a
 universal 2x solution. The remaining target is the complete M1 transform/decode
 graph, not another N64 threshold tweak.
+
+### 33. M1 split-K recheck
+
+With the N64 route restricted to very-wide short-K modules, a same-process
+randomized split-K A/B sweep compared `split=1,2,4,8` for the barrier-free M1
+path. At `(M=1,K=2048,N=256)`, p50 was `0.33133`, `0.26417`, `0.24167`, and
+`0.23433` ms respectively; at `(M=1,K=2048,N=2048)`, it was `0.23173`,
+`0.21225`, `0.20350`, and `0.20246` ms. For `(M=1,K=8192,N=2048)`, the
+corresponding values were `0.37581`, `0.28898`, `0.25315`, and `0.24283` ms.
+The existing M2 and other-row policies were not changed.
+
+The M1 policy now uses eight FP32 K slices for `K>=2048` and `N<=2048`; the
+wide `N>=8192` M1 route remains the unsplit K64/N64 specialization. A fresh
+synchronized 80-sample module sweep after this change measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.73877 / 1.00981` | `0.93610 / 1.52155` | `1.267x` |
+| `(M=1,K=2048,N=2048)` | `0.60642 / 1.34904` | `0.72448 / 1.64450` | `1.195x` |
+| `(M=1,K=2048,N=8192)` | `0.73196 / 1.23071` | `0.99352 / 1.69036` | `1.357x` |
+| `(M=1,K=8192,N=2048)` | `0.59758 / 0.98875` | `0.77985 / 1.33635` | `1.305x` |
+| `(M=4,K=2048,N=8192)` | `0.95435 / 2.03251` | `1.76977 / 3.48783` | `1.854x` |
+| `(M=8,K=2048,N=8192)` | `0.90754 / 1.25920` | `1.87727 / 2.34283` | `2.069x` |
+| `(M=16,K=8192,N=8192)` | `2.61092 / 3.47956` | `5.81538 / 6.11900` | `2.227x` |
+
+The split-8 change is a modest M1 improvement, not the missing universal 2x.
+It reduces the remaining short-row latency by exposing more independent work,
+at the cost of the fixed partial-output reduction. Exact output parity is
+covered by the existing split-inference oracle tests.

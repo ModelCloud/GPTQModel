@@ -2387,11 +2387,14 @@ def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = 
         # split the production FP32-output path.
         return 1
     if m < 4:
-        # Wide short-K M1/M2 modules benefit from four independent K slices:
-        # the extra parallelism offsets the fixed MLX reduction dispatch at
-        # the complete-module boundary.  Long-K down projections expose
-        # enough independent work for eight slices.
-        split_k = 8 if k >= 8192 and n <= 2048 else 4
+        # M1 exposes enough independent output work that eight slices win for
+        # both short and long K on the M4 Max.  Very-wide short-K M1 is
+        # handled by the separate unsplit N64 route below. Keep M2 on the
+        # previously measured four-slice policy until it has its own sweep.
+        if m == 1 and k >= 2048 and n <= 2048:
+            split_k = 8
+        else:
+            split_k = 8 if k >= 8192 and n <= 2048 else 4
     elif m == 8 and k <= 2048 and n >= 8192:
         # The unsplit path avoids partial materialization/reduction.  The
         # matrix variant is separately gated by _USE_LR_MMA after profiling.
