@@ -2081,3 +2081,22 @@ command-buffer/encoder records. This host/Xcode combination reports
 hardware occupancy, cache-miss, or stall percentages. It is therefore useful
 for submission/barrier sequencing only; no profiler bundle is checked into
 the repository.
+
+The same paired complete-module sweep was run with the benchmark's optional
+shape-specialized `mx.compile` mode (`40` warmups and `80` samples). Compile
+materialization was performed before timing, and LR/P32 order was randomized
+within every sample:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.59854 / 1.52378` | `0.71031 / 2.06327` | `1.187x` |
+| `(M=1,K=2048,N=2048)` | `0.61002 / 1.47761` | `0.68287 / 2.43198` | `1.119x` |
+| `(M=1,K=2048,N=8192)` | `0.32685 / 0.58326` | `0.45319 / 0.74550` | `1.387x` |
+| `(M=1,K=8192,N=2048)` | `0.23967 / 0.26706` | `0.28827 / 0.32470` | `1.203x` |
+| `(M=4,K=2048,N=8192)` | `0.28421 / 0.30444` | `0.51181 / 0.59204` | `1.801x` |
+| `(M=8,K=2048,N=8192)` | `0.40025 / 1.28598` | `0.82896 / 3.06904` | `2.071x` |
+| `(M=16,K=8192,N=8192)` | `2.58025 / 4.79632` | `5.75225 / 6.87943` | `2.229x` |
+
+Compilation changes absolute latency substantially, especially for wide M1
+shapes, but does not produce a universal `2x` LR advantage. Eager and compiled
+tables should not be mixed when judging kernel changes.
