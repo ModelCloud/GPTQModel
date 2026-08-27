@@ -934,6 +934,11 @@ isolated inner p50 to `0.981x` of the current path at `(M=1,K=2048,N=8192)` and 
 regression shows that the apparent lookup win does not survive the surrounding MLX graph, so the existing float2
 lookup remains production.
 
+A compact W2 state-to-PGC-index permutation table was also tested to replace the integer mixer arithmetic while
+retaining the normal 256-entry FP16 level table. It was exactly parity-safe, but random constant-table access was
+slower than the arithmetic path: interleaved inner p50 was `1.129x` of current at `(M=1,K=2048,N=8192)` and
+`1.084x` at `(M=1,K=8192,N=2048)`. The arithmetic mixer remains production.
+
 A corrected barrier-free M4 register-only probe was also oracle-correct, but did not improve the complete module. At
 `(M=4,K=2048,N=8192)`, inner p50 was `0.43950 ms` for the current decoder versus `0.43948 ms` for the register probe,
 while complete-module p50 was `0.31408 ms` versus `0.40544 ms`. At `(M=4,K=8192,N=2048)`, inner p50 was `0.28675 ms`
