@@ -4248,3 +4248,32 @@ against production; its P32 comparison was `1.891x` at p50. It was removed
 and not promoted. This confirms that the apparent isolated split-16 gain was
 sampling noise at the complete-module boundary; the long-K M1 production
 route remains unchanged.
+
+## 120. M1 paired N32 two-way split probe rejected
+
+The existing paired N32/N64 M1 decoder was tested at the short-K wide-N
+shape `(M=1,K=2048,N=8192)` with a two-way split matching the production
+N64 route, rather than its current eight-way split. The candidate used the
+same 128-thread footprint and fused the two partials in one threadgroup,
+removing the materialized MLX reduction. It was numerically close but not
+bit-exact to the production N64 half2 route:
+
+```text
+max_abs = 0.0625
+relative_l2 = 0
+rmse = 0.000732421875
+```
+
+A same-process three-way complete-module A/B used identical payloads and
+inputs, 15 warmups, 60 randomized samples per arm, and the AC/performance-
+mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N64 W2 half2 | `0.83300` | `1.46954` | `0.89078` |
+| Paired N32 two-way candidate | `0.70425` | `0.96705` | `0.74442` |
+| Non-local P32 | `1.18569` | `1.65023` | `1.23465` |
+
+The candidate measured `1.183x` against current LR and `1.684x` against P32,
+with reduction-order drift. It was not promoted; the production M1/N64
+half2 route remains unchanged.
