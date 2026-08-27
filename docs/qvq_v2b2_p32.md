@@ -3349,3 +3349,41 @@ These timings are complete-module measurements with randomized LR/P32 order,
 not inner-kernel-only timings. The half2 specialization is a valid targeted
 improvement, but the universal `2x` objective remains unmet: the M1 shapes
 remain below `2x` while M4/M8/M16 exceed it in this sample.
+
+## 87. M1 shared-fused half2 hybrid rejected at module boundary
+
+An in-memory hybrid combined the promoted shared-split-2 launch geometry with
+the W2 half2 codebook decoder. It preserved the same complete-module input,
+output, and dispatch shape as the production M1/N64 half2 route. The corrected
+oracle comparison was exact (`max_abs=0`, relative L2 `0`).
+
+However, a same-process randomized/interleaved complete-module A/B at
+`(M=1,K=2048,N=8192)` was slower than the current production route:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production N64 W2 half2 | `0.35996` | `0.49180` | `0.39829` |
+| Shared-fused W2 half2 hybrid | `0.37535` | `0.55380` | `0.41344` |
+
+The hybrid was `0.959x` at p50 and `0.963x` by mean, so it was not promoted.
+The result reinforces that the current M1 half2 route is the better measured
+launch at the complete `QVQMLXLinear` boundary, even though the hybrid showed
+a direct-kernel win in an earlier inner-GEMV probe. The universal `2x` target
+therefore remains unmet for M1.
+
+The refreshed AC/high-performance M4 Max complete-module sweep used
+randomized/interleaved LR/P32 order, `30` warmups, `100` samples, and seed
+`20261025`:
+
+| Shape | LR p50 | P32 p50 | LR speedup | LR p95 | P32 p95 |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.69754` | `1.04621` | `1.500x` | `1.66247` | `3.07326` |
+| `(1,2048,2048)` | `0.69606` | `0.98285` | `1.412x` | `1.87468` | `2.09249` |
+| `(1,2048,8192)` | `0.96515` | `1.38344` | `1.433x` | `3.05937` | `3.33985` |
+| `(1,8192,2048)` | `0.51156` | `0.91133` | `1.781x` | `0.99670` | `1.80207` |
+| `(4,2048,8192)` | `0.44575` | `0.96140` | `2.157x` | `0.51989` | `1.30131` |
+| `(8,2048,8192)` | `1.04635` | `2.41800` | `2.311x` | `2.72699` | `5.71893` |
+| `(16,8192,8192)` | `2.73783` | `5.94892` | `2.173x` | `5.13221` | `7.68134` |
+
+Power-management state was verified as `powermode 2` before this sweep. The
+large p95 spread remains a reason to treat p50/mean as the primary comparison.
