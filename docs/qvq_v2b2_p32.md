@@ -3096,3 +3096,41 @@ passed (`612 passed, 9 skipped`) after the promotion. The change is safe and
 improves the targeted short-K N256 route, but the complete-module result is
 still only `1.433x` there. The universal `2x` target therefore remains
 unproven; current `2x+` results are confined to larger-row regimes.
+
+## 76. M1 Metal trace and AC/performance-mode baseline
+
+The current host is an Apple M4 Max (`applegpu_g16s`, 51 GiB memory) running
+MLX on `Device(gpu, 0)`, plugged into AC power with `powermode=2`. A fresh
+complete-module LR/P32 benchmark at commit `9124b5f0` used `30` warmups and
+`100` randomized synchronized samples per arm, seed `20261009`:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.37913` | `0.59777` | `1.577x` | `0.62263` | `1.38225` |
+| `(M=1,K=2048,N=2048)` | `0.44577` | `0.66631` | `1.495x` | `3.46981` | `8.70170` |
+| `(M=1,K=2048,N=8192)` | `0.70527` | `1.04296` | `1.479x` | `3.27844` | `4.42899` |
+| `(M=1,K=8192,N=2048)` | `0.95590` | `1.42329` | `1.489x` | `11.07154` | `8.34451` |
+| `(M=4,K=2048,N=8192)` | `1.20788` | `2.44819` | `2.027x` | `2.62644` | `4.43511` |
+| `(M=8,K=2048,N=8192)` | `0.96042` | `2.41021` | `2.510x` | `2.56084` | `4.22975` |
+| `(M=16,K=8192,N=8192)` | `2.59785` | `5.93781` | `2.286x` | `18.31792` | `15.82349` |
+
+A bounded Xcode Metal System Trace was captured for the weak short-K wide-N
+case `(M=1,K=2048,N=8192)` after `30` warmups and `12` active calls at:
+`/tmp/qvq-metal-profile-9124b5f0-m1n8192/system.trace` (84 MiB). The trace
+shows repeated short compute command buffers, but this Xcode/device pair
+reports `Counter Set: (null)` and `Shader Timeline: Disabled`; the Metal GPU
+counter profile is unsupported. Therefore no occupancy, stall, bandwidth, or
+utilization percentages are claimed.
+
+The source-level bottleneck map is narrower: M1/N64 avoids the multirow
+decoded-weight tile but still uses shared activation staging and synchronization
+per K batch; its split outputs are reduced by a separate MLX operation. The
+fused M1/N16 and M1/N32 routes reduce inside one threadgroup and avoid that
+materialized split tensor. The common input/output Hadamard and scale/epilogue
+work remains outside the LR kernel, which limits complete-module speedup even
+when inner GEMV improves. The split-1 versus split-2 recheck at
+`M=1,K=2048,N=8192` was neutral on this host (p50 `0.27910` versus `0.27479`
+ms; mean `0.30562` versus `0.30614` ms), so no policy change was promoted.
+
+This confirms the present status: `2x+` is repeatable for larger-row regimes,
+but the universal `2x` target remains unmet for M1.
