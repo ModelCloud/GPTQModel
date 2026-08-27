@@ -100,6 +100,8 @@ _LR_M1_N32_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_N32_FUSED_SPLIT_ERRORS: dict[int, str] = {}
 _LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
 _LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[int, Any] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 # The fused M1/N64 split-2 route is retained for targeted experiments and
@@ -1130,8 +1132,8 @@ if(output_n<N)out[output_n*split_count+split]=sum0;
 def _make_lr_m1_n32_fused_split_source(source: str, split_count: int) -> str:
     """Fuse fixed M1/N32 K-split reduction into one threadgroup."""
 
-    if split_count not in (8, 16):
-        raise ValueError("QVQ LR32 M1/N32 fused split count must be 8 or 16")
+    if split_count not in (8, 16, 32):
+        raise ValueError("QVQ LR32 M1/N32 fused split count must be 8, 16, or 32")
     layout = (
         "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
         "uint split=group%split_count;group/=split_count;\n"
@@ -1165,6 +1167,13 @@ _LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
 )
 _LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
     _LR_SMALL_M1_N32_W2_FP32_SOURCE, 16
+)
+_LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE, 32
+).replace(
+    "uint simd=simdgroup_index_in_threadgroup,split=simd;",
+    "uint simd=thread_index_in_threadgroup/32u,split=simd;",
+    1,
 )
 
 
@@ -2727,10 +2736,17 @@ def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int)
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
-    if split_count not in (8, 16):
-        raise ValueError(f"QVQ LR32 M1/N32 split count must be 8 or 16, got {split_count}")
-    kernels = _LR_M1_N32_FUSED_SPLIT16_KERNELS if split_count == 16 else _LR_M1_N32_FUSED_SPLIT_KERNELS
-    errors = _LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS if split_count == 16 else _LR_M1_N32_FUSED_SPLIT_ERRORS
+    if split_count not in (8, 16, 32):
+        raise ValueError(f"QVQ LR32 M1/N32 split count must be 8, 16, or 32, got {split_count}")
+    if split_count == 32:
+        kernels = _LR_M1_N32_FUSED_SPLIT32_KERNELS
+        errors = _LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS
+    elif split_count == 16:
+        kernels = _LR_M1_N32_FUSED_SPLIT16_KERNELS
+        errors = _LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS
+    else:
+        kernels = _LR_M1_N32_FUSED_SPLIT_KERNELS
+        errors = _LR_M1_N32_FUSED_SPLIT_ERRORS
     kernel = kernels.get(alt_bank_id)
     if kernel is not None:
         return kernel
@@ -2745,10 +2761,13 @@ def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int)
 
         try:
             source = (
-                _LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE
+                _LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE
+                if split_count == 32
+                else _LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE
                 if split_count == 16
                 else _LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE
-            ).replace(
+            )
+            source = source.replace(
                 "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
                 "uint bank_bit=(selector>>ring)&1u;",
             ).replace(
@@ -4671,6 +4690,20 @@ def qvq_mlx_gemv(
             and not m1_n64_split2
             and not m1_n64_shared_split2
         )
+        m1_n32_fused_split32 = (
+            _USE_LR_M1_N32_FUSED
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k >= 8192
+            and k % 1024 == 0
+            and n <= 2048
+            and n % 32 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+        )
         m1_n32_fused_split = (
             _USE_LR_M1_N32_FUSED
             and
@@ -4705,6 +4738,14 @@ def qvq_mlx_gemv(
             group_size = 256
             output_width = 64
             kernel = _local_ring_m1_n64_split2_kernel(alt_bank_id=alt_id)
+        elif m1_n32_fused_split32:
+            # Thirty-two K slices expose more independent long-K work on
+            # M4 Max.  The fixed 1024-thread reduction remains deterministic
+            # and avoids materializing an MLX partial tensor.
+            row_tile = 1
+            group_size = 1024
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(alt_bank_id=alt_id, split_count=32)
         elif m1_n32_fused_split16:
             # One lane owns one output channel across four K32xN8 tiles.
             # Sixteen SIMD groups reduce the K slices in one 512-thread
@@ -4833,6 +4874,7 @@ def qvq_mlx_gemv(
             and not m1_fused_split16
             and not m1_n32_fused_split
             and not m1_n32_fused_split16
+            and not m1_n32_fused_split32
             and not m1_n64_split2
             and not m1_n64_shared_split2
         ):
@@ -4841,7 +4883,7 @@ def qvq_mlx_gemv(
             64
             if m1_n64_split2 or m1_n64_shared_split2 or m1_n64
             else 32
-            if m1_n32_fused_split or m1_n32_fused_split16
+            if m1_n32_fused_split or m1_n32_fused_split16 or m1_n32_fused_split32
             else _local_ring_small_output_width(n)
             if small_rows and m <= 2 and n % 16 == 0
             else 8
@@ -4853,6 +4895,7 @@ def qvq_mlx_gemv(
                 or m1_fused_split16
                 or m1_n32_fused_split
                 or m1_n32_fused_split16
+                or m1_n32_fused_split32
                 or m1_n64_split2
                 or m1_n64_shared_split2
             )
@@ -4871,6 +4914,7 @@ def qvq_mlx_gemv(
                     or m1_fused_split16
                     or m1_n32_fused_split
                     or m1_n32_fused_split16
+                    or m1_n32_fused_split32
                     or m1_n64_split2
                     or m1_n64_shared_split2
                     else n * split_k,
@@ -4884,6 +4928,7 @@ def qvq_mlx_gemv(
             or m1_fused_split16
             or m1_n32_fused_split
             or m1_n32_fused_split16
+            or m1_n32_fused_split32
             or m1_n64_split2
             or m1_n64_shared_split2
         ):

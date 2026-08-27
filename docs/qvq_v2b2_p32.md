@@ -2553,3 +2553,40 @@ These results reinforce the current dispatch boundary: retain the direct
 one-output N32 route only for long-K M1 W2 FP32 shapes, and avoid widening the
 tile or replacing cached activation loads with SIMD broadcasts without a
 measured full-module win.
+
+## 57. Long-K M1 N32 split-32 promotion
+
+An oracle-tested 32-way fused K split was compared with the committed N32
+split-16 kernel at `(M=1,K=8192,N=2048)` using identical tensors and 160
+randomized synchronized kernel samples per arm. The 1024-thread split-32
+launch was faster:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| N32 split-32 | `0.39381` | `0.51161` | `0.40768` |
+| N32 split-16 | `0.42150` | `0.53725` | `0.44036` |
+
+The split-32 output differed from split-16 by maximum absolute error
+`1.53e-4` and relative L2 `4.07e-7`, within the existing Torch LOCAL-RING
+oracle tolerance. Production dispatch now selects split-32 only for W2 FP32
+M1 N32 shapes with `K>=8192`, `K%1024==0`, `N<=2048`, and `N%32==0`; other
+N32 shapes retain split-8 or split-16.
+
+A post-promotion randomized complete-module LR/P32 sweep used 30 warmups and
+120 synchronized samples per arm on the AC/high-performance M4 Max:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.27502` | `0.43392` | `1.578x` |
+| `(M=1,K=2048,N=2048)` | `0.25865` | `0.32117` | `1.242x` |
+| `(M=1,K=2048,N=8192)` | `0.25408` | `0.32708` | `1.287x` |
+| `(M=1,K=8192,N=2048)` | `0.22652` | `0.32044` | `1.415x` |
+| `(M=4,K=2048,N=8192)` | `0.30504` | `0.54788` | `1.796x` |
+| `(M=8,K=2048,N=8192)` | `0.37327` | `0.91087` | `2.440x` |
+| `(M=16,K=8192,N=8192)` | `2.12731` | `5.18573` | `2.438x` |
+
+The focused LR32 suite remains green at `168 passed`; the broader MLX suite
+also remains green at `326 passed`. The complete-module M1 result is still
+below the universal `2x` target because transforms and epilogues dominate
+part of the module latency, but LR remains faster than P32 for every tested
+shape.

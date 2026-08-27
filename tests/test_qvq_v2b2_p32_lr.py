@@ -76,16 +76,16 @@ def test_lr32_m1_n64_split_policy(k, expected):
 
 
 @pytest.mark.parametrize(
-    "in_features, out_features, kernel_name",
+    "in_features, out_features, kernel_name, expected_split_count",
     (
-        (2048, 240, "_local_ring_m1_fused_split16_kernel"),
-        (2048, 256, "_local_ring_m1_fused_split16_kernel"),
-        (2304, 256, "_local_ring_m1_fused_split_kernel"),
-        (8192, 2048, "_local_ring_m1_n32_fused_split_kernel"),
+        (2048, 240, "_local_ring_m1_fused_split16_kernel", None),
+        (2048, 256, "_local_ring_m1_fused_split16_kernel", None),
+        (2304, 256, "_local_ring_m1_fused_split_kernel", None),
+        (8192, 2048, "_local_ring_m1_n32_fused_split_kernel", 32),
     ),
 )
 def test_lr32_m1_fused_split_route_matches_torch_oracle(
-    monkeypatch, in_features, out_features, kernel_name
+    monkeypatch, in_features, out_features, kernel_name, expected_split_count
 ):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
@@ -111,6 +111,7 @@ def test_lr32_m1_fused_split_route_matches_torch_oracle(
 
     def observed(**kwargs):
         selected["called"] = True
+        selected["split_count"] = kwargs.get("split_count")
         return original(**kwargs)
 
     monkeypatch.setattr(qvq_mlx, kernel_name, observed)
@@ -127,6 +128,8 @@ def test_lr32_m1_fused_split_route_matches_torch_oracle(
     )
     mx.eval(actual)
     assert selected["called"]
+    if expected_split_count is not None:
+        assert selected["split_count"] == expected_split_count
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
 
 
