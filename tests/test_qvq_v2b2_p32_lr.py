@@ -38,6 +38,24 @@ from gptqmodel.utils.model import hf_gptqmodel_prepare_model_for_load, make_quan
 LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
 
 
+@pytest.mark.parametrize(
+    "m,k,n,output_fp32,expected",
+    (
+        (1, 2048, 256, False, 4),
+        (3, 64, 16, False, 2),
+        (4, 2048, 8192, False, 1),
+        (4, 2048, 8192, True, 2),
+        (8, 2048, 8192, True, 4),
+        (16, 8192, 2048, True, 8),
+        (16, 8192, 8192, True, 4),
+    ),
+)
+def test_lr32_multirow_split_policy(m, k, n, output_fp32, expected):
+    from gptqmodel.utils.qvq_mlx import _local_ring_multirow_split_k
+
+    assert _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32) == expected
+
+
 def _random_lr_payload(bits: float, tiles: int = 2):
     transition_bits = int(bits * 2)
     edges = torch.randint(

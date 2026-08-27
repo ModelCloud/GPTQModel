@@ -490,6 +490,11 @@ inline uint qstate_lr_w2_packed(uint word0,uint word1,uint pair){uint first=(pai
   uint s2=qpt_lr_w2_packed(word0,word1,first+2u),s3=qpt_lr_w2_packed(word0,word1,first+3u);
   return((s0<<12u)|(s1<<8u)|(s2<<4u)|s3)&0xffffu;
 }
+inline uint qstate_lr_w2_packed_fast(uint word0,uint word1,uint pair){
+  uint first=(pair+13u)&15u;ulong packed=ulong(word0)|(ulong(word1)<<32u);
+  ulong raw=(packed>>(first<<2u))|(packed<<((16u-first)<<2u));
+  return uint(((raw&0xfull)<<12u)|((raw&0xf0ul)<<4u)|((raw&0xf00ul)>>4u)|((raw>>12u)&0xful));
+}
 inline uint qstated(device const int* tile,uint pair,uint eb){uint chain=pair&1u,step=pair>>1;
   uint count=(15+eb)/eb,first=(step+64-count+1)&63,s=0;
   for(uint j=0;j<count;++j){uint edge=(((first+j)&63u)<<1)|chain;
@@ -752,7 +757,7 @@ _LR_W2_SOURCE = (
         "uint state=qstate_lr_w2(tile_ptr,ring,0);",
         "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
         "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
-        "uint state=qstate_lr_w2_packed(packed0,packed1,0);",
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,0);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
 )
@@ -848,7 +853,7 @@ _LR_MULTIROW_W2_SOURCE = (
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
         "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
         "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
-        "uint state=qstate_lr_w2_packed(packed0,packed1,first_pair);",
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
 )
@@ -1520,16 +1525,23 @@ def _local_ring_split_k(m: int, k: int, n: int) -> int:
     return split_k
 
 
-def _local_ring_multirow_split_k(m: int, k: int, n: int) -> int:
-    """Split tiny N8 multi-row dispatches without changing the output ABI."""
+def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = False) -> int:
+    """Choose a conservative K split for the multi-row LR dispatch."""
 
     if m < 4:
         split_k = 4
-    else:
-        logical_groups = m * (n // 8)
+    elif not output_fp32:
+        # Keep FP16 reduction order stable; the FP32 production path can use
+        # shape-specific splits without changing the public FP16 contract.
         split_k = 1
-        while logical_groups * split_k < 16 and split_k < 16:
-            split_k <<= 1
+    elif k >= 8192 and n <= 2048:
+        split_k = 8
+    elif k <= 2048 and n >= 8192:
+        split_k = 4 if m >= 8 else 2
+    elif m >= 16 and k >= 4096 and n >= 4096:
+        split_k = 4
+    else:
+        split_k = 1
     while split_k > 1 and k % (32 * split_k):
         split_k >>= 1
     return split_k
@@ -3019,7 +3031,7 @@ def qvq_mlx_gemv(
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
     if v2b2_p32_lr:
         row_tile = 16 if m >= 16 else 8 if m >= 4 else min(4, m)
-        split_k = _local_ring_multirow_split_k(m, k, n) if m < 4 else 1
+        split_k = _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32)
         group_size = ((row_tile + 1) // 2) * 32
         row_blocks = (m + row_tile - 1) // row_tile
         kernel = _local_ring_multirow_kernel(
