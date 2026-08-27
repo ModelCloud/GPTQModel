@@ -4277,3 +4277,30 @@ mode M4 Max:
 The candidate measured `1.183x` against current LR and `1.684x` against P32,
 with reduction-order drift. It was not promoted; the production M1/N64
 half2 route remains unchanged.
+
+## 121. M1 long-K K64/N64 probe rejected
+
+The existing shape-specialized K64/N64 staged-activation decoder was screened
+at `(M=1,K=8192,N=2048)`, outside its short-K production guard, against the
+current N32 fused split-32 route. The probe used the valid `SplitK=1` source
+contract and was numerically close but not bit-exact:
+
+```text
+max_abs = 0.0625
+relative_l2 = 0
+rmse = 0.0020275115966796875
+```
+
+A same-process three-way complete-module A/B used identical payloads and
+inputs, 10 warmups, 40 randomized samples per arm, and the AC/performance-
+mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N32 fused split-32 | `0.58273` | `1.42755` | `0.71854` |
+| K64/N64 candidate | `1.23183` | `2.60409` | `1.41118` |
+| Non-local P32 | `0.95037` | `2.16049` | `1.16365` |
+
+The candidate measured `0.473x` against current LR and `0.772x` against P32,
+with reduction-order drift. It was not promoted; the long-K M1 N32 route
+remains unchanged.
