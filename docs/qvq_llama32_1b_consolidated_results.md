@@ -123,7 +123,7 @@ stable across JSON/Markdown logs and evaluator artifacts.
 | Arm ID | GPU | Exact configuration | Output checkpoint | Atomic/Smooth | State | D300 | GSM8K Platinum |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
 | 595f38 | 0 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38` | — | **complete** | **23.7604% (exact 7/300; mean div 7.263)** | **37.3863% (452/1209)** |
-| bf96be | 1 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be` | Atomic | quant complete; **D300 running on GPU2** | running | **36.6419% (443/1209)** |
+| bf96be | 1 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-atomic-bf96be` | Atomic | **complete** | **24.3125% (exact 13/300; mean div 7.260)** | **36.6419% (443/1209)** |
 | bf272e | 2 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown30_smooth_atomic.json` | `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | Smooth + Atomic | **complete** | **24.3750% (exact 7/300; mean div 7.463)** | **36.5591% (442/1209)** |
 | 56c940 | 3 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo25_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940` | — | **complete** | **21.1458% (exact 9/300; mean div 6.440)** | **34.6567% (419/1209)** |
 | e5ca9f | 4 | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown35-e5ca9f` | — | **complete** | **25.5521% (exact 9/300; mean div 7.327)** | **40.2812% (487/1209)** |
