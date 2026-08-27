@@ -1288,3 +1288,34 @@ baseline p50 ratios of `1.001x` for `(M=1,K=2048,N=8192)` and `1.012x` for
 The optimization is therefore not enabled. This reinforces the promotion
 rule: an inner-kernel change must improve the complete module, including MLX
 dispatch, transforms, and split-K reduction, before being retained.
+
+### 19. Current M1 profiling and split-K recheck
+
+With the M4 Max connected to AC power and performance mode enabled, a bounded
+Metal System Trace was captured for the current M1 W2 workload:
+
+```text
+xcrun xctrace record --template "Metal System Trace" \
+  --output /tmp/qvq-metal-profile-ac-performance-m1-current.trace \
+  --launch -- /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+  scripts/profile_qvq_mlx_metal.py --m 1 --k 2048 --n 8192 \
+  --bits 2 --warmup 20 --active-calls 20
+```
+
+The 15.62-second trace completed successfully on macOS 26.6/Xcode 26.6. The
+Metal System Trace reported no counter set and disabled shader timeline on
+this target, so no occupancy or stall percentages are inferred. Source and
+dispatch inspection confirms that the production M1 path is the barrier-free
+small-row kernel; its remaining fixed cost is the split-K partial reduction
+and the surrounding Hadamard operations.
+
+A synchronized randomized 60-sample-per-arm complete-module sweep on the same
+AC/performance-mode host compared split-K values:
+
+| Shape | split 1 p50 | split 2 p50 | split 4 p50 | best |
+|---|---:|---:|---:|---:|
+| (M=1,K=2048,N=256) | 0.47708 ms | 0.38425 ms | **0.32873 ms** | 4 |
+| (M=1,K=2048,N=2048) | 0.44692 ms | 0.37723 ms | **0.33852 ms** | 4 |
+
+The long-K/narrow and short-K/wide policies remain split-8 and split-4,
+respectively. These measurements do not justify another split-policy change.
