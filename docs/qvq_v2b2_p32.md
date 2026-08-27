@@ -1435,6 +1435,7 @@ not by itself establish a universal 2x result: the strongest M1 case here is
 
 Two follow-up probes were rejected by the oracle gate. Replacing the scalar
 shared activation buffer with `float4` storage produced `4.1–4.4%` relative
-error at `(M=1,K=2048,N=8192)`, and extending the grouping from N64 to N128
-produced `2.9%` relative error. Neither change was promoted; the scalar N64
-layout remains the verified implementation.
+error at `(M=1,K=2048,N=8192)`. Two N128 extensions were also rejected: the
+original extension produced `2.9%` relative error, while a 128-thread
+two-output-tile variant produced `7.2%`. Neither change was promoted; the
+scalar N64 layout remains the verified implementation.
