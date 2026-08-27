@@ -1272,3 +1272,19 @@ make the sophisticated quantizer look simple to the hardware
 LOCAL-RING does that without buying speed by increasing BPW or serializing a dense/codebook cache. It makes the existing
 L16/V2 state capacity local to a hardware-sized P32 unit, then lets CUDA and Metal consume that unit directly with
 32-lane execution.
+
+### 18. Rejected W2 M1 bank-mask specialization
+
+The W2 M1/N16 vector kernel was experimentally specialized for each immutable
+alternate-bank ID. The specialization kept the selector bit dynamic but
+embedded the alternate-bank XOR mask in the Metal source. It was exact for
+alternate-bank IDs 1, 2, and 3 and passed the Torch oracle at the production
+M=1/N=2048 shape.
+
+It was rejected at the complete `QVQMLXLinear` boundary. On the AC/performance
+mode M4 Max, a randomized same-process 150-sample A/B measured candidate over
+baseline p50 ratios of `1.001x` for `(M=1,K=2048,N=8192)` and `1.012x` for
+`(M=1,K=8192,N=2048)`; the corresponding speedups were `0.999x` and `0.989x`.
+The optimization is therefore not enabled. This reinforces the promotion
+rule: an inner-kernel change must improve the complete module, including MLX
+dispatch, transforms, and split-K reduction, before being retained.
