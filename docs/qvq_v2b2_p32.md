@@ -2904,3 +2904,32 @@ bundle size was approximately `47 MB`. As with the M1 capture, Xcode reports
 numeric shader occupancy, cache, or stall counters. It confirms the bounded
 MLX Metal workload but leaves source-level barrier accounting as the usable
 evidence for the cooperative M4 route.
+
+## 69. M4 cooperative W2 literal bank-mask specialization
+
+The M4 cooperative W2 path now uses a fixed-alt-bank source when immutable
+checkpoint metadata is available. The three possible W2 bank masks are
+embedded in the generated Metal header, so the kernel avoids the dynamic
+`bank_alt_id` buffer load and lookup. Direct randomized synchronized kernel
+tests at `(M=4,K=2048,N=8192)` preserved exact output parity (`max_abs=0`)
+and measured the literal-mask source at `1.102x` p50 / `1.224x` mean faster
+than the generic cooperative W2 source over a 200-sample repeat.
+
+The complete `QVQMLXLinear` benchmark was rerun on AC/high-performance mode
+with `30` warmups and `100` randomized synchronized samples per arm (seed
+`20260902`):
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.26677` | `0.41610` | `1.560x` | `0.29942` | `0.44113` |
+| `(M=1,K=2048,N=2048)` | `0.66554` | `0.95219` | `1.431x` | `1.84250` | `2.25278` |
+| `(M=1,K=2048,N=8192)` | `0.84740` | `1.19263` | `1.407x` | `1.45947` | `1.85340` |
+| `(M=1,K=8192,N=2048)` | `0.70996` | `1.12758` | `1.588x` | `1.58738` | `2.30544` |
+| `(M=4,K=2048,N=8192)` | `1.20510` | `2.41838` | `2.007x` | `2.20764` | `3.34832` |
+| `(M=8,K=2048,N=8192)` | `1.42656` | `3.58287` | `2.512x` | `2.21812` | `5.15361` |
+| `(M=16,K=8192,N=8192)` | `2.53733` | `5.71308` | `2.252x` | `2.98290` | `6.29590` |
+
+The supported regression suite after this source specialization is
+`612 passed, 9 skipped`; the focused LR suite is `169 passed`. The measured
+`2x` target is reached for the M4/M8/M16 complete-module shapes, but remains
+universal only for the larger-row regimes rather than every M1 shape.

@@ -1883,6 +1883,25 @@ _LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(
     _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
 )
 
+# The M4 cooperative path is measured with a fixed alternative-bank ID for
+# loadable QVQ modules.  Inline that tiny W2 bank mask so the compiler can
+# remove the bank buffer load and the dynamic mask lookup.  Keep the generic
+# source below for direct callers that do not provide immutable metadata.
+_LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE = (
+    _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+    .replace(
+        "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+        "uint bank_bit=(selector>>ring)&1u;",
+    )
+    .replace(
+        "qlevelsv2b_lr_const_w2(state,bank)",
+        "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+    )
+)
+_LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE
+)
+
 _LR_MULTIROW_COOPERATIVE_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
 _LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE = _make_lr_multirow_split_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
 _LR_MULTIROW_COOPERATIVE_SPLIT_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE)
@@ -3163,16 +3182,27 @@ def _local_ring_multirow_kernel(
         import mlx.core as mx
 
         try:
+            literal_m4_w2_mask = m4_cooperative_decode and w2 and alt_bank_id is not None
             if m4_cooperative_decode:
-                source = (
-                    _LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE
-                    if split_k > 1 and output_fp32 and w2
-                    else _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
-                    if split_k > 1 and w2
-                    else _LR_MULTIROW_M4_COOPERATIVE_FP32_SOURCE
-                    if output_fp32
-                    else _LR_MULTIROW_M4_COOPERATIVE_SOURCE
-                )
+                if w2:
+                    if literal_m4_w2_mask:
+                        source = (
+                            _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_FP32_SOURCE
+                            if output_fp32
+                            else _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE
+                        )
+                    else:
+                        source = (
+                            _LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE
+                            if output_fp32
+                            else _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+                        )
+                else:
+                    source = (
+                        _LR_MULTIROW_M4_COOPERATIVE_FP32_SOURCE
+                        if output_fp32
+                        else _LR_MULTIROW_M4_COOPERATIVE_SOURCE
+                    )
             elif cooperative_decode:
                 source = (
                     _LR_MULTIROW_COOPERATIVE_SPLIT_W2_FP32_SOURCE
@@ -3210,7 +3240,7 @@ def _local_ring_multirow_kernel(
                     else _LR_MULTIROW_SOURCE
                 )
             specialized_alt_bank = alt_bank_id is not None
-            if specialized_alt_bank:
+            if specialized_alt_bank and not literal_m4_w2_mask:
                 # The bank family is immutable checkpoint metadata.  Keep it
                 # out of the MLX input graph so every production linear avoids
                 # a host scalar extraction and a device buffer load.
@@ -3226,7 +3256,7 @@ def _local_ring_multirow_kernel(
                 ),
                 input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
                 output_names=["out"],
-                header=_HEADER,
+                header=_lr_small_w2_mask_header(alt_bank_id) if literal_m4_w2_mask else _HEADER,
                 source=source,
                 ensure_row_contiguous=True,
                 compile_options={"math_mode": "fast"},
