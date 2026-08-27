@@ -94,6 +94,8 @@ _LR_M1_N64_SHARED_SPLIT2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N64_HALF2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_HALF2_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_UINT2_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_UINT2_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
@@ -119,6 +121,11 @@ _USE_LR_M1_N64_SHARED_SPLIT2 = True
 # The half2 codebook path is specialized to the measured short-K wide-N
 # shape.  Other M1/N64 shapes retain their existing fused or generic route.
 _USE_LR_M1_N64_HALF2 = True
+# The W2 M1/N64 K64 decoder can load the two aligned packed words for a ring
+# as one uint2 transaction.  This is deliberately limited to the benchmarked
+# short-K wide-N shape; retain the half2 scalar-load route as the fallback for
+# every other shape/device until it has its own A/B evidence.
+_USE_LR_M1_N64_UINT2 = True
 # One-lane-per-output N32 is retained only for the measured long-K M1 regime;
 # short-K shapes were neutral or slower than the promoted N16 route.
 _USE_LR_M1_N32_FUSED = True
@@ -1518,6 +1525,20 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
 
 
 _LR_M1_N64_K64_W2_FP32_SOURCE = _make_lr_m1_n64_k64_source(_LR_M1_N64_W2_FP32_SOURCE)
+
+# Each N16 SIMD tile has two lanes per ring.  The half2 route previously had
+# those lanes load one packed W2 word each.  For aligned LR32 W2 tiles, the
+# two words are adjacent, so one even lane can load them as uint2 and both
+# lanes can receive the components through SIMD shuffles.
+_LR_M1_N64_K64_W2_UINT2_FP32_SOURCE = _LR_M1_N64_K64_W2_FP32_SOURCE.replace(
+    "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;uint packed0=(lane&1u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;uint packed1=(lane&1u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;packed0=simd_shuffle(packed0,ushort(lane&~1u));packed1=simd_shuffle(packed1,ushort((lane&~1u)+1u));",
+    "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;\n"
+    "  device const uint2* packed_ptr=(device const uint2*)(tile_ptr+ring_base);\n"
+    "  uint2 packed_pair=(lane&1u)==0u?packed_ptr[0]:uint2(0u);\n"
+    "  uint packed0=simd_shuffle(packed_pair.x,ushort(lane&~1u));\n"
+    "  uint packed1=simd_shuffle(packed_pair.y,ushort(lane&~1u));",
+    1,
+)
 
 
 def _make_lr_m1_n64_shared_split2_source(source: str) -> str:
@@ -3151,6 +3172,63 @@ def _local_ring_m1_n64_half2_kernel(*, alt_bank_id: int):
             _LR_M1_N64_HALF2_KERNEL_ERRORS[alt_bank_id] = error
             raise RuntimeError(error) from exc
         _LR_M1_N64_HALF2_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int):
+    """Build the aligned uint2-load variant of the M1/N64 W2 kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_UINT2_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_UINT2_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_UINT2_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = (
+                _lr_m1_n64_shape_source(
+                    2048,
+                    8192,
+                    source=_LR_M1_N64_K64_W2_UINT2_FP32_SOURCE,
+                )
+                .replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                )
+                .replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+                )
+                .replace(
+                    "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                    "half2 value=qlevelsv2b_lr_const_w2_small_half",
+                )
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_uint2_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 M1/N64 uint2-load kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_N64_UINT2_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_UINT2_KERNELS[alt_bank_id] = kernel
         return kernel
 
 
@@ -4954,6 +5032,10 @@ def qvq_mlx_gemv(
             and k == 2048
             and n == 8192
         )
+        m1_n64_uint2 = (
+            _USE_LR_M1_N64_UINT2
+            and m1_n64_half2
+        )
         m1_n64_n32pair_split8 = (
             _USE_LR_M1_N64_N32PAIR_SPLIT8
             and output_fp32
@@ -5039,6 +5121,16 @@ def qvq_mlx_gemv(
             group_size = 512
             output_width = 64
             kernel = _local_ring_m1_n64_n32pair_split8_kernel(alt_bank_id=alt_id)
+        elif m1_n64_uint2:
+            # The fixed short-K wide-N source loads each aligned pair of W2
+            # words as one uint2 on the even lane, then shares both words
+            # with its ring mate through SIMD shuffles.  Keep the same
+            # half2 codebook arithmetic and split-2 output contract as the
+            # fallback route.
+            row_tile = 1
+            group_size = 128
+            output_width = 64
+            kernel = _local_ring_m1_n64_uint2_kernel(alt_bank_id=alt_id)
         elif m1_n64_half2:
             # The fixed short-K wide-N source keeps each decoded PGC16 pair
             # in native half2 form while the dot product remains FP32.  It

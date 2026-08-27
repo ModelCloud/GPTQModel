@@ -4580,3 +4580,46 @@ arm on the AC/performance-mode M4 Max:
 The modest module-boundary gain is insufficient to approach the M1 `2x`
 target, so the source was not promoted and the production route remains
 unchanged.
+
+## 131. M1 aligned `uint2` W2 packed-load promotion
+
+The M1/N64 W2 K64 decoder now has a shape-specialized aligned-load variant
+for `(M=1,K=2048,N=8192)`. Each ring's adjacent pair of packed W2 words is
+loaded as one `uint2` by the even lane and distributed to the ring mate with
+SIMD shuffles. The half2 codebook arithmetic, K64 activation staging,
+split-2 reduction, and output ordering are unchanged. The half2 scalar-load
+kernel remains the fallback for all other shapes.
+
+The new source is exact against the Torch reconstruction oracle at the raw
+kernel boundary:
+
+```text
+max_abs = 0
+relative_l2 = 0
+rmse = 0
+```
+
+The focused MLX/Torch/SwiGLU/threadgroup suite passed `190` tests, including
+the new `uint2` and half2 routes for alternate banks `1`, `2`, and `3`.
+
+A same-process randomized complete-module A/B used 15 warmups and 100
+samples per arm with identical payloads and inputs on the plugged-in,
+performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing half2 fallback | `0.58356` | `0.92594` | `0.63704` |
+| Aligned `uint2` candidate | `0.56023` | `0.84910` | `0.61154` |
+| Non-local P32 | `0.89985` | `1.30055` | `0.98461` |
+
+The aligned-load candidate is `1.042x` faster than the existing LR M1 route
+at the complete-module boundary and `1.606x` faster than P32 in this run.
+Its final FP16 module output remained within the existing production
+contract relative to the fallback (`max_abs=0.0625`, `relative_l2=1.651e-5`,
+`rmse=0.0008046`). The candidate is therefore promoted only for this exact
+short-K/wide-N W2 shape; it does not solve the universal M1 `2x` target.
+
+For context, a fresh 100-sample complete-module benchmark after promotion
+measured LR/P32 p50 of `0.25402/0.34433 ms` (`1.356x`) for this shape. Apple
+GPU timing remains sensitive to thermal and scheduling state, so the paired
+same-process A/B above is the canonical promotion evidence.

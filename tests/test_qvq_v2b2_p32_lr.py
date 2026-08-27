@@ -988,7 +988,16 @@ def test_lr32_mlx_m1_n64_shared_split2_kernel_matches_torch_oracle(monkeypatch, 
 
 
 @pytest.mark.parametrize("bank_alt_value", [1, 2, 3])
-def test_lr32_mlx_m1_n64_half2_kernel_matches_torch_oracle(monkeypatch, bank_alt_value):
+@pytest.mark.parametrize(
+    "use_uint2,kernel_name",
+    (
+        (True, "_local_ring_m1_n64_uint2_kernel"),
+        (False, "_local_ring_m1_n64_half2_kernel"),
+    ),
+)
+def test_lr32_mlx_m1_n64_packed_load_kernel_matches_torch_oracle(
+    monkeypatch, bank_alt_value, use_uint2, kernel_name
+):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
 
@@ -1010,13 +1019,14 @@ def test_lr32_mlx_m1_n64_half2_kernel_matches_torch_oracle(monkeypatch, bank_alt
         bank_alt_id=bank_alt_id,
     )
     selected = {"called": False}
-    original = qvq_mlx._local_ring_m1_n64_half2_kernel
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_UINT2", use_uint2)
+    original = getattr(qvq_mlx, kernel_name)
 
     def observed(**kwargs):
         selected["called"] = True
         return original(**kwargs)
 
-    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_n64_half2_kernel", observed)
+    monkeypatch.setattr(qvq_mlx, kernel_name, observed)
     actual = qvq_mlx.qvq_mlx_gemv(
         mx.array(x.numpy()),
         mx.array(trellis.numpy()),
