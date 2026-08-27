@@ -4715,3 +4715,18 @@ Split-2 was slower by `0.972x` at p50 and `0.951x` by mean relative to the
 current split-4 route, with a `0.01563` maximum output difference from the
 changed reduction grouping. The experiment was rejected; the production
 dispatch intentionally retains split-4 for the promoted `uint2` path.
+
+## 136. M1 one-barrier K64 staging rejected for correctness
+
+An in-memory source probe attempted to stage both K32 activation halves of a
+K64 batch before a single threadgroup barrier, reducing the production two
+barriers per K64 batch to one while retaining the 128-thread `uint2` decoder.
+The probe used the production shape specialization and complete-module
+dispatch at `(M=1,K=2048,N=8192)`.
+
+It produced a large mismatch against the production route (`max_abs` about
+`76.4`, with non-finite relative comparison), so it was rejected before any
+timing result was considered. The likely issue is that removing the
+sub-tile synchronization permits faster SIMD groups to advance into later
+K64 iterations while slower groups still consume the prior shared activation
+region. The production two-barrier staging remains unchanged.
