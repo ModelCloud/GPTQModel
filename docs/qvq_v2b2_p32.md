@@ -3885,6 +3885,33 @@ The candidate measured `1.103x` against current LR and `1.569x` against P32,
 with reduction-order drift. It was not promoted; the production M1/N64
 half2 route remains unchanged.
 
+## 123. M1 vectorized W2 dot probe rejected
+
+The M1/N64 W2 half2 decoder was tested with the two scalar FP32 FMAs per
+decoded pair replaced by a `float2` dot product. The K64 staging, state
+recurrence, split-2 layout, and output reduction were unchanged. The
+candidate produced reduction/operation-order drift relative to production:
+
+```text
+max_abs = 0.0625
+relative_l2 = 0
+rmse = 0.0011186599731445312
+```
+
+A same-process three-way complete-module A/B used identical payloads and
+inputs, 15 warmups, 60 randomized samples per arm, and the AC/performance-
+mode M4 Max at `(M=1,K=2048,N=8192)`:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N64 W2 half2 | `0.81344` | `1.26416` | `0.87546` |
+| Vectorized `float2` dot | `0.74787` | `1.32216` | `0.81328` |
+| Non-local P32 | `1.20015` | `2.19313` | `1.33688` |
+
+The candidate measured `1.088x` against current LR and `1.605x` against P32,
+with reduction-order drift. It was not promoted; the production scalar-FMA
+path remains unchanged.
+
 ## 106. M4 K64-batched cooperative decode recheck
 
 The cooperative M4 W2 decoder was restructured to stage and decode two
