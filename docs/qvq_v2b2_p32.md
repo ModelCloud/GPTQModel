@@ -942,6 +942,14 @@ neutral at the module boundary: fused/plain p50 ratios were `1.004x` for `(M=1,K
 barriers did not beat MLX's native Hadamard implementation, so this fusion is rejected and the generic reduction plus
 native full Hadamard remain the production path.
 
+A second prototype fused split-K reduction directly into the single-row W2/N16 SIMD threadgroup. It produced exact
+FP32 output parity with the generic reduction and improved isolated inner p50 in some trials (for example, `0.54669`
+versus `0.56002 ms` at `(M=1,K=2048,N=8192)`), but the complete-module A/B was not consistently better: the same
+shape was only `0.961x` fused/plain at p50, `(M=1,K=8192,N=2048)` was `1.012x`, and `(M=2,K=2048,N=8192)` was
+`0.999x`. Because the separate reduction remains part of the module's transform/epilogue graph, this kernel-only
+optimization is not promoted; `mx.sum` remains the production reduction until a genuinely fused module epilogue is
+available.
+
 ### 11.4 Metal profiling findings
 
 The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's
