@@ -86,8 +86,8 @@ _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
 _LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool, bool], Any] = {}
 _LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool, bool], str] = {}
-_LR_M1_N64_KERNELS: dict[int, Any] = {}
-_LR_M1_N64_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_KERNELS: dict[tuple[int, int, int], Any] = {}
+_LR_M1_N64_KERNEL_ERRORS: dict[tuple[int, int, int], str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
@@ -1154,6 +1154,19 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
 
 
 _LR_M1_N64_K64_W2_FP32_SOURCE = _make_lr_m1_n64_k64_source(_LR_M1_N64_W2_FP32_SOURCE)
+
+
+def _lr_m1_n64_shape_source(k: int, n: int) -> str:
+    """Specialize the K64 source's fixed shape constants for one module shape."""
+
+    marker = "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+simd,n0=vector<<4u;"
+    replacement = (
+        f"constexpr uint K={k}u,N={n}u,eb=EdgeBits;\n"
+        "uint vector=group*4u+simd,n0=vector<<4u;"
+    )
+    if marker not in _LR_M1_N64_K64_W2_FP32_SOURCE:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its shape marker")
+    return _LR_M1_N64_K64_W2_FP32_SOURCE.replace(marker, replacement, 1)
 
 
 def _lr_m1_n64_w2_mask_header(alt_bank_id: int) -> str:
@@ -2249,30 +2262,31 @@ def _local_ring_small_kernel(
         return kernel
 
 
-def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
+def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int):
     """Build the W2 M1 kernel that shares two K32 activations per barrier."""
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
-    kernel = _LR_M1_N64_KERNELS.get(alt_bank_id)
+    key = (alt_bank_id, k, n)
+    kernel = _LR_M1_N64_KERNELS.get(key)
     if kernel is not None:
         return kernel
     with _KERNEL_LOCK:
-        kernel = _LR_M1_N64_KERNELS.get(alt_bank_id)
+        kernel = _LR_M1_N64_KERNELS.get(key)
         if kernel is not None:
             return kernel
-        error = _LR_M1_N64_KERNEL_ERRORS.get(alt_bank_id)
+        error = _LR_M1_N64_KERNEL_ERRORS.get(key)
         if error is not None:
             raise RuntimeError(error)
         import mlx.core as mx
 
         try:
             kernel = mx.fast.metal_kernel(
-                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k64_fp32_alt{alt_bank_id}",
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k{k}_n{n}_fp32_alt{alt_bank_id}",
                 input_names=["x", "trellis", "bank_ids", "dims"],
                 output_names=["out"],
                 header=_lr_m1_n64_w2_mask_header(alt_bank_id),
-                source=_LR_M1_N64_K64_W2_FP32_SOURCE.replace(
+                source=_lr_m1_n64_shape_source(k, n).replace(
                     "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
                     "uint bank_bit=(selector>>ring)&1u;",
                 )
@@ -2288,10 +2302,10 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
                 ensure_row_contiguous=False,
             )
         except Exception as exc:
-            error = f"QVQ LR32 MLX M1/N64 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
-            _LR_M1_N64_KERNEL_ERRORS[alt_bank_id] = error
+            error = f"QVQ LR32 MLX M1/N64 kernel creation failed for alt_bank_id={alt_bank_id}, K={k}, N={n}: {exc}"
+            _LR_M1_N64_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
-        _LR_M1_N64_KERNELS[alt_bank_id] = kernel
+        _LR_M1_N64_KERNELS[key] = kernel
         return kernel
 
 
@@ -3983,7 +3997,7 @@ def qvq_mlx_gemv(
             row_tile = 1
             group_size = 128
             output_width = 64
-            kernel = _local_ring_m1_n64_kernel(alt_bank_id=alt_id)
+            kernel = _local_ring_m1_n64_kernel(alt_bank_id=alt_id, k=k, n=n)
         elif small_rows:
             # One or two rows fit in one SIMD group.  Decode four pairs
             # per lane and reduce the four lanes belonging to each N8

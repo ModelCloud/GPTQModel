@@ -1615,3 +1615,18 @@ In a same-process 120-sample complete-module comparison at
 (`1.080x`) and p95 from `1.63559` to `1.26313 ms`, with exact output parity.
 This is a guarded M1 improvement; it does not change the K64 codec or tensor
 ABI.
+
+### 28. Shape-specialized K64 constants
+
+The K64 M1 kernel is cached by `(alternate-bank ID, K, N)` and embeds the
+validated module shape as Metal `constexpr` values. This lets the compiler
+remove the dynamic K/N indexing and simplify the fixed-shape loop bounds while
+retaining the same four-N16-tile layout and runtime checkpoint ABI.
+
+The specialization is exact against the Torch oracle. In synchronized
+same-process complete-module comparisons, it improved p50 from `0.30779` to
+`0.30254 ms` (`1.017x`) at `(M=1,K=2048,N=8192)`, and from `0.30331` to
+`0.29746 ms` (`1.020x`) at `(M=1,K=2048,N=2048)`. The broader 80-sample sweep
+on the same AC/performance-mode host measured `1.444x` P32/LR at `N=8192` and
+`1.363x` at `(M=1,K=8192,N=2048)`; Apple timing variance is larger than this
+small shape-constant effect. The LR32 suite remains `149 passed`.
