@@ -1021,3 +1021,9 @@ and 3.
 | monitor | `llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | `gsm8k_platinum_cot` | complete; metric=0.3159636062861869; report `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | `gsm8k_platinum_cot` | complete; metric=0.3655913978494624; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-updown30-atomic-95ef88` | `divergence300` | complete; metric=0.17375; report `/root/qvq-results/llama32-1b-w2-updown30-atomic-95ef88-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-updown30-smooth-atomic-4e4d0d` | `divergence300` | complete; metric=0.19635416666666666; report `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e` | `divergence300` | complete; metric=0.24375; report `/root/qvq-results/llama32-1b-w2-vo35-updown30-smooth-atomic-bf272e-div300-dev-v1.json` |
