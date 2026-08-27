@@ -999,3 +999,7 @@ and 3.
 | queued | `4e4d0d` | `Up+Down W3 + Smooth+Atomic` | GPU 7; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_updown30_smooth_atomic.json`; output `/root/qvq-results/llama32-1b-w2-updown30-smooth-atomic-4e4d0d`; Smooth group size 16 / max 512 tokens plus atomic replay; clean disjoint slices and replay rows; D300/GSM8K queued after quantization |
 
 | started | `595f38`, `bf96be`, `bf272e`, `56c940`, `e5ca9f`, `baeb18`, `95ef88`, `4e4d0d` | `8-GPU mixed-rate matrix` | queue wrappers launched on physical GPUs 0--7; all eight quantizers passed the low-utilization/free-memory gate and are loading/capturing the 302,193-token YAQA mix (atomic arms also load 13,147-token search and 22,609-token confirmation slices); D300 and GSM8K Platinum remain pending until each checkpoint marker is published; monitor will schedule both automatically |
+
+| monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `gsm8k_platinum_cot` | complete; metric=0.3465674110835401; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `gsm8k_platinum_cot` | complete; metric=0.3738626964433416; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-gsm8k-platinum-v1.json` |
