@@ -901,6 +901,14 @@ Finally, a fixed Metal split-K reduction was compared with MLX's `mx.sum` on the
 `(M=2,K=2048,N=8192)`. Because the result is shape-dependent and was not yet measured at complete-module level, the
 generic reduction remains the production choice.
 
+A follow-up prototype fused the split-K reduction with the first local H32 factor, leaving only the outer Hadamard
+factor for the complete module. The transform was oracle-correct (FP32 relative error was at most `1.2e-7` in the
+tested shapes), but a randomized interleaved 120-sample complete-module A/B on the AC/performance-mode M4 Max was
+neutral at the module boundary: fused/plain p50 ratios were `1.004x` for `(M=1,K=2048,N=8192)`, `1.005x` for
+`(M=2,K=2048,N=8192)`, and `0.988x` for `(M=1,K=8192,N=2048)`. The additional kernel and five H32 threadgroup
+barriers did not beat MLX's native Hadamard implementation, so this fusion is rejected and the generic reduction plus
+native full Hadamard remain the production path.
+
 ### 11.4 Metal profiling findings
 
 The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's
