@@ -3739,6 +3739,31 @@ The candidate measured `0.862x` at p50 and `0.848x` by mean. The additional
 shared tile and wider epilogue outweighed the reduced launch count, so the
 production N8 cooperative route remains unchanged.
 
+## 103. M4 fixed-shape specialization rejected
+
+The production M4 cooperative W2 kernel was compiled with fixed
+`M=4,K=2048,N=8192,row_tile=4` constants and without the dynamic dimensions
+input. Decode layout, synchronization, and FP32 arithmetic were unchanged.
+The candidate was bit-exact:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+The complete-module A/B used 200 randomized/interleaved samples per arm, 40
+warmups, and seed `20261108` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production dynamic M4 | `1.01869` | `2.84788` | `1.30625` | `0.78883` | `7.27792` |
+| Fixed-shape candidate | `0.97600` | `2.18049` | `1.33844` | `0.78562` | `18.68575` |
+
+The candidate measured `1.044x` at p50 but only `0.976x` by mean and had a
+worse maximum sample. Shape specialization is not a reliable module-level
+win, so no production dispatch changed.
+
 ## 95. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
