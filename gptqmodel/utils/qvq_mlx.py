@@ -1029,8 +1029,8 @@ _LR_SMALL_M1_N16_W2_SOURCE = (
     # M1/N16 W2 always decodes eight pairs per local ring.  Keep the loop
     # unrolled for both scalar and vector-activation variants derived below.
     .replace(
-        "  for(uint offset=0u;offset<8u;offset++){",
-        "  #pragma unroll\n  for(uint offset=0u;offset<8u;offset++){",
+        "  for(uint offset=0;offset<8u;offset++){",
+        "  #pragma unroll\n  for(uint offset=0;offset<8u;offset++){",
     )
 )
 _LR_SMALL_M1_N16_W2_FP32_SOURCE = _LR_SMALL_M1_N16_W2_SOURCE.replace("=half(sum0);", "=sum0;")
@@ -1179,7 +1179,12 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
     offset_marker = "for(uint offset=0;offset<8u;offset++){"
     if offset_marker not in source:
         raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its W2 pair loop")
-    source = source.replace(offset_marker, "#pragma unroll\n  " + offset_marker, 1)
+    # The K64 source is derived from the already-specialized M1/N16 W2
+    # source, which may already carry this directive.  Keep generation
+    # idempotent so inherited variants do not emit duplicate pragmas.
+    unrolled_marker = "#pragma unroll\n  " + offset_marker
+    if unrolled_marker not in source:
+        source = source.replace(offset_marker, unrolled_marker, 1)
     close_marker = "  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     close_replacement = "    }\n  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     if close_marker not in source:
