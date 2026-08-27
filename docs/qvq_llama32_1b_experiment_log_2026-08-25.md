@@ -1153,3 +1153,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6` | `divergence300` | complete; metric=0.35125; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp3-3151c6-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f` | `divergence300` | complete; metric=0.3958333333333333; report `/root/qvq-results/llama32-1b-w2-reg015-w3anchor-qk3-vo35-mlp35-370e9f-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3` | `micro_math` | complete; metric='mini_exact=0.03125; delta_ce=0.0032523682427008167; delta_kl=0.07477968862095022; answer_logprob_delta=-0.2800725244764072; answer_margin_delta=0.7598060494038597; critical_top1=0.9562160434643656'; report `/root/qvq-results/llama32-1b-w2-w3front-qk25-vo35-gate2-up35-down35-c2fbf3-micro-math-v1.json` |
