@@ -2988,3 +2988,44 @@ FP32 reduction tolerance (`max_abs <= 6.9e-5`):
 Split-16 remains the production choice. The result reinforces that the
 remaining M1 gap is not solved by changing split count; future work should
 target module-level fusion or a different data-reuse strategy.
+
+## 73. M1 short-K paired N32 output-tile promotion
+
+The M1 short-K route now pairs two adjacent N32 output tiles in one 512-thread
+launch for the exact measured shape `(M=1,K=2048,N=2048)`. The kernel retains
+the proven one-lane-per-output LR decoder and fused split-8 reduction, while
+sharing the launch across two N32 tiles. It is intentionally shape-gated; the
+N256 probe was neutral and remains on the existing N16 route.
+
+The direct inner-kernel A/B used randomized synchronized ordering with `200`
+samples. The paired N64 route preserved the FP32 result within the existing
+inner-kernel tolerance (`max_abs=5.6267e-5`, relative L2 `2.9305e-7`):
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N32 split-16 | `0.20427` | `0.31388` | `0.21628` |
+| Paired N64 split-8 | `0.19348` | `0.27569` | `0.20562` |
+
+At the complete-module boundary, a same-process randomized/interleaved A/B
+with `30` warmups and `100` synchronized samples measured candidate/current
+latencies of `0.54600/0.58823 ms` p50 and `0.58436/0.61467 ms` mean. Module
+parity was `max_abs=3.90625e-3`, within the `2e-2` module oracle tolerance.
+
+The post-promotion complete-module LR/P32 benchmark was rerun on the plugged-
+in AC/high-performance M4 Max host with `30` warmups, `100` randomized
+synchronized samples per arm, and seed `20260916`:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.26465` | `0.41340` | `1.562x` | `0.37758` | `0.45390` |
+| `(M=1,K=2048,N=2048)` | `0.25435` | `0.34737` | `1.366x` | `0.29206` | `0.44579` |
+| `(M=1,K=2048,N=8192)` | `0.25527` | `0.33192` | `1.300x` | `0.30126` | `0.38046` |
+| `(M=1,K=8192,N=2048)` | `0.21673` | `0.31798` | `1.467x` | `0.23409` | `0.34318` |
+| `(M=4,K=2048,N=8192)` | `0.31856` | `0.56000` | `1.758x` | `0.34410` | `0.60093` |
+| `(M=8,K=2048,N=8192)` | `0.37179` | `0.91554` | `2.463x` | `0.39357` | `0.98051` |
+| `(M=16,K=8192,N=8192)` | `2.54750` | `5.72173` | `2.246x` | `2.89774` | `6.19918` |
+
+The focused LR suite passed (`169 passed`) and the supported QVQ/MLX suite
+passed (`612 passed, 9 skipped`). This is a targeted M1 improvement: larger
+row regimes still exceed `2x`, but the universal `2x` target remains
+unproven.

@@ -80,7 +80,7 @@ def test_lr32_m1_n64_split_policy(k, expected):
     (
         (2048, 240, "_local_ring_m1_fused_split16_kernel", None),
         (2048, 256, "_local_ring_m1_fused_split16_kernel", None),
-        (2048, 2048, "_local_ring_m1_n32_fused_split_kernel", 16),
+        (2048, 2048, "_local_ring_m1_n64_n32pair_split8_kernel", None),
         (2304, 256, "_local_ring_m1_fused_split_kernel", None),
         (8192, 2048, "_local_ring_m1_n32_fused_split_kernel", 32),
     ),
@@ -92,6 +92,7 @@ def test_lr32_m1_fused_split_route_matches_torch_oracle(
     from gptqmodel.utils import qvq_mlx
 
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_SPLIT2", False)
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_N32PAIR_SPLIT8", True)
     _, _, trellis, selectors = _random_lr_payload(
         2,
         tiles=(in_features // 32) * (out_features // 8),
