@@ -86,8 +86,8 @@ _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
 _LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool, bool], Any] = {}
 _LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool, bool], str] = {}
-_LR_M1_N64_KERNELS: dict[tuple[int, int, int], Any] = {}
-_LR_M1_N64_KERNEL_ERRORS: dict[tuple[int, int, int], str] = {}
+_LR_M1_N64_KERNELS: dict[tuple[int, int, int, int], Any] = {}
+_LR_M1_N64_KERNEL_ERRORS: dict[tuple[int, int, int, int], str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
@@ -1156,17 +1156,36 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
 _LR_M1_N64_K64_W2_FP32_SOURCE = _make_lr_m1_n64_k64_source(_LR_M1_N64_W2_FP32_SOURCE)
 
 
-def _lr_m1_n64_shape_source(k: int, n: int) -> str:
-    """Specialize the K64 source's fixed shape constants for one module shape."""
+def _make_lr_m1_n64_k128_source(source: str) -> str:
+    """Decode four adjacent K32 tiles per barrier in the M1/N64 source."""
+
+    source = source.replace("threadgroup float shared_activation[64];", "threadgroup float shared_activation[128];")
+    source = source.replace("simd == 0u && lane < 16u", "simd == 0u && lane < 32u")
+    source = source.replace("base+=64u){", "base+=128u){")
+    source = source.replace(
+        "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){",
+        "  #pragma unroll\n  for(uint sub=0u;sub<4u;sub++){",
+    )
+    return source
+
+
+_LR_M1_N64_K128_W2_FP32_SOURCE = _make_lr_m1_n64_k128_source(
+    _LR_M1_N64_K64_W2_FP32_SOURCE
+)
+
+
+def _lr_m1_n64_shape_source(k: int, n: int, *, source: str | None = None) -> str:
+    """Specialize an M1/N64 source's fixed shape constants."""
 
     marker = "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+simd,n0=vector<<4u;"
     replacement = (
         f"constexpr uint K={k}u,N={n}u,eb=EdgeBits;\n"
         "uint vector=group*4u+simd,n0=vector<<4u;"
     )
-    if marker not in _LR_M1_N64_K64_W2_FP32_SOURCE:
+    source = _LR_M1_N64_K64_W2_FP32_SOURCE if source is None else source
+    if marker not in source:
         raise RuntimeError("QVQ LR32 M1/N64 source is missing its shape marker")
-    return _LR_M1_N64_K64_W2_FP32_SOURCE.replace(marker, replacement, 1)
+    return source.replace(marker, replacement, 1)
 
 
 def _lr_m1_n64_w2_mask_header(alt_bank_id: int) -> str:
@@ -2262,12 +2281,16 @@ def _local_ring_small_kernel(
         return kernel
 
 
-def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int):
-    """Build the W2 M1 kernel that shares two K32 activations per barrier."""
+def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int, k_tile: int = 64):
+    """Build the W2 M1/N64 kernel with a shape-specialized K tile batch."""
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
-    key = (alt_bank_id, k, n)
+    if k_tile not in (64, 128):
+        raise ValueError(f"QVQ LR32 M1/N64 K tile batch must be 64 or 128, got {k_tile}")
+    if k % k_tile:
+        raise ValueError(f"QVQ LR32 M1/N64 K={k} is not divisible by K tile batch {k_tile}")
+    key = (alt_bank_id, k, n, k_tile)
     kernel = _LR_M1_N64_KERNELS.get(key)
     if kernel is not None:
         return kernel
@@ -2281,12 +2304,20 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int):
         import mlx.core as mx
 
         try:
+            base_source = (
+                _LR_M1_N64_K128_W2_FP32_SOURCE
+                if k_tile == 128
+                else _LR_M1_N64_K64_W2_FP32_SOURCE
+            )
             kernel = mx.fast.metal_kernel(
-                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k{k}_n{n}_fp32_alt{alt_bank_id}",
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k{k}_n{n}"
+                    f"_kt{k_tile}_fp32_alt{alt_bank_id}"
+                ),
                 input_names=["x", "trellis", "bank_ids"],
                 output_names=["out"],
                 header=_lr_m1_n64_w2_mask_header(alt_bank_id),
-                source=_lr_m1_n64_shape_source(k, n).replace(
+                source=_lr_m1_n64_shape_source(k, n, source=base_source).replace(
                     "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
                     "uint bank_bit=(selector>>ring)&1u;",
                 )
@@ -4000,7 +4031,12 @@ def qvq_mlx_gemv(
             row_tile = 1
             group_size = 128
             output_width = 64
-            kernel = _local_ring_m1_n64_kernel(alt_bank_id=alt_id, k=k, n=n)
+            kernel = _local_ring_m1_n64_kernel(
+                alt_bank_id=alt_id,
+                k=k,
+                n=n,
+                k_tile=128 if k >= 128 and k % 128 == 0 else 64,
+            )
         elif small_rows:
             # One or two rows fit in one SIMD group.  Decode four pairs
             # per lane and reduce the four lanes belonging to each N8
