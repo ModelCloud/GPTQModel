@@ -4387,3 +4387,40 @@ mode M4 Max:
 The candidate measured `0.473x` against current LR and `0.772x` against P32,
 with reduction-order drift. It was not promoted; the long-K M1 N32 route
 remains unchanged.
+
+## 125. Current AC/performance-mode LR32 benchmark refresh
+
+The benchmark was rerun from commit `36c5dd09` on the plugged-in M4 Max with
+the high-performance power mode enabled. Both arms used identical inputs and
+randomized/interleaved same-process timing, with 20 warmups and 50 samples per
+arm. Every sample forced MLX completion with `mx.eval` and
+`mx.synchronize()`.
+
+The direct public-kernel results were:
+
+| Shape `(M,K,N)` | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.19769` | `0.27965` | `1.415x` | `0.33023` | `0.34533` |
+| `(1,2048,2048)` | `0.21788` | `0.29146` | `1.338x` | `0.24442` | `0.31835` |
+| `(1,2048,8192)` | `0.39573` | `0.57252` | `1.447x` | `0.47851` | `0.66171` |
+| `(1,8192,2048)` | `0.23104` | `0.34352` | `1.487x` | `0.25883` | `0.39721` |
+| `(4,2048,8192)` | `0.29225` | `0.48940` | `1.675x` | `0.32929` | `0.54962` |
+| `(8,2048,8192)` | `0.34185` | `0.83227` | `2.435x` | `0.36208` | `0.91201` |
+| `(16,8192,8192)` | `2.19092` | `5.10333` | `2.329x` | `2.32214` | `5.35552` |
+
+The complete `QVQMLXLinear` results under the same timing policy were:
+
+| Shape `(M,K,N)` | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.57798` | `0.85540` | `1.480x` | `0.90855` | `1.57600` |
+| `(1,2048,2048)` | `0.61879` | `0.87181` | `1.409x` | `1.39737` | `1.24618` |
+| `(1,2048,8192)` | `0.85777` | `1.18927` | `1.386x` | `1.16475` | `1.72444` |
+| `(1,8192,2048)` | `0.72388` | `1.19883` | `1.656x` | `1.43929` | `2.01598` |
+| `(4,2048,8192)` | `1.15344` | `2.36904` | `2.054x` | `1.66400` | `3.64726` |
+| `(8,2048,8192)` | `1.42885` | `3.78246` | `2.647x` | `1.83052` | `5.16905` |
+| `(16,8192,8192)` | `2.56588` | `5.75929` | `2.245x` | `2.90276` | `6.41811` |
+
+LR remains faster than non-local P32 for every tested shape. The complete
+module clears `2x` for M4, M8, and M16, but not for any M1 shape; the universal
+`2x` objective therefore remains open. The focused LR/SwiGLU/threadgroup
+correctness suite passed `19` tests, and `qvq_mlx.py` passed `py_compile`.
