@@ -4623,3 +4623,50 @@ For context, a fresh 100-sample complete-module benchmark after promotion
 measured LR/P32 p50 of `0.25402/0.34433 ms` (`1.356x`) for this shape. Apple
 GPU timing remains sensitive to thermal and scheduling state, so the paired
 same-process A/B above is the canonical promotion evidence.
+
+## 132. M1 one-lane N64 route rejected
+
+A barrier-free M1/N64 W2 candidate was tested for `(M=1,K=2048,N=8192)`. It
+used two one-lane N32 SIMD groups in a 64-thread launch, with aligned `uint2`
+packed-word loads and no shared activation tile or threadgroup barriers. The
+candidate passed the Torch reconstruction oracle for alternate-bank IDs `1`,
+`2`, and `3`; the focused suite also passed with the candidate enabled.
+
+It was nevertheless rejected at the complete-module boundary. A same-process
+randomized A/B used identical payloads and inputs, 15 warmups, and 80 samples
+per arm on the plugged-in, performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing aligned `uint2` route | `0.44310` | `0.50827` | `0.42266` |
+| One-lane candidate | `0.45733` | `0.51037` | `0.43649` |
+| Non-local P32 | `0.77613` | `0.82832` | `0.70847` |
+
+The candidate was `0.969x` the existing LR route by both p50 and mean, while
+the existing route remained `1.697x` faster than P32 by p50. The one-lane
+source and dispatch were removed; production continues to use the aligned
+`uint2` route. This confirms that removing barriers alone does not overcome
+the occupancy/reduction tradeoff on this M4 Max shape.
+
+## 133. AC/performance-mode benchmark refresh after one-lane rejection
+
+The complete `QVQMLXLinear` benchmark was rerun after the host was connected
+to AC power with high-performance mode enabled. It used randomized,
+interleaved LR/P32 order, shared synthetic inputs and payloads, 30 warmups,
+and 100 synchronized samples per arm:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.27117` | `0.41723` | `1.539x` | `0.34689` | `0.46671` |
+| `(1,2048,2048)` | `0.24792` | `0.32971` | `1.330x` | `0.32265` | `0.47087` |
+| `(1,2048,8192)` | `0.24096` | `0.31637` | `1.313x` | `0.26530` | `0.34934` |
+| `(1,8192,2048)` | `0.22992` | `0.33252` | `1.446x` | `0.24422` | `0.34656` |
+| `(4,2048,8192)` | `0.32494` | `0.55960` | `1.722x` | `0.35282` | `0.58935` |
+| `(8,2048,8192)` | `0.37725` | `0.91987` | `2.438x` | `0.40941` | `0.97662` |
+| `(16,8192,8192)` | `2.12273` | `5.18004` | `2.440x` | `2.16220` | `5.21702` |
+
+The current LR implementation is therefore consistently faster than P32 and
+exceeds `2x` for the batched M8/M16 cases, but the universal `2x` M1 target
+remains open. The host power state is recorded because Apple GPU scheduling
+and thermal state materially affect absolute latency; paired same-process
+comparisons remain the preferred evidence for individual promotions.
