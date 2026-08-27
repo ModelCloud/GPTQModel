@@ -3689,6 +3689,31 @@ The candidate measured only `1.043x` at p50 and `1.004x` by mean, while
 introducing FP16 boundary drift and worse tails. The production FP32 output
 path remains unchanged; the universal `2x` target remains open.
 
+## 101. M4 matrix-path probe rejected
+
+The existing LR `simdgroup_matrix` implementation was tested at M4 by using an
+8-row matrix tile with four valid input rows and four zero rows. This reuses
+the M8 matrix geometry but avoids changing the serialized format. At
+`(M=4,K=2048,N=8192)`, compared with the production cooperative scalar route:
+
+```text
+max_abs = 0.125
+relative_l2 = 0
+differing elements = 14121
+```
+
+The complete-module A/B used 150 randomized/interleaved samples per arm, 30
+warmups, and seed `20261106` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 cooperative | `1.12071` | `2.10285` | `1.41531` | `0.82087` | `23.21321` |
+| M4 matrix candidate | `1.31773` | `2.14877` | `1.42549` | `1.07158` | `5.07571` |
+
+The candidate measured `0.850x` at p50 and `0.993x` by mean, while adding
+FP16 matrix-boundary drift. The M4 cooperative scalar route remains in
+production and the universal `2x` target remains open.
+
 ## 95. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
