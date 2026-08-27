@@ -110,14 +110,6 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
 | d13602 | V + O projections W2 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0232** | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498% (269/1209)** |
 | b7d172 | V + O projections W2.5 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0663** | 7 | complete; D300 **19.0833%**, exact 4/300, mean divergence 5.9333 | GSM8K complete: **25.3102% (306/1209)** |
-| 595f38 | V + O W3.5 + Up + Down W3, reg .15 | **2.7042** | 0 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| bf96be | V + O W3.5 + Up + Down W3 + Atomic SwiGLU, reg .15 | **2.7042** | 1 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| bf272e | V + O W3.5 + Up + Down W3 + Smooth + Atomic SwiGLU, reg .15 | **2.7042** | 2 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| 56c940 | V + O W2.5 + Up + Down W3, reg .15 | **2.6180** | 3 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| e5ca9f | V + O W3.5 + Up + Down W3.5, reg .15 | **2.9801** | 4 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| baeb18 | V + O W3.5 + all MLP W2.5, reg .15 | **2.5663** | 5 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| 95ef88 | Up + Down W3 + Atomic SwiGLU, reg .15 | **2.5749** | 6 | quantizing; D300/GSM8K pending | queued after checkpoint |
-| 4e4d0d | Up + Down W3 + Smooth + Atomic SwiGLU, reg .15 | **2.5749** | 7 | quantizing; D300/GSM8K pending | queued after checkpoint |
 
 ### Current 8-GPU mixed-rate matrix (started 2026-08-27 UTC)
 
