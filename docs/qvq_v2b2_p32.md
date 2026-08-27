@@ -1573,3 +1573,30 @@ the M1 gap:
 These compile-mode values are a separate timing run and are not used to
 claim a production speedup; they confirm that graph specialization alone is
 insufficient for a universal 2x M1 result.
+
+### 26. K64 fixed-loop unrolling
+
+The K64 M1 source now asks Metal to unroll its fixed two-subtile loop and
+eight-pair local decode loop. This changes no memory layout, arithmetic, or
+serialized ABI. The K64 path remained exact against the Torch oracle for all
+three alternate-bank IDs, and the LR32 suite remained `148 passed`.
+
+In a same-process, randomized 120-sample complete-module comparison at
+`(M=1,K=2048,N=8192)`, unrolling reduced p50 from `0.77794` to `0.73317 ms`
+(`1.061x`) and p95 from `0.92474` to `0.88539 ms`. A fresh 80-sample
+synchronized sweep after integration measured the following p50/p95 values:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.51433 / 1.03365` | `0.71431 / 1.91832` | `1.389x` |
+| `(M=1,K=2048,N=2048)` | `0.77304 / 3.08403` | `0.83698 / 2.41919` | `1.083x` |
+| `(M=1,K=2048,N=8192)` | `0.71698 / 1.59999` | `1.06379 / 2.07936` | `1.484x` |
+| `(M=1,K=8192,N=2048)` | `0.99479 / 2.83122` | `1.23354 / 3.78588` | `1.240x` |
+| `(M=4,K=2048,N=8192)` | `1.23915 / 3.66467` | `2.35648 / 4.98262` | `1.902x` |
+| `(M=8,K=2048,N=8192)` | `1.66900 / 3.62983` | `3.90021 / 5.32726` | `2.337x` |
+| `(M=16,K=8192,N=8192)` | `2.55008 / 3.21072` | `5.75190 / 7.31761` | `2.256x` |
+
+The wider sweep is noisy in absolute latency, but agrees with the paired
+promotion result that unrolling is a modest M1 improvement. It does not close
+the remaining M1 gap to 2x; N128 grouping was also oracle-exact but neutral at
+the complete-module boundary (`0.995x`) and was not promoted.

@@ -1139,6 +1139,13 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
     ).replace(
         "shared_activation[(pair<<1u)+1u]", "shared_activation[(sub<<5u)+(pair<<1u)+1u]"
     )
+    source = source.replace(
+        "  for(uint sub=0u;sub<2u;sub++){",
+        "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){",
+    ).replace(
+        "    for(uint offset=0u;offset<8u;offset++){",
+        "    #pragma unroll\n    for(uint offset=0u;offset<8u;offset++){",
+    )
     close_marker = "  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     close_replacement = "    }\n  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     if close_marker not in source:
