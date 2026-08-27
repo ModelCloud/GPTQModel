@@ -1499,11 +1499,11 @@ _LR_MMA_W2_FP32_SOURCE = _LR_MMA_W2_SOURCE.replace(
 )
 _LR_MMA_HEADER = "#include <metal_simdgroup_matrix>\n" + _HEADER
 
-# Keep the matrix path available for correctness/performance experiments, but
-# do not use it in production until it matches the measured multirow path on
-# Apple GPUs.  On the M4 Max it is barrier-free yet slower for M8 wide-N GEMV
-# because one SIMD group does not provide enough occupancy.
-_USE_LR_MMA = False
+# The matrix path is shape-gated below.  The original experiment underfilled
+# the M4 Max, but the current W2 source and AC/high-performance recheck make
+# it a win for M8, K<=2048, wide-N FP32 GEMV.  Keep the flag separate so
+# another Apple GPU can disable the specialization without changing dispatch.
+_USE_LR_MMA = True
 
 # Cooperative ring decode remains disabled for M8/M16: its extra state setup
 # did not beat the SIMD0 decoder consistently on the M4 Max.  M4 is separate:

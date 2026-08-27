@@ -1027,12 +1027,12 @@ The trace confirmed the production dispatches and exposed the following executio
 | M=1/2 small-row | no `threadgroup_barrier`; M1 vector/scalar activation-sharing sources use SIMD shuffles and direct reductions | keep in production |
 | M=4 | M4 cooperative source uses both SIMD groups for the eight-ring decode; two barriers remain per K32 decode/consume iteration | enabled only for `split_k=1` on `applegpu_g16*` |
 | M=8/16 legacy multirow | two `threadgroup_barrier` calls per K32 decode/consume iteration; legacy decode is performed by SIMD group 0 while sibling groups wait | keep legacy on M4 Max after cooperative A/B lost/was neutral |
-| M8 MMA experiment | no threadgroup barriers, but one SIMD group and matrix setup underfill the GPU | kept oracle-tested but disabled in production |
+| M8 MMA experiment | no threadgroup barriers; the current W2 M8/K<=2048/wide-N specialization now wins on the AC/high-performance M4 Max recheck | enabled only for the measured shape gate; retain legacy fallback |
 | selector metadata | one selector byte is shared by every ring in an N8 tile | implemented as one lane-0 load plus SIMD broadcast |
 | W2 N8 compressed words | each packed word is shared by four decoder lanes | implemented as one load per word plus SIMD shuffle |
 | PGC16 levels | fixed 256-entry FP16 codebook is reused by every decoder | embedded in Metal constant memory; no per-threadgroup LUT copy |
 
-The controlled same-process M8 A/B measured the MMA experiment at approximately 0.495 ms versus 0.234 ms for the existing
+The earlier controlled same-process M8 A/B measured the first MMA experiment at approximately 0.495 ms versus 0.234 ms for the existing
 multirow path, so removing barriers alone was not sufficient. The current M4 cooperative decoder is exact and measured
 at `1.01–1.23x` legacy speed across representative K/N shapes; the wide K2048 N8192 case was the strongest. It is
 architecture-gated to `applegpu_g16*`. A valid M4 K8192 N2048 shape selects split-K=8, so production dispatch explicitly
@@ -1043,6 +1043,27 @@ while preserving the sequential per-ring state recurrence. It passed 24 M8/M16 t
 output dtypes, but a synchronized same-process A/B on this M4 Max measured legacy/cooperative p50 ratios of `0.86x` for
 M8 (cooperative slower) and `0.99x` for M16 (parity). It is therefore retained behind `_USE_LR_COOPERATIVE_DECODE` and
 disabled in production; its result does not justify replacing the current decoder on this device.
+
+The W2 MMA source was subsequently rechecked after the W2 packed-state and dispatch updates on AC power with macOS
+high-performance mode. The corrected randomized/interleaved A/B used the same M8 input, trellis, and selectors for both
+arms, with 20 warmups and 160 synchronized samples per arm. The current production multirow path was compared with the
+MMA path at `(M=8,K=2048,N=8192)`:
+
+| Measurement | Legacy multirow | W2 MMA | Legacy/MMA |
+|---|---:|---:|---:|
+| inner GEMV p50 (ms) | `1.24742` | `0.98094` | `1.272x` |
+| inner GEMV p95 (ms) | `1.94961` | `1.59880` | — |
+| complete module p50 (ms) | `1.67371` | `1.48000` | `1.131x` |
+| complete module p95 (ms) | `2.91623` | `2.18837` | — |
+
+The complete-module outputs were exactly equal in this run; the direct inner
+outputs had maximum absolute difference `3.51e-4` and relative L2 difference
+`8.11e-7`, within the existing LR32 oracle tolerance. This enables the MMA
+route only for `M=8`, `K<=2048`, `N>=8192`, W2-compatible LR32 FP32 output,
+and `split_k=1`; all other shapes retain the legacy dispatch. The older
+barrier-free MMA result remains documented as a rejected variant because it
+used an earlier source/dispatch state and should not override the current
+shape-specific measurement.
 
 The GPU counter profile was unavailable on this host. `xctrace` accepted the additional **Metal GPU Counters** instrument
 but reported `Selected counter profile is not supported on target device`; the standalone template name was also not
@@ -2304,3 +2325,45 @@ active. The eight-N16-tile prototype was Torch-oracle equivalent within
 `1.53e-4` absolute, but measured `0.41592 ms` versus `0.39625 ms` for the
 current route (`0.953x`). It was rejected because the extra threadgroup
 barrier and larger threadgroup outweighed the reduction in launches.
+
+## 51. M8 W2 `simdgroup_matrix` specialization
+
+The first LR32 MMA experiment was rejected because its single-SIMD-group
+matrix setup was slower than the then-current multirow decoder. After the W2
+packed-state, selector-specialization, and dispatch updates, the experiment
+was rerun on the AC-powered M4 Max in macOS high-performance mode. The A/B
+used the same input, trellis payload, and selectors, randomized LR/MMA order
+within each sample, and synchronized every measurement. It used 20 warmups
+and 160 timed samples per arm at `(M=8,K=2048,N=8192)`.
+
+| Measurement | Legacy multirow | W2 MMA | Legacy/MMA |
+|---|---:|---:|---:|
+| inner GEMV p50 (ms) | `1.24742` | `0.98094` | `1.272x` |
+| inner GEMV p95 (ms) | `1.94961` | `1.59880` | — |
+| complete module p50 (ms) | `1.67371` | `1.48000` | `1.131x` |
+| complete module p95 (ms) | `2.91623` | `2.18837` | — |
+
+The complete-module outputs were exactly equal in this run. Direct inner
+outputs differed by maximum absolute error `3.51e-4` and relative L2
+`8.11e-7`, within the LR32 oracle tolerance. The W2 MMA route is therefore
+enabled only for `M=8`, `K<=2048`, `N>=8192`, FP32 output, W2-compatible
+LR32, and `split_k=1`; all other shapes retain the legacy dispatch.
+
+A fresh 100-sample randomized complete-module LR/P32 sweep after promotion
+measured the following ratios. This is a separate LR-versus-P32 comparison,
+not the MMA-versus-legacy A/B above:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.25698` | `0.40113` | `1.561x` | `0.48030` | `0.75065` |
+| `(M=1,K=2048,N=2048)` | `0.21569` | `0.27077` | `1.255x` | `0.31162` | `0.36616` |
+| `(M=1,K=2048,N=8192)` | `0.25765` | `0.35294` | `1.370x` | `0.41026` | `0.51426` |
+| `(M=1,K=8192,N=2048)` | `0.25160` | `0.31675` | `1.259x` | `0.31602` | `0.40183` |
+| `(M=4,K=2048,N=8192)` | `0.29750` | `0.54612` | `1.836x` | `0.36896` | `0.65109` |
+| `(M=8,K=2048,N=8192)` | `0.35819` | `0.89454` | `2.497x` | `0.40476` | `0.96862` |
+| `(M=16,K=8192,N=8192)` | `2.75533` | `5.93131` | `2.153x` | `4.06772` | `7.96385` |
+
+The corresponding inner-kernel ratios were `1.194x`, `1.152x`, `1.150x`,
+`1.163x`, `1.683x`, `2.174x`, and `2.163x` in the same shape order. These
+results confirm a measured M8 MMA win while preserving the previous
+conclusion that LR32 does not yet deliver a universal `2x` M1 speedup.

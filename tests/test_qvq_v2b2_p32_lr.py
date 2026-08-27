@@ -662,6 +662,40 @@ def test_lr32_mlx_mma_m8_matches_torch_reconstruction(bits, output_fp32):
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)
 
 
+def test_lr32_mlx_mma_is_selected_for_production_m8_dispatch(monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    in_features = 32
+    out_features = 8192
+    _, _, trellis, selectors = _random_lr_payload(2, tiles=out_features // 8)
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([2], dtype=torch.uint8)
+    x = torch.randn(8, in_features, dtype=torch.float32)
+    selected = {"called": False}
+    original = qvq_mlx._local_ring_mma_kernel
+
+    def observed(**kwargs):
+        selected["called"] = True
+        return original(**kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_MMA", True)
+    monkeypatch.setattr(qvq_mlx, "_local_ring_mma_kernel", observed)
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(trellis.numpy()),
+        2,
+        out_features=out_features,
+        bank_ids=mx.array(packed_selectors.numpy()),
+        bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=2,
+    )
+    mx.eval(actual)
+    assert selected["called"]
+
+
 @pytest.mark.parametrize("output_fp32", (False, True))
 @pytest.mark.parametrize("bits", LR_RATES)
 def test_lr32_mlx_m4_row_tile_matches_torch_reconstruction(bits, output_fp32):
