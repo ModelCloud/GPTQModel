@@ -3831,3 +3831,28 @@ warmups, and seed `20261109` on the AC/performance-mode M4 Max:
 Split-2 measured `1.058x` at p50 and `1.125x` by mean, but the result is
 far below the `2x` target, changes reduction order, and has a worse p95. The
 production cooperative split-1 route remains unchanged.
+
+## 105. M4 packed row/tile register launch rejected
+
+Four independent `(row-pair,N8-tile)` register/SIMD computations were packed
+into one 128-thread launch. The candidate removed cross-SIMD barriers and
+halved the launch count relative to standalone two-row groups, but decoded
+each output tile independently. At `(M=4,K=2048,N=8192)`, it produced:
+
+```text
+max_abs = 0.0625
+relative_l2 = 0
+differing elements = 101
+```
+
+The complete-module A/B used 150 randomized/interleaved samples per arm, 30
+warmups, and seed `20261110` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 cooperative | `0.59615` | `1.19149` | `0.80166` | `0.40788` | `16.51754` |
+| Packed row/tile register candidate | `1.13483` | `2.46686` | `1.34818` | `0.79704` | `3.40988` |
+
+The candidate measured `0.525x` at p50 and `0.595x` by mean. Duplicate decode
+work outweighed the reduced launch count, so the production cooperative route
+remains unchanged.
