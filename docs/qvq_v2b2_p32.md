@@ -3231,3 +3231,26 @@ Module output remained within the existing contract (`relative delta=0`,
 `max_abs=0.01563`), but the candidate was not promoted because complete
 `QVQMLXLinear` latency is the governing metric. The scalar activation layout
 remains production.
+
+## 82. M1 serial-N128 output grouping: exact but only a small positive
+
+An in-memory W2 probe kept the proven four-SIMD-group occupancy of the M1/N64
+route while computing two adjacent N64 output tiles sequentially per group.
+The candidate reused the staged K64 activation tile and used a 128-output
+shape-specialized launch at `(M=1,K=2048,N=8192)`. The complete-module output
+was exactly equal to the current production output (`max_abs=0`, relative L2
+`0`).
+
+The synchronized complete-module A/B used identical payloads and input, `30`
+warmups, and `100` randomized samples per arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Current N64 | `0.72960` | `1.39615` | `0.82959` |
+| Serial N128 candidate | `0.71700` | `1.04853` | `0.78083` |
+
+This is `1.018x` faster at p50 and `1.063x` faster by mean, with a larger p95
+improvement in this run. It is a useful shape-specific positive probe, but it
+does not establish the universal `2x` target and was not promoted without
+broader-shape and alternate-bank validation. The production M1/N64 route
+remains unchanged.
