@@ -782,3 +782,48 @@ def test_lr32_mlx_single_row_specialization_matches_two_row_kernel(monkeypatch):
     specialized = run(True)
     fallback = run(False)
     np.testing.assert_allclose(specialized, fallback, rtol=0, atol=2e-2)
+
+
+def test_lr32_m1_w2_n64_grouped_kernel_matches_torch_oracle(monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    in_features = 64
+    out_features = 2048
+    _, _, trellis, selectors = _random_lr_payload(
+        2,
+        tiles=(in_features // 32) * (out_features // 8),
+    )
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([2], dtype=torch.uint8)
+    x = torch.randn(1, in_features, dtype=torch.float32)
+    expected = x @ reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=2,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=packed_selectors,
+        bank_alt_id=bank_alt_id,
+    )
+    selected = {"called": False}
+    original = qvq_mlx._local_ring_m1_n64_kernel
+
+    def observed(**kwargs):
+        selected["called"] = True
+        return original(**kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_n64_kernel", observed)
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(trellis.numpy()),
+        2,
+        out_features=out_features,
+        bank_ids=mx.array(packed_selectors.numpy()),
+        bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=2,
+    )
+    mx.eval(actual)
+    assert selected["called"]
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)

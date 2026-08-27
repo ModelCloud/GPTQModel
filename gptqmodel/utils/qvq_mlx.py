@@ -86,6 +86,8 @@ _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
 _LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool, bool], Any] = {}
 _LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool, bool], str] = {}
+_LR_M1_N64_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
@@ -1060,6 +1062,58 @@ _LR_SMALL_M1_N16_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_
 _LR_SMALL_M1_N16_VECTOR_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
 _LR_SMALL_M1_N16_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_W2_SOURCE)
 _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+
+def _make_lr_m1_n64_shared_activation_source(source: str) -> str:
+    """Pack four M1/N16 SIMD tiles into one group and share each K32 input tile."""
+
+    layout = (
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;"
+    )
+    replacement = (
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint simd=simdgroup_index_in_threadgroup;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+simd,n0=vector<<4u;\n"
+        "threadgroup float shared_activation[32];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its N16 layout marker")
+    source = source.replace(layout, replacement)
+    activation = (
+        "  float4 activation=lane<8u?float4(float(x[base+(lane<<2u)]),float(x[base+(lane<<2u)+1u]),"
+        "float(x[base+(lane<<2u)+2u]),float(x[base+(lane<<2u)+3u])):float4(0.0f);"
+    )
+    activation_replacement = (
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(lane<<2u)] = float(x[base+(lane<<2u)]);\n"
+        "    shared_activation[(lane<<2u)+1u] = float(x[base+(lane<<2u)+1u]);\n"
+        "    shared_activation[(lane<<2u)+2u] = float(x[base+(lane<<2u)+2u]);\n"
+        "    shared_activation[(lane<<2u)+3u] = float(x[base+(lane<<2u)+3u]);\n"
+        "  }\n"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+    )
+    if activation not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its vector activation marker")
+    source = source.replace(activation, activation_replacement)
+    pair_values = (
+        "    float4 pair_values=simd_shuffle(activation,ushort(pair>>1u));\n"
+        "    uint component=(pair<<1u)&3u;\n"
+        "    sum0+=pair_values[component]*value.x+pair_values[component+1u]*value.y;"
+    )
+    pair_replacement = (
+        "    float a0=shared_activation[pair<<1u];\n"
+        "    float a1=shared_activation[(pair<<1u)+1u];\n"
+        "    sum0+=a0*value.x+a1*value.y;"
+    )
+    if pair_values not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its vector pair marker")
+    return source.replace(pair_values, pair_replacement)
+
+
+_LR_M1_N64_W2_FP32_SOURCE = _make_lr_m1_n64_shared_activation_source(
+    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
 
 _LR_MMA_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -2136,6 +2190,40 @@ def _local_ring_small_kernel(
             _LR_SMALL_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
         _LR_SMALL_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_kernel(*, alt_bank_id: int):
+    """Build the W2 M1 kernel that shares one K32 activation across four N16 tiles."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_HEADER,
+                source=_LR_M1_N64_W2_FP32_SOURCE.replace("uint(bank_alt_id[0])", "AltBank"),
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX M1/N64 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
+            _LR_M1_N64_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_KERNELS[alt_bank_id] = kernel
         return kernel
 
 
@@ -3805,7 +3893,27 @@ def qvq_mlx_gemv(
     if v2b2_p32_lr:
         split_k = _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32)
         small_rows = m <= 2
-        if small_rows:
+        m1_n64 = (
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k <= 2048
+            and k % 64 == 0
+            and n >= 2048
+            and n % 64 == 0
+        )
+        if m1_n64:
+            # Four N16 SIMD tiles share one K32 activation tile in a
+            # 128-thread group.  The shared activation load and one barrier
+            # replace four independent groups.  W2 FP32 uses two K slices;
+            # this preserves the complete K reduction while reducing the
+            # M1-wide launch count substantially.
+            split_k = 2
+            row_tile = 1
+            group_size = 128
+            output_width = 64
+            kernel = _local_ring_m1_n64_kernel(alt_bank_id=alt_id)
+        elif small_rows:
             # One or two rows fit in one SIMD group.  Decode four pairs
             # per lane and reduce the four lanes belonging to each N8
             # output; this avoids the shared decoded tile and its
@@ -3858,7 +3966,13 @@ def qvq_mlx_gemv(
         template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
         if split_k > 1 or small_rows:
             template.append(("SplitK", split_k))
-        output_width = _local_ring_small_output_width(n) if small_rows and m <= 2 and n % 16 == 0 else 8
+        output_width = (
+            64
+            if m1_n64
+            else _local_ring_small_output_width(n)
+            if small_rows and m <= 2 and n % 16 == 0
+            else 8
+        )
         partials = kernel(
             inputs=inputs,
             template=template,

@@ -1378,21 +1378,57 @@ It is not automatically enabled for model inference because dynamic sequence
 lengths can trigger additional shape-specialized compilations. The benchmark
 now uses one shared W2 payload/selector set for both formats, warms both
 runners, materializes compilation outside timing, and randomizes LR/P32 order
-inside every sample. On the AC and performance-mode M4 Max, the corrected
-compiled complete-module run used 80 synchronized samples per arm:
+inside every sample. On the AC and performance-mode M4 Max, the post-M1/N64
+corrected compiled complete-module run used 80 synchronized samples per arm.
+The table reports p50 because the N64 dispatch changed the production path
+after the older p95 table was recorded:
 
-| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
 |---|---:|---:|---:|
-| `(M=1,K=2048,N=256)` | `0.49787 / 0.69401` | `0.60223 / 0.85224` | `1.210x` |
-| `(M=1,K=2048,N=2048)` | `0.55371 / 0.78361` | `0.63533 / 0.86140` | `1.147x` |
-| `(M=1,K=2048,N=8192)` | `1.01900 / 4.50329` | `1.25460 / 3.20451` | `1.231x` |
-| `(M=1,K=8192,N=2048)` | `0.70785 / 1.18872` | `0.95819 / 1.46239` | `1.354x` |
-| `(M=4,K=2048,N=8192)` | `1.00458 / 1.57457` | `2.07521 / 2.56356` | `2.066x` |
-| `(M=8,K=2048,N=8192)` | `0.78383 / 1.05300` | `1.65625 / 2.10488` | `2.113x` |
-| `(M=16,K=8192,N=8192)` | `2.36087 / 2.61202` | `5.47515 / 5.73502` | `2.319x` |
+| `(M=1,K=2048,N=256)` | `0.27840` | `0.34929` | `1.255x` |
+| `(M=1,K=2048,N=2048)` | `0.33994` | `0.37360` | `1.099x` |
+| `(M=1,K=2048,N=8192)` | `0.64406` | `0.91338` | `1.418x` |
+| `(M=1,K=8192,N=2048)` | `0.80910` | `1.09027` | `1.348x` |
+| `(M=4,K=2048,N=8192)` | `0.61867` | `1.11685` | `1.805x` |
+| `(M=8,K=2048,N=8192)` | `0.83433` | `1.80779` | `2.167x` |
+| `(M=16,K=8192,N=8192)` | `2.34367` | `5.42621` | `2.315x` |
 
 These are compile-mode LR/P32 ratios, not compile-vs-eager gains; the latter
 are sensitive to process state and must be measured as a four-arm same-process
 experiment. The compiled graph is therefore a useful deployment-side
 optimization, but it does not establish a universal 2x M1 result; the M1
 ratios remain shape-dependent.
+
+### 22. M1 W2/N64 shared-activation dispatch
+
+The M1 W2 FP32 path now groups four existing N16 SIMD tiles into one 128-thread
+launch. SIMD group 0 loads each K32 activation tile once into a 32-float
+threadgroup buffer; the four SIMD groups then reuse it while decoding their
+independent N16 output tiles. This reduces the launch count for wide output
+matrices and preserves the existing W2 state decoder and split-K reduction.
+
+The specialization is deliberately narrow: `M=1`, W2, FP32 output,
+`K<=2048`, `K%64==0`, `N>=2048`, and `N%64==0`. Other shapes retain the
+previous barrier-free N16 or multirow dispatch. A deterministic Torch
+reconstruction oracle passed for the new route, and the complete LR suite was
+`146 passed`.
+
+On the AC/performance-mode M4 Max, using the same payload and selector bytes,
+randomized LR/P32 ordering, and 80 synchronized samples per arm, the updated
+uncompiled complete-module p50 results were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.57292` | `0.73471` | `1.282x` |
+| `(M=1,K=2048,N=2048)` | `0.67102` | `0.80183` | `1.195x` |
+| `(M=1,K=2048,N=8192)` | `0.69348` | `1.02460` | `1.477x` |
+| `(M=1,K=8192,N=2048)` | `0.84229` | `1.14835` | `1.363x` |
+| `(M=4,K=2048,N=8192)` | `1.15619` | `2.38165` | `2.060x` |
+| `(M=8,K=2048,N=8192)` | `0.99281` | `2.15427` | `2.170x` |
+| `(M=16,K=8192,N=8192)` | `2.52546` | `5.86590` | `2.323x` |
+
+The direct LR output matched the Torch oracle across the tested wide M1
+shapes with relative L2 error about `8.4e-7` to `8.6e-7` and maximum absolute
+error below `3e-4`. The candidate is a meaningful M1 improvement, but it does
+not by itself establish a universal 2x result: the strongest M1 case here is
+`1.477x`, while M4/M8/M16 remain above 2x.
