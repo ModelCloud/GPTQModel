@@ -604,6 +604,46 @@ def test_lr32_mlx_m4_row_tile_matches_torch_reconstruction(bits, output_fp32):
     torch.testing.assert_close(actual_torch, expected, rtol=0, atol=8e-3)
 
 
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("rows", (8, 16))
+@pytest.mark.parametrize("bits", LR_RATES)
+def test_lr32_mlx_cooperative_decode_matches_torch_reconstruction(rows, bits, output_fp32, monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_COOPERATIVE_DECODE", True)
+
+    in_features = 64
+    out_features = 16
+    torch_layer = _make_torch_lr_layer(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    x = torch.randn(rows, in_features, dtype=torch.float16)
+    expected = x.to(torch.float32) @ reconstruct_local_ring_inner_weight(
+        torch_layer.trellis,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=torch_layer.bank_ids,
+        bank_alt_id=torch_layer.bank_alt_id,
+    )
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(torch_layer.trellis.numpy()),
+        bits,
+        out_features=out_features,
+        bank_ids=mx.array(torch_layer.bank_ids.numpy()),
+        bank_alt_id=mx.array(torch_layer.bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=output_fp32,
+    )
+    mx.eval(actual)
+    expected = expected if output_fp32 else expected.to(torch.float16)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)
+
+
 @pytest.mark.parametrize("out_features", (8, 16, 40))
 def test_lr32_mlx_linear_inference_matches_torch_oracle(out_features):
     mx = pytest.importorskip("mlx.core")

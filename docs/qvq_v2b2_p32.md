@@ -768,6 +768,12 @@ The controlled same-process M8 A/B measured the MMA experiment at approximately 
 multirow path, so removing barriers alone was not sufficient. The opt-in barrier-free M4 experiment was also slower
 (0.533 ms versus 0.463 ms), indicating that duplicated decode costs more than the saved barriers at M=4.
 
+An additional oracle-tested cooperative decoder distributed the eight independent rings across the available SIMD groups
+while preserving the sequential per-ring state recurrence. It passed 24 M8/M16 tests covering W1 through W3.5 and both
+output dtypes, but a synchronized same-process A/B on this M4 Max measured legacy/cooperative p50 ratios of `0.86x` for
+M8 (cooperative slower) and `0.99x` for M16 (parity). It is therefore retained behind `_USE_LR_COOPERATIVE_DECODE` and
+disabled in production; its result does not justify replacing the current decoder on this device.
+
 The GPU counter profile was unavailable on this host (`Selected counter profile is not supported on target device`),
 so the run does not claim hardware occupancy, register, cache, or stall-counter values. The remaining actionable overlap
 opportunities are structural: distribute LR state decode across SIMD groups for M>=8 and fuse the fixed split-K
