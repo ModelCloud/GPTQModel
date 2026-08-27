@@ -687,7 +687,8 @@ small-row path where four lanes cooperate on each output and accumulate directly
 eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows, with a dedicated row-tile
 boundary at M=4. W2 combines each ring's two packed words into one circular
 64-bit window to derive its sixteen states, avoiding four separate state-start extractions; the split-W2 variants use
-the same fast state-start path. The LR production kernel specializes the immutable alternate-bank ID as a Metal
+the same fast state-start path. The W2 N8 kernels load each compressed word once per SIMD group and distribute it to the
+four decoder lanes with SIMD shuffles. The LR production kernel specializes the immutable alternate-bank ID as a Metal
 template value, broadcasts selector metadata once per N8 tile, and reads the fixed PGC16-v1 FP16 level table from Metal
 constant memory. For small M, N16 is used for the common N=2048 projection while wide N=8192 uses N8 to expose more
 independent groups. `QVQMLXLinear` keeps the transformed LR activation in FP32, avoiding the legacy
@@ -707,30 +708,44 @@ reported:
 
 | Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| (1,2048,256) | 0.17215 | 0.15710 | 0.91x | 0.28267 | 0.22464 |
-| (1,2048,2048) | 0.14938 | 0.15458 | 1.04x | 0.20919 | 0.21862 |
-| (1,2048,8192) | 0.19700 | 0.52612 | 2.67x | 0.29929 | 0.64305 |
-| (1,8192,2048) | 0.41031 | 0.60015 | 1.46x | 0.81893 | 0.98125 |
-| (4,2048,8192) | 0.43902 | 0.48469 | 1.10x | 0.72538 | 0.58145 |
-| (8,2048,8192) | 0.38081 | 0.81460 | 2.14x | 0.47941 | 0.96679 |
-| (16,8192,8192) | 2.16550 | 5.28565 | 2.44x | 2.33071 | 5.46143 |
+| (1,2048,256) | 0.16854 | 0.15194 | 0.90x | 0.25660 | 0.19943 |
+| (1,2048,2048) | 0.14669 | 0.15738 | 1.07x | 0.19666 | 0.27913 |
+| (1,2048,8192) | 0.18767 | 0.21283 | 1.13x | 0.25893 | 0.27324 |
+| (1,8192,2048) | 0.21092 | 0.58581 | 2.78x | 0.29886 | 0.96219 |
+| (4,2048,8192) | 0.27767 | 0.58700 | 2.11x | 0.36570 | 0.83595 |
+| (8,2048,8192) | 0.37935 | 0.82292 | 2.17x | 0.45852 | 0.96443 |
+| (16,8192,8192) | 2.14417 | 5.29258 | 2.47x | 2.30625 | 5.42018 |
 
-This run establishes at least 2x speedup for the representative M=8 and M=16 wide projection shapes, while keeping the
-same public inference graph and checkpoint rate. The M=1 wide projection is also a 2.67x inner-kernel win in this run;
-the narrow M=1 shape remains launch-bound. M=4 was variable across AC runs and measured close to parity in this sample,
-so it is not claimed as a stable 2x result.
+This run establishes at least 2x speedup for the representative M=4, M=8, and M=16 wide projection shapes, while keeping
+the same public inference graph and checkpoint rate. The M=1, K=8192 down-projection shape is also above 2x; the M=1,
+K=2048 wide projection is only 1.13x and the narrow M=1 shape remains launch-bound. M=4 and M=8 were variable across
+the immediate AC repeats, so only M=16 is treated as a stable 2x result from this pair of runs.
 These numbers measure the public inner-GEMV path, not end-to-end model latency. Full `QVQMLXLinear` timing also includes
 the input/output Hadamard transforms, scale/bias epilogue, and MLX graph overhead. Measurements are host-dependent
 and should be repeated on each target Apple GPU.
 
-A separate synthetic full-module sanity check (50 warmup, 200 samples; 20 warmup, 100 samples for M=16) measured:
+An immediate second 300-sample run on the same AC/performance-mode host produced p50 speedups of `0.90x, 1.28x, 1.32x,
+2.16x, 1.05x, 1.13x, 2.48x` in the table's shape order. This confirms that host scheduling/cache state affects individual
+dispatch timings; conclusions use the synchronized p50/p95 values and do not treat the noisiest M4/M8 runs as universal
+guarantees.
 
-| Shape (M,K,N) | Full LR p50 (ms) | Full P32 p50 (ms) | P32/LR |
-|---|---:|---:|---:|
-| (1,2048,8192) | 0.6123 | 0.6684 | 1.09x |
-| (4,2048,8192) | 0.6080 | 0.8679 | 1.43x |
-| (8,2048,8192) | 0.7195 | 1.4235 | 1.98x |
-| (16,8192,8192) | 2.7845 | 5.8669 | 2.11x |
+A separate synthetic full-module benchmark is available with:
+
+```text
+python scripts/benchmark_qvq_v2b2_p32_lr_mlx_module.py --warmup 50 --samples 200
+```
+
+On the same AC/performance-mode host, one 50-warmup/200-sample run measured:
+
+| Shape (M,K,N) | Full LR p50 (ms) | Full P32 p50 (ms) | P32/LR | Full LR p95 (ms) | Full P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.65383 | 0.70235 | 1.07x | 0.97129 | 0.95571 |
+| (1,2048,2048) | 0.55608 | 0.53233 | 0.96x | 0.84241 | 0.92769 |
+| (1,2048,8192) | 0.61525 | 0.81744 | 1.33x | 1.01985 | 1.28278 |
+| (1,8192,2048) | 0.66300 | 0.86631 | 1.31x | 0.96357 | 1.48027 |
+| (4,2048,8192) | 0.82758 | 0.81788 | 0.99x | 1.39779 | 1.45551 |
+| (8,2048,8192) | 1.07281 | 1.26992 | 1.18x | 1.47251 | 1.59435 |
+| (16,8192,8192) | 2.70494 | 5.79129 | 2.14x | 3.00818 | 5.96905 |
 
 These full-module numbers include the Hadamard/scale/epilogue graph and use independent synthetic payloads per format;
 they are a sanity check rather than a model-level throughput claim.
@@ -747,16 +762,18 @@ The trace confirmed the production dispatches and exposed the following executio
 | M=4/8/16 multirow | two threadgroup barriers per K32 decode/consume iteration; decode is performed by SIMD group 0 while sibling groups wait | next cooperative-decode target |
 | M8 MMA experiment | no threadgroup barriers, but one SIMD group and matrix setup underfill the GPU | kept oracle-tested but disabled in production |
 | selector metadata | one selector byte is shared by every ring in an N8 tile | broadcast from lane 0 |
+| W2 N8 compressed words | each packed word is shared by four decoder lanes | one load per word plus SIMD shuffle |
 
 The controlled same-process M8 A/B measured the MMA experiment at approximately 0.495 ms versus 0.234 ms for the existing
 multirow path, so removing barriers alone was not sufficient. The opt-in barrier-free M4 experiment was also slower
 (0.533 ms versus 0.463 ms), indicating that duplicated decode costs more than the saved barriers at M=4.
 
 The GPU counter profile was unavailable on this host (`Selected counter profile is not supported on target device`),
-so the run does not claim hardware occupancy, register, cache, or stall-counter values. The actionable overlap
-opportunities are therefore structural: distribute LR state decode across SIMD groups for M>=8, load W2 packed words
-once and shuffle them to decoder lanes, and fuse the fixed split-K reduction/epilogue when full-module profiling shows
-that materialized partials are on the critical path. The capture bundle is intended for manual inspection in Xcode GPU
+so the run does not claim hardware occupancy, register, cache, or stall-counter values. The remaining actionable overlap
+opportunities are structural: distribute LR state decode across SIMD groups for M>=8 and fuse the fixed split-K
+reduction/epilogue when full-module profiling shows that materialized partials are on the critical path. The W2
+load-once/shuffle optimization is now implemented in the N8 kernels and covered by the LR oracle tests. The capture
+bundle is intended for manual inspection in Xcode GPU
 Frame Capture; it is not a checkpoint artifact.
 
 ## 12. YAQA integration

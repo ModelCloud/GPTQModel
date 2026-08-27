@@ -838,11 +838,9 @@ _LR_SMALL_W2_SOURCE = (
     .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
     .replace(
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
-        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
-        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
-        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
-        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
-        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
         "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
@@ -1064,11 +1062,9 @@ _LR_MULTIROW_W2_SOURCE = (
     .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
     .replace(
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
-        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
-        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
-        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
-        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
-        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
         "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
@@ -1080,11 +1076,9 @@ _LR_MULTIROW_SPLIT_W2_SOURCE = (
     .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
     .replace(
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
-        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
-        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
-        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
-        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
-        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
         "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
