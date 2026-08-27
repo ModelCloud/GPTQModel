@@ -1080,3 +1080,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5` | `gsm8k_platinum_cot` | complete; metric=0.40860215053763443; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-mlpall30-5fddf5-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-flat-flat-w15-862367` | `gsm8k_platinum_cot` | complete; metric=0.034739454094292806; report `/root/qvq-results/llama32-1b-flat-flat-w15-862367-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-flat-flat-w30-1040a5` | `gsm8k_platinum_cot` | complete; metric=0.4292803970223325; report `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5-gsm8k-platinum-v1.json` |
