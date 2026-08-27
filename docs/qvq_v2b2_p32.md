@@ -809,6 +809,19 @@ output grouping. An M1 K2048 N8192 Metal System Trace captured the specialized
 Apple hardware stall/occupancy counters on this target. `xctrace` listed Metal GPU Counters, but the counter profile
 returned “Selected counter profile is not supported on target device”.
 
+The public inner-kernel benchmark was also rerun after the policy change with 75 warmup calls and 200 synchronized
+samples. This path includes the MLX LR split-K reduction but not the complete-module Hadamard/epilogue graph:
+
+| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.23262 | 0.27027 | 1.16x | 0.37735 | 0.38793 |
+| (1,2048,2048) | 0.18602 | 0.16102 | 0.87x | 0.23530 | 0.21842 |
+| (1,2048,8192) | 0.20040 | 0.21556 | 1.08x | 0.21663 | 0.23354 |
+| (1,8192,2048) | 0.22312 | 0.25954 | 1.16x | 0.24804 | 0.28049 |
+| (4,2048,8192) | 0.26267 | 0.47321 | 1.80x | 0.28311 | 0.54235 |
+| (8,2048,8192) | 0.37919 | 0.82333 | 2.17x | 0.40121 | 0.87779 |
+| (16,8192,8192) | 2.05342 | 5.09027 | 2.48x | 2.13184 | 5.16288 |
+
 ### 11.4 Metal profiling findings
 
 The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's
