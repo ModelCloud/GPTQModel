@@ -685,9 +685,13 @@ materialization would defeat the design goal of keeping decode and accumulation 
 The first MLX implementation keeps the checkpoint ABI above but uses an N8 SIMD-group kernel: one 32-lane group
 decodes eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows. M>=4 uses the
 two-row form, with a dedicated row-tile boundary at M=4. W2 combines each ring's two packed words into one circular
-64-bit window to derive its sixteen states, avoiding four separate state-start extractions. FP32 production GEMVs use
-measured shape-specific split-K dispatch for wide FFN and down-projection shapes; the M=4, K<=2048, N>=8192 case
-uses the unsplit row-tile-4 path because it is faster on the M4 Max. FP16 keeps the original reduction order. No dense
+64-bit window to derive its sixteen states, avoiding four separate state-start extractions; the split-W2 variants use
+the same fast state-start path. The LR production kernel specializes the immutable alternate-bank ID as a Metal
+template value, broadcasts selector metadata within each ring's SIMD lanes, and reads the fixed PGC16-v1 FP16 level
+table from Metal constant memory. `QVQMLXLinear` keeps the transformed LR activation in FP32, avoiding the legacy
+FP16 row-range/narrow/rescale graph. FP32 production GEMVs use measured shape-specific split-K dispatch for wide FFN
+and down-projection shapes; the M=4, K<=2048, N>=8192 case uses the unsplit row-tile-4 path because it is faster on
+the M4 Max. FP16 output disables split-K so its reduction preserves the original full-K rounding semantics. No dense
 weight matrix is materialized.
 
 Run the paired public-path benchmark with:
@@ -699,20 +703,22 @@ python scripts/benchmark_qvq_v2b2_p32_lr_mlx.py --warmup 30 --samples 100
 The benchmark uses synthetic W2 payloads, FP16 activations, FP32 output, matched warmup/sample counts, and explicit
 GPU synchronization. On an Apple M4 Max, one representative run from the optimized implementation reported:
 
-| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR |
-|---|---:|---:|---:|
-| (1,2048,256) | 0.2337 | 0.1866 | 0.80x |
-| (1,2048,2048) | 0.1781 | 0.1571 | 0.88x |
-| (1,2048,8192) | 0.1990 | 0.2184 | 1.10x |
-| (1,8192,2048) | 0.1901 | 0.2502 | 1.32x |
-| (4,2048,8192) | 0.2295 | 0.4651 | 2.03x |
-| (8,2048,8192) | 0.3328 | 0.8293 | 2.49x |
-| (16,8192,8192) | 1.8285 | 5.2256 | 2.86x |
+| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.23327 | 0.19050 | 0.82x | 0.40756 | 0.25711 |
+| (1,2048,2048) | 0.24840 | 0.16269 | 0.65x | 0.31420 | 0.21950 |
+| (1,2048,8192) | 0.26046 | 0.37002 | 1.42x | 0.32222 | 0.57388 |
+| (1,8192,2048) | 0.24562 | 0.32092 | 1.31x | 0.34321 | 0.39170 |
+| (4,2048,8192) | 0.39421 | 0.67854 | 1.72x | 0.49328 | 0.79195 |
+| (8,2048,8192) | 0.40027 | 0.83996 | 2.10x | 0.44644 | 0.91333 |
+| (16,8192,8192) | 2.17681 | 5.18504 | 2.38x | 2.34593 | 5.42967 |
 
-This establishes at least 2x speedup for the representative M=4, M=8, and M=16 wide projection shapes, while keeping
-the same public inference graph and checkpoint rate. It does not claim a universal 2x decode speedup: tiny M=1
-dispatches remain launch-bound, and the narrow M=1 cases can be slower than selector-aware P32. Measurements are
-host-dependent and should be repeated on each target Apple GPU.
+This run establishes at least 2x speedup for the representative M=8 and M=16 wide projection shapes, while keeping
+the same public inference graph and checkpoint rate. M=4 remains a substantial 1.72x win in this run but is below the
+2x target; tiny M=1 dispatches remain launch-bound, and narrow M=1 cases can be slower than selector-aware P32.
+These numbers measure the public inner-GEMV path, not end-to-end model latency. Full `QVQMLXLinear` timing also includes
+the input/output Hadamard transforms, scale/bias epilogue, and MLX graph overhead. Measurements are host-dependent
+and should be repeated on each target Apple GPU.
 
 ## 12. YAQA integration
 

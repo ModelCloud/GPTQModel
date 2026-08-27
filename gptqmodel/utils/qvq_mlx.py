@@ -439,6 +439,19 @@ _QVQ_V4_BANK_MASKS_METAL = _qvq_v4_bank_masks_metal("qbank_masks")
 _QVQ_V2_BANK_MASKS_METAL = _qvq_v2_bank_masks_metal("qv2bank_masks")
 
 
+def _qvq_pgc16_levels_metal() -> str:
+    """Embed the fixed production FP16 PGC16 levels for LR32 kernels."""
+
+    import torch
+
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).to(torch.float16).contiguous()
+    bits = levels.view(torch.int16).tolist()
+    return "constant ushort qvq_pgc16_levels[256]={" + ",".join(f"0x{int(value) & 0xffff:04x}u" for value in bits) + "};"
+
+
+_QVQ_PGC16_LEVELS_METAL = _qvq_pgc16_levels_metal()
+
+
 _HEADER = r"""
 inline uint qpw(uint remaining) {
   if(remaining>=16)return 16;if(remaining>=8)return 8;if(remaining>=4)return 4;if(remaining>=2)return 2;return 1;
@@ -515,6 +528,14 @@ inline float4 qlevels4(device const half* levels,uint s){uint p0=s^(s>>8);p0=(p0
   return float4(float(levels[p0>>8]),float(levels[p0&255u]),float(levels[p1>>8]),float(levels[p1&255u]));}
 __QVQ_V4_BANK_MASKS_METAL__
 __QVQ_V2_BANK_MASKS_METAL__
+__QVQ_PGC16_LEVELS_METAL__
+inline half qpgc16_lr(uint index){return as_type<half>(qvq_pgc16_levels[index]);}
+inline float2 qlevelsv2b_lr_const(uint s,uint bank,uint eb){
+  uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));}
+inline float2 qlevelsv2b_lr_const_w2(uint s,uint bank){
+  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));}
 inline float2 qlevelsv2b(device const half* levels,uint s,uint bank,uint eb){
   uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
   return float2(float(levels[p>>8]),float(levels[p&255u]));}
@@ -669,7 +690,7 @@ inline float qhyb(device const int* t,device const half* lut,uint k,uint n,uint 
   return((local&1)&&(h&(1u<<15)))?-v:v;}
 """.replace("__QVQ_V4_BANK_MASKS_METAL__", _QVQ_V4_BANK_MASKS_METAL).replace(
     "__QVQ_V2_BANK_MASKS_METAL__", _QVQ_V2_BANK_MASKS_METAL
-)
+).replace("__QVQ_PGC16_LEVELS_METAL__", _QVQ_PGC16_LEVELS_METAL)
 
 _SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -772,21 +793,20 @@ uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,row_tile=dims[4],vc=(N+7u)>>3;
 uint row_block=group/vc,vector=group-row_block*vc,row_base=row_block*row_tile,n0=vector<<3;
 uint row_groups=(row_tile+1u)>>1,row0=row_base+simd,row1=row0+row_groups;
 threadgroup half decoded[8][32];
-threadgroup half level_cache[256];
-uint tid=thread_position_in_threadgroup.x,thread_count=row_groups*32u;
-for(uint i=tid;i<256u;i+=thread_count)level_cache[i]=levels[i];
-threadgroup_barrier(mem_flags::mem_threadgroup);
 float4 sum00=0.0f,sum01=0.0f,sum10=0.0f,sum11=0.0f;
 for(uint base=0;base<K;base+=32){
   if(simd==0u){
     uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u;
     uint output_n=n0+output_lane,tile=(base>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
     device const int* tile_ptr=trellis+tile*(4*eb);
+    uint ring_lane=lane&~3u;
     uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
-    uint bank=((uint(bank_ids[tile])>>ring)&1u)*uint(bank_alt_id[0]);
+    uint selector=(lane&3u)==0u?uint(bank_ids[tile]):0u;
+    selector=simd_shuffle(selector,ushort(ring_lane));
+    uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
     for(uint offset=0;offset<4u;offset++){
       uint pair=first_pair+offset;
-      float2 value=qlevelsv2b(level_cache,state,bank,eb);
+      float2 value=qlevelsv2b_lr_const(state,bank,eb);
       decoded[output_lane][pair*2u]=half(value.x);
       decoded[output_lane][pair*2u+1u]=half(value.y);
       if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
@@ -848,11 +868,14 @@ _LR_MULTIROW_SPLIT_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SPLI
 _LR_MULTIROW_W2_SOURCE = (
     _LR_MULTIROW_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
     .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
-    .replace("qlevelsv2b(level_cache,state,bank,eb)", "qlevelsv2b_w2(level_cache,state,bank)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
     .replace(
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
         "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
-        "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
+        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
+        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
+        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
         "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
@@ -861,11 +884,14 @@ _LR_MULTIROW_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_W2_SOUR
 _LR_MULTIROW_SPLIT_W2_SOURCE = (
     _LR_MULTIROW_SPLIT_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
     .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
-    .replace("qlevelsv2b(level_cache,state,bank,eb)", "qlevelsv2b_w2(level_cache,state,bank)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
     .replace(
         "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
         "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
-        "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
+        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
+        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
+        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
         "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
     )
     .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
@@ -1601,7 +1627,7 @@ def _local_ring_multirow_kernel(
                 # out of the MLX input graph so every production linear avoids
                 # a host scalar extraction and a device buffer load.
                 source = source.replace("uint(bank_alt_id[0])", "AltBank")
-            input_names = ["x", "trellis", "bank_ids", "levels", "dims"]
+            input_names = ["x", "trellis", "bank_ids", "dims"]
             kernel = mx.fast.metal_kernel(
                 name=(
                     f"gptqmodel_qvq_v2b2_p32_lr_multirow_"
@@ -3029,8 +3055,10 @@ def qvq_mlx_gemv(
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     if x.ndim != 2 or trellis.ndim != 2:
         raise ValueError("QVQ MLX expects 2D x and trellis arrays")
-    if x.dtype != mx.float16 or trellis.dtype != mx.int32:
-        raise TypeError("QVQ MLX requires float16 x and int32 planar trellis words")
+    if trellis.dtype != mx.int32:
+        raise TypeError("QVQ MLX requires int32 planar trellis words")
+    if x.dtype != mx.float16 and not (v2b2_p32_lr and x.dtype == mx.float32):
+        raise TypeError("QVQ MLX requires float16 x, or float32 x for LR32")
     m, k = x.shape
     n = _integer_argument(out_features, "out_features")
     if v2b2_p32_lr:
@@ -3072,7 +3100,7 @@ def qvq_mlx_gemv(
             split_k=split_k,
             alt_bank_id=alt_id,
         )
-        inputs = [x, trellis, bank_ids, levels, _dims_array(m, k, n, transition_bits, row_tile)]
+        inputs = [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
         if split_k > 1:
             template.append(("SplitK", split_k))
@@ -3413,7 +3441,14 @@ if _mlx_nn is not None:
                 x.reshape(-1, self.in_features).astype(mx.float32) * self.SU,
                 self._input_hadamard,
             )
-            native_input, row_scale = _qvq_mlx_narrow_with_row_scale(transformed)
+            if self.v2b2_p32_lr:
+                # LR32 accumulates in FP32 and has no legacy FP16 GEMV
+                # boundary.  Keep the transformed activation wide and avoid
+                # the row max/log2/ceil/pow/narrow/rescale graph on every
+                # linear call.
+                native_input, row_scale = transformed, None
+            else:
+                native_input, row_scale = _qvq_mlx_narrow_with_row_scale(transformed)
             output = qvq_mlx_gemv(
                 native_input,
                 self.trellis,
@@ -3431,7 +3466,9 @@ if _mlx_nn is not None:
                 output_fp32=True,
                 _bank_alt_id_value=self._bank_alt_id_value,
             )
-            output = _qvq_mlx_hadamard(output * row_scale, self._output_hadamard)
+            if row_scale is not None:
+                output = output * row_scale
+            output = _qvq_mlx_hadamard(output, self._output_hadamard)
             output = output * self.SV
             if self.bias is not None:
                 output = output + self.bias
