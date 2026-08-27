@@ -4388,6 +4388,38 @@ The candidate measured `0.473x` against current LR and `0.772x` against P32,
 with reduction-order drift. It was not promoted; the long-K M1 N32 route
 remains unchanged.
 
+## 126. M1 FP16 activation-boundary probe rejected
+
+The LR complete-module path was tested with a plain FP16 cast immediately
+after the input Hadamard transform, before the existing FP32 LR GEMV. This
+was intended to reduce activation traffic without reintroducing the P32
+power-of-two row-scale analysis. The candidate used the same weights, input,
+kernel dispatch, and output epilogue as production; only the GEMV input dtype
+changed.
+
+The candidate was not numerically identical to the production FP32-input LR
+path:
+
+| Shape `(M,K,N)` | max absolute output difference | RMSE |
+|---|---:|---:|
+| `(1,2048,2048)` | `0.0625` | `0.015686` |
+| `(1,2048,8192)` | `0.125` | `0.015198` |
+| `(1,8192,2048)` | `0.25` | `0.031799` |
+
+A same-process randomized complete-module A/B used 10 warmups and 40
+samples per arm on the AC/performance-mode M4 Max:
+
+| Shape | FP32-input LR p50 (ms) | FP16-cast LR p50 (ms) | Candidate/current |
+|---|---:|---:|---:|
+| `(1,2048,2048)` | `0.66188` | `0.65550` | `1.010x` |
+| `(1,2048,8192)` | `0.82281` | `0.85442` | `0.963x` |
+| `(1,8192,2048)` | `0.72808` | `0.68423` | `1.064x` |
+
+The cast does not approach the missing `2x` M1 improvement, and the
+shape-dependent drift is not justified by the small or negative latency
+change. The production LR path therefore continues to retain the FP32
+transformed activation and its exact accumulation contract.
+
 ## 125. Current AC/performance-mode LR32 benchmark refresh
 
 The benchmark was rerun from commit `36c5dd09` on the plugged-in M4 Max with
