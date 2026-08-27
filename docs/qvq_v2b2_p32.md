@@ -2367,3 +2367,22 @@ The corresponding inner-kernel ratios were `1.194x`, `1.152x`, `1.150x`,
 `1.163x`, `1.683x`, `2.174x`, and `2.163x` in the same shape order. These
 results confirm a measured M8 MMA win while preserving the previous
 conclusion that LR32 does not yet deliver a universal `2x` M1 speedup.
+
+The same complete-module benchmark was then repeated with `mx.compile` for
+both fixed-shape arms. Compilation was materialized before timing; the
+benchmark still randomized LR/P32 order and synchronized every sample. With
+30 warmups and 80 timed samples per arm, the post-promotion ratios were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.23654` | `0.34208` | `1.446x` | `0.34116` | `0.60622` |
+| `(M=1,K=2048,N=2048)` | `0.27954` | `0.34542` | `1.236x` | `0.46358` | `0.53207` |
+| `(M=1,K=2048,N=8192)` | `0.26525` | `0.35387` | `1.334x` | `0.38930` | `0.53895` |
+| `(M=1,K=8192,N=2048)` | `0.80340` | `1.06179` | `1.322x` | `1.95549` | `4.15433` |
+| `(M=4,K=2048,N=8192)` | `1.15290` | `2.20550` | `1.913x` | `6.78086` | `8.66457` |
+| `(M=8,K=2048,N=8192)` | `0.90029` | `2.37631` | `2.639x` | `5.86593` | `10.36749` |
+| `(M=16,K=8192,N=8192)` | `2.53515` | `5.63875` | `2.224x` | `3.70723` | `6.97027` |
+
+Compiled and eager timings are separate measurements because compilation
+changes the graph and launch behavior; neither table should be mixed with
+the other when evaluating a kernel change.
