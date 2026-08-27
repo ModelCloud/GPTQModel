@@ -47,7 +47,7 @@ LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
         (3, 64, 16, False, 1),
         (4, 2048, 8192, False, 1),
         (4, 2048, 8192, True, 1),
-        (8, 2048, 8192, True, 4),
+        (8, 2048, 8192, True, 1),
         (16, 8192, 2048, True, 8),
         (16, 8192, 8192, True, 4),
     ),
@@ -56,6 +56,13 @@ def test_lr32_multirow_split_policy(m, k, n, output_fp32, expected):
     from gptqmodel.utils.qvq_mlx import _local_ring_multirow_split_k
 
     assert _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32) == expected
+
+
+@pytest.mark.parametrize("n,expected", ((2048, 16), (8192, 8)))
+def test_lr32_small_row_output_width_policy(n, expected):
+    from gptqmodel.utils.qvq_mlx import _local_ring_small_output_width
+
+    assert _local_ring_small_output_width(n) == expected
 
 
 def _random_lr_payload(bits: float, tiles: int = 2):
@@ -510,6 +517,50 @@ def test_lr32_mlx_small_row_kernel_handles_two_rows(output_fp32):
         v2b2_p32_lr=True,
         output_fp32=output_fp32,
     )
+    mx.eval(actual)
+    expected = expected if output_fp32 else expected.to(torch.float16)
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)
+
+
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("bits", LR_RATES)
+def test_lr32_mlx_mma_m8_matches_torch_reconstruction(bits, output_fp32):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    in_features = 32
+    out_features = 8192
+    torch_layer = _make_torch_lr_layer(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+    )
+    x = torch.randn(8, in_features, dtype=torch.float16)
+    expected = x.to(torch.float32) @ reconstruct_local_ring_inner_weight(
+        torch_layer.trellis,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=torch_layer.bank_ids,
+        bank_alt_id=torch_layer.bank_alt_id,
+    )
+    actual = qvq_mlx._local_ring_mma_kernel(
+        output_fp32=output_fp32,
+        w2=int(bits * 2) == 4,
+        alt_bank_id=2,
+    )(
+        inputs=[
+            mx.array(x.numpy()),
+            mx.array(torch_layer.trellis.numpy()),
+            mx.array(torch_layer.bank_ids.numpy()),
+            qvq_mlx._dims_array(8, in_features, out_features, int(bits * 2), 8),
+        ],
+        template=[("EdgeBits", int(bits * 2)), ("AltBank", 2)],
+        grid=(out_features // 8 * 32, 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(8, out_features)],
+        output_dtypes=[mx.float32 if output_fp32 else mx.float16],
+    )[0]
     mx.eval(actual)
     expected = expected if output_fp32 else expected.to(torch.float16)
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=8e-3)

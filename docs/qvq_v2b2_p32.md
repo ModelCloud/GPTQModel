@@ -688,12 +688,12 @@ eight local rings into a K32 x N8 shared tile and accumulates that tile for one 
 boundary at M=4. W2 combines each ring's two packed words into one circular
 64-bit window to derive its sixteen states, avoiding four separate state-start extractions; the split-W2 variants use
 the same fast state-start path. The LR production kernel specializes the immutable alternate-bank ID as a Metal
-template value, broadcasts selector metadata within each ring's SIMD lanes, and reads the fixed PGC16-v1 FP16 level
-table from Metal constant memory. `QVQMLXLinear` keeps the transformed LR activation in FP32, avoiding the legacy
+template value, broadcasts selector metadata once per N8 tile, and reads the fixed PGC16-v1 FP16 level table from Metal
+constant memory. For small M, N16 is used for the common N=2048 projection while wide N=8192 uses N8 to expose more
+independent groups. `QVQMLXLinear` keeps the transformed LR activation in FP32, avoiding the legacy
 FP16 row-range/narrow/rescale graph. FP32 production GEMVs use measured shape-specific split-K dispatch for wide FFN
-and down-projection shapes; the M=4, K<=2048, N>=8192 case uses the unsplit row-tile-4 path because it is faster on
-the M4 Max. FP16 output disables split-K so its reduction preserves the original full-K rounding semantics. No dense
-weight matrix is materialized.
+and down-projection shapes; the M=4, K<=2048, N>=8192 case uses the unsplit row-tile-4 path. FP16 output disables
+split-K so its reduction preserves the original full-K rounding semantics. No dense weight matrix is materialized.
 
 Run the paired public-path benchmark with:
 
@@ -707,20 +707,57 @@ reported:
 
 | Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| (1,2048,256) | 0.18900 | 0.15008 | 0.79x | 0.25593 | 0.22339 |
-| (1,2048,2048) | 0.20350 | 0.19925 | 0.98x | 0.28386 | 0.28163 |
-| (1,2048,8192) | 0.41454 | 0.36817 | 0.89x | 0.47526 | 0.66202 |
-| (1,8192,2048) | 0.22329 | 0.24873 | 1.11x | 0.33526 | 0.33365 |
-| (4,2048,8192) | 0.25844 | 0.52667 | 2.04x | 0.39185 | 0.62175 |
-| (8,2048,8192) | 0.51952 | 0.79281 | 1.53x | 0.71746 | 0.92409 |
-| (16,8192,8192) | 2.11490 | 5.17760 | 2.45x | 2.40140 | 5.31115 |
+| (1,2048,256) | 0.17215 | 0.15710 | 0.91x | 0.28267 | 0.22464 |
+| (1,2048,2048) | 0.14938 | 0.15458 | 1.04x | 0.20919 | 0.21862 |
+| (1,2048,8192) | 0.19700 | 0.52612 | 2.67x | 0.29929 | 0.64305 |
+| (1,8192,2048) | 0.41031 | 0.60015 | 1.46x | 0.81893 | 0.98125 |
+| (4,2048,8192) | 0.43902 | 0.48469 | 1.10x | 0.72538 | 0.58145 |
+| (8,2048,8192) | 0.38081 | 0.81460 | 2.14x | 0.47941 | 0.96679 |
+| (16,8192,8192) | 2.16550 | 5.28565 | 2.44x | 2.33071 | 5.46143 |
 
-This run establishes at least 2x speedup for the representative M=4 and M=16 wide projection shapes, while keeping the
-same public inference graph and checkpoint rate. M=8 remains a 1.53x win in this run. The small-row path is near parity
-for common M=1 shapes, although the narrow 2048x256 and wide 2048x8192 cases remain launch-bound in this sample.
+This run establishes at least 2x speedup for the representative M=8 and M=16 wide projection shapes, while keeping the
+same public inference graph and checkpoint rate. The M=1 wide projection is also a 2.67x inner-kernel win in this run;
+the narrow M=1 shape remains launch-bound. M=4 was variable across AC runs and measured close to parity in this sample,
+so it is not claimed as a stable 2x result.
 These numbers measure the public inner-GEMV path, not end-to-end model latency. Full `QVQMLXLinear` timing also includes
 the input/output Hadamard transforms, scale/bias epilogue, and MLX graph overhead. Measurements are host-dependent
 and should be repeated on each target Apple GPU.
+
+A separate synthetic full-module sanity check (50 warmup, 200 samples; 20 warmup, 100 samples for M=16) measured:
+
+| Shape (M,K,N) | Full LR p50 (ms) | Full P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| (1,2048,8192) | 0.6123 | 0.6684 | 1.09x |
+| (4,2048,8192) | 0.6080 | 0.8679 | 1.43x |
+| (8,2048,8192) | 0.7195 | 1.4235 | 1.98x |
+| (16,8192,8192) | 2.7845 | 5.8669 | 2.11x |
+
+These full-module numbers include the Hadamard/scale/epilogue graph and use independent synthetic payloads per format;
+they are a sanity check rather than a model-level throughput claim.
+
+### 11.4 Metal profiling findings
+
+The M4 Max was plugged into AC power with performance mode enabled for the current measurements. Profiling used MLX's
+Metal GPU capture (`MTL_CAPTURE_ENABLED=1`, producing a `.gputrace`) and Xcode Instruments' **Metal System Trace**.
+The trace confirmed the production dispatches and exposed the following execution costs:
+
+| Path | Trace/source observation | Decision |
+|---|---|---|
+| M=1/2 small-row | no `threadgroup_barrier`, direct activation reads, SIMD reductions only | keep in production |
+| M=4/8/16 multirow | two threadgroup barriers per K32 decode/consume iteration; decode is performed by SIMD group 0 while sibling groups wait | next cooperative-decode target |
+| M8 MMA experiment | no threadgroup barriers, but one SIMD group and matrix setup underfill the GPU | kept oracle-tested but disabled in production |
+| selector metadata | one selector byte is shared by every ring in an N8 tile | broadcast from lane 0 |
+
+The controlled same-process M8 A/B measured the MMA experiment at approximately 0.495 ms versus 0.234 ms for the existing
+multirow path, so removing barriers alone was not sufficient. The opt-in barrier-free M4 experiment was also slower
+(0.533 ms versus 0.463 ms), indicating that duplicated decode costs more than the saved barriers at M=4.
+
+The GPU counter profile was unavailable on this host (`Selected counter profile is not supported on target device`),
+so the run does not claim hardware occupancy, register, cache, or stall-counter values. The actionable overlap
+opportunities are therefore structural: distribute LR state decode across SIMD groups for M>=8, load W2 packed words
+once and shuffle them to decoder lanes, and fuse the fixed split-K reduction/epilogue when full-module profiling shows
+that materialized partials are on the critical path. The capture bundle is intended for manual inspection in Xcode GPU
+Frame Capture; it is not a checkpoint artifact.
 
 ## 12. YAQA integration
 
