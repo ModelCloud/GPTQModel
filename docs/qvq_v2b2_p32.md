@@ -1945,3 +1945,29 @@ complete-module sweep after the policy change measured:
 This improves the smaller-K policy without changing the primary Llama M1
 `K=2048,N=8192` route, which remains faster than P32 but below the universal
 `2x` target.
+
+### 42. M1/N64 W2 fixed-pair-loop unrolling
+
+The shape-specialized W2 M1/N64 K64 source now asks Metal to fully unroll its
+fixed eight-pair decode loop. Each local ring always emits eight W2 pairs, so
+the compiler can overlap the packed-state recurrence, constant PGC16 lookup,
+and FP32 multiply-accumulate without dynamic loop-control dependencies. The
+change is limited to the W2 M1/N64 source; generic LR rates and non-M1 paths
+are unchanged. The derived K128 source inherits the same fixed-loop unroll.
+
+All `156/156` LR32 tests pass, including W1 through W3.5, K64/K128 reuse,
+split-K, and Torch-oracle checks. In a paired 120-sample complete-module A/B
+on the plugged-in AC/performance-mode M4 Max, the unrolled source versus the
+pre-unroll production source measured:
+
+| Shape | Production p50 / p95 (ms) | Unrolled p50 / p95 (ms) | Production/unrolled |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=8192)` | `0.78117 / 1.59775` | `0.63769 / 1.20417` | `1.225x` |
+| `(M=1,K=8192,N=2048)` | `0.85452 / 1.21483` | `0.63958 / 1.44731` | `1.336x` |
+
+The improvement is meaningful in this paired probe, although p95 remains
+host-variable. A fresh 120-sample production LR/P32 sweep after the change
+measured `0.24767 / 0.26577 ms` versus `0.32804 / 0.34767 ms` at
+`(M=1,K=2048,N=8192)`, or `1.325x` p50 over P32. The unroll is retained as a
+verified M1 decode optimization, but the universal M1 `2x` target remains
+open.

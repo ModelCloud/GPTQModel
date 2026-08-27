@@ -1164,6 +1164,16 @@ def _make_lr_m1_n64_k64_source(source: str) -> str:
         "  for(uint sub=0u;sub<2u;sub++){",
         "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){",
     )
+    # W2 always decodes exactly eight pairs for each local ring.  The
+    # production M1/N64 path is shape-specialized, so fully unrolling this
+    # fixed inner loop lets Metal overlap the packed-state recurrence, PGC16
+    # lookup, and FP32 FMA without paying a dynamic loop-control dependency.
+    # Keep this change in the W2 M1 source only; the generic LR rates have
+    # different transition widths and remain on their measured source.
+    offset_marker = "for(uint offset=0;offset<8u;offset++){"
+    if offset_marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its W2 pair loop")
+    source = source.replace(offset_marker, "#pragma unroll\n  " + offset_marker, 1)
     close_marker = "  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     close_replacement = "    }\n  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
     if close_marker not in source:
