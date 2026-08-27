@@ -4869,7 +4869,10 @@ def qvq_mlx_gemv(
             and transition_bits == 4
             and m == 1
             and k % 64 == 0
-            and k > 2048
+            # The fused two-split launch also wins at the short wide M1
+            # K=2048 shape: it removes the materialized MLX split reduction
+            # while retaining the same two-way K parallelism.
+            and k >= 2048
             and n >= 8192
             and n % 64 == 0
         )
@@ -5097,14 +5100,14 @@ def qvq_mlx_gemv(
         row_blocks = (m + row_tile - 1) // row_tile
         inputs = (
             [x, trellis, bank_ids]
-            if m1_n64
+            if m1_n64 and not m1_n64_shared_split2
             else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         )
         literal_w2_mask = (
             v2b2_p32_lr
             and transition_bits == 4
             and small_rows
-            and not m1_n64
+            and (not m1_n64 or m1_n64_shared_split2)
         )
         template = [("EdgeBits", transition_bits)]
         if not literal_w2_mask:

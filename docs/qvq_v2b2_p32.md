@@ -3273,3 +3273,29 @@ probe: both module arms could resolve the patched GEMV function. Its reported
 module timing and parity are therefore not evidence and are intentionally not
 used for a production decision. A corrected boundary A/B is required before
 revisiting this idea.
+
+## 85. Promote shared-split-2 for M1 K2048 wide-N
+
+The existing fused shared-split-2 LR32 kernel was extended to the short-K
+wide-N M1 case `(M=1,K=2048,N>=8192)`. Previously this shape used two
+independent K64 launches per output tile followed by an MLX split reduction.
+The shared route keeps two K splits in one 256-threadgroup launch, stages one
+activation tile per split, and performs the deterministic split reduction in
+Metal. The dispatch wrapper was updated to use the shared kernel's `dims`
+input ABI when this route overlaps the shape-specialized M1 predicate.
+
+The Torch/MLX oracle remains exact for both K2048 and K4096 (`170` focused LR32
+tests passed). A corrected complete-module A/B at `(M=1,K=2048,N=8192)` used
+identical payloads and input, `30` warmups, and `100` randomized synchronized
+samples:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous split-2 + MLX reduction | `0.80810` | `1.63035` | `0.94579` |
+| Shared split-2 fused | `0.74785` | `1.43890` | `0.81786` |
+
+The candidate was exactly equal to the previous module output (`max_abs=0`,
+relative L2 `0`) and improved p50 by `1.081x` and mean by `1.156x` in this
+run. The production dispatch now uses the fused route for this shape. The
+universal `2x` target remains unmet for M1; M4/M8/M16 continue to meet or
+exceed `2x` in the post-change complete-module benchmark.

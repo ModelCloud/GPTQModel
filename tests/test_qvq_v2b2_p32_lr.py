@@ -938,12 +938,12 @@ def test_lr32_mlx_m1_n64_split2_kernel_matches_torch_oracle(monkeypatch, out_fea
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
 
 
-def test_lr32_mlx_m1_n64_shared_split2_kernel_matches_torch_oracle(monkeypatch):
+@pytest.mark.parametrize("in_features", (2048, 4096))
+def test_lr32_mlx_m1_n64_shared_split2_kernel_matches_torch_oracle(monkeypatch, in_features):
     mx = pytest.importorskip("mlx.core")
     from gptqmodel.utils import qvq_mlx
 
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_SHARED_SPLIT2", True)
-    in_features = 4096
     out_features = 8192
     _, _, trellis, selectors = _random_lr_payload(
         2,
