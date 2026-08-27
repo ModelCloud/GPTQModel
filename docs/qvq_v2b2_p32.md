@@ -1341,3 +1341,25 @@ ratios were `1.018x` for `(M=1,K=2048,N=8192)`, `0.997x` for
 `(M=1,K=8192,N=2048)`, and `1.029x` for `(M=2,K=2048,N=8192)`. The existing
 64-bit helper remains enabled because the specialization did not provide a
 reliable end-to-end win.
+
+### 20. Rejected fused scale/Hadamard probe
+
+An experimental MLX Metal kernel fused the elementwise `x * SU` with the
+normalized power-of-two Hadamard transform. The implementation was checked
+against native MLX Hadamard output at widths 2,048 and 8,192, with exact
+parity in the tested FP32 cases (relative L2 `0.0`, maximum absolute error
+`0.0`). It was not promoted because native MLX remains faster for this
+operation and the complete module did not improve.
+
+On the AC/performance-mode M4 Max, using the same payload and synchronized
+randomized interleaving, 100 samples per arm measured:
+
+| Shape | native full module p50 / p95 (ms) | fused input-H p50 / p95 (ms) | fused/native speedup |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=8192)` | `0.79125 / 1.15622` | `0.81590 / 1.09938` | `0.970x` |
+| `(M=1,K=8192,N=2048)` | `0.82315 / 1.59959` | `0.92740 / 1.74104` | `0.888x` |
+
+The probe used a barrier-based shared-memory butterfly and therefore remains
+a useful negative result: replacing MLX's native Hadamard path with a custom
+kernel is not justified unless a future implementation removes the extra
+barrier/launch cost. Production dispatch remains native MLX Hadamard.
