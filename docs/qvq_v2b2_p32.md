@@ -3927,3 +3927,43 @@ warmups, and seed `20261116` on the AC/performance-mode M4 Max:
 The composition measured `1.066x` at p50 and `1.123x` by mean. The two
 optimizations do not multiply into a 2x result, so production dispatch remains
 unchanged.
+
+## 109. Latest synchronized complete-module benchmark
+
+The fetched PR head is `eea748fb` (the remote PR ref currently points here;
+`b00dd1ff` is the earlier compile-benchmark commit). The complete-module
+benchmark now uses one shared input, trellis payload, and selector set for both
+LR32 and P32, randomizes the arm order for every sample, and materializes both
+`mx.compile` runners outside the timed region. This was revalidated on the
+M4 Max with AC/performance mode enabled (`powermode=2`), seed `20260828`, 30
+warmups, and 80 synchronized samples per arm.
+
+Eager complete-module results:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR p50 |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.31192 / 0.37978` | `0.50723 / 0.63960` | `1.626x` |
+| `(M=1,K=2048,N=2048)` | `0.27444 / 0.34825` | `0.41396 / 0.51605` | `1.508x` |
+| `(M=1,K=2048,N=8192)` | `0.45725 / 0.54853` | `0.72677 / 0.87680` | `1.589x` |
+| `(M=1,K=8192,N=2048)` | `0.44269 / 1.31304` | `0.79152 / 1.67584` | `1.788x` |
+| `(M=4,K=2048,N=8192)` | `1.27658 / 2.31166` | `2.46563 / 3.80280` | `1.931x` |
+| `(M=8,K=2048,N=8192)` | `1.65898 / 4.01718` | `4.12900 / 6.94651` | `2.489x` |
+| `(M=16,K=8192,N=8192)` | `2.71033 / 3.79313` | `5.86100 / 7.56346` | `2.162x` |
+
+Shape-specialized compiled complete-module results:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR p50 |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.49615 / 0.78026` | `0.66485 / 1.12314` | `1.340x` |
+| `(M=1,K=2048,N=2048)` | `0.54106 / 1.87804` | `0.67623 / 1.82516` | `1.250x` |
+| `(M=1,K=2048,N=8192)` | `0.74602 / 1.63361` | `0.98998 / 2.01371` | `1.327x` |
+| `(M=1,K=8192,N=2048)` | `0.65377 / 1.05767` | `1.02740 / 1.43520` | `1.571x` |
+| `(M=4,K=2048,N=8192)` | `1.00944 / 1.76616` | `2.10919 / 3.05695` | `2.089x` |
+| `(M=8,K=2048,N=8192)` | `0.93008 / 2.39030` | `2.15419 / 3.93516` | `2.316x` |
+| `(M=16,K=8192,N=8192)` | `2.38858 / 2.87714` | `5.42450 / 5.79443` | `2.271x` |
+
+The benchmark methodology issue identified against the earlier `b00dd1ff`
+snapshot is therefore fixed in the current PR head. These measurements do not
+establish a universal 2x result: the M1 ratios remain below 2x, while larger
+row tiles exceed 2x. The focused MLX/LR suite also passed all `493` tests in
+`135.16s` on this host.
