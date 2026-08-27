@@ -1971,3 +1971,42 @@ measured `0.24767 / 0.26577 ms` versus `0.32804 / 0.34767 ms` at
 `(M=1,K=2048,N=8192)`, or `1.325x` p50 over P32. The unroll is retained as a
 verified M1 decode optimization, but the universal M1 `2x` target remains
 open.
+
+### 43. AC/performance-mode Metal trace and two-accumulator rejection
+
+The M4 Max was rechecked on AC power with the high-power setting enabled
+(`pmset` reports `powermode=2`). A synchronized 60-sample inner-kernel sweep
+at the current `b074813d` head measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.48019 / 1.29131` | `0.53187 / 0.77235` | `1.108x` |
+| `(M=1,K=2048,N=2048)` | `0.63623 / 1.45718` | `0.58235 / 1.21820` | `0.915x` |
+| `(M=1,K=2048,N=8192)` | `0.66319 / 0.93056` | `0.80877 / 1.58292` | `1.220x` |
+| `(M=1,K=8192,N=2048)` | `0.71652 / 1.43932` | `0.85842 / 1.17556` | `1.198x` |
+| `(M=4,K=2048,N=8192)` | `0.99288 / 1.94592` | `2.01481 / 2.64107` | `2.029x` |
+| `(M=8,K=2048,N=8192)` | `0.91479 / 1.69896` | `1.74298 / 2.58736` | `1.905x` |
+| `(M=16,K=8192,N=8192)` | `2.48217 / 2.74182` | `5.40979 / 5.88153` | `2.179x` |
+
+The run confirms substantial device-state variance even with AC/high-power
+mode; the complete-module table remains the promotion metric. A bounded
+Metal System Trace was captured with Xcode 26.6 using an absolute Python
+interpreter at `/tmp/qvq-metal-profile-current-m1-20260827d.trace` (46 MB).
+The trace contains valid application command-buffer/encoder intervals, but
+reports `Counter Set: (null)` and `Shader Timeline: Disabled`. Therefore it
+does not provide hardware occupancy, cache, or stall percentages. It does
+confirm the expected MLX submission structure, including separate compute
+submissions around the LR work and reduction. An MLX GPU Frame Capture was
+also obtained with `MTL_CAPTURE_ENABLED=1` at
+`/tmp/qvq-metal-profile-current-m1-20260827e.gputrace` (182 MB); capture
+bundles are intentionally not committed.
+
+Source-backed synchronization counts identify the remaining M1 dependency:
+the K64/N64 specialized source has one threadgroup barrier per K64 activation
+batch (`32` barriers for `K=2048`), while the barrier-free M1/N16 source has
+none. The barrier publishes the shared activation tile to the four SIMD
+groups, so removing it requires a different ownership or double-buffering
+scheme rather than a local compiler flag. A one-SIMD-group, two-accumulator
+N64 prototype was tested as that alternative; it failed complete-module
+parity (`relative L2` about `1.3`, maximum error above `259` for the wide
+shape) and was slower at `(M=1,K=2048,N=8192)`. It was rejected.
