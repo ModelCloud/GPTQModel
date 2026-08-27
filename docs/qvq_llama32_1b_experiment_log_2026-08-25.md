@@ -1072,3 +1072,5 @@ and 3.
 | monitor | `llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c` | `divergence300` | complete; metric=0.2891666666666667; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-qk25-vo35-updown35-83b60c-div300-dev-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11` | `divergence300` | complete; metric=0.22791666666666666; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo25-mlpall25-1fee11-div300-dev-v1.json` |
+
+| monitor | `llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2` | `divergence300` | complete; metric=0.2328125; report `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo30-mlpall25-b2dee2-div300-dev-v1.json` |
