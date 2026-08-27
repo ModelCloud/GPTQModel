@@ -3264,3 +3264,19 @@ SIMD groups are still reading the preceding tile. The exact output check
 detected the race (`max_abs=58.40625`, non-finite relative comparison), so its
 timing was discarded. Any attempt to reduce the barrier count must include an
 explicit producer/consumer handoff or a double-buffered activation tile.
+
+## 84. M1 direct-activation/no-shared-memory probe rejected
+
+An in-memory M1/N64 W2 kernel probe removed `shared_activation` and all
+activation barriers. Each of the four SIMD groups loaded the K32 activation
+directly and used SIMD shuffles for its pair reads. The complete-module result
+was exactly equal to production (`max_abs=0`, relative L2 `0`), but duplicated
+activation loads outweighed the synchronization savings. The synchronized A/B
+at `(M=1,K=2048,N=8192)` used `30` warmups and `100` randomized samples:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Current shared-activation N64 | `0.73904` | `0.82707` | `0.65654` |
+| Direct-activation candidate | `0.74362` | `0.84484` | `0.69023` |
+
+The production shared-activation N64 route remains enabled.
