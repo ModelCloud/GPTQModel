@@ -49,9 +49,11 @@ def _module(rng: np.random.Generator, m: int, k: int, n: int, *, lr: bool):
     )
 
 
-def _measure(module, x, *, warmup: int, samples: int):
+def _measure(module, x, *, warmup: int, samples: int, compile_module: bool):
+    runner = mx.compile(module) if compile_module else module
+
     def run():
-        output = module(x)
+        output = runner(x)
         mx.eval(output)
         mx.synchronize()
 
@@ -71,6 +73,11 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--seed", type=int, default=20260827)
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Wrap each fixed-shape module in mx.compile before timing (shape-specialized research mode).",
+    )
     args = parser.parse_args()
     if args.warmup < 0 or args.samples < 1:
         parser.error("--warmup must be non-negative and --samples must be positive")
@@ -79,8 +86,20 @@ def main() -> None:
     print("shape | LR p50 ms | P32 p50 ms | speedup | LR p95 ms | P32 p95 ms")
     for m, k, n in DEFAULT_SHAPES:
         x = mx.array(rng.standard_normal((m, k)).astype(np.float16))
-        lr = _measure(_module(rng, m, k, n, lr=True), x, warmup=args.warmup, samples=args.samples)
-        p32 = _measure(_module(rng, m, k, n, lr=False), x, warmup=args.warmup, samples=args.samples)
+        lr = _measure(
+            _module(rng, m, k, n, lr=True),
+            x,
+            warmup=args.warmup,
+            samples=args.samples,
+            compile_module=args.compile,
+        )
+        p32 = _measure(
+            _module(rng, m, k, n, lr=False),
+            x,
+            warmup=args.warmup,
+            samples=args.samples,
+            compile_module=args.compile,
+        )
         print(
             f"({m},{k},{n}) | {lr[0]:.5f} | {p32[0]:.5f} | {p32[0] / lr[0]:.3f} "
             f"| {lr[1]:.5f} | {p32[1]:.5f}"

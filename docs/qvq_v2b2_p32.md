@@ -1363,3 +1363,30 @@ The probe used a barrier-based shared-memory butterfly and therefore remains
 a useful negative result: replacing MLX's native Hadamard path with a custom
 kernel is not justified unless a future implementation removes the extra
 barrier/launch cost. Production dispatch remains native MLX Hadamard.
+
+### 21. Shape-specialized `mx.compile` probe
+
+Wrapping a complete fixed-shape `QVQMLXLinear` in `mx.compile` reduces MLX
+graph/launch overhead without changing checkpoint bytes or the kernel ABI.
+This is exposed only as an explicit benchmark option:
+
+```text
+python scripts/benchmark_qvq_v2b2_p32_lr_mlx_module.py --compile
+```
+
+It is not automatically enabled for model inference because dynamic sequence
+lengths can trigger additional shape-specialized compilations. On the AC and
+performance-mode M4 Max, with 80 synchronized randomized samples per arm,
+the compiled complete-module results were:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=8192)` | `0.32829 / 0.67819` | `0.45160 / 0.80777` | `1.376x` |
+| `(M=1,K=8192,N=2048)` | `0.24256 / 0.30511` | `0.29371 / 0.37897` | `1.211x` |
+| `(M=4,K=2048,N=8192)` | `0.28604 / 0.39447` | `0.52127 / 0.65524` | `1.822x` |
+| `(M=8,K=2048,N=8192)` | `0.39585 / 0.50195` | `0.85277 / 1.00529` | `2.154x` |
+
+Compared with the same-process uncompiled arms, LR p50 improved by about
+`1.15x`, `1.10x`, `1.13x`, and `1.08x`, respectively. The compiled graph is
+therefore a useful deployment-side optimization, but it does not establish a
+universal 2x M1 result; the M1 ratios remain shape-dependent.
