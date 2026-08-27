@@ -2283,7 +2283,7 @@ def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int):
         try:
             kernel = mx.fast.metal_kernel(
                 name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k{k}_n{n}_fp32_alt{alt_bank_id}",
-                input_names=["x", "trellis", "bank_ids", "dims"],
+                input_names=["x", "trellis", "bank_ids"],
                 output_names=["out"],
                 header=_lr_m1_n64_w2_mask_header(alt_bank_id),
                 source=_lr_m1_n64_shape_source(k, n).replace(
@@ -4047,7 +4047,11 @@ def qvq_mlx_gemv(
                 ),
             )
         row_blocks = (m + row_tile - 1) // row_tile
-        inputs = [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
+        inputs = (
+            [x, trellis, bank_ids]
+            if m1_n64
+            else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
+        )
         template = [("EdgeBits", transition_bits), ("AltBank", alt_id)]
         if split_k > 1 or small_rows:
             template.append(("SplitK", split_k))

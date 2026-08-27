@@ -1616,6 +1616,20 @@ In a same-process 120-sample complete-module comparison at
 This is a guarded M1 improvement; it does not change the K64 codec or tensor
 ABI.
 
+### 29. Shape-specialized K64 dead-dims removal
+
+After embedding `K/N` as compile-time constants, the K64 source no longer
+references the dimensions buffer. The specialized launch consequently binds
+only activation, trellis, and selector buffers; all other LR32 dispatches keep
+the existing dimensions-buffer ABI. The strided-input regression and all other
+LR32 tests remain green (`149 passed`).
+
+In a same-process randomized 120-sample complete-module comparison at
+`(M=1,K=2048,N=8192)`, removing the dead buffer reduced p50 from `0.78569` to
+`0.74498 ms` (`1.055x`) and p95 from `0.96139` to `0.87515 ms`, with exact
+Torch/MLX output parity. This is a small launch-boundary improvement; the
+current M1 speedup versus P32 remains below 2x.
+
 ### 28. Shape-specialized K64 constants
 
 The K64 M1 kernel is cached by `(alternate-bank ID, K, N)` and embeds the
