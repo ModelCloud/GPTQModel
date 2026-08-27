@@ -3981,7 +3981,7 @@ def qvq_mlx_gemv(
             and m == 1
             and k <= 2048
             and k % 64 == 0
-            and n >= 2048
+            and n >= 8192
             and n % 64 == 0
         )
         if m1_n64:

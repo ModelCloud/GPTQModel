@@ -1693,3 +1693,36 @@ dependent: the current K64/no-dims route is clearly ahead at `N=256` and
 `N=8192`, effectively tied/slightly behind at `N=2048`, and nowhere near a
 universal `2x`. The next optimization should therefore target the remaining
 M1 decode/transform graph cost rather than add more launch constants.
+
+### 32. M1 N64 versus barrier-free N16 dispatch
+
+The K64/N64 shared-activation kernel is not optimal for every M1 width. A
+same-process, randomized 100-sample complete-module A/B on the AC/performance-
+mode M4 Max compared it with the existing barrier-free M1/N16 kernel using the
+same payload, selector bytes, and input:
+
+| Shape | N16 p50 / p95 (ms) | N64 p50 / p95 (ms) | P32 p50 (ms) | P32/N16 | P32/N64 |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=2048)` | `0.64352 / 1.07685` | `0.73663 / 1.12073` | `0.85729` | `1.332x` | `1.164x` |
+| `(M=1,K=2048,N=8192)` | `0.84777 / 1.39348` | `0.78235 / 1.27881` | `1.13585` | `1.340x` | `1.452x` |
+| `(M=1,K=8192,N=2048)` | `0.86000 / 1.57719` | `0.85919 / 1.81988` | `1.19252` | `1.387x` | `1.388x` |
+
+The production predicate is consequently shape-specialized: the grouped N64
+route is retained for short-K, very-wide `N>=8192` M1 W2 FP32 modules, while
+`N=2048` uses the barrier-free N16 route. The new route-selection regression
+and the N64 oracle/strided tests pass. A fresh synchronized 80-sample
+production sweep after this change measured:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.56360 / 1.19332` | `0.72994 / 1.50384` | `1.295x` |
+| `(M=1,K=2048,N=2048)` | `0.52877 / 0.86584` | `0.68054 / 0.96255` | `1.287x` |
+| `(M=1,K=2048,N=8192)` | `0.80933 / 1.37180` | `1.14081 / 1.73221` | `1.410x` |
+| `(M=1,K=8192,N=2048)` | `0.66821 / 0.98509` | `0.84810 / 1.32954` | `1.269x` |
+| `(M=4,K=2048,N=8192)` | `0.76329 / 1.11250` | `1.29652 / 1.78523` | `1.699x` |
+| `(M=8,K=2048,N=8192)` | `1.02623 / 1.51601` | `2.08454 / 3.58147` | `2.031x` |
+| `(M=16,K=8192,N=8192)` | `2.62519 / 3.05644` | `5.80371 / 6.19722` | `2.211x` |
+
+This improves the current M1 `N=2048` case materially, but it is still not a
+universal 2x solution. The remaining target is the complete M1 transform/decode
+graph, not another N64 threshold tweak.
