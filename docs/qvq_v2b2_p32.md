@@ -3543,3 +3543,27 @@ The N128 candidate measured only `0.920x` at p50 and `0.934x` by mean. The
 larger threadgroup and wider output ownership did not amortize the additional
 SIMD/shared-activation work at M1, so no production dispatch was changed.
 The universal M1 `2x` target remains open.
+
+## 94. AC/performance-mode complete-module benchmark refresh
+
+After moving the M4 Max from power-save operation to AC power with
+performance mode enabled, the complete `QVQMLXLinear` LR/P32 benchmark was
+rerun with the randomized/interleaved harness, 30 warmups, 100 samples per
+arm, and seed `20261029`. This measures the production module boundary,
+including the input/output transforms and MLX synchronization, rather than
+only the inner GEMV.
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | p50 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.24723` | `0.39883` | `1.613x` | `0.37018` | `0.44560` |
+| `(1,2048,2048)` | `0.22548` | `0.31950` | `1.417x` | `0.29684` | `0.43244` |
+| `(1,2048,8192)` | `0.23335` | `0.31073` | `1.332x` | `0.29752` | `0.34768` |
+| `(1,8192,2048)` | `0.21033` | `0.30846` | `1.467x` | `0.22500` | `0.36576` |
+| `(4,2048,8192)` | `0.28958` | `0.53225` | `1.838x` | `0.30701` | `0.60889` |
+| `(8,2048,8192)` | `0.35010` | `0.89148` | `2.546x` | `0.36775` | `0.94982` |
+| `(16,8192,8192)` | `2.10317` | `5.16615` | `2.456x` | `2.31034` | `5.43808` |
+
+The production LR path beats P32 on every tested shape and clears `2x` for
+M8/M16, but the universal `2x` objective remains unmet for M1 and M4. The
+focused LR32 suite remains green at `173 passed in 22.75s` on commit
+`e9f228f3`.
