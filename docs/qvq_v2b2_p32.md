@@ -843,6 +843,39 @@ calls and 160 synchronized samples per format on the same AC/performance-mode M4
 This comparison is between the current native-Hadamard checkout and the same MLX implementation's P32 control. Both
 formats receive the graph optimization; it changes neither BPW nor the LR32 kernel ABI.
 
+#### Pushed-checkout randomized AC/performance-mode recheck
+
+After the rejected H32 probe was removed, the clean `a7df1139` checkout was rechecked on the plugged-in,
+performance-mode M4 Max. Each row used the same input and randomized interleaving of 100 LR/P32 samples after one
+warmup call for each arm; every sample forced `mx.eval()` and `mx.synchronize()`. This avoids the large ordering bias
+seen in sequential MLX timings. Complete-module results were:
+
+| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.63381 | 0.72704 | 1.15x | 2.57688 | 4.43331 |
+| (1,2048,2048) | 0.49677 | 0.65094 | 1.31x | 2.12641 | 2.03458 |
+| (1,2048,8192) | 0.73154 | 1.12662 | 1.54x | 2.98602 | 2.51994 |
+| (1,8192,2048) | 0.76283 | 1.13223 | 1.48x | 1.36160 | 2.53017 |
+| (4,2048,8192) | 1.21552 | 2.59315 | 2.13x | 3.81650 | 6.95502 |
+| (8,2048,8192) | 0.90396 | 2.03660 | 2.25x | 1.88381 | 4.40024 |
+| (16,8192,8192) | 2.49333 | 5.63358 | 2.26x | 3.88162 | 7.72514 |
+
+The corresponding inner `qvq_mlx_gemv` recheck used the same randomized 100-sample protocol:
+
+| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.23304 | 0.27027 | 1.16x | 0.40981 | 0.40377 |
+| (1,2048,2048) | 0.26627 | 0.27675 | 1.04x | 0.65451 | 0.30722 |
+| (1,2048,8192) | 0.28315 | 0.35321 | 1.25x | 0.43945 | 0.55783 |
+| (1,8192,2048) | 0.22988 | 0.27702 | 1.21x | 0.29521 | 0.31121 |
+| (4,2048,8192) | 0.26665 | 0.47108 | 1.77x | 0.32421 | 0.57449 |
+| (8,2048,8192) | 0.37831 | 0.81604 | 2.16x | 0.42441 | 0.89820 |
+| (16,8192,8192) | 2.16567 | 5.12169 | 2.37x | 2.32365 | 5.27084 |
+
+The full-module table is the production-relevant result: LR is faster for every tested shape and clears 2x at M4,
+M8, and M16. The inner table shows why M1/M2 are not 2x yet: their LR decode is already competitive, while MLX
+launch, split reduction, and full-Hadamard costs dominate the module boundary.
+
 #### Latest AC/performance-mode split-K recheck
 
 The small-M FP32 policy was subsequently changed from split-2 to split-4 for wide short-K modules, and to split-8 for
