@@ -4218,3 +4218,33 @@ does not establish a universal `2x` guarantee: M1 remains below target. A
 fresh Xcode 26.6 System Trace retry was also attempted, but the host reported
 `_lockKPerf: could not lock kperf` and an unsupported GPU counter profile; no
 occupancy, stall, or barrier percentages are claimed from that run.
+
+## 119. M1 exact split32x2 threadgroup probe rejected
+
+The long-K M1/N32 route was probed with the same 32-way K partition and the
+same deterministic reduction order as production split-32, but with sixteen
+SIMD groups computing two partitions sequentially in a 512-thread group
+instead of thirty-two groups in a 1024-thread group. The candidate was
+bit-exact against the existing route at `(M=1,K=8192,N=2048)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+rmse = 0
+```
+
+A same-process three-way complete-module A/B used identical payloads and
+inputs, 20 warmups, 100 randomized samples per arm, and the AC/performance-
+mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing 1024-thread split-32 | `0.41977` | `0.46842` | `0.39891` |
+| 512-thread exact split32x2 | `0.41971` | `0.47297` | `0.39579` |
+| Non-local P32 | `0.79346` | `0.89807` | `0.72476` |
+
+The exact candidate was neutral at p50 (`1.000x`) and only `1.008x` by mean
+against production; its P32 comparison was `1.891x` at p50. It was removed
+and not promoted. This confirms that the apparent isolated split-16 gain was
+sampling noise at the complete-module boundary; the long-K M1 production
+route remains unchanged.
