@@ -4553,3 +4553,30 @@ module speedup           = 0.960x
 Although the inner kernel improved by `1.218x`, the candidate lost at the
 complete-module boundary. It was not promoted; production dispatch remains
 the existing K64 half2 source.
+
+## 130. M1 outer K64-loop unroll rejected
+
+The shape-specialized M1/N64 W2 half2 source for `(M=1,K=2048,N=8192)` was
+rebuilt with the fixed outer K64 loop explicitly marked for unrolling. The
+state recurrence, half2 codebook path, shared activation staging, barriers,
+split-2 reduction, and output ordering were unchanged.
+
+The candidate was bit-exact at the inner and complete-module boundaries:
+
+```text
+max_abs = 0
+relative_l2 = 0
+rmse = 0
+```
+
+With identical payloads and inputs, 10 warmups, and 50 randomized samples per
+arm on the AC/performance-mode M4 Max:
+
+| Boundary | Production p50/p95/mean (ms) | Candidate p50/p95/mean (ms) | Speedup |
+|---|---:|---:|---:|
+| Inner LR GEMV | `0.65700 / 0.95219 / 0.70413` | `0.58098 / 1.34245 / 0.66949` | `1.131x` |
+| Complete `QVQMLXLinear` | `0.46235 / 0.77422 / 0.51017` | `0.45071 / 0.66882 / 0.48186` | `1.026x` |
+
+The modest module-boundary gain is insufficient to approach the M1 `2x`
+target, so the source was not promoted and the production route remains
+unchanged.
