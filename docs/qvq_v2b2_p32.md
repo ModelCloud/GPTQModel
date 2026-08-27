@@ -4080,3 +4080,23 @@ arm:
 The barrier-free mapping measured `0.987x` at p50 and `0.952x` by mean, with
 worse tail latency, so it was removed and not promoted. The production M1
 dispatch remains unchanged.
+
+## 114. Isolated M4 half2 decode probe rejected
+
+An isolated M4 candidate kept the cooperative two-SIMD-group decoder and
+threadgroup layout unchanged, but returned each W2 PGC16 pair as native
+`half2` before the existing FP32 accumulation. This separates conversion
+pressure from the previously tested K64 batching composition.
+
+At `(M=4,K=2048,N=2048)`, the candidate was exactly equal to the production
+cooperative decoder (`max_abs=0`, zero differing elements, relative L2 `0`). A
+same-process randomized direct-kernel A/B used 4 warmups and 10 samples per
+arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production cooperative | `0.69869` | `0.89984` | `0.73007` |
+| Isolated half2 candidate | `0.65965` | `1.02371` | `0.75336` |
+
+The candidate improved p50 by `1.059x` but regressed mean to `0.969x` and had
+worse p95. It was removed and not promoted; no M4 production dispatch changed.
