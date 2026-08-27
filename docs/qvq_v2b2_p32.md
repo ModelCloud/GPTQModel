@@ -1319,3 +1319,10 @@ AC/performance-mode host compared split-K values:
 
 The long-K/narrow and short-K/wide policies remain split-8 and split-4,
 respectively. These measurements do not justify another split-policy change.
+
+The same M1 reduction boundary was also tested with a fixed-size pairwise
+split-2/4/8 epilogue. It preserved the FP32 oracle within `8.4e-7` relative
+L2 on the wide production shape, but was slower than MLX's native `mx.sum` at
+the complete-module boundary: candidate/baseline p50 ratios were `1.021x`
+for `(M=1,K=2048,N=8192)`, `1.127x` for `(M=1,K=8192,N=2048)`, and `1.053x`
+for `(M=2,K=2048,N=8192)`. The native reduction remains enabled.
