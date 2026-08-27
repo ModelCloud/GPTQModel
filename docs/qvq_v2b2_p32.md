@@ -1763,27 +1763,29 @@ activation-staging barrier (K128) when K>=128 and divisible by 128. The K64
 source remains the fallback for smaller divisible K. The K128 source uses the
 same W2 packed-state decoder, bank-mask specialization, shape constants, and
 exact output mapping as K64; it only enlarges the shared activation tile and
-reduces the number of staging barriers by half.
+reduces the number of staging barriers from two per K64 batch to one per K128
+batch.
 
 The K128 candidate matched the direct LR GEMV baseline within atol=2e-2 and
 the dedicated (K=128,N=8192) Torch-oracle test passed. In a same-process
-100-sample complete-module comparison at (M=1,K=2048,N=8192), K64 measured
-0.89231 / 1.38506 ms p50/p95 and K128 measured 0.84892 / 1.71960 ms; P32
-measured 1.16731 ms p50. The p50 ratios were 1.051x K64/K128 and 1.375x
-P32/K128. The p95 result was noisier and did not improve, so this
+120-sample complete-module comparison at (M=1,K=2048,N=8192), K64 measured
+0.24948 / 0.30694 ms p50/p95 and K128 measured 0.24765 / 0.31931 ms; P32
+measured 0.32492 / 0.43323 ms. The p50 ratios were 1.007x K64/K128 and
+1.312x P32/K128. The p95 result was noisier and did not improve, so this
 specialization remains restricted to the measured short-K wide-N shape family.
 
-A fresh synchronized 80-sample production sweep after integration measured:
+A fresh synchronized 80-sample production sweep after the corrected
+one-barrier implementation measured:
 
 | Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
 |---|---:|---:|---:|
-| (M=1,K=2048,N=256) | 0.51227 / 0.91176 | 0.68937 / 1.01099 | 1.346x |
-| (M=1,K=2048,N=2048) | 0.66921 / 0.90466 | 0.84996 / 1.22872 | 1.270x |
-| (M=1,K=2048,N=8192) | 0.79831 / 0.98987 | 1.12612 / 1.26436 | 1.411x |
-| (M=1,K=8192,N=2048) | 0.85104 / 1.07858 | 1.15879 / 1.39140 | 1.362x |
-| (M=4,K=2048,N=8192) | 1.07977 / 1.40337 | 2.23319 / 2.66035 | 2.068x |
-| (M=8,K=2048,N=8192) | 0.91225 / 1.25043 | 1.88631 / 2.63724 | 2.068x |
-| (M=16,K=8192,N=8192) | 2.47623 / 3.53531 | 5.61360 / 6.09085 | 2.267x |
+| (M=1,K=2048,N=256) | 0.47631 / 0.92391 | 0.63608 / 2.13259 | 1.335x |
+| (M=1,K=2048,N=2048) | 0.63342 / 0.94692 | 0.84296 / 1.35796 | 1.331x |
+| (M=1,K=2048,N=8192) | 0.79604 / 1.36820 | 1.21194 / 1.62331 | 1.522x |
+| (M=1,K=8192,N=2048) | 0.73194 / 1.05847 | 0.96556 / 1.32044 | 1.319x |
+| (M=4,K=2048,N=8192) | 1.07140 / 1.24462 | 2.21206 / 2.39033 | 2.065x |
+| (M=8,K=2048,N=8192) | 1.02088 / 1.64221 | 2.23960 / 3.72596 | 2.194x |
+| (M=16,K=8192,N=8192) | 2.49148 / 2.66023 | 5.64148 / 6.01134 | 2.264x |
 
 The K128 route is a real p50 improvement for the targeted wide M1 shape, but
 the universal 2x target remains unmet. No claim is made for hardware stall or

@@ -1160,13 +1160,39 @@ def _make_lr_m1_n64_k128_source(source: str) -> str:
     """Decode four adjacent K32 tiles per barrier in the M1/N64 source."""
 
     source = source.replace("threadgroup float shared_activation[64];", "threadgroup float shared_activation[128];")
-    source = source.replace("simd == 0u && lane < 16u", "simd == 0u && lane < 32u")
     source = source.replace("base+=64u){", "base+=128u){")
-    source = source.replace(
-        "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){",
-        "  #pragma unroll\n  for(uint sub=0u;sub<4u;sub++){",
+    loop_start_marker = "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){"
+    loop_start = source.find(loop_start_marker)
+    loop_end_marker = "\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
+    loop_end = source.find(loop_end_marker, loop_start)
+    activation_block = (
+        "  // Share the K32 activation tile across all output lanes in this SIMD\n"
+        "  // group; the LR decode remains lane-local while inputs are broadcast.\n"
+        "  if (simd == 0u && lane < 16u) {\n"
+        "    shared_activation[(lane<<2u)] = float(x[base+(lane<<2u)]);\n"
+        "    shared_activation[(lane<<2u)+1u] = float(x[base+(lane<<2u)+1u]);\n"
+        "    shared_activation[(lane<<2u)+2u] = float(x[base+(lane<<2u)+2u]);\n"
+        "    shared_activation[(lane<<2u)+3u] = float(x[base+(lane<<2u)+3u]);\n"
+        "  }\n"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
     )
-    return source
+    if loop_start < 0 or loop_end < 0 or activation_block not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its K128 staging markers")
+    loop = source[loop_start:loop_end].replace(activation_block, "")
+    loop = loop.replace("sub<2u", "sub<4u")
+    stage = (
+        "  #pragma unroll\n"
+        "  for(uint sub=0u;sub<4u;sub++){\n"
+        "    if (simd == 0u && lane < 8u) {\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)] = float(x[base+(sub<<5u)+(lane<<2u)]);\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)+1u] = float(x[base+(sub<<5u)+(lane<<2u)+1u]);\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)+2u] = float(x[base+(sub<<5u)+(lane<<2u)+2u]);\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)+3u] = float(x[base+(sub<<5u)+(lane<<2u)+3u]);\n"
+        "    }\n"
+        "  }\n"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+    )
+    return source[:loop_start] + stage + loop + source[loop_end:]
 
 
 _LR_M1_N64_K128_W2_FP32_SOURCE = _make_lr_m1_n64_k128_source(
