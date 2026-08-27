@@ -707,3 +707,42 @@ def test_lr32_mlx_single_row_split_inference_matches_torch_oracle(bits):
     )
     mx.eval(actual)
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
+
+
+def test_lr32_mlx_single_row_specialization_matches_two_row_kernel(monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    torch_layer = _make_torch_lr_layer(bits=2, in_features=64, out_features=16)
+    x = torch.randn(1, 64, dtype=torch.float16)
+    inputs = (
+        mx.array(x.numpy()),
+        mx.array(torch_layer.trellis.numpy()),
+        mx.array(torch_layer.bank_ids.numpy()),
+        mx.array(torch_layer.bank_alt_id.numpy()),
+    )
+    original = qvq_mlx._local_ring_small_kernel
+
+    def run(single_row):
+        def selected(**kwargs):
+            kwargs["single_row"] = single_row
+            return original(**kwargs)
+
+        monkeypatch.setattr(qvq_mlx, "_local_ring_small_kernel", selected)
+        actual = qvq_mlx.qvq_mlx_gemv(
+            inputs[0],
+            inputs[1],
+            2,
+            out_features=16,
+            bank_ids=inputs[2],
+            bank_alt_id=inputs[3],
+            v2b2_p32_lr=True,
+            output_fp32=True,
+            _bank_alt_id_value=2,
+        )
+        mx.eval(actual)
+        return np.asarray(actual)
+
+    specialized = run(True)
+    fallback = run(False)
+    np.testing.assert_array_equal(specialized, fallback)

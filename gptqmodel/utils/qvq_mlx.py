@@ -84,8 +84,8 @@ _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
 _LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
 _LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
-_LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None], Any] = {}
-_LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None], str] = {}
+_LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool], Any] = {}
+_LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool], str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool], Any] = {}
@@ -851,6 +851,54 @@ _LR_SMALL_W2_FP32_SOURCE = _LR_SMALL_W2_SOURCE.replace(
     "=half(sum1);", "=sum1;"
 )
 
+# M=1 does not need the second-row accumulator used by the M<=2 kernel.  Keep
+# this as a separate source so the compiler can remove the row1 loads,
+# branches, accumulator, and four extra SIMD reductions entirely.  The
+# serialized LR32 mapping is identical to _LR_SMALL_SOURCE: four lanes own
+# four consecutive pairs of one ring for N8 output tiles.
+_LR_SMALL_M1_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint split=group%split_count;group/=split_count;
+uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<3u;
+uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u,output_n=n0+output_lane;
+if(output_n>=N)return;
+uint ring=output_n&7u;
+float sum0=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=lane==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(0));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  for(uint offset=0;offset<4u;offset++){
+    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+sum0+=simd_shuffle(sum0,ushort(lane^2u));
+if((lane&3u)==0u)out[output_n*split_count+split]=half(sum0);
+"""
+_LR_SMALL_M1_FP32_SOURCE = _LR_SMALL_M1_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_W2_SOURCE = (
+    _LR_SMALL_M1_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_SMALL_M1_W2_FP32_SOURCE = _LR_SMALL_M1_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
 _LR_SMALL_N16_SOURCE = r"""
 constexpr uint split_count=SplitK;
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -911,6 +959,52 @@ _LR_SMALL_N16_W2_FP32_SOURCE = _LR_SMALL_N16_W2_SOURCE.replace(
 ).replace(
     "=half(sum1);", "=sum1;"
 )
+
+# Single-row N16 variant.  Two lanes share each ring and each lane decodes
+# one half of the sixteen pairs, but there is no dormant second-row work.
+_LR_SMALL_M1_N16_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint split=group%split_count;group/=split_count;
+uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;
+uint output_lane=lane>>1u,first_pair=(lane&1u)<<3u,output_n=n0+output_lane;
+if(output_n>=N)return;
+uint ring=output_n&7u;
+float sum0=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=(lane&15u)==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(lane&16u));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  for(uint offset=0;offset<8u;offset++){
+    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+if((lane&1u)==0u)out[output_n*split_count+split]=half(sum0);
+"""
+_LR_SMALL_M1_N16_FP32_SOURCE = _LR_SMALL_M1_N16_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_N16_W2_SOURCE = (
+    _LR_SMALL_M1_N16_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=(lane&1u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
+        "uint packed1=(lane&1u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(lane&~1u));"
+        "packed1=simd_shuffle(packed1,ushort((lane&~1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_SMALL_M1_N16_W2_FP32_SOURCE = _LR_SMALL_M1_N16_W2_SOURCE.replace("=half(sum0);", "=sum0;")
 
 _LR_MMA_SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -1829,6 +1923,7 @@ def _local_ring_small_kernel(
     split_k: int = 1,
     output_width: int = 8,
     alt_bank_id: int | None = None,
+    single_row: bool = False,
 ):
     """Build the barrier-free LR32 kernel for one or two input rows."""
 
@@ -1838,7 +1933,9 @@ def _local_ring_small_kernel(
         raise ValueError(f"QVQ LR32 small output width must be 8 or 16, got {output_width}")
     if alt_bank_id is not None and alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
-    key = (output_fp32, split_k, w2, output_width, alt_bank_id)
+    if not isinstance(single_row, bool):
+        raise TypeError("QVQ LR32 single_row must be a bool")
+    key = (output_fp32, split_k, w2, output_width, alt_bank_id, single_row)
     kernel = _LR_SMALL_KERNELS.get(key)
     if kernel is not None:
         return kernel
@@ -1852,7 +1949,23 @@ def _local_ring_small_kernel(
 
         try:
             source = (
-                _LR_SMALL_N16_W2_FP32_SOURCE
+                _LR_SMALL_M1_N16_W2_FP32_SOURCE
+                if single_row and output_width == 16 and output_fp32 and w2
+                else _LR_SMALL_M1_N16_W2_SOURCE
+                if single_row and output_width == 16 and w2
+                else _LR_SMALL_M1_N16_FP32_SOURCE
+                if single_row and output_width == 16 and output_fp32
+                else _LR_SMALL_M1_N16_SOURCE
+                if single_row and output_width == 16
+                else _LR_SMALL_M1_W2_FP32_SOURCE
+                if single_row and output_fp32 and w2
+                else _LR_SMALL_M1_W2_SOURCE
+                if single_row and w2
+                else _LR_SMALL_M1_FP32_SOURCE
+                if single_row and output_fp32
+                else _LR_SMALL_M1_SOURCE
+                if single_row
+                else _LR_SMALL_N16_W2_FP32_SOURCE
                 if output_width == 16 and output_fp32 and w2
                 else _LR_SMALL_N16_W2_SOURCE
                 if output_width == 16 and w2
@@ -1877,6 +1990,7 @@ def _local_ring_small_kernel(
                     f"gptqmodel_qvq_v2b2_p32_lr_small_"
                     f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
                     f"_n{output_width}"
+                    f"{'_m1' if single_row else ''}"
                     f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
                 ),
                 input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
@@ -3551,6 +3665,7 @@ def qvq_mlx_gemv(
                 split_k=split_k,
                 output_width=output_width,
                 alt_bank_id=alt_id,
+                single_row=m == 1,
             )
         elif _USE_LR_MMA and m == 8 and k <= 2048 and n >= 8192 and split_k == 1:
             # Four K8 matrix operations cover one K32 local-ring tile.  A

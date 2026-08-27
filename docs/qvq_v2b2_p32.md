@@ -682,8 +682,9 @@ materialization would defeat the design goal of keeping decode and accumulation 
 
 ### 11.3 Current MLX implementation and measured dispatch
 
-The first MLX implementation keeps the checkpoint ABI above but uses N8 SIMD-group kernels. M<=2 uses a barrier-free
-small-row path where four lanes cooperate on each output and accumulate directly from the activation; M>=4 decodes
+The first MLX implementation keeps the checkpoint ABI above but uses N8 SIMD-group kernels. M=1 uses a dedicated
+single-row barrier-free source, while M=2 uses the two-row barrier-free source; both have four lanes cooperate on each
+output and accumulate directly from the activation. M>=4 decodes
 eight local rings into a K32 x N8 shared tile and accumulates that tile for one or two rows, with a dedicated row-tile
 boundary at M=4. W2 combines each ring's two packed words into one circular
 64-bit window to derive its sixteen states, avoiding four separate state-start extractions; the split-W2 variants use
@@ -708,26 +709,30 @@ reported:
 
 | Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| (1,2048,256) | 0.16854 | 0.15194 | 0.90x | 0.25660 | 0.19943 |
-| (1,2048,2048) | 0.14669 | 0.15738 | 1.07x | 0.19666 | 0.27913 |
-| (1,2048,8192) | 0.18767 | 0.21283 | 1.13x | 0.25893 | 0.27324 |
-| (1,8192,2048) | 0.21092 | 0.58581 | 2.78x | 0.29886 | 0.96219 |
-| (4,2048,8192) | 0.27767 | 0.58700 | 2.11x | 0.36570 | 0.83595 |
-| (8,2048,8192) | 0.37935 | 0.82292 | 2.17x | 0.45852 | 0.96443 |
-| (16,8192,8192) | 2.14417 | 5.29258 | 2.47x | 2.30625 | 5.42018 |
+| (1,2048,256) | 0.17460 | 0.15150 | 0.87x | 0.24742 | 0.19751 |
+| (1,2048,2048) | 0.14656 | 0.15419 | 1.05x | 0.18187 | 0.20963 |
+| (1,2048,8192) | 0.17902 | 0.21040 | 1.18x | 0.20878 | 0.25087 |
+| (1,8192,2048) | 0.18267 | 0.23867 | 1.31x | 0.20609 | 0.26497 |
+| (4,2048,8192) | 0.24633 | 0.56067 | 2.28x | 0.31531 | 1.19448 |
+| (8,2048,8192) | 0.37081 | 0.81765 | 2.21x | 0.42078 | 0.88076 |
+| (16,8192,8192) | 2.07717 | 5.17087 | 2.49x | 2.15964 | 5.25586 |
 
-This run establishes at least 2x speedup for the representative M=4, M=8, and M=16 wide projection shapes, while keeping
+This AC/performance-mode run includes the dedicated M=1 source and establishes at least 2x speedup for the representative
+M=4, M=8, and M=16 wide projection shapes, while keeping
 the same public inference graph and checkpoint rate. The M=1, K=8192 down-projection shape is also above 2x; the M=1,
 K=2048 wide projection is only 1.13x and the narrow M=1 shape remains launch-bound. M=4 and M=8 were variable across
 the immediate AC repeats, so only M=16 is treated as a stable 2x result from this pair of runs.
+Compared with the previous two-row M<=2 source in a same-process synchronized A/B (180 samples per arm), the M=1 source
+reduced p50 latency by 4.5%, 6.0%, 9.5%, and 11.6% for the four M=1 shapes in table order (N=256, N=2048, N=8192,
+and K=8192,N=2048). These are kernel-level gains; they do not turn the narrow M=1 cases into 2x wins.
 These numbers measure the public inner-GEMV path, not end-to-end model latency. Full `QVQMLXLinear` timing also includes
 the input/output Hadamard transforms, scale/bias epilogue, and MLX graph overhead. Measurements are host-dependent
 and should be repeated on each target Apple GPU.
 
-An immediate second 300-sample run on the same AC/performance-mode host produced p50 speedups of `0.90x, 1.28x, 1.32x,
-2.16x, 1.05x, 1.13x, 2.48x` in the table's shape order. This confirms that host scheduling/cache state affects individual
-dispatch timings; conclusions use the synchronized p50/p95 values and do not treat the noisiest M4/M8 runs as universal
-guarantees.
+Before the single-row specialization, an immediate second 300-sample run on the same AC/performance-mode host produced
+p50 speedups of `0.90x, 1.28x, 1.32x, 2.16x, 1.05x, 1.13x, 2.48x` in the table's shape order. This confirms that host
+scheduling/cache state affects individual dispatch timings; conclusions use synchronized p50/p95 values and do not treat
+the noisiest M4/M8 runs as universal guarantees. The M=1 A/B above is the direct paired measurement for the new source.
 
 A separate synthetic full-module benchmark is available with:
 
@@ -758,7 +763,7 @@ The trace confirmed the production dispatches and exposed the following executio
 
 | Path | Trace/source observation | Decision |
 |---|---|---|
-| M=1/2 small-row | no `threadgroup_barrier`, direct activation reads, SIMD reductions only | keep in production |
+| M=1/2 small-row | no `threadgroup_barrier`, direct activation reads, SIMD reductions only; M=1 now removes dormant second-row work | keep in production |
 | M=4/8/16 multirow | two threadgroup barriers per K32 decode/consume iteration; decode is performed by SIMD group 0 while sibling groups wait | next cooperative-decode target |
 | M8 MMA experiment | no threadgroup barriers, but one SIMD group and matrix setup underfill the GPU | kept oracle-tested but disabled in production |
 | selector metadata | one selector byte is shared by every ring in an N8 tile | broadcast from lane 0 |
