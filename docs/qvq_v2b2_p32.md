@@ -698,25 +698,26 @@ weight matrix is materialized.
 Run the paired public-path benchmark with:
 
 ```text
-python scripts/benchmark_qvq_v2b2_p32_lr_mlx.py --warmup 30 --samples 100
+python scripts/benchmark_qvq_v2b2_p32_lr_mlx.py --warmup 75 --samples 300
 ```
 
 The benchmark uses synthetic W2 payloads, FP16 activations, FP32 output, matched warmup/sample counts, and explicit
-GPU synchronization. On an Apple M4 Max, one representative run from the optimized implementation reported:
+GPU synchronization. With the host on AC performance mode, one uniform 300-sample run from the optimized implementation
+reported:
 
 | Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| (1,2048,256) | 0.16577 | 0.15235 | 0.92x | 0.24159 | 0.20949 |
-| (1,2048,2048) | 0.14827 | 0.15385 | 1.04x | 0.23270 | 0.17360 |
-| (1,2048,8192) | 0.20294 | 0.21963 | 1.08x | 0.21484 | 0.22845 |
-| (1,8192,2048) | 0.19883 | 0.23765 | 1.20x | 0.22059 | 0.30323 |
-| (4,2048,8192) | 0.26715 | 0.47335 | 1.77x | 0.29449 | 0.53406 |
-| (8,2048,8192) | 0.35233 | 0.89319 | 2.54x | 0.37780 | 1.56849 |
-| (16,8192,8192) | 2.09275 | 5.13540 | 2.45x | 2.15454 | 5.36052 |
+| (1,2048,256) | 0.18900 | 0.15008 | 0.79x | 0.25593 | 0.22339 |
+| (1,2048,2048) | 0.20350 | 0.19925 | 0.98x | 0.28386 | 0.28163 |
+| (1,2048,8192) | 0.41454 | 0.36817 | 0.89x | 0.47526 | 0.66202 |
+| (1,8192,2048) | 0.22329 | 0.24873 | 1.11x | 0.33526 | 0.33365 |
+| (4,2048,8192) | 0.25844 | 0.52667 | 2.04x | 0.39185 | 0.62175 |
+| (8,2048,8192) | 0.51952 | 0.79281 | 1.53x | 0.71746 | 0.92409 |
+| (16,8192,8192) | 2.11490 | 5.17760 | 2.45x | 2.40140 | 5.31115 |
 
-This run establishes at least 2x speedup for the representative M=8 and M=16 wide projection shapes, while keeping the
-same public inference graph and checkpoint rate. M=4 is a substantial 1.77x win in this run. The small-row path brings
-common M=1 shapes to parity or better, although the narrow 2048x256 case remains launch-bound at 0.92x.
+This run establishes at least 2x speedup for the representative M=4 and M=16 wide projection shapes, while keeping the
+same public inference graph and checkpoint rate. M=8 remains a 1.53x win in this run. The small-row path is near parity
+for common M=1 shapes, although the narrow 2048x256 and wide 2048x8192 cases remain launch-bound in this sample.
 These numbers measure the public inner-GEMV path, not end-to-end model latency. Full `QVQMLXLinear` timing also includes
 the input/output Hadamard transforms, scale/bias epilogue, and MLX graph overhead. Measurements are host-dependent
 and should be repeated on each target Apple GPU.
