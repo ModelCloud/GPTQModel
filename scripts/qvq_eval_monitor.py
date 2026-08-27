@@ -240,7 +240,15 @@ def append_ledger(ledger: Path, job: Job, payload: dict[str, Any]) -> None:
     task_payload = payload.get("gsm8k_platinum_cot", payload.get("tasks", {}).get("gsm8k_platinum_cot", {}))
     metric = task_payload.get("metrics", {}).get("acc,num")
     if job.task == "micro_math":
-        metric = payload.get("metrics", {}).get("mini_math_exact_answer_accuracy")
+        metrics = payload.get("metrics", {})
+        metric = (
+            f"mini_exact={metrics.get('mini_math_exact_answer_accuracy')!r}; "
+            f"delta_ce={metrics.get('reasoning_delta_ce')!r}; "
+            f"delta_kl={metrics.get('reasoning_delta_kl')!r}; "
+            f"answer_logprob_delta={metrics.get('answer_token_logprob_delta')!r}; "
+            f"answer_margin_delta={metrics.get('answer_token_margin_delta')!r}; "
+            f"critical_top1={metrics.get('critical_token_top1_quantized_vs_dense')!r}"
+        )
     elif job.task == "divergence300":
         metric = payload.get("divergence_300_at_32", {}).get("independent_token_top1_agreement_at_32")
     line = (
