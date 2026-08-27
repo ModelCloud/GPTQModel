@@ -2954,3 +2954,20 @@ fixed-K p50 `0.46215 ms`, with means `0.56764 ms` versus `0.57467 ms`.
 These results leave the promoted N32 source unchanged and shift further work
 toward reducing complete-module graph overhead or a measured fusion
 opportunity rather than additional M1 decoder-loop specialization.
+
+## 71. M1 complete-module compilation probe
+
+The complete-module benchmark was rerun with `mx.compile`, using `30`
+warmups and `100` randomized synchronized samples per arm on the
+AC/high-performance M4 Max host. Shape compilation improved absolute
+latency but did not change the M1 conclusion:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=2048)` | `0.51233` | `0.65825` | `1.285x` |
+| `(M=1,K=2048,N=8192)` | `0.72183` | `0.97577` | `1.352x` |
+| `(M=1,K=8192,N=2048)` | `0.64927` | `1.03479` | `1.594x` |
+
+Compilation therefore does not provide the missing M1 `2x` result. Further
+work should target a new fused module/epilogue or a different M1 data-reuse
+mapping, not simply additional MLX graph compilation.
