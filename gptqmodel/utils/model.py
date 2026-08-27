@@ -717,15 +717,14 @@ def create_quant_module(
         # positive module match
         if overrides:
             # override base QuantizeConfig for every quant config key/value
-            tmp_bits = _normalize_quant_bits(overrides.get("bits", bits), format_value=format)
+            if FORMAT_FIELD_CODE in overrides or "format" in overrides:
+                raw_format = overrides.get(FORMAT_FIELD_CODE, overrides.get("format"))
+                tmp_format = raw_format if isinstance(raw_format, FORMAT) else FORMAT(str(raw_format).strip().lower())
+            tmp_bits = _normalize_quant_bits(overrides.get("bits", bits), format_value=tmp_format)
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
-            if FORMAT_FIELD_CODE in overrides or "format" in overrides:
-                raw_format = overrides.get(FORMAT_FIELD_CODE, overrides.get("format"))
-                tmp_format = raw_format if isinstance(raw_format, FORMAT) else FORMAT(str(raw_format).strip().lower())
-
             if format == FORMAT.FP8:
                 fp8_format_override = overrides.get(FORMAT_FIELD_CODE, overrides.get("fmt"))
                 if fp8_format_override is not None:
