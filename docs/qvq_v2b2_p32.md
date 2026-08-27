@@ -2183,3 +2183,36 @@ tested against the current implementation using randomized, interleaved
 `0.987x`, and `1.006x` for the same three shapes, respectively. It was
 neutral within device variance and was not promoted. Both probes preserved
 the existing Torch-oracle output contract.
+
+### 49. Shared-activation M1/N64 split-2 path
+
+The next M1 experiment fused two K splits into one 256-threadgroup while
+keeping a separate K64 activation tile for each split. Four adjacent N16
+output tiles are covered by the eight SIMD groups. Each split stages its
+activation once, then the two FP32 partials are reduced inside the same
+threadgroup. This removes duplicate activation loads across the split
+variants without introducing a cross-split shared-memory race. The earlier
+four-way split prototype was removed after it showed no repeatable gain.
+
+The generated W2 kernel matched the Torch K32xN8 reconstruction oracle at
+`K=128,N=8192`; larger direct oracle checks also remained within the normal
+FP32 reconstruction error contract:
+
+| K | N | max absolute error | relative L2 |
+|---:|---:|---:|---:|
+| 4096 | 8192 | `0.00050354` | `1.2266e-6` |
+| 8192 | 8192 | `0.00131226` | `1.7973e-6` |
+
+A synchronized, randomized 100-sample complete-module A/B on the AC/high-
+performance M4 Max host measured the shared path against the prior M1/N64
+dispatch using identical inputs, trellis payloads, and selectors:
+
+| Shape | Prior p50 (ms) | Shared p50 (ms) | Speedup |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=8192)` | `0.45510` | `0.45544` | `0.999x` |
+| `(M=1,K=4096,N=8192)` | `0.38806` | `0.32581` | `1.191x` |
+| `(M=1,K=8192,N=8192)` | `0.46038` | `0.37471` | `1.229x` |
+
+The short-K dispatch is intentionally unchanged because the shared candidate
+was neutral there. The long-K win is retained as the default for `K>2048`,
+wide M1 W2 projections. The universal M1 `2x` objective remains open.
