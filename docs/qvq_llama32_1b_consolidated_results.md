@@ -150,6 +150,22 @@ are weighted payload estimates.
 | 4f018a | 6 | V+O W3.5 + Gate W2.5 + Up/Down W3.5 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate25_updown35.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate25-updown35-4f018a` | **quantizing** | pending | pending |
 | 8e67f6 | 7 | V+O W3.5 + Gate W3.5 + Up/Down W3 | **3.1180** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_reg015_vo35_gate35_updown30.json` | `/root/qvq-results/llama32-1b-w2-reg015-pareto-vo35-gate35-updown30-8e67f6` | **quantizing** | pending | pending |
 
+### Flat-rate projection baselines (queued 2026-08-27 UTC)
+
+These controls quantize all attention projections (Q/K/V/O) and all MLP
+projections (gate/up/down) at one common V2B2/P32 rate. They use the same
+clean YAQA/NM slices, reg `.15`, seed 0, and strict benchmark disjointness.
+W1.5 is within the V2B2 supported W1--W3.5 rate range. Evaluations are
+scheduled automatically after each checkpoint completes.
+
+| Arm ID | GPU | Flat rate | Eff. BPW* | Config | Output checkpoint | State | D300 | GSM8K Platinum |
+| --- | ---: | ---: | ---: | --- | --- | --- | --- | --- |
+| 88be04 | 0 | W2 | **2.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json` | `/root/qvq-results/llama32-1b-flat-flat-w20-88be04` | **queued (GPU busy)** | pending | pending |
+| 509b7f | 1 | W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json` | `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f` | **queued (GPU busy)** | pending | pending |
+| 1040a5 | 2 | W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json` | `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5` | **queued (GPU busy)** | pending | pending |
+| b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **queued (GPU busy)** | pending | pending |
+| 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **queued (GPU busy)** | pending | pending |
+
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
 output. They are not current active jobs; current arms are listed above:

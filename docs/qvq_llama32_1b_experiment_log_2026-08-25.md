@@ -1011,6 +1011,14 @@ and 3.
 
 | started | `1fee11`, `b2dee2`, `dc38d2`, `8dd86a`, `5fddf5`, `83b60c`, `4f018a`, `8e67f6` | `Pareto allocation sweep` | all eight queue wrappers launched with `setsid` on physical GPUs 0--7 at 03:20 UTC; quantizers are active and loading the 302,193-token YAQA mix; monitor will schedule D300 and GSM8K Platinum after each checkpoint marker |
 
+| queued | `88be04` | `flat W2 (Q/K/V/O + gate/up/down)` | GPU 0; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w20.json`; output `/root/qvq-results/llama32-1b-flat-flat-w20-88be04`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `509b7f` | `flat W2.5 (Q/K/V/O + gate/up/down)` | GPU 1; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json`; output `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `1040a5` | `flat W3 (Q/K/V/O + gate/up/down)` | GPU 2; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json`; output `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `b72667` | `flat W3.5 (Q/K/V/O + gate/up/down)` | GPU 3; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json`; output `/root/qvq-results/llama32-1b-flat-flat-w35-b72667`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+| queued | `862367` | `flat W1.5 (Q/K/V/O + gate/up/down)` | GPU 4; config `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json`; output `/root/qvq-results/llama32-1b-flat-flat-w15-862367`; V2B2/P32, reg .15, clean NM/YAQA calibration, strict benchmark manifest; queued behind active Pareto arm |
+
+| started | `88be04`, `509b7f`, `1040a5`, `b72667`, `862367` | `flat-rate baseline sweep` | five detached queue wrappers launched with `setsid` at 03:35 UTC on physical GPUs 0--4; all are waiting for their assigned GPU to become idle, then will quantize and trigger D300/GSM8K automatically |
+
 | monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `gsm8k_platinum_cot` | complete; metric=0.3465674110835401; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `gsm8k_platinum_cot` | complete; metric=0.3738626964433416; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-gsm8k-platinum-v1.json` |
