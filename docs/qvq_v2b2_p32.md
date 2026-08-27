@@ -3515,3 +3515,31 @@ not promoted. The result suggests that the smaller threadgroup geometry can
 reduce the median launch cost, but its extra synchronization/variance does
 not provide a reliable module-level win. Production dispatch remains
 unchanged and the universal M1 `2x` target remains open.
+
+## 93. M1 true parallel N128 geometry rejected
+
+The M1/N64 W2 half2 source was reshaped to cover one N128 output tile with
+eight SIMD groups in parallel, while retaining the shared K64 activation tile
+and split-2 reduction. This was a distinct geometry from the earlier serial
+N128 probe: it doubled the output width per threadgroup and assigned one N16
+output slice to each SIMD group. The candidate was bit-exact against the
+production N64 module at `(M=1,K=2048,N=8192)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+The randomized complete-module A/B used 120 samples per arm on the plugged-in
+M4 Max performance configuration:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production N64 W2 half2 | `0.33000` | `0.50354` | `0.36895` |
+| True parallel N128 candidate | `0.35885` | `0.53751` | `0.39517` |
+
+The N128 candidate measured only `0.920x` at p50 and `0.934x` by mean. The
+larger threadgroup and wider output ownership did not amortize the additional
+SIMD/shared-activation work at M1, so no production dispatch was changed.
+The universal M1 `2x` target remains open.
