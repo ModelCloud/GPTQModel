@@ -1832,3 +1832,24 @@ In a same-process probe against the old full-staging source, corrected K64 was
 source is not a valid baseline because of the race, so this result is recorded
 as a correctness/stability fix rather than a promoted speed claim. The
 unresolved universal M1 `2x` target remains open.
+
+### 37. Post-race-fix production sweep
+
+After the K64 staged-activation correction, a fresh synchronized MLX
+complete-module sweep was run from commit `ba6d3c57` on the plugged-in M4 Max
+in AC/performance mode. The benchmark used 50 warmups and 80 synchronized
+randomized LR/P32 samples per shape:
+
+| Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.66942 / 1.06906` | `0.89865 / 1.57291` | `1.342x` |
+| `(M=1,K=2048,N=2048)` | `0.69590 / 1.06291` | `0.89292 / 1.45580` | `1.283x` |
+| `(M=1,K=2048,N=8192)` | `0.89038 / 1.82093` | `1.29923 / 2.30305` | `1.459x` |
+| `(M=1,K=8192,N=2048)` | `0.96792 / 1.68947` | `1.26694 / 2.04959` | `1.309x` |
+| `(M=4,K=2048,N=8192)` | `1.26479 / 2.33861` | `2.46285 / 3.70156` | `1.947x` |
+| `(M=8,K=2048,N=8192)` | `1.59015 / 2.98585` | `3.81569 / 5.17590` | `2.400x` |
+| `(M=16,K=8192,N=8192)` | `2.59304 / 3.03420` | `5.72367 / 6.18885` | `2.207x` |
+
+The corrected kernel remains Torch-oracle tested and faster than P32 for every
+shape. The result confirms the race fix did not regress production behavior,
+but also confirms that a universal M1 `2x` speedup has not yet been reached.
