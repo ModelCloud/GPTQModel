@@ -3714,6 +3714,31 @@ The candidate measured `0.850x` at p50 and `0.993x` by mean, while adding
 FP16 matrix-boundary drift. The M4 cooperative scalar route remains in
 production and the universal `2x` target remains open.
 
+## 102. M4 wider N16 shared tile rejected
+
+The M4 cooperative W2 decoder was widened from one N8 tile to one N16 tile.
+Four SIMD groups decoded and shared 16 output channels per activation tile,
+halving output-tile launches while retaining FP32 accumulation and the same
+row ownership. The candidate was bit-exact at `(M=4,K=2048,N=8192)`:
+
+```text
+max_abs = 0
+relative_l2 = 0
+differing elements = 0
+```
+
+The complete-module A/B used 120 randomized/interleaved samples per arm, 25
+warmups, and seed `20261107` on the AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 N8 cooperative | `0.34446` | `0.55654` | `0.39141` | `0.27946` | `0.63150` |
+| M4 N16 shared candidate | `0.39940` | `0.70834` | `0.46182` | `0.33617` | `0.97167` |
+
+The candidate measured `0.862x` at p50 and `0.848x` by mean. The additional
+shared tile and wider epilogue outweighed the reduced launch count, so the
+production N8 cooperative route remains unchanged.
+
 ## 95. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
