@@ -2297,3 +2297,10 @@ than the production route at `(K,N)=(2048,256)`, `(2048,2048)`, and
 `(8192,2048)`, respectively, its Torch-oracle relative errors were `0.962`,
 `0.998`, and `0.980`. The prototype therefore had an incorrect lane/packing
 mapping and was rejected; it is not part of the production dispatch.
+
+The same wider shared-activation idea was tested at the wide M1 projection
+shape `(K=2048,N=8192)`, where the current four-N16-tile shape kernel is
+active. The eight-N16-tile prototype was Torch-oracle equivalent within
+`1.53e-4` absolute, but measured `0.41592 ms` versus `0.39625 ms` for the
+current route (`0.953x`). It was rejected because the extra threadgroup
+barrier and larger threadgroup outweighed the reduction in launches.
