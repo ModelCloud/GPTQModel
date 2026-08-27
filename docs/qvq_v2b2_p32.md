@@ -3591,7 +3591,7 @@ The inner-kernel results confirm that LR32 is already a greater-than-2x
 kernel win for M8/M16, while M1 remains the limiting regime even before the
 full-module transform and epilogue are included.
 
-## 97. Corrected AC inner-kernel benchmark
+## 95. Corrected AC inner-kernel benchmark
 
 The direct inner-kernel benchmark was corrected to pass
 `_inputs_contiguous=True` for LR, matching `QVQMLXLinear`, which stages the
@@ -3613,7 +3613,7 @@ This corrected measurement confirms the production-comparable inner LR path
 is faster than P32 for every shape and clears `2x` for M8/M16. M1 and M4
 remain below the universal `2x` target.
 
-## 98. M4 barrier-free two-row register probe rejected
+## 96. M4 barrier-free two-row register probe rejected
 
 The M4 cooperative shared-decode route was compared with a different mapping
 that assigns one barrier-free register/SIMD kernel to each two-row pair. The
@@ -3639,7 +3639,7 @@ for the second row pair costs more than the removed shared-memory barriers, so
 the cooperative M4 route remains enabled and the universal `2x` target remains
 open.
 
-## 99. M4 transposed decoded-tile probe rejected
+## 97. M4 transposed decoded-tile probe rejected
 
 The M4 cooperative W2 decoder was re-laid out from threadgroup
 `decoded[8][32]` to `decoded[32][8]`, allowing each consumer lane to access its
@@ -3663,7 +3663,7 @@ warmups, and seed `20261104` on the AC/performance-mode M4 Max:
 The candidate measured `0.999x` at p50 and `0.984x` by mean. The original
 decoded layout remains in production; the universal `2x` target remains open.
 
-## 100. M4 FP16-output boundary probe rejected
+## 98. M4 FP16-output boundary probe rejected
 
 The cooperative M4 W2 decoder was tested with FP32 accumulation followed by
 FP16 output storage, then an explicit FP32 cast before the production output
@@ -3689,7 +3689,7 @@ The candidate measured only `1.043x` at p50 and `1.004x` by mean, while
 introducing FP16 boundary drift and worse tails. The production FP32 output
 path remains unchanged; the universal `2x` target remains open.
 
-## 101. M4 matrix-path probe rejected
+## 99. M4 matrix-path probe rejected
 
 The existing LR `simdgroup_matrix` implementation was tested at M4 by using an
 8-row matrix tile with four valid input rows and four zero rows. This reuses
@@ -3714,7 +3714,7 @@ The candidate measured `0.850x` at p50 and `0.993x` by mean, while adding
 FP16 matrix-boundary drift. The M4 cooperative scalar route remains in
 production and the universal `2x` target remains open.
 
-## 102. M4 wider N16 shared tile rejected
+## 100. M4 wider N16 shared tile rejected
 
 The M4 cooperative W2 decoder was widened from one N8 tile to one N16 tile.
 Four SIMD groups decoded and shared 16 output channels per activation tile,
@@ -3739,7 +3739,7 @@ The candidate measured `0.862x` at p50 and `0.848x` by mean. The additional
 shared tile and wider epilogue outweighed the reduced launch count, so the
 production N8 cooperative route remains unchanged.
 
-## 103. M4 fixed-shape specialization rejected
+## 101. M4 fixed-shape specialization rejected
 
 The production M4 cooperative W2 kernel was compiled with fixed
 `M=4,K=2048,N=8192,row_tile=4` constants and without the dynamic dimensions
@@ -3764,7 +3764,7 @@ The candidate measured `1.044x` at p50 but only `0.976x` by mean and had a
 worse maximum sample. Shape specialization is not a reliable module-level
 win, so no production dispatch changed.
 
-## 104. M1 N32 shared-activation geometry AC recheck
+## 102. M1 N32 shared-activation geometry AC recheck
 
 The previously promising two-SIMD-group N32 geometry was rechecked against the
 current production N64 W2 half2 route at `(M=1,K=2048,N=8192)` with 200
@@ -3787,7 +3787,7 @@ The candidate measured `1.109x` at p50 and `1.102x` by mean, with a worse
 maximum sample. This is not a reliable module-level improvement and was not
 promoted. The universal M1 `2x` target remains open.
 
-## 105. M1 N64 half2 split-K sweep rejected
+## 103. M1 N64 half2 split-K sweep rejected
 
 The current shape-specialized M1/N64 W2 half2 decoder was benchmarked with
 split-2, split-4, and split-8 at `(M=1,K=2048,N=8192)`. Each arm used the same
@@ -3807,7 +3807,7 @@ Relative to split-2, split-4 improved p50 by only `1.017x` and mean by
 The small timing gains do not justify introducing reduction-order drift, so
 the production split-2 policy remains unchanged.
 
-## 106. M4 legacy split-2 control rejected
+## 104. M4 legacy split-2 control rejected
 
 The M4 cooperative split-1 route was compared with the legacy multirow
 split-2 route at `(M=4,K=2048,N=8192)`. Split-2 materializes two FP32 partial
