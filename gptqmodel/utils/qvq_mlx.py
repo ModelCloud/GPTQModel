@@ -96,6 +96,10 @@ _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N32_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
+_LR_M1_N32_FUSED_SPLIT_ERRORS: dict[int, str] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 # The fused M1/N64 split-2 route is retained for targeted experiments and
@@ -106,6 +110,9 @@ _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 # the default again by accident.
 _USE_LR_M1_N64_SPLIT2 = False
 _USE_LR_M1_N64_SHARED_SPLIT2 = True
+# One-lane-per-output N32 is retained only for the measured long-K M1 regime;
+# short-K shapes were neutral or slower than the promoted N16 route.
+_USE_LR_M1_N32_FUSED = True
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
 _LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool, bool], str] = {}
 
@@ -1084,6 +1091,81 @@ _LR_SMALL_M1_N16_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_
 _LR_SMALL_M1_N16_VECTOR_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
 _LR_SMALL_M1_N16_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_W2_SOURCE)
 _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+
+# One SIMD lane per output channel.  N32 spans four logical K32xN8 tiles;
+# each lane therefore owns one ring in one tile and can consume all sixteen
+# W2 pairs directly, avoiding the two-lane-per-output reduction used by the
+# N16 source above.  The source is only used by the fused FP32 M1 path.
+_LR_SMALL_M1_N32_W2_FP32_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint split=group%split_count;group/=split_count;
+uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;
+if(output_n>=N)return;
+uint ring=output_n&7u;
+float sum0=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=(lane&7u)==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(lane&~7u));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;
+  uint packed0=as_type<uint>(tile_ptr[ring_base]);
+  uint packed1=as_type<uint>(tile_ptr[ring_base+1u]);
+  uint state=qstate_lr_w2_packed_fast(packed0,packed1,0u);
+  #pragma unroll
+  for(uint offset=0u;offset<16u;offset++){
+    float2 value=qlevelsv2b_lr_const_w2(state,bank);
+    uint k0=base+(offset<<1u);
+    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;
+    if(offset!=15u)state=((state<<4u)|qpt_lr_w2_packed(packed0,packed1,offset+1u))&0xffffu;
+  }
+}
+if(output_n<N)out[output_n*split_count+split]=sum0;
+"""
+
+
+def _make_lr_m1_n32_fused_split_source(source: str, split_count: int) -> str:
+    """Fuse fixed M1/N32 K-split reduction into one threadgroup."""
+
+    if split_count not in (8, 16):
+        raise ValueError("QVQ LR32 M1/N32 fused split count must be 8 or 16")
+    layout = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;"
+    )
+    replacement = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;\n"
+        f"threadgroup float split_outputs[{split_count * 32}];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 fused M1/N32 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1).replace(
+        "constexpr uint split_count=SplitK;", f"constexpr uint split_count={split_count}u;", 1
+    )
+    output = "if(output_n<N)out[output_n*split_count+split]=sum0;"
+    fused_output = (
+        "if(output_n<N)split_outputs[split*32u+lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        f"if(simd==0u&&lane<32u){{float total=0.0f;for(uint s=0u;s<{split_count}u;s++)"
+        "total+=split_outputs[s*32u+lane];out[n0+lane]=total;}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 fused M1/N32 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE, 8
+)
+_LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE, 16
+)
 
 
 def _make_lr_m1_fused_split_source(source: str) -> str:
@@ -2637,6 +2719,62 @@ def _local_ring_m1_fused_split16_kernel(*, alt_bank_id: int):
             _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS[alt_bank_id] = error
             raise RuntimeError(error) from exc
         _LR_M1_FUSED_SPLIT16_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int):
+    """Build the barrier-minimal fixed M1/N32 W2 split kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    if split_count not in (8, 16):
+        raise ValueError(f"QVQ LR32 M1/N32 split count must be 8 or 16, got {split_count}")
+    kernels = _LR_M1_N32_FUSED_SPLIT16_KERNELS if split_count == 16 else _LR_M1_N32_FUSED_SPLIT_KERNELS
+    errors = _LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS if split_count == 16 else _LR_M1_N32_FUSED_SPLIT_ERRORS
+    kernel = kernels.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = kernels.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = errors.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = (
+                _LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE
+                if split_count == 16
+                else _LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE
+            ).replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_m1_n32_fused_split{split_count}"
+                    f"_alt{alt_bank_id}"
+                ),
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                f"QVQ LR32 fused M1/N32 split-{split_count} kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            errors[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        kernels[alt_bank_id] = kernel
         return kernel
 
 
@@ -4519,6 +4657,34 @@ def qvq_mlx_gemv(
             and not m1_n64_split2
             and not m1_n64_shared_split2
         )
+        m1_n32_fused_split16 = (
+            _USE_LR_M1_N32_FUSED
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 16
+            and k >= 8192
+            and n <= 2048
+            and n % 32 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+        )
+        m1_n32_fused_split = (
+            _USE_LR_M1_N32_FUSED
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 8
+            and k >= 8192
+            and n <= 2048
+            and n % 32 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+        )
         if m1_n64_shared_split2:
             # Eight SIMD groups cover four N16 tiles and both K splits in
             # one threadgroup.  Each split has its own staged K64 tile, so
@@ -4539,6 +4705,19 @@ def qvq_mlx_gemv(
             group_size = 256
             output_width = 64
             kernel = _local_ring_m1_n64_split2_kernel(alt_bank_id=alt_id)
+        elif m1_n32_fused_split16:
+            # One lane owns one output channel across four K32xN8 tiles.
+            # Sixteen SIMD groups reduce the K slices in one 512-thread
+            # group, halving the output-tile launch count versus N16.
+            row_tile = 1
+            group_size = 512
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(alt_bank_id=alt_id, split_count=16)
+        elif m1_n32_fused_split:
+            row_tile = 1
+            group_size = 256
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(alt_bank_id=alt_id, split_count=8)
         elif m1_fused_split16:
             # Sixteen FP32 split results are reduced inside one 512-thread
             # threadgroup.  This exposes more independent K work than the
@@ -4652,6 +4831,8 @@ def qvq_mlx_gemv(
             (split_k > 1 or small_rows)
             and not m1_fused_split
             and not m1_fused_split16
+            and not m1_n32_fused_split
+            and not m1_n32_fused_split16
             and not m1_n64_split2
             and not m1_n64_shared_split2
         ):
@@ -4659,13 +4840,22 @@ def qvq_mlx_gemv(
         output_width = (
             64
             if m1_n64_split2 or m1_n64_shared_split2 or m1_n64
+            else 32
+            if m1_n32_fused_split or m1_n32_fused_split16
             else _local_ring_small_output_width(n)
             if small_rows and m <= 2 and n % 16 == 0
             else 8
         )
         launch_split = (
             1
-            if m1_fused_split or m1_fused_split16 or m1_n64_split2 or m1_n64_shared_split2
+            if (
+                m1_fused_split
+                or m1_fused_split16
+                or m1_n32_fused_split
+                or m1_n32_fused_split16
+                or m1_n64_split2
+                or m1_n64_shared_split2
+            )
             else split_k
         )
         partials = kernel(
@@ -4679,6 +4869,8 @@ def qvq_mlx_gemv(
                     n
                     if m1_fused_split
                     or m1_fused_split16
+                    or m1_n32_fused_split
+                    or m1_n32_fused_split16
                     or m1_n64_split2
                     or m1_n64_shared_split2
                     else n * split_k,
@@ -4690,6 +4882,8 @@ def qvq_mlx_gemv(
             split_k == 1
             or m1_fused_split
             or m1_fused_split16
+            or m1_n32_fused_split
+            or m1_n32_fused_split16
             or m1_n64_split2
             or m1_n64_shared_split2
         ):

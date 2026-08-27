@@ -78,9 +78,10 @@ def test_lr32_m1_n64_split_policy(k, expected):
 @pytest.mark.parametrize(
     "in_features, out_features, kernel_name",
     (
-        (2048, 256, "_local_ring_m1_fused_split16_kernel"),
         (2048, 240, "_local_ring_m1_fused_split16_kernel"),
+        (2048, 256, "_local_ring_m1_fused_split16_kernel"),
         (2304, 256, "_local_ring_m1_fused_split_kernel"),
+        (8192, 2048, "_local_ring_m1_n32_fused_split_kernel"),
     ),
 )
 def test_lr32_m1_fused_split_route_matches_torch_oracle(

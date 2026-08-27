@@ -2489,3 +2489,31 @@ dependency evidence only, not hardware occupancy, cache, bandwidth, or
 stall percentages. The most credible remaining overlap opportunity is still
 the M4/M8 decode-to-compute mapping; M1's promoted route already avoids the
 shared decoded tile and external split reduction.
+
+## 55. Long-K M1 one-lane N32 specialization
+
+The M1 W2 FP32 fused reduction was tested with an alternate N32 layout: one
+SIMD lane owns one output channel across four logical K32xN8 tiles and
+consumes all sixteen local-ring pairs directly. This removes the two-lane
+per-output reduction used by the N16 source and halves the output-tile launch
+count. The generated kernel matches the Torch K32xN8 oracle for both the
+K2048/split16 and K2304/split8 edge cases before dispatch was narrowed.
+
+A same-process randomized complete-module A/B on the AC/high-performance M4
+Max compared the promoted N16 route with the N32 candidate using identical
+payloads and 120 synchronized samples per arm:
+
+| Shape | N16 p50/p95 (ms) | N32 p50/p95 (ms) | N16/N32 |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.58810 / 1.18903` | `0.59767 / 1.55739` | `0.984x` |
+| `(M=1,K=2048,N=2048)` | `0.64067 / 1.47324` | `0.63040 / 2.27797` | `1.016x` |
+| `(M=1,K=8192,N=2048)` | `0.91792 / 1.62632` | `0.84737 / 1.88848` | `1.083x` |
+
+Because N32 was neutral/slower at K2048 and clearly useful only in the
+long-K case, production dispatch enables it only for M1 W2 FP32 with
+`K>=8192`, `N<=2048`, and `N%32==0`; other M1 shapes retain N16. The route
+passes the full LR32 suite (`168 passed`) and the broader MLX suites
+(`326 passed`). A fresh complete-module LR/P32 sweep after enabling the
+narrowed route measured `1.563x` at `(M=1,K=8192,N=2048)` and `2.129x` at
+`(M=4,K=2048,N=8192)`; the M8/M16 results were `2.418x` and `2.430x`.
+These are same-host p50 ratios, not a claim of a universal `2x` result.
