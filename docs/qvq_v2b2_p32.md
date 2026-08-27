@@ -3884,3 +3884,22 @@ The candidate measured `1.125x` at p50 and `1.115x` by mean. This is a
 repeatable partial improvement, but it does not meet the `2x` promotion gate
 and has a slightly worse maximum sample; production dispatch remains
 unchanged.
+
+## 107. M4 K128/K256 batching saturation
+
+The same exact K-batched cooperative design was extended from K64 to K128
+and K256 to identify the useful barrier-amortization range. K128 measured
+approximately `1.117x` at p50 and `1.127x` by mean in its randomized module
+recheck. K256 remained bit-exact and showed only a small gain at
+`(M=4,K=2048,N=8192)`:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | min (ms) | max (ms) |
+|---|---:|---:|---:|---:|---:|
+| Production M4 K32 cooperative | `0.35596` | `0.54059` | `0.38749` | `0.29642` | `0.91375` |
+| K256-batched candidate | `0.34565` | `0.51134` | `0.36987` | `0.28188` | `0.64304` |
+
+The K256 candidate had exact parity (`max_abs=0`, relative L2 `0`, zero
+differing elements) but measured only `1.030x` at p50 and `1.048x` by mean.
+The results indicate that K64/K128 are the practical batching range; larger
+shared decoded tiles do not continue improving latency. None reaches the
+`2x` promotion gate, so production dispatch remains unchanged.
