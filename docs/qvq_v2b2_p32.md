@@ -2216,3 +2216,7 @@ dispatch using identical inputs, trellis payloads, and selectors:
 The short-K dispatch is intentionally unchanged because the shared candidate
 was neutral there. The long-K win is retained as the default for `K>2048`,
 wide M1 W2 projections. The universal M1 `2x` objective remains open.
+
+The same shared candidate was also tested for narrower N=2048 outputs. It
+was neutral at `K=4096` (`1.005x`) and slower at `K=8192` (`0.964x`), so the
+production route remains restricted to wide `N>=8192` projections.
