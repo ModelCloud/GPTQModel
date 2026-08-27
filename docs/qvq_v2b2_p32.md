@@ -4165,3 +4165,24 @@ The corresponding complete `QVQMLXLinear` benchmark used the same 30 warmups,
 The focused LR32 suite remained green at `173 passed in 59.51s` after
 promotion. This is a repeatable M4 improvement and is enabled in the
 production literal-bank path. M1 remains below the universal `2x` target.
+
+## 117. M1 selected packed-word recurrence probe rejected
+
+The shape-specialized M1/N64 W2 K64 decoder was tested with a lower-level
+recurrence variant. It selected the packed word once per lane's eight-pair
+half and replaced each dynamic `qpt_lr_w2_packed()` call with a fixed shift of
+that word. The candidate was exactly equal to the production split output
+(`max_abs=0`, zero differing elements, relative L2 `0`) at
+`(M=1,K=2048,N=8192)`.
+
+A randomized same-process direct-kernel A/B used 10 warmups and 50 samples per
+arm on the plugged-in AC/performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production M1/N64 half2 | `0.72446` | `3.47042` | `1.23166` |
+| Selected packed-word recurrence | `0.66281` | `3.66274` | `1.49610` |
+
+The candidate improved p50 by `1.093x` but regressed mean to `0.823x` and had
+a worse p95. It was not promoted; the existing M1 W2 recurrence remains in
+production.
