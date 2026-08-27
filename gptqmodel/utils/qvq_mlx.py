@@ -4036,7 +4036,14 @@ def _qvq_mlx_hadamard(x, hadamard_matrix=None):
 
     original_shape = x.shape
     width = original_shape[-1]
-    factor = 1 if hadamard_matrix is None else hadamard_matrix.shape[0]
+    if hadamard_matrix is None:
+        # MLX has a fused Walsh-Hadamard implementation for power-of-two
+        # widths.  Besides reducing the Python/MLX graph to one operation,
+        # this keeps the transform on the GPU and avoids materializing every
+        # butterfly stage as a separate lazy op.  Preserve QVQ's normalized
+        # convention explicitly rather than relying on the API default.
+        return mx.hadamard_transform(x, scale=width**-0.5)
+    factor = hadamard_matrix.shape[0]
     work = x.reshape(-1, width, 1)
     while work.shape[1] > factor:
         work = work.reshape(work.shape[0], work.shape[1] // 2, 2, work.shape[2])

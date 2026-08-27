@@ -822,6 +822,27 @@ samples. This path includes the MLX LR split-K reduction but not the complete-mo
 | (8,2048,8192) | 0.37919 | 0.82333 | 2.17x | 0.40121 | 0.87779 |
 | (16,8192,8192) | 2.05342 | 5.09027 | 2.48x | 2.13184 | 5.16288 |
 
+#### Native MLX Hadamard recheck
+
+For power-of-two widths supported by MLX, QVQ now uses the fused `mx.hadamard_transform` instead of constructing the
+butterfly with repeated reshape/stack/add/sub operations. The normalized scale is passed explicitly, and non-power-of-
+two QVQ widths continue using the existing factored path. The native transform matched the previous implementation at
+approximately `2e-7` relative output error in the M1/M8 checks. The complete-module benchmark below used 60 warmup
+calls and 160 synchronized samples per format on the same AC/performance-mode M4 Max:
+
+| Shape (M,K,N) | Full LR p50 (ms) | Full P32 p50 (ms) | P32/LR | Full LR p95 (ms) | Full P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.29342 | 0.41129 | 1.40x | 0.33114 | 0.45899 |
+| (1,2048,2048) | 0.23096 | 0.25771 | 1.12x | 0.25879 | 0.26874 |
+| (1,2048,8192) | 0.26315 | 0.32142 | 1.22x | 0.28021 | 0.33614 |
+| (1,8192,2048) | 0.25342 | 0.33687 | 1.33x | 0.32271 | 0.34805 |
+| (4,2048,8192) | 0.31869 | 0.57031 | 1.79x | 0.34465 | 0.62908 |
+| (8,2048,8192) | 0.40975 | 0.91535 | 2.23x | 0.44165 | 0.98032 |
+| (16,8192,8192) | 2.12323 | 5.17300 | 2.44x | 2.17138 | 5.27063 |
+
+This comparison is between the current native-Hadamard checkout and the same MLX implementation's P32 control. Both
+formats receive the graph optimization; it changes neither BPW nor the LR32 kernel ABI.
+
 ### 11.4 Metal profiling findings
 
 The M4 Max was plugged into AC power with performance mode enabled (`pmset` AC `powermode=2`). Profiling used MLX's

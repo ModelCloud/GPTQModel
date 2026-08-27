@@ -26,6 +26,8 @@ from gptqmodel.utils.qvq_mlx import (
     QVQ_MLX_BITS,
     QVQMLXLinear,
     _multirow_vector_width,
+    _qvq_mlx_hadamard,
+    _qvq_mlx_hadamard_matrix,
     _v4_independent_output_width,
     _v4_row_tile,
     _v4_use_mma,
@@ -176,6 +178,25 @@ def test_qvq_mlx_linear_runs_full_format_native_forward(bits, vector_size, banke
 
     torch.testing.assert_close(actual_torch, expected, rtol=1e-3, atol=1e-3)
     assert actual_torch.dtype == x.dtype
+
+
+def test_qvq_mlx_hadamard_uses_native_power_of_two_transform():
+    from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
+
+    generator = torch.Generator().manual_seed(22332)
+    x = torch.randn((3, 32), generator=generator, dtype=torch.float32)
+    assert _qvq_mlx_hadamard_matrix(x.shape[-1]) is None
+
+    actual = _qvq_mlx_hadamard(_mlx(x))
+    expected = matmul_hadU(x)
+    mx.eval(actual)
+
+    torch.testing.assert_close(
+        torch.from_numpy(np.asarray(actual)),
+        expected,
+        rtol=2e-6,
+        atol=2e-6,
+    )
 
 
 def test_qvq_l18_v4_mlx_linear_runs_full_native_forward():
