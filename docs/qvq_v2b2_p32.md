@@ -1031,7 +1031,7 @@ counter profile means they do not provide occupancy, cache, register-spill, or h
 
 | Opportunity | Dependency/evidence | Next action |
 |---|---|---|
-| M1 launch/reduction overhead | M1 K2048 N8192 emits the LR split-K dispatch followed by a separate reduction dispatch; M1 source has no barriers | test a fixed split-2 reduction/epilogue kernel; preserve current path until it wins end-to-end |
+| M1 launch/decoder overhead | The targeted M1 K2048 wide-N route now uses N64 grouping with one K slice and no separate split-K reduction; M1 source has one activation-sharing barrier per K32 tile | pursue decoder/launch specialization only with exact full-module A/B evidence |
 | M8/M16 decode overlap | legacy source gates decode on `simd==0`; sibling SIMD groups wait at two barriers per K32 tile | cooperative decode was oracle-correct but slower/neutral in prior A/B; keep as opt-in experiment |
 | M4 decode overlap | two SIMD groups can split four rings each; current source is exact and faster on wide K2048 N8192 | retain architecture/shape gate; benchmark split-K fallback separately |
 | full-module graph boundaries | inner kernel gains are reduced by Hadamard/epilogue work at M1–M4 | profile/fuse outer-H/H32 and fixed reduction only after full-module A/B |
