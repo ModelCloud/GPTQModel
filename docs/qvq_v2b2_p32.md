@@ -1375,18 +1375,24 @@ python scripts/benchmark_qvq_v2b2_p32_lr_mlx_module.py --compile
 ```
 
 It is not automatically enabled for model inference because dynamic sequence
-lengths can trigger additional shape-specialized compilations. On the AC and
-performance-mode M4 Max, with 80 synchronized randomized samples per arm,
-the compiled complete-module results were:
+lengths can trigger additional shape-specialized compilations. The benchmark
+now uses one shared W2 payload/selector set for both formats, warms both
+runners, materializes compilation outside timing, and randomizes LR/P32 order
+inside every sample. On the AC and performance-mode M4 Max, the corrected
+compiled complete-module run used 80 synchronized samples per arm:
 
 | Shape | LR p50 / p95 (ms) | P32 p50 / p95 (ms) | P32/LR |
 |---|---:|---:|---:|
-| `(M=1,K=2048,N=8192)` | `0.32829 / 0.67819` | `0.45160 / 0.80777` | `1.376x` |
-| `(M=1,K=8192,N=2048)` | `0.24256 / 0.30511` | `0.29371 / 0.37897` | `1.211x` |
-| `(M=4,K=2048,N=8192)` | `0.28604 / 0.39447` | `0.52127 / 0.65524` | `1.822x` |
-| `(M=8,K=2048,N=8192)` | `0.39585 / 0.50195` | `0.85277 / 1.00529` | `2.154x` |
+| `(M=1,K=2048,N=256)` | `0.49787 / 0.69401` | `0.60223 / 0.85224` | `1.210x` |
+| `(M=1,K=2048,N=2048)` | `0.55371 / 0.78361` | `0.63533 / 0.86140` | `1.147x` |
+| `(M=1,K=2048,N=8192)` | `1.01900 / 4.50329` | `1.25460 / 3.20451` | `1.231x` |
+| `(M=1,K=8192,N=2048)` | `0.70785 / 1.18872` | `0.95819 / 1.46239` | `1.354x` |
+| `(M=4,K=2048,N=8192)` | `1.00458 / 1.57457` | `2.07521 / 2.56356` | `2.066x` |
+| `(M=8,K=2048,N=8192)` | `0.78383 / 1.05300` | `1.65625 / 2.10488` | `2.113x` |
+| `(M=16,K=8192,N=8192)` | `2.36087 / 2.61202` | `5.47515 / 5.73502` | `2.319x` |
 
-Compared with the same-process uncompiled arms, LR p50 improved by about
-`1.15x`, `1.10x`, `1.13x`, and `1.08x`, respectively. The compiled graph is
-therefore a useful deployment-side optimization, but it does not establish a
-universal 2x M1 result; the M1 ratios remain shape-dependent.
+These are compile-mode LR/P32 ratios, not compile-vs-eager gains; the latter
+are sensitive to process state and must be measured as a four-arm same-process
+experiment. The compiled graph is therefore a useful deployment-side
+optimization, but it does not establish a universal 2x M1 result; the M1
+ratios remain shape-dependent.
