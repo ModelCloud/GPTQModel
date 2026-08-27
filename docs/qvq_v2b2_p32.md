@@ -4122,3 +4122,46 @@ The candidate improved p50 by only `1.008x`, regressed mean to `0.971x`, and
 had a slightly worse p95. It was removed rather than promoted. This does not
 support overlapping M4 decode and compute with the current MLX/Apple execution
 mapping; the production M4 K32 cooperative decoder remains enabled.
+
+## 116. M4 W2 local packed-word loads promoted
+
+The M4 cooperative W2 literal-bank decoder was tightened to load only the
+eight packed words owned by its SIMD group (four local rings), rather than
+loading all sixteen words in both groups. The group-local word payload is
+then distributed with the existing SIMD shuffles. This changes only redundant
+metadata traffic; the decode state, PGC16 values, accumulation order, and
+output layout are unchanged.
+
+The candidate was exactly equal to production at the Torch/MLX kernel and
+complete-module boundaries. A corrected complete-module screening A/B at
+`(M=4,K=2048,N=8192)` measured `1.108x` p50 and `1.145x` by mean for the
+candidate over production. A fresh synchronized randomized inner-kernel
+benchmark then used 30 warmups and 100 samples per arm on the plugged-in
+AC/performance-mode M4 Max:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(1,2048,256)` | `0.16858` | `0.25454` | `1.510x` |
+| `(1,2048,2048)` | `0.19340` | `0.26477` | `1.369x` |
+| `(1,2048,8192)` | `0.22115` | `0.27165` | `1.228x` |
+| `(1,8192,2048)` | `0.17483` | `0.25758` | `1.473x` |
+| `(4,2048,8192)` | `0.36265` | `0.73477` | `2.026x` |
+| `(8,2048,8192)` | `0.31265` | `0.80854` | `2.586x` |
+| `(16,8192,8192)` | `2.16779` | `5.08206` | `2.344x` |
+
+The corresponding complete `QVQMLXLinear` benchmark used the same 30 warmups,
+100 randomized synchronized samples, and identical payload/input policy:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(1,2048,256)` | `0.62933` | `0.90504` | `1.438x` |
+| `(1,2048,2048)` | `0.63877` | `0.89431` | `1.400x` |
+| `(1,2048,8192)` | `0.82719` | `1.18400` | `1.431x` |
+| `(1,8192,2048)` | `0.73854` | `1.21733` | `1.648x` |
+| `(4,2048,8192)` | `1.18056` | `2.43931` | `2.066x` |
+| `(8,2048,8192)` | `1.32377` | `3.57335` | `2.699x` |
+| `(16,8192,8192)` | `2.55850` | `5.73296` | `2.241x` |
+
+The focused LR32 suite remained green at `173 passed in 59.51s` after
+promotion. This is a repeatable M4 improvement and is enabled in the
+production literal-bank path. M1 remains below the universal `2x` target.

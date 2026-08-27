@@ -1980,6 +1980,18 @@ _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE = (
         "qlevelsv2b_lr_const_w2(state,bank)",
         "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
     )
+    # M4 assigns one SIMD group to four rings.  Each group therefore needs
+    # only the eight packed W2 words for its own rings; loading all sixteen
+    # words in both groups duplicates half of the compressed metadata traffic.
+    .replace(
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));",
+        "uint local_ring=ring&3u;"
+        "uint packed_word=lane<8u?as_type<uint>(tile_ptr[(simd<<3u)+lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(local_ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((local_ring<<1u)+1u));",
+    )
 )
 _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_FP32_SOURCE = _make_lr_multirow_fp32_source(
     _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE
