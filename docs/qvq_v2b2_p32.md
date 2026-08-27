@@ -4032,3 +4032,28 @@ These 50-sample values are a spot check, not a replacement for the 80/100+
 sample tables above. They again show M1 and M4 below the universal `2x`
 target and M8/M16 above it; no production code was changed from the profiler
 run.
+
+## 112. M1 K64 ping-pong activation probe rejected
+
+The current M1/N64 K64 source stages two adjacent K32 activation halves in
+shared memory and publishes each half before its decode/compute loop. A probe
+used a 128-value ping-pong tile: it staged both halves first, published them
+with one barrier, consumed both, and selected the alternate buffer for the
+next K64 batch. This was intended to overlap the next producer write with
+sibling SIMD-group consumption without introducing a reuse race.
+
+The generated source had one barrier statement per K64 batch and the
+deterministic packed W2 state path. It was exactly equal to the existing K64
+decoder on a randomized K1024/N1024 comparison (`max_abs=0`, zero differing
+elements, relative L2 `0`). A same-process randomized direct-kernel A/B with
+10 warmups and 50 samples per arm measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing K64 staging | `0.29225` | `0.31468` | `0.29489` |
+| Ping-pong candidate | `0.28481` | `0.52938` | `0.31393` |
+
+The candidate improved p50 by only `1.026x`, regressed mean to `0.939x`, and
+had a substantially worse p95. It was removed rather than promoted. The
+production K64 source and dispatch are unchanged; the universal `2x` target
+remains open.
