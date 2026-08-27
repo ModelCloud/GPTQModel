@@ -1217,3 +1217,15 @@ and 3.
 | monitor | `llama32-1b-w2-w32-mid-down35-c84f7a` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.0446749097048761; delta_kl=0.04016066288985497; answer_logprob_delta=0.2123295553584597; answer_margin_delta=1.018183010727612; critical_top1=0.968040907638223'; report `/root/qvq-results/llama32-1b-w2-w32-mid-down35-c84f7a-micro-math-v1.json` |
 
 | monitor | `llama32-1b-w2-w32-late-gate35-e6b204` | `micro_math` | complete; metric='mini_exact=0.046875; delta_ce=-0.03310974608763225; delta_kl=0.04098139690999987; answer_logprob_delta=0.12644648907789544; answer_margin_delta=1.1331510116804893; critical_top1=0.9705976350271652'; report `/root/qvq-results/llama32-1b-w2-w32-late-gate35-e6b204-micro-math-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-late-down35-7a3d91` | `gsm8k_platinum_cot` | complete; metric=0.4392059553349876; report `/root/qvq-results/llama32-1b-w2-w32-late-down35-7a3d91-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-late-gate-down35-5d19be` | `gsm8k_platinum_cot` | complete; metric=0.4334160463192721; report `/root/qvq-results/llama32-1b-w2-w32-late-gate-down35-5d19be-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-mid-down35-c84f7a` | `gsm8k_platinum_cot` | complete; metric=0.43424317617866004; report `/root/qvq-results/llama32-1b-w2-w32-mid-down35-c84f7a-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w32-late-gate35-e6b204` | `gsm8k_platinum_cot` | complete; metric=0.43010752688172044; report `/root/qvq-results/llama32-1b-w2-w32-late-gate35-e6b204-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w35-qk25-9ab413` | `gsm8k_platinum_cot` | complete; metric=0.43755169561621177; report `/root/qvq-results/llama32-1b-w2-w35-qk25-9ab413-gsm8k-platinum-v1.json` |
+
+| monitor | `llama32-1b-w2-w35-qk30-f0276c` | `gsm8k_platinum_cot` | complete; metric=0.4317617866004963; report `/root/qvq-results/llama32-1b-w2-w35-qk30-f0276c-gsm8k-platinum-v1.json` |
