@@ -164,7 +164,7 @@ scheduled automatically after each checkpoint completes.
 | 509b7f | 1 | W2.5 | **2.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w25.json` | `/root/qvq-results/llama32-1b-flat-flat-w25-509b7f` | **queued (GPU busy)** | pending | pending |
 | 1040a5 | 2 | W3 | **3.0232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w30.json` | `/root/qvq-results/llama32-1b-flat-flat-w30-1040a5` | **queued (GPU busy)** | pending | pending |
 | b72667 | 3 | W3.5 | **3.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w35.json` | `/root/qvq-results/llama32-1b-flat-flat-w35-b72667` | **queued (GPU busy)** | pending | pending |
-| 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **queued (GPU busy)** | pending | pending |
+| 862367 | 4 | W1.5 | **1.5232** | `scripts/configs/llama32_1b_v2b2_p32_yaqa_flat_w15.json` | `/root/qvq-results/llama32-1b-flat-flat-w15-862367` | **quantizing** | pending | pending |
 
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each

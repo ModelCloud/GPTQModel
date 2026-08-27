@@ -1019,6 +1019,8 @@ and 3.
 
 | started | `88be04`, `509b7f`, `1040a5`, `b72667`, `862367` | `flat-rate baseline sweep` | five detached queue wrappers launched with `setsid` at 03:35 UTC on physical GPUs 0--4; all are waiting for their assigned GPU to become idle, then will quantize and trigger D300/GSM8K automatically |
 
+| started | `862367` | `flat W1.5` | GPU 4 became available and quantization started; W2/W2.5/W3/W3.5 wrappers remain queued behind active work |
+
 | monitor | `llama32-1b-w2-reg015-vo25-updown30-56c940` | `gsm8k_platinum_cot` | complete; metric=0.3465674110835401; report `/root/qvq-results/llama32-1b-w2-reg015-vo25-updown30-56c940-gsm8k-platinum-v1.json` |
 
 | monitor | `llama32-1b-w2-reg015-vo35-updown30-595f38` | `gsm8k_platinum_cot` | complete; metric=0.3738626964433416; report `/root/qvq-results/llama32-1b-w2-reg015-vo35-updown30-595f38-gsm8k-platinum-v1.json` |
