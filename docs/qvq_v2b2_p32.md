@@ -1542,3 +1542,34 @@ The K64 route is a real M1 improvement, but the universal 2x goal remains
 unmet: the best fresh M1 ratio is `1.465x`. The remaining M1 cost is now
 primarily complete-module launch/transform overhead and the scalar LR decode,
 not the removed split-K reduction or the K32 activation barrier count.
+
+A current-head bounded Metal System Trace was also captured for the integrated
+K64 inner workload at
+`/tmp/qvq-metal-profile-k64-61f56697-v2/system.trace` and exported to
+`application.xml` and `gpu.xml` beside it. The trace ran on the M4 Max in AC /
+performance mode and completed normally. This Xcode 26.6 configuration again
+reported `Counter Set: (null)` and `Shader Timeline: Disabled`, so it does not
+support numerical occupancy or hardware-stall claims. Structural inspection
+does confirm the expected repeated compute submissions and no counter-visible
+overlap signal; the K64 source has one threadgroup activation barrier per two
+K32 tiles. GPU Frame Capture remains the appropriate next tool for per-dispatch
+resource inspection if a future profiling pass needs more than scheduling
+ evidence.
+
+For completeness, a shape-specialized `mx.compile` module sweep on the same
+host used 40 synchronized samples per arm after five warmups. It did not close
+the M1 gap:
+
+| Shape | compiled LR p50 / p95 (ms) | compiled P32 p50 / p95 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.52075 / 0.70571` | `0.64429 / 0.99051` | `1.237x` |
+| `(M=1,K=2048,N=2048)` | `0.68979 / 1.43110` | `0.69754 / 1.08134` | `1.011x` |
+| `(M=1,K=2048,N=8192)` | `0.75146 / 1.09691` | `0.99004 / 1.30877` | `1.317x` |
+| `(M=1,K=8192,N=2048)` | `0.79598 / 1.58732` | `1.05065 / 1.38858` | `1.320x` |
+| `(M=4,K=2048,N=8192)` | `1.08348 / 3.17213` | `2.30358 / 3.39820` | `2.126x` |
+| `(M=8,K=2048,N=8192)` | `1.41627 / 5.27623` | `3.15681 / 6.30564` | `2.229x` |
+| `(M=16,K=8192,N=8192)` | `2.54681 / 2.78190` | `5.66425 / 5.82268` | `2.224x` |
+
+These compile-mode values are a separate timing run and are not used to
+claim a production speedup; they confirm that graph specialization alone is
+insufficient for a universal 2x M1 result.
