@@ -3857,6 +3857,34 @@ The candidate measured `0.525x` at p50 and `0.595x` by mean. Duplicate decode
 work outweighed the reduced launch count, so the production cooperative route
 remains unchanged.
 
+## 122. M1 sequential fused split-2 probe rejected
+
+The short-K wide-N M1/N64 half2 route was tested with a sequential fused
+split-2 kernel. Each SIMD group computed both K partitions for its N16 output
+tile and emitted one result, keeping the 128-thread geometry while removing
+the raw split-output tensor and separate MLX reduction. The candidate was
+close but not bit-exact to production:
+
+```text
+max_abs = 0.0625
+relative_l2 = 0
+rmse = 0.000690460205078125
+```
+
+A same-process three-way complete-module A/B used identical payloads and
+inputs, 15 warmups, 60 randomized samples per arm, and the AC/performance-
+mode M4 Max at `(M=1,K=2048,N=8192)`:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N64 W2 half2 | `0.83100` | `1.44761` | `0.91226` |
+| Sequential fused split-2 | `0.75350` | `1.31850` | `0.83953` |
+| Non-local P32 | `1.18260` | `1.73282` | `1.29203` |
+
+The candidate measured `1.103x` against current LR and `1.569x` against P32,
+with reduction-order drift. It was not promoted; the production M1/N64
+half2 route remains unchanged.
+
 ## 106. M4 K64-batched cooperative decode recheck
 
 The cooperative M4 W2 decoder was restructured to stage and decode two
