@@ -928,6 +928,33 @@ passed the current LR oracle (`3.3e-7` relative error at `(M=1,K=2048,N=8192)` a
 `(M=1,K=8192,N=2048)`), but one output per lane increased register/decode work: interleaved inner p50 was `1.428x`
 of N16 for `K=2048,N=8192` and `1.174x` for `K=8192,N=2048`. N16 remains the production small-row tile.
 
+### 41. Rejected fast-math half-input and long-K split-4 probes
+
+The production LR32 module deliberately keeps the transformed activation in FP32. A fast-math A/B was run to test
+whether narrowing that activation to FP16 before the LR GEMV could remove enough activation traffic to justify the loss
+of the FP32 input path. The candidate used the same complete `QVQMLXLinear` graph, payload, and input as production,
+but inserted an FP16 cast immediately before the LR GEMV and omitted the corresponding row rescale. On the plugged-in
+AC/performance-mode M4 Max, the test used 30 warmups and 80 synchronized samples per arm:
+
+| Shape | FP32-input p50 / p95 (ms) | FP16-input p50 / p95 (ms) | FP32/FP16 p50 | rel. output delta | max delta |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=8192)` | `0.81025 / 1.21955` | `0.80835 / 1.09912` | `1.002x` | `3.235e-4` | `0.125` |
+| `(M=1,K=8192,N=2048)` | `0.86913 / 1.41535` | `0.89898 / 1.83783` | `0.967x` | `3.189e-4` | `0.125` |
+| `(M=1,K=2048,N=2048)` | `0.71292 / 1.39906` | `0.71540 / 1.68791` | `0.997x` | `3.297e-4` | `0.125` |
+
+The candidate is therefore rejected: it has no meaningful wide-N gain, regresses long-K/narrow-N, and introduces a
+relative output change around `3.2e-4`, much larger than the LR32 Torch-oracle tolerance used for kernel changes.
+The production FP32 transformed-activation path remains unchanged.
+
+The preliminary direct-kernel probe suggested that split-4 might beat the production split-8 policy for the long-K
+narrow-N M1 case, so this was rechecked at the actual complete-module boundary. Two `QVQMLXLinear` instances with
+the same payload and input were measured in randomized order for 120 samples after 20 warmups. The production
+split-8 module measured `0.87283 ms` p50, `1.48100 ms` p95, and `0.91078 ms` mean; the temporary split-4 module
+measured `0.91900 ms` p50, `1.36084 ms` p95, and `0.95798 ms` mean. Outputs remained oracle-consistent, with relative
+delta `5.52e-7` and maximum absolute delta `2.06e-4`. Split-8 remains the production policy. This is another
+example of why LR decisions are accepted only from paired complete-module measurements rather than an isolated
+inner-kernel result.
+
 A W2 lookup-register probe kept PGC16 values as `half2` until the FP32 multiply. It was oracle-exact and reduced
 isolated inner p50 to `0.981x` of the current path at `(M=1,K=2048,N=8192)` and `0.969x` at
 `(M=1,K=8192,N=2048)`, but complete-module p50 changed to `1.228x` and `0.983x`, respectively. The wide-module
