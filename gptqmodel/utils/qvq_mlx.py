@@ -1129,6 +1129,44 @@ if(output_n<N)out[output_n*split_count+split]=sum0;
 """
 
 
+def _make_lr_m1_n32_explicit_pair_source(source: str) -> str:
+    """Replace the fixed W2 pair loop with literal packed-nibble updates."""
+
+    loop = (
+        "  #pragma unroll\n"
+        "  for(uint offset=0u;offset<16u;offset++){\n"
+        "    float2 value=qlevelsv2b_lr_const_w2(state,bank);\n"
+        "    uint k0=base+(offset<<1u);\n"
+        "    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;\n"
+        "    if(offset!=15u)state=((state<<4u)|qpt_lr_w2_packed(packed0,packed1,offset+1u))&0xffffu;\n"
+        "  }"
+    )
+    blocks = []
+    for offset in range(16):
+        block = [
+            "  {",
+            "    float2 value=qlevelsv2b_lr_const_w2(state,bank);",
+            f"    uint k0=base+{offset * 2}u;",
+            "    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;",
+        ]
+        if offset != 15:
+            pair = offset + 1
+            word = "packed0" if pair < 8 else "packed1"
+            shift = (pair & 7) * 4
+            block.append(f"    state=((state<<4u)|(({word}>>{shift}u)&15u))&0xffffu;")
+        block.append("  }")
+        blocks.append("\n".join(block))
+    explicit = "\n".join(blocks)
+    if loop not in source:
+        raise RuntimeError("QVQ LR32 M1/N32 W2 source is missing its pair loop")
+    return source.replace(loop, explicit, 1)
+
+
+_LR_SMALL_M1_N32_W2_FP32_SOURCE = _make_lr_m1_n32_explicit_pair_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE
+)
+
+
 def _make_lr_m1_n32_fused_split_source(source: str, split_count: int) -> str:
     """Fuse fixed M1/N32 K-split reduction into one threadgroup."""
 

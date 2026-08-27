@@ -2590,3 +2590,46 @@ also remains green at `326 passed`. The complete-module M1 result is still
 below the universal `2x` target because transforms and epilogues dominate
 part of the module latency, but LR remains faster than P32 for every tested
 shape.
+
+## 58. M1 N32 literal W2 pair unrolling
+
+The long-K M1 N32 W2 source now expands its fixed sixteen-pair loop into
+literal blocks. Each block keeps the same FP32 activation loads and PGC16
+lookup, but uses a compile-time `packed0` or `packed1` nibble shift for the
+next local-ring state instead of calling the dynamic packed-nibble helper.
+The serialized LR32 layout, bank selection, and reduction order are
+unchanged.
+
+The prototype was compared with the previous dynamic-loop source in a
+same-process randomized A/B at `(M=1,K=8192,N=2048)` using identical tensors
+and 160 synchronized samples per arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Literal pair blocks | `0.34779` | `0.52501` | `0.36179` |
+| Previous dynamic loop | `0.41869` | `0.51605` | `0.43190` |
+
+The p50 improvement was `1.204x` and the mean improvement was `1.194x`.
+The output was oracle-equivalent (`max_abs=0`, relative L2 `0`), so the
+literal source is retained for the production W2 N32 route.
+
+For comparison, a full state-to-level LUT was also tested at the same shape.
+It was exactly equivalent but slower (`1.01115 ms` versus `0.56229 ms` p50
+for the hash/codebook source), so no runtime LUT buffer was added. The latest
+complete-module recheck after the literal-unroll and split-32 changes remains
+faster than P32 at every tested shape:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.26877` | `0.41308` | `1.537x` |
+| `(M=1,K=2048,N=2048)` | `0.24571` | `0.30356` | `1.235x` |
+| `(M=1,K=2048,N=8192)` | `0.22690` | `0.30142` | `1.328x` |
+| `(M=1,K=8192,N=2048)` | `0.21144` | `0.31242` | `1.478x` |
+| `(M=4,K=2048,N=8192)` | `0.31110` | `0.55517` | `1.785x` |
+| `(M=8,K=2048,N=8192)` | `0.36694` | `0.90056` | `2.454x` |
+| `(M=16,K=8192,N=8192)` | `2.13046` | `5.18854` | `2.435x` |
+
+The focused LR32 suite is `168 passed` and the broader MLX suite is
+`326 passed`. M1 complete-module speedup is still below the universal `2x`
+goal because transform and epilogue work remains outside the Metal kernel;
+the kernel-level long-K M1 result is materially improved.
