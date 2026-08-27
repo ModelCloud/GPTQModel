@@ -3452,3 +3452,26 @@ so no production dispatch or checkpoint behavior was changed. The remaining
 M1 opportunity is a genuinely fused full-module transform/epilogue design,
 which must be benchmarked at the `QVQMLXLinear` boundary and checked against
 the dense/original FP32 path.
+
+## 90. Corrected M1 output-H32 fusion recheck rejected
+
+The full-H factorization was rechecked independently: normalized contiguous
+H32 followed by an outer H(N/32) matches MLX's normalized full Hadamard to
+floating-point tolerance. An in-memory LR candidate then fused local H32 into
+the existing shared split-2 M1/N64 output tile, using the surviving SIMD lanes
+to transform two 32-value blocks before storing; MLX applied only the outer
+H256 transform.
+
+The complete-module candidate was numerically close to the production path
+(`max_abs=0.0625`, relative L2 `0`, 13 differing FP16 output elements), but
+lost in a corrected same-process A/B at `(M=1,K=2048,N=8192)`:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Native full-H production | `0.32840` | `0.47851` | `0.36927` |
+| Fused local-H32 + outer-H | `0.33144` | `0.59821` | `0.39049` |
+
+The candidate measured `0.991x` at p50 and `0.946x` by mean. The additional
+shared-output barrier and outer transform outweighed the saved native-H work,
+so no production fusion was promoted. The universal `2x` target remains open
+for M1; larger-row LR32 paths continue to clear it.
