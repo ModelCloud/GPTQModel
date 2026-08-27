@@ -102,14 +102,14 @@ divergence token 5.3633. Its full GSM8K Platinum score is 17.8660%.
 | 45a387 | up + down MLP projections W2.5, reg .15 | **2.2990** | 5 | complete; D300 **19.9583%**, exact 3/300, mean divergence 5.0200 | GSM8K complete: **28.1224%** |
 | 19d89a | Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 4 | complete; D300 **16.5938%**, exact 1/300, mean divergence 4.2667 | GSM8K complete: **19.9338%** |
 | ebec00 | Smooth + Atomic SwiGLU triplet replay, reg .15 | 2.0232 | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498%** |
-| 0f642c | Up + Down projections W3, reg .15 | **2.5749** | 0 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
-| 569a95 | Up + Down projections W3.5, reg .15 | **2.8508** | 1 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
+| 0f642c | Up + Down projections W3, reg .15 | **2.5749** | 0 | complete; D300 **21.7396%**, exact 7/300, mean divergence 5.6300 | GSM8K complete: **30.6865% (371/1209)** |
+| 569a95 | Up + Down projections W3.5, reg .15 | **2.8508** | 1 | complete; D300 **21.3021%**, exact 6/300, mean divergence 5.7000 | GSM8K complete: **31.6791% (383/1209)** |
 | cdfa75 | Up + Down projections W4, reg .15 | **~3.1266*** | 2 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
-| ef21af | V + O projections W3, reg .15 | **2.1094** | 3 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
-| 60a68a | V + O projections W3.5, reg .15 | **2.1525** | 4 | quantizing; clean benchmark manifest | D300 + GSM8K Platinum pending |
+| ef21af | V + O projections W3, reg .15 | **2.1094** | 3 | complete; D300 **17.9271%**, exact 2/300, mean divergence 4.5933 | GSM8K complete: **24.7312% (299/1209)** |
+| 60a68a | V + O projections W3.5, reg .15 | **2.1525** | 4 | complete; D300 **19.0833%**, exact 4/300, mean divergence 5.0133 | GSM8K complete: **26.6336% (322/1209)** |
 | 98daf5 | V + O projections W4, reg .15 | **~2.1956*** | 5 | **failed during quantization** with model-wide `qvq_v4`; trusted CUDA Viterbi rejects V4 sequences; no checkpoint | No D300/GSM8K result |
-| d13602 | V + O projections W2 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0232** | 6 | quantizing; clean YAQA/NM and disjoint replay manifests | D300 + GSM8K Platinum pending |
-| b7d172 | V + O projections W2.5 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0663** | 7 | quantizing; clean YAQA/NM and disjoint replay manifests | D300 + GSM8K Platinum pending |
+| d13602 | V + O projections W2 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0232** | 6 | complete; D300 **17.6146%**, exact 1/300, mean divergence 4.9933 | GSM8K complete: **22.2498% (269/1209)** |
+| b7d172 | V + O projections W2.5 + Smooth + Atomic SwiGLU replay, reg .15 | **2.0663** | 7 | complete; D300 **19.0833%**, exact 4/300, mean divergence 5.9333 | GSM8K complete: **25.3102% (306/1209)** |
 
 For historical traceability, an earlier monitor snapshot (2026-08-26 UTC)
 listed three replay quantizations with evaluator wrappers reserved for each
