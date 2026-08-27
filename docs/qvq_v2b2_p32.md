@@ -2684,3 +2684,23 @@ or an Instruments GUI-created package with shader timeline enabled. Until
 then, the highest-confidence overlap opportunity is still removing the
 multirow M1 barrier/shared-tile architecture, not tuning an unobserved stall
 counter.
+
+## 61. Corrected H32 sign/permutation follow-up
+
+The first H32 probe in section 59 contained a prototype-only butterfly sign
+error. A follow-up used the standard per-stage Hadamard update
+`even: local + other; odd: other - local` and passed the local H32 oracle
+exactly (`max_abs=0`, relative L2 `0`) before the outer factorization.
+
+At `(M=1,K=8192,N=2048)`, the corrected complete-module candidate measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Current full-H | `0.43190` | `0.49820` | `0.46225` |
+| Local-H32 + outer-H | `0.41556` | `0.45868` | `0.41636` |
+
+This is only `1.039x` at p50 and `1.110x` by mean, and after the required
+FP16 output cast the complete-module comparison still had `max_abs=0.03125`
+with four differing elements. The candidate is therefore rejected: the
+modest and noisy latency change does not justify a new transform path without
+a stronger numerical contract and a clear full-module win.
