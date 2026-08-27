@@ -3490,3 +3490,28 @@ Two in-memory one-load variants were tested using either a lane-0
 0 across the two tile-owning halves in this kernel mapping. The apparent
 single-load timing improvement is therefore invalid. The production two-load
 selector mapping remains unchanged.
+
+## 92. M1 two-SIMD-group N32 geometry rechecks
+
+The M1/N64 decoder was re-shaped in memory so each threadgroup covered one
+N32 output tile with two SIMD groups, while retaining shared K64 activation
+staging and the existing W2 half2 recurrence. The output was exactly equal to
+the production N64 route. At `(M=1,K=2048,N=8192)`, the candidate improved
+complete-module p50 by approximately `1.135x` and mean by `1.229x` in the
+screening A/B, but remained well below the required `2x`.
+
+A second candidate mapped the same two-SIMD-group geometry onto the fused
+two-split schedule, removing the external MLX reduction. It was also exactly
+equal to production, but the corrected randomized complete-module A/B was
+effectively neutral at p50 and worse by mean:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production N64 W2 half2 | `0.32769` | `0.52336` | `0.37452` |
+| Fused N32 split-2 candidate | `0.31879` | `0.57765` | `0.38355` |
+
+The fused candidate measured `1.028x` at p50 but `0.976x` by mean and was
+not promoted. The result suggests that the smaller threadgroup geometry can
+reduce the median launch cost, but its extra synchronization/variance does
+not provide a reliable module-level win. Production dispatch remains
+unchanged and the universal M1 `2x` target remains open.
