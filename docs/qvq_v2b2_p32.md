@@ -2289,3 +2289,11 @@ remained faster at the shapes where the two routes differ: `0.41623 ms` versus
 at `K=2048,N=2048` (`1.130x`), with parity below `6.5e-5` absolute. The
 fused split-8 route is retained. The `K=8192,N=2048` probe does not exercise
 this choice because its dedicated M1/N64 shape route takes precedence.
+
+A no-barrier N32 prototype was also tested for M1 W2. It assigned one output
+lane per channel and doubled the fixed pair loop, reducing the number of
+threadgroups. Although it measured `1.086x`, `1.275x`, and `1.429x` faster
+than the production route at `(K,N)=(2048,256)`, `(2048,2048)`, and
+`(8192,2048)`, respectively, its Torch-oracle relative errors were `0.962`,
+`0.998`, and `0.980`. The prototype therefore had an incorrect lane/packing
+mapping and was rejected; it is not part of the production dispatch.
