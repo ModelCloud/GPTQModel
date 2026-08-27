@@ -2704,3 +2704,25 @@ FP16 output cast the complete-module comparison still had `max_abs=0.03125`
 with four differing elements. The candidate is therefore rejected: the
 modest and noisy latency change does not justify a new transform path without
 a stronger numerical contract and a clear full-module win.
+
+## 62. Fresh AC/high-performance baseline after power-mode change
+
+After switching the M4 Max from power-save operation to plugged-in
+high-performance mode, the randomized complete-module benchmark was rerun at
+the committed tree (`434db0cd`) with 30 warmups, 120 synchronized samples per
+arm, shared payloads, and seed `20260933`:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(M=1,K=2048,N=256)` | `0.76385` | `1.08496` | `1.420x` | `3.55846` | `2.71772` |
+| `(M=1,K=2048,N=2048)` | `0.75502` | `1.02904` | `1.363x` | `2.07321` | `2.26158` |
+| `(M=1,K=2048,N=8192)` | `0.99494` | `1.33665` | `1.343x` | `1.89971` | `2.92736` |
+| `(M=1,K=8192,N=2048)` | `0.87221` | `1.40054` | `1.606x` | `2.27788` | `2.90844` |
+| `(M=4,K=2048,N=8192)` | `1.35781` | `2.58375` | `1.903x` | `3.46390` | `4.36540` |
+| `(M=8,K=2048,N=8192)` | `1.71915` | `4.20119` | `2.444x` | `4.36786` | `6.70336` |
+| `(M=16,K=8192,N=8192)` | `2.57754` | `5.74940` | `2.231x` | `4.15159` | `8.37990` |
+
+These measurements are not directly interchangeable with the earlier AC
+tables: the host still exhibits substantial p50/p95 variation. They establish
+a new comparison point only; all future candidates must be interleaved with
+the committed route in the same process and session.
