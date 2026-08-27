@@ -49,6 +49,27 @@ if [ -e "$OUT/qvq_quantize_run.json" ]; then
   exit 0
 fi
 
+# Replay datasets are valid only for configs that explicitly enable the
+# module-granular replay controller.  Passing them to an ordinary precision
+# allocation arm is rejected by qvq_quantize.py, so derive the optional CLI
+# fragment from the authoritative JSON config instead of guessing from the
+# arm name.
+REPLAY_ARGS=()
+if python - "$CONFIG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+raise SystemExit(0 if payload.get("module_granular_replay") else 1)
+PY
+then
+  REPLAY_ARGS=(
+    --replay-search-dataset "$REPLAY" --replay-search-row-start 0 --replay-search-rows 32
+    --replay-confirmation-dataset "$REPLAY" --replay-confirmation-row-start 32 --replay-confirmation-rows 32
+  )
+fi
+
 echo "[$(date -u +%FT%TZ)] starting arm=${ARM} on physical gpu=${GPU}"
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" \
   python /root/QvQ/scripts/qvq_quantize.py \
@@ -57,8 +78,7 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$GPU" \
     --quant-config "/root/QvQ/$CONFIG" \
     --calibration-dataset "$CAL" --calibration-row-start 0 --calibration-rows 128 \
     --yaqa-dataset "$YAQA" --yaqa-row-start 0 --yaqa-rows 182 \
-    --replay-search-dataset "$REPLAY" --replay-search-row-start 0 --replay-search-rows 32 \
-    --replay-confirmation-dataset "$REPLAY" --replay-confirmation-row-start 32 --replay-confirmation-rows 32 \
+    "${REPLAY_ARGS[@]}" \
     --device cuda:0 \
     --disjointness-manifest "$MANIFEST" \
     --require-disjointness \
