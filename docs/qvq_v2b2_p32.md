@@ -843,6 +843,29 @@ calls and 160 synchronized samples per format on the same AC/performance-mode M4
 This comparison is between the current native-Hadamard checkout and the same MLX implementation's P32 control. Both
 formats receive the graph optimization; it changes neither BPW nor the LR32 kernel ABI.
 
+#### Latest AC/performance-mode split-K recheck
+
+The small-M FP32 policy was subsequently changed from split-2 to split-4 for wide short-K modules, and to split-8 for
+long-K down projections. In a paired 150-sample complete-module comparison, split-4 versus split-2 reduced p50 from
+`0.85088 ms` to `0.80094 ms` for `(M=1,K=2048,N=8192)` and from `0.84133 ms` to `0.80137 ms` for `(M=2,K=2048,N=8192)`.
+The corresponding inner-GEMV p50 changed from `0.67381 ms` to `0.65473 ms` for M1; M2 was statistically neutral at
+`0.68613 ms` versus `0.68929 ms`. Output parity was exact in these split comparisons.
+
+The production module benchmark was rerun with 60 warmup calls and 160 synchronized samples after this policy change:
+
+| Shape (M,K,N) | LR p50 (ms) | P32 p50 (ms) | P32/LR | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| (1,2048,256) | 0.29210 | 0.39269 | 1.34x | 0.32613 | 0.44571 |
+| (1,2048,2048) | 0.21140 | 0.23127 | 1.09x | 0.24128 | 0.25406 |
+| (1,2048,8192) | 0.23850 | 0.29792 | 1.25x | 0.25951 | 0.32755 |
+| (1,8192,2048) | 0.24354 | 0.30925 | 1.27x | 0.26330 | 0.34461 |
+| (4,2048,8192) | 0.29790 | 0.54356 | 1.83x | 0.33380 | 0.64917 |
+| (8,2048,8192) | 0.40596 | 0.89542 | 2.21x | 0.45401 | 0.95833 |
+| (16,8192,8192) | 2.16085 | 5.18069 | 2.40x | 2.34851 | 5.34035 |
+
+This recheck confirms the policy change improves the latency-sensitive M1 wide case, while the complete-module 2x
+target remains strongest at M8/M16 because M1--M4 include a larger fixed transform/launch fraction.
+
 #### AC/performance-mode rejected probes
 
 Two additional same-process probes were run on the plugged-in M4 Max and were not promoted to production. Metal
