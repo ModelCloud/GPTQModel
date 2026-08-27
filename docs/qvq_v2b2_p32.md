@@ -4015,19 +4015,20 @@ an exact Torch/MLX oracle plus randomized same-process complete-module A/B;
 Xcode trace structure alone is not sufficient to promote a kernel.
 
 A fresh AC/performance-mode spot check after the capture used the existing
-randomized/interleaved complete-module benchmark with 10 warmups and 10
+randomized/interleaved complete-module benchmark with 30 warmups and 50
 samples per arm, seed `20260828`. It reproduced the current regime:
 
 | Shape | LR p50 (ms) | P32 p50 (ms) | p50 speedup |
 |---|---:|---:|---:|
-| `(1,2048,256)` | `0.44760` | `0.72406` | `1.618x` |
-| `(1,2048,2048)` | `0.51848` | `0.75617` | `1.458x` |
-| `(1,2048,8192)` | `0.80915` | `1.24496` | `1.539x` |
-| `(1,8192,2048)` | `0.84219` | `1.25419` | `1.489x` |
-| `(4,2048,8192)` | `1.29371` | `2.65917` | `2.055x` |
-| `(8,2048,8192)` | `1.49619` | `3.95900` | `2.646x` |
-| `(16,8192,8192)` | `2.54125` | `5.83413` | `2.296x` |
+| `(1,2048,256)` | `0.35877` | `0.53969` | `1.504x` |
+| `(1,2048,2048)` | `0.40246` | `0.57217` | `1.422x` |
+| `(1,2048,8192)` | `0.28390` | `0.38650` | `1.361x` |
+| `(1,8192,2048)` | `0.20854` | `0.30637` | `1.469x` |
+| `(4,2048,8192)` | `0.31573` | `0.55569` | `1.760x` |
+| `(8,2048,8192)` | `0.36798` | `0.89812` | `2.441x` |
+| `(16,8192,8192)` | `2.76317` | `5.94931` | `2.153x` |
 
-These 10-sample values are a spot check, not a replacement for the 80/100+
-sample tables above. They again show M1 below the universal `2x` target and
-M8/M16 above it; no production code was changed from the profiler run.
+These 50-sample values are a spot check, not a replacement for the 80/100+
+sample tables above. They again show M1 and M4 below the universal `2x`
+target and M8/M16 above it; no production code was changed from the profiler
+run.
