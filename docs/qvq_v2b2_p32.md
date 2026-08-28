@@ -4824,3 +4824,49 @@ Those metrics must come from an Instruments configuration/device session with
 Metal hardware counters and shader timeline enabled. The trace is therefore
 kept as scheduling/submission evidence only; no optimization is promoted from
 it and the trace package is not committed to the repository.
+
+## 141. M1 uint2 direct-activation and fused split-4 probes rejected
+
+Two additional in-memory probes targeted the remaining short-K/wide-N M1
+gap. Both used the current aligned-`uint2` W2 decoder and the complete
+`QVQMLXLinear` boundary at `(M=1,K=2048,N=8192)` on the plugged-in,
+performance-mode M4 Max.
+
+The first removed the shared K64 activation tile and its threadgroup barriers.
+Each SIMD group loaded its own K32 activation values and distributed them with
+`simd_shuffle`, while retaining the current packed-word decoder and four-way
+split. It was exactly equal to production:
+
+```text
+max_abs = 0
+relative_l2 = 0
+rmse = 0
+```
+
+The randomized same-process A/B used identical payloads and inputs, 12
+warmups, and 80 samples per arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production aligned `uint2` | `0.34600` | `0.48589` | `0.36265` |
+| Direct SIMD activation | `0.45827` | `0.75884` | `0.49197` |
+
+The direct-activation candidate was `0.755x` at p50 and `0.737x` by mean.
+Removing the shared activation barriers does not compensate for the extra
+activation loads on this M4 Max shape, so no production change was made.
+
+The second probe fused the four K splits and four N16 tiles into one
+512-threadgroup launch with an in-kernel deterministic reduction, eliminating
+the external MLX split reduction. The candidate failed the complete-module
+correctness gate against production:
+
+```text
+max_abs = 236.5
+rmse = 55.71875
+relative_l2 = nan in the probe comparison
+```
+
+Its measured p50/mean were `0.38123/0.41088 ms` versus production
+`0.32352/0.36449 ms`, but those timings are not performance evidence because
+the candidate is numerically invalid. The transient source was discarded;
+the production aligned-`uint2` K64 route remains unchanged.
