@@ -139,6 +139,10 @@ _LR_M1_N32_FUSED_WIDE_SPLIT_COUNT = 16
 # Pair two N32 output tiles in one 512-thread group for the single measured
 # short-K shape.  This is intentionally narrow: the N256 probe was neutral.
 _USE_LR_M1_N64_N32PAIR_SPLIT8 = True
+# Long-K wide-N M1 uses the same paired N32/Split8 geometry as the validated
+# short-K N2048 route.  Keep this independently gated until its complete
+# QVQMLXLinear A/B and FP16 drift are reviewed.
+_USE_LR_M1_N64_N32PAIR_SPLIT8_LONGK = True
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
 _LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool, bool], str] = {}
 
@@ -5077,12 +5081,17 @@ def qvq_mlx_gemv(
             and m1_n64_half2
         )
         m1_n64_n32pair_split8 = (
-            _USE_LR_M1_N64_N32PAIR_SPLIT8
-            and output_fp32
-            and transition_bits == 4
-            and m == 1
-            and k == 2048
-            and n == 2048
+            (_USE_LR_M1_N64_N32PAIR_SPLIT8 and m == 1 and k == 2048 and n == 2048)
+            or (
+                _USE_LR_M1_N64_N32PAIR_SPLIT8_LONGK
+                and output_fp32
+                and transition_bits == 4
+                and m == 1
+                and k >= 8192
+                and k % 256 == 0
+                and n >= 8192
+                and n % 64 == 0
+            )
         )
         m1_n32_fused_split16_wide = (
             _USE_LR_M1_N32_FUSED_WIDE

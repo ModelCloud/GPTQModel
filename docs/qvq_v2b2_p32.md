@@ -5243,3 +5243,42 @@ p50; `0.39091` vs `0.35600` ms mean). A 128-thread sequential-Split2
 variant was also slower (`0.78600` vs `0.75108` ms p50; `0.84294` vs
 `0.79698` ms mean). Their isolated inner-kernel wins therefore do not
 translate to module-level wins, and neither is enabled.
+
+## 152. Long-K wide-N paired N32/Split8 route
+
+The validated paired N32/Split8 decoder was extended behind
+`_USE_LR_M1_N64_N32PAIR_SPLIT8_LONGK` for M1 W2 FP32 workloads with
+`K>=8192`, `K%256==0`, and `N>=8192`, `N%64==0`. Two N32 output tiles share
+one 512-thread launch and one fused deterministic split-8 reduction. The
+existing short-K `(K=2048,N=2048)` route is unchanged; all other shapes keep
+their previous dispatch.
+
+The route was added with an independent raw Torch-oracle test for both
+`(K=8192,N=8192)` and the Llama-style `(K=8192,N=11008)` width. The focused
+route set passed `8/8`; the complete LR32 suite passed `179/179` in `54.80 s`.
+
+On the plugged-in, `powermode=2` M4 Max, a same-process randomized/interleaved
+complete-module A/B used 30 warmups and 120 synchronized samples per arm.
+Compared with the previous generic M1 fallback:
+
+| Shape | Fallback p50 (ms) | Pair8 p50 (ms) | Fallback/Pair8 | Fallback p95 | Pair8 p95 |
+|---|---:|---:|---:|---:|---:|
+| `(1,8192,8192)` | `0.56100` | `0.45400` | `1.236x` | `0.67872` | `0.60270` |
+| `(1,8192,11008)` | `0.62523` | `0.49454` | `1.264x` | `0.86744` | `0.64382` |
+
+The active route was then compared directly with P32 under the same timing
+policy:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | LR speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,8192,8192)` | `1.11575` | `1.83000` | `1.640x` | `1.47727` | `2.87135` |
+| `(1,8192,11008)` | `2.19279` | `3.74052` | `1.706x` | `2.57025` | `4.14761` |
+
+The raw kernel remains within the existing `atol=2e-2` Torch oracle. At the
+complete FP16 module boundary, reduction-order drift versus the previous
+fallback was `max_abs=0.03125` for `N=8192` and `max_abs=0.125` for `N=11008`
+in the measured random payloads, with RMSE `0.00104` and `0.00245`
+respectively. These are not exact-output claims; the route is retained as a
+narrow performance specialization and should be evaluated for model-quality
+impact before any wider rollout. It improves the long-K M1 baseline but does
+not yet meet the universal `2x` objective.
