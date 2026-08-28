@@ -5694,3 +5694,37 @@ both were substantially slower than native `mx.hadamard_transform`. At width
 `0.05–0.08 ms` native; at width 8192 it was approximately `0.25–0.40 ms`
 versus `0.04–0.08 ms`. Neither was promoted. Native MLX Hadamard remains the
 production transform path.
+
+## 169. W2 state-to-level LUT probe and latest powered baseline
+
+The active M1/N32 W2 decoder was also tested with an offline-generated
+`65536 x 2` FP16 lookup table for each of the two PGC16 banks. The table
+replaces the per-pair state hash/mask arithmetic while preserving the exact
+PGC16 values. The Torch/production oracle was bit-exact (`max_abs=0`, relative
+L2 `0`), but the extra random device-memory access was substantially slower
+than the compact constant-table path:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production N32/split-16 | `0.210438` | `0.322710` | `0.228776` |
+| State-to-level LUT | `0.342083` | `0.829124` | `0.450454` |
+
+The LUT/production ratios were `1.624x` by p50 and `1.970x` by mean, so the
+LUT is rejected and no additional runtime table is added.
+
+The same powered M4 Max run refreshed the public inner-kernel comparison at
+300 synchronized randomized samples per arm:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.36773` | `0.45373` | `1.234x` | `0.60170` | `0.65660` |
+| `(1,2048,2048)` | `0.45092` | `0.51698` | `1.147x` | `0.87364` | `0.76499` |
+| `(1,2048,8192)` | `0.50900` | `0.77592` | `1.524x` | `0.86117` | `1.14937` |
+| `(1,8192,2048)` | `0.63787` | `0.95767` | `1.501x` | `1.55351` | `1.68890` |
+| `(4,2048,8192)` | `0.99658` | `1.95790` | `1.965x` | `1.35445` | `2.55385` |
+| `(8,2048,8192)` | `0.96875` | `2.24502` | `2.317x` | `1.44860` | `3.49311` |
+| `(16,8192,8192)` | `2.64604` | `5.58500` | `2.111x` | `2.95971` | `5.90841` |
+
+LR remains faster than the non-local P32 kernel for every tested shape. The
+inner-kernel `2x` target is met for M8/M16, while short-M cases remain the
+unresolved portion of the objective.
