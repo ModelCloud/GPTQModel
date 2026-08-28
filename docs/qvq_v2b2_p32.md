@@ -5028,6 +5028,49 @@ The inner kernel remains faster than P32 for all tested shapes and exceeds
 and GPU scheduling history, so the paired ratio is the useful comparison.
 The M1 short-K/wide-N kernel remains below the universal `2x` objective.
 
+## 151. Apple Metal profiling and N32 metadata-load probe
+
+The M4 Max was tested plugged into AC power with macOS `powermode=2`. A
+bounded Xcode `Metal System Trace` capture was collected for the production
+M1 `(M=1,K=2048,N=8192)` route and the M8 `(M=8,K=2048,N=8192)` route, using
+20 warmups and 12 active calls. The traces were saved outside the repository
+under `/tmp/qvq-metal-profile-*` and are intentionally not committed.
+
+This installed Xcode/OS/device combination reported:
+
+```text
+Counter Set: (null)
+Shader Timeline: Disabled
+```
+
+The `Metal GPU Counters` name is present in the installed instrument list but
+is not an `xctrace` recording template on this machine, so no hardware
+occupancy, cache, bandwidth, stall, or utilization percentages are claimed.
+The usable result is scheduling evidence: the trace contains the target
+process's Metal command-buffer and GPU-interval tables. Fine-grained shader
+barriers are therefore audited from the generated source and validated by
+paired timing rather than inferred from unavailable counters.
+
+The source audit shows the promoted M1/N32 W2 kernel has one threadgroup
+barrier for its fused split reduction and no barrier inside its K loop. The
+multi-row M8 path has the expected two threadgroup barriers per K32 tile: one
+publishes the decoded tile and one protects the next tile overwrite. This
+supports keeping the barrier-minimal M1 route and focusing future profiling on
+module-boundary overhead or a separately validated M8+ decode/MMA design.
+
+An attempted M1/N32 W2 metadata optimization tried to load each ring's packed
+words once and distribute them with SIMD shuffles, and also tried replacing
+the established per-eight-lane selector broadcast with a single lane-0
+broadcast. Both variants failed the Torch reconstruction oracle on the
+N32-derived routes; the production source was restored and the targeted
+regression set returned to `12 passed`. This is a rejected optimization, not a
+runtime behavior change.
+
+The full LR32 suite remains the release gate and must be rerun after any
+future Metal source change. The current M1 path is faster than P32 but does
+not yet meet the universal `2x` target; M4/M8/M16 paths do meet or exceed `2x`
+in the documented synchronized sweeps.
+
 ## 147. M1 half2 activation staging probe (rejected)
 
 The M1/N64 W2 route was tested with the shared K64 activation tile stored as
