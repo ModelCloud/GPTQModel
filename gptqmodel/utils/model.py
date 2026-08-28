@@ -705,6 +705,7 @@ def create_quant_module(
     tmp_sym = sym
     tmp_pack_dtype = pack_dtype
     tmp_format = format
+    dynamic_format_override = False
     tmp_init_kwargs = dict(init_kwargs or {})
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
@@ -726,6 +727,7 @@ def create_quant_module(
             if FORMAT_FIELD_CODE in overrides or "format" in overrides:
                 raw_format = overrides.get(FORMAT_FIELD_CODE, overrides.get("format"))
                 tmp_format = raw_format if isinstance(raw_format, FORMAT) else FORMAT(str(raw_format).strip().lower())
+                dynamic_format_override = True
             tmp_bits = _normalize_quant_bits(overrides.get("bits", bits), format_value=tmp_format)
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
@@ -777,7 +779,7 @@ def create_quant_module(
     # QVQ's format selects its serialized geometry.  A dynamic format override
     # must therefore update the constructor flags inherited from the global
     # config (otherwise a normal V2 W5 module could be instantiated as V2B2).
-    if getattr(linear_cls, "QUANT_TYPE", None) == "qvq":
+    if getattr(linear_cls, "QUANT_TYPE", None) == "qvq" and dynamic_format_override:
         tmp_init_kwargs["format"] = tmp_format
         if tmp_format in (FORMAT.QVQ, FORMAT.QVQ_DUAL_V2):
             tmp_init_kwargs.update(vector_size=2, trellis_window=16, bank_count=1)
