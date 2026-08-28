@@ -426,13 +426,13 @@ diagnostic.
 
 | Arm ID | GPU | Allocation | Target BPW | State |
 | --- | ---: | --- | ---: | --- |
-| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | queued |
-| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | queued |
-| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | queued |
-| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | queued |
-| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | queued |
-| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | queued |
-| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | queued |
-| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | queued |
+| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | waiting for GPU |
+| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | waiting for GPU |
+| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | waiting for GPU |
+| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | waiting for GPU |
+| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | waiting for GPU |
+| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | waiting for GPU |
+| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | waiting for GPU |
+| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | waiting for GPU |
 
 Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.
