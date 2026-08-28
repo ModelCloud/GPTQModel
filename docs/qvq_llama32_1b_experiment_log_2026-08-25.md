@@ -1298,3 +1298,20 @@ and 3.
 | monitor | `llama32-1b-w2-w1fixed_w1_up4_l12_15` | `divergence300` | complete; aligned_token_top1=0.35270833333333335; exact=19/300; mean_first_divergence=10.96; report `/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_l12_15-div300-dev-v1.json` |
 | monitor | `llama32-1b-w2-w1fixed_w1_up4_l8_11` | `divergence300` | complete; aligned_token_top1=0.35260416666666666; exact=18/300; mean_first_divergence=10.673333333333334; report `/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_l8_11-div300-dev-v1.json` |
 | monitor | `llama32-1b-w2-w1fixed_w1_v4_up4_l13_15` | `divergence300` | complete; aligned_token_top1=0.37114583333333334; exact=20/300; mean_first_divergence=11.323333333333334; report `/root/qvq-results/llama32-1b-w2-w1fixed_w1_v4_up4_l13_15-div300-dev-v1.json` |
+
+## Wave-3 corrected frontier evaluations (2026-08-28 UTC)
+
+| monitor | arm_id | task | result | report |
+| --- | --- | --- | --- | --- |
+| monitor | `b6429f` | `micro_math` | complete; mini_exact=0.046875 (3/64); answer_logprob_delta=-0.025164622424253776; answer_margin_delta=0.4311086455387856; critical_top1=0.970917225950783 | `/root/qvq-results/llama32-1b-w2-w3queued_b6429f_llama32_1b_frontier_w3_control_qk25_vo35_g3_u35_d3-micro-math-v3.json` |
+| monitor | `42a659` | `micro_math` | complete; mini_exact=0.0625 (4/64); answer_logprob_delta=-0.14303467567287273; answer_margin_delta=0.3544583391787401; critical_top1=0.9725151805688719 | `/root/qvq-results/llama32-1b-w2-w3queued_42a659_llama32_1b_frontier_w3_o4_early_up3-micro-math-v3.json` |
+| monitor | `5dc744` | `micro_math` | complete; mini_exact=0.046875 (3/64); answer_logprob_delta=-0.26148495256011167; answer_margin_delta=0.5950916062540083; critical_top1=0.9731543624161074 | `/root/qvq-results/llama32-1b-w2-w3queued_5dc744_llama32_1b_frontier_w3_o4_early_gate25-micro-math-v3.json` |
+| monitor | `286d6d` | `micro_math` | complete; mini_exact=0.046875 (3/64); answer_logprob_delta=0.06851246864048403; answer_margin_delta=0.4319104151939278; critical_top1=0.975071907957814 | `/root/qvq-results/llama32-1b-w2-w3queued_286d6d_llama32_1b_frontier_w3_o4_q2-micro-math-v3.json` |
+| monitor | `4e7424` | `micro_math` | complete; mini_exact=0.03125 (2/64); answer_logprob_delta=0.6117219907134327; answer_margin_delta=1.9054487997026586; critical_top1=0.975071907957814 | `/root/qvq-results/llama32-1b-w2-w3queued_4e7424_llama32_1b_frontier_w3_flat35_up4_l12_15_seed1-micro-math-v3.json` |
+| monitor | `d0be49` | `micro_math` | complete; mini_exact=0.03125 (2/64); answer_logprob_delta=-0.6450147655472827; answer_margin_delta=-0.7907120434205923; critical_top1=0.9776286353467561 | `/root/qvq-results/llama32-1b-w2-w3queued_d0be49_llama32_1b_frontier_w3_flat35_up4_l7_15-micro-math-v3.json` |
+| monitor | `b6429f` | `gsm8k_platinum_cot` | complete; accuracy=0.4284532671629446 (518/1209); invalid=0 | `/root/qvq-results/llama32-1b-w2-w3queued_b6429f_llama32_1b_frontier_w3_control_qk25_vo35_g3_u35_d3-gsm8k-platinum-v3.json` |
+| monitor | `42a659` | `gsm8k_platinum_cot` | complete; accuracy=0.4218362282878412 (510/1209); invalid=0 | `/root/qvq-results/llama32-1b-w2-w3queued_42a659_llama32_1b_frontier_w3_o4_early_up3-gsm8k-platinum-v3.json` |
+| monitor | `5dc744` | `gsm8k_platinum_cot` | complete; accuracy=0.42018196856906537 (508/1209); invalid=0 | `/root/qvq-results/llama32-1b-w2-w3queued_5dc744_llama32_1b_frontier_w3_o4_early_gate25-gsm8k-platinum-v3.json` |
+| monitor | `286d6d` | `gsm8k_platinum_cot` | complete; accuracy=0.4358974358974359 (527/1209); invalid=0 | `/root/qvq-results/llama32-1b-w2-w3queued_286d6d_llama32_1b_frontier_w3_o4_q2-gsm8k-platinum-v3.json` |
+| monitor | `4e7424` | `gsm8k_platinum_cot` | complete; accuracy=0.46153846153846156 (558/1209); invalid=0 | `/root/qvq-results/llama32-1b-w2-w3queued_4e7424_llama32_1b_frontier_w3_flat35_up4_l12_15_seed1-gsm8k-platinum-v3.json` |
+| monitor | `d0be49` | `gsm8k_platinum_cot` | complete; accuracy=0.44086021505376344 (533/1209); invalid=0 | `/root/qvq-results/llama32-1b-w2-w3queued_d0be49_llama32_1b_frontier_w3_flat35_up4_l7_15-gsm8k-platinum-v3.json` |

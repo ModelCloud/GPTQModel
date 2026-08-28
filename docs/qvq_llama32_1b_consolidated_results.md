@@ -417,23 +417,29 @@ Machine-readable status and cross-references: `docs/experiments/frontier_wave2_r
 
 ## Wave-3 control/reallocation queue (2026-08-28 UTC)
 
-These eight arms were queued behind the corrected Wave-2 quantizations; six are
-now actively quantizing and two duplicate allocations are reused from Wave-2.
+These eight arms were queued behind the corrected Wave-2 quantizations; six
+unique allocations have now completed Mini-GSM and GSM8K Platinum, and two
+duplicate allocations are reused from Wave-2.
 The batch includes a current-
 code replication of the historical `2ae00f` allocation, exact-budget O/Up
 reallocations, and high-frontier late-Up breadth/seed controls. Mini-GSM and
 full GSM8K Platinum are required after each checkpoint; D300 remains
 diagnostic.
 
-| Arm ID | GPU | Allocation | Target BPW | State |
-| --- | ---: | --- | ---: | --- |
-| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | evaluation running |
-| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | evaluation running |
-| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | evaluation running |
-| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | evaluation running |
-| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | evaluation running |
-| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | reused Wave-2 arm `42c2fc` |
-| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | evaluation running |
-| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | reused Wave-2 arm `f7f157` |
+| Arm ID | GPU | Allocation | Target BPW | State | Mini-GSM | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | ---: | ---: |
+| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | evaluation complete | 4.69% (3/64) | **42.85% (518/1209)** |
+| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | evaluation complete | 6.25% (4/64) | **42.18% (510/1209)** |
+| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | evaluation complete | 4.69% (3/64) | **42.02% (508/1209)** |
+| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | evaluation complete | 4.69% (3/64) | **43.59% (527/1209)** |
+| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | evaluation complete | 3.13% (2/64) | **46.15% (558/1209)** |
+| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | reused Wave-2 arm `42c2fc` | 4.69% (3/64) | **44.25% (535/1209)** |
+| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | evaluation complete | 3.13% (2/64) | **44.09% (533/1209)** |
+| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | reused Wave-2 arm `f7f157` | 4.69% (3/64) | **44.42% (537/1209)** |
+
+Wave-3 GSM8K reports are recorded in
+`docs/experiments/frontier_wave3_queue_20260828.json`; all six unique runs
+completed with zero invalid generations. The seed-1 high-frontier control
+(`4e7424`) currently leads this wave at 558/1209 (46.15%).
 
 Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.
