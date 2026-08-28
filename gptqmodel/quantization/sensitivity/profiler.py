@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from ..analysis import AnalysisSelection, QuantizationAnalyzer, _layer_index, _module_role, _weight_matrix
+from ..config import quant_bits_width
 
 
 def _rate_label(rate: Any) -> str:
@@ -36,14 +37,20 @@ class SensitivityProfiler:
         """Collect input-channel diagonal Hessian and activation tails in one dense pass."""
         modules = {name: m for name, m in model.named_modules() if isinstance(m, nn.Linear)}
 
+        seen_this_batch: set[str] = set()
         def hook(name):
-            def capture(module, args):
+            def capture(module, args, kwargs):
                 if not args or not torch.is_tensor(args[0]):
                     return
                 x = args[0].detach()
                 if x.ndim == 1:
                     x = x.reshape(1, -1)
+                original_shape = x.shape
                 x = x.reshape(-1, x.shape[-1]).to(self.device, dtype=torch.float32)
+                mask = kwargs.get("attention_mask") if isinstance(kwargs, Mapping) else None
+                if torch.is_tensor(mask) and tuple(mask.shape) == tuple(original_shape[:-1]):
+                    mask = mask.reshape(-1).to(self.device, dtype=torch.bool)
+                    x = x[mask]
                 finite = torch.isfinite(x).all(dim=1)
                 x = x[finite]
                 if not x.numel():
@@ -54,9 +61,10 @@ class SensitivityProfiler:
                 amax = x.abs().amax(dim=0)
                 state["max"] = amax if state["max"] is None else torch.maximum(state["max"], amax)
                 state["tokens"] += int(x.shape[0])
+                seen_this_batch.add(name)
             return capture
 
-        self._hooks = [module.register_forward_pre_hook(hook(name)) for name, module in modules.items()]
+        self._hooks = [module.register_forward_pre_hook(hook(name), with_kwargs=True) for name, module in modules.items()]
         model_was_training = model.training
         model.eval()
         with torch.inference_mode():
@@ -65,12 +73,18 @@ class SensitivityProfiler:
                     break
                 if isinstance(batch, Mapping):
                     batch = {k: (v.to(self.device) if torch.is_tensor(v) else v) for k, v in batch.items()}
-                    model(**batch)
+                    try:
+                        model(**batch)
+                    except TypeError:
+                        # Small adapter models (and unit-test sequential models)
+                        # often expose only positional forward(input).
+                        model(batch.get("input_ids", next(iter(batch.values()))))
                 else:
                     value = batch.to(self.device) if torch.is_tensor(batch) else batch
                     model(value)
-                for state in self._activation.values():
-                    state["sequences"] += 1
+                for name in seen_this_batch:
+                    self._activation[name]["sequences"] += 1
+                seen_this_batch.clear()
         for h in self._hooks:
             h.remove()
         self._hooks.clear()
@@ -111,15 +125,9 @@ class SensitivityProfiler:
             h = activation.get("hessian") if activation else None
             curves = {}
             for rate in self.candidate_rates:
-                bits = int(round(float(rate)))
-                stats, _ = self.analyzer._analyze_weight(weight, bit_width=bits, group_size=record["group_size"], sym=record["sym"])
-                damage = float(stats["rel_rmse"] ** 2)
-                if h is not None and h.numel() == weight.shape[1]:
-                    # Diagonal activation-weighted proxy; exact Q(W) error is
-                    # represented by the measured RTN relative error curve.
-                    channel_mass = float(h.sum().item()) / max(float(h.numel()), 1.0)
-                    damage *= channel_mass
-                curves[_rate_label(rate)] = {"representation_error": stats["rel_rmse"], "activation_error": damage}
+                representation, damage = self._candidate_damage(weight, float(rate), record["group_size"], record["sym"], h)
+                curves[_rate_label(rate)] = {"rate": float(rate), "representation_error": representation,
+                                             "activation_error": damage, "candidate_kind": "rtn_proxy"}
             confidence = 100.0 if not activation else min(100.0, 100.0 * math.log1p(activation["tokens"]) / math.log1p(262144))
             risk = max(float(v["activation_error"]) for v in curves.values()) if curves else float(record["risk_score"])
             record = dict(record)
@@ -146,11 +154,53 @@ class SensitivityProfiler:
         values = [_layer_index(n) for n, _ in model.named_modules()]
         return max((v for v in values if v is not None), default=0) + 1
 
+    def _candidate_damage(self, weight, rate: float, group_size: int, sym: bool, hessian):
+        """Return representation and channel-weighted damage for a rate.
+
+        Fractional QVQ rates are retained as candidates. Until a native QVQ
+        reconstruction callback is supplied, half-rates interpolate adjacent
+        integer RTN probes and are marked ``rtn_proxy`` in the report.
+        """
+        lo = max(1, int(math.floor(rate))); hi = max(lo, int(math.ceil(rate)))
+        def one(width):
+            rows, cols = weight.shape
+            qmax = (2 ** (width - 1) - 1) if sym else (2 ** width - 1)
+            qmin = -qmax if sym else 0
+            eps = torch.finfo(torch.float32).eps
+            w = weight.float()
+            step = cols if group_size <= 0 else group_size
+            q = torch.empty_like(w)
+            for start in range(0, cols, step):
+                block = w[:, start:min(start + step, cols)]
+                if sym:
+                    scale = torch.amax(block.abs(), dim=1, keepdim=True).clamp_min(eps) / max(qmax, 1)
+                    q[:, start:start + block.shape[1]] = torch.round(block / scale).clamp(qmin, qmax) * scale
+                else:
+                    mn, mx = block.amin(1, keepdim=True), block.amax(1, keepdim=True)
+                    scale = (mx - mn).clamp_min(eps) / max(qmax, 1)
+                    zero = torch.round(-mn / scale).clamp(qmin, qmax)
+                    q[:, start:start + block.shape[1]] = (torch.round(block / scale + zero).clamp(qmin, qmax) - zero) * scale
+            diff2 = (w - q).square(); signal = w.square()
+            if hessian is not None and hessian.numel() == cols:
+                weights = hessian.to(w.device, dtype=w.dtype).reshape(1, -1)
+                num = float((diff2 * weights).sum().item())
+                den = float((signal * weights).sum().item())
+            else:
+                num, den = float(diff2.sum().item()), float(signal.sum().item())
+            return math.sqrt(num / max(den, eps)), num / max(den, eps)
+        a, da = one(lo)
+        if hi == lo:
+            return a, da
+        b, db = one(hi); alpha = rate - lo
+        return a + alpha * (b - a), da + alpha * (db - da)
+
     def plan(self, records: Sequence[dict[str, Any]], *, target_bpw: float | None = None) -> dict[str, Any]:
         """Greedy marginal-recovery plan; callers can replace it with SLQ ILP."""
         base = float(self.qcfg.bits)
         target = float(target_bpw) if target_bpw is not None else base
         selected = {r["module"]: base for r in records}
+        total_numel = max(1, sum(int(r.get("numel", 0)) for r in records))
+        budget = max(0.0, target - base)
         if target > base and records:
             candidates = []
             for r in records:
@@ -159,14 +209,15 @@ class SensitivityProfiler:
                     a, b = curves.get(_rate_label(low), {}), curves.get(_rate_label(high), {})
                     if a and b and float(high) > float(low):
                         gain = float(a.get("activation_error", 0)) - float(b.get("activation_error", 0))
-                        candidates.append((gain / float(high - low), r["module"], float(high)))
+                        weight_fraction = int(r.get("numel", 0)) / total_numel
+                        candidates.append((gain / max(weight_fraction * float(high - low), 1e-12), r["module"], float(low), float(high), weight_fraction * float(high - low)))
             candidates.sort(reverse=True)
-            budget = target - base
-            for _, name, rate in candidates:
+            for _, name, low, rate, weighted_delta in candidates:
                 if budget <= 0:
                     break
-                delta = rate - selected[name]
-                if delta > 0:
+                # Only permit adjacent transitions; never price W2 -> W4 as one step.
+                if abs(selected[name] - low) < 1e-6 and weighted_delta <= budget:
                     selected[name] = rate
-                    budget -= delta
-        return {"target_bpw": target, "base_bpw": base, "assignments": selected}
+                    budget -= weighted_delta
+        return {"target_bpw": target, "base_bpw": base, "assignments": selected,
+                "budget_units": "parameter-weighted bits/weight", "remaining_budget": max(0.0, budget)}
