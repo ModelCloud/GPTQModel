@@ -6083,3 +6083,25 @@ arm on the AC/high-performance M4 Max:
 
 The candidate was only `1.012x` faster at p50 and `1.007x` by mean. It was
 rejected; the scalar SIMD-shuffle source remains production behavior.
+
+## 182. Current M1 module-boundary decomposition
+
+To locate the remaining gap, the current powered M4 Max path was timed at the
+individual MLX boundaries for `(M=1,K=2048,N=8192)` using the same transformed
+FP32 LR activation and payload as the complete module. These measurements are
+diagnostic and not additive because each isolated call creates a different
+lazy graph and synchronization boundary.
+
+| Component | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Input scale + Hadamard | `0.401584` | `0.541950` | `0.440533` |
+| LR GEMV | `0.539625` | `0.613681` | `0.548478` |
+| Output Hadamard | `0.352146` | `0.402052` | `0.354947` |
+| Output Hadamard + SV | `0.383646` | `0.488952` | `0.403633` |
+| Complete `QVQMLXLinear` | `0.672895` | `0.769065` | `0.689549` |
+
+The same complete module under a shape-specialized `mx.compile` callable was
+`0.378521` ms p50 and `0.384296` ms mean versus eager `0.400438` ms p50 and
+`0.403306` ms mean (`1.058x` p50 and `1.049x` mean). Compilation helps the
+graph boundary but is not sufficient for 2x. The next boundary candidate must
+preserve exact LR32 output while reducing Hadamard/epilogue launch overhead.
