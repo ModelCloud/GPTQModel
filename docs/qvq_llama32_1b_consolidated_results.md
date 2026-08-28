@@ -393,3 +393,24 @@ strict audit at `docs/experiments/disjointness-div300-sources-v2.json`.
 Arm `4aa38f`, which used the ineligible 993-row artifact, is therefore listed
 in the "Invalidated arms" section above and should not be compared as a
 completed flat-W2 result.
+## Corrected Wave-2 matched-budget rerun (2026-08-28 UTC)
+
+The first Wave-2 launch was invalid because stale configurations required 2,000
+YAQA sequences while the run supplied 182. It produced no checkpoints or
+metrics. The corrected launch uses regenerated configs with
+`minimum_sequences=182`, W4 regularization `0.02`, the corrected dynamic-rule
+precedence, and the seed-1 control. A launcher preflight now refuses any config
+whose sequence floor exceeds the supplied YAQA slice.
+
+| Arm ID | GPU | Allocation | Effective BPW | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | --- | --- |
+| `42c2fc` | 0 | Flat W3.5 + Up W4 layers 8–15 | 3.5921 | quantizing | pending | pending |
+| `e55f4d` | 1 | Flat W3.5 + Up W4 layers 6–15 | 3.6094 | quantizing | pending | pending |
+| `428e4d` | 2 | Flat W3.5 + Up W4 layers 4–15 | 3.6266 | quantizing | pending | pending |
+| `a7e34b` | 3 | Flat W3.5 + Up/Down W4 layers 12–15 | 3.5921 | quantizing | pending | pending |
+| `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | quantizing | pending | pending |
+| `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | quantizing | pending | pending |
+| `049d0c` | 6 | Flat W3.5 + Up W4 layers 9–15 + V W4 all | 3.6266 | quantizing | pending | pending |
+| `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | quantizing | pending | pending |
+
+Machine-readable status and cross-references: `docs/experiments/frontier_wave2_rerun_20260828.json` and `docs/experiments/arm_id_index.json`.
