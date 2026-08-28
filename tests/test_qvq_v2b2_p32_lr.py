@@ -947,6 +947,7 @@ def test_lr32_mlx_m1_n64_shared_split2_kernel_matches_torch_oracle(monkeypatch, 
     # This test targets the shared-split implementation explicitly; the
     # production K=2048/N=8192 dispatch may prefer the half2 candidate.
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_HALF2", False)
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N32_FUSED_WIDE", False)
     out_features = 8192
     _, _, trellis, selectors = _random_lr_payload(
         2,
@@ -1020,6 +1021,9 @@ def test_lr32_mlx_m1_n64_packed_load_kernel_matches_torch_oracle(
     )
     selected = {"called": False}
     monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N64_UINT2", use_uint2)
+    # This test covers the two N64 implementations directly; the production
+    # short-K/wide-N N32 promotion has its own dispatch/oracle test below.
+    monkeypatch.setattr(qvq_mlx, "_USE_LR_M1_N32_FUSED_WIDE", False)
     original = getattr(qvq_mlx, kernel_name)
 
     def observed(**kwargs):
@@ -1043,6 +1047,53 @@ def test_lr32_mlx_m1_n64_packed_load_kernel_matches_torch_oracle(
     assert selected["called"]
     if use_uint2:
         assert selected["k_tile"] == 128
+    torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
+
+
+def test_lr32_mlx_m1_n32_wide_dispatch_matches_torch_oracle(monkeypatch):
+    mx = pytest.importorskip("mlx.core")
+    from gptqmodel.utils import qvq_mlx
+
+    in_features = 2048
+    out_features = 8192
+    _, _, trellis, selectors = _random_lr_payload(
+        2,
+        tiles=(in_features // 32) * (out_features // 8),
+    )
+    packed_selectors = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([2], dtype=torch.uint8)
+    x = torch.randn(1, in_features, dtype=torch.float32)
+    expected = x @ reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=2,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=packed_selectors,
+        bank_alt_id=bank_alt_id,
+    )
+    selected = {"called": False}
+    original = qvq_mlx._local_ring_m1_n32_fused_split_kernel
+
+    def observed(**kwargs):
+        selected["called"] = True
+        selected.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(qvq_mlx, "_local_ring_m1_n32_fused_split_kernel", observed)
+    actual = qvq_mlx.qvq_mlx_gemv(
+        mx.array(x.numpy()),
+        mx.array(trellis.numpy()),
+        2,
+        out_features=out_features,
+        bank_ids=mx.array(packed_selectors.numpy()),
+        bank_alt_id=mx.array(bank_alt_id.numpy()),
+        v2b2_p32_lr=True,
+        output_fp32=True,
+        _bank_alt_id_value=2,
+    )
+    mx.eval(actual)
+    assert selected["called"]
+    assert selected["split_count"] == 16
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
 
 

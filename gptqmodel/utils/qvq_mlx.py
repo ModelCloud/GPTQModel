@@ -126,9 +126,16 @@ _USE_LR_M1_N64_HALF2 = True
 # short-K wide-N shape; retain the half2 scalar-load route as the fallback for
 # every other shape/device until it has its own A/B evidence.
 _USE_LR_M1_N64_UINT2 = True
-# One-lane-per-output N32 is retained only for the measured long-K M1 regime;
-# short-K shapes were neutral or slower than the promoted N16 route.
+# One-lane-per-output N32 remains enabled for the measured long-K M1 regime
+# and the separately promoted short-K/wide-N shape.
 _USE_LR_M1_N32_FUSED = True
+# Keep the short-K/wide-N promotion independently switchable so its A/B can
+# be compared with the N64 source without changing the established N32 policy
+# for the other M1 shapes.
+_USE_LR_M1_N32_FUSED_WIDE = True
+# M4 Max screening favors the high-occupancy Split16/32 variants for the
+# fixed short-K/wide-N route. Keep the selected count explicit for A/B runs.
+_LR_M1_N32_FUSED_WIDE_SPLIT_COUNT = 16
 # Pair two N32 output tiles in one 512-thread group for the single measured
 # short-K shape.  This is intentionally narrow: the N256 probe was neutral.
 _USE_LR_M1_N64_N32PAIR_SPLIT8 = True
@@ -5077,6 +5084,16 @@ def qvq_mlx_gemv(
             and k == 2048
             and n == 2048
         )
+        m1_n32_fused_split16_wide = (
+            _USE_LR_M1_N32_FUSED_WIDE
+            and output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k == 2048
+            and n == 8192
+        )
+        if _LR_M1_N32_FUSED_WIDE_SPLIT_COUNT not in (16, 32):
+            raise ValueError("QVQ LR32 wide M1/N32 split count must be 16 or 32")
         m1_fused_split = (
             output_fp32
             and transition_bits == 4
@@ -5154,6 +5171,19 @@ def qvq_mlx_gemv(
             group_size = 512
             output_width = 64
             kernel = _local_ring_m1_n64_n32pair_split8_kernel(alt_bank_id=alt_id)
+        elif m1_n32_fused_split16_wide:
+            # The short-K wide-N case is better served by the barrier-minimal
+            # one-lane-per-output N32 decoder than by the shared N64 source.
+            # Sixteen fixed K slices expose enough independent work while the
+            # fused reduction avoids materializing split partials.
+            row_tile = 1
+            wide_split_count = _LR_M1_N32_FUSED_WIDE_SPLIT_COUNT
+            group_size = 1024 if wide_split_count == 32 else 512
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id,
+                split_count=wide_split_count,
+            )
         elif m1_n64_uint2:
             # The fixed short-K wide-N source loads each aligned pair of W2
             # words as one uint2 on the even lane, then shares both words
@@ -5317,7 +5347,8 @@ def qvq_mlx_gemv(
         row_blocks = (m + row_tile - 1) // row_tile
         inputs = (
             [x, trellis, bank_ids]
-            if (m1_n64 and not m1_n64_shared_split2) or m1_n64_half2
+            if ((m1_n64 and not m1_n64_shared_split2) or m1_n64_half2)
+            and not m1_n32_fused_split16_wide
             else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
         )
         literal_w2_mask = (
@@ -5337,16 +5368,24 @@ def qvq_mlx_gemv(
             and not m1_n32_fused_split16
             and not m1_n32_fused_split32
             and not m1_n64_n32pair_split8
+            and not m1_n32_fused_split16_wide
             and not m1_n64_split2
             and (not m1_n64_shared_split2 or m1_n64_half2)
         ):
             template.append(("SplitK", split_k))
         output_width = (
             64
-            if m1_n64_split2 or (m1_n64_shared_split2 and not m1_n64_half2) or m1_n64
+            if m1_n64_split2
+            or (m1_n64_shared_split2 and not m1_n64_half2)
+            or (m1_n64 and not m1_n32_fused_split16_wide)
             or m1_n64_n32pair_split8
             else 32
-            if m1_n32_fused_split or m1_n32_fused_split16 or m1_n32_fused_split32
+            if (
+                m1_n32_fused_split
+                or m1_n32_fused_split16
+                or m1_n32_fused_split32
+                or m1_n32_fused_split16_wide
+            )
             else _local_ring_small_output_width(n)
             if small_rows and m <= 2 and n % 16 == 0
             else 8
@@ -5359,6 +5398,7 @@ def qvq_mlx_gemv(
                 or m1_n32_fused_split
                 or m1_n32_fused_split16
                 or m1_n32_fused_split32
+                or m1_n32_fused_split16_wide
                 or m1_n64_n32pair_split8
                 or m1_n64_split2
                 or (m1_n64_shared_split2 and not m1_n64_half2)
@@ -5379,6 +5419,7 @@ def qvq_mlx_gemv(
                     or m1_n32_fused_split
                     or m1_n32_fused_split16
                     or m1_n32_fused_split32
+                    or m1_n32_fused_split16_wide
                     or m1_n64_n32pair_split8
                     or m1_n64_split2
                     or (m1_n64_shared_split2 and not m1_n64_half2)
@@ -5395,6 +5436,7 @@ def qvq_mlx_gemv(
             or m1_n32_fused_split
             or m1_n32_fused_split16
             or m1_n32_fused_split32
+            or m1_n32_fused_split16_wide
             or m1_n64_n32pair_split8
             or m1_n64_split2
             or (m1_n64_shared_split2 and not m1_n64_half2)

@@ -5140,3 +5140,63 @@ warmups and 100 randomized/interleaved samples per arm:
 The fresh run remains faster than P32 for every listed shape; M1 is still
 below the universal `2x` objective, while the larger-row paths continue to
 clear it.
+
+## 150. Barrier-minimal N32 promotion for short-K wide-N M1
+
+The short-K/wide-N `(M=1,K=2048,N=8192)` case was moved from the shared
+K128/N64 decoder to the existing barrier-minimal one-lane-per-output N32
+decoder. The N32 source uses sixteen fixed K splits, explicit W2 nibble
+updates, and one fused in-threadgroup reduction; it has no per-K
+threadgroup barriers. The promotion is isolated behind
+`_USE_LR_M1_N32_FUSED_WIDE` and does not change other M1 policies.
+
+The dispatch/oracle test passed for the production route and all three
+alternative-bank IDs remain covered by the N64 tests. The full LR32 test
+file passed:
+
+```text
+177 passed in 41.07s
+```
+
+A same-process randomized/interleaved complete-module A/B used identical
+payloads and inputs, 250 samples per arm, and the plugged-in,
+performance-mode M4 Max. The N32 route preserved the existing output
+contract:
+
+```text
+max_abs = 0.015625
+relative_l2 = 0
+rmse = 0.000244140625
+```
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous N64/K128 | `0.42152` | `0.45322` | `0.38155` |
+| Promoted N32/Split16 | `0.38308` | `0.40505` | `0.34575` |
+
+The promoted route measured `1.100x` faster at p50, `1.119x` at p95, and
+`1.104x` by mean relative to the previous M1 route. A fresh canonical
+LR/P32 sweep with 30 warmups and 150 randomized/interleaved samples per arm
+reported:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.36542` | `0.57792` | `1.582x` | `0.57445` | `0.73460` |
+| `(1,2048,2048)` | `0.35567` | `0.55910` | `1.572x` | `0.45938` | `0.67083` |
+| `(1,2048,8192)` | `0.49971` | `0.86890` | `1.739x` | `0.67366` | `1.10107` |
+| `(1,8192,2048)` | `0.48967` | `0.86281` | `1.762x` | `0.68517` | `1.08325` |
+| `(4,2048,8192)` | `0.86608` | `1.96156` | `2.265x` | `1.01065` | `2.15602` |
+| `(8,2048,8192)` | `0.58163` | `1.46262` | `2.515x` | `0.76124` | `1.89345` |
+| `(16,8192,8192)` | `2.27050` | `5.35804` | `2.360x` | `2.57164` | `5.95677` |
+
+The M1 wide shape improved from the previous canonical `1.442x` snapshot to
+`1.739x` in this AC/performance-mode run, but it remains below the universal
+`2x` objective. The M4/M8/M16 cases continue to exceed `2x`.
+
+Two split-reduction candidates were also tested and rejected at the complete
+module boundary. A 256-thread K128/Split2 shared reduction had exact output
+parity but was slower than the previous route (`0.32412` vs `0.30635` ms
+p50; `0.39091` vs `0.35600` ms mean). A 128-thread sequential-Split2
+variant was also slower (`0.78600` vs `0.75108` ms p50; `0.84294` vs
+`0.79698` ms mean). Their isolated inner-kernel wins therefore do not
+translate to module-level wins, and neither is enabled.
