@@ -8,6 +8,7 @@ import inspect
 import math
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -210,6 +211,9 @@ class AWQProcessor(LoopProcessor):
         self.duo_scaling = True
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
+        self._awq_feature_stats: Dict[str, Dict[str, Any]] = {}
+        self._awq_scale_feature_by_module: Dict[str, str] = {}
+        self._awq_feature_task_names: Set[str] = set()
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -373,7 +377,29 @@ class AWQProcessor(LoopProcessor):
         self._nsamples_total = total_tokens
         self.nsamples = total_tokens
 
-    def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+    def _feature_aggregation_policy(self, module_name: str) -> Optional[Dict[str, Any]]:
+        """Return an optional model-specific activation aggregation policy."""
+
+        selector = getattr(self.gptq_model, "awq_input_feature_aggregation", None)
+        if not callable(selector):
+            return None
+        policy = selector(module_name)
+        if policy is None:
+            return None
+        if not isinstance(policy, Mapping):
+            raise TypeError(
+                "awq_input_feature_aggregation must return a mapping or None "
+                f"for {module_name!r}, got {type(policy).__name__}."
+            )
+        return dict(policy)
+
+    def _record_input_feature(
+        self,
+        module_name: str,
+        feature: torch.Tensor,
+        *,
+        dedupe_batch: bool = False,
+    ) -> None:
         """Caches one captured input feature tensor for a named module."""
 
         # Preserve a leading sample axis for flattened [seq, hidden] captures so later
@@ -381,19 +407,74 @@ class AWQProcessor(LoopProcessor):
         if feature.dim() <= 2:
             feature = feature.unsqueeze(0)
 
-        if feature.device.type != "cpu":
-            feature = feature.detach().cpu()
-        else:
-            feature = feature.detach()
+        batch_index = self.current_batch_index()
+        reserved_batch_index = False
+        if dedupe_batch and batch_index is not None:
+            # Reserve before the potentially large GPU -> CPU transfer. MoE roots
+            # can replay the same input once per expert subset; checking after the
+            # transfer would discard the duplicate but still copy a full hidden
+            # state tensor for every layer.
+            with self.lock:
+                entry = self.tasks.get(module_name)
+                if entry is None:
+                    entry = {"inputs": [], "batch_indices": []}
+                    self.tasks[module_name] = entry
+                seen_batch_indices = entry.setdefault("seen_batch_indices", set())
+                if batch_index in seen_batch_indices:
+                    return
+                seen_batch_indices.add(batch_index)
+                reserved_batch_index = True
+
+        try:
+            if feature.device.type != "cpu":
+                feature = feature.detach().cpu()
+            else:
+                feature = feature.detach()
+        except Exception:
+            if reserved_batch_index:
+                with self.lock:
+                    entry = self.tasks.get(module_name)
+                    if entry is not None:
+                        entry.get("seen_batch_indices", set()).discard(batch_index)
+            raise
 
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
                 entry = {"inputs": [], "batch_indices": []}
                 self.tasks[module_name] = entry
+            if dedupe_batch and batch_index is not None and not reserved_batch_index:
+                seen_batch_indices = entry.setdefault("seen_batch_indices", set())
+                if batch_index in seen_batch_indices:
+                    return
+                seen_batch_indices.add(batch_index)
             inputs_list = entry.setdefault("inputs", [])
             inputs_list.append(feature)
-            entry.setdefault("batch_indices", []).append(self.current_batch_index())
+            entry.setdefault("batch_indices", []).append(batch_index)
+
+    def record_moe_root_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+        """Capture one pointwise MoE-root input per calibration batch when requested.
+
+        MoE layers are normally hooked only at expert projections.  Model-specific
+        AWQ scale groups may instead need the shared pre-router input.  The policy
+        gate keeps this opt-in so sequence-sensitive models retain their existing
+        replay contract.
+        """
+
+        if getattr(self, "coverage_only", False):
+            return
+
+        policy = self._feature_aggregation_policy(module_name)
+        if not policy or not policy.get("capture_root", False):
+            return
+        # Capture only while at least one routed projection under this root has
+        # an active AWQ task. Replay-only passes after task cleanup must not
+        # repopulate the root cache.
+        task_prefix = f"{module_name}."
+        with self.lock:
+            if not any(name.startswith(task_prefix) for name in self.tasks):
+                return
+        self._record_input_feature(module_name, feature, dedupe_batch=True)
 
     @staticmethod
     def _can_concat_batch_tensors(tensors: List[torch.Tensor]) -> bool:
@@ -407,6 +488,60 @@ class AWQProcessor(LoopProcessor):
             tensor.dim() == first.dim() and tensor.shape[1:] == first.shape[1:]
             for tensor in tensors
         )
+
+    @staticmethod
+    def _pack_token_rows(
+        tensors: List[torch.Tensor],
+        *,
+        max_tokens: int,
+    ) -> Tuple[torch.Tensor, int]:
+        """Pack ragged pointwise activations into deterministic bounded token rows.
+
+        The returned tensor always has shape ``[1, retained_tokens, hidden]``.
+        Sampling is evenly spaced over calibration-batch order and includes both
+        endpoints, avoiding the previous latest-batch-only bias without allocating
+        a full concatenated activation tensor first.
+        """
+
+        if not tensors:
+            return torch.empty(0), 0
+        if max_tokens <= 0:
+            raise ValueError(f"AWQ token-row max_tokens must be positive, got {max_tokens}.")
+
+        hidden = int(tensors[0].shape[-1])
+        rows = []
+        total_tokens = 0
+        for tensor in tensors:
+            if tensor.dim() < 2 or int(tensor.shape[-1]) != hidden:
+                raise ValueError(
+                    "AWQ token-row aggregation requires tensors with one common "
+                    f"hidden dimension ({hidden}); got shape={tuple(tensor.shape)}."
+                )
+            flattened = tensor.reshape(-1, hidden)
+            rows.append(flattened)
+            total_tokens += int(flattened.shape[0])
+
+        retained_tokens = min(total_tokens, max_tokens)
+        if retained_tokens == total_tokens:
+            return torch.cat(rows, dim=0).unsqueeze(0), total_tokens
+        if retained_tokens == 1:
+            return rows[0][:1].unsqueeze(0), total_tokens
+
+        sample_indices = (
+            torch.arange(retained_tokens, dtype=torch.int64)
+            * (total_tokens - 1)
+            // (retained_tokens - 1)
+        )
+        selected = []
+        offset = 0
+        for tensor_rows in rows:
+            end = offset + int(tensor_rows.shape[0])
+            mask = (sample_indices >= offset) & (sample_indices < end)
+            if mask.any():
+                local_indices = sample_indices[mask] - offset
+                selected.append(tensor_rows.index_select(0, local_indices))
+            offset = end
+        return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
 
     @staticmethod
     def _concat_batch_metadata(values: List[Any]) -> Any:
@@ -645,30 +780,94 @@ class AWQProcessor(LoopProcessor):
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         """Collapse cached per-batch inputs into one replay tensor per module.
 
-        Most batches can be concatenated on dim 0. Variable-length calibration
-        batches cannot: for example `[1, 423, H]` and `[1, 36, H]` represent
-        different sequence lengths after masking or packing. In that case we
-        keep the most recent feature tensor and rebuild kwargs from the same
-        batch index so activations, masks, and position ids remain aligned.
+        Model-specific pointwise policies pack variable-length batches into
+        bounded token rows, so every calibration batch contributes to AWQ scale
+        statistics. Generic sequence-sensitive modules retain the legacy
+        behavior: concatenate equal shapes, otherwise keep the latest feature
+        and aligned kwargs.
         """
 
         features: Dict[str, torch.Tensor] = {}
         feature_kwargs: Dict[str, Dict[str, Any]] = {}
-        root_buckets: Dict[str, List[torch.Tensor]] = {}
+        feature_stats: Dict[str, Dict[str, Any]] = {}
+        feature_names = list(state.modules)
+        roots = {name.split(".", 1)[0] for name in feature_names}
+        for root in sorted(roots):
+            if root in self.tasks and root not in feature_names:
+                policy = self._feature_aggregation_policy(root)
+                if policy and policy.get("capture_root", False):
+                    feature_names.append(root)
+
+        self._awq_feature_task_names = set(feature_names)
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
-        for name in list(state.modules):
+        for name in feature_names:
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             batch_indices: List[Optional[int]] = entry.get("batch_indices", [])  # type: ignore[arg-type]
             if not tensors:
                 features[name] = torch.empty(0)
                 feature_kwargs[name] = {}
+                feature_stats[name] = {
+                    "mode": "empty",
+                    "raw_tokens": 0,
+                    "retained_tokens": 0,
+                    "batches": 0,
+                }
                 continue
-            if self._can_concat_batch_tensors(tensors):
+
+            # Capture hooks can complete in device/runtime order, not
+            # necessarily calibration-batch order.  Restore the serial replay
+            # order before concatenation (or before choosing the last
+            # variable-length capture) so activation statistics and their
+            # cached kwargs stay aligned with the calibration corpus.
+            if (
+                len(batch_indices) == len(tensors)
+                and all(index is not None and index >= 0 for index in batch_indices)
+            ):
+                ordered = sorted(
+                    zip(batch_indices, tensors),
+                    key=lambda item: int(item[0]),
+                )
+                batch_indices = [item[0] for item in ordered]
+                tensors = [item[1] for item in ordered]
+
+            policy = self._feature_aggregation_policy(name)
+            aggregation_mode = (policy or {}).get("mode")
+            if aggregation_mode == "token_rows":
+                max_tokens = int((policy or {}).get("max_tokens", 512))
+                features[name], raw_tokens = self._pack_token_rows(
+                    tensors,
+                    max_tokens=max_tokens,
+                )
+                feature_kwargs[name] = {}
+                retained_tokens = int(features[name].shape[-2])
+                entry["inputs"] = [features[name]]
+                entry["batch_indices"] = [None]
+                feature_stats[name] = {
+                    "mode": "token_rows",
+                    "raw_tokens": raw_tokens,
+                    "retained_tokens": retained_tokens,
+                    "batches": len(tensors),
+                    "max_tokens": max_tokens,
+                }
+            elif aggregation_mode not in (None, "batch"):
+                raise ValueError(
+                    f"Unsupported AWQ feature aggregation mode {aggregation_mode!r} "
+                    f"for {name!r}."
+                )
+            elif self._can_concat_batch_tensors(tensors):
                 features[name] = torch.cat(tensors, dim=0)
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices(batch_indices)
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [None]
+                hidden = max(int(features[name].shape[-1]), 1)
+                tokens = int(features[name].numel() // hidden)
+                feature_stats[name] = {
+                    "mode": "batch",
+                    "raw_tokens": tokens,
+                    "retained_tokens": tokens,
+                    "batches": len(tensors),
+                }
             else:
                 # Variable-length captures such as `[1, 423, H]` and `[1, 36, H]`
                 # cannot be concatenated on dim 0. Keep the latest capture and
@@ -678,8 +877,15 @@ class AWQProcessor(LoopProcessor):
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices([last_batch_index])
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [last_batch_index]
-            root = name.split(".", 1)[0]
-            root_buckets.setdefault(root, []).extend(tensors)
+                hidden = max(int(features[name].shape[-1]), 1)
+                raw_tokens = sum(int(tensor.numel() // hidden) for tensor in tensors)
+                retained_tokens = int(features[name].numel() // hidden)
+                feature_stats[name] = {
+                    "mode": "latest_batch",
+                    "raw_tokens": raw_tokens,
+                    "retained_tokens": retained_tokens,
+                    "batches": len(tensors),
+                }
             if features[name] is not None and features[name].numel() > 0:
                 pass  # previously logged input feature shapes
                 # log.info(
@@ -688,14 +894,8 @@ class AWQProcessor(LoopProcessor):
                 #     tuple(features[name].shape),
                 # )
 
-        # for root, tensors in root_buckets.items():
-        #     if not tensors or root in features:
-        #         continue
-        #     try:
-        #         features[root] = torch.cat(tensors, dim=0)
-        #     except RuntimeError:
-        #         features[root] = tensors[0]
         self._awq_feature_kwargs = feature_kwargs
+        self._awq_feature_stats = feature_stats
         return features
 
     def _quantize_layer_fallback(
@@ -827,8 +1027,12 @@ class AWQProcessor(LoopProcessor):
             if feat is None or feat.numel() == 0:
                 return True
 
-            hidden = feat.shape[-1] if feat.dim() >= 1 else 1
-            captured_tokens += feat.numel() // max(hidden, 1)
+            feature_stat = getattr(self, "_awq_feature_stats", {}).get(name, {})
+            if "raw_tokens" in feature_stat:
+                captured_tokens += int(feature_stat["raw_tokens"])
+            else:
+                hidden = feat.shape[-1] if feat.dim() >= 1 else 1
+                captured_tokens += feat.numel() // max(hidden, 1)
 
         expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
         return should_use_fallback(
@@ -865,6 +1069,7 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
+        self._awq_scale_feature_by_module = {}
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing and not self.fallback:
             raise RuntimeError(
@@ -981,6 +1186,18 @@ class AWQProcessor(LoopProcessor):
             )
 
         sanitized_module_config = filtered_module_config
+        feature_name_by_id = {id(tensor): name for name, tensor in input_feat.items()}
+        for cfg in sanitized_module_config:
+            feature_name = feature_name_by_id.get(id(cfg.get("inp")))
+            if feature_name is None:
+                continue
+            for layer in cfg.get("layers") or []:
+                layer_name = (
+                    get_op_name(layer_module_ref, layer)
+                    if isinstance(layer, torch.nn.Module)
+                    else str(layer)
+                )
+                self._awq_scale_feature_by_module[layer_name] = feature_name
         if not sanitized_module_config and not fallback_names:
             log.warning(
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
@@ -1104,10 +1321,13 @@ class AWQProcessor(LoopProcessor):
         state.previous_weight_scale = None
 
         with self.lock:
-            for name in named_childs:
+            for name in self._awq_feature_task_names or set(named_childs):
                 task_entry = self.tasks.pop(name, None)
                 if task_entry and "inputs" in task_entry:
                     task_entry["inputs"].clear()
+        self._awq_feature_task_names = set()
+        self._awq_feature_stats = {}
+        self._awq_scale_feature_by_module = {}
 
         if hasattr(self._scale_context, "layer_index"):
             delattr(self._scale_context, "layer_index")
@@ -1790,6 +2010,19 @@ class AWQProcessor(LoopProcessor):
                 loss_summary = f"{avg_loss_value:.10f}"
 
             # TODO "loss" and "nsamples" may not be consistent with the semantics of gptq quantization.
+            activation_stat = getattr(self, "_awq_feature_stats", {}).get(
+                named_module.name,
+                {},
+            )
+            scale_feature = getattr(self, "_awq_scale_feature_by_module", {}).get(
+                named_module.name,
+                named_module.name,
+            )
+            scale_stat = getattr(self, "_awq_feature_stats", {}).get(
+                scale_feature,
+                activation_stat,
+            )
+            retained_samples = int(scale_stat.get("retained_tokens", 0)) or self._nsamples_total
             stat = {
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: named_module.layer_index,
@@ -1797,7 +2030,14 @@ class AWQProcessor(LoopProcessor):
                 MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
                 DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
                 QUANT_LOG_LOSS: loss_summary,
-                QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
+                QUANT_LOG_NSAMPLES: f"{retained_samples}",
+                "activation_raw_tokens": int(activation_stat.get("raw_tokens", 0)),
+                "activation_retained_tokens": int(activation_stat.get("retained_tokens", 0)),
+                "activation_batches": int(activation_stat.get("batches", 0)),
+                "activation_aggregation": activation_stat.get("mode", "unknown"),
+                "scale_feature": scale_feature,
+                "scale_raw_tokens": int(scale_stat.get("raw_tokens", 0)),
+                "scale_retained_tokens": int(scale_stat.get("retained_tokens", 0)),
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",

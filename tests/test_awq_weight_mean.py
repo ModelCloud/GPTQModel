@@ -127,6 +127,84 @@ def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kw
     assert features["self_attn.q_proj"].shape == (1, 36, QWEN3_HIDDEN_SIZE)
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["attention_mask"].shape == (1, 1, 36, 36)
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["position_ids"].shape == (1, 36)
+    assert processor._awq_feature_stats["self_attn.q_proj"]["mode"] == "latest_batch"
+    assert processor._awq_feature_stats["self_attn.q_proj"]["raw_tokens"] == 459
+    assert processor._awq_feature_stats["self_attn.q_proj"]["retained_tokens"] == 36
+
+
+def test_awq_layer_input_features_packs_variable_pointwise_token_rows():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    state = _AWQLayerState(modules={"mlp.experts.0.gate_proj": object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 8}
+        if name == "mlp.experts.0.gate_proj"
+        else None
+    )
+    processor.tasks["mlp.experts.0.gate_proj"] = {
+        "inputs": [
+            torch.full((1, 4, 4), 30.0),
+            torch.full((1, 2, 4), 10.0),
+            torch.full((1, 3, 4), 20.0),
+        ],
+        "batch_indices": [2, 0, 1],
+    }
+
+    features = processor._layer_input_features(state)
+    packed = features["mlp.experts.0.gate_proj"]
+
+    assert packed.shape == (1, 8, 4)
+    assert torch.equal(
+        torch.unique(packed[0, :, 0]),
+        torch.tensor([10.0, 20.0, 30.0]),
+    )
+    assert processor._awq_feature_kwargs["mlp.experts.0.gate_proj"] == {}
+    assert processor._awq_feature_stats["mlp.experts.0.gate_proj"] == {
+        "mode": "token_rows",
+        "raw_tokens": 9,
+        "retained_tokens": 8,
+        "batches": 3,
+        "max_tokens": 8,
+    }
+
+
+def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 16, "capture_root": True}
+        if name == "mlp"
+        else None
+    )
+    processor.tasks["mlp.experts.0.gate_proj"] = {
+        "inputs": [torch.ones(1, 1, 4)],
+        "batch_indices": [0],
+    }
+    processor._set_current_batch_index(0)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 2, 4), 10.0))
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 2, 4), 99.0))
+    processor._set_current_batch_index(1)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 3, 4), 20.0))
+    processor._set_current_batch_index(None)
+
+    state = _AWQLayerState(modules={"mlp.experts.0.gate_proj": object()})
+    features = processor._layer_input_features(state)
+
+    assert features["mlp"].shape == (1, 5, 4)
+    assert torch.equal(features["mlp"][0, :, 0], torch.tensor([10.0, 10.0, 20.0, 20.0, 20.0]))
+    assert processor._awq_feature_stats["mlp"]["batches"] == 2
+
+    processor.tasks.pop("mlp.experts.0.gate_proj")
+    processor._set_current_batch_index(2)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 7, 4), 30.0))
+    assert processor.tasks["mlp"]["inputs"][0].shape == (1, 5, 4)
+
+    processor.tasks["mlp.experts.0.gate_proj"] = {
+        "inputs": [torch.ones(1, 1, 4)],
+        "batch_indices": [0],
+    }
+    processor.coverage_only = True
+    processor._set_current_batch_index(3)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 9, 4), 40.0))
+    assert processor.tasks["mlp"]["inputs"][0].shape == (1, 5, 4)
 
 
 def test_awq_can_concat_batch_tensors_requires_matching_trailing_shapes():
