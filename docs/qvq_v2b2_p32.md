@@ -5884,3 +5884,41 @@ The fixed state-start specialization is promoted for the existing N32 W2
 routes. The latest powered public refresh remains faster than non-local P32
 for every shape; M8/M16 clear 2x, while M1/M4 remain the unresolved part of
 the broader objective.
+
+## 175. Hoist invariant indexing in the M1/N32 W2 route
+
+The fused M1/N32 W2 source now hoists the output-tile index, the number of
+logical N8 tiles, and the per-ring packed-word base outside the K32 loop. The
+loop still uses the same LR32 tile mapping, state recurrence, reduction order,
+and output layout; this is an indexing-only optimization for the N32 W2
+routes. Generated N64/N96 variants use a distinct output-tile name so their
+multi-tile dispatch variables do not collide.
+
+Dedicated inner-kernel A/Bs were exact against the production route:
+
+```text
+(M=1,K=2048,N=8192): max_abs=0, relative_l2=0, rmse=0
+(M=1,K=8192,N=2048): max_abs=0, relative_l2=0, rmse=0
+```
+
+On the AC/high-performance M4 Max, same-process randomized/interleaved
+comparisons used identical inputs and payloads, 20 warmups, and 150
+synchronized samples per arm:
+
+| Inner shape | Production p50 (ms) | Hoist p50 (ms) | Candidate/production p50 | Candidate/production mean |
+|---|---:|---:|---:|---:|
+| `(1,2048,8192)` | `0.534667` | `0.462292` | `0.865x` | `0.848x` |
+| `(1,8192,2048)` | `0.474833` | `0.427625` | `0.901x` | `0.886x` |
+
+The complete `QVQMLXLinear` A/Bs were also exact:
+
+| Module shape | Production p50 (ms) | Hoist p50 (ms) | Candidate/production p50 | Candidate/production mean |
+|---|---:|---:|---:|---:|
+| `(1,2048,8192)` | `0.374521` | `0.360792` | `0.963x` | `0.957x` |
+| `(1,8192,2048)` | `0.215542` | `0.204625` | `0.949x` | `0.955x` |
+
+The optimization is promoted. It improves the inner N32 route materially,
+with a smaller but repeatable complete-module improvement after the fixed
+Hadamard and scaling work is included. The latest powered refresh remains
+faster than non-local P32 for every measured shape; the broader 2x objective
+is met for M8/M16 but remains open for M1/M4.

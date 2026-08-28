@@ -1169,14 +1169,14 @@ uint split=group%split_count;group/=split_count;
 uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;
 if(output_n>=N)return;
 uint ring=output_n&7u;
+uint n32_output_tile=output_n>>3u,tiles_n=N>>3u,ring_base=(ring>>1u)*4u+(ring&1u)*2u;
 float sum0=0.0f;
 for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
-  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  uint tile=(base>>5u)*tiles_n+n32_output_tile;
   device const int* tile_ptr=trellis+tile*(4u*eb);
   uint selector=(lane&7u)==0u?uint(bank_ids[tile]):0u;
   selector=simd_shuffle(selector,ushort(lane&~7u));
   uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
-  uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;
   uint packed0=as_type<uint>(tile_ptr[ring_base]);
   uint packed1=as_type<uint>(tile_ptr[ring_base+1u]);
   // The N32 source always begins a K32 tile at pair zero.  Extract the
