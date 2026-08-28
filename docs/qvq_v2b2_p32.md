@@ -6216,3 +6216,32 @@ The small mean difference is within normal GPU timing variation and does not
 justify another shape-specialized dispatch. The long-K M1 route therefore
 remains scalar; activation broadcast stays limited to the validated short-wide
 case where its complete-module gain was material.
+
+## 187. M1 FP16 split-partial reduction rejected
+
+The short-wide M1/N32 W2 kernel was probed with FP32 accumulation within each
+K split but FP16 storage for the sixteen split partials. The final output was
+then cast to the same FP16 dtype as `QVQMLXLinear`, so this was measured at the
+complete module boundary rather than as a raw-kernel shortcut. The comparison
+used `(M=1,K=2048,N=8192)`, identical input and payload, 20 warmups, and 80
+randomized/interleaved synchronized samples per arm on the AC/high-performance
+M4 Max.
+
+The candidate reduced threadgroup partial storage, but it was not numerically
+equivalent to the production FP32 reduction:
+
+```text
+max_abs=0.125
+relative_l2=3.29424e-4
+RMSE=0.0148784
+```
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production FP32 split partials | `0.658645` | `0.806008` | `0.639914` |
+| FP16 split partials | `0.514105` | `0.735946` | `0.524155` |
+
+The candidate was `1.280x` faster at p50 and `1.221x` by mean, but the
+additional rounding is too large for the current FP32 LR32 output contract.
+It is rejected; split partials remain FP32 and the production reduction order
+is unchanged.
