@@ -5728,3 +5728,42 @@ The same powered M4 Max run refreshed the public inner-kernel comparison at
 LR remains faster than the non-local P32 kernel for every tested shape. The
 inner-kernel `2x` target is met for M8/M16, while short-M cases remain the
 unresolved portion of the objective.
+
+## 170. AC/high-performance powered refresh
+
+After the host was connected to AC and switched to the macOS high-performance
+power mode, both public MLX benchmarks were rerun from the clean
+`dbd87684` tree. Each arm used the same process, randomized/interleaved order,
+30 warmups, 100 synchronized samples, and seed `20260828`. The inner benchmark
+resolved the immutable alternative-bank metadata before timing, matching the
+production `QVQMLXLinear` contract.
+
+The public `qvq_mlx_gemv` results were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.27612` | `0.39402` | `1.427x` | `0.55439` | `0.81598` |
+| `(1,2048,2048)` | `0.27475` | `0.37304` | `1.358x` | `0.58713` | `0.67446` |
+| `(1,2048,8192)` | `0.41963` | `0.67696` | `1.613x` | `0.80373` | `1.36173` |
+| `(1,8192,2048)` | `0.41894` | `0.72267` | `1.725x` | `0.60714` | `1.01570` |
+| `(4,2048,8192)` | `0.42865` | `0.76662` | `1.788x` | `0.79118` | `1.77003` |
+| `(8,2048,8192)` | `0.68394` | `1.85558` | `2.713x` | `2.44163` | `4.28903` |
+| `(16,8192,8192)` | `2.28104` | `5.29358` | `2.321x` | `2.43817` | `5.44688` |
+
+The complete `QVQMLXLinear` results were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.25298` | `0.40608` | `1.605x` | `0.39373` | `0.55262` |
+| `(1,2048,2048)` | `0.24775` | `0.33483` | `1.351x` | `0.32510` | `0.46062` |
+| `(1,2048,8192)` | `0.21833` | `0.32006` | `1.466x` | `0.29376` | `0.44921` |
+| `(1,8192,2048)` | `0.21740` | `0.31625` | `1.455x` | `0.29394` | `0.35579` |
+| `(4,2048,8192)` | `0.30756` | `0.54844` | `1.783x` | `0.40270` | `0.66751` |
+| `(8,2048,8192)` | `0.38071` | `0.88927` | `2.336x` | `0.44361` | `1.00799` |
+| `(16,8192,8192)` | `2.17950` | `5.23010` | `2.400x` | `2.39101` | `5.43223` |
+
+The refresh confirms the LR32 production path is faster than non-local P32 at
+every tested shape. The 2x objective is met for M8/M16 at both the inner and
+complete-module boundaries, while M1 and M4 remain below 2x. Absolute timings
+continue to vary with GPU scheduling and thermal state; same-process paired
+ratios are the comparison metric.
