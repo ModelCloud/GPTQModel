@@ -5004,3 +5004,26 @@ and inputs:
 The route remains faster than P32 for every tested shape and now clears `2x`
 at the complete-module boundary for M4/M8/M16. M1 remains below the
 universal `2x` target despite this exact optimization.
+
+## 146. Post-promotion inner-kernel refresh
+
+The public `qvq_mlx_gemv` benchmark was rerun after the 32-bit W2 state-start
+promotion on the plugged-in, performance-mode M4 Max. It used randomized,
+interleaved LR/P32 order, shared inputs and payloads, 30 warmups, and 100
+synchronized samples per arm. This table excludes the complete module's
+Hadamard transforms and epilogue.
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.20260` | `0.28806` | `1.422x` | `0.24667` | `0.31325` |
+| `(1,2048,2048)` | `0.22240` | `0.29250` | `1.315x` | `0.24717` | `0.32279` |
+| `(1,2048,8192)` | `0.21094` | `0.25323` | `1.200x` | `0.23926` | `0.27997` |
+| `(1,8192,2048)` | `0.19960` | `0.27996` | `1.403x` | `0.20938` | `0.29392` |
+| `(4,2048,8192)` | `0.27985` | `0.47492` | `1.697x` | `0.31152` | `0.51512` |
+| `(8,2048,8192)` | `0.32837` | `0.80456` | `2.450x` | `0.36633` | `0.87356` |
+| `(16,8192,8192)` | `2.15635` | `5.09915` | `2.365x` | `2.21457` | `5.16988` |
+
+The inner kernel remains faster than P32 for all tested shapes and exceeds
+`2x` for M8/M16 in this run. Absolute times vary with MLX graph materializing
+and GPU scheduling history, so the paired ratio is the useful comparison.
+The M1 short-K/wide-N kernel remains below the universal `2x` objective.
