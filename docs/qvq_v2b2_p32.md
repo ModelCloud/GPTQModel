@@ -5407,3 +5407,22 @@ all tested shapes. The 2x kernel target is met for the larger-row M8/M16
 cases, while M1 and M4 remain below 2x in this refresh. These are inner
 kernel timings and must not be substituted for the complete-module metric;
 the latter includes the shared Hadamard transforms and epilogue.
+
+## 158. Short-K paired-N64 geometry rejection
+
+A second short-K M1 geometry was screened at `(M=1,K=2048,N=8192)`: two
+N32 output tiles shared one 512-thread group with eight K-splits. The raw
+Torch oracle passed with `max_abs=2.44e-4` and RMSE `3.64e-5`, but the
+complete-module A/B did not improve the promoted N32/Split16 route. It used
+identical inputs and payloads, randomized/interleaved execution, 30 warmups,
+and 300 synchronized samples per arm on the powered M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N32/Split16 | `0.683313` | `0.884481` | `0.678274` |
+| Candidate paired N64/Split8 | `0.698854` | `0.920107` | `0.693450` |
+
+The existing route was faster by `1.022x` at p50 and by `1.022x` by mean;
+the candidate was also slower at p95 (`0.961x` current/candidate). The
+reduction-order output drift was `max_abs=0.03125`, RMSE `0.000546`. The
+candidate is rejected and the short-K production dispatch remains N32/Split16.
