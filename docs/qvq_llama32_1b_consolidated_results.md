@@ -431,8 +431,8 @@ diagnostic.
 | `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | waiting for GPU |
 | `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | waiting for GPU |
 | `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | waiting for GPU |
-| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | waiting for GPU |
+| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | reused Wave-2 arm `42c2fc` |
 | `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | waiting for GPU |
-| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | waiting for GPU |
+| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | reused Wave-2 arm `f7f157` |
 
 Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.
