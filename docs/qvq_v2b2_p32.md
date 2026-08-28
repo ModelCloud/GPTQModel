@@ -4789,3 +4789,38 @@ input, and randomized 80-sample module protocol:
 The candidate was `0.975x` at p50 and `0.981x` by mean, and introduced
 `max_abs=0.125` output drift. It was rejected; production retains the
 FP32-transformed LR input path.
+
+## 140. Current-head Metal System Trace counter availability
+
+A bounded Xcode 26.6 `Metal System Trace` capture was recorded for the
+current MLX LR/P32 benchmark on the plugged-in, performance-mode M4 Max:
+
+```text
+xcrun xctrace record --no-prompt --template 'Metal System Trace' \\
+  --time-limit 20s --output /tmp/qvq-metal-current.qNbEbp --launch -- \\
+  /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \\
+  scripts/benchmark_qvq_v2b2_p32_lr_mlx.py \\
+  --warmup 2 --samples 3 --seed 20260828
+```
+
+The target exited normally after `4.396950 s`. The exported trace contained
+`140` Metal application command-buffer submissions, `1,492` GPU intervals,
+and `2,984` GPU execution points for the captured system trace tables. This
+confirms that the benchmark is submitting the expected MLX compute workload,
+but it does not identify individual LR/P32 kernels: the command buffers are
+labelled generically by MLX/Python.
+
+The capture metadata reported:
+
+```text
+Counter Set: (null)
+Shader Timeline: Disabled
+Induced GPU Performance State: Default
+```
+
+Consequently this capture cannot support quantitative claims about SIMD
+occupancy, memory stalls, cache hit rates, barrier wait cycles, or overlap.
+Those metrics must come from an Instruments configuration/device session with
+Metal hardware counters and shader timeline enabled. The trace is therefore
+kept as scheduling/submission evidence only; no optimization is promoted from
+it and the trace package is not committed to the repository.
