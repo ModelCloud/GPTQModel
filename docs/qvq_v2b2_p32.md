@@ -4745,3 +4745,47 @@ production route. No performance result was considered and no production
 source was changed. A valid fused split-4 implementation will need an
 independently designed ownership/layout mapping rather than textual widening
 of the split-2 prototype.
+
+## 138. M1 vectorized shared-activation probe rejected
+
+The promoted M1/N64 `uint2` decoder was probed with its shared activation tile
+stored as `threadgroup float2[32]`, allowing one vector load per decoded W2
+pair instead of two scalar shared-memory loads. The existing 128-thread
+occupancy, split-4 schedule, two barriers per K64 batch, decoder, and FP32
+accumulation were unchanged.
+
+The candidate remained within the numerical contract relative to production:
+
+```text
+max_abs = 0.0625
+relative_l2 = 0
+rmse = 0.000732421875
+```
+
+At `(M=1,K=2048,N=8192)`, a same-process randomized complete-module A/B
+used identical payloads and inputs, 12 warmups, and 80 samples per arm on
+the plugged-in, performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production `uint2` | `0.45344` | `0.52048` | `0.44906` |
+| `float2` shared activation | `0.45802` | `0.51862` | `0.45144` |
+
+The vector layout was `0.990x` at p50 and `0.995x` by mean, so it was not
+promoted.
+
+## 139. M1 FP16-input narrowing probe rejected
+
+The complete LR module was also tested with the transformed FP32 activation
+narrowed to FP16 immediately before the LR GEMV, while retaining FP32 kernel
+accumulation. At `(M=1,K=2048,N=8192)`, the candidate used the same payload,
+input, and randomized 80-sample module protocol:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production FP32 input | `0.43035` | `0.47507` | `0.43803` |
+| FP16 input candidate | `0.44115` | `0.47583` | `0.44673` |
+
+The candidate was `0.975x` at p50 and `0.981x` by mean, and introduced
+`max_abs=0.125` output drift. It was rejected; production retains the
+FP32-transformed LR input path.
