@@ -5351,3 +5351,27 @@ The N128 four-tile and 16-split variants remain rejected. The long-K M1
 complete-module result is still below the universal 2x target, but the inner
 kernel is above 2x at the `N=11008` width and this targeted N96 promotion
 reduces the complete-module latency by a measured 5.3% versus pair-8.
+
+## 155. Short-K M1 split-4 rejection
+
+A fixed four-way fused split source was screened for the short-K wide-N
+workload `(M=1,K=2048,N=8192)`. The source passed the raw Torch oracle, with
+maximum absolute error `9.92e-5` and RMSE `1.92e-5` in the screening payload.
+The first 100-pair module probe looked favorable, but it was not stable under
+the larger randomized test on the same plugged-in, `powermode=2` M4 Max.
+
+The decisive run used identical inputs and payloads, randomized/interleaved
+execution, 30 warmups, and 300 synchronized samples per arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing N32/Split16 | `0.278729` | `0.393966` | `0.302285` |
+| Candidate N32/Split4 | `0.282458` | `0.424729` | `0.311767` |
+
+The existing route was faster by `1.013x` at p50, `1.142x` at p95, and
+`1.031x` by mean. The two routes differed only by the expected deterministic
+split-reduction order (`max_abs=0.0625`, RMSE `0.000880`). Because the
+candidate does not improve the complete `QVQMLXLinear` boundary under the
+larger paired sample, split-4 is rejected and is not part of production
+dispatch. This is a useful reminder that an isolated inner-kernel win near
+the M1 launch floor is insufficient evidence for a module-level promotion.
