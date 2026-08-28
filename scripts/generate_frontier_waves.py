@@ -22,7 +22,8 @@ def emit(name, bits, dynamic):
         entries.extend([
             ("[0-9]+", "self_attn.q_proj|self_attn.k_proj", 2.5),
             ("[0-9]+", "self_attn.v_proj|self_attn.o_proj", 3.5),
-            ("[0-9]+", "mlp.gate_proj|mlp.up_proj|mlp.down_proj", 3.0),
+            ("[0-9]+", "mlp.gate_proj|mlp.down_proj", 3.0),
+            ("[0-9]+", "mlp.up_proj", 3.5),
         ])
     for pat, mod, rate in dynamic:
         entries.append((pat, mod, rate))

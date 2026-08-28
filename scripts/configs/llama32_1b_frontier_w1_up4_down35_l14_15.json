@@ -16,8 +16,11 @@
     "+:^model\\.layers\\.[0-9]+\\.(self_attn.v_proj|self_attn.o_proj)$": {
       "bits": 3.5
     },
-    "+:^model\\.layers\\.[0-9]+\\.(mlp.gate_proj|mlp.up_proj|mlp.down_proj)$": {
+    "+:^model\\.layers\\.[0-9]+\\.(mlp.gate_proj|mlp.down_proj)$": {
       "bits": 3.0
+    },
+    "+:^model\\.layers\\.[0-9]+\\.(mlp.up_proj)$": {
+      "bits": 3.5
     },
     "+:^model\\.layers\\.(14|15)\\.(mlp.up_proj)$": {
       "bits": 4,
