@@ -100,12 +100,12 @@ _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
-_LR_M1_N32_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
-_LR_M1_N32_FUSED_SPLIT_ERRORS: dict[int, str] = {}
-_LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
-_LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
-_LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[int, Any] = {}
-_LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N32_FUSED_SPLIT_KERNELS: dict[tuple[int, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT_ERRORS: dict[tuple[int, bool], str] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[tuple[int, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[tuple[int, bool], str] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[tuple[int, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[tuple[int, bool], str] = {}
 _LR_M1_N64_N32PAIR_SPLIT8_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS: dict[int, Any] = {}
@@ -2990,13 +2990,17 @@ def _local_ring_m1_fused_split16_kernel(*, alt_bank_id: int):
         return kernel
 
 
-def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int):
+def _local_ring_m1_n32_fused_split_kernel(
+    *, alt_bank_id: int, split_count: int, inputs_contiguous: bool = False
+):
     """Build the barrier-minimal fixed M1/N32 W2 split kernel."""
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
     if split_count not in (8, 16, 32):
         raise ValueError(f"QVQ LR32 M1/N32 split count must be 8, 16, or 32, got {split_count}")
+    if not isinstance(inputs_contiguous, bool):
+        raise TypeError("QVQ LR32 inputs_contiguous must be a bool")
     if split_count == 32:
         kernels = _LR_M1_N32_FUSED_SPLIT32_KERNELS
         errors = _LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS
@@ -3006,14 +3010,15 @@ def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int)
     else:
         kernels = _LR_M1_N32_FUSED_SPLIT_KERNELS
         errors = _LR_M1_N32_FUSED_SPLIT_ERRORS
-    kernel = kernels.get(alt_bank_id)
+    key = (alt_bank_id, inputs_contiguous)
+    kernel = kernels.get(key)
     if kernel is not None:
         return kernel
     with _KERNEL_LOCK:
-        kernel = kernels.get(alt_bank_id)
+        kernel = kernels.get(key)
         if kernel is not None:
             return kernel
-        error = errors.get(alt_bank_id)
+        error = errors.get(key)
         if error is not None:
             raise RuntimeError(error)
         import mlx.core as mx
@@ -3039,13 +3044,19 @@ def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int)
             kernel = mx.fast.metal_kernel(
                 name=(
                     f"gptqmodel_qvq_v2b2_p32_lr_m1_n32_fused_split{split_count}"
-                    f"_alt{alt_bank_id}"
+                    f"_alt{alt_bank_id}_{'contig' if inputs_contiguous else 'checked'}"
                 ),
                 input_names=["x", "trellis", "bank_ids", "dims"],
                 output_names=["out"],
                 header=_lr_small_w2_mask_header(alt_bank_id),
                 source=source,
-                ensure_row_contiguous=True,
+                # qvq_mlx_gemv materializes the three flat inputs when the
+                # caller has not asserted contiguity.  QVQMLXLinear already
+                # makes the immutable payloads contiguous, and its
+                # transformed activation is row-contiguous, so avoid an
+                # extra MLX preparation boundary on the latency-sensitive
+                # M1/N32 route.
+                ensure_row_contiguous=not inputs_contiguous,
                 compile_options={"math_mode": "fast"},
             )
         except Exception as exc:
@@ -3053,9 +3064,9 @@ def _local_ring_m1_n32_fused_split_kernel(*, alt_bank_id: int, split_count: int)
                 f"QVQ LR32 fused M1/N32 split-{split_count} kernel creation failed for "
                 f"alt_bank_id={alt_bank_id}: {exc}"
             )
-            errors[alt_bank_id] = error
+            errors[key] = error
             raise RuntimeError(error) from exc
-        kernels[alt_bank_id] = kernel
+        kernels[key] = kernel
         return kernel
 
 
@@ -5301,6 +5312,7 @@ def qvq_mlx_gemv(
             kernel = _local_ring_m1_n32_fused_split_kernel(
                 alt_bank_id=alt_id,
                 split_count=wide_split_count,
+                inputs_contiguous=_inputs_contiguous,
             )
         elif m1_n64_uint2:
             # The fixed short-K wide-N source loads each aligned pair of W2
@@ -5356,7 +5368,9 @@ def qvq_mlx_gemv(
             row_tile = 1
             group_size = 1024
             output_width = 32
-            kernel = _local_ring_m1_n32_fused_split_kernel(alt_bank_id=alt_id, split_count=32)
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id, split_count=32, inputs_contiguous=_inputs_contiguous
+            )
         elif m1_n32_fused_split16:
             # One lane owns one output channel across four K32xN8 tiles.
             # Sixteen SIMD groups reduce the K slices in one 512-thread
@@ -5364,12 +5378,16 @@ def qvq_mlx_gemv(
             row_tile = 1
             group_size = 512
             output_width = 32
-            kernel = _local_ring_m1_n32_fused_split_kernel(alt_bank_id=alt_id, split_count=16)
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id, split_count=16, inputs_contiguous=_inputs_contiguous
+            )
         elif m1_n32_fused_split:
             row_tile = 1
             group_size = 256
             output_width = 32
-            kernel = _local_ring_m1_n32_fused_split_kernel(alt_bank_id=alt_id, split_count=8)
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id, split_count=8, inputs_contiguous=_inputs_contiguous
+            )
         elif m1_fused_split16:
             # Sixteen FP32 split results are reduced inside one 512-thread
             # threadgroup.  This exposes more independent K work than the

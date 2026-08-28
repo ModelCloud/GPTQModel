@@ -5464,3 +5464,45 @@ difference `0.125`. Because the wide model-shaped case was slightly slower
 and the narrower gain was small and shape-dependent, the FP16-input variant
 is rejected and is not part of production dispatch. The production LR path
 continues to retain the FP32 transformed activation.
+
+## 160. M1/N32 contiguity-wrapper specialization
+
+The M1/N32 fused W2 kernels now have two cached construction variants. The
+production `QVQMLXLinear` path passes `_inputs_contiguous=True`, so it uses a
+Metal kernel with `ensure_row_contiguous=False` and avoids MLX's redundant
+per-launch preparation wrapper. Direct callers retain the checked
+`ensure_row_contiguous=True` variant. The kernel cache key includes this
+contract bit, so the optimized variant cannot be selected accidentally for an
+unchecked caller.
+
+The optimized route was Torch-oracle exact at both tested shapes:
+
+```text
+(M=1,K=2048,N=8192): max_abs=0, relative_l2=0, rmse=0
+(M=1,K=8192,N=2048): max_abs=0, relative_l2=0, rmse=0
+```
+
+A same-process randomized complete-module A/B compared the new production
+variant with the previous wrapper-enabled kernel on the plugged-in,
+`powermode=2` M4 Max, using identical tensors and 200 synchronized samples:
+
+| Shape | New no-wrapper p50 | Old wrapper p50 | Old/new | New mean | Old mean |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,8192)` | `0.524478` | `0.612354` | `1.168x` | `0.570246` | `0.689367` |
+| `(1,8192,2048)` | `0.539687` | `0.597646` | `1.107x` | `0.591699` | `0.656284` |
+
+The fresh canonical 100-sample module sweep after the change was:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.50388` | `0.74346` | `1.475x` | `0.68064` | `0.94018` |
+| `(1,2048,2048)` | `0.51315` | `0.74327` | `1.448x` | `0.79133` | `1.04997` |
+| `(1,2048,8192)` | `0.62817` | `1.05965` | `1.687x` | `0.85924` | `1.42378` |
+| `(1,8192,2048)` | `0.66065` | `1.13167` | `1.713x` | `1.18774` | `1.64189` |
+| `(4,2048,8192)` | `1.08004` | `2.22637` | `2.061x` | `1.59887` | `2.81442` |
+| `(8,2048,8192)` | `0.87381` | `1.99875` | `2.287x` | `1.24094` | `2.51127` |
+| `(16,8192,8192)` | `2.66590` | `5.76431` | `2.162x` | `2.87511` | `6.03869` |
+
+The specialization is retained: it is exact and materially reduces M1/N32
+module latency, although M1 remains below the broader `2x` objective because
+the surrounding Hadamard/epilogue graph is shared with P32.

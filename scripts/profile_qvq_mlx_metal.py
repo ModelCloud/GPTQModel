@@ -28,7 +28,7 @@ from gptqmodel.quantization.qvq import (
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
 )
-from gptqmodel.utils.qvq_mlx import qvq_mlx_gemv
+from gptqmodel.utils.qvq_mlx import QVQMLXLinear, qvq_mlx_gemv
 
 
 def _payload(k: int, n: int, bits: float, seed: int):
@@ -56,6 +56,11 @@ def main() -> None:
     parser.add_argument("--bits", type=float, default=2.0)
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--active-calls", type=int, default=10)
+    parser.add_argument(
+        "--full-module",
+        action="store_true",
+        help="Profile complete QVQMLXLinear, including Hadamard transforms and epilogue.",
+    )
     parser.add_argument("--capture-gputrace", type=Path)
     args = parser.parse_args()
 
@@ -65,28 +70,50 @@ def main() -> None:
     import mlx.core as mx
 
     trellis_torch, bank_ids_torch = _payload(args.k, args.n, args.bits, seed=20260827)
-    x = mx.array(np.random.default_rng(20260827).standard_normal((args.m, args.k)).astype(np.float32))
+    x_dtype = np.float16 if args.full_module else np.float32
+    x = mx.array(np.random.default_rng(20260827).standard_normal((args.m, args.k)).astype(x_dtype))
     trellis = mx.array(trellis_torch.numpy())
     bank_ids = mx.array(bank_ids_torch.numpy())
     bank_alt_id = mx.array(np.array([2], dtype=np.uint8))
 
-    def run_once():
-        output = qvq_mlx_gemv(
-            x,
-            trellis,
-            args.bits,
+    module = None
+    if args.full_module:
+        module = QVQMLXLinear(
+            bits=args.bits,
+            in_features=args.k,
             out_features=args.n,
+            trellis=trellis,
+            SU=mx.ones((args.k,), dtype=mx.float32),
+            SV=mx.ones((args.n,), dtype=mx.float32),
+            vector_size=2,
+            trellis_window=16,
             bank_ids=bank_ids,
-            bank_alt_id=bank_alt_id,
             v2b2_p32_lr=True,
-            output_fp32=True,
-            _bank_alt_id_value=2,
+            bank_alt_id=bank_alt_id,
         )
+
+    def run_once():
+        if module is None:
+            output = qvq_mlx_gemv(
+                x,
+                trellis,
+                args.bits,
+                out_features=args.n,
+                bank_ids=bank_ids,
+                bank_alt_id=bank_alt_id,
+                v2b2_p32_lr=True,
+                output_fp32=True,
+                _bank_alt_id_value=2,
+            )
+        else:
+            output = module(x)
         mx.eval(output)
         mx.synchronize()
 
     print(f"device={mx.default_device()}")
     print(f"device_info={mx.device_info()}")
+    mode = "full-module" if args.full_module else "inner-gemv"
+    print(f"mode={mode}")
     print(f"shape=M{args.m} K{args.k} N{args.n} bits={args.bits}")
     for _ in range(args.warmup):
         run_once()
