@@ -5612,3 +5612,26 @@ conclusions remain: M1 is on the barrier-minimal N32/split-16 path, while
 M8+ uses shared decode and the native matrix path. Future profiling should
 use Xcode GPU Frame Capture interactively if per-dispatch inspection is
 needed; synchronized A/B timings remain the performance acceptance gate.
+
+## 166. Resident decoded-weight cache is not an M1 win
+
+As a final feasibility check, the valid LR32 payload was decoded once into a
+resident FP32 `[K,N]` MLX matrix and compared with the on-the-fly LR32 and
+non-local P32 inner kernels. This intentionally excludes decode cost from the
+dense path, so it measures the best possible latency ceiling for a
+memory-for-latency cache rather than a fair compressed-format comparison.
+
+The plugged-in, `powermode=2` M4 Max probe used the same random payload and
+selector with synchronized randomized execution. LR32 and the dense cache
+used the transformed FP32 activation; P32 used its required FP16 activation
+boundary:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Resident dense matmul p50 (ms) |
+|---|---:|---:|---:|
+| `(1,2048,8192)` | `0.30263` | `0.57596` | `0.45156` |
+| `(1,8192,2048)` | `0.47579` | `0.58373` | `1.22492` |
+
+The dense cache is slower than LR32 in both M1 shapes even before accounting
+for its substantially larger resident memory footprint. It is therefore not
+a viable route to the `2x` M1 objective on this M4 Max, and no decoded-weight
+cache or alternate production format is enabled.
