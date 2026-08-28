@@ -49,6 +49,27 @@ if [ -e "$OUT/qvq_quantize_run.json" ]; then
   exit 0
 fi
 
+# Fail closed when the requested YAQA slice cannot satisfy the config's
+# independent-sequence floor.  Earlier Wave-2 launches used stale configs
+# with minimum_sequences=2000 while passing only 182 YAQA rows; that produced
+# a late, avoidable failure during Sketch-B collection.  Keep this check in
+# the launcher so a stale/generated config can never consume a GPU silently.
+read -r YAQA_MIN YAQA_SEED < <(python - "$CONFIG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+yaqa = payload.get("yaqa", {})
+print(int(yaqa.get("minimum_sequences", 0)), int(yaqa.get("seed", 0)))
+PY
+)
+if [ "${YAQA_MIN:-0}" -gt 182 ]; then
+  echo "[$(date -u +%FT%TZ)] refusing arm=${ARM}: config minimum_sequences=${YAQA_MIN} exceeds YAQA rows=182"
+  exit 2
+fi
+echo "[$(date -u +%FT%TZ)] preflight arm=${ARM} yaqa_rows=182 minimum_sequences=${YAQA_MIN} yaqa_seed=${YAQA_SEED}"
+
 # Replay datasets are valid only for configs that explicitly enable the
 # module-granular replay controller.  Passing them to an ordinary precision
 # allocation arm is rejected by qvq_quantize.py, so derive the optional CLI
