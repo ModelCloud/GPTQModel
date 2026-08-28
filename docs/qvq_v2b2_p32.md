@@ -5569,3 +5569,46 @@ duplicate or zero work. The previously measured padded M1 MMA path was about
 This closes the native-matrix route for exact M1 LR32 on the current Apple
 GPU/Metal stack. Matrix operations remain appropriate for the existing M8+
 path, where the row dimension is naturally `8` or larger.
+
+## 164. Decode-time Q/K/V shared-input transform probe rejected
+
+Llama 3.2 attention Q/K/V projections consume the same `M=1, K=2048`
+hidden-state row, so a decode-time prototype batched their three input-side
+Hadamard transforms into one MLX operation. Each projection retained its own
+`SU`, LR32 trellis, `SV`, output transform, and epilogue; the experiment did
+not change the codec or numerical path. The independent-module and batched
+forms were compared on the same deterministic zero-payload oracle and were
+bit-exact (`max_abs=0`, relative L2 `0`) for Q, K, and V.
+
+On the plugged-in, `powermode=2` M4 Max, with 40 warmups and 100 randomized,
+synchronized same-process samples, the batched transform was slower:
+
+| Q/K/V execution | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Three independent LR32 modules | `0.894063` | `1.228104` | `0.887596` |
+| Batched input transform + three LR32 GEMVs | `0.955750` | `1.406604` | `0.963844` |
+
+The candidate/current ratios were `1.069x` at p50 and `1.086x` by mean, so
+this is rejected. The additional stacked transform graph and changed MLX
+launch shape outweigh the saved transform launch at this workload. No
+production Q/K/V grouping is enabled; a future fused Metal kernel would need
+to share the input load and transform without introducing the stacked-graph
+overhead measured here.
+
+## 165. Xcode Metal profiling limits on the powered M4 Max
+
+The profiling host was an Apple M4 Max (`applegpu_g16s`), Xcode `26.6`
+(`17F113`), MLX GPU backend, AC power, and `powermode=2`. Bounded M1 and M8
+full-module workloads were launched with the repository profiling script
+after warmup. The M8 Metal System Trace completed successfully, but Xcode
+reported `Selected counter profile is not supported on target device` and
+the trace TOC reported `Counter Set: (null)` and `Shader Timeline: Disabled`.
+The M1 trace could not be exported as a valid deferred trace after a second
+capture attempt.
+
+Accordingly, this capture provides no defensible occupancy, stall,
+bandwidth, or hardware-counter percentages. The source-backed structural
+conclusions remain: M1 is on the barrier-minimal N32/split-16 path, while
+M8+ uses shared decode and the native matrix path. Future profiling should
+use Xcode GPU Frame Capture interactively if per-dispatch inspection is
+needed; synchronized A/B timings remain the performance acceptance gate.
