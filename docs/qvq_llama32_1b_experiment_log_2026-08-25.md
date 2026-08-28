@@ -1271,3 +1271,5 @@ and 3.
 | monitor | `highrate-llama32_1b_highrate_flat35_up4_l12_15` | `divergence300` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_flat35_up4_l12_15-div300-dev-v1.json` |
 
 | monitor | `highrate-llama32_1b_highrate_flat35_up55_l15` | `divergence300` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_flat35_up55_l15-div300-dev-v1.json` |
+
+| monitor | `highrate-llama32_1b_highrate_up4_l12_13_up6_l14_15` | `divergence300` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_up4_l12_13_up6_l14_15-div300-dev-v1.json` |
