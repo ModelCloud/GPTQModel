@@ -5823,3 +5823,29 @@ faster by mean. The small mean difference is not a robust improvement and
 does not offset the production route's lower median, so the candidate was
 rejected. The fused N32/split-16 dispatch remains active; no production code
 changed from this probe.
+
+## 173. M1 external split-4 module probe rejected
+
+The external-reduction N32 probe was extended to four K slices at the
+short-K/wide-N M1 shape `(M=1,K=2048,N=8192)`. The inner GEMV output was
+oracle-close (`max_abs=9.92e-5`, relative L2 `4.32e-7` versus the fused
+production reduction), but the complete module amplified the different
+reduction order to FP16 output differences:
+
+```text
+max_abs=0.03125, relative_l2=0, rmse=0.00042295
+```
+
+A same-process randomized/interleaved complete-module A/B used identical
+input and payloads, 20 warmups, and 100 synchronized samples per arm on the
+AC/high-performance M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production fused N32/split-16 | `0.56406` | `0.97176` | `0.66025` |
+| External N32/split-4 | `0.52163` | `0.84639` | `0.58021` |
+
+The candidate was `1.081x` faster at p50 and `1.138x` by mean, but this is a
+small module-level gain with reduction-order drift and remains far below the
+2x objective. It was rejected; the fused N32/split-16 dispatch remains
+production behavior.
