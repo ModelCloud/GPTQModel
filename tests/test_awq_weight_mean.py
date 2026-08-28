@@ -167,6 +167,34 @@ def test_awq_layer_input_features_packs_variable_pointwise_token_rows():
     }
 
 
+def test_awq_pack_token_rows_reserves_a_row_from_every_batch():
+    tensors = [
+        torch.full((1, 5, 4), 10.0),
+        torch.full((1, 1, 4), 20.0),
+        torch.full((1, 5, 4), 30.0),
+    ]
+
+    packed, raw_tokens = AWQProcessor._pack_token_rows(tensors, max_tokens=4)
+
+    assert raw_tokens == 11
+    assert packed.shape == (1, 4, 4)
+    # The single-row middle batch must not be skipped by uniform sampling.
+    assert torch.equal(
+        torch.unique(packed[0, :, 0]),
+        torch.tensor([10.0, 20.0, 30.0]),
+    )
+
+    repacked, _ = AWQProcessor._pack_token_rows(tensors, max_tokens=4)
+    assert torch.equal(packed, repacked)
+
+    # Budget smaller than the batch count: one leading row from evenly
+    # spaced batches, deterministically.
+    tiny, tiny_raw = AWQProcessor._pack_token_rows(tensors, max_tokens=2)
+    assert tiny_raw == 11
+    assert tiny.shape == (1, 2, 4)
+    assert torch.equal(tiny[0, :, 0], torch.tensor([10.0, 30.0]))
+
+
 def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor.gptq_model.awq_input_feature_aggregation = lambda name: (

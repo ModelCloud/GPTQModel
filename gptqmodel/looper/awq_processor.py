@@ -498,9 +498,14 @@ class AWQProcessor(LoopProcessor):
         """Pack ragged pointwise activations into deterministic bounded token rows.
 
         The returned tensor always has shape ``[1, retained_tokens, hidden]``.
-        Sampling is evenly spaced over calibration-batch order and includes both
-        endpoints, avoiding the previous latest-batch-only bias without allocating
-        a full concatenated activation tensor first.
+        Whenever ``max_tokens`` is at least the number of cached batches, every
+        calibration batch contributes at least one row; the remaining budget is
+        distributed proportionally to batch length (largest remainder, ties
+        broken by batch order) and rows are sampled evenly inside each batch.
+        This avoids the previous latest-batch-only bias without allocating a
+        full concatenated activation tensor first. When ``max_tokens`` is
+        smaller than the batch count, one row is taken from each of
+        ``max_tokens`` evenly spaced batches instead.
         """
 
         if not tensors:
@@ -524,23 +529,61 @@ class AWQProcessor(LoopProcessor):
         retained_tokens = min(total_tokens, max_tokens)
         if retained_tokens == total_tokens:
             return torch.cat(rows, dim=0).unsqueeze(0), total_tokens
-        if retained_tokens == 1:
-            return rows[0][:1].unsqueeze(0), total_tokens
 
-        sample_indices = (
-            torch.arange(retained_tokens, dtype=torch.int64)
-            * (total_tokens - 1)
-            // (retained_tokens - 1)
-        )
+        lengths = [int(tensor_rows.shape[0]) for tensor_rows in rows]
+        batch_count = len(rows)
+
+        if retained_tokens < batch_count:
+            # The budget cannot cover every batch; sample one leading row from
+            # evenly spaced batches so the selection stays deterministic.
+            if retained_tokens == 1:
+                batch_ids = [0]
+            else:
+                batch_ids = [
+                    int(i * (batch_count - 1) // (retained_tokens - 1))
+                    for i in range(retained_tokens)
+                ]
+            selected = [rows[batch_id][:1] for batch_id in dict.fromkeys(batch_ids)]
+            return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
+
+        # Reserve one row per batch, then hand out the remaining budget
+        # proportionally to batch length (largest remainder, ties by order).
+        quotas = [1] * batch_count
+        remaining = retained_tokens - batch_count
+        if remaining > 0:
+            exact = [length * remaining / total_tokens for length in lengths]
+            floors = [int(share) for share in exact]
+            for index, floor_share in enumerate(floors):
+                quotas[index] += floor_share
+            leftover = retained_tokens - sum(quotas)
+            order = sorted(
+                range(batch_count),
+                key=lambda index: (-(exact[index] - floors[index]), index),
+            )
+            for index in order:
+                if leftover <= 0:
+                    break
+                if quotas[index] < lengths[index]:
+                    quotas[index] += 1
+                    leftover -= 1
+
         selected = []
-        offset = 0
-        for tensor_rows in rows:
-            end = offset + int(tensor_rows.shape[0])
-            mask = (sample_indices >= offset) & (sample_indices < end)
-            if mask.any():
-                local_indices = sample_indices[mask] - offset
-                selected.append(tensor_rows.index_select(0, local_indices))
-            offset = end
+        for tensor_rows, quota, length in zip(rows, quotas, lengths):
+            quota = min(quota, length)
+            if quota <= 0:
+                continue
+            if quota == length:
+                selected.append(tensor_rows)
+                continue
+            if quota == 1:
+                local_indices = torch.zeros(1, dtype=torch.int64)
+            else:
+                local_indices = (
+                    torch.arange(quota, dtype=torch.int64)
+                    * (length - 1)
+                    // (quota - 1)
+                )
+            selected.append(tensor_rows.index_select(0, local_indices))
         return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
 
     @staticmethod
@@ -1029,6 +1072,11 @@ class AWQProcessor(LoopProcessor):
 
             feature_stat = getattr(self, "_awq_feature_stats", {}).get(name, {})
             if "raw_tokens" in feature_stat:
+                # Fallback asks "did enough of the calibration corpus route to
+                # this module", so compare the raw routed token count against
+                # the expected corpus total. `retained_tokens` is the policy's
+                # deliberate, uniform sampling bound (e.g. 512 rows) and would
+                # trip absolute or percent thresholds for every policy module.
                 captured_tokens += int(feature_stat["raw_tokens"])
             else:
                 hidden = feat.shape[-1] if feat.dim() >= 1 else 1
