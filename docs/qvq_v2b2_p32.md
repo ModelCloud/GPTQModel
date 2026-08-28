@@ -5384,3 +5384,26 @@ N32 lanes with the same `lane & 7` ring index are assigned to four different
 N8 output tiles, so their `trellis` words are not duplicates. Sharing those
 loads therefore changes the decoded weights and is not a valid optimization
 for this layout. No shuffle-load variant is retained in production.
+
+## 157. Current-head powered inner-kernel refresh
+
+The clean pushed head was rerun on the plugged-in, high-performance M4 Max
+with the public `qvq_mlx_gemv` benchmark. The run used identical LR/P32
+inputs, randomized/interleaved order, 30 warmups, and 100 synchronized
+samples per arm:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.35727` | `0.44056` | `1.233x` | `0.50034` | `0.65895` |
+| `(1,2048,2048)` | `0.42177` | `0.50696` | `1.202x` | `0.52258` | `0.66816` |
+| `(1,2048,8192)` | `0.42002` | `0.53256` | `1.268x` | `0.50597` | `0.69539` |
+| `(1,8192,2048)` | `0.54810` | `0.85227` | `1.555x` | `0.78978` | `1.19147` |
+| `(4,2048,8192)` | `0.56798` | `0.95867` | `1.688x` | `0.80462` | `1.30627` |
+| `(8,2048,8192)` | `0.61056` | `1.23365` | `2.021x` | `0.81589` | `1.54970` |
+| `(16,8192,8192)` | `2.65725` | `5.55069` | `2.089x` | `3.08432` | `5.83560` |
+
+This confirms the current implementation is faster than non-local P32 for
+all tested shapes. The 2x kernel target is met for the larger-row M8/M16
+cases, while M1 and M4 remain below 2x in this refresh. These are inner
+kernel timings and must not be substituted for the complete-module metric;
+the latter includes the shared Hadamard transforms and epilogue.
