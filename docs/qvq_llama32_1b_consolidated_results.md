@@ -414,3 +414,25 @@ whose sequence floor exceeds the supplied YAQA slice.
 | `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | quantizing | pending | pending |
 
 Machine-readable status and cross-references: `docs/experiments/frontier_wave2_rerun_20260828.json` and `docs/experiments/arm_id_index.json`.
+
+## Wave-3 control/reallocation queue (2026-08-28 UTC)
+
+These eight arms are queued behind the active corrected Wave-2 quantizations;
+each waits for its assigned GPU to become idle. The batch includes a current-
+code replication of the historical `2ae00f` allocation, exact-budget O/Up
+reallocations, and high-frontier late-Up breadth/seed controls. Mini-GSM and
+full GSM8K Platinum are required after each checkpoint; D300 remains
+diagnostic.
+
+| Arm ID | GPU | Allocation | Target BPW | State |
+| --- | ---: | --- | ---: | --- |
+| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | queued |
+| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | queued |
+| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | queued |
+| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | queued |
+| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | queued |
+| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | queued |
+| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | queued |
+| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | queued |
+
+Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.

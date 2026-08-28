@@ -46,5 +46,13 @@
     ,"f7f157": {"report_row": "Wave-2 corrected: Flat W3.5 + Up W4 layers 12-15 and O W4 all layers", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_o4_all.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_f7f157_llama32_1b_frontier_w2_flat35_up4_o4_all"}
     ,"049d0c": {"report_row": "Wave-2 corrected: Flat W3.5 + V W4 all layers and Up W4 layers 9-15", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_v4_l9_15.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_049d0c_llama32_1b_frontier_w2_flat35_up4_v4_l9_15"}
     ,"9769b1": {"report_row": "Wave-2 corrected: Flat W3.5 seed-1 control", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_seed1.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_9769b1_llama32_1b_frontier_w2_flat35_seed1"}
+    ,"b6429f": {"report_row": "Wave-3 current-code replication of 2ae00f", "config": "scripts/configs/llama32_1b_frontier_w3_control_qk25_vo35_g3_u35_d3.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_b6429f_w3_control_qk25_vo35_g3_u35_d3"}
+    ,"42a659": {"report_row": "Wave-3 O4 all funded by early Up W3", "config": "scripts/configs/llama32_1b_frontier_w3_o4_early_up3.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_42a659_w3_o4_early_up3"}
+    ,"5dc744": {"report_row": "Wave-3 O4 all funded by early Gate W2.5", "config": "scripts/configs/llama32_1b_frontier_w3_o4_early_gate25.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_5dc744_w3_o4_early_gate25"}
+    ,"286d6d": {"report_row": "Wave-3 O4 all funded by Q W2", "config": "scripts/configs/llama32_1b_frontier_w3_o4_q2.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_286d6d_w3_o4_q2"}
+    ,"4e7424": {"report_row": "Wave-3 Flat W3.5 + Up W4 layers 12-15 seed-1", "config": "scripts/configs/llama32_1b_frontier_w3_flat35_up4_l12_15_seed1.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_4e7424_w3_flat35_up4_l12_15_seed1"}
+    ,"d64179": {"report_row": "Wave-3 Flat W3.5 + Up W4 layers 8-15", "config": "scripts/configs/llama32_1b_frontier_w3_flat35_up4_l8_15.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_d64179_w3_flat35_up4_l8_15"}
+    ,"d0be49": {"report_row": "Wave-3 Flat W3.5 + Up W4 layers 7-15", "config": "scripts/configs/llama32_1b_frontier_w3_flat35_up4_l7_15.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_d0be49_w3_flat35_up4_l7_15"}
+    ,"e9c194": {"report_row": "Wave-3 Flat W3.5 + Up W4 layers 12-15 + O4 all", "config": "scripts/configs/llama32_1b_frontier_w3_flat35_up4_l12_15_o4.json", "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_e9c194_w3_flat35_up4_l12_15_o4"}
   }
 }

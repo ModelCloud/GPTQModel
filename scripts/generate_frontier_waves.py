@@ -102,8 +102,38 @@ def main():
         ("w2_flat35_up4_v4_l9_15", 3.5, [("(9|10|11|12|13|14|15)", "mlp.up_proj", 4), ("[0-9]+", "self_attn.v_proj", 4)]),
         ("w2_flat35_seed1", 3.5, []),
     ]
+    wave3 = [
+        # Current-code replication of the historical 2ae00f allocation.
+        ("w3_control_qk25_vo35_g3_u35_d3", 2, []),
+        # Exact-budget reallocations: O4 is funded by early Up precision.
+        ("w3_o4_early_up3", 2, [
+            ("[0-9]+", "self_attn.o_proj", 4),
+            ("[0-3]", "mlp.up_proj", 3),
+        ]),
+        ("w3_o4_early_gate25", 2, [
+            ("[0-9]+", "self_attn.o_proj", 4),
+            ("[0-3]", "mlp.gate_proj", 2.5),
+        ]),
+        ("w3_o4_q2", 2, [
+            ("[0-9]+", "self_attn.o_proj", 4),
+            ("[0-9]+", "self_attn.q_proj", 2),
+        ]),
+        ("w3_flat35_up4_l12_15_seed1", 3.5, [
+            ("(12|13|14|15)", "mlp.up_proj", 4),
+        ]),
+        ("w3_flat35_up4_l8_15", 3.5, [
+            ("(8|9|10|11|12|13|14|15)", "mlp.up_proj", 4),
+        ]),
+        ("w3_flat35_up4_l7_15", 3.5, [
+            ("(7|8|9|10|11|12|13|14|15)", "mlp.up_proj", 4),
+        ]),
+        ("w3_flat35_up4_l12_15_o4", 3.5, [
+            ("(12|13|14|15)", "mlp.up_proj", 4),
+            ("[0-9]+", "self_attn.o_proj", 4),
+        ]),
+    ]
     # Dynamic patterns are converted below to the repository's full module regex form.
-    for wave, arms in ((1, wave1), (2, wave2)):
+    for wave, arms in ((1, wave1), (2, wave2), (3, wave3)):
         manifest = []
         seen = {}
         for name, bits, entries in arms:
