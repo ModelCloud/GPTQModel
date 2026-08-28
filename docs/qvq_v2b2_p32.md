@@ -5534,3 +5534,25 @@ The current N32/split-16 route remains the best measured short-K M1 choice.
 This refresh confirms that the remaining universal `2x` gap is not explained
 by the tested W2 load, activation-shuffle, split geometry, or local arithmetic
 variants; it remains concentrated at the M1 execution/module boundary.
+
+## 162. M1 N128/split-4 batching probe rejected
+
+The short-K M1 N32/split-16 source was remapped to process four N32 output
+tiles and four K splits in each 512-threadgroup. This reduces the number of
+threadgroups by 4x while preserving the LR32 tile mapping and deterministic
+in-group reduction. The candidate was checked against the promoted N32 route
+with the Torch oracle before timing.
+
+The candidate was numerically oracle-close (maximum absolute differences were
+`8.4e-5` at `(M=1,K=2048,N=8192)` and `2.9e-4` at
+`(M=1,K=8192,N=2048)`). A randomized/interleaved inner-kernel comparison on
+the powered M4 Max measured:
+
+| Shape | Production N32/split-16 p50 | Candidate N128/split-4 p50 | Candidate/production | Candidate/production mean |
+|---|---:|---:|---:|---:|
+| `(1,2048,8192)` | `0.44265` ms | `0.46594` ms | `1.053x` | `1.033x` |
+| `(1,8192,2048)` | `0.48469` ms | `0.64352` ms | `1.328x` | `1.342x` |
+
+The reduced launch count did not offset the larger per-group K work and
+reduced scheduling flexibility. The candidate is rejected and the existing
+N32/split-16 production dispatch remains active.
