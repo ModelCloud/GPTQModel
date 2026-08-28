@@ -5922,3 +5922,42 @@ with a smaller but repeatable complete-module improvement after the fixed
 Hadamard and scaling work is included. The latest powered refresh remains
 faster than non-local P32 for every measured shape; the broader 2x objective
 is met for M8/M16 but remains open for M1/M4.
+
+## 176. Current AC/performance-mode module baseline and M1 pair probe
+
+A fresh complete-module comparison was run at commit `fa02b9c3` on the AC
+powered M4 Max with `powermode=2`, seed `20260828`, 20 warmups, and 80
+randomized/interleaved synchronized samples per arm. The two formats shared
+the same input and serialized payload bytes. These are current reference
+measurements; individual timings remain sensitive to system scheduling.
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | LR/P32 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.61158` | `0.89583` | `1.465x` | `0.90810` | `1.37403` |
+| `(1,2048,2048)` | `0.60569` | `0.82577` | `1.363x` | `0.92614` | `1.23390` |
+| `(1,2048,8192)` | `0.70119` | `1.14133` | `1.628x` | `1.04086` | `1.52457` |
+| `(1,8192,2048)` | `0.67417` | `1.12098` | `1.663x` | `1.17563` | `1.67646` |
+| `(4,2048,8192)` | `0.72277` | `1.28850` | `1.783x` | `0.96472` | `1.70554` |
+| `(8,2048,8192)` | `1.08667` | `2.70144` | `2.486x` | `1.67243` | `4.58040` |
+| `(16,8192,8192)` | `2.49715` | `5.64188` | `2.259x` | `3.01994` | `6.09992` |
+
+The optional shape-specialized `mx.compile` benchmark was also run with the
+same seed, warmup, and sample count. Its p50 speedups were `1.176x`, `1.261x`,
+`1.630x`, `1.561x`, `2.141x`, `2.389x`, and `2.294x` in the table's shape
+order. Compilation is useful for fixed-shape deployment, but does not solve
+the M1 gap and remains an opt-in benchmark/runtime policy.
+
+The already-implemented N64/N32 pair route was temporarily enabled for the
+short-wide M1 shape `(1,2048,8192)`. It was exact against the Torch
+reconstruction oracle (`max_abs=2.90e-4`, relative L2 `8.47e-7` for a direct
+probe), but the paired inner-kernel comparison was slower than the active N32
+route: p50 `1.081x` slower and mean `1.029x` slower. The complete-module
+comparison was p50 `1.054x` slower and mean `1.066x` slower. The temporary
+dispatch change was reverted; the active N32/split-16 route remains the M1
+short-wide fallback.
+
+The separate N32 `uint2` packed-word source was also exact. A standalone
+same-process A/B measured only a mean `1.049x` improvement at short-K M1 with
+neutral p50 (`0.999x`), and neutral long-K behavior (p50 `0.992x`, mean
+`1.006x`). It was not promoted. The current branch therefore contains only
+the verified invariant-hoist optimization from section 175.
