@@ -5057,3 +5057,36 @@ The probe measured `0.949x` of production p50 and `0.956x` by mean, but was
 discarded because it introduces avoidable FP16 activation-rounding drift.
 The exact FP32 activation-staging route remains active; this result does not
 change the production kernel or the current LR/P32 speedup tables.
+
+## 148. M1 pairwise W2 loop rejected at module boundary
+
+The promoted M1/N64 W2 `uint2` source was probed with two adjacent W2 pairs
+processed per unrolled loop iteration. The probe retained the exact FP32
+activation staging, aligned packed loads, promoted 32-bit state-start
+extraction, and the existing split-output/reduction contract. An initial
+transient harness allocated the wrong raw split-output shape; after correcting
+it to `(M,N*SplitK)` and applying the MLX split reduction, the candidate was
+oracle-close:
+
+```text
+max_abs vs production = 0.0000972747802734375
+relative_l2 = 4.434924392171524e-7
+rmse = 1.9805607735179365e-5
+```
+
+In a 300-sample randomized/interleaved inner-kernel A/B on the plugged-in,
+performance-mode M4 Max, the pairwise candidate measured `0.916x` of
+production p50, `0.947x` p95, and `0.939x` by mean. However, the governing
+complete `QVQMLXLinear` A/B with the same payload/input and 200 samples
+measured the opposite:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous promoted uint2 source | `0.74944` | `1.12016` | `0.78905` |
+| Pairwise W2 loop candidate | `0.79469` | `1.34543` | `0.88536` |
+
+The candidate was `0.943x` at p50 and `0.891x` by mean, with complete-module
+output delta `max_abs=0.015625`. The source was therefore reverted: the
+production route keeps the original eight-pair loop. This result reinforces
+that an inner-kernel win is insufficient when it does not survive the full
+MLX module boundary.
