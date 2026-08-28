@@ -9,7 +9,17 @@ BASE = {
     "format": "qvq_v2b2_p32",
     "bank_count": 2,
     "rounding": "yaqa",
-    "yaqa": {"seed": 0, "regularization": 0.15},
+    "yaqa": {
+        "seed": 0,
+        "regularization": 0.15,
+        "regularization_by_rate": [[2.0, 0.15], [2.5, 0.02], [3.0, 0.02], [3.5, 0.02]],
+        "minimum_sequences": 182,
+        "batch_size": 1,
+        "sequence_sort": "desc",
+        "activation_checkpointing": True,
+        "v2b2_family_mode": "reselect",
+        "sample_strategy": "full",
+    },
     "device": "cuda:0",
     "offload_to_disk": False,
 }
