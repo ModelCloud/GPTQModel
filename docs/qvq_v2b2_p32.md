@@ -4870,3 +4870,25 @@ Its measured p50/mean were `0.38123/0.41088 ms` versus production
 `0.32352/0.36449 ms`, but those timings are not performance evidence because
 the candidate is numerically invalid. The transient source was discarded;
 the production aligned-`uint2` K64 route remains unchanged.
+
+## 142. M1 corrected fused split-2 `uint2` probe rejected
+
+The fused split-4 idea was reduced to a 256-threadgroup split-2 variant to
+avoid the occupancy cost of the 512-threadgroup design. It used the current
+aligned-`uint2` decoder, one separate K64 activation tile for each split, and
+an in-kernel two-way deterministic reduction. The source was otherwise
+restricted to `(M=1,K=2048,N=8192)` and compared at the complete-module
+boundary.
+
+The candidate failed the correctness gate:
+
+```text
+max_abs = 150.5
+relative_l2 = nan in the probe comparison
+rmse = 39.28125
+```
+
+The transient timing was `0.59733 ms` p50 and `0.65669 ms` mean versus
+production `0.59552 ms` p50 and `0.65078 ms` mean, but it is discarded because
+the output was invalid. No production source or dispatch was changed; the
+aligned-`uint2` four-way split route remains active.
