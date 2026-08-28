@@ -5666,3 +5666,31 @@ These component measurements were collected independently and are not
 additive; they indicate that future M1 work should target the Hadamard and
 module launch/epilogue boundary rather than another unvalidated LR decoder
 layout.
+
+## 168. Fixed-shape MLX compilation and SIMD-Hadamard probes
+
+Shape-specialized `mx.compile` callables were compared with the ordinary
+public `qvq_mlx_gemv` path using the same payloads, randomized execution, and
+150 synchronized samples per arm on the powered M4 Max. Compilation helps
+the MLX graph boundary, but does not close the M1 `2x` gap:
+
+| Shape | Raw LR p50 | Raw P32 p50 | Raw speedup | Compiled LR p50 | Compiled P32 p50 | Compiled speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| `(1,2048,8192)` | `0.56121` | `0.81029` | `1.444x` | `0.44385` | `0.69215` | `1.559x` |
+| `(1,8192,2048)` | `0.50975` | `0.70904` | `1.391x` | `0.39285` | `0.57996` | `1.476x` |
+| `(4,2048,8192)` | `0.92725` | `1.81998` | `1.963x` | `0.80777` | `1.50883` | `1.868x` |
+| `(8,2048,8192)` | `0.93310` | `2.13471` | `2.288x` | `0.77206` | `2.02558` | `2.624x` |
+
+The compiled callable is useful for fixed-shape deployments, but it is not a
+kernel-format change and does not meet the universal objective.
+
+Two custom full-width Hadamard kernels were also tested as possible ways to
+remove the input/output transform graph boundary. The first used a
+threadgroup-memory butterfly; the second kept the low stages in registers and
+SIMD shuffles and used threadgroup memory only for cross-SIMD stages. Both
+were oracle-correct (the latter had FP32 relative error below `1.2e-7`), but
+both were substantially slower than native `mx.hadamard_transform`. At width
+2048, the SIMD version was approximately `0.24–0.37 ms` versus
+`0.05–0.08 ms` native; at width 8192 it was approximately `0.25–0.40 ms`
+versus `0.04–0.08 ms`. Neither was promoted. Native MLX Hadamard remains the
+production transform path.
