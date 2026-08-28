@@ -6047,3 +6047,20 @@ AC/high-performance M4 Max:
 The LUT was only `1.003x` faster at p50 and `0.998x` by mean, so it was not
 promoted. The compact constant-codebook arithmetic remains the production
 path.
+
+## 180. Additional M1 activation-sharing probes rejected
+
+The same SIMD activation-sharing transformation was screened on the two
+remaining small-row N32-family routes. Both candidates were exact against
+their production routes (`max_abs=0`, relative L2 `0`) on the AC/high-
+performance M4 Max:
+
+| Shape and route | Production p50 (ms) | Candidate p50 (ms) | p50 speedup | Mean speedup |
+|---|---:|---:|---:|---:|
+| `(1,2048,2048)` paired N64/split-8 | `0.481750` | `0.475125` | `1.014x` | `1.043x` |
+| `(1,2048,256)` N32/split-32 | `0.256125` | `0.249500` | `1.027x` | `0.996x` |
+
+Each same-process comparison used identical inputs and payloads, 20 warmups,
+and 80 randomized/interleaved samples per arm. The small and inconsistent
+gains do not justify additional dispatch variants; only the validated
+short-wide N32 activation-broadcast route remains promoted.
