@@ -1,7 +1,7 @@
 {
   "schema": "qvq.frontier-wave-rerun.v1",
   "wave": 2,
-  "status": "quantizing",
+  "status": "quantization_complete_evaluation_running",
   "launched_at_utc": "2026-08-28T11:28:16Z",
   "launch_commit": "bc0d8f41",
   "reason": "Relaunched after the prior attempt failed closed because stale configs required minimum_sequences=2000 while only 182 YAQA rows were supplied.",
@@ -12,13 +12,13 @@
     "strict_disjointness": true
   },
   "arms": [
-    {"arm_id":"42c2fc","gpu":0,"name":"w2_flat35_up4_l8_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_l8_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_42c2fc_llama32_1b_frontier_w2_flat35_up4_l8_15","effective_fingerprint":"42c2fc67f349","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"e55f4d","gpu":1,"name":"w2_flat35_up4_l6_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_l6_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_e55f4d_llama32_1b_frontier_w2_flat35_up4_l6_15","effective_fingerprint":"e55f4d3f16ac","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"428e4d","gpu":2,"name":"w2_flat35_up4_l4_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_l4_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_428e4d_llama32_1b_frontier_w2_flat35_up4_l4_15","effective_fingerprint":"428e4d90b5dc","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"a7e34b","gpu":3,"name":"w2_flat35_up4_down4_l12_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_down4_l12_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_a7e34b_llama32_1b_frontier_w2_flat35_up4_down4_l12_15","effective_fingerprint":"a7e34b6851cf","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"7cf6ca","gpu":4,"name":"w2_flat35_up4_gate4_l12_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_gate4_l12_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_7cf6ca_llama32_1b_frontier_w2_flat35_up4_gate4_l12_15","effective_fingerprint":"7cf6caa5b433","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"f7f157","gpu":5,"name":"w2_flat35_up4_o4_all","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_o4_all.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_f7f157_llama32_1b_frontier_w2_flat35_up4_o4_all","effective_fingerprint":"f7f157bc6b05","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"049d0c","gpu":6,"name":"w2_flat35_up4_v4_l9_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_v4_l9_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_049d0c_llama32_1b_frontier_w2_flat35_up4_v4_l9_15","effective_fingerprint":"049d0c3709a1","state":"quantizing","d300":null,"gsm8k":null},
-    {"arm_id":"9769b1","gpu":7,"name":"w2_flat35_seed1","config":"scripts/configs/llama32_1b_frontier_w2_flat35_seed1.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_9769b1_llama32_1b_frontier_w2_flat35_seed1","effective_fingerprint":"9769b10aee0e","state":"quantizing","d300":null,"gsm8k":null}
+    {"arm_id":"42c2fc","gpu":0,"name":"w2_flat35_up4_l8_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_l8_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_42c2fc_llama32_1b_frontier_w2_flat35_up4_l8_15","effective_fingerprint":"42c2fc67f349","state":"quant_complete_eval_running","d300":null,"gsm8k":null},
+    {"arm_id":"e55f4d","gpu":1,"name":"w2_flat35_up4_l6_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_l6_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_e55f4d_llama32_1b_frontier_w2_flat35_up4_l6_15","effective_fingerprint":"e55f4d3f16ac","state":"quant_complete_eval_queued","d300":null,"gsm8k":null},
+    {"arm_id":"428e4d","gpu":2,"name":"w2_flat35_up4_l4_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_l4_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_428e4d_llama32_1b_frontier_w2_flat35_up4_l4_15","effective_fingerprint":"428e4d90b5dc","state":"quant_complete_eval_queued","d300":null,"gsm8k":null},
+    {"arm_id":"a7e34b","gpu":3,"name":"w2_flat35_up4_down4_l12_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_down4_l12_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_a7e34b_llama32_1b_frontier_w2_flat35_up4_down4_l12_15","effective_fingerprint":"a7e34b6851cf","state":"quant_complete_eval_queued","d300":null,"gsm8k":null},
+    {"arm_id":"7cf6ca","gpu":4,"name":"w2_flat35_up4_gate4_l12_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_gate4_l12_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_7cf6ca_llama32_1b_frontier_w2_flat35_up4_gate4_l12_15","effective_fingerprint":"7cf6caa5b433","state":"quant_complete_eval_running","d300":null,"gsm8k":null},
+    {"arm_id":"f7f157","gpu":5,"name":"w2_flat35_up4_o4_all","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_o4_all.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_f7f157_llama32_1b_frontier_w2_flat35_up4_o4_all","effective_fingerprint":"f7f157bc6b05","state":"quant_complete_eval_queued","d300":null,"gsm8k":null},
+    {"arm_id":"049d0c","gpu":6,"name":"w2_flat35_up4_v4_l9_15","config":"scripts/configs/llama32_1b_frontier_w2_flat35_up4_v4_l9_15.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_049d0c_llama32_1b_frontier_w2_flat35_up4_v4_l9_15","effective_fingerprint":"049d0c3709a1","state":"quant_complete_eval_queued","d300":null,"gsm8k":null},
+    {"arm_id":"9769b1","gpu":7,"name":"w2_flat35_seed1","config":"scripts/configs/llama32_1b_frontier_w2_flat35_seed1.json","checkpoint":"/root/qvq-results/llama32-1b-w2-w2fixed_9769b1_llama32_1b_frontier_w2_flat35_seed1","effective_fingerprint":"9769b10aee0e","state":"quant_complete_eval_queued","d300":null,"gsm8k":null}
   ]
 }
