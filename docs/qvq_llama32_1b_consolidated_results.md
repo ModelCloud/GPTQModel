@@ -404,11 +404,11 @@ whose sequence floor exceeds the supplied YAQA slice.
 
 | Arm ID | GPU | Allocation | Effective BPW | State | D300 | GSM8K Platinum |
 | --- | ---: | --- | ---: | --- | --- | --- |
-| `42c2fc` | 0 | Flat W3.5 + Up W4 layers 8–15 | 3.5921 | quant complete; Mini-GSM running | pending | pending |
+| `42c2fc` | 0 | Flat W3.5 + Up W4 layers 8–15 | 3.5921 | evaluation complete (Mini-GSM 4.69%) | pending | **44.25% (535/1209)** |
 | `e55f4d` | 1 | Flat W3.5 + Up W4 layers 6–15 | 3.6094 | quant complete; evaluation queued | pending | pending |
 | `428e4d` | 2 | Flat W3.5 + Up W4 layers 4–15 | 3.6266 | quant complete; evaluation queued | pending | pending |
 | `a7e34b` | 3 | Flat W3.5 + Up/Down W4 layers 12–15 | 3.5921 | quant complete; evaluation queued | pending | pending |
-| `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | quant complete; Mini-GSM running | pending | pending |
+| `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 7.81%) | pending | **43.59% (527/1209)** |
 | `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | quant complete; evaluation queued | pending | pending |
 | `049d0c` | 6 | Flat W3.5 + Up W4 layers 9–15 + V W4 all | 3.6266 | quant complete; evaluation queued | pending | pending |
 | `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | quant complete; evaluation queued | pending | pending |
