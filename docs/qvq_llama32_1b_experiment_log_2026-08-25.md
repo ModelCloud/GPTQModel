@@ -1257,3 +1257,7 @@ and 3.
 | monitor | `highrate-llama32_1b_highrate_up4_l8_15` | `gsm8k_platinum_cot` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_up4_l8_15-gsm8k-platinum-v1.json` |
 
 | monitor | `highrate-llama32_1b_highrate_up4_l12_13_up6_l14_15` | `gsm8k_platinum_cot` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_up4_l12_13_up6_l14_15-gsm8k-platinum-v1.json` |
+
+| monitor | `highrate-llama32_1b_highrate_flat35_up55_l15` | `gsm8k_platinum_cot` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_flat35_up55_l15-gsm8k-platinum-v1.json` |
+
+| monitor | `highrate-llama32_1b_highrate_up7_l14_15` | `gsm8k_platinum_cot` | complete; metric=0.0; report `/root/qvq-results/highrate-llama32_1b_highrate_up7_l14_15-gsm8k-platinum-v1.json` |
