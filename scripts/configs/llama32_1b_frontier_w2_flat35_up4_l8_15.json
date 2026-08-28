@@ -1,0 +1,18 @@
+{
+  "bits": 3.5,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "yaqa",
+  "yaqa": {
+    "seed": 0,
+    "regularization": 0.15
+  },
+  "device": "cuda:0",
+  "offload_to_disk": false,
+  "dynamic": {
+    "+:^model\\.layers\\.(8|9|10|11|12|13|14|15)\\.(mlp.up_proj)$": {
+      "bits": 4,
+      "format": "qvq"
+    }
+  }
+}

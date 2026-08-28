@@ -1,0 +1,45 @@
+{
+  "wave": 1,
+  "arms": [
+    {
+      "id": "w1_up4_l12_15",
+      "config": "scripts/configs/llama32_1b_frontier_w1_up4_l12_15.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_up4_l10_13",
+      "config": "scripts/configs/llama32_1b_frontier_w1_up4_l10_13.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_up4_l8_11",
+      "config": "scripts/configs/llama32_1b_frontier_w1_up4_l8_11.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_up4_interleaved",
+      "config": "scripts/configs/llama32_1b_frontier_w1_up4_interleaved.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_up4_down35_l14_15",
+      "config": "scripts/configs/llama32_1b_frontier_w1_up4_down35_l14_15.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_up4_gate35_l14_15",
+      "config": "scripts/configs/llama32_1b_frontier_w1_up4_gate35_l14_15.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_o4_all",
+      "config": "scripts/configs/llama32_1b_frontier_w1_o4_all.json",
+      "wave": 1
+    },
+    {
+      "id": "w1_v4_up4_l13_15",
+      "config": "scripts/configs/llama32_1b_frontier_w1_v4_up4_l13_15.json",
+      "wave": 1
+    }
+  ]
+}

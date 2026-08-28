@@ -1,0 +1,13 @@
+{
+  "bits": 3.5,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "yaqa",
+  "yaqa": {
+    "seed": 0,
+    "regularization": 0.15
+  },
+  "device": "cuda:0",
+  "offload_to_disk": false,
+  "dynamic": {}
+}

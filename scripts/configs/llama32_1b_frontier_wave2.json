@@ -1,0 +1,45 @@
+{
+  "wave": 2,
+  "arms": [
+    {
+      "id": "w2_flat35_up4_l8_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l8_15.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_up4_l6_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l6_15.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_up4_l4_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l4_15.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_up4_down4_l12_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_down4_l12_15.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_up4_gate4_l12_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_gate4_l12_15.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_up4_o4_all",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_o4_all.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_up4_v4_l9_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_v4_l9_15.json",
+      "wave": 2
+    },
+    {
+      "id": "w2_flat35_seed1",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_seed1.json",
+      "wave": 2
+    }
+  ]
+}
