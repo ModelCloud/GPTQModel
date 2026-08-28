@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 root=/root/QvQ
 results=/root/qvq-results
 smoke=highrate-rerun-llama32_1b_highrate_up4_l8_15
