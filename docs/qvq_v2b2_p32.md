@@ -6164,3 +6164,32 @@ The candidate's complete-module difference was `max_abs=0.125`, relative L2
 `5.56e-4`, and RMSE `0.0251`; it was `0.691x` production by p50 and
 `0.682x` by mean. It is rejected, and the FP32 LR output path remains the
 production contract.
+
+## 185. Refreshed compiled-module probe rejected for M1
+
+After the host was connected to AC power and placed in high-performance mode,
+the complete-module benchmark was rerun with `--compile`, which wraps each
+fixed-shape `QVQMLXLinear` in an `mx.compile` callable. The benchmark performs
+one untimed materialization call per arm, then uses randomized/interleaved
+warmups and synchronized samples with the same input and compressed payload.
+The run used 50 warmups, 120 samples per arm, and seed `20260828`.
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | LR/P32 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.25429` | `0.38271` | `1.505x` | `0.28292` | `0.45478` |
+| `(1,2048,2048)` | `0.18913` | `0.23835` | `1.260x` | `0.25616` | `0.35593` |
+| `(1,2048,8192)` | `0.19835` | `0.27485` | `1.386x` | `0.21824` | `0.29130` |
+| `(1,8192,2048)` | `0.21329` | `0.29256` | `1.372x` | `0.23197` | `0.31471` |
+| `(4,2048,8192)` | `0.32000` | `0.54194` | `1.694x` | `0.32926` | `0.60813` |
+| `(8,2048,8192)` | `0.39198` | `0.93331` | `2.381x` | `1.28885` | `3.46621` |
+| `(16,8192,8192)` | `2.28142` | `5.35273` | `2.346x` | `2.56773` | `5.70304` |
+
+Compilation improves the MLX graph boundary in some runs, but it does not
+close the M1 gap: all four M1 shapes remain below `2x`, and the M4 shape is
+also below `2x` in this sample. Since the complete-module production path
+must support varying sequence lengths, making compilation mandatory would
+also introduce shape-specialized variants and first-use compilation costs.
+This is therefore retained as an opt-in benchmark mode, not promoted to
+production dispatch. The remaining universal `2x` objective requires a new
+M1 execution or module-boundary mapping rather than another compile-policy
+tuning pass.
