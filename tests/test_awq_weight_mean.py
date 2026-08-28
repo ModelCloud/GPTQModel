@@ -195,6 +195,43 @@ def test_awq_pack_token_rows_reserves_a_row_from_every_batch():
     assert torch.equal(tiny[0, :, 0], torch.tensor([10.0, 30.0]))
 
 
+def test_awq_pack_token_rows_never_underfills_budget():
+    """Exhaustive small-scale grid: retained rows must equal min(total, budget).
+
+    Guards the single-pass distribution flaw where saturated short batches
+    stranded leftover budget (e.g. lengths [1, 1, 1, 5] with max_tokens=7
+    previously returned 6 rows).
+    """
+
+    import itertools
+
+    hidden = 2
+    for batch_count in range(1, 5):
+        for lengths in itertools.product(range(1, 5), repeat=batch_count):
+            tensors = [
+                torch.full((1, length, hidden), float(i + 1))
+                for i, length in enumerate(lengths)
+            ]
+            total = sum(lengths)
+            for max_tokens in range(1, total + 2):
+                packed, raw = AWQProcessor._pack_token_rows(
+                    tensors, max_tokens=max_tokens
+                )
+                assert raw == total
+                expected = min(total, max_tokens)
+                assert packed.shape == (1, expected, hidden), (
+                    lengths,
+                    max_tokens,
+                    packed.shape,
+                )
+                if max_tokens >= batch_count:
+                    values = set(packed[0, :, 0].tolist())
+                    assert values == {float(i + 1) for i in range(batch_count)}, (
+                        lengths,
+                        max_tokens,
+                    )
+
+
 def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor.gptq_model.awq_input_feature_aggregation = lambda name: (

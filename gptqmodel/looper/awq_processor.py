@@ -560,12 +560,22 @@ class AWQProcessor(LoopProcessor):
                 range(batch_count),
                 key=lambda index: (-(exact[index] - floors[index]), index),
             )
-            for index in order:
-                if leftover <= 0:
+            # Multiple passes: a single pass can strand budget when the
+            # high-remainder batches saturate (e.g. lengths [1, 1, 1, 5]
+            # with budget 7). retained_tokens <= total_tokens guarantees
+            # enough capacity, so the loop always terminates with zero
+            # leftover.
+            while leftover > 0:
+                distributed = False
+                for index in order:
+                    if leftover <= 0:
+                        break
+                    if quotas[index] < lengths[index]:
+                        quotas[index] += 1
+                        leftover -= 1
+                        distributed = True
+                if not distributed:
                     break
-                if quotas[index] < lengths[index]:
-                    quotas[index] += 1
-                    leftover -= 1
 
         selected = []
         for tensor_rows, quota, length in zip(rows, quotas, lengths):
