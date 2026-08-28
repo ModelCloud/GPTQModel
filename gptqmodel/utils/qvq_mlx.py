@@ -82,6 +82,72 @@ _SYMMETRIC_GRAM_KERNELS: dict[str, Any] = {}
 _SYMMETRIC_GRAM_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
+_LR_KERNELS: dict[tuple[bool, int, bool], Any] = {}
+_LR_KERNEL_ERRORS: dict[tuple[bool, int, bool], str] = {}
+_LR_SMALL_KERNELS: dict[tuple[bool, int, bool, int, int | None, bool, bool], Any] = {}
+_LR_SMALL_KERNEL_ERRORS: dict[tuple[bool, int, bool, int, int | None, bool, bool], str] = {}
+_LR_M1_N64_KERNELS: dict[tuple[int, int, int, int], Any] = {}
+_LR_M1_N64_KERNEL_ERRORS: dict[tuple[int, int, int, int], str] = {}
+_LR_M1_N64_SPLIT2_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_SHARED_SPLIT2_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_HALF2_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_HALF2_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_UINT2_KERNELS: dict[tuple[int, int], Any] = {}
+_LR_M1_N64_UINT2_KERNEL_ERRORS: dict[tuple[int, int], str] = {}
+_LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
+_LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
+_LR_M1_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N32_FUSED_SPLIT_KERNELS: dict[tuple[int, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT_ERRORS: dict[tuple[int, bool], str] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[tuple[int, bool, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[tuple[int, bool, bool], str] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[tuple[int, bool, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[tuple[int, bool, bool], str] = {}
+_LR_M1_N64_N32PAIR_SPLIT8_KERNELS: dict[int, Any] = {}
+_LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS: dict[int, Any] = {}
+_LR_M1_N96_N32TRIPLE_SPLIT8_KERNEL_ERRORS: dict[int, str] = {}
+_LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
+_LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
+# The fused M1/N64 split-2 route is retained for targeted experiments and
+# very-small N shapes, but is not the default for production M1 dispatch.
+# On the M4 Max, the barrier-free M1/N16 path is faster for the model's
+# narrow-N down projections (N=2048) and for N=256.  Keep this toggle so the
+# grouped implementation remains directly benchmarkable without making it
+# the default again by accident.
+_USE_LR_M1_N64_SPLIT2 = False
+_USE_LR_M1_N64_SHARED_SPLIT2 = True
+# The half2 codebook path is specialized to the measured short-K wide-N
+# shape.  Other M1/N64 shapes retain their existing fused or generic route.
+_USE_LR_M1_N64_HALF2 = True
+# The W2 M1/N64 K64 decoder can load the two aligned packed words for a ring
+# as one uint2 transaction.  This is deliberately limited to the benchmarked
+# short-K wide-N shape; retain the half2 scalar-load route as the fallback for
+# every other shape/device until it has its own A/B evidence.
+_USE_LR_M1_N64_UINT2 = True
+# One-lane-per-output N32 remains enabled for the measured long-K M1 regime
+# and the separately promoted short-K/wide-N shape.
+_USE_LR_M1_N32_FUSED = True
+# Keep the short-K/wide-N promotion independently switchable so its A/B can
+# be compared with the N64 source without changing the established N32 policy
+# for the other M1 shapes.
+_USE_LR_M1_N32_FUSED_WIDE = True
+# M4 Max screening favors the high-occupancy Split16/32 variants for the
+# fixed short-K/wide-N route. Keep the selected count explicit for A/B runs.
+_LR_M1_N32_FUSED_WIDE_SPLIT_COUNT = 16
+# Pair two N32 output tiles in one 512-thread group for the single measured
+# short-K shape.  This is intentionally narrow: the N256 probe was neutral.
+_USE_LR_M1_N64_N32PAIR_SPLIT8 = True
+# Long-K wide-N M1 uses the same paired N32/Split8 geometry as the validated
+# short-K N2048 route.  Keep this independently gated until its complete
+# QVQMLXLinear A/B and FP16 drift are reviewed.
+_USE_LR_M1_N64_N32PAIR_SPLIT8_LONGK = True
+_USE_LR_M1_N96_N32TRIPLE_SPLIT8_LONGK = True
+_LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
+_LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool, bool], str] = {}
 
 _SYMMETRIC_GRAM_PACK_SOURCE = r"""
 uint index = thread_position_in_grid.x;
@@ -435,6 +501,19 @@ _QVQ_V4_BANK_MASKS_METAL = _qvq_v4_bank_masks_metal("qbank_masks")
 _QVQ_V2_BANK_MASKS_METAL = _qvq_v2_bank_masks_metal("qv2bank_masks")
 
 
+def _qvq_pgc16_levels_metal() -> str:
+    """Embed the fixed production FP16 PGC16 levels for LR32 kernels."""
+
+    import torch
+
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).to(torch.float16).contiguous()
+    bits = levels.view(torch.int16).tolist()
+    return "constant ushort qvq_pgc16_levels[256]={" + ",".join(f"0x{int(value) & 0xffff:04x}u" for value in bits) + "};"
+
+
+_QVQ_PGC16_LEVELS_METAL = _qvq_pgc16_levels_metal()
+
+
 _HEADER = r"""
 inline uint qpw(uint remaining) {
   if(remaining>=16)return 16;if(remaining>=8)return 8;if(remaining>=4)return 4;if(remaining>=2)return 2;return 1;
@@ -445,6 +524,52 @@ inline uint qpt(device const int* p,uint edge,uint eb){uint block=edge>>5,lane=e
     v|=code<<off;rem-=w;row+=w;off+=w;}return v;}
 inline uint qstate(device const int* tile,uint pair,uint eb){uint count=(15+eb)/eb,first=(pair+128-count+1)&127,s=0;
   for(uint j=0;j<count;++j){uint edge=(first+j)&127;s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}return s;}
+inline uint qstate_lr(device const int* tile,uint ring,uint pair,uint eb){
+  uint count=(15+eb)/eb,first=(pair+16-count+1)&15u,s=0;
+  for(uint j=0;j<count;++j){uint edge=ring*16u+((first+j)&15u);
+    s=((s<<eb)|qpt(tile,edge,eb))&0xffffu;}
+  return s;
+}
+inline uint qpt_lr_fast(device const int* tile,uint edge,uint eb){
+  uint block=edge>>5,lane=edge&31u,base=block*eb;
+  if(eb==2u){uint word=as_type<uint>(tile[base+(lane>>4)]);return(word>>((lane&15u)<<1u))&3u;}
+  if(eb==3u){uint word=as_type<uint>(tile[base+(lane>>4)]);uint value=(word>>((lane&15u)<<1u))&3u;
+    uint extra=as_type<uint>(tile[base+2u]);return value|(((extra>>lane)&1u)<<2u);}
+  uint word=as_type<uint>(tile[base+(lane>>3)]);uint value=(word>>((lane&7u)<<2u))&15u;
+  if(eb==4u)return value;
+  uint extra=as_type<uint>(tile[base+4u+(eb>=6u?lane>>4:0u)]);
+  value|=((extra>>((eb>=6u?(lane&15u)<<1u:lane)))&((eb==5u)?1u:3u))<<4u;
+  if(eb==7u){uint last=as_type<uint>(tile[base+6u]);value|=((last>>lane)&1u)<<6u;}
+  return value;
+}
+inline uint qstate_lr_fast(device const int* tile,uint ring,uint pair,uint eb){
+  uint count=(15u+eb)/eb,first=(pair+16u-count+1u)&15u,s=0;
+  for(uint j=0;j<count;++j){uint edge=ring*16u+((first+j)&15u);
+    s=((s<<eb)|qpt_lr_fast(tile,edge,eb))&0xffffu;}
+  return s;
+}
+inline uint qpt_lr_w2(device const int* tile,uint ring,uint pair){
+  uint local=((ring&1u)<<4u)|(pair&15u);
+  uint word=as_type<uint>(tile[(ring>>1u)*4u+(local>>3u)]);
+  return(word>>((local&7u)<<2u))&15u;}
+inline uint qpt_lr_w2_packed(uint word0,uint word1,uint pair){
+  uint local=pair&15u,word=local<8u?word0:word1;
+  return(word>>((local&7u)<<2u))&15u;}
+inline uint qstate_lr_w2(device const int* tile,uint ring,uint pair){uint first=(pair+13u)&15u;
+  uint s0=qpt_lr_w2(tile,ring,first),s1=qpt_lr_w2(tile,ring,first+1u);
+  uint s2=qpt_lr_w2(tile,ring,first+2u),s3=qpt_lr_w2(tile,ring,first+3u);
+  return((s0<<12u)|(s1<<8u)|(s2<<4u)|s3)&0xffffu;
+}
+inline uint qstate_lr_w2_packed(uint word0,uint word1,uint pair){uint first=(pair+13u)&15u;
+  uint s0=qpt_lr_w2_packed(word0,word1,first),s1=qpt_lr_w2_packed(word0,word1,first+1u);
+  uint s2=qpt_lr_w2_packed(word0,word1,first+2u),s3=qpt_lr_w2_packed(word0,word1,first+3u);
+  return((s0<<12u)|(s1<<8u)|(s2<<4u)|s3)&0xffffu;
+}
+inline uint qstate_lr_w2_packed_fast(uint word0,uint word1,uint pair){
+  uint first=(pair+13u)&15u;ulong packed=ulong(word0)|(ulong(word1)<<32u);
+  ulong raw=(packed>>(first<<2u))|(packed<<((16u-first)<<2u));
+  return uint(((raw&0xfull)<<12u)|((raw&0xf0ul)<<4u)|((raw&0xf00ul)>>4u)|((raw>>12u)&0xful));
+}
 inline uint qstated(device const int* tile,uint pair,uint eb){uint chain=pair&1u,step=pair>>1;
   uint count=(15+eb)/eb,first=(step+64-count+1)&63,s=0;
   for(uint j=0;j<count;++j){uint edge=(((first+j)&63u)<<1)|chain;
@@ -465,8 +590,25 @@ inline float4 qlevels4(device const half* levels,uint s){uint p0=s^(s>>8);p0=(p0
   return float4(float(levels[p0>>8]),float(levels[p0&255u]),float(levels[p1>>8]),float(levels[p1&255u]));}
 __QVQ_V4_BANK_MASKS_METAL__
 __QVQ_V2_BANK_MASKS_METAL__
+__QVQ_PGC16_LEVELS_METAL__
+inline half qpgc16_lr(uint index){return as_type<half>(qvq_pgc16_levels[index]);}
+inline float2 qlevelsv2b_lr_const(uint s,uint bank,uint eb){
+  uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));}
+inline float2 qlevelsv2b_lr_const_w2(uint s,uint bank){
+  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));}
 inline float2 qlevelsv2b(device const half* levels,uint s,uint bank,uint eb){
   uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(levels[p>>8]),float(levels[p&255u]));}
+inline float2 qlevelsv2b(threadgroup const half* levels,uint s,uint bank,uint eb){
+  uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(levels[p>>8]),float(levels[p&255u]));}
+inline float2 qlevelsv2b_w2(device const half* levels,uint s,uint bank){
+  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(levels[p>>8]),float(levels[p&255u]));}
+inline float2 qlevelsv2b_w2(threadgroup const half* levels,uint s,uint bank){
+  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
   return float2(float(levels[p>>8]),float(levels[p&255u]));}
 inline uint qbank(constant const uchar* ids,uint tile){return(uint(ids[tile>>2])>>((tile&3u)<<1))&3u;}
 inline uint qbank(device const uchar* ids,uint tile){return(uint(ids[tile>>2])>>((tile&3u)<<1))&3u;}
@@ -610,7 +752,7 @@ inline float qhyb(device const int* t,device const half* lut,uint k,uint n,uint 
   return((local&1)&&(h&(1u<<15)))?-v:v;}
 """.replace("__QVQ_V4_BANK_MASKS_METAL__", _QVQ_V4_BANK_MASKS_METAL).replace(
     "__QVQ_V2_BANK_MASKS_METAL__", _QVQ_V2_BANK_MASKS_METAL
-)
+).replace("__QVQ_PGC16_LEVELS_METAL__", _QVQ_PGC16_LEVELS_METAL)
 
 _SOURCE = r"""
 uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
@@ -655,6 +797,1392 @@ _V4_N4_L18_SOURCE = _V4_N4_SOURCE.replace("qquad4(trellis,levels,", "qquad4l18(t
 _FP32_SOURCE = _SOURCE.replace(
     "out[m*N+n]=half(sum0);out[m*N+n+1]=half(sum1);",
     "out[m*N+n]=sum0;out[m*N+n+1]=sum1;",
+)
+_LR_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,groups_n=(N+31u)>>5;
+uint split=group%split_count;
+uint logical_group=group/split_count;
+uint m=logical_group/groups_n,n=(logical_group%groups_n)*32u+lane;
+if(m>=M)return;
+bool active=n<N;
+uint k_begin=(K*split)/split_count,k_end=(K*(split+1u))/split_count;
+float sum=0.0f;
+for(uint k0=k_begin;k0<k_end;k0+=32){
+  // One lane loads one value from the K32 activation tile. All output lanes
+  // then read the needed pair through the Apple SIMD-group shuffle. Inactive
+  // tail lanes use output zero for valid address arithmetic and never write.
+  float activation=float(x[m*K+k0+lane]);
+  uint output_n=active?n:0u;
+  uint tile=(k0>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
+  device const int* tile_ptr=trellis+tile*(4*eb);
+  uint state=qstate_lr_fast(tile_ptr,ring,0,eb);
+  uint bank=((uint(bank_ids[tile])>>ring)&1u)*uint(bank_alt_id[0]);
+  for(uint pair=0;pair<16;pair++){
+    float2 value=qlevelsv2b(levels,state,bank,eb);
+    float a0=simd_shuffle(activation,ushort(pair<<1));
+    float a1=simd_shuffle(activation,ushort((pair<<1)+1u));
+    sum+=a0*value.x+a1*value.y;
+    if(pair!=15u){
+      state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+    }
+  }
+}
+if(active)out[(m*N+n)*split_count+split]=half(sum);
+"""
+_LR_FP32_SOURCE = _LR_SOURCE.replace("out[(m*N+n)*split_count+split]=half(sum);", "out[(m*N+n)*split_count+split]=sum;")
+_LR_W2_SOURCE = (
+    _LR_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,0,eb)", "qstate_lr_w2(tile_ptr,ring,0)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b(levels,state,bank,eb)", "qlevelsv2b_w2(levels,state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,0);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=as_type<uint>(tile_ptr[ring_base]),packed1=as_type<uint>(tile_ptr[ring_base+1u]);"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,0);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_W2_FP32_SOURCE = _LR_W2_SOURCE.replace(
+    "out[(m*N+n)*split_count+split]=half(sum);", "out[(m*N+n)*split_count+split]=sum;"
+)
+
+_LR_SMALL_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,vc=(N+7u)>>3;
+uint split=group%split_count;group/=split_count;
+uint row_tile=dims[4],row_block=group/vc,vector=group-row_block*vc;
+uint row_base=row_block*row_tile,n0=vector<<3,row0=row_base,row1=row0+1u;
+uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u,output_n=n0+output_lane;
+if(row0>=M)return;
+uint ring=output_n&7u,ring_lane=lane&~3u;
+float sum0=0.0f,sum1=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5)*(N>>3)+(output_n>>3);
+  device const int* tile_ptr=trellis+tile*(4*eb);
+// All eight rings in this N8 tile share one selector byte.  Load it once
+// instead of once per output lane and broadcast it to the SIMD group.
+uint selector=lane==0u?uint(bank_ids[tile]):0u;
+selector=simd_shuffle(selector,ushort(0));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  // Every output lane in this SIMD group consumes the same K32 activation
+  // tile.  Load each activation once and broadcast it to the lanes that own
+  // the corresponding output pair instead of rereading x for every output.
+  float activation0=float(x[row0*K+base+lane]);
+  float activation1=row1<M?float(x[row1*K+base+lane]):0.0f;
+  for(uint offset=0;offset<4u;offset++){
+    uint pair=first_pair+offset;
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    float a0=simd_shuffle(activation0,ushort(pair<<1u));
+    float a1=simd_shuffle(activation0,ushort((pair<<1u)+1u));
+    sum0+=a0*value.x+a1*value.y;
+    if(row1<M){
+      float b0=simd_shuffle(activation1,ushort(pair<<1u));
+      float b1=simd_shuffle(activation1,ushort((pair<<1u)+1u));
+      sum1+=b0*value.x+b1*value.y;
+    }
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+sum0+=simd_shuffle(sum0,ushort(lane^2u));
+sum1+=simd_shuffle(sum1,ushort(lane^1u));
+sum1+=simd_shuffle(sum1,ushort(lane^2u));
+if((lane&3u)==0u&&output_n<N){
+  out[(row0*N+output_n)*split_count+split]=half(sum0);
+  if(row1<M)out[(row1*N+output_n)*split_count+split]=half(sum1);
+}
+"""
+_LR_SMALL_FP32_SOURCE = _LR_SMALL_SOURCE.replace(
+    "=half(sum0);", "=sum0;"
+).replace(
+    "=half(sum1);", "=sum1;"
+)
+_LR_SMALL_W2_SOURCE = (
+    _LR_SMALL_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_SMALL_W2_FP32_SOURCE = _LR_SMALL_W2_SOURCE.replace(
+    "=half(sum0);", "=sum0;"
+).replace(
+    "=half(sum1);", "=sum1;"
+)
+
+# M=1 does not need the second-row accumulator used by the M<=2 kernel.  Keep
+# this as a separate source so the compiler can remove the row1 loads,
+# branches, accumulator, and four extra SIMD reductions entirely.  The
+# serialized LR32 mapping is identical to _LR_SMALL_SOURCE: four lanes own
+# four consecutive pairs of one ring for N8 output tiles.
+_LR_SMALL_M1_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint split=group%split_count;group/=split_count;
+uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<3u;
+uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u,output_n=n0+output_lane;
+if(output_n>=N)return;
+uint ring=output_n&7u;
+float sum0=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=lane==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(0));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  // Share the K32 activation tile across all output lanes in this SIMD
+  // group; the LR decode remains lane-local while inputs are broadcast.
+  float activation=float(x[base+lane]);
+  for(uint offset=0;offset<4u;offset++){
+    uint pair=first_pair+offset;
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    float a0=simd_shuffle(activation,ushort(pair<<1u));
+    float a1=simd_shuffle(activation,ushort((pair<<1u)+1u));
+    sum0+=a0*value.x+a1*value.y;
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+sum0+=simd_shuffle(sum0,ushort(lane^2u));
+if((lane&3u)==0u)out[output_n*split_count+split]=half(sum0);
+"""
+_LR_SMALL_M1_FP32_SOURCE = _LR_SMALL_M1_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_W2_SOURCE = (
+    _LR_SMALL_M1_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_SMALL_M1_W2_FP32_SOURCE = _LR_SMALL_M1_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+_LR_SMALL_N16_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,vc=(N+15u)>>4;
+uint split=group%split_count;group/=split_count;
+uint row_tile=dims[4],row_block=group/vc,vector=group-row_block*vc;
+uint row_base=row_block*row_tile,n0=vector<<4,row0=row_base,row1=row0+1u;
+uint output_lane=lane>>1u,first_pair=(lane&1u)<<3u,output_n=n0+output_lane;
+if(row0>=M)return;
+uint ring=output_n&7u,ring_lane=lane&~1u;
+float sum0=0.0f,sum1=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+// N16 contains two adjacent N8 tiles, so each half of the SIMD group has
+// one selector byte to broadcast.
+uint selector=(lane&15u)==0u?uint(bank_ids[tile]):0u;
+selector=simd_shuffle(selector,ushort(lane&16u));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  for(uint offset=0;offset<8u;offset++){
+    uint pair=first_pair+offset,k0=base+(pair<<1u);
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    sum0+=float(x[row0*K+k0])*value.x+float(x[row0*K+k0+1u])*value.y;
+    if(row1<M)sum1+=float(x[row1*K+k0])*value.x+float(x[row1*K+k0+1u])*value.y;
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+sum1+=simd_shuffle(sum1,ushort(lane^1u));
+if((lane&1u)==0u&&output_n<N){
+  out[(row0*N+output_n)*split_count+split]=half(sum0);
+  if(row1<M)out[(row1*N+output_n)*split_count+split]=half(sum1);
+}
+"""
+_LR_SMALL_N16_FP32_SOURCE = _LR_SMALL_N16_SOURCE.replace(
+    "=half(sum0);", "=sum0;"
+).replace(
+    "=half(sum1);", "=sum1;"
+)
+_LR_SMALL_N16_W2_SOURCE = (
+    _LR_SMALL_N16_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=(lane&1u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
+        "uint packed1=(lane&1u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
+        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_SMALL_N16_W2_FP32_SOURCE = _LR_SMALL_N16_W2_SOURCE.replace(
+    "=half(sum0);", "=sum0;"
+).replace(
+    "=half(sum1);", "=sum1;"
+)
+
+# Single-row N16 variant.  Two lanes share each ring and each lane decodes
+# one half of the sixteen pairs, but there is no dormant second-row work.
+_LR_SMALL_M1_N16_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint split=group%split_count;group/=split_count;
+uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;
+uint output_lane=lane>>1u,first_pair=(lane&1u)<<3u,output_n=n0+output_lane;
+if(output_n>=N)return;
+uint ring=output_n&7u;
+float sum0=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=(lane&15u)==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(lane&16u));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+  // Share the K32 activation tile across all output lanes in this SIMD
+  // group; the LR decode remains lane-local while inputs are broadcast.
+  float activation=float(x[base+lane]);
+  for(uint offset=0;offset<8u;offset++){
+    uint pair=first_pair+offset;
+    float2 value=qlevelsv2b_lr_const(state,bank,eb);
+    float a0=simd_shuffle(activation,ushort(pair<<1u));
+    float a1=simd_shuffle(activation,ushort((pair<<1u)+1u));
+    sum0+=a0*value.x+a1*value.y;
+    if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+  }
+}
+sum0+=simd_shuffle(sum0,ushort(lane^1u));
+if((lane&1u)==0u)out[output_n*split_count+split]=half(sum0);
+"""
+_LR_SMALL_M1_N16_FP32_SOURCE = _LR_SMALL_M1_N16_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_N16_W2_SOURCE = (
+    _LR_SMALL_M1_N16_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;"
+        "uint packed0=(lane&1u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;"
+        "uint packed1=(lane&1u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(lane&~1u));"
+        "packed1=simd_shuffle(packed1,ushort((lane&~1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+    # M1/N16 W2 always decodes eight pairs per local ring.  Keep the loop
+    # unrolled for both scalar and vector-activation variants derived below.
+    .replace(
+        "  for(uint offset=0;offset<8u;offset++){",
+        "  #pragma unroll\n  for(uint offset=0;offset<8u;offset++){",
+    )
+)
+_LR_SMALL_M1_N16_W2_FP32_SOURCE = _LR_SMALL_M1_N16_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+
+def _make_lr_small_m1_vector_activation_source(source: str) -> str:
+    """Broadcast four K32 activations per producer lane for an M=1 source."""
+
+    marker = "  float activation=float(x[base+lane]);"
+    body = (
+        "    float a0=simd_shuffle(activation,ushort(pair<<1u));\n"
+        "    float a1=simd_shuffle(activation,ushort((pair<<1u)+1u));\n"
+        "    sum0+=a0*value.x+a1*value.y;"
+    )
+    if marker not in source or body not in source:
+        raise RuntimeError("QVQ LR32 M=1 source is missing the scalar activation broadcast pattern")
+    return source.replace(
+        marker,
+        "  float4 activation=lane<8u?float4("
+        "float(x[base+(lane<<2u)]),float(x[base+(lane<<2u)+1u]),"
+        "float(x[base+(lane<<2u)+2u]),float(x[base+(lane<<2u)+3u])):float4(0.0f);",
+    ).replace(
+        body,
+        "    float4 pair_values=simd_shuffle(activation,ushort(pair>>1u));\n"
+        "    uint component=(pair<<1u)&3u;\n"
+        "    sum0+=pair_values[component]*value.x+pair_values[component+1u]*value.y;",
+    )
+
+
+_LR_SMALL_M1_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_SOURCE)
+_LR_SMALL_M1_VECTOR_FP32_SOURCE = _LR_SMALL_M1_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_W2_SOURCE)
+_LR_SMALL_M1_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_N16_VECTOR_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_SOURCE)
+_LR_SMALL_M1_N16_VECTOR_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_SOURCE.replace("=half(sum0);", "=sum0;")
+_LR_SMALL_M1_N16_VECTOR_W2_SOURCE = _make_lr_small_m1_vector_activation_source(_LR_SMALL_M1_N16_W2_SOURCE)
+_LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE = _LR_SMALL_M1_N16_VECTOR_W2_SOURCE.replace("=half(sum0);", "=sum0;")
+
+
+def _make_lr_m1_n16_literal_pair_source(source: str) -> str:
+    """Expand the fixed W2 N16 pair loop and packed-nibble updates."""
+
+    blocks = ["  uint packed_next=first_pair==0u?packed0:packed1;"]
+    for offset in range(8):
+        block = [
+            "  {",
+            "    float2 value=qlevelsv2b_lr_const_w2(state,bank);",
+            f"    float4 pair_values=simd_shuffle(activation,ushort(({offset}+first_pair)>>1u));",
+            f"    uint component=(({offset}+first_pair)<<1u)&3u;",
+            "    sum0+=pair_values[component]*value.x+pair_values[component+1u]*value.y;",
+        ]
+        if offset != 7:
+            block.append(
+                f"    state=((state<<4u)|((packed_next>>{(offset + 1) * 4}u)&15u))&0xffffu;"
+            )
+        block.append("  }")
+        blocks.append("\n".join(block))
+    expanded = "\n".join(blocks)
+    loop_start = source.find("  #pragma unroll\n  for(uint offset=0;offset<8u;offset++){")
+    loop_end = source.find("\n  }\n}", loop_start)
+    if loop_start < 0 or loop_end < 0:
+        raise RuntimeError("QVQ LR32 M1/N16 source is missing its W2 pair loop")
+    loop_end += len("\n  }")
+    return source[:loop_start] + expanded + source[loop_end:]
+
+
+_LR_SMALL_M1_N16_LITERAL_W2_FP32_SOURCE = _make_lr_m1_n16_literal_pair_source(
+    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
+
+
+# One SIMD lane per output channel.  N32 spans four logical K32xN8 tiles;
+# each lane therefore owns one ring in one tile and can consume all sixteen
+# W2 pairs directly, avoiding the two-lane-per-output reduction used by the
+# N16 source above.  The source is only used by the fused FP32 M1 path.
+_LR_SMALL_M1_N32_W2_FP32_SOURCE = r"""
+constexpr uint split_count=SplitK;
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint split=group%split_count;group/=split_count;
+uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;
+if(output_n>=N)return;
+uint ring=output_n&7u;
+uint n32_output_tile=output_n>>3u,tiles_n=N>>3u,ring_base=(ring>>1u)*4u+(ring&1u)*2u;
+float sum0=0.0f;
+for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
+  uint tile=(base>>5u)*tiles_n+n32_output_tile;
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=(lane&7u)==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(lane&~7u));
+  uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+  uint packed0=as_type<uint>(tile_ptr[ring_base]);
+  uint packed1=as_type<uint>(tile_ptr[ring_base+1u]);
+  // The N32 source always begins a K32 tile at pair zero.  Extract the
+  // circular nibble window with 32-bit operations instead of constructing a
+  // 64-bit rotated word; this is equivalent to
+  // qstate_lr_w2_packed_fast(packed0, packed1, 0) and is cheaper on Apple
+  // GPUs.  Keep the generic helper for routes whose pair is dynamic.
+  uint state=(((packed1>>20u)&15u)<<12u)|(((packed1>>24u)&15u)<<8u)|(((packed1>>28u)&15u)<<4u)|(packed0&15u);
+  #pragma unroll
+  for(uint offset=0u;offset<16u;offset++){
+    float2 value=qlevelsv2b_lr_const_w2(state,bank);
+    uint k0=base+(offset<<1u);
+    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;
+    if(offset!=15u)state=((state<<4u)|qpt_lr_w2_packed(packed0,packed1,offset+1u))&0xffffu;
+  }
+}
+if(output_n<N)out[output_n*split_count+split]=sum0;
+"""
+
+
+def _make_lr_m1_n32_explicit_pair_source(source: str) -> str:
+    """Replace the fixed W2 pair loop with literal packed-nibble updates."""
+
+    loop = (
+        "  #pragma unroll\n"
+        "  for(uint offset=0u;offset<16u;offset++){\n"
+        "    float2 value=qlevelsv2b_lr_const_w2(state,bank);\n"
+        "    uint k0=base+(offset<<1u);\n"
+        "    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;\n"
+        "    if(offset!=15u)state=((state<<4u)|qpt_lr_w2_packed(packed0,packed1,offset+1u))&0xffffu;\n"
+        "  }"
+    )
+    blocks = []
+    for offset in range(16):
+        block = [
+            "  {",
+            "    float2 value=qlevelsv2b_lr_const_w2(state,bank);",
+            f"    uint k0=base+{offset * 2}u;",
+            "    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;",
+        ]
+        if offset != 15:
+            pair = offset + 1
+            word = "packed0" if pair < 8 else "packed1"
+            shift = (pair & 7) * 4
+            block.append(f"    state=((state<<4u)|(({word}>>{shift}u)&15u))&0xffffu;")
+        block.append("  }")
+        blocks.append("\n".join(block))
+    explicit = "\n".join(blocks)
+    if loop not in source:
+        raise RuntimeError("QVQ LR32 M1/N32 W2 source is missing its pair loop")
+    return source.replace(loop, explicit, 1)
+
+
+_LR_SMALL_M1_N32_W2_FP32_SOURCE = _make_lr_m1_n32_explicit_pair_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_n32_fused_split_source(source: str, split_count: int) -> str:
+    """Fuse fixed M1/N32 K-split reduction into one threadgroup."""
+
+    if split_count not in (8, 16, 32):
+        raise ValueError("QVQ LR32 M1/N32 fused split count must be 8, 16, or 32")
+    layout = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;"
+    )
+    replacement = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;\n"
+        f"threadgroup float split_outputs[{split_count * 32}];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 fused M1/N32 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1).replace(
+        "constexpr uint split_count=SplitK;", f"constexpr uint split_count={split_count}u;", 1
+    )
+    output = "if(output_n<N)out[output_n*split_count+split]=sum0;"
+    fused_output = (
+        "if(output_n<N)split_outputs[split*32u+lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        f"if(simd==0u&&lane<32u){{float total=0.0f;for(uint s=0u;s<{split_count}u;s++)"
+        "total+=split_outputs[s*32u+lane];out[n0+lane]=total;}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 fused M1/N32 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE, 8
+)
+_LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE, 16
+)
+_LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
+    _LR_SMALL_M1_N32_W2_FP32_SOURCE, 32
+).replace(
+    "uint simd=simdgroup_index_in_threadgroup,split=simd;",
+    "uint simd=thread_index_in_threadgroup/32u,split=simd;",
+    1,
+)
+
+
+def _make_lr_m1_n32_activation_broadcast_source(source: str) -> str:
+    """Share each K32 activation across the N32 output lanes.
+
+    The N32 M1 decoder has one lane per output. The scalar implementation
+    consequently reloads the same 32 activation values once per output lane.
+    Each lane already owns one distinct activation position, so a SIMD
+    shuffle turns those 32 loads into one load per K32 tile while preserving
+    the exact FP32 dot-product order.
+    """
+
+    marker = "for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){"
+    if marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N32 source is missing its K32 loop")
+    source = source.replace(marker, marker + "\n  float activation=float(x[base+lane]);", 1)
+    selector_marker = (
+        "  uint selector=(lane&7u)==0u?uint(bank_ids[tile]):0u;\n"
+        "  selector=simd_shuffle(selector,ushort(lane&~7u));"
+    )
+    selector_replacement = (
+        "  // N32 covers four adjacent K32xN8 tiles. Their selector bytes are\n"
+        "  // contiguous and 4-byte aligned, so one lane can load all four\n"
+        "  // bytes and broadcast the packed word to the SIMD group.\n"
+        "  uint selector_words=(lane==0u)?*((device const uint*)(bank_ids+"
+        "(base>>5u)*tiles_n+(n0>>3u))):0u;\n"
+        "  selector_words=simd_shuffle(selector_words,ushort(0));\n"
+        "  uint selector=(selector_words>>((lane>>3u)<<3u))&255u;"
+    )
+    if selector_marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N32 source is missing its selector broadcast pattern")
+    source = source.replace(selector_marker, selector_replacement, 1)
+    for offset in range(16):
+        old = (
+            f"    uint k0=base+{offset * 2}u;\n"
+            "    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;"
+        )
+        new = (
+            f"    sum0+=simd_shuffle(activation,ushort({offset * 2}u))*value.x+"
+            f"simd_shuffle(activation,ushort({offset * 2 + 1}u))*value.y;"
+        )
+        if old not in source:
+            raise RuntimeError(
+                f"QVQ LR32 M1/N32 source is missing explicit pair {offset}"
+            )
+        source = source.replace(old, new, 1)
+    return source
+
+
+# The short-wide M1 route is activation-load bound: every output lane uses
+# the same K32 activation tile. Keep the optimized source separate from the
+# scalar long-K source because the complete-module A/B was positive only for
+# the short-wide route.
+_LR_M1_N32_FUSED_SPLIT16_SHARED_W2_FP32_SOURCE = (
+    _make_lr_m1_n32_activation_broadcast_source(_LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE)
+)
+_LR_M1_N32_FUSED_SPLIT32_SHARED_W2_FP32_SOURCE = (
+    _make_lr_m1_n32_activation_broadcast_source(_LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE)
+)
+
+
+def _make_lr_m1_n64_n32pair_split8_source(source: str) -> str:
+    """Pair two N32 tiles in one M1/N64 split-8 threadgroup."""
+
+    layout = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<5u,output_n=n0+lane;"
+    )
+    replacement = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=thread_index_in_threadgroup/32u,split=simd>>1u,output_tile=simd&1u;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<6u,output_n=n0+(output_tile<<5u)+lane;"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 paired M1/N64 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1).replace(
+        "threadgroup float split_outputs[256];", "threadgroup float split_outputs[512];", 1
+    )
+    output = (
+        "if(output_n<N)split_outputs[split*32u+lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "if(simd==0u&&lane<32u){float total=0.0f;for(uint s=0u;s<8u;s++)"
+        "total+=split_outputs[s*32u+lane];out[n0+lane]=total;}"
+    )
+    fused_output = (
+        "if(output_n<N)split_outputs[split*64u+output_tile*32u+lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "if(simd<2u&&lane<32u){float total=0.0f;for(uint s=0u;s<8u;s++)"
+        "total+=split_outputs[s*64u+output_tile*32u+lane];"
+        "out[n0+output_tile*32u+lane]=total;}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 paired M1/N64 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_N64_N32PAIR_SPLIT8_W2_FP32_SOURCE = _make_lr_m1_n64_n32pair_split8_source(
+    _LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_n96_n32triple_split8_source(source: str) -> str:
+    """Pair three N32 output tiles in one M1/N96 split-8 threadgroup."""
+
+    source = source.replace(
+        "uint simd=thread_index_in_threadgroup/32u,split=simd>>1u,output_tile=simd&1u;",
+        "uint simd=thread_index_in_threadgroup/32u,split=simd/3u,output_tile=simd%3u;",
+        1,
+    ).replace(
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<6u,output_n=n0+(output_tile<<5u)+lane;",
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group*96u,output_n=n0+(output_tile*32u)+lane;",
+        1,
+    ).replace(
+        "threadgroup float split_outputs[512];",
+        "threadgroup float split_outputs[768];",
+        1,
+    ).replace(
+        "split*64u+output_tile*32u+lane",
+        "split*96u+output_tile*32u+lane",
+    ).replace(
+        "s*64u+output_tile*32u+lane",
+        "s*96u+output_tile*32u+lane",
+    ).replace(
+        "if(simd<2u&&lane<32u){float total=0.0f;for(uint s=0u;s<8u;s++)",
+        "if(simd<3u&&lane<32u){float total=0.0f;for(uint s=0u;s<8u;s++)",
+        1,
+    )
+    return source
+
+
+_LR_M1_N96_N32TRIPLE_SPLIT8_W2_FP32_SOURCE = _make_lr_m1_n96_n32triple_split8_source(
+    _LR_M1_N64_N32PAIR_SPLIT8_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_fused_split_source(source: str) -> str:
+    """Fuse the fixed M1/N16 W2 split-8 epilogue into one threadgroup."""
+
+    layout = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;"
+    )
+    replacement = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;\n"
+        "threadgroup float split_outputs[128];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 fused M1 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1).replace(
+        "constexpr uint split_count=SplitK;", "constexpr uint split_count=8u;", 1
+    )
+    output = "if((lane&1u)==0u)out[output_n*split_count+split]=sum0;"
+    fused_output = (
+        "if((lane&1u)==0u)split_outputs[split*16u+output_lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "if(simd==0u&&lane<16u){\n"
+        "  float total=0.0f;\n"
+        "  for(uint s=0u;s<8u;s++)total+=split_outputs[s*16u+lane];\n"
+        "  out[n0+lane]=total;\n"
+        "}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 fused M1 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_FUSED_SPLIT_W2_FP32_SOURCE = _make_lr_m1_fused_split_source(
+    _LR_SMALL_M1_N16_LITERAL_W2_FP32_SOURCE
+)
+_LR_M1_FUSED_SPLIT16_W2_FP32_SOURCE = (
+    _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE
+    .replace("constexpr uint split_count=8u;", "constexpr uint split_count=16u;", 1)
+    .replace("threadgroup float split_outputs[128];", "threadgroup float split_outputs[256];", 1)
+    .replace("for(uint s=0u;s<8u;s++)", "for(uint s=0u;s<16u;s++)", 1)
+    # Derive the SIMD-group ordinal explicitly for the 512-thread launch.
+    # This keeps split assignment stable on Apple devices where the implicit
+    # simdgroup-index builtin is not reliable for this larger threadgroup.
+    .replace(
+        "uint simd=simdgroup_index_in_threadgroup,split=simd;",
+        "uint simd=thread_index_in_threadgroup/32u,split=simd;",
+        1,
+    )
+)
+
+
+def _make_lr_m1_n64_split2_source(source: str) -> str:
+    """Fuse two K splits across four adjacent N16 output tiles."""
+
+    layout = (
+        "constexpr uint split_count=SplitK;\n"
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;"
+    )
+    replacement = (
+        "constexpr uint split_count=2u;\n"
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup;\n"
+        "uint split=simd&1u;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+(simd>>1u),n0=vector<<4u;\n"
+        "threadgroup float split_outputs[128];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 split-2 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1).replace(
+        "constexpr uint split_count=SplitK;", "constexpr uint split_count=2u;", 1
+    )
+    output = "if((lane&1u)==0u)out[output_n*split_count+split]=sum0;"
+    fused_output = (
+        "if((lane&1u)==0u)split_outputs[(vector&3u)*32u+(split<<4u)+output_lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "if((lane&1u)==0u){\n"
+        "  float total=split_outputs[(vector&3u)*32u+output_lane]+\n"
+        "    split_outputs[(vector&3u)*32u+16u+output_lane];\n"
+        "  out[n0+output_lane]=total;\n"
+        "}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 split-2 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_N64_SPLIT2_W2_FP32_SOURCE = _make_lr_m1_n64_split2_source(
+    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_n64_shared_activation_source(source: str) -> str:
+    """Pack four M1/N16 SIMD tiles into one group and share each K32 input tile."""
+
+    layout = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group,n0=vector<<4u;"
+    )
+    replacement = (
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint simd=simdgroup_index_in_threadgroup;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+simd,n0=vector<<4u;\n"
+        "threadgroup float shared_activation[32];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its N16 layout marker")
+    source = source.replace(layout, replacement)
+    activation = (
+        "  float4 activation=lane<8u?float4(float(x[base+(lane<<2u)]),float(x[base+(lane<<2u)+1u]),"
+        "float(x[base+(lane<<2u)+2u]),float(x[base+(lane<<2u)+3u])):float4(0.0f);"
+    )
+    activation_replacement = (
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(lane<<2u)] = float(x[base+(lane<<2u)]);\n"
+        "    shared_activation[(lane<<2u)+1u] = float(x[base+(lane<<2u)+1u]);\n"
+        "    shared_activation[(lane<<2u)+2u] = float(x[base+(lane<<2u)+2u]);\n"
+        "    shared_activation[(lane<<2u)+3u] = float(x[base+(lane<<2u)+3u]);\n"
+        "  }\n"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+    )
+    if activation not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its vector activation marker")
+    source = source.replace(activation, activation_replacement)
+    pair_values = (
+        "    float4 pair_values=simd_shuffle(activation,ushort(pair>>1u));\n"
+        "    uint component=(pair<<1u)&3u;\n"
+        "    sum0+=pair_values[component]*value.x+pair_values[component+1u]*value.y;"
+    )
+    pair_replacement = (
+        "    float a0=shared_activation[pair<<1u];\n"
+        "    float a1=shared_activation[(pair<<1u)+1u];\n"
+        "    sum0+=a0*value.x+a1*value.y;"
+    )
+    if pair_values not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its vector pair marker")
+    return source.replace(pair_values, pair_replacement)
+
+
+_LR_M1_N64_W2_FP32_SOURCE = _make_lr_m1_n64_shared_activation_source(
+    _LR_SMALL_M1_N16_VECTOR_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_n64_k64_source(source: str) -> str:
+    """Decode two adjacent K32 tiles per barrier in the M1/N64 source."""
+
+    source = source.replace("threadgroup float shared_activation[32];", "threadgroup float shared_activation[64];")
+    source = source.replace("base+=32u){", "base+=64u){")
+    tile_block = (
+        "  uint tile=(base>>5u)*(N>>3u)+(output_n>>3u);\n"
+        "  device const int* tile_ptr=trellis+tile*(4u*eb);"
+    )
+    tile_replacement = (
+        "  for(uint sub=0u;sub<2u;sub++){\n"
+        "    uint tile=((base>>5u)+sub)*(N>>3u)+(output_n>>3u);\n"
+        "    device const int* tile_ptr=trellis+tile*(4u*eb);"
+    )
+    if tile_block not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its tile marker")
+    source = source.replace(tile_block, tile_replacement)
+    activation_block = (
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(lane<<2u)] = float(x[base+(lane<<2u)]);\n"
+        "    shared_activation[(lane<<2u)+1u] = float(x[base+(lane<<2u)+1u]);\n"
+        "    shared_activation[(lane<<2u)+2u] = float(x[base+(lane<<2u)+2u]);\n"
+        "    shared_activation[(lane<<2u)+3u] = float(x[base+(lane<<2u)+3u]);\n"
+        "  }"
+    )
+    activation_replacement = (
+        "  // Stage only the active K32 half.  The next outer K64 iteration can\n"
+        "  // therefore reuse the other half while sibling SIMD groups finish\n"
+        "  // consuming this one, without overlapping shared-memory writes.\n"
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)] = float(x[base+(sub<<5u)+(lane<<2u)]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+1u] = float(x[base+(sub<<5u)+(lane<<2u)+1u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+2u] = float(x[base+(sub<<5u)+(lane<<2u)+2u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+3u] = float(x[base+(sub<<5u)+(lane<<2u)+3u]);\n"
+        "  }"
+    )
+    if activation_block not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its activation marker")
+    source = source.replace(activation_block, activation_replacement, 1)
+    source = source.replace(
+        "shared_activation[pair<<1u]", "shared_activation[(sub<<5u)+(pair<<1u)]"
+    ).replace(
+        "shared_activation[(pair<<1u)+1u]", "shared_activation[(sub<<5u)+(pair<<1u)+1u]"
+    )
+    source = source.replace(
+        "  for(uint sub=0u;sub<2u;sub++){",
+        "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){",
+    )
+    # W2 always decodes exactly eight pairs for each local ring.  The
+    # production M1/N64 path is shape-specialized, so fully unrolling this
+    # fixed inner loop lets Metal overlap the packed-state recurrence, PGC16
+    # lookup, and FP32 FMA without paying a dynamic loop-control dependency.
+    # Keep this change in the W2 M1 source only; the generic LR rates have
+    # different transition widths and remain on their measured source.
+    offset_marker = "for(uint offset=0;offset<8u;offset++){"
+    if offset_marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its W2 pair loop")
+    # The K64 source is derived from the already-specialized M1/N16 W2
+    # source, which may already carry this directive.  Keep generation
+    # idempotent so inherited variants do not emit duplicate pragmas.
+    unrolled_marker = "#pragma unroll\n  " + offset_marker
+    if unrolled_marker not in source:
+        source = source.replace(offset_marker, unrolled_marker, 1)
+    close_marker = "  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
+    close_replacement = "    }\n  }\n}\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
+    if close_marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 K64 source is missing its loop terminator")
+    return source.replace(close_marker, close_replacement, 1)
+
+
+_LR_M1_N64_K64_W2_FP32_SOURCE = _make_lr_m1_n64_k64_source(_LR_M1_N64_W2_FP32_SOURCE)
+
+# Each N16 SIMD tile has two lanes per ring.  The half2 route previously had
+# those lanes load one packed W2 word each.  For aligned LR32 W2 tiles, the
+# two words are adjacent, so one even lane can load them as uint2 and both
+# lanes can receive the components through SIMD shuffles.
+_LR_M1_N64_K64_W2_UINT2_FP32_SOURCE = _LR_M1_N64_K64_W2_FP32_SOURCE.replace(
+    "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;uint packed0=(lane&1u)==0u?as_type<uint>(tile_ptr[ring_base]):0u;uint packed1=(lane&1u)==1u?as_type<uint>(tile_ptr[ring_base+1u]):0u;packed0=simd_shuffle(packed0,ushort(lane&~1u));packed1=simd_shuffle(packed1,ushort((lane&~1u)+1u));",
+    "uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;\n"
+    "  device const uint2* packed_ptr=(device const uint2*)(tile_ptr+ring_base);\n"
+    "  uint2 packed_pair=(lane&1u)==0u?packed_ptr[0]:uint2(0u);\n"
+    "  uint packed0=simd_shuffle(packed_pair.x,ushort(lane&~1u));\n"
+    "  uint packed1=simd_shuffle(packed_pair.y,ushort(lane&~1u));",
+    1,
+)
+
+# In the two-lane-per-output W2 N64 mapping, first_pair is always 0 or 8.
+# Extracting those four nibbles directly from the two packed words avoids the
+# generic 64-bit circular-window construction while preserving the exact
+# 16-bit state value.  Keep the unspecialized uint2 source above as the
+# fallback for future shapes; this variant is promoted only by the fixed
+# K=2048/N=8192 dispatch below.
+_LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE = (
+    _LR_M1_N64_K64_W2_UINT2_FP32_SOURCE.replace(
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+        """uint state=first_pair==0u
+    ? (((packed1>>20u)&15u)<<12u)|(((packed1>>24u)&15u)<<8u)|(((packed1>>28u)&15u)<<4u)|(packed0&15u)
+    : (((packed0>>20u)&15u)<<12u)|(((packed0>>24u)&15u)<<8u)|(((packed0>>28u)&15u)<<4u)|(packed1&15u);""",
+        1,
+    )
+)
+
+
+def _make_lr_m1_n64_shared_split2_source(source: str) -> str:
+    """Fuse two K splits while sharing each split's K64 activation tile."""
+
+    layout = (
+        "constexpr uint split_count=SplitK;\n"
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint split=group%split_count;group/=split_count;\n"
+        "uint simd=simdgroup_index_in_threadgroup;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+simd,n0=vector<<4u;\n"
+        "threadgroup float shared_activation[64];"
+    )
+    replacement = (
+        "constexpr uint split_count=2u;\n"
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\n"
+        "uint simd=simdgroup_index_in_threadgroup;\n"
+        "uint split=simd&1u;\n"
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+(simd>>1u),n0=vector<<4u;\n"
+        "threadgroup float shared_activation[128];\n"
+        "threadgroup float split_outputs[128];"
+    )
+    if layout not in source:
+        raise RuntimeError("QVQ LR32 shared split-2 source is missing its layout marker")
+    source = source.replace(layout, replacement, 1)
+    source = source.replace(
+        "if (simd == 0u && lane < 8u)", "if (simd < 2u && lane < 8u)"
+    ).replace(
+        "shared_activation[(sub<<5u)", "shared_activation[(split<<6u)+(sub<<5u)"
+    )
+    output = "if((lane&1u)==0u)out[output_n*split_count+split]=sum0;"
+    fused_output = (
+        "if((lane&1u)==0u)split_outputs[(vector&3u)*32u+(split<<4u)+output_lane]=sum0;\n"
+        "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        "if((lane&1u)==0u){\n"
+        "  uint offset=(vector&3u)*32u+output_lane;\n"
+        "  float total=split_outputs[offset]+split_outputs[offset+16u];\n"
+        "  out[n0+output_lane]=total;\n"
+        "}"
+    )
+    if output not in source:
+        raise RuntimeError("QVQ LR32 shared split-2 source is missing its output marker")
+    return source.replace(output, fused_output, 1)
+
+
+_LR_M1_N64_SHARED_SPLIT2_W2_FP32_SOURCE = _make_lr_m1_n64_shared_split2_source(
+    _LR_M1_N64_K64_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_n64_k128_source(source: str) -> str:
+    """Decode four adjacent K32 tiles per barrier in the M1/N64 source."""
+
+    source = source.replace("threadgroup float shared_activation[64];", "threadgroup float shared_activation[128];")
+    source = source.replace("base+=64u){", "base+=128u){")
+    loop_start_marker = "  #pragma unroll\n  for(uint sub=0u;sub<2u;sub++){"
+    loop_start = source.find(loop_start_marker)
+    loop_end_marker = "\nsum0+=simd_shuffle(sum0,ushort(lane^1u));"
+    loop_end = source.find(loop_end_marker, loop_start)
+    activation_block = (
+        "  // Stage only the active K32 half.  The next outer K64 iteration can\n"
+        "  // therefore reuse the other half while sibling SIMD groups finish\n"
+        "  // consuming this one, without overlapping shared-memory writes.\n"
+        "  if (simd == 0u && lane < 8u) {\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)] = float(x[base+(sub<<5u)+(lane<<2u)]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+1u] = float(x[base+(sub<<5u)+(lane<<2u)+1u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+2u] = float(x[base+(sub<<5u)+(lane<<2u)+2u]);\n"
+        "    shared_activation[(sub<<5u)+(lane<<2u)+3u] = float(x[base+(sub<<5u)+(lane<<2u)+3u]);\n"
+        "  }\n"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+    )
+    if loop_start < 0 or loop_end < 0 or activation_block not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its K128 staging markers")
+    loop = source[loop_start:loop_end].replace(activation_block, "")
+    loop = loop.replace("sub<2u", "sub<4u")
+    stage = (
+        "  #pragma unroll\n"
+        "  for(uint sub=0u;sub<4u;sub++){\n"
+        "    if (simd == 0u && lane < 8u) {\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)] = float(x[base+(sub<<5u)+(lane<<2u)]);\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)+1u] = float(x[base+(sub<<5u)+(lane<<2u)+1u]);\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)+2u] = float(x[base+(sub<<5u)+(lane<<2u)+2u]);\n"
+        "      shared_activation[(sub<<5u)+(lane<<2u)+3u] = float(x[base+(sub<<5u)+(lane<<2u)+3u]);\n"
+        "    }\n"
+        "  }\n"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+    )
+    # The barrier before the decode loop publishes the staged activation.
+    # A second barrier is required before the next outer K128 iteration can
+    # overwrite shared_activation: the other SIMD groups may still be
+    # reading the previous batch while SIMD 0 starts staging the next one.
+    # Without this hand-off barrier the first K128 batch is correct but later
+    # batches have a data race for K > 128.
+    loop = loop.replace(
+        "    }\n  }\n}",
+        "    }\n  }\n  threadgroup_barrier(mem_flags::mem_threadgroup);\n}",
+        1,
+    )
+    return source[:loop_start] + stage + loop + source[loop_end:]
+
+
+_LR_M1_N64_K128_W2_FP32_SOURCE = _make_lr_m1_n64_k128_source(
+    _LR_M1_N64_K64_W2_FP32_SOURCE
+)
+# The fixed wide-N W2 route uses the same K128 staging geometry with the
+# promoted aligned-uint2 loads and exact 32-bit state-start extraction.  Keep
+# the older scalar source above for its direct compatibility coverage.
+_LR_M1_N64_K128_W2_UINT2_FAST_STATE_FP32_SOURCE = _make_lr_m1_n64_k128_source(
+    _LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE
+)
+
+
+def _lr_m1_n64_shape_source(k: int, n: int, *, source: str | None = None) -> str:
+    """Specialize an M1/N64 source's fixed shape constants."""
+
+    marker = "uint K=dims[1],N=dims[2],eb=EdgeBits,vector=group*4u+simd,n0=vector<<4u;"
+    replacement = (
+        f"constexpr uint K={k}u,N={n}u,eb=EdgeBits;\n"
+        "uint vector=group*4u+simd,n0=vector<<4u;"
+    )
+    source = _LR_M1_N64_K64_W2_FP32_SOURCE if source is None else source
+    if marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N64 source is missing its shape marker")
+    return source.replace(marker, replacement, 1)
+
+
+def _lr_m1_n64_w2_mask_header(alt_bank_id: int) -> str:
+    """Add the fixed W2 bank mask to the M1/N64 specialized header."""
+
+    masks = {1: 0x5A5A, 2: 0x3C3C, 3: 0xC3C3}
+    try:
+        mask = masks[alt_bank_id]
+    except KeyError as exc:
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}") from exc
+    return _HEADER + f"""
+inline float2 qlevelsv2b_lr_const_w2_m1_mask(uint s,uint bank_bit){{
+  uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));
+}}
+"""
+
+
+def _lr_small_w2_mask_header(alt_bank_id: int) -> str:
+    """Add a literal W2 alternate-bank mask to small-row LR kernels."""
+
+    masks = {1: 0x5A5A, 2: 0x3C3C, 3: 0xC3C3}
+    try:
+        mask = masks[alt_bank_id]
+    except KeyError as exc:
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}") from exc
+    return _HEADER + f"""
+inline float2 qlevelsv2b_lr_const_w2_small_mask(uint s,uint bank_bit){{
+  uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return float2(float(qpgc16_lr(p>>8)),float(qpgc16_lr(p&255u)));
+}}
+// The long-K M1/N32 W2 path accumulates in FP32, but the PGC16 table is
+// already FP16.  Returning the pair in its native width avoids two explicit
+// half-to-float conversions per decoded pair; the consuming expression still
+// promotes the operands for the FP32 accumulation.
+inline half2 qlevelsv2b_lr_const_w2_small_half(uint s,uint bank_bit){{
+  uint p=s^(bank_bit?0x{mask:04x}u:0u);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
+  return half2(qpgc16_lr(p>>8),qpgc16_lr(p&255u));
+}}
+"""
+
+_LR_MMA_SOURCE = r"""
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,nb=N>>3;
+uint row0=(group/nb)<<3,n=(group%nb)<<3;
+uint qid=lane>>2u,fm=(qid&4u)+((lane>>1u)&3u),fn=(qid&2u)*2u+(lane&1u)*2u;
+metal::simdgroup_matrix<float,8,8> C,D;
+C.thread_elements()[0]=0.0f;C.thread_elements()[1]=0.0f;
+for(uint base=0;base<K;base+=8u){
+  metal::simdgroup_matrix<half,8,8>A,B;
+  uint ar=row0+fm,ak=base+fn;
+  A.thread_elements()[0]=ar<M?x[ar*K+ak]:half(0.0h);
+  A.thread_elements()[1]=ar<M?x[ar*K+ak+1u]:half(0.0h);
+  uint tile=(base>>5u)*(N>>3u)+(n>>3u),ring0=fn&7u,ring1=(fn+1u)&7u;
+  uint pair=((base&31u)>>1u)+(fm>>1u),pair_lane=fm&1u;
+  device const int* tile_ptr=trellis+tile*(4u*eb);
+  uint selector=lane==0u?uint(bank_ids[tile]):0u;
+  selector=simd_shuffle(selector,ushort(0));
+  uint bank0=((selector>>ring0)&1u)*uint(bank_alt_id[0]);
+  uint bank1=((selector>>ring1)&1u)*uint(bank_alt_id[0]);
+  uint state0=qstate_lr_fast(tile_ptr,ring0,pair,eb);
+  uint state1=qstate_lr_fast(tile_ptr,ring1,pair,eb);
+  float2 value0=qlevelsv2b_lr_const(state0,bank0,eb);
+  float2 value1=qlevelsv2b_lr_const(state1,bank1,eb);
+  B.thread_elements()[0]=pair_lane?value0.y:value0.x;
+  B.thread_elements()[1]=pair_lane?value1.y:value1.x;
+  simdgroup_multiply_accumulate(D,A,B,C);C=D;
+}
+if(row0+fm<M){
+  out[(row0+fm)*N+n+fn]=half(C.thread_elements()[0]);
+  out[(row0+fm)*N+n+fn+1u]=half(C.thread_elements()[1]);
+}
+"""
+_LR_MMA_FP32_SOURCE = _LR_MMA_SOURCE.replace(
+    "=half(C.thread_elements()[0]);", "=C.thread_elements()[0];"
+).replace(
+    "=half(C.thread_elements()[1]);", "=C.thread_elements()[1];"
+)
+_LR_MMA_W2_SOURCE = _LR_MMA_SOURCE.replace(
+    "uint state0=qstate_lr_fast(tile_ptr,ring0,pair,eb);\n"
+    "  uint state1=qstate_lr_fast(tile_ptr,ring1,pair,eb);",
+    "uint ring0_base=(ring0>>1u)*4u+(ring0&1u)*2u,ring1_base=(ring1>>1u)*4u+(ring1&1u)*2u;"
+    "uint packed00=as_type<uint>(tile_ptr[ring0_base]),packed01=as_type<uint>(tile_ptr[ring0_base+1u]);"
+    "uint packed10=as_type<uint>(tile_ptr[ring1_base]),packed11=as_type<uint>(tile_ptr[ring1_base+1u]);"
+    "uint state0=qstate_lr_w2_packed_fast(packed00,packed01,pair);"
+    "uint state1=qstate_lr_w2_packed_fast(packed10,packed11,pair);",
+).replace(
+    "float2 value0=qlevelsv2b_lr_const(state0,bank0,eb);\n"
+    "  float2 value1=qlevelsv2b_lr_const(state1,bank1,eb);",
+    "float2 value0=qlevelsv2b_lr_const_w2(state0,bank0);\n"
+    "  float2 value1=qlevelsv2b_lr_const_w2(state1,bank1);",
+)
+_LR_MMA_W2_FP32_SOURCE = _LR_MMA_W2_SOURCE.replace(
+    "=half(C.thread_elements()[0]);", "=C.thread_elements()[0];"
+).replace(
+    "=half(C.thread_elements()[1]);", "=C.thread_elements()[1];"
+)
+_LR_MMA_HEADER = "#include <metal_simdgroup_matrix>\n" + _HEADER
+
+# The matrix path is shape-gated below.  The original experiment underfilled
+# the M4 Max, but the current W2 source and AC/high-performance recheck make
+# it a win for M8, K<=2048, wide-N FP32 GEMV.  Keep the flag separate so
+# another Apple GPU can disable the specialization without changing dispatch.
+_USE_LR_MMA = True
+
+# Cooperative ring decode remains disabled for M8/M16: its extra state setup
+# did not beat the SIMD0 decoder consistently on the M4 Max.  M4 is separate:
+# two SIMD groups can split the eight rings evenly, and its measured path is
+# enabled independently below after removing the decode bottleneck.
+_USE_LR_COOPERATIVE_DECODE = False
+_USE_LR_M4_COOPERATIVE_DECODE = True
+_LR_M4_COOPERATIVE_SUPPORTED: bool | None = None
+
+
+def _lr_m4_cooperative_supported() -> bool:
+    """Use the M4-tuned decoder only on the Apple GPU family it was measured on."""
+
+    global _LR_M4_COOPERATIVE_SUPPORTED
+    if _LR_M4_COOPERATIVE_SUPPORTED is None:
+        try:
+            import mlx.core as mx
+
+            architecture = str(mx.metal.device_info().get("architecture", ""))
+        except (AttributeError, KeyError, RuntimeError, TypeError):
+            architecture = ""
+        _LR_M4_COOPERATIVE_SUPPORTED = architecture.startswith("applegpu_g16")
+    return _LR_M4_COOPERATIVE_SUPPORTED
+
+_LR_MULTIROW_SOURCE = r"""
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint simd=simdgroup_index_in_threadgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,row_tile=dims[4],vc=(N+7u)>>3;
+uint row_block=group/vc,vector=group-row_block*vc,row_base=row_block*row_tile,n0=vector<<3;
+uint row_groups=(row_tile+1u)>>1,row0=row_base+simd,row1=row0+row_groups;
+threadgroup half decoded[8][32];
+float4 sum00=0.0f,sum01=0.0f,sum10=0.0f,sum11=0.0f;
+for(uint base=0;base<K;base+=32){
+  if(simd==0u){
+    uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u;
+    uint output_n=n0+output_lane,tile=(base>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
+    device const int* tile_ptr=trellis+tile*(4*eb);
+    uint ring_lane=lane&~3u;
+    uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+    // Every decoder lane in this SIMD group consumes the same N8 tile.
+    uint selector=lane==0u?uint(bank_ids[tile]):0u;
+    selector=simd_shuffle(selector,ushort(0));
+    uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+    for(uint offset=0;offset<4u;offset++){
+      uint pair=first_pair+offset;
+      float2 value=qlevelsv2b_lr_const(state,bank,eb);
+      decoded[output_lane][pair*2u]=half(value.x);
+      decoded[output_lane][pair*2u+1u]=half(value.y);
+      if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint k=base+lane;
+  if(k<K){
+    float4 weights0=float4(decoded[0][lane],decoded[1][lane],decoded[2][lane],decoded[3][lane]);
+    float4 weights1=float4(decoded[4][lane],decoded[5][lane],decoded[6][lane],decoded[7][lane]);
+    if(row0<M){float input0=float(x[row0*K+k]);sum00+=input0*weights0;sum01+=input0*weights1;}
+    if(row1<M){float input1=float(x[row1*K+k]);sum10+=input1*weights0;sum11+=input1*weights1;}
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+sum00.x=simd_sum(sum00.x);sum00.y=simd_sum(sum00.y);sum00.z=simd_sum(sum00.z);sum00.w=simd_sum(sum00.w);
+sum01.x=simd_sum(sum01.x);sum01.y=simd_sum(sum01.y);sum01.z=simd_sum(sum01.z);sum01.w=simd_sum(sum01.w);
+sum10.x=simd_sum(sum10.x);sum10.y=simd_sum(sum10.y);sum10.z=simd_sum(sum10.z);sum10.w=simd_sum(sum10.w);
+sum11.x=simd_sum(sum11.x);sum11.y=simd_sum(sum11.y);sum11.z=simd_sum(sum11.z);sum11.w=simd_sum(sum11.w);
+if(lane==0u){
+  if(row0<M){out[row0*N+n0]=half(sum00.x);out[row0*N+n0+1u]=half(sum00.y);out[row0*N+n0+2u]=half(sum00.z);out[row0*N+n0+3u]=half(sum00.w);
+    out[row0*N+n0+4u]=half(sum01.x);out[row0*N+n0+5u]=half(sum01.y);out[row0*N+n0+6u]=half(sum01.z);out[row0*N+n0+7u]=half(sum01.w);}
+  if(row1<M){out[row1*N+n0]=half(sum10.x);out[row1*N+n0+1u]=half(sum10.y);out[row1*N+n0+2u]=half(sum10.z);out[row1*N+n0+3u]=half(sum10.w);
+    out[row1*N+n0+4u]=half(sum11.x);out[row1*N+n0+5u]=half(sum11.y);out[row1*N+n0+6u]=half(sum11.z);out[row1*N+n0+7u]=half(sum11.w);}
+}
+"""
+
+
+def _make_lr_m4_cooperative_source(source: str) -> str:
+    """Distribute four decoded rings to each of M4's two SIMD groups."""
+
+    needle = "  if(simd==0u){\n    uint output_lane=lane>>2u,first_pair=(lane&3u)<<2u;"
+    replacement = "  if(lane<16u){\n    uint output_lane=(simd<<2u)+(lane>>2u),first_pair=(lane&3u)<<2u;"
+    if needle not in source:
+        raise RuntimeError("QVQ LR32 multirow source is missing the legacy decoder pattern")
+    return source.replace(needle, replacement)
+
+
+_LR_MULTIROW_M4_COOPERATIVE_SOURCE = _make_lr_m4_cooperative_source(_LR_MULTIROW_SOURCE)
+
+
+def _make_lr_multirow_fp32_source(source: str) -> str:
+    for value in ("sum00.x", "sum00.y", "sum00.z", "sum00.w", "sum01.x", "sum01.y", "sum01.z", "sum01.w",
+                  "sum10.x", "sum10.y", "sum10.z", "sum10.w", "sum11.x", "sum11.y", "sum11.z", "sum11.w"):
+        source = source.replace(f"half({value})", value)
+    return source
+
+
+_LR_MULTIROW_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SOURCE)
+_LR_MULTIROW_M4_COOPERATIVE_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_M4_COOPERATIVE_SOURCE
+)
+
+
+# Experimental cooperative decoder for row tiles with at least four SIMD
+# groups.  The ordinary multi-row kernel has SIMD group 0 decode all 128
+# state pairs in a K32 x N8 tile while the other groups wait at the barrier.
+# Here the first four SIMD groups each decode two rings using the same
+# four-lanes-per-ring sequential recurrence as the legacy decoder. This keeps
+# the number of state starts low while distributing independent rings across
+# SIMD groups. The decoded layout deliberately matches _LR_MULTIROW_SOURCE so
+# the consumer and output epilogue stay identical.
+_LR_MULTIROW_COOPERATIVE_SOURCE = r"""
+uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;
+uint simd=simdgroup_index_in_threadgroup;
+uint M=dims[0],K=dims[1],N=dims[2],eb=EdgeBits,row_tile=dims[4],vc=(N+7u)>>3;
+uint row_block=group/vc,vector=group-row_block*vc,row_base=row_block*row_tile,n0=vector<<3;
+uint row_groups=(row_tile+1u)>>1,row0=row_base+simd,row1=row0+row_groups;
+threadgroup half decoded[8][32];
+float4 sum00=0.0f,sum01=0.0f,sum10=0.0f,sum11=0.0f;
+for(uint base=0;base<K;base+=32){
+  if(simd<4u&&lane<8u){
+    uint output_lane=(simd<<1u)+(lane>>2u),first_pair=(lane&3u)<<2u;
+    uint output_n=n0+output_lane,tile=(base>>5)*(N>>3)+(output_n>>3),ring=output_n&7u;
+    device const int* tile_ptr=trellis+tile*(4*eb);
+    uint selector=lane==0u?uint(bank_ids[tile]):0u;
+    selector=simd_shuffle(selector,ushort(0));
+    uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);
+    uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);
+    for(uint offset=0;offset<4u;offset++){
+      uint pair=first_pair+offset;
+      float2 value=qlevelsv2b_lr_const(state,bank,eb);
+      decoded[output_lane][pair*2u]=half(value.x);
+      decoded[output_lane][pair*2u+1u]=half(value.y);
+      if(pair!=15u)state=((state<<eb)|qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb))&0xffffu;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  uint k=base+lane;
+  if(k<K){
+    float4 weights0=float4(decoded[0][lane],decoded[1][lane],decoded[2][lane],decoded[3][lane]);
+    float4 weights1=float4(decoded[4][lane],decoded[5][lane],decoded[6][lane],decoded[7][lane]);
+    if(row0<M){float input0=float(x[row0*K+k]);sum00+=input0*weights0;sum01+=input0*weights1;}
+    if(row1<M){float input1=float(x[row1*K+k]);sum10+=input1*weights0;sum11+=input1*weights1;}
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+sum00.x=simd_sum(sum00.x);sum00.y=simd_sum(sum00.y);sum00.z=simd_sum(sum00.z);sum00.w=simd_sum(sum00.w);
+sum01.x=simd_sum(sum01.x);sum01.y=simd_sum(sum01.y);sum01.z=simd_sum(sum01.z);sum01.w=simd_sum(sum01.w);
+sum10.x=simd_sum(sum10.x);sum10.y=simd_sum(sum10.y);sum10.z=simd_sum(sum10.z);sum10.w=simd_sum(sum10.w);
+sum11.x=simd_sum(sum11.x);sum11.y=simd_sum(sum11.y);sum11.z=simd_sum(sum11.z);sum11.w=simd_sum(sum11.w);
+if(lane==0u){
+  if(row0<M){out[row0*N+n0]=half(sum00.x);out[row0*N+n0+1u]=half(sum00.y);out[row0*N+n0+2u]=half(sum00.z);out[row0*N+n0+3u]=half(sum00.w);
+    out[row0*N+n0+4u]=half(sum01.x);out[row0*N+n0+5u]=half(sum01.y);out[row0*N+n0+6u]=half(sum01.z);out[row0*N+n0+7u]=half(sum01.w);}
+  if(row1<M){out[row1*N+n0]=half(sum10.x);out[row1*N+n0+1u]=half(sum10.y);out[row1*N+n0+2u]=half(sum10.z);out[row1*N+n0+3u]=half(sum10.w);
+    out[row1*N+n0+4u]=half(sum11.x);out[row1*N+n0+5u]=half(sum11.y);out[row1*N+n0+6u]=half(sum11.z);out[row1*N+n0+7u]=half(sum11.w);}
+}
+"""
+
+
+def _make_lr_multirow_split_source(source: str) -> str:
+    """Add a compile-time K split and interleaved partial-output layout."""
+
+    source = source.replace(
+        "uint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;",
+        "constexpr uint split_count=SplitK;\nuint group=threadgroup_position_in_grid.x,lane=thread_index_in_simdgroup;\nuint split=group%split_count;group/=split_count;",
+    ).replace(
+        "for(uint base=0;base<K;base+=32){",
+        "uint k_begin=(K*split)/split_count,k_end=(K*(split+1u))/split_count;\nfor(uint base=k_begin;base<k_end;base+=32){",
+    )
+    for row in ("row0", "row1"):
+        for offset in range(8):
+            suffix = "" if offset == 0 else f"+{offset}u"
+            source = source.replace(
+                f"out[{row}*N+n0{suffix}]=half",
+                f"out[({row}*N+n0{suffix})*split_count+split]=half",
+            )
+    return source
+
+
+_LR_MULTIROW_SPLIT_SOURCE = _make_lr_multirow_split_source(_LR_MULTIROW_SOURCE)
+_LR_MULTIROW_SPLIT_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SPLIT_SOURCE)
+_LR_MULTIROW_W2_SOURCE = (
+    _LR_MULTIROW_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_MULTIROW_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_W2_SOURCE)
+_LR_MULTIROW_SPLIT_W2_SOURCE = (
+    _LR_MULTIROW_SPLIT_SOURCE.replace("qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)")
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_MULTIROW_SPLIT_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_SPLIT_W2_SOURCE)
+
+_LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE = (
+    _LR_MULTIROW_M4_COOPERATIVE_SOURCE.replace(
+        "qstate_lr_fast(tile_ptr,ring,first_pair,eb)", "qstate_lr_w2(tile_ptr,ring,first_pair)"
+    )
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2(tile_ptr,ring,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+    .replace(
+        "uint state=qstate_lr_w2(tile_ptr,ring,first_pair);",
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_w2(tile_ptr,ring,pair+1u)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+)
+_LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+)
+
+# The M4 cooperative path is measured with a fixed alternative-bank ID for
+# loadable QVQ modules.  Inline that tiny W2 bank mask so the compiler can
+# remove the bank buffer load and the dynamic mask lookup.  Keep the generic
+# source below for direct callers that do not provide immutable metadata.
+_LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE = (
+    _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+    .replace(
+        "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+        "uint bank_bit=(selector>>ring)&1u;",
+    )
+    .replace(
+        "qlevelsv2b_lr_const_w2(state,bank)",
+        "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+    )
+    # M4 assigns one SIMD group to four rings.  Each group therefore needs
+    # only the eight packed W2 words for its own rings; loading all sixteen
+    # words in both groups duplicates half of the compressed metadata traffic.
+    .replace(
+        "uint packed_word=lane<16u?as_type<uint>(tile_ptr[lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((ring<<1u)+1u));",
+        "uint local_ring=ring&3u;"
+        "uint packed_word=lane<8u?as_type<uint>(tile_ptr[(simd<<3u)+lane]):0u;"
+        "uint packed0=simd_shuffle(packed_word,ushort(local_ring<<1u));"
+        "uint packed1=simd_shuffle(packed_word,ushort((local_ring<<1u)+1u));",
+    )
+)
+_LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE
+)
+_LR_MULTIROW_COOPERATIVE_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
+_LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE = _make_lr_multirow_split_source(_LR_MULTIROW_COOPERATIVE_SOURCE)
+_LR_MULTIROW_COOPERATIVE_SPLIT_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE)
+_LR_MULTIROW_COOPERATIVE_W2_SOURCE = (
+    _LR_MULTIROW_COOPERATIVE_SOURCE.replace(
+        "uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);",
+        "uint ring_lane=lane&~3u;"
+        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring<<1u]):0u;"
+        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[(ring<<1u)+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
+        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+)
+_LR_MULTIROW_COOPERATIVE_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(_LR_MULTIROW_COOPERATIVE_W2_SOURCE)
+_LR_MULTIROW_COOPERATIVE_SPLIT_W2_SOURCE = (
+    _LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE.replace(
+        "uint state=qstate_lr_fast(tile_ptr,ring,first_pair,eb);",
+        "uint ring_lane=lane&~3u;"
+        "uint packed0=(lane&3u)==0u?as_type<uint>(tile_ptr[ring<<1u]):0u;"
+        "uint packed1=(lane&3u)==1u?as_type<uint>(tile_ptr[(ring<<1u)+1u]):0u;"
+        "packed0=simd_shuffle(packed0,ushort(ring_lane));"
+        "packed1=simd_shuffle(packed1,ushort(ring_lane+1u));"
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+    )
+    .replace("qpt_lr_fast(tile_ptr,ring*16u+pair+1u,eb)", "qpt_lr_w2_packed(packed0,packed1,pair+1u)")
+    .replace("qlevelsv2b_lr_const(state,bank,eb)", "qlevelsv2b_lr_const_w2(state,bank)")
+)
+_LR_MULTIROW_COOPERATIVE_SPLIT_W2_FP32_SOURCE = _make_lr_multirow_fp32_source(
+    _LR_MULTIROW_COOPERATIVE_SPLIT_W2_SOURCE
 )
 _DUAL_V2_SOURCE = _SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
 _DUAL_V2_FP32_SOURCE = _FP32_SOURCE.replace("qpair(trellis,levels,", "qpaird(trellis,levels,")
@@ -1256,6 +2784,983 @@ def _v2_banked_kernel(kind: str, vector_width: int, *, output_fp32: bool):
         return kernel
 
 
+def _local_ring_kernel(*, output_fp32: bool, split_k: int = 1, w2: bool = False):
+    """Build the LR32 GPU GEMV, optionally splitting K across SIMD groups."""
+
+    if split_k not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError(f"QVQ LR32 split_k must be a power of two from 1 through 64, got {split_k}")
+    key = (output_fp32, split_k, w2)
+    kernel = _LR_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        if key in _LR_KERNEL_ERRORS:
+            raise RuntimeError(_LR_KERNEL_ERRORS[key])
+        import mlx.core as mx
+
+        try:
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_{'fp32' if output_fp32 else 'fp16'}_split{split_k}",
+                input_names=["x", "trellis", "bank_ids", "bank_alt_id", "levels", "dims"],
+                output_names=["out"],
+                header=_HEADER,
+                source=(
+                    _LR_W2_FP32_SOURCE
+                    if output_fp32 and w2
+                    else _LR_W2_SOURCE
+                    if w2
+                    else _LR_FP32_SOURCE
+                    if output_fp32
+                    else _LR_SOURCE
+                ),
+                ensure_row_contiguous=True,
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX kernel creation failed for split_k={split_k}: {exc}"
+            _LR_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_small_kernel(
+    *,
+    output_fp32: bool,
+    w2: bool = False,
+    split_k: int = 1,
+    output_width: int = 8,
+    alt_bank_id: int | None = None,
+    single_row: bool = False,
+    vector_activation: bool = False,
+):
+    """Build the barrier-free LR32 kernel for one or two input rows."""
+
+    if split_k not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError(f"QVQ LR32 small split_k must be a power of two from 1 through 64, got {split_k}")
+    if output_width not in (8, 16):
+        raise ValueError(f"QVQ LR32 small output width must be 8 or 16, got {output_width}")
+    if alt_bank_id is not None and alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    if not isinstance(single_row, bool):
+        raise TypeError("QVQ LR32 single_row must be a bool")
+    if not isinstance(vector_activation, bool):
+        raise TypeError("QVQ LR32 vector_activation must be a bool")
+    if vector_activation and not single_row:
+        raise ValueError("QVQ LR32 vector_activation requires single_row=True")
+    key = (output_fp32, split_k, w2, output_width, alt_bank_id, single_row, vector_activation)
+    kernel = _LR_SMALL_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_SMALL_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        if key in _LR_SMALL_KERNEL_ERRORS:
+            raise RuntimeError(_LR_SMALL_KERNEL_ERRORS[key])
+        import mlx.core as mx
+
+        try:
+            source = (
+                _LR_SMALL_M1_N16_LITERAL_W2_FP32_SOURCE
+                if vector_activation and output_width == 16 and output_fp32 and w2
+                else _LR_SMALL_M1_N16_VECTOR_W2_SOURCE
+                if vector_activation and output_width == 16 and w2
+                else _LR_SMALL_M1_N16_VECTOR_FP32_SOURCE
+                if vector_activation and output_width == 16 and output_fp32
+                else _LR_SMALL_M1_N16_VECTOR_SOURCE
+                if vector_activation and output_width == 16
+                else _LR_SMALL_M1_VECTOR_W2_FP32_SOURCE
+                if vector_activation and output_fp32 and w2
+                else _LR_SMALL_M1_VECTOR_W2_SOURCE
+                if vector_activation and w2
+                else _LR_SMALL_M1_VECTOR_FP32_SOURCE
+                if vector_activation and output_fp32
+                else _LR_SMALL_M1_VECTOR_SOURCE
+                if vector_activation
+                else
+                _LR_SMALL_M1_N16_W2_FP32_SOURCE
+                if single_row and output_width == 16 and output_fp32 and w2
+                else _LR_SMALL_M1_N16_W2_SOURCE
+                if single_row and output_width == 16 and w2
+                else _LR_SMALL_M1_N16_FP32_SOURCE
+                if single_row and output_width == 16 and output_fp32
+                else _LR_SMALL_M1_N16_SOURCE
+                if single_row and output_width == 16
+                else _LR_SMALL_M1_W2_FP32_SOURCE
+                if single_row and output_fp32 and w2
+                else _LR_SMALL_M1_W2_SOURCE
+                if single_row and w2
+                else _LR_SMALL_M1_FP32_SOURCE
+                if single_row and output_fp32
+                else _LR_SMALL_M1_SOURCE
+                if single_row
+                else _LR_SMALL_N16_W2_FP32_SOURCE
+                if output_width == 16 and output_fp32 and w2
+                else _LR_SMALL_N16_W2_SOURCE
+                if output_width == 16 and w2
+                else _LR_SMALL_N16_FP32_SOURCE
+                if output_width == 16 and output_fp32
+                else _LR_SMALL_N16_SOURCE
+                if output_width == 16
+                else _LR_SMALL_W2_FP32_SOURCE
+                if output_fp32 and w2
+                else _LR_SMALL_W2_SOURCE
+                if w2
+                else _LR_SMALL_FP32_SOURCE
+                if output_fp32
+                else _LR_SMALL_SOURCE
+            )
+            specialized_alt_bank = alt_bank_id is not None
+            literal_w2_mask = w2 and specialized_alt_bank
+            header = _HEADER
+            if literal_w2_mask:
+                source = source.replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                ).replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+                ).replace(
+                    "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                    "half2 value=qlevelsv2b_lr_const_w2_small_half",
+                )
+                header = _lr_small_w2_mask_header(alt_bank_id)
+            if specialized_alt_bank and not literal_w2_mask:
+                source = source.replace("uint(bank_alt_id[0])", "AltBank")
+            input_names = ["x", "trellis", "bank_ids", "dims"]
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_small_"
+                    f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
+                    f"_n{output_width}"
+                    f"{'_m1' if single_row else ''}"
+                    f"{'_vec' if vector_activation else ''}"
+                    f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
+                ),
+                input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
+                output_names=["out"],
+                header=header,
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX small-row kernel creation failed: {exc}"
+            _LR_SMALL_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_SMALL_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_m1_fused_split_kernel(*, alt_bank_id: int):
+    """Build the barrier-minimal fixed M1/N16 W2 split-8 kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_FUSED_SPLIT_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_FUSED_SPLIT_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_FUSED_SPLIT_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_FUSED_SPLIT_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_fused_split8_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 fused M1 split kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_FUSED_SPLIT_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_FUSED_SPLIT_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_fused_split16_kernel(*, alt_bank_id: int):
+    """Build the barrier-minimal fixed M1/N16 W2 split-16 kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_FUSED_SPLIT16_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_FUSED_SPLIT16_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_FUSED_SPLIT16_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
+            )
+            kernel = mx.fast.metal_kernel(
+                # Keep a distinct MLX kernel name while the split ordinal is
+                # derived from the explicit thread index below.  MLX/Metal
+                # may retain compiled artifacts by name across calls.
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_fused_split16_tid_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 fused M1 split-16 kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_FUSED_SPLIT16_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n32_fused_split_kernel(
+    *,
+    alt_bank_id: int,
+    split_count: int,
+    inputs_contiguous: bool = False,
+    activation_broadcast: bool = False,
+):
+    """Build the barrier-minimal fixed M1/N32 W2 split kernel.
+
+    ``activation_broadcast`` is reserved for the short-wide M1 shape where
+    all N32 output lanes consume the same K32 activation tile.  Long-K
+    dispatch keeps the scalar source until it has independent A/B evidence.
+    """
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    if split_count not in (8, 16, 32):
+        raise ValueError(f"QVQ LR32 M1/N32 split count must be 8, 16, or 32, got {split_count}")
+    if not isinstance(inputs_contiguous, bool):
+        raise TypeError("QVQ LR32 inputs_contiguous must be a bool")
+    if not isinstance(activation_broadcast, bool):
+        raise TypeError("QVQ LR32 activation_broadcast must be a bool")
+    if split_count == 32:
+        kernels = _LR_M1_N32_FUSED_SPLIT32_KERNELS
+        errors = _LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS
+    elif split_count == 16:
+        kernels = _LR_M1_N32_FUSED_SPLIT16_KERNELS
+        errors = _LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS
+    else:
+        kernels = _LR_M1_N32_FUSED_SPLIT_KERNELS
+        errors = _LR_M1_N32_FUSED_SPLIT_ERRORS
+    key = (alt_bank_id, inputs_contiguous, activation_broadcast)
+    kernel = kernels.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = kernels.get(key)
+        if kernel is not None:
+            return kernel
+        error = errors.get(key)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = (
+                _LR_M1_N32_FUSED_SPLIT32_SHARED_W2_FP32_SOURCE
+                if split_count == 32 and activation_broadcast
+                else _LR_M1_N32_FUSED_SPLIT16_SHARED_W2_FP32_SOURCE
+                if split_count == 16 and activation_broadcast
+                else _LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE
+                if split_count == 32
+                else _LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE
+                if split_count == 16
+                else _LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE
+            )
+            source = source.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_m1_n32_fused_split{split_count}"
+                    f"_alt{alt_bank_id}_{'contig' if inputs_contiguous else 'checked'}"
+                    f"_{'actbroadcast' if activation_broadcast else 'scalar'}"
+                ),
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                # qvq_mlx_gemv materializes the three flat inputs when the
+                # caller has not asserted contiguity.  QVQMLXLinear already
+                # makes the immutable payloads contiguous, and its
+                # transformed activation is row-contiguous, so avoid an
+                # extra MLX preparation boundary on the latency-sensitive
+                # M1/N32 route.
+                ensure_row_contiguous=not inputs_contiguous,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                f"QVQ LR32 fused M1/N32 split-{split_count} kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            errors[key] = error
+            raise RuntimeError(error) from exc
+        kernels[key] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_n32pair_split8_kernel(*, alt_bank_id: int):
+    """Build the measured M1/N64 kernel with two paired N32 output tiles."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_N32PAIR_SPLIT8_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_N32PAIR_SPLIT8_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_N64_N32PAIR_SPLIT8_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_n32pair_split8_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 paired M1/N64 split-8 kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_N32PAIR_SPLIT8_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n96_n32triple_split8_kernel(*, alt_bank_id: int):
+    """Build the measured M1/N96 kernel with three paired N32 output tiles."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N96_N32TRIPLE_SPLIT8_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_N96_N32TRIPLE_SPLIT8_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n96_n32triple_split8_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 triple M1/N96 split-8 kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_N96_N32TRIPLE_SPLIT8_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_split2_kernel(*, alt_bank_id: int):
+    """Build the fused two-split kernel for four adjacent N16 tiles."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_SPLIT2_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_SPLIT2_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_SPLIT2_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_N64_SPLIT2_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_split2_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 M1/N64 split-2 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
+            _LR_M1_N64_SPLIT2_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_SPLIT2_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_shared_split2_kernel(*, alt_bank_id: int):
+    """Build the shared-activation M1/N64 two-split kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_SHARED_SPLIT2_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_SHARED_SPLIT2_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_N64_SHARED_SPLIT2_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_mask(state,bank_bit)",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_shared_split2_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 M1/N64 shared split-2 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
+            _LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_SHARED_SPLIT2_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_half2_kernel(*, alt_bank_id: int):
+    """Build the fixed M1/N64 W2 kernel retaining PGC16 pairs as half2."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N64_HALF2_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_HALF2_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_HALF2_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = (
+                _lr_m1_n64_shape_source(
+                    2048,
+                    8192,
+                    source=_LR_M1_N64_K64_W2_FP32_SOURCE,
+                )
+                .replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                )
+                .replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+                )
+                .replace(
+                    "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                    "half2 value=qlevelsv2b_lr_const_w2_small_half",
+                )
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_half2_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 M1/N64 half2 kernel creation failed for alt_bank_id={alt_bank_id}: {exc}"
+            _LR_M1_N64_HALF2_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_HALF2_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int, k_tile: int = 64):
+    """Build the aligned uint2-load variant of the M1/N64 W2 kernel."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    if k_tile not in (64, 128):
+        raise ValueError(f"QVQ LR32 M1/N64 K tile batch must be 64 or 128, got {k_tile}")
+    key = (alt_bank_id, k_tile)
+    kernel = _LR_M1_N64_UINT2_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_UINT2_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_UINT2_KERNEL_ERRORS.get(key)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            base_source = (
+                _LR_M1_N64_K128_W2_UINT2_FAST_STATE_FP32_SOURCE
+                if k_tile == 128
+                else _LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE
+            )
+            source = (
+                _lr_m1_n64_shape_source(
+                    2048,
+                    8192,
+                    source=base_source,
+                )
+                .replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                )
+                .replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+                )
+                .replace(
+                    "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                    "half2 value=qlevelsv2b_lr_const_w2_small_half",
+                )
+            )
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_uint2_kt{k_tile}"
+                    f"_fp32_alt{alt_bank_id}"
+                ),
+                input_names=["x", "trellis", "bank_ids"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 M1/N64 uint2-load kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_N64_UINT2_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_UINT2_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_m1_n64_kernel(*, alt_bank_id: int, k: int, n: int, k_tile: int = 64):
+    """Build the W2 M1/N64 kernel with a shape-specialized K tile batch."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    if k_tile not in (64, 128):
+        raise ValueError(f"QVQ LR32 M1/N64 K tile batch must be 64 or 128, got {k_tile}")
+    if k % k_tile:
+        raise ValueError(f"QVQ LR32 M1/N64 K={k} is not divisible by K tile batch {k_tile}")
+    key = (alt_bank_id, k, n, k_tile)
+    kernel = _LR_M1_N64_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N64_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N64_KERNEL_ERRORS.get(key)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            base_source = (
+                _LR_M1_N64_K128_W2_FP32_SOURCE
+                if k_tile == 128
+                else _LR_M1_N64_K64_W2_FP32_SOURCE
+            )
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_k{k}_n{n}"
+                    f"_kt{k_tile}_fp32_alt{alt_bank_id}"
+                ),
+                input_names=["x", "trellis", "bank_ids"],
+                output_names=["out"],
+                header=_lr_m1_n64_w2_mask_header(alt_bank_id),
+                source=_lr_m1_n64_shape_source(k, n, source=base_source).replace(
+                    "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                    "uint bank_bit=(selector>>ring)&1u;",
+                )
+                .replace(
+                    "qlevelsv2b_lr_const_w2(state,bank)",
+                    "qlevelsv2b_lr_const_w2_m1_mask(state,bank_bit)",
+                )
+                .replace("uint(bank_alt_id[0])", "AltBank"),
+                # qvq_mlx_gemv explicitly makes the three flat inputs
+                # contiguous for this guarded path.  Avoid the generic MLX
+                # preparation wrapper, which otherwise adds a per-launch
+                # row-contiguity check/copy boundary.
+                ensure_row_contiguous=False,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX M1/N64 kernel creation failed for alt_bank_id={alt_bank_id}, K={k}, N={n}: {exc}"
+            _LR_M1_N64_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N64_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_mma_kernel(
+    *,
+    output_fp32: bool,
+    w2: bool = False,
+    alt_bank_id: int | None = None,
+):
+    """Build the one-SIMD-group LR32 M8 x N8 matrix-multiply kernel."""
+
+    key = (output_fp32, w2, alt_bank_id)
+    kernel = _LR_MMA_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    if alt_bank_id is not None and alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    with _KERNEL_LOCK:
+        kernel = _LR_MMA_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        if key in _LR_MMA_KERNEL_ERRORS:
+            raise RuntimeError(_LR_MMA_KERNEL_ERRORS[key])
+        import mlx.core as mx
+
+        try:
+            source = (
+                _LR_MMA_W2_FP32_SOURCE
+                if output_fp32 and w2
+                else _LR_MMA_W2_SOURCE
+                if w2
+                else _LR_MMA_FP32_SOURCE
+                if output_fp32
+                else _LR_MMA_SOURCE
+            )
+            specialized_alt_bank = alt_bank_id is not None
+            if specialized_alt_bank:
+                source = source.replace("uint(bank_alt_id[0])", "AltBank")
+            input_names = ["x", "trellis", "bank_ids", "dims"]
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_mma_"
+                    f"{'fp32' if output_fp32 else 'fp16'}"
+                    f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
+                ),
+                input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
+                output_names=["out"],
+                header=_LR_MMA_HEADER,
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX MMA kernel creation failed: {exc}"
+            _LR_MMA_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_MMA_KERNELS[key] = kernel
+        return kernel
+
+
+def _local_ring_split_k(m: int, k: int, n: int) -> int:
+    """Add independent K-slices until small LR dispatches expose the GPU."""
+
+    logical_groups = m * ((n + 31) // 32)
+    split_k = 1
+    while logical_groups * split_k < 128 and split_k < 64:
+        split_k <<= 1
+    while split_k > 1 and k % (32 * split_k):
+        split_k >>= 1
+    return split_k
+
+
+def _local_ring_multirow_split_k(m: int, k: int, n: int, *, output_fp32: bool = False) -> int:
+    """Choose a conservative K split for the multi-row LR dispatch."""
+
+    if not output_fp32:
+        # Splitting and storing FP16 partials changes the public reduction
+        # semantics: each K slice would be rounded before the final sum.
+        # Keep one FP32 accumulation/reduction for the FP16 contract and only
+        # split the production FP32-output path.
+        return 1
+    if m < 4:
+        # M1 exposes enough independent output work that eight slices win for
+        # both short and long K on the M4 Max.  Sixteen slices further reduce
+        # the latency of the fused M1/N16 path when K is divisible by 512;
+        # the divisibility guard below falls back to eight for other K.
+        # Very-wide short-K M1 is handled by the separate N64 route below.
+        # Keep M2 on the previously measured four-slice policy until it has
+        # its own sweep.
+        if m == 1 and k >= 2048 and n <= 2048:
+            split_k = 16
+        else:
+            split_k = 16 if m == 1 and k >= 8192 and n <= 2048 else 4
+    elif m == 8 and k <= 2048 and n >= 8192:
+        # The unsplit path avoids partial materialization/reduction.  The
+        # matrix variant is separately gated by _USE_LR_MMA after profiling.
+        split_k = 1
+    elif k >= 8192 and n <= 2048:
+        split_k = 8
+    elif k <= 2048 and n >= 8192:
+        split_k = 4 if m >= 8 else 1
+    elif m >= 16 and k >= 4096 and n >= 4096:
+        split_k = 4
+    else:
+        split_k = 1
+    while split_k > 1 and k % (32 * split_k):
+        split_k >>= 1
+    return split_k
+
+
+def _local_ring_small_output_width(n: int) -> int:
+    """Choose the small-row output tile from measured M4 Max occupancy."""
+
+    # N16 reduces the number of threadgroups and repeated LR decode work.  On
+    # the AC/performance-mode M4 Max recheck it wins for both narrow and wide
+    # M1/M2 projection shapes, including N=8192.  Keep this centralized so a
+    # future GPU-specific policy can replace it without touching dispatch.
+    del n
+    return 16
+
+
+def _local_ring_m1_n64_split_k(k: int) -> int:
+    """Choose the wide-M1 split from measured K64 launch/reduction costs."""
+
+    # The K64 grouped source exposes enough independent work at the model's
+    # K=2048 wide projection shape for split-2 to win.  At smaller K, the
+    # fixed partial-output materialization and MLX reduction cost more than
+    # the extra occupancy, so keep one full-K accumulation.
+    return 2 if k == 2048 else 1
+
+
+def _local_ring_multirow_kernel(
+    *,
+    output_fp32: bool,
+    w2: bool = False,
+    split_k: int = 1,
+    alt_bank_id: int | None = None,
+    cooperative_decode: bool = False,
+    m4_cooperative_decode: bool = False,
+):
+    """Build the LR32 multi-row GEMV that shares one decode across rows."""
+
+    if split_k not in (1, 2, 4, 8, 16, 32, 64):
+        raise ValueError(f"QVQ LR32 multi-row split_k must be a power of two from 1 through 64, got {split_k}")
+    if alt_bank_id is not None and alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    if not isinstance(cooperative_decode, bool):
+        raise TypeError("QVQ LR32 cooperative_decode must be a bool")
+    if not isinstance(m4_cooperative_decode, bool):
+        raise TypeError("QVQ LR32 m4_cooperative_decode must be a bool")
+    if cooperative_decode and m4_cooperative_decode:
+        raise ValueError("QVQ LR32 cooperative decode modes are mutually exclusive")
+    if m4_cooperative_decode and split_k != 1:
+        raise ValueError("QVQ LR32 M4 cooperative decode requires split_k=1")
+    key = (output_fp32, split_k, w2, alt_bank_id, cooperative_decode, m4_cooperative_decode)
+    kernel = _LR_MULTIROW_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_MULTIROW_KERNELS.get(key)
+        if kernel is not None:
+            return kernel
+        if key in _LR_MULTIROW_KERNEL_ERRORS:
+            raise RuntimeError(_LR_MULTIROW_KERNEL_ERRORS[key])
+        import mlx.core as mx
+
+        try:
+            literal_m4_w2_mask = m4_cooperative_decode and w2 and alt_bank_id is not None
+            if m4_cooperative_decode:
+                if w2:
+                    if literal_m4_w2_mask:
+                        source = (
+                            _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_FP32_SOURCE
+                            if output_fp32
+                            else _LR_MULTIROW_M4_COOPERATIVE_W2_LITERAL_SOURCE
+                        )
+                    else:
+                        source = (
+                            _LR_MULTIROW_M4_COOPERATIVE_W2_FP32_SOURCE
+                            if output_fp32
+                            else _LR_MULTIROW_M4_COOPERATIVE_W2_SOURCE
+                        )
+                else:
+                    source = (
+                        _LR_MULTIROW_M4_COOPERATIVE_FP32_SOURCE
+                        if output_fp32
+                        else _LR_MULTIROW_M4_COOPERATIVE_SOURCE
+                    )
+            elif cooperative_decode:
+                source = (
+                    _LR_MULTIROW_COOPERATIVE_SPLIT_W2_FP32_SOURCE
+                    if split_k > 1 and output_fp32 and w2
+                    else _LR_MULTIROW_COOPERATIVE_SPLIT_W2_SOURCE
+                    if split_k > 1 and w2
+                    else _LR_MULTIROW_COOPERATIVE_SPLIT_FP32_SOURCE
+                    if split_k > 1 and output_fp32
+                    else _LR_MULTIROW_COOPERATIVE_SPLIT_SOURCE
+                    if split_k > 1
+                    else _LR_MULTIROW_COOPERATIVE_W2_FP32_SOURCE
+                    if output_fp32 and w2
+                    else _LR_MULTIROW_COOPERATIVE_W2_SOURCE
+                    if w2
+                    else _LR_MULTIROW_COOPERATIVE_FP32_SOURCE
+                    if output_fp32
+                    else _LR_MULTIROW_COOPERATIVE_SOURCE
+                )
+            else:
+                source = (
+                    _LR_MULTIROW_SPLIT_W2_FP32_SOURCE
+                    if split_k > 1 and output_fp32 and w2
+                    else _LR_MULTIROW_SPLIT_W2_SOURCE
+                    if split_k > 1 and w2
+                    else _LR_MULTIROW_SPLIT_FP32_SOURCE
+                    if split_k > 1 and output_fp32
+                    else _LR_MULTIROW_SPLIT_SOURCE
+                    if split_k > 1
+                    else _LR_MULTIROW_W2_FP32_SOURCE
+                    if output_fp32 and w2
+                    else _LR_MULTIROW_W2_SOURCE
+                    if w2
+                    else _LR_MULTIROW_FP32_SOURCE
+                    if output_fp32
+                    else _LR_MULTIROW_SOURCE
+                )
+            specialized_alt_bank = alt_bank_id is not None
+            if specialized_alt_bank and not literal_m4_w2_mask:
+                # The bank family is immutable checkpoint metadata.  Keep it
+                # out of the MLX input graph so every production linear avoids
+                # a host scalar extraction and a device buffer load.
+                source = source.replace("uint(bank_alt_id[0])", "AltBank")
+            input_names = ["x", "trellis", "bank_ids", "dims"]
+            kernel = mx.fast.metal_kernel(
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_multirow_"
+                    f"{'fp32' if output_fp32 else 'fp16'}_split{split_k}"
+                    f"{'_coop' if cooperative_decode else ''}"
+                    f"{'_m4coop' if m4_cooperative_decode else ''}"
+                    f"{'' if alt_bank_id is None else f'_alt{alt_bank_id}'}"
+                ),
+                input_names=input_names if specialized_alt_bank else [*input_names[:3], "bank_alt_id", *input_names[3:]],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id) if literal_m4_w2_mask else _HEADER,
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = f"QVQ LR32 MLX multi-row kernel creation failed: {exc}"
+            _LR_MULTIROW_KERNEL_ERRORS[key] = error
+            raise RuntimeError(error) from exc
+        _LR_MULTIROW_KERNELS[key] = kernel
+        return kernel
 def _v4_kernel():
     global _V4_KERNEL, _V4_KERNEL_ERROR
     if _V4_KERNEL is None:
@@ -2608,8 +5113,11 @@ def qvq_mlx_gemv(
     bank_ids=None,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
+    v2b2_p32_lr: bool = False,
     bank_alt_id=None,
     output_fp32: bool = False,
+    _bank_alt_id_value: int | None = None,
+    _inputs_contiguous: bool = False,
     _prepared_compander: _QVQMLXPreparedCompander | None = None,
 ):
     """Multiply transformed MLX activations by planar PGC16 tiles."""
@@ -2619,12 +5127,14 @@ def qvq_mlx_gemv(
     bits = normalize_qvq_rate(bits)
     if not isinstance(output_fp32, bool):
         raise TypeError("QVQ MLX output_fp32 must be a bool")
+    if not isinstance(_inputs_contiguous, bool):
+        raise TypeError("QVQ MLX _inputs_contiguous must be a bool")
     if not isinstance(dual_v2, bool):
         raise TypeError("QVQ MLX dual_v2 must be a bool")
-    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
+    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool) or not isinstance(v2b2_p32_lr, bool):
         raise TypeError("QVQ MLX banked-V2 format flags must be bools")
-    if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
-        raise ValueError("QVQ MLX Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive")
+    if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
+        raise ValueError("QVQ MLX Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive")
     if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
         raise ValueError("QVQ MLX vector_size must be 2, or 4 for rates W1 through W4")
     trellis_window = _integer_argument(trellis_window, "trellis_window")
@@ -2636,18 +5146,24 @@ def qvq_mlx_gemv(
         raise ValueError("QVQ MLX L18 supports only rates W1 through W2.5")
     if trellis_window == 18 and bank_ids is not None:
         raise ValueError("QVQ MLX L18 uses implicit history-selected banks and rejects bank_ids")
-    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32):
+    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32 or v2b2_p32_lr):
         raise ValueError("QVQ MLX bank selectors require vector_size=4")
     if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
         raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
-    if (v2b4_p64 or v2b2_p32) and (
+    if (v2b4_p64 or v2b2_p32 or v2b2_p32_lr) and (
         vector_size != 2 or trellis_window != 16 or bits > 3.5 or bank_ids is None
     ):
         raise ValueError("QVQ MLX banked-V2 formats require L16/V2, packed selectors, and W1 through W3.5")
-    if v2b2_p32:
+    if v2b2_p32 or v2b2_p32_lr:
         if bank_alt_id is None or bank_alt_id.dtype != mx.uint8 or bank_alt_id.shape != (1,):
-            raise ValueError("QVQ MLX V2B2-P32 requires one uint8 alternative-bank ID")
-        alt_id = int(bank_alt_id.item())
+            raise ValueError("QVQ MLX V2B2-P32 formats require one uint8 alternative-bank ID")
+        if _bank_alt_id_value is None:
+            # Compatibility path for direct callers that have not wrapped the
+            # payload in QVQMLXLinear.  The loadable MLX module resolves this
+            # immutable metadata once in __init__ and passes the Python value.
+            alt_id = int(bank_alt_id.item())
+        else:
+            alt_id = _integer_argument(_bank_alt_id_value, "bank_alt_id")
         if not 1 <= alt_id <= 3:
             raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
     elif bank_alt_id is not None:
@@ -2655,20 +5171,28 @@ def qvq_mlx_gemv(
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     if x.ndim != 2 or trellis.ndim != 2:
         raise ValueError("QVQ MLX expects 2D x and trellis arrays")
-    if x.dtype != mx.float16 or trellis.dtype != mx.int32:
-        raise TypeError("QVQ MLX requires float16 x and int32 planar trellis words")
+    if trellis.dtype != mx.int32:
+        raise TypeError("QVQ MLX requires int32 planar trellis words")
+    if x.dtype != mx.float16 and not (v2b2_p32_lr and x.dtype == mx.float32):
+        raise TypeError("QVQ MLX requires float16 x, or float32 x for LR32")
     m, k = x.shape
     n = _integer_argument(out_features, "out_features")
-    if k <= 0 or n <= 0 or k % 16 or n % 16:
-        raise ValueError(f"QVQ MLX requires positive K/N divisible by 16, got K={k}, N={n}")
+    if v2b2_p32_lr:
+        if k <= 0 or n <= 0 or k % 32 or n % 8:
+            raise ValueError(f"QVQ MLX LR32 requires positive K/N divisible by K32/N8, got K={k}, N={n}")
+        tile_count = (k // 32) * (n // 8)
+    else:
+        if k <= 0 or n <= 0 or k % 16 or n % 16:
+            raise ValueError(f"QVQ MLX requires positive K/N divisible by 16, got K={k}, N={n}")
+        tile_count = (k // 16) * (n // 16)
     expected = (
-        (k // 16) * (n // 16),
+        tile_count,
         qvq_words_per_tile(bits, vector_size=vector_size),
     )
     if trellis.shape != expected:
         raise ValueError(f"QVQ planar trellis must have shape {expected}, got {trellis.shape}")
     if bank_ids is not None:
-        packed_count = expected[0] if v2b4_p64 or v2b2_p32 else (expected[0] + 3) // 4
+        packed_count = expected[0] if v2b4_p64 or v2b2_p32 or v2b2_p32_lr else (expected[0] + 3) // 4
         if bank_ids.dtype != mx.uint8:
             raise TypeError("QVQ MLX bank selectors must use packed uint8 storage")
         if bank_ids.ndim != 1 or bank_ids.size != packed_count:
@@ -2681,6 +5205,468 @@ def qvq_mlx_gemv(
     selector_size = 0 if bank_ids is None else bank_ids.size
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
+    if v2b2_p32_lr:
+        split_k = _local_ring_multirow_split_k(m, k, n, output_fp32=output_fp32)
+        small_rows = m <= 2
+        m1_n64 = (
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k <= 2048
+            and k % 64 == 0
+            and n >= 8192
+            and n % 64 == 0
+        )
+        m1_n64_split2 = (
+            _USE_LR_M1_N64_SPLIT2
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k % 128 == 0
+            and n >= 64
+            and n % 64 == 0
+            and not m1_n64
+        )
+        m1_n64_shared_split2 = (
+            _USE_LR_M1_N64_SHARED_SPLIT2
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k % 64 == 0
+            # The fused two-split launch also wins at the short wide M1
+            # K=2048 shape: it removes the materialized MLX split reduction
+            # while retaining the same two-way K parallelism.
+            and k >= 2048
+            # At N=16384 the larger threadgroup cost outweighs the saved MLX
+            # reduction, so keep this specialization at the validated width.
+            and n == 8192
+            and n % 64 == 0
+        )
+        m1_n64_half2 = (
+            _USE_LR_M1_N64_HALF2
+            and output_fp32
+            and transition_bits == 4
+            and m1_n64
+            and k == 2048
+            and n == 8192
+        )
+        m1_n64_uint2 = (
+            _USE_LR_M1_N64_UINT2
+            and m1_n64_half2
+        )
+        m1_n96_n32triple_split8 = (
+            _USE_LR_M1_N96_N32TRIPLE_SPLIT8_LONGK
+            and output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k >= 8192
+            and k % 256 == 0
+            and n == 11008
+        )
+        m1_n64_n32pair_split8 = (
+            (_USE_LR_M1_N64_N32PAIR_SPLIT8 and m == 1 and k == 2048 and n == 2048)
+            or (
+                _USE_LR_M1_N64_N32PAIR_SPLIT8_LONGK
+                and output_fp32
+                and transition_bits == 4
+                and m == 1
+                and k >= 8192
+                and k % 256 == 0
+                and n >= 8192
+                and n % 64 == 0
+                and not m1_n96_n32triple_split8
+            )
+        )
+        m1_n32_fused_split16_wide = (
+            _USE_LR_M1_N32_FUSED_WIDE
+            and output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k == 2048
+            and n == 8192
+        )
+        if _LR_M1_N32_FUSED_WIDE_SPLIT_COUNT not in (16, 32):
+            raise ValueError("QVQ LR32 wide M1/N32 split count must be 16 or 32")
+        m1_fused_split = (
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 8
+            and n % 16 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
+            and not m1_n64_n32pair_split8
+        )
+        m1_fused_split16 = (
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 16
+            and n % 16 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
+            and not m1_n64_n32pair_split8
+        )
+        m1_n32_fused_split16 = (
+            _USE_LR_M1_N32_FUSED
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 16
+            # N32 is promoted for the measured short-K N2048 and N256 cases;
+            # long-K N32 remains enabled for the existing N<=2048 path.
+            and (k >= 8192 or (k == 2048 and n in (256, 2048)))
+            and n <= 2048
+            and n % 32 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
+            and not m1_n64_n32pair_split8
+        )
+        m1_n32_fused_split32 = (
+            _USE_LR_M1_N32_FUSED
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and (k >= 8192 or (k == 2048 and n == 256))
+            and k % 1024 == 0
+            and n <= 2048
+            and n % 32 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
+            and not m1_n64_n32pair_split8
+        )
+        m1_n32_fused_split = (
+            _USE_LR_M1_N32_FUSED
+            and
+            output_fp32
+            and transition_bits == 4
+            and m == 1
+            and split_k == 8
+            and k >= 8192
+            and n <= 2048
+            and n % 32 == 0
+            and not m1_n64
+            and not m1_n64_split2
+            and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
+            and not m1_n64_n32pair_split8
+        )
+        if m1_n96_n32triple_split8:
+            # Three N32 output tiles share one 768-thread launch.  This is a
+            # narrow long-K/N=11008 specialization: N96 improves launch
+            # amortization on the validated Llama-style width, while N128
+            # was neutral and N96 was slower at N=8192.
+            row_tile = 1
+            group_size = 768
+            output_width = 96
+            kernel = _local_ring_m1_n96_n32triple_split8_kernel(alt_bank_id=alt_id)
+        elif m1_n64_n32pair_split8:
+            # Two N32 output tiles share one 512-thread launch.  The paired
+            # source keeps the proven one-lane-per-output decoder and fused
+            # split-8 reduction while halving launches for this shape.
+            row_tile = 1
+            group_size = 512
+            output_width = 64
+            kernel = _local_ring_m1_n64_n32pair_split8_kernel(alt_bank_id=alt_id)
+        elif m1_n32_fused_split16_wide:
+            # The short-K wide-N case is better served by the barrier-minimal
+            # one-lane-per-output N32 decoder than by the shared N64 source.
+            # Sixteen fixed K slices expose enough independent work while the
+            # fused reduction avoids materializing split partials.
+            row_tile = 1
+            wide_split_count = _LR_M1_N32_FUSED_WIDE_SPLIT_COUNT
+            group_size = 1024 if wide_split_count == 32 else 512
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id,
+                split_count=wide_split_count,
+                inputs_contiguous=_inputs_contiguous,
+                activation_broadcast=True,
+            )
+        elif m1_n64_uint2:
+            # The fixed short-K wide-N source loads each aligned pair of W2
+            # words as one uint2 on the even lane, then shares both words
+            # with its ring mate through SIMD shuffles.  Keep the same
+            # half2 codebook arithmetic and split-2 output contract as the
+            # fallback route.
+            row_tile = 1
+            group_size = 128
+            output_width = 64
+            kernel = _local_ring_m1_n64_uint2_kernel(
+                alt_bank_id=alt_id,
+                k_tile=128 if k == 2048 else 64,
+            )
+        elif m1_n64_half2:
+            # The fixed short-K wide-N source keeps each decoded PGC16 pair
+            # in native half2 form while the dot product remains FP32.  It
+            # uses the original two-split launch shape; unlike the shared
+            # route below, the MLX reduction remains the measured winner.
+            if not _inputs_contiguous:
+                x = mx.contiguous(x)
+                trellis = mx.contiguous(trellis)
+                bank_ids = mx.contiguous(bank_ids)
+            split_k = _local_ring_m1_n64_split_k(k)
+            row_tile = 1
+            group_size = 128
+            output_width = 64
+            kernel = _local_ring_m1_n64_half2_kernel(alt_bank_id=alt_id)
+        elif m1_n64_shared_split2:
+            # Eight SIMD groups cover four N16 tiles and both K splits in
+            # one threadgroup.  Each split has its own staged K64 tile, so
+            # activation loads are shared without a cross-split race.
+            x = mx.contiguous(x)
+            trellis = mx.contiguous(trellis)
+            bank_ids = mx.contiguous(bank_ids)
+            row_tile = 1
+            group_size = 256
+            output_width = 64
+            kernel = _local_ring_m1_n64_shared_split2_kernel(alt_bank_id=alt_id)
+        elif m1_n64_split2:
+            # Eight independent SIMD groups compute four adjacent N16 tiles
+            # across two K slices in one threadgroup.  Each output tile has
+            # both slices in the same group, so the split reduction is fused
+            # while retaining more K parallelism than a full-K no-split path.
+            row_tile = 1
+            group_size = 256
+            output_width = 64
+            kernel = _local_ring_m1_n64_split2_kernel(alt_bank_id=alt_id)
+        elif m1_n32_fused_split32:
+            # Thirty-two K slices expose more independent long-K work on
+            # M4 Max.  The fixed 1024-thread reduction remains deterministic
+            # and avoids materializing an MLX partial tensor.
+            row_tile = 1
+            group_size = 1024
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id, split_count=32, inputs_contiguous=_inputs_contiguous
+            )
+        elif m1_n32_fused_split16:
+            # One lane owns one output channel across four K32xN8 tiles.
+            # Sixteen SIMD groups reduce the K slices in one 512-thread
+            # group, halving the output-tile launch count versus N16.
+            row_tile = 1
+            group_size = 512
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id, split_count=16, inputs_contiguous=_inputs_contiguous
+            )
+        elif m1_n32_fused_split:
+            row_tile = 1
+            group_size = 256
+            output_width = 32
+            kernel = _local_ring_m1_n32_fused_split_kernel(
+                alt_bank_id=alt_id, split_count=8, inputs_contiguous=_inputs_contiguous
+            )
+        elif m1_fused_split16:
+            # Sixteen FP32 split results are reduced inside one 512-thread
+            # threadgroup.  This exposes more independent K work than the
+            # split-8 route while retaining one deterministic in-kernel
+            # reduction and no materialized MLX partial tensor.
+            row_tile = 1
+            group_size = 512
+            output_width = 16
+            kernel = _local_ring_m1_fused_split16_kernel(alt_bank_id=alt_id)
+        elif m1_fused_split:
+            # The eight FP32 split results are reduced inside one 256-thread
+            # threadgroup.  This removes eight separate M1/N16 launches and
+            # the materialized MLX reduction while retaining the same
+            # per-split FP32 accumulation and deterministic split order.
+            row_tile = 1
+            group_size = 256
+            output_width = 16
+            kernel = _local_ring_m1_fused_split_kernel(alt_bank_id=alt_id)
+        elif m1_n64:
+            # Four N16 SIMD tiles share one K32 activation tile in a
+            # 128-thread group.  The shared activation load and one barrier
+            # replace four independent groups.  A single K slice avoids the
+            # separate split-K reduction; on M4 Max this is faster for the
+            # targeted short-K, wide-N M1 shapes.
+            if not _inputs_contiguous:
+                x = mx.contiguous(x)
+                trellis = mx.contiguous(trellis)
+                bank_ids = mx.contiguous(bank_ids)
+            # Two K64 batches per split expose more independent threadgroups
+            # for long-enough wide M1 GEMVs.  The half-K boundary must itself
+            # be K64-aligned because the source consumes two K32 subtiles at
+            # a time; retain one slice for the K128-only and K<256 cases.
+            split_k = _local_ring_m1_n64_split_k(k)
+            row_tile = 1
+            group_size = 128
+            output_width = 64
+            kernel = _local_ring_m1_n64_kernel(
+                alt_bank_id=alt_id,
+                k=k,
+                n=n,
+                # K128 remains the direct-compatibility path for K=128;
+                # larger fallback shapes retain the established K64 source.
+                k_tile=128 if k == 128 else 64,
+            )
+        elif small_rows:
+            # One or two rows fit in one SIMD group.  Decode four pairs
+            # per lane and reduce the four lanes belonging to each N8
+            # output; this avoids the shared decoded tile and its
+            # barriers at the latency-sensitive small-M end of GEMV.
+            row_tile = 1 if m == 1 else 2
+            group_size = 32
+            output_width = _local_ring_small_output_width(n) if m <= 2 and n % 16 == 0 else 8
+            kernel = _local_ring_small_kernel(
+                output_fp32=output_fp32,
+                w2=transition_bits == 4,
+                split_k=split_k,
+                output_width=output_width,
+                alt_bank_id=alt_id,
+                single_row=m == 1,
+                # The four-at-a-time producer layout pays off once there are
+                # enough output tiles to amortize its vector loads. Keep the
+                # smallest projection on the scalar-shuffle source, which is
+                # measurably closer to the M4 Max launch floor there.
+                vector_activation=m == 1 and n >= 2048,
+            )
+        elif _USE_LR_MMA and m == 8 and k <= 2048 and n >= 8192 and split_k == 1:
+            # Four K8 matrix operations cover one K32 local-ring tile.  A
+            # single SIMD group computes the complete M8xN8 output tile with
+            # no decoded shared tile or threadgroup barriers.
+            row_tile = 8
+            group_size = 32
+            kernel = _local_ring_mma_kernel(
+                output_fp32=output_fp32,
+                w2=transition_bits == 4,
+                alt_bank_id=alt_id,
+            )
+        else:
+            row_tile = 16 if m >= 16 else 8 if m >= 5 else 4
+            group_size = ((row_tile + 1) // 2) * 32
+            kernel = _local_ring_multirow_kernel(
+                output_fp32=output_fp32,
+                w2=transition_bits == 4,
+                split_k=split_k,
+                alt_bank_id=alt_id,
+                cooperative_decode=_USE_LR_COOPERATIVE_DECODE and m >= 8,
+                m4_cooperative_decode=(
+                    _USE_LR_M4_COOPERATIVE_DECODE
+                    and m == 4
+                    and split_k == 1
+                    and _lr_m4_cooperative_supported()
+                ),
+            )
+        row_blocks = (m + row_tile - 1) // row_tile
+        inputs = (
+            [x, trellis, bank_ids]
+            if ((m1_n64 and not m1_n64_shared_split2) or m1_n64_half2)
+            and not m1_n32_fused_split16_wide
+            else [x, trellis, bank_ids, _dims_array(m, k, n, transition_bits, row_tile)]
+        )
+        literal_w2_mask = (
+            v2b2_p32_lr
+            and transition_bits == 4
+            and small_rows
+            and (not m1_n64 or m1_n64_shared_split2 or m1_n64_half2)
+        )
+        template = [("EdgeBits", transition_bits)]
+        if not literal_w2_mask:
+            template.append(("AltBank", alt_id))
+        if (
+            (split_k > 1 or small_rows)
+            and not m1_fused_split
+            and not m1_fused_split16
+            and not m1_n32_fused_split
+            and not m1_n32_fused_split16
+            and not m1_n32_fused_split32
+            and not m1_n96_n32triple_split8
+            and not m1_n64_n32pair_split8
+            and not m1_n32_fused_split16_wide
+            and not m1_n64_split2
+            and (not m1_n64_shared_split2 or m1_n64_half2)
+        ):
+            template.append(("SplitK", split_k))
+        output_width = (
+            96
+            if m1_n96_n32triple_split8
+            else 64
+            if m1_n64_split2
+            or (m1_n64_shared_split2 and not m1_n64_half2)
+            or (m1_n64 and not m1_n32_fused_split16_wide)
+            or m1_n64_n32pair_split8
+            else 32
+            if (
+                m1_n32_fused_split
+                or m1_n32_fused_split16
+                or m1_n32_fused_split32
+                or m1_n32_fused_split16_wide
+            )
+            else _local_ring_small_output_width(n)
+            if small_rows and m <= 2 and n % 16 == 0
+            else 8
+        )
+        launch_split = (
+            1
+            if (
+                m1_fused_split
+                or m1_fused_split16
+                or m1_n32_fused_split
+                or m1_n32_fused_split16
+                or m1_n32_fused_split32
+                or m1_n32_fused_split16_wide
+                or m1_n96_n32triple_split8
+                or m1_n64_n32pair_split8
+                or m1_n64_split2
+                or (m1_n64_shared_split2 and not m1_n64_half2)
+            )
+            else split_k
+        )
+        partials = kernel(
+            inputs=inputs,
+            template=template,
+            grid=(row_blocks * ((n + output_width - 1) // output_width) * launch_split * group_size, 1, 1),
+            threadgroup=(group_size, 1, 1),
+            output_shapes=[
+                (
+                    m,
+                    n
+                    if m1_fused_split
+                    or m1_fused_split16
+                    or m1_n32_fused_split
+                    or m1_n32_fused_split16
+                    or m1_n32_fused_split32
+                    or m1_n32_fused_split16_wide
+                    or m1_n96_n32triple_split8
+                    or m1_n64_n32pair_split8
+                    or m1_n64_split2
+                    or (m1_n64_shared_split2 and not m1_n64_half2)
+                    or (m1_n64 and not m1_n64_half2)
+                    else n * split_k,
+                )
+            ],
+            output_dtypes=[mx.float32 if output_fp32 else mx.float16],
+        )[0]
+        if (
+            split_k == 1
+            or m1_fused_split
+            or m1_fused_split16
+            or m1_n32_fused_split
+            or m1_n32_fused_split16
+            or m1_n32_fused_split32
+            or m1_n32_fused_split16_wide
+            or m1_n96_n32triple_split8
+            or m1_n64_n32pair_split8
+            or m1_n64_split2
+            or (m1_n64_shared_split2 and not m1_n64_half2)
+            or (m1_n64 and not m1_n64_half2)
+        ):
+            return partials
+        return mx.sum(partials.reshape(m, n, split_k), axis=-1)
     if output_fp32:
         if v2b4_p64 or v2b2_p32:
             return _run_v2_banked(
@@ -2848,7 +5834,14 @@ def _qvq_mlx_hadamard(x, hadamard_matrix=None):
 
     original_shape = x.shape
     width = original_shape[-1]
-    factor = 1 if hadamard_matrix is None else hadamard_matrix.shape[0]
+    if hadamard_matrix is None:
+        # MLX has a fused Walsh-Hadamard implementation for power-of-two
+        # widths.  Besides reducing the Python/MLX graph to one operation,
+        # this keeps the transform on the GPU and avoids materializing every
+        # butterfly stage as a separate lazy op.  Preserve QVQ's normalized
+        # convention explicitly rather than relying on the API default.
+        return mx.hadamard_transform(x, scale=width**-0.5)
+    factor = hadamard_matrix.shape[0]
     work = x.reshape(-1, width, 1)
     while work.shape[1] > factor:
         work = work.reshape(work.shape[0], work.shape[1] // 2, 2, work.shape[2])
@@ -2910,6 +5903,7 @@ if _mlx_nn is not None:
             bank_ids=None,
             v2b4_p64: bool = False,
             v2b2_p32: bool = False,
+            v2b2_p32_lr: bool = False,
             bank_alt_id=None,
         ):
             super().__init__()
@@ -2924,12 +5918,13 @@ if _mlx_nn is not None:
             if not isinstance(dual_v2, bool):
                 raise TypeError("QVQ MLX dual_v2 must be a bool")
             self.dual_v2 = dual_v2
-            if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
+            if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool) or not isinstance(v2b2_p32_lr, bool):
                 raise TypeError("QVQ MLX banked-V2 format flags must be bools")
-            if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
-                raise ValueError("QVQ MLX Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive")
+            if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
+                raise ValueError("QVQ MLX Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive")
             self.v2b4_p64 = v2b4_p64
             self.v2b2_p32 = v2b2_p32
+            self.v2b2_p32_lr = v2b2_p32_lr
             if self.trellis_window not in (16, 18):
                 raise ValueError("QVQ MLX trellis_window must be 16 or 18")
             if self.trellis_window == 18 and self.vector_size != 4:
@@ -2940,21 +5935,43 @@ if _mlx_nn is not None:
                 raise ValueError("QVQ MLX L18 uses implicit history-selected banks and rejects bank_ids")
             if self.dual_v2 and (self.vector_size != 2 or self.trellis_window != 16 or bank_ids is not None):
                 raise ValueError("QVQ MLX Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids")
-            if (self.v2b4_p64 or self.v2b2_p32) and (
+            if (self.v2b4_p64 or self.v2b2_p32 or self.v2b2_p32_lr) and (
                 self.vector_size != 2 or self.trellis_window != 16 or self.bits > 3.5 or bank_ids is None
             ):
                 raise ValueError("QVQ MLX banked-V2 formats require L16/V2, selectors, and W1 through W3.5")
+            if self.v2b2_p32_lr and (self.in_features % 32 or self.out_features % 8):
+                raise ValueError("QVQ MLX LR32 requires in_features divisible by 32 and out_features divisible by 8")
             self.trellis = trellis.astype(mx.int32)
             self.SU = SU.astype(mx.float32)
             self.SV = SV.astype(mx.float32)
             self.bias = None if bias is None else bias.astype(mx.float32)
             self.bank_ids = None if bank_ids is None else bank_ids.astype(mx.uint8)
+            if self.v2b2_p32_lr:
+                # The specialized wide-N M1 kernel deliberately disables
+                # MLX's per-call contiguous-input preparation.  Checkpoint
+                # metadata is immutable, so make these two buffers contiguous
+                # once at module construction instead of at every forward.
+                self.trellis = mx.contiguous(self.trellis)
+                self.bank_ids = mx.contiguous(self.bank_ids)
             self.bank_alt_id = None if bank_alt_id is None else bank_alt_id.astype(mx.uint8)
+            self._bank_alt_id_value = None
+            if self.v2b2_p32 or self.v2b2_p32_lr:
+                if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
+                    raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
+                # This is immutable checkpoint metadata.  Resolve it once at
+                # construction so every forward can stay on the MLX graph.
+                self._bank_alt_id_value = int(self.bank_alt_id.item())
+                if not 1 <= self._bank_alt_id_value <= 3:
+                    raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
             self._input_hadamard = _qvq_mlx_hadamard_matrix(self.in_features)
             self._output_hadamard = _qvq_mlx_hadamard_matrix(self.out_features)
 
             expected_trellis = (
-                (self.in_features // 16) * (self.out_features // 16),
+                (
+                    (self.in_features // 32) * (self.out_features // 8)
+                    if self.v2b2_p32_lr
+                    else (self.in_features // 16) * (self.out_features // 16)
+                ),
                 qvq_words_per_tile(self.bits, vector_size=self.vector_size),
             )
             if self.trellis.shape != expected_trellis:
@@ -2965,6 +5982,21 @@ if _mlx_nn is not None:
                 raise ValueError("QVQ MLX SU/SV shapes must match the linear dimensions")
             if self.bias is not None and self.bias.shape != (self.out_features,):
                 raise ValueError("QVQ MLX bias shape must match out_features")
+            if self.v2b4_p64 or self.v2b2_p32 or self.v2b2_p32_lr:
+                if self.bank_ids is None or self.bank_ids.ndim != 1:
+                    raise ValueError("QVQ MLX banked formats require one-dimensional packed selectors")
+                expected_selectors = expected_trellis[0]
+                if self.bank_ids.size != expected_selectors:
+                    raise ValueError(
+                        f"QVQ MLX bank selectors must have packed shape {(expected_selectors,)}, got {self.bank_ids.shape}"
+                    )
+            if self.v2b2_p32 or self.v2b2_p32_lr:
+                # Presence and shape are validated before the one-time scalar
+                # extraction above; keep this branch as a defensive invariant.
+                if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
+                    raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
+            elif self.bank_alt_id is not None:
+                raise ValueError("QVQ MLX bank_alt_id is valid only for V2B2-P32 formats")
 
         def __call__(self, x):
             import mlx.core as mx
@@ -2979,7 +6011,14 @@ if _mlx_nn is not None:
                 x.reshape(-1, self.in_features).astype(mx.float32) * self.SU,
                 self._input_hadamard,
             )
-            native_input, row_scale = _qvq_mlx_narrow_with_row_scale(transformed)
+            if self.v2b2_p32_lr:
+                # LR32 accumulates in FP32 and has no legacy FP16 GEMV
+                # boundary.  Keep the transformed activation wide and avoid
+                # the row max/log2/ceil/pow/narrow/rescale graph on every
+                # linear call.
+                native_input, row_scale = transformed, None
+            else:
+                native_input, row_scale = _qvq_mlx_narrow_with_row_scale(transformed)
             output = qvq_mlx_gemv(
                 native_input,
                 self.trellis,
@@ -2992,10 +6031,15 @@ if _mlx_nn is not None:
                 bank_ids=self.bank_ids,
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
+                v2b2_p32_lr=self.v2b2_p32_lr,
                 bank_alt_id=self.bank_alt_id,
                 output_fp32=True,
+                _bank_alt_id_value=self._bank_alt_id_value,
+                _inputs_contiguous=self.v2b2_p32_lr,
             )
-            output = _qvq_mlx_hadamard(output * row_scale, self._output_hadamard)
+            if row_scale is not None:
+                output = output * row_scale
+            output = _qvq_mlx_hadamard(output, self._output_hadamard)
             output = output * self.SV
             if self.bias is not None:
                 output = output + self.bias

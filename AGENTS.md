@@ -46,6 +46,8 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - Contiguous-memory layout regressions in quantization or kernel paths: use `$gptqmodel-contiguous-memory`.
 - Torch-profiler traces, Nsight analysis, bottleneck attribution, launch gaps, overlap, or fusion opportunities:
   use `$gptqmodel-gpu-profiling`.
+- Apple silicon, MLX custom Metal kernels, Xcode Metal System Trace/GPU Frame Capture, Metal counters, barriers,
+  occupancy clues, or M-chip kernel tuning: use `$gptqmodel-metal-profiling`.
 - Nsight Systems capture, `.nsys-rep` reports, CUDA launch gaps, memory copies, or NCCL timeline analysis:
   use `$perf-nsight-systems`.
 - Nsight Compute kernel metrics, `.ncu-rep` reports, SOL/roofline, occupancy, memory hierarchy, or warp stalls:
@@ -67,6 +69,7 @@ Read every selected `SKILL.md` completely before editing. Follow its linked refe
 |---|---|
 | Add timing/instrumentation to a region | `$gptqmodel-telemetry` (or `$perf-workload-profiling` for CUDA-event benchmarks) |
 | Capture a trace or Chrome/Perfetto timeline | `$gptqmodel-gpu-profiling` |
+| MLX/Metal trace, Xcode GPU capture, Apple GPU barriers or M-chip tuning | `$gptqmodel-metal-profiling` |
 | System-level `nsys` timeline, launch gaps, NCCL | `$perf-nsight-systems` |
 | Kernel-level `ncu` metrics, SOL%, roofline | `$perf-nsight-compute-analysis` |
 

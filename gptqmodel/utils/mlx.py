@@ -82,6 +82,7 @@ def _qvq_mlx_linear_from_torch(module):
         bank_ids=copy_array(module.bank_ids),
         v2b4_p64=module.v2b4_p64,
         v2b2_p32=module.v2b2_p32,
+        v2b2_p32_lr=module.v2b2_p32_lr,
         bank_alt_id=copy_array(module.bank_alt_id),
     )
 
