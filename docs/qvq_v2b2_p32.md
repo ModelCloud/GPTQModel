@@ -5506,3 +5506,31 @@ The fresh canonical 100-sample module sweep after the change was:
 The specialization is retained: it is exact and materially reduces M1/N32
 module latency, although M1 remains below the broader `2x` objective because
 the surrounding Hadamard/epilogue graph is shared with P32.
+
+## 161. Powered M1 N32 follow-up probes
+
+The current head was rechecked on the plugged-in, high-performance M4 Max
+after the M1/N32 contiguity-wrapper promotion. The public inner-kernel
+benchmark used randomized/interleaved LR/P32 execution, 20 warmups, and 100
+synchronized samples per arm. The short-K wide-N M1 result was:
+
+```text
+(M=1,K=2048,N=8192): LR p50=0.19360 ms, P32 p50=0.25406 ms, 1.312x
+```
+
+Several temporary M1/N32 alternatives were then checked against the same
+Torch-oracle output. The candidates were not promoted:
+
+| Candidate | Oracle result | Powered inner-kernel result | Decision |
+|---|---|---:|---|
+| SIMD activation shuffle sharing | exact | candidate/production p50 `1.047x`, mean `0.981x` | reject; p50/mean split is not stable |
+| aligned `uint2` packed-word load | exact | candidate/production p50 `1.024x`, mean `0.978x` | reject; no stable gain |
+| paired N64, split-16 | exact | candidate/production p50 `1.041x`, mean `1.096x` | reject |
+| static K/N constants and no `dims` input | exact | about `1.01x` by mean | reject as immaterial |
+| two-pair `float4 dot` accumulation | oracle-close (`2.6e-7` relative L2) | about `1.00x` | reject |
+
+The temporary probes were intentionally not added to production dispatch.
+The current N32/split-16 route remains the best measured short-K M1 choice.
+This refresh confirms that the remaining universal `2x` gap is not explained
+by the tested W2 load, activation-shuffle, split geometry, or local arithmetic
+variants; it remains concentrated at the M1 execution/module boundary.
