@@ -5282,3 +5282,43 @@ respectively. These are not exact-output claims; the route is retained as a
 narrow performance specialization and should be evaluated for model-quality
 impact before any wider rollout. It improves the long-K M1 baseline but does
 not yet meet the universal `2x` objective.
+
+## 153. Long-K M1 paired-tile follow-up and Xcode trace
+
+The powered-host recheck was run on the Apple M4 Max with AC power and
+`powermode=2`. A same-process randomized/interleaved inner-kernel benchmark
+using 25 warmups and 80 synchronized samples per arm measured the committed
+pair-8 route against P32 as follows:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(1,8192,8192)` | `0.37883` | `0.74154` | `1.957x` |
+| `(1,8192,11008)` | `0.47129` | `0.96079` | `2.039x` |
+
+The corresponding complete-module recheck used the same input/payloads and
+80 synchronized samples:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | P32/LR |
+|---|---:|---:|---:|
+| `(1,8192,8192)` | `0.68558` | `1.20963` | `1.764x` |
+| `(1,8192,11008)` | `2.00754` | `3.61150` | `1.799x` |
+
+The inner kernel therefore reaches the 2x target at the Llama-style
+`N=11008` width and is within timing noise of 2x at `N=8192`. The complete
+module remains below 2x because its Hadamard and epilogue graph is shared by
+both formats and is not part of the LR decoder speedup.
+
+Two additional exact probes were rejected. A 16-split paired-N32 source
+preserved the output exactly but was slower than pair-8 (`0.803x` and
+`0.788x` of pair-8 at `N=8192` and `N=11008`). A four-tile N128 grouping
+with split-8 was also raw-oracle exact, but its complete-module timing was
+neutral at `N=8192` (`1.000x` in the paired recheck) and at `N=11008`
+(`1.009x` current/candidate). Neither is production code.
+
+An Xcode `Metal System Trace` capture was also taken around the module
+benchmark while the host was on AC/performance mode. The trace contains the
+M4 Max GPU and Metal application/GPU interval tables, but this Xcode setup
+reports `Counter Set: (null)` and `Shader Timeline: Disabled`; exported
+counter samples are zero. It therefore provides submission/interval evidence
+only, not valid stall, occupancy, barrier-wait, or memory-throughput
+percentages. No counter-derived claims should be made from this capture.
