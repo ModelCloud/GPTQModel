@@ -5556,3 +5556,16 @@ the powered M4 Max measured:
 The reduced launch count did not offset the larger per-group K work and
 reduced scheduling flexibility. The candidate is rejected and the existing
 N32/split-16 production dispatch remains active.
+
+## 163. M1 native matrix-shape capability check
+
+The M1 MMA alternative was revisited at the Metal capability level. MLX's
+Metal compiler rejects `simdgroup_matrix<float,1,8>` with an invalid matrix
+size assertion. The available `8x8` matrix primitive therefore cannot express
+an exact single-row tile; using it for M1 necessarily pads seven rows with
+duplicate or zero work. The previously measured padded M1 MMA path was about
+`0.53x` the production route at p50 and is already rejected.
+
+This closes the native-matrix route for exact M1 LR32 on the current Apple
+GPU/Metal stack. Matrix operations remain appropriate for the existing M8+
+path, where the row dimension is naturally `8` or larger.
