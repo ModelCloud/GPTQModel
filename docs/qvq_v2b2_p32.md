@@ -5027,3 +5027,33 @@ The inner kernel remains faster than P32 for all tested shapes and exceeds
 `2x` for M8/M16 in this run. Absolute times vary with MLX graph materializing
 and GPU scheduling history, so the paired ratio is the useful comparison.
 The M1 short-K/wide-N kernel remains below the universal `2x` objective.
+
+## 147. M1 half2 activation staging probe (rejected)
+
+The M1/N64 W2 route was tested with the shared K64 activation tile stored as
+`half2`, so each producer lane writes two FP16 activations and each decoder
+lane reads one packed pair. The probe retained the promoted exact 32-bit W2
+state-start extraction, aligned `uint2` weight loads, FP32 accumulation, and
+the existing split-4 contract. It was measured on the plugged-in,
+performance-mode M4 Max with identical inputs/payloads and 100 synchronized
+samples per arm.
+
+The candidate was bitwise different at the FP16 boundary:
+
+```text
+max_abs = 0.125
+relative_l2 = 0
+rmse = 0.01462554931640625
+```
+
+Timing was modestly better:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production FP32 activation staging | `0.41919` | `0.46855` | `0.39912` |
+| `half2` activation staging probe | `0.39790` | `0.45247` | `0.38166` |
+
+The probe measured `0.949x` of production p50 and `0.956x` by mean, but was
+discarded because it introduces avoidable FP16 activation-rounding drift.
+The exact FP32 activation-staging route remains active; this result does not
+change the production kernel or the current LR/P32 speedup tables.
