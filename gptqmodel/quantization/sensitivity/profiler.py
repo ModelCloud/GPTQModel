@@ -7,6 +7,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import torch
 from torch import nn
+from dataclasses import dataclass
 
 from ..analysis import AnalysisSelection, QuantizationAnalyzer, _layer_index, _module_role, _weight_matrix
 from ..config import quant_bits_width
@@ -14,6 +15,16 @@ from ..config import quant_bits_width
 
 def _rate_label(rate: Any) -> str:
     return str(float(rate)).rstrip("0").rstrip(".")
+
+
+@dataclass(frozen=True)
+class RateCandidate:
+    format: str
+    rate: float
+
+    @property
+    def label(self) -> str:
+        return f"{self.format}:{_rate_label(self.rate)}"
 
 
 class SensitivityProfiler:
@@ -27,11 +38,21 @@ class SensitivityProfiler:
 
     def __init__(self, quantize_config, *, candidate_rates: Sequence[Any] = (2, 2.5, 3, 3.5, 4), device="cpu"):
         self.qcfg = quantize_config
-        self.candidate_rates = tuple(candidate_rates)
+        self.candidate_rates = tuple(self._normalize_candidate(c) for c in candidate_rates)
         self.device = torch.device(device)
         self.analyzer = QuantizationAnalyzer(quantize_config, compute_device=self.device)
         self._activation: dict[str, dict[str, Any]] = defaultdict(lambda: {"hessian": None, "max": None, "tokens": 0, "sequences": 0})
         self._hooks: list[Any] = []
+        self._active_mask: torch.Tensor | None = None
+
+    @staticmethod
+    def _normalize_candidate(value: Any) -> RateCandidate:
+        if isinstance(value, RateCandidate):
+            return value
+        if isinstance(value, str) and ":" in value:
+            fmt, rate = value.rsplit(":", 1)
+            return RateCandidate(fmt, float(rate))
+        return RateCandidate("qvq_v2b2_p32" if float(value) <= 3.5 else "qvq", float(value))
 
     def collect_activations(self, model: nn.Module, batches: Iterable[Any], *, max_batches: int | None = None) -> dict[str, Any]:
         """Collect input-channel diagonal Hessian and activation tails in one dense pass."""
@@ -48,6 +69,8 @@ class SensitivityProfiler:
                 original_shape = x.shape
                 x = x.reshape(-1, x.shape[-1]).to(self.device, dtype=torch.float32)
                 mask = kwargs.get("attention_mask") if isinstance(kwargs, Mapping) else None
+                if mask is None:
+                    mask = self._active_mask
                 if torch.is_tensor(mask) and tuple(mask.shape) == tuple(original_shape[:-1]):
                     mask = mask.reshape(-1).to(self.device, dtype=torch.bool)
                     x = x[mask]
@@ -73,6 +96,7 @@ class SensitivityProfiler:
                     break
                 if isinstance(batch, Mapping):
                     batch = {k: (v.to(self.device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+                    self._active_mask = batch.get("attention_mask") if torch.is_tensor(batch.get("attention_mask")) else None
                     try:
                         model(**batch)
                     except TypeError:
@@ -80,11 +104,13 @@ class SensitivityProfiler:
                         # often expose only positional forward(input).
                         model(batch.get("input_ids", next(iter(batch.values()))))
                 else:
+                    self._active_mask = None
                     value = batch.to(self.device) if torch.is_tensor(batch) else batch
                     model(value)
                 for name in seen_this_batch:
                     self._activation[name]["sequences"] += 1
                 seen_this_batch.clear()
+                self._active_mask = None
         for h in self._hooks:
             h.remove()
         self._hooks.clear()
@@ -124,10 +150,10 @@ class SensitivityProfiler:
             activation = self._activation.get(name)
             h = activation.get("hessian") if activation else None
             curves = {}
-            for rate in self.candidate_rates:
-                representation, damage = self._candidate_damage(weight, float(rate), record["group_size"], record["sym"], h)
-                curves[_rate_label(rate)] = {"rate": float(rate), "representation_error": representation,
-                                             "activation_error": damage, "candidate_kind": "rtn_proxy"}
+            for candidate in self.candidate_rates:
+                representation, damage = self._candidate_damage(weight, candidate.rate, record["group_size"], record["sym"], h)
+                curves[candidate.label] = {"rate": candidate.rate, "format": candidate.format, "representation_error": representation,
+                    "activation_error": damage, "candidate_kind": "rtn_proxy", "native_qvq": False}
             confidence = 100.0 if not activation else min(100.0, 100.0 * math.log1p(activation["tokens"]) / math.log1p(262144))
             risk = max(float(v["activation_error"]) for v in curves.values()) if curves else float(record["risk_score"])
             record = dict(record)
@@ -196,17 +222,18 @@ class SensitivityProfiler:
 
     def plan(self, records: Sequence[dict[str, Any]], *, target_bpw: float | None = None) -> dict[str, Any]:
         """Greedy marginal-recovery plan; callers can replace it with SLQ ILP."""
-        base = float(self.qcfg.bits)
+        base = self.effective_bpw(records)
         target = float(target_bpw) if target_bpw is not None else base
-        selected = {r["module"]: base for r in records}
+        selected = {r["module"]: float(r.get("bits", base)) for r in records}
         total_numel = max(1, sum(int(r.get("numel", 0)) for r in records))
         budget = max(0.0, target - base)
         if target > base and records:
             candidates = []
             for r in records:
                 curves = r.get("rates", {})
-                for low, high in zip(self.candidate_rates, self.candidate_rates[1:]):
-                    a, b = curves.get(_rate_label(low), {}), curves.get(_rate_label(high), {})
+                ordered = sorted((v for v in curves.values() if isinstance(v, dict)), key=lambda v: float(v.get("rate", 0)))
+                for a, b in zip(ordered, ordered[1:]):
+                    low, high = float(a["rate"]), float(b["rate"])
                     if a and b and float(high) > float(low):
                         gain = float(a.get("activation_error", 0)) - float(b.get("activation_error", 0))
                         weight_fraction = int(r.get("numel", 0)) / total_numel
@@ -219,5 +246,16 @@ class SensitivityProfiler:
                 if abs(selected[name] - low) < 1e-6 and weighted_delta <= budget:
                     selected[name] = rate
                     budget -= weighted_delta
-        return {"target_bpw": target, "base_bpw": base, "assignments": selected,
+        return {"target_bpw": target, "base_bpw": base, "planned_bpw": self.effective_bpw(records, selected), "assignments": selected,
                 "budget_units": "parameter-weighted bits/weight", "remaining_budget": max(0.0, budget)}
+
+    @staticmethod
+    def effective_bpw(records: Sequence[dict[str, Any]], assignments: Mapping[str, float] | None = None,
+                      *, auxiliary_overhead: float = 0.023168) -> float:
+        """Compute the shared experiment-report payload BPW for a module plan."""
+        total = max(1, sum(int(r.get("numel", 0)) for r in records))
+        weighted = 0.0
+        for record in records:
+            rate = float(assignments.get(record["module"], record.get("bits", 0)) if assignments is not None else record.get("bits", 0))
+            weighted += int(record.get("numel", 0)) / total * rate
+        return weighted + float(auxiliary_overhead)
