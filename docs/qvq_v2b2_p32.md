@@ -5090,3 +5090,53 @@ output delta `max_abs=0.015625`. The source was therefore reverted: the
 production route keeps the original eight-pair loop. This result reinforces
 that an inner-kernel win is insufficient when it does not survive the full
 MLX module boundary.
+
+## 149. Promote K128 activation batching for M1/N64 W2
+
+The fixed short-K/wide-N M1 route was tested with K128 activation batching,
+using the promoted aligned-`uint2` loads and 32-bit W2 state-start extraction.
+Each batch stages four K32 activation subtiles and reuses them across the
+four output SIMD groups, retaining the deterministic split-output contract
+and the explicit hand-off barrier before shared-memory reuse. This halves the
+number of K-batch iterations relative to K64 without changing the decoded
+weights or FP32 accumulation type.
+
+The candidate passed the K128 Torch/MLX oracle tests. Against the previous
+K64 production source, complete-module output remained within the existing
+contract:
+
+```text
+max_abs = 0.015625
+relative_l2 = 0
+rmse = 0.000244140625
+```
+
+A corrected same-process randomized/interleaved A/B used identical payloads
+and inputs, 30 warmups, and 200 samples per arm on the plugged-in,
+performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous K64 production | `0.62900` | `1.47631` | `0.80498` |
+| K128 candidate | `0.60242` | `1.15909` | `0.70235` |
+
+K128 measured `1.044x` faster at p50, `1.274x` at p95, and `1.146x` by
+mean. The route is now active for the short-K wide-N `(M=1,K=2048,N=8192)`
+case, while other shapes retain their existing specialized policies.
+
+A fresh canonical complete-module LR/P32 sweep after promotion used 30
+warmups and 100 randomized/interleaved samples per arm:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.46800` | `0.70950` | `1.516x` | `0.67880` | `1.00284` |
+| `(1,2048,2048)` | `0.57913` | `0.82075` | `1.417x` | `0.66630` | `0.94997` |
+| `(1,2048,8192)` | `0.82921` | `1.19585` | `1.442x` | `1.36270` | `1.91229` |
+| `(1,8192,2048)` | `0.70675` | `1.15423` | `1.633x` | `0.87909` | `1.29933` |
+| `(4,2048,8192)` | `1.10046` | `2.23325` | `2.029x` | `1.26213` | `2.45186` |
+| `(8,2048,8192)` | `1.17971` | `2.83627` | `2.404x` | `1.54765` | `3.97727` |
+| `(16,8192,8192)` | `2.43104` | `5.55077` | `2.283x` | `2.67355` | `5.84841` |
+
+The fresh run remains faster than P32 for every listed shape; M1 is still
+below the universal `2x` objective, while the larger-row paths continue to
+clear it.

@@ -94,8 +94,8 @@ _LR_M1_N64_SHARED_SPLIT2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_SHARED_SPLIT2_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N64_HALF2_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_HALF2_KERNEL_ERRORS: dict[int, str] = {}
-_LR_M1_N64_UINT2_KERNELS: dict[int, Any] = {}
-_LR_M1_N64_UINT2_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N64_UINT2_KERNELS: dict[tuple[int, int], Any] = {}
+_LR_M1_N64_UINT2_KERNEL_ERRORS: dict[tuple[int, int], str] = {}
 _LR_M1_FUSED_SPLIT_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
@@ -1659,6 +1659,12 @@ def _make_lr_m1_n64_k128_source(source: str) -> str:
 _LR_M1_N64_K128_W2_FP32_SOURCE = _make_lr_m1_n64_k128_source(
     _LR_M1_N64_K64_W2_FP32_SOURCE
 )
+# The fixed wide-N W2 route uses the same K128 staging geometry with the
+# promoted aligned-uint2 loads and exact 32-bit state-start extraction.  Keep
+# the older scalar source above for its direct compatibility coverage.
+_LR_M1_N64_K128_W2_UINT2_FAST_STATE_FP32_SOURCE = _make_lr_m1_n64_k128_source(
+    _LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE
+)
 
 
 def _lr_m1_n64_shape_source(k: int, n: int, *, source: str | None = None) -> str:
@@ -3191,29 +3197,37 @@ def _local_ring_m1_n64_half2_kernel(*, alt_bank_id: int):
         return kernel
 
 
-def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int):
+def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int, k_tile: int = 64):
     """Build the aligned uint2-load variant of the M1/N64 W2 kernel."""
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
-    kernel = _LR_M1_N64_UINT2_KERNELS.get(alt_bank_id)
+    if k_tile not in (64, 128):
+        raise ValueError(f"QVQ LR32 M1/N64 K tile batch must be 64 or 128, got {k_tile}")
+    key = (alt_bank_id, k_tile)
+    kernel = _LR_M1_N64_UINT2_KERNELS.get(key)
     if kernel is not None:
         return kernel
     with _KERNEL_LOCK:
-        kernel = _LR_M1_N64_UINT2_KERNELS.get(alt_bank_id)
+        kernel = _LR_M1_N64_UINT2_KERNELS.get(key)
         if kernel is not None:
             return kernel
-        error = _LR_M1_N64_UINT2_KERNEL_ERRORS.get(alt_bank_id)
+        error = _LR_M1_N64_UINT2_KERNEL_ERRORS.get(key)
         if error is not None:
             raise RuntimeError(error)
         import mlx.core as mx
 
         try:
+            base_source = (
+                _LR_M1_N64_K128_W2_UINT2_FAST_STATE_FP32_SOURCE
+                if k_tile == 128
+                else _LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE
+            )
             source = (
                 _lr_m1_n64_shape_source(
                     2048,
                     8192,
-                    source=_LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE,
+                    source=base_source,
                 )
                 .replace(
                     "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
@@ -3229,7 +3243,10 @@ def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int):
                 )
             )
             kernel = mx.fast.metal_kernel(
-                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_uint2_fp32_alt{alt_bank_id}",
+                name=(
+                    f"gptqmodel_qvq_v2b2_p32_lr_m1_n64_uint2_kt{k_tile}"
+                    f"_fp32_alt{alt_bank_id}"
+                ),
                 input_names=["x", "trellis", "bank_ids"],
                 output_names=["out"],
                 header=_lr_small_w2_mask_header(alt_bank_id),
@@ -3242,9 +3259,9 @@ def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int):
                 "QVQ LR32 M1/N64 uint2-load kernel creation failed for "
                 f"alt_bank_id={alt_bank_id}: {exc}"
             )
-            _LR_M1_N64_UINT2_KERNEL_ERRORS[alt_bank_id] = error
+            _LR_M1_N64_UINT2_KERNEL_ERRORS[key] = error
             raise RuntimeError(error) from exc
-        _LR_M1_N64_UINT2_KERNELS[alt_bank_id] = kernel
+        _LR_M1_N64_UINT2_KERNELS[key] = kernel
         return kernel
 
 
@@ -5146,7 +5163,10 @@ def qvq_mlx_gemv(
             row_tile = 1
             group_size = 128
             output_width = 64
-            kernel = _local_ring_m1_n64_uint2_kernel(alt_bank_id=alt_id)
+            kernel = _local_ring_m1_n64_uint2_kernel(
+                alt_bank_id=alt_id,
+                k_tile=128 if k == 2048 else 64,
+            )
         elif m1_n64_half2:
             # The fixed short-K wide-N source keeps each decoded PGC16 pair
             # in native half2 form while the dot product remains FP32.  It
@@ -5242,11 +5262,8 @@ def qvq_mlx_gemv(
                 alt_bank_id=alt_id,
                 k=k,
                 n=n,
-                # K128 needs a hand-off barrier before reusing the shared
-                # activation tile.  That makes multi-batch K128 slower than
-                # K64 on the M4 Max, so keep the production fast path on K64;
-                # the K128 source remains covered by its oracle test for a
-                # future double-buffered implementation.
+                # K128 remains the direct-compatibility path for K=128;
+                # larger fallback shapes retain the established K64 source.
                 k_tile=128 if k == 128 else 64,
             )
         elif small_rows:

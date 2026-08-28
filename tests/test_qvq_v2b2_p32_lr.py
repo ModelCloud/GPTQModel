@@ -1024,6 +1024,7 @@ def test_lr32_mlx_m1_n64_packed_load_kernel_matches_torch_oracle(
 
     def observed(**kwargs):
         selected["called"] = True
+        selected.update(kwargs)
         return original(**kwargs)
 
     monkeypatch.setattr(qvq_mlx, kernel_name, observed)
@@ -1040,6 +1041,8 @@ def test_lr32_mlx_m1_n64_packed_load_kernel_matches_torch_oracle(
     )
     mx.eval(actual)
     assert selected["called"]
+    if use_uint2:
+        assert selected["k_tile"] == 128
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
 
 
@@ -1283,8 +1286,8 @@ def test_lr32_m1_w2_n64_k128_and_split2_match_torch_oracle():
         bank_alt_id=bank_alt_id,
     )
 
-    # Exercise the multi-batch K128 source directly. Production dispatch uses
-    # K64 for K>128 because K128 needs the reuse hand-off barrier.
+    # Exercise the multi-batch K128 source directly. The same K128 geometry
+    # is now promoted for the short-K wide-N production shape.
     kernel = qvq_mlx._local_ring_m1_n64_kernel(alt_bank_id=2, k=in_features, n=out_features, k_tile=128)
     actual_k128 = kernel(
         inputs=[mx.array(x.numpy()), mx.array(trellis.numpy()), mx.array(packed_selectors.numpy())],
