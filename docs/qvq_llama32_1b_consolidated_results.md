@@ -246,6 +246,31 @@ means no result file has been observed yet. The six-character path keys are
 stable local cross-reference IDs for artifacts that do not yet have a ledger Arm
 ID.
 
+### Corrected Wave-1 dynamic-allocation reruns (2026-08-28)
+
+The first Wave-1 batch was invalid because broad dynamic rules shadowed the
+arm-specific rules. These fresh checkpoints were generated after fixing
+first-match precedence, adding the W4 YAQA regularization override (`0.02`),
+and validating resolved allocation fingerprints. Quantization and the new
+64-row disjoint micro-math probe are complete; canonical D300 and GSM8K
+Platinum evaluations remain pending.
+
+| Arm ID | Allocation | Eff. BPW | Quant | Micro-math exact | ΔCE | ΔKL | Answer logprob Δ | Critical top-1 | D300 | GSM8K Platinum |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `fd7dfc` | Up W4, layers 12–15 | **3.1956** | complete | 3.125% | 0.01725 | 0.04014 | +0.00476 | 97.19% | pending | pending |
+| `1e2a4d` | Up W4, layers 10–13 | **3.1956** | complete | 7.8125% | 0.01569 | 0.04056 | −0.04216 | 97.35% | pending | pending |
+| `fe7561` | Up W4, layers 8–11 | **3.1956** | complete | 3.125% | 0.01944 | 0.04051 | −0.03588 | 97.09% | pending | pending |
+| `f65579` | Up W4, layers 8,10,12,14 | **3.1956** | complete | 4.6875% | 0.02075 | 0.04066 | −0.17996 | 97.22% | pending | pending |
+| `0f1294` | Up W4 + Down W3.5, layers 14–15 | **3.1956** | complete | 7.8125% | 0.01883 | 0.04058 | −0.01077 | 97.09% | pending | pending |
+| `47f9f1` | Up W4 + Gate W3.5, layers 14–15 | **3.1956** | complete | 7.8125% | 0.01935 | 0.04109 | −0.14875 | 97.16% | pending | pending |
+| `b82726` | O W4, all layers | **3.1956** | complete | 6.25% | 0.02224 | 0.03841 | −0.00970 | 97.28% | pending | pending |
+| `c58c0a` | V W4 + Up W4, layers 13–15 | **3.1956** | complete | 6.25% | 0.01277 | 0.03994 | +0.04268 | 97.00% | pending | pending |
+
+Machine-readable results and report paths are in
+`docs/experiments/frontier_wave1_fixed_micro_math_results.json`. The prior
+shadowed Wave-1 artifacts and their identical GSM8K results remain invalid and
+are intentionally not merged into this table.
+
 | Artifact ID | Checkpoint / experiment | Quant | D300 | GSM8K Platinum |
 | --- | --- | --- | --- | --- |
 | `ff5436` | `llama32-1b-v2b2p32-align2e64-e2e-susv-r128n300-v1` | completed | completed | completed |
