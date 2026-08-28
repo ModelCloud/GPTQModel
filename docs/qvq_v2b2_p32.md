@@ -5635,3 +5635,34 @@ The dense cache is slower than LR32 in both M1 shapes even before accounting
 for its substantially larger resident memory footprint. It is therefore not
 a viable route to the `2x` M1 objective on this M4 Max, and no decoded-weight
 cache or alternate production format is enabled.
+
+## 167. M1 sequential output-tile batching follow-ups
+
+Two temporary kernels were checked against the Torch/production LR32 oracle
+before timing. They serialize adjacent N32 output tiles inside one
+threadgroup while retaining the fused split reduction. The exact N64/split-16
+candidate reduced inner-kernel launch overhead, but its complete-module gain
+was small: on the powered M4 Max, the 100-sample module comparison was
+`0.609520 ms` p50 for the promoted route versus `0.589896 ms` for the
+candidate (`1.033x`), with mean `0.634823 ms` versus `0.621908 ms`
+(`1.021x`). It was not promoted because this does not materially close the
+M1 module gap.
+
+The exact four-tile N128/split-16 extension was also rejected. Its inner
+kernel candidate/production ratios were `1.034x` by p50 and `1.031x` by mean
+at `(M=1,K=2048,N=8192)`. The eight-tile N256 extension was not stable:
+`0.990x` by p50 and `1.024x` by mean. These results do not justify adding
+more launch-batching variants to production dispatch.
+
+A separate reconstruction of the N64 source failed the exact oracle
+(`relative L2=1.39`, maximum absolute error about `254`) and was discarded;
+its timing was not used. This is retained here as a guard against confusing
+an invalid source-generation probe with a performance result.
+
+For additional diagnosis, a powered 150-sample component probe at
+`(M=1,K=2048,N=8192)` measured p50 input Hadamard `0.21454 ms`, LR GEMV
+`0.37323 ms`, output Hadamard `0.21448 ms`, and complete module `0.46687 ms`.
+These component measurements were collected independently and are not
+additive; they indicate that future M1 work should target the Hadamard and
+module launch/epilogue boundary rather than another unvalidated LR decoder
+layout.
