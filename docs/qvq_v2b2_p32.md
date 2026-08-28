@@ -5768,7 +5768,35 @@ complete-module boundaries, while M1 and M4 remain below 2x. Absolute timings
 continue to vary with GPU scheduling and thermal state; same-process paired
 ratios are the comparison metric.
 
-## 171. M1 external split-K N32 probe rejected
+## 171. M4 padded matrix-path probe rejected
+
+The existing exact M8 `simdgroup_matrix` LR32 path was screened for M4 by
+padding four real activation rows with four zero rows, running the M8 matrix
+kernel, and retaining the first four output rows. This tests whether matrix
+throughput could compensate for the doubled padded work without introducing a
+new Metal kernel.
+
+At `(M=4,K=2048,N=8192)` the candidate differed from the production M4
+cooperative FP32 path at the matrix FP16 boundary:
+
+```text
+max_abs=0.0415483, relative_l2=2.0795e-4, rmse=0.0093169
+```
+
+A same-process randomized/interleaved inner-kernel A/B used identical real
+rows, trellis, and selectors, 20 warmups, and 100 synchronized samples per
+arm on the AC/high-performance M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production M4 cooperative | `0.91806` | `1.26792` | `0.95913` |
+| Padded M8 matrix path | `1.15842` | `1.68153` | `1.23644` |
+
+The padded matrix candidate was `1.262x` slower at p50 and `1.289x` slower by
+mean, in addition to failing the production FP32 oracle tolerance. It was
+rejected and no M4 matrix dispatch was added.
+
+## 172. M1 external split-K N32 probe rejected
 
 The one-lane-per-output N32 W2 source was also tested with ordinary 32-thread
 threadgroups and an external MLX split-K reduction. This is distinct from the
