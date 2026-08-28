@@ -6064,3 +6064,22 @@ Each same-process comparison used identical inputs and payloads, 20 warmups,
 and 80 randomized/interleaved samples per arm. The small and inconsistent
 gains do not justify additional dispatch variants; only the validated
 short-wide N32 activation-broadcast route remains promoted.
+
+## 181. M1 vector activation-load mapping probe rejected
+
+The short-wide M1/N32 decoder was tested with eight `float4` activation loads
+per K32 tile, followed by SIMD vector shuffles, instead of the promoted
+32-lane scalar activation loads. This reduced the source-level load count but
+was exact against the production route (`max_abs=0`, relative L2 `0`).
+
+At `(M=1,K=2048,N=8192)`, a same-process complete-module A/B used identical
+inputs and payloads, 10 warmups, and 80 randomized/interleaved samples per
+arm on the AC/high-performance M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production scalar activation broadcast | `0.399104` | `0.424429` | `0.389984` |
+| `float4` activation mapping | `0.394478` | `0.421237` | `0.387279` |
+
+The candidate was only `1.012x` faster at p50 and `1.007x` by mean. It was
+rejected; the scalar SIMD-shuffle source remains production behavior.
