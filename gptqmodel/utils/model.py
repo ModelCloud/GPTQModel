@@ -710,6 +710,12 @@ def create_quant_module(
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
     if dynamic is not None:
         overrides = dynamic_get(dynamic=dynamic, module_name=name)
+        # Loader module names are often relative to the model root (e.g.
+        # ``layers.15.mlp.up_proj``), while QVQ configs are authored with the
+        # canonical ``model.layers...`` prefix used during quantization.
+        # Retry the canonical form so mixed-format overrides survive reload.
+        if overrides is None and not name.startswith("model."):
+            overrides = dynamic_get(dynamic=dynamic, module_name=f"model.{name}")
         # negative module match, skip this module
         if overrides == False:  # noqa: E712
             return
