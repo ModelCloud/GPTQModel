@@ -5426,3 +5426,41 @@ The existing route was faster by `1.022x` at p50 and by `1.022x` by mean;
 the candidate was also slower at p95 (`0.961x` current/candidate). The
 reduction-order output drift was `max_abs=0.03125`, RMSE `0.000546`. The
 candidate is rejected and the short-K production dispatch remains N32/Split16.
+
+## 159. Powered complete-module refresh and FP16-input boundary probe
+
+After the host was connected to AC and switched to high-performance mode, the
+complete `QVQMLXLinear` benchmark was rerun on the current clean head. The
+run used randomized/interleaved LR/P32 execution, 30 warmups, and 100
+synchronized samples per arm:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.38046` | `0.58271` | `1.532x` | `0.94910` | `0.95079` |
+| `(1,2048,2048)` | `0.42654` | `0.60917` | `1.428x` | `0.72537` | `0.99894` |
+| `(1,2048,8192)` | `0.52590` | `0.92656` | `1.762x` | `0.89779` | `1.40447` |
+| `(1,8192,2048)` | `0.59040` | `1.01315` | `1.716x` | `0.96253` | `1.40733` |
+| `(4,2048,8192)` | `0.91269` | `2.05102` | `2.247x` | `1.42617` | `2.52205` |
+| `(8,2048,8192)` | `0.72650` | `1.77667` | `2.446x` | `1.21371` | `2.49654` |
+| `(16,8192,8192)` | `2.42581` | `5.51331` | `2.273x` | `3.00865` | `5.99272` |
+
+LR remains faster in every tested complete-module shape and exceeds `2x` for
+M4/M8/M16. M1 remains below `2x`, confirming that the unresolved gap is
+concentrated at the small-row module boundary rather than indicating an LR
+decoder regression.
+
+An additional 300-sample paired probe tested casting the existing FP32
+Hadamard output to FP16 before LR GEMV, preserving the same output
+Hadamard/epilogue. The candidate was numerically close but not a reliable
+performance improvement:
+
+| Shape | FP32-input p50 | FP16-input p50 | candidate/current | candidate/current mean |
+|---|---:|---:|---:|---:|
+| `(1,2048,8192)` | `0.658521` | `0.663812` | `1.008x` | `0.999x` |
+| `(1,2048,2048)` | `0.543646` | `0.540375` | `0.994x` | `0.968x` |
+
+Relative output drift was approximately `3.2e-4` with maximum absolute
+difference `0.125`. Because the wide model-shaped case was slightly slower
+and the narrower gain was small and shape-dependent, the FP16-input variant
+is rejected and is not part of production dispatch. The production LR path
+continues to retain the FP32 transformed activation.
