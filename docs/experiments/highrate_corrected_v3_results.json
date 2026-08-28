@@ -1,0 +1,15 @@
+{
+  "protocol": "corrected_mixed_format_v3",
+  "model": "Llama-3.2-1B-Instruct",
+  "gsm8k_manifest": "madrylab/gsm8k-platinum:test",
+  "d300_manifest": "/root/qvq-data/divergence300-v1/divergence300-development.jsonl",
+  "results": [
+    {"arm_id":"7c91e2","allocation":"Up W4 layers 8-15","gsm8k":0.4292803970223325,"d300_top1":0.34708333333333335,"d300_exact32":20,"mean_first_divergence":10.76},
+    {"arm_id":"4a6d1f","allocation":"Up W5 layers 12-15","gsm8k":0.4152191894127378,"d300_top1":0.3328125,"d300_exact32":20,"mean_first_divergence":10.203333333333333},
+    {"arm_id":"c83b70","allocation":"Up W7 layers 14-15","gsm8k":0.41687344913151364,"d300_top1":0.32177083333333334,"d300_exact32":18,"mean_first_divergence":9.93},
+    {"arm_id":"e2f49a","allocation":"Up W4 L12-13 + W6 L14-15","gsm8k":0.42349048800661704,"d300_top1":0.326875,"d300_exact32":19,"mean_first_divergence":10.023333333333333},
+    {"arm_id":"91d5c4","allocation":"Flat W3.5 + Up W4 L12-15","gsm8k":0.4557485525227461,"d300_top1":0.3883333333333333,"d300_exact32":38,"mean_first_divergence":11.706666666666667},
+    {"arm_id":"b6a028","allocation":"Flat W3.5 + Up W4.5 L14-15","gsm8k":0.445822994210091,"d300_top1":0.4013541666666667,"d300_exact32":35,"mean_first_divergence":11.85},
+    {"arm_id":"f04e77","allocation":"Flat W3.5 + Up W5.5 L15","gsm8k":0.4425144747725393,"d300_top1":0.39947916666666666,"d300_exact32":37,"mean_first_divergence":11.843333333333334}
+  ]
+}

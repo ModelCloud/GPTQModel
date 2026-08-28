@@ -213,6 +213,28 @@ estimates only and are not directly comparable to the segmented V2B2 rows.
 
 ## Complete artifact inventory (live reconciliation)
 
+### Corrected mixed-format high-rate reruns (2026-08-28)
+
+The original high-rate evaluations that returned all-zero/invalid outputs are
+excluded. These reruns use the corrected mixed-format loader and independent
+GPU-pinned evaluation processes. GSM8K Platinum has 1,209 held-out questions;
+D300 uses the disjoint 300-prompt development manifest. Arm IDs below are the
+stable cross-reference keys for the companion JSON artifact.
+
+| Arm ID | Allocation | Eff. BPW* | GSM8K Platinum | D300 aligned top-1 | Exact@32 | Mean first divergence |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 7c91e2 | Up W4, layers 8–15 | pending | 42.9280% (519/1209) | 34.7083% | 20/300 | 10.76 |
+| 4a6d1f | Up W5, layers 12–15 | pending | 41.5219% (502/1209) | 33.2813% | 20/300 | 10.20 |
+| c83b70 | Up W7, layers 14–15 | pending | 41.6873% (504/1209) | 32.1771% | 18/300 | 9.93 |
+| e2f49a | Up W4 L12–13 + W6 L14–15 | pending | 42.3490% (512/1209) | 32.6875% | 19/300 | 10.02 |
+| 91d5c4 | Flat W3.5 + Up W4 L12–15 | pending | 45.5749% (551/1209) | 38.8333% | 38/300 | 11.71 |
+| b6a028 | Flat W3.5 + Up W4.5 L14–15 | pending | 44.5823% (539/1209) | 40.1354% | 35/300 | 11.85 |
+| f04e77 | Flat W3.5 + Up W5.5 L15 | pending | 44.2514% (535/1209) | 39.9479% | 37/300 | 11.84 |
+
+\*Effective BPW remains pending for these mixed-format checkpoints until the
+serialized module-weight accounting is reconciled; the table intentionally
+does not infer a rate from the failed pre-fix artifacts.
+
 This inventory is generated from `/root/qvq-results/llama32-1b*` checkpoint
 directories and is intended to include every quantization artifact, including
 experiments that have not yet produced canonical evaluations. `active` means a
