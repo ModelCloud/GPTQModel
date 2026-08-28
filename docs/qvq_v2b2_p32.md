@@ -6105,3 +6105,62 @@ The same complete module under a shape-specialized `mx.compile` callable was
 `0.403306` ms mean (`1.058x` p50 and `1.049x` mean). Compilation helps the
 graph boundary but is not sufficient for 2x. The next boundary candidate must
 preserve exact LR32 output while reducing Hadamard/epilogue launch overhead.
+
+## 183. Current powered baseline after benchmark-harness correction
+
+The current clean checkout (`ad906f85`) was benchmarked on the plugged-in,
+high-performance M4 Max (`powermode=2`) after the module benchmark was changed
+to randomized/interleaved LR/P32 sampling. Both arms used the same input,
+trellis payload, and selector bytes. The inner-kernel run used 50 warmups and
+120 synchronized samples per arm; the complete-module run used the same
+protocol and seed `20260828`.
+
+The public `qvq_mlx_gemv` results were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.41183` | `0.51225` | `1.244x` | `0.57750` | `0.73610` |
+| `(1,2048,2048)` | `0.41121` | `0.50400` | `1.226x` | `0.83575` | `0.94911` |
+| `(1,2048,8192)` | `0.53844` | `0.77827` | `1.445x` | `0.64205` | `0.92056` |
+| `(1,8192,2048)` | `0.56038` | `0.85387` | `1.524x` | `0.70222` | `1.00132` |
+| `(4,2048,8192)` | `0.88433` | `1.81960` | `2.058x` | `1.13730` | `2.05856` |
+| `(8,2048,8192)` | `0.71144` | `1.60465` | `2.255x` | `0.93711` | `1.99716` |
+| `(16,8192,8192)` | `2.37929` | `5.30269` | `2.229x` | `2.52998` | `5.45268` |
+
+The complete `QVQMLXLinear` results were:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.28108` | `0.43646` | `1.553x` | `0.30222` | `0.46184` |
+| `(1,2048,2048)` | `0.24194` | `0.30848` | `1.275x` | `0.27726` | `0.36020` |
+| `(1,2048,8192)` | `0.23162` | `0.33052` | `1.427x` | `0.23783` | `0.34219` |
+| `(1,8192,2048)` | `0.37663` | `0.60156` | `1.597x` | `0.83812` | `1.24220` |
+| `(4,2048,8192)` | `1.11894` | `2.26167` | `2.021x` | `1.79005` | `2.53985` |
+| `(8,2048,8192)` | `1.12173` | `2.68515` | `2.394x` | `1.44339` | `3.74858` |
+| `(16,8192,8192)` | `2.53300` | `5.67815` | `2.242x` | `4.25456` | `6.94557` |
+
+This run confirms that LR32 is faster than non-local P32 at every tested
+shape and clears 2x at M4/M8/M16 in both public inner-GEMV and complete-module
+measurements. M1 remains below 2x. Ratios are more portable than absolute
+latencies because Apple GPU scheduling and thermal state still affect the
+wall-clock samples.
+
+## 184. M1 FP16-output shortcut rejected at the module boundary
+
+An isolated M1 probe used `output_fp32=False` for the LR GEMV, relying on the
+final module cast to FP16. At `(M=1,K=2048,N=8192)` it reduced the standalone
+GEMV cost, but the resulting FP16 GEMV differed from the FP32 production path
+by approximately `2.08e-4` relative L2. More importantly, the complete module
+was both less accurate and slower. The module A/B used identical synthetic
+payloads and FP16 input on the powered M4 Max, with 20 warmups and 80
+randomized/interleaved samples per arm:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production FP32 LR GEMV | `0.417291` | `0.447825` | `0.417494` |
+| FP16-output LR GEMV | `0.603855` | `0.668569` | `0.612296` |
+
+The candidate's complete-module difference was `max_abs=0.125`, relative L2
+`5.56e-4`, and RMSE `0.0251`; it was `0.691x` production by p50 and
+`0.682x` by mean. It is rejected, and the FP32 LR output path remains the
+production contract.
