@@ -5767,3 +5767,31 @@ every tested shape. The 2x objective is met for M8/M16 at both the inner and
 complete-module boundaries, while M1 and M4 remain below 2x. Absolute timings
 continue to vary with GPU scheduling and thermal state; same-process paired
 ratios are the comparison metric.
+
+## 171. M1 external split-K N32 probe rejected
+
+The one-lane-per-output N32 W2 source was also tested with ordinary 32-thread
+threadgroups and an external MLX split-K reduction. This is distinct from the
+promoted fused 512-thread split-16 route: each 32-thread group computes one
+N32 output tile for one of sixteen K slices, and MLX sums the FP32 partials.
+The candidate was exact against the current production LR32 output at
+`(M=1,K=2048,N=8192)`:
+
+```text
+max_abs=0, relative_l2=0, rmse=0
+```
+
+A same-process randomized/interleaved inner-kernel A/B used identical input,
+trellis, and selector tensors, 20 warmups, and 100 synchronized samples per
+arm on the AC/high-performance M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production fused N32/split-16 | `0.41812` | `0.57572` | `0.45245` |
+| 32-thread external split-16 | `0.44517` | `0.56711` | `0.44455` |
+
+The external-reduction candidate was `1.065x` slower at p50 and only `1.018x`
+faster by mean. The small mean difference is not a robust improvement and
+does not offset the production route's lower median, so the candidate was
+rejected. The fused N32/split-16 dispatch remains active; no production code
+changed from this probe.
