@@ -4923,3 +4923,32 @@ performance-mode M4 Max:
 The candidate was `0.832x` at p50 and `0.900x` by mean. The shorter
 per-lane chain did not offset the larger threadgroup and reduction cost, so
 the transient source was discarded and the production mapping remains active.
+
+## 144. M1 padded `simdgroup_matrix` path rejected
+
+The existing LR32 W2 `simdgroup_matrix` decoder was tested for M1 by using
+its native 8-row matrix tile with seven zero-padded rows and retaining only
+the valid first output row. This directly tested whether Apple matrix
+throughput could overcome the wasted-row arithmetic at M1. The candidate used
+one SIMD group per N8 tile and the existing FP32 accumulation path.
+
+At `(M=1,K=2048,N=8192)`, complete-module output stayed within the existing
+FP16-boundary drift:
+
+```text
+max_abs = 0.125
+relative_l2 = 0
+rmse = 0.0146331787109375
+```
+
+A same-process randomized A/B used identical payloads and inputs, 12
+warmups, and 80 samples per arm on the plugged-in, performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production aligned `uint2` | `0.54523` | `0.88659` | `0.63925` |
+| Padded M1 matrix candidate | `1.02433` | `1.40566` | `1.09295` |
+
+The candidate was `0.533x` at p50 and `0.585x` by mean. The seven wasted
+matrix rows outweigh the hardware matrix throughput, so the transient source
+was discarded and the scalar aligned-`uint2` route remains active.
