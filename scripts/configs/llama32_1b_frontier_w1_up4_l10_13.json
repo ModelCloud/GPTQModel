@@ -22,6 +22,10 @@
       [
         3.5,
         0.02
+      ],
+      [
+        4.0,
+        0.02
       ]
     ],
     "minimum_sequences": 182,
@@ -34,6 +38,10 @@
   "device": "cuda:0",
   "offload_to_disk": false,
   "dynamic": {
+    "+:^model\\.layers\\.(10|11|12|13)\\.(mlp.up_proj)$": {
+      "bits": 4,
+      "format": "qvq"
+    },
     "+:^model\\.layers\\.[0-9]+\\.(self_attn.q_proj|self_attn.k_proj)$": {
       "bits": 2.5
     },
@@ -45,10 +53,6 @@
     },
     "+:^model\\.layers\\.[0-9]+\\.(mlp.up_proj)$": {
       "bits": 3.5
-    },
-    "+:^model\\.layers\\.(10|11|12|13)\\.(mlp.up_proj)$": {
-      "bits": 4,
-      "format": "qvq"
     }
   }
 }

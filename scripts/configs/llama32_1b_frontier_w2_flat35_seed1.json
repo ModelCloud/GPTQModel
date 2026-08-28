@@ -4,7 +4,7 @@
   "bank_count": 2,
   "rounding": "yaqa",
   "yaqa": {
-    "seed": 0,
+    "seed": 1,
     "regularization": 0.15,
     "regularization_by_rate": [
       [
@@ -21,6 +21,10 @@
       ],
       [
         3.5,
+        0.02
+      ],
+      [
+        4.0,
         0.02
       ]
     ],
