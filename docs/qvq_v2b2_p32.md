@@ -6004,3 +6004,46 @@ about `1.45x` for the short-wide shape and below `2x` for the other M1 shapes;
 M8/M16 remain above `2x`. The next meaningful M1 opportunity is a different
 execution mapping (or a combined optimization), not further source-level
 unrolling of this route.
+
+## 178. Short-wide M1 N32 split-count probe
+
+The fused activation-broadcast N32 route was also tested with alternate fixed
+K-split counts at `(M=1,K=2048,N=8192)`. Both candidates were exact against
+the production route (`max_abs=0`, relative L2 `0`). A same-process paired
+complete-module comparison used identical inputs and payloads, 20 warmups,
+and 80 synchronized samples per arm for split-8 (60 per arm for split-32)
+on the AC/high-performance M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) | Relative to split-16 |
+|---|---:|---:|---:|---:|
+| Activation-broadcast split-16 | `0.432396` | `0.513185` | `0.440458` | `1.000x` |
+| Activation-broadcast split-8 | `0.431022` | `0.473613` | `0.436371` | `1.003x` / `1.009x` mean |
+| Activation-broadcast split-32 | `0.663500` | `0.881197` | `0.665043` | `0.986x` / `0.995x` mean |
+
+The split-8 difference is too small to justify another production dispatch
+variant, and split-32 is slower. The production wide-M1 policy remains
+split-16.
+
+## 179. Constant W2 state-to-half2 LUT probe rejected
+
+The fixed W2 M1/N32 source was tested with a generated `2 x 65536` state-to-
+`half2` lookup embedded in Metal constant storage. This replaces the compact
+per-pair state hash and two PGC16 table lookups with one constant lookup. The
+candidate was exact against the production activation-broadcast route:
+
+```text
+max_abs=0, relative_l2=0
+```
+
+At `(M=1,K=2048,N=8192)`, a same-process complete-module A/B used identical
+inputs and payloads, 10 warmups, and 50 synchronized samples per arm on the
+AC/high-performance M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production hash/codebook path | `0.377750` | `0.501710` | `0.373645` |
+| Constant state LUT | `0.376562` | `0.543371` | `0.374508` |
+
+The LUT was only `1.003x` faster at p50 and `0.998x` by mean, so it was not
+promoted. The compact constant-codebook arithmetic remains the production
+path.
