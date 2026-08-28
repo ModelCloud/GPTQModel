@@ -1297,6 +1297,22 @@ def _make_lr_m1_n32_activation_broadcast_source(source: str) -> str:
     if marker not in source:
         raise RuntimeError("QVQ LR32 M1/N32 source is missing its K32 loop")
     source = source.replace(marker, marker + "\n  float activation=float(x[base+lane]);", 1)
+    selector_marker = (
+        "  uint selector=(lane&7u)==0u?uint(bank_ids[tile]):0u;\n"
+        "  selector=simd_shuffle(selector,ushort(lane&~7u));"
+    )
+    selector_replacement = (
+        "  // N32 covers four adjacent K32xN8 tiles. Their selector bytes are\n"
+        "  // contiguous and 4-byte aligned, so one lane can load all four\n"
+        "  // bytes and broadcast the packed word to the SIMD group.\n"
+        "  uint selector_words=(lane==0u)?*((device const uint*)(bank_ids+"
+        "(base>>5u)*tiles_n+(n0>>3u))):0u;\n"
+        "  selector_words=simd_shuffle(selector_words,ushort(0));\n"
+        "  uint selector=(selector_words>>((lane>>3u)<<3u))&255u;"
+    )
+    if selector_marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N32 source is missing its selector broadcast pattern")
+    source = source.replace(selector_marker, selector_replacement, 1)
     for offset in range(16):
         old = (
             f"    uint k0=base+{offset * 2}u;\n"

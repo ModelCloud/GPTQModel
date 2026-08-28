@@ -6245,3 +6245,36 @@ The candidate was `1.280x` faster at p50 and `1.221x` by mean, but the
 additional rounding is too large for the current FP32 LR32 output contract.
 It is rejected; split partials remain FP32 and the production reduction order
 is unchanged.
+
+## 188. Promote packed selector-word loads for short-wide M1/N32
+
+The promoted short-wide M1/N32 W2 path previously loaded one selector byte
+per logical N8 tile. Four adjacent N8 tiles are covered by each N32 output
+tile, so their selector bytes are contiguous and 4-byte aligned after the
+production LR32 contiguity preparation. The kernel now has one lane load the
+four bytes as a packed `uint`, broadcasts that word through the SIMD group,
+and extracts the byte for each output lane. Weight decoding, activation
+loads, accumulation order, and output dtype are unchanged.
+
+The source was compiled for both the split-16 and split-32 activation-broadcast
+variants. The split-16 production route was compared at the complete module
+boundary using `(M=1,K=2048,N=8192)`, identical input and payload, 20 warmups,
+and 80 randomized/interleaved synchronized samples per arm on the
+AC/high-performance M4 Max. The result was bit-exact:
+
+```text
+max_abs=0, relative_l2=0, RMSE=0
+```
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous selector-byte loads | `0.585375` | `0.740960` | `0.596260` |
+| Packed selector-word load | `0.466979` | `0.569852` | `0.478418` |
+
+The packed selector load is `1.254x` faster at p50 and `1.246x` by mean in
+this same-process A/B. A fresh randomized LR/P32 module refresh after the
+promotion measured `(1,2048,8192)` at `0.69687` ms versus `1.13265` ms for
+P32 (`1.625x`), while M4/M8/M16 measured `2.081x`, `2.659x`, and `2.280x`.
+The change is therefore promoted only for the short-wide activation-broadcast
+N32 source; long-K and other M1 routes retain their independently validated
+dispatches.
