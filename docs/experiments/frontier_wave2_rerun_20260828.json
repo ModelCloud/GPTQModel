@@ -3,7 +3,7 @@
   "wave": 2,
   "status": "quantizing",
   "launched_at_utc": "2026-08-28T11:28:16Z",
-  "launch_commit": "b58f85f0",
+  "launch_commit": "bc0d8f41",
   "reason": "Relaunched after the prior attempt failed closed because stale configs required minimum_sequences=2000 while only 182 YAQA rows were supplied.",
   "preflight": {
     "yaqa_rows": 182,
