@@ -6193,3 +6193,26 @@ This is therefore retained as an opt-in benchmark mode, not promoted to
 production dispatch. The remaining universal `2x` objective requires a new
 M1 execution or module-boundary mapping rather than another compile-policy
 tuning pass.
+
+## 186. Long-K M1 activation broadcast rejected
+
+The SIMD activation-sharing transformation already promoted for the short-wide
+M1/N32 route was tested on the long-K M1 path at the complete module boundary.
+The comparison used `(M=1,K=8192,N=2048)`, identical input and compressed
+payload, 20 warmups, and 80 randomized/interleaved synchronized samples per
+arm on the AC/high-performance M4 Max. Both routes were bit-exact:
+
+```text
+max_abs=0, relative_l2=0
+```
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Existing scalar activation loads | `0.418375` | `0.488346` | `0.423282` |
+| Long-K activation broadcast | `0.421334` | `0.447785` | `0.420661` |
+
+The candidate was `1.007x` the existing route at p50 and `0.994x` by mean.
+The small mean difference is within normal GPU timing variation and does not
+justify another shape-specialized dispatch. The long-K M1 route therefore
+remains scalar; activation broadcast stays limited to the validated short-wide
+case where its complete-module gain was material.
