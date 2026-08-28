@@ -75,6 +75,7 @@ def _build_awq_module(
     qzeros: torch.Tensor,
     scales: torch.Tensor,
     bias: torch.Tensor,
+    dtype: torch.dtype = torch.float16,
 ):
     module = module_cls(
         bits=bits,
@@ -85,13 +86,14 @@ def _build_awq_module(
         out_features=out_features,
         bias=True,
         register_buffers=True,
+        dtype=dtype,
     ).to(device)
 
     with torch.no_grad():
         module.qweight.copy_(qweight.to(device))
         module.qzeros.copy_(qzeros.to(device))
-        module.scales.copy_(scales.to(torch.float16).to(device))
-        module.bias.copy_(bias.to(torch.float16).to(device))
+        module.scales.copy_(scales.to(dtype=dtype, device=device))
+        module.bias.copy_(bias.to(dtype=dtype, device=device))
 
     module.post_init()
     module.eval()
@@ -172,6 +174,86 @@ def test_awq_marlin_cuda_zero_points_match_torch_awq():
         atol=8e-3,
         rtol=8e-3,
     )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "rows,in_features,out_features,group_size",
+    [
+        (1, 256, 200, 32),  # N tail during decode
+        (17, 208, 256, -1),  # K tail with channelwise scales
+        (8, 208, 256, 208),  # Explicit K-sized channelwise group
+        (33, 288, 200, 32),  # N and K tails
+    ],
+)
+def test_awq_marlin_cuda_padded_shape_matches_dense_reference(
+    dtype, rows, in_features, out_features, group_size
+):
+    capability = torch.cuda.get_device_capability()
+    if capability[0] < 8 and dtype == torch.bfloat16:
+        pytest.skip("AWQ Marlin BF16 requires compute capability >= 8.0")
+    if marlin_import_exception is not None:
+        pytest.skip(f"AWQ Marlin kernel unavailable: {marlin_import_exception}")
+    if not marlin_runtime_available(dtype):
+        pytest.skip(marlin_runtime_error(dtype))
+
+    torch.manual_seed(23)
+    device = torch.device("cuda:0")
+    bits = 4
+    effective_group_size = in_features if group_size == -1 else group_size
+    groups = in_features // effective_group_size
+    maxq = (1 << bits) - 1
+
+    codes = torch.randint(
+        0,
+        maxq + 1,
+        (in_features, out_features),
+        dtype=torch.int32,
+    )
+    zero_points = torch.randint(
+        0,
+        maxq + 1,
+        (groups, out_features),
+        dtype=torch.int32,
+    )
+    scales = (torch.rand((groups, out_features)) * 0.01 + 0.001).to(dtype)
+    bias = (torch.randn(out_features) * 0.01).to(dtype)
+    qweight = _pack_awq_tensor(codes, bits)
+    qzeros = _pack_awq_tensor(zero_points, bits)
+
+    module = _build_awq_module(
+        AwqMarlinLinear,
+        device=device,
+        bits=bits,
+        group_size=group_size,
+        in_features=in_features,
+        out_features=out_features,
+        qweight=qweight,
+        qzeros=qzeros,
+        scales=scales,
+        bias=bias,
+        dtype=dtype,
+    )
+
+    group_indices = torch.arange(in_features) // effective_group_size
+    dense_weight = (
+        codes - zero_points.index_select(0, group_indices)
+    ).to(dtype) * scales.index_select(0, group_indices)
+    dense_weight = dense_weight.to(device)
+    x = torch.randn((rows, in_features), device=device, dtype=dtype) / in_features**0.5
+    expected = x @ dense_weight + bias.to(device)
+    with torch.inference_mode():
+        actual = module(x)
+        repeated = module(x)
+    torch.cuda.synchronize(device)
+
+    assert module._marlin_tile_padding is not None
+    assert actual.shape == (rows, out_features)
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, expected, atol=5e-2, rtol=5e-2)
+    torch.testing.assert_close(repeated, expected, atol=5e-2, rtol=5e-2)
 
 
 @pytest.mark.cuda
