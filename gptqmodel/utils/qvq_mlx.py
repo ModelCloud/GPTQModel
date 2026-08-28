@@ -1179,7 +1179,12 @@ for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){
   uint ring_base=(ring>>1u)*4u+(ring&1u)*2u;
   uint packed0=as_type<uint>(tile_ptr[ring_base]);
   uint packed1=as_type<uint>(tile_ptr[ring_base+1u]);
-  uint state=qstate_lr_w2_packed_fast(packed0,packed1,0u);
+  // The N32 source always begins a K32 tile at pair zero.  Extract the
+  // circular nibble window with 32-bit operations instead of constructing a
+  // 64-bit rotated word; this is equivalent to
+  // qstate_lr_w2_packed_fast(packed0, packed1, 0) and is cheaper on Apple
+  // GPUs.  Keep the generic helper for routes whose pair is dynamic.
+  uint state=(((packed1>>20u)&15u)<<12u)|(((packed1>>24u)&15u)<<8u)|(((packed1>>28u)&15u)<<4u)|(packed0&15u);
   #pragma unroll
   for(uint offset=0u;offset<16u;offset++){
     float2 value=qlevelsv2b_lr_const_w2(state,bank);

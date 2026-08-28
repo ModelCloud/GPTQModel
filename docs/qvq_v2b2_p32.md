@@ -5849,3 +5849,38 @@ The candidate was `1.081x` faster at p50 and `1.138x` by mean, but this is a
 small module-level gain with reduction-order drift and remains far below the
 2x objective. It was rejected; the fused N32/split-16 dispatch remains
 production behavior.
+
+## 174. Fixed 32-bit W2 state start for N32 routes
+
+The M1/N32 W2 decoder always begins each K32 tile at local `pair=0`. The
+production source now uses the validated 32-bit nibble extraction for that
+fixed state start instead of constructing a 64-bit circular window. Dynamic
+pair routes retain the generic packed-state helper. The change preserves the
+serialized ABI and all bank/layout semantics.
+
+The change was exact in dedicated A/Bs:
+
+```text
+(M=1,K=2048,N=8192): max_abs=0, relative_l2=0, rmse=0
+(M=1,K=8192,N=2048): max_abs=0, relative_l2=0, rmse=0
+```
+
+On the AC/high-performance M4 Max, same-process randomized/interleaved inner
+kernel comparisons with 20 warmups and 150 synchronized samples measured:
+
+| Shape | Candidate/production p50 | Candidate/production mean |
+|---|---:|---:|
+| `(1,2048,8192)` | `0.849x` | `0.864x` |
+| `(1,8192,2048)` | `0.850x` | `0.874x` |
+
+The corresponding complete-module comparisons were:
+
+| Shape | Candidate/production p50 | Candidate/production mean | Module parity |
+|---|---:|---:|---:|
+| `(1,2048,8192)` | `0.958x` | `0.981x` | exact |
+| `(1,8192,2048)` | `0.898x` | `0.884x` | exact |
+
+The fixed state-start specialization is promoted for the existing N32 W2
+routes. The latest powered public refresh remains faster than non-local P32
+for every shape; M8/M16 clear 2x, while M1/M4 remain the unresolved part of
+the broader objective.
