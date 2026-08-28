@@ -1,0 +1,14 @@
+{
+  "status": "provisional_gsm8k_only_d300_pending",
+  "note": "GSM8K runs completed; D300 runs terminated before 300 prompts and are not publishable yet. Do not rank these arms until D300 is complete and the identical GSM rates are independently audited.",
+  "arms": [
+    {"arm_id":"344c85","name":"w1_up4_l12_15","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"410661","name":"w1_up4_l10_13","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"5524b6","name":"w1_up4_l8_11","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"f95e1b","name":"w1_up4_interleaved","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"12aad7","name":"w1_up4_down35_l14_15","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"7eb96a","name":"w1_up4_gate35_l14_15","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"821b10","name":"w1_o4_all","gsm8k":0.42762613730355664,"d300":null},
+    {"arm_id":"e42b91","name":"w1_v4_up4_l13_15","gsm8k":0.42762613730355664,"d300":null}
+  ]
+}
