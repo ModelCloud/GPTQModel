@@ -4892,3 +4892,34 @@ The transient timing was `0.59733 ms` p50 and `0.65669 ms` mean versus
 production `0.59552 ms` p50 and `0.65078 ms` mean, but it is discarded because
 the output was invalid. No production source or dispatch was changed; the
 aligned-`uint2` four-way split route remains active.
+
+## 143. M1 four-lanes-per-output decode rejected
+
+The M1/N64 W2 decoder was probed with four SIMD lanes per output channel,
+where each lane decoded four W2 pairs, instead of the production two lanes per
+output with eight pairs per lane. The candidate retained K64 activation
+staging, aligned `uint2` packed-word loads, four-way K splitting, and FP32
+accumulation. This shortened each lane's serial state/FMA chain but doubled
+the SIMD groups in the N64 threadgroup.
+
+At `(M=1,K=2048,N=8192)`, the candidate stayed within the production FP32
+contract relative to the current route:
+
+```text
+max_abs = 0.015625
+relative_l2 = 0
+rmse = 0.000244140625
+```
+
+A same-process randomized complete-module A/B used identical payloads and
+inputs, 12 warmups, and 80 samples per arm on the plugged-in,
+performance-mode M4 Max:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Production two lanes/output | `0.38767` | `0.48259` | `0.38995` |
+| Four lanes/output candidate | `0.46629` | `0.54603` | `0.43301` |
+
+The candidate was `0.832x` at p50 and `0.900x` by mean. The shorter
+per-lane chain did not offset the larger threadgroup and reduction cost, so
+the transient source was discarded and the production mapping remains active.
