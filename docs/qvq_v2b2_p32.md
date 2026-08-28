@@ -4730,3 +4730,18 @@ timing result was considered. The likely issue is that removing the
 sub-tile synchronization permits faster SIMD groups to advance into later
 K64 iterations while slower groups still consume the prior shared activation
 region. The production two-barrier staging remains unchanged.
+
+## 137. M1 fused split-4 N64 epilogue rejected
+
+An in-memory candidate attempted to fuse the four split outputs of the
+promoted M1/N64 `uint2` path into one 512-thread launch. It retained the W2
+decoder and shared K64 activation staging, but widened the split-2-derived
+shared reduction layout to four partitions and padded the result back through
+the existing module contract.
+
+The candidate failed the complete-module correctness gate at
+`(M=1,K=2048,N=8192)` with `max_abs` approximately `231.75` relative to the
+production route. No performance result was considered and no production
+source was changed. A valid fused split-4 implementation will need an
+independently designed ownership/layout mapping rather than textual widening
+of the split-2 prototype.
