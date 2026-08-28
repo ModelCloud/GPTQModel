@@ -1,0 +1,23 @@
+{
+  "status": "complete_gsm8k_d300_pending",
+  "protocol": {
+    "model": "Llama-3.2-1B-Instruct",
+    "dataset": "madrylab/gsm8k-platinum",
+    "split": "test",
+    "rows": 1209,
+    "invalid_generations": 0,
+    "attn_implementation": "paged|sdpa",
+    "continuous_batching_required": true,
+    "paged_attention_required": true
+  },
+  "arms": [
+    {"arm_id":"fd7dfc","name":"w1_up4_l12_15","gsm8k":0.4185277088502895,"correct":506,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_l12_15-gsm8k-platinum-v1.json"},
+    {"arm_id":"1e2a4d","name":"w1_up4_l10_13","gsm8k":0.42349048800661704,"correct":512,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_l10_13-gsm8k-platinum-v1.json"},
+    {"arm_id":"fe7561","name":"w1_up4_l8_11","gsm8k":0.43093465674110837,"correct":521,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_l8_11-gsm8k-platinum-v1.json"},
+    {"arm_id":"f65579","name":"w1_up4_interleaved","gsm8k":0.42018196856906537,"correct":508,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_interleaved-gsm8k-platinum-v1.json"},
+    {"arm_id":"0f1294","name":"w1_up4_down35_l14_15","gsm8k":0.4267990074441687,"correct":516,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_down35_l14_15-gsm8k-platinum-v1.json"},
+    {"arm_id":"47f9f1","name":"w1_up4_gate35_l14_15","gsm8k":0.42018196856906537,"correct":508,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_up4_gate35_l14_15-gsm8k-platinum-v1.json"},
+    {"arm_id":"b82726","name":"w1_o4_all","gsm8k":0.43755169561621177,"correct":529,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_o4_all-gsm8k-platinum-v1.json"},
+    {"arm_id":"c58c0a","name":"w1_v4_up4_l13_15","gsm8k":0.42762613730355664,"correct":517,"total":1209,"d300":null,"report":"/root/qvq-results/llama32-1b-w2-w1fixed_w1_v4_up4_l13_15-gsm8k-platinum-v1.json"}
+  ]
+}
