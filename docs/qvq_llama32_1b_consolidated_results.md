@@ -407,11 +407,11 @@ whose sequence floor exceeds the supplied YAQA slice.
 | `42c2fc` | 0 | Flat W3.5 + Up W4 layers 8–15 | 3.5921 | evaluation complete (Mini-GSM 4.69%) | pending | **44.25% (535/1209)** |
 | `e55f4d` | 1 | Flat W3.5 + Up W4 layers 6–15 | 3.6094 | evaluation complete (Mini-GSM 3.13%) | pending | **45.82% (554/1209)** |
 | `428e4d` | 2 | Flat W3.5 + Up W4 layers 4–15 | 3.6266 | evaluation complete (Mini-GSM 1.56%) | pending | **45.57% (551/1209)** |
-| `a7e34b` | 3 | Flat W3.5 + Up/Down W4 layers 12–15 | 3.5921 | quant complete; evaluation queued | pending | pending |
+| `a7e34b` | 3 | Flat W3.5 + Up/Down W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 3.13%) | pending | **44.00% (532/1209)** |
 | `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 7.81%) | pending | **43.59% (527/1209)** |
 | `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | evaluation complete (Mini-GSM 4.69%) | pending | **44.42% (537/1209)** |
 | `049d0c` | 6 | Flat W3.5 + Up W4 layers 9–15 + V W4 all | 3.6266 | evaluation complete (Mini-GSM 4.69%) | pending | **45.99% (556/1209)** |
-| `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | Mini-GSM running | pending | pending |
+| `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | GSM8K running (Mini-GSM 3.13%) | pending | pending |
 
 Machine-readable status and cross-references: `docs/experiments/frontier_wave2_rerun_20260828.json` and `docs/experiments/arm_id_index.json`.
 
