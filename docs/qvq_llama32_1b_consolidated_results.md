@@ -428,7 +428,7 @@ diagnostic.
 | Arm ID | GPU | Allocation | Target BPW | State |
 | --- | ---: | --- | ---: | --- |
 | `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | evaluation running |
-| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | quantizing |
+| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | evaluation running |
 | `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | evaluation running |
 | `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | evaluation running |
 | `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | evaluation running |
