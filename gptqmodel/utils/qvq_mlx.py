@@ -1540,6 +1540,22 @@ _LR_M1_N64_K64_W2_UINT2_FP32_SOURCE = _LR_M1_N64_K64_W2_FP32_SOURCE.replace(
     1,
 )
 
+# In the two-lane-per-output W2 N64 mapping, first_pair is always 0 or 8.
+# Extracting those four nibbles directly from the two packed words avoids the
+# generic 64-bit circular-window construction while preserving the exact
+# 16-bit state value.  Keep the unspecialized uint2 source above as the
+# fallback for future shapes; this variant is promoted only by the fixed
+# K=2048/N=8192 dispatch below.
+_LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE = (
+    _LR_M1_N64_K64_W2_UINT2_FP32_SOURCE.replace(
+        "uint state=qstate_lr_w2_packed_fast(packed0,packed1,first_pair);",
+        """uint state=first_pair==0u
+    ? (((packed1>>20u)&15u)<<12u)|(((packed1>>24u)&15u)<<8u)|(((packed1>>28u)&15u)<<4u)|(packed0&15u)
+    : (((packed0>>20u)&15u)<<12u)|(((packed0>>24u)&15u)<<8u)|(((packed0>>28u)&15u)<<4u)|(packed1&15u);""",
+        1,
+    )
+)
+
 
 def _make_lr_m1_n64_shared_split2_source(source: str) -> str:
     """Fuse two K splits while sharing each split's K64 activation tile."""
@@ -3197,7 +3213,7 @@ def _local_ring_m1_n64_uint2_kernel(*, alt_bank_id: int):
                 _lr_m1_n64_shape_source(
                     2048,
                     8192,
-                    source=_LR_M1_N64_K64_W2_UINT2_FP32_SOURCE,
+                    source=_LR_M1_N64_K64_W2_UINT2_FAST_STATE_FP32_SOURCE,
                 )
                 .replace(
                     "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",

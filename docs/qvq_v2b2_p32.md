@@ -4952,3 +4952,55 @@ warmups, and 80 samples per arm on the plugged-in, performance-mode M4 Max:
 The candidate was `0.533x` at p50 and `0.585x` by mean. The seven wasted
 matrix rows outweigh the hardware matrix throughput, so the transient source
 was discarded and the scalar aligned-`uint2` route remains active.
+
+## 145. Promote W2 32-bit initial-state extraction
+
+The promoted M1/N64 W2 `uint2` decoder replaces its generic 64-bit circular
+state-start helper with direct 32-bit nibble extraction. In this mapping the
+two lanes for an output channel always start at pair `0` or `8`, so the four
+state nibbles can be assembled directly from `packed0` and `packed1`. The
+existing packed loads, K64 staging, split-4 contract, and FP32 accumulation
+are unchanged; the generic source remains available for other shapes.
+
+The target route was first checked with an 80-sample complete-module A/B, then
+rechecked with identical payloads and inputs, 20 warmups, and 200 randomized
+samples per arm on the plugged-in, performance-mode M4 Max. Both module and
+inner GEMV outputs were exactly equal:
+
+```text
+module max_abs = 0
+module relative_l2 = 0
+module rmse = 0
+GEMV max_abs = 0
+GEMV relative_l2 = 0
+GEMV rmse = 0
+```
+
+The 200-sample module recheck measured:
+
+| Route | p50 (ms) | p95 (ms) | mean (ms) |
+|---|---:|---:|---:|
+| Previous aligned `uint2` state start | `0.27917` | `0.35435` | `0.28327` |
+| 32-bit nibble state start | `0.27054` | `0.33912` | `0.27469` |
+
+The candidate was `1.032x` faster at p50 and `1.031x` by mean. The
+specialization is now in production for the fixed `(M=1,K=2048,N=8192,
+W2)` route.
+
+A fresh canonical complete-module LR/P32 sweep after promotion used 30
+warmups and 100 randomized/interleaved samples per arm with shared payloads
+and inputs:
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | Speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.56333` | `0.81725` | `1.451x` | `0.71753` | `0.99623` |
+| `(1,2048,2048)` | `0.54460` | `0.80917` | `1.486x` | `0.72450` | `0.99087` |
+| `(1,2048,8192)` | `0.76819` | `1.13165` | `1.473x` | `1.11333` | `1.40047` |
+| `(1,8192,2048)` | `0.70825` | `1.15523` | `1.631x` | `0.84787` | `1.33086` |
+| `(4,2048,8192)` | `1.05563` | `2.15754` | `2.044x` | `1.18986` | `2.56062` |
+| `(8,2048,8192)` | `0.99302` | `2.33962` | `2.356x` | `1.39316` | `3.74934` |
+| `(16,8192,8192)` | `2.46767` | `5.63556` | `2.284x` | `2.73455` | `5.94959` |
+
+The route remains faster than P32 for every tested shape and now clears `2x`
+at the complete-module boundary for M4/M8/M16. M1 remains below the
+universal `2x` target despite this exact optimization.
