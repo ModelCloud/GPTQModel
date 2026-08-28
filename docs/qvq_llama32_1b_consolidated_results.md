@@ -405,11 +405,11 @@ whose sequence floor exceeds the supplied YAQA slice.
 | Arm ID | GPU | Allocation | Effective BPW | State | D300 | GSM8K Platinum |
 | --- | ---: | --- | ---: | --- | --- | --- |
 | `42c2fc` | 0 | Flat W3.5 + Up W4 layers 8–15 | 3.5921 | evaluation complete (Mini-GSM 4.69%) | pending | **44.25% (535/1209)** |
-| `e55f4d` | 1 | Flat W3.5 + Up W4 layers 6–15 | 3.6094 | quant complete; evaluation queued | pending | pending |
+| `e55f4d` | 1 | Flat W3.5 + Up W4 layers 6–15 | 3.6094 | GSM8K running (Mini-GSM 3.13%) | pending | pending |
 | `428e4d` | 2 | Flat W3.5 + Up W4 layers 4–15 | 3.6266 | quant complete; evaluation queued | pending | pending |
 | `a7e34b` | 3 | Flat W3.5 + Up/Down W4 layers 12–15 | 3.5921 | quant complete; evaluation queued | pending | pending |
 | `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 7.81%) | pending | **43.59% (527/1209)** |
-| `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | quant complete; evaluation queued | pending | pending |
+| `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | GSM8K running (Mini-GSM 4.69%) | pending | pending |
 | `049d0c` | 6 | Flat W3.5 + Up W4 layers 9–15 + V W4 all | 3.6266 | quant complete; evaluation queued | pending | pending |
 | `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | quant complete; evaluation queued | pending | pending |
 
@@ -417,8 +417,9 @@ Machine-readable status and cross-references: `docs/experiments/frontier_wave2_r
 
 ## Wave-3 control/reallocation queue (2026-08-28 UTC)
 
-These eight arms are queued behind the active corrected Wave-2 quantizations;
-each waits for its assigned GPU to become idle. The batch includes a current-
+These eight arms were queued behind the corrected Wave-2 quantizations; six are
+now actively quantizing and two duplicate allocations are reused from Wave-2.
+The batch includes a current-
 code replication of the historical `2ae00f` allocation, exact-budget O/Up
 reallocations, and high-frontier late-Up breadth/seed controls. Mini-GSM and
 full GSM8K Platinum are required after each checkpoint; D300 remains
@@ -426,13 +427,13 @@ diagnostic.
 
 | Arm ID | GPU | Allocation | Target BPW | State |
 | --- | ---: | --- | ---: | --- |
-| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | waiting for GPU |
-| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | waiting for GPU |
-| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | waiting for GPU |
-| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | waiting for GPU |
-| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | waiting for GPU |
+| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | quantizing |
+| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | quantizing |
+| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | quantizing |
+| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | quantizing |
+| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | quantizing |
 | `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | reused Wave-2 arm `42c2fc` |
-| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | waiting for GPU |
+| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | quantizing |
 | `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | reused Wave-2 arm `f7f157` |
 
 Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.
