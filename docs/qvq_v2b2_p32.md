@@ -5322,3 +5322,32 @@ reports `Counter Set: (null)` and `Shader Timeline: Disabled`; exported
 counter samples are zero. It therefore provides submission/interval evidence
 only, not valid stall, occupancy, barrier-wait, or memory-throughput
 percentages. No counter-derived claims should be made from this capture.
+
+## 154. Long-K M1 N96 production promotion
+
+The three-tile N96 probe was integrated only for the validated W2 FP32 shape
+family `M=1`, `K>=8192`, `K%256==0`, `N=11008`. It uses a 768-thread
+threadgroup, eight K splits, and three N32 output tiles. The source preserves
+the pair-8 decoder and deterministic fused reduction; the only layout change
+is the output-tile grouping and corresponding shared reduction stride.
+
+The route passed the complete dispatch/oracle subset and the full LR32 suite:
+
+```text
+179 passed in 31.48s
+```
+
+On the AC/performance-mode M4 Max, a same-process randomized/interleaved
+complete-module benchmark used identical inputs/payloads, 30 warmups, and
+100 synchronized samples per arm:
+
+| Shape | N96 LR p50 (ms) | P32 p50 (ms) | P32/LR | N96 LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,8192,11008)` | `2.06923` | `3.63015` | `1.754x` | `2.43681` | `4.08500` |
+
+The earlier pair-8 route remains used at `N=8192`: the N96 geometry was
+slower there in the inner-kernel probe and is intentionally not generalized.
+The N128 four-tile and 16-split variants remain rejected. The long-K M1
+complete-module result is still below the universal 2x target, but the inner
+kernel is above 2x at the `N=11008` width and this targeted N96 promotion
+reduces the complete-module latency by a measured 5.3% versus pair-8.

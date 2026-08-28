@@ -82,7 +82,7 @@ def test_lr32_m1_n64_split_policy(k, expected):
         (2048, 256, "_local_ring_m1_n32_fused_split_kernel", 32),
         (2048, 2048, "_local_ring_m1_n64_n32pair_split8_kernel", None),
         (8192, 8192, "_local_ring_m1_n64_n32pair_split8_kernel", None),
-        (8192, 11008, "_local_ring_m1_n64_n32pair_split8_kernel", None),
+        (8192, 11008, "_local_ring_m1_n96_n32triple_split8_kernel", None),
         (2304, 256, "_local_ring_m1_fused_split_kernel", None),
         (8192, 2048, "_local_ring_m1_n32_fused_split_kernel", 32),
     ),

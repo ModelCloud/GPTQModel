@@ -108,6 +108,8 @@ _LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[int, Any] = {}
 _LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N64_N32PAIR_SPLIT8_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS: dict[int, str] = {}
+_LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS: dict[int, Any] = {}
+_LR_M1_N96_N32TRIPLE_SPLIT8_KERNEL_ERRORS: dict[int, str] = {}
 _LR_MMA_KERNELS: dict[tuple[bool, bool, int | None], Any] = {}
 _LR_MMA_KERNEL_ERRORS: dict[tuple[bool, bool, int | None], str] = {}
 # The fused M1/N64 split-2 route is retained for targeted experiments and
@@ -143,6 +145,7 @@ _USE_LR_M1_N64_N32PAIR_SPLIT8 = True
 # short-K N2048 route.  Keep this independently gated until its complete
 # QVQMLXLinear A/B and FP16 drift are reviewed.
 _USE_LR_M1_N64_N32PAIR_SPLIT8_LONGK = True
+_USE_LR_M1_N96_N32TRIPLE_SPLIT8_LONGK = True
 _LR_MULTIROW_KERNELS: dict[tuple[bool, int, bool, int | None, bool, bool], Any] = {}
 _LR_MULTIROW_KERNEL_ERRORS: dict[tuple[bool, int, bool, int | None, bool, bool], str] = {}
 
@@ -1313,6 +1316,40 @@ def _make_lr_m1_n64_n32pair_split8_source(source: str) -> str:
 
 _LR_M1_N64_N32PAIR_SPLIT8_W2_FP32_SOURCE = _make_lr_m1_n64_n32pair_split8_source(
     _LR_M1_N32_FUSED_SPLIT_W2_FP32_SOURCE
+)
+
+
+def _make_lr_m1_n96_n32triple_split8_source(source: str) -> str:
+    """Pair three N32 output tiles in one M1/N96 split-8 threadgroup."""
+
+    source = source.replace(
+        "uint simd=thread_index_in_threadgroup/32u,split=simd>>1u,output_tile=simd&1u;",
+        "uint simd=thread_index_in_threadgroup/32u,split=simd/3u,output_tile=simd%3u;",
+        1,
+    ).replace(
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group<<6u,output_n=n0+(output_tile<<5u)+lane;",
+        "uint K=dims[1],N=dims[2],eb=EdgeBits,n0=group*96u,output_n=n0+(output_tile*32u)+lane;",
+        1,
+    ).replace(
+        "threadgroup float split_outputs[512];",
+        "threadgroup float split_outputs[768];",
+        1,
+    ).replace(
+        "split*64u+output_tile*32u+lane",
+        "split*96u+output_tile*32u+lane",
+    ).replace(
+        "s*64u+output_tile*32u+lane",
+        "s*96u+output_tile*32u+lane",
+    ).replace(
+        "if(simd<2u&&lane<32u){float total=0.0f;for(uint s=0u;s<8u;s++)",
+        "if(simd<3u&&lane<32u){float total=0.0f;for(uint s=0u;s<8u;s++)",
+        1,
+    )
+    return source
+
+
+_LR_M1_N96_N32TRIPLE_SPLIT8_W2_FP32_SOURCE = _make_lr_m1_n96_n32triple_split8_source(
+    _LR_M1_N64_N32PAIR_SPLIT8_W2_FP32_SOURCE
 )
 
 
@@ -3067,6 +3104,54 @@ def _local_ring_m1_n64_n32pair_split8_kernel(*, alt_bank_id: int):
             _LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS[alt_bank_id] = error
             raise RuntimeError(error) from exc
         _LR_M1_N64_N32PAIR_SPLIT8_KERNELS[alt_bank_id] = kernel
+        return kernel
+
+
+def _local_ring_m1_n96_n32triple_split8_kernel(*, alt_bank_id: int):
+    """Build the measured M1/N96 kernel with three paired N32 output tiles."""
+
+    if alt_bank_id not in (1, 2, 3):
+        raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
+    kernel = _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS.get(alt_bank_id)
+    if kernel is not None:
+        return kernel
+    with _KERNEL_LOCK:
+        kernel = _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS.get(alt_bank_id)
+        if kernel is not None:
+            return kernel
+        error = _LR_M1_N96_N32TRIPLE_SPLIT8_KERNEL_ERRORS.get(alt_bank_id)
+        if error is not None:
+            raise RuntimeError(error)
+        import mlx.core as mx
+
+        try:
+            source = _LR_M1_N96_N32TRIPLE_SPLIT8_W2_FP32_SOURCE.replace(
+                "uint bank=((selector>>ring)&1u)*uint(bank_alt_id[0]);",
+                "uint bank_bit=(selector>>ring)&1u;",
+            ).replace(
+                "qlevelsv2b_lr_const_w2(state,bank)",
+                "qlevelsv2b_lr_const_w2_small_half(state,bank_bit)",
+            ).replace(
+                "float2 value=qlevelsv2b_lr_const_w2_small_half",
+                "half2 value=qlevelsv2b_lr_const_w2_small_half",
+            )
+            kernel = mx.fast.metal_kernel(
+                name=f"gptqmodel_qvq_v2b2_p32_lr_m1_n96_n32triple_split8_fp32_alt{alt_bank_id}",
+                input_names=["x", "trellis", "bank_ids", "dims"],
+                output_names=["out"],
+                header=_lr_small_w2_mask_header(alt_bank_id),
+                source=source,
+                ensure_row_contiguous=True,
+                compile_options={"math_mode": "fast"},
+            )
+        except Exception as exc:
+            error = (
+                "QVQ LR32 triple M1/N96 split-8 kernel creation failed for "
+                f"alt_bank_id={alt_bank_id}: {exc}"
+            )
+            _LR_M1_N96_N32TRIPLE_SPLIT8_KERNEL_ERRORS[alt_bank_id] = error
+            raise RuntimeError(error) from exc
+        _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS[alt_bank_id] = kernel
         return kernel
 
 
@@ -5080,6 +5165,15 @@ def qvq_mlx_gemv(
             _USE_LR_M1_N64_UINT2
             and m1_n64_half2
         )
+        m1_n96_n32triple_split8 = (
+            _USE_LR_M1_N96_N32TRIPLE_SPLIT8_LONGK
+            and output_fp32
+            and transition_bits == 4
+            and m == 1
+            and k >= 8192
+            and k % 256 == 0
+            and n == 11008
+        )
         m1_n64_n32pair_split8 = (
             (_USE_LR_M1_N64_N32PAIR_SPLIT8 and m == 1 and k == 2048 and n == 2048)
             or (
@@ -5091,6 +5185,7 @@ def qvq_mlx_gemv(
                 and k % 256 == 0
                 and n >= 8192
                 and n % 64 == 0
+                and not m1_n96_n32triple_split8
             )
         )
         m1_n32_fused_split16_wide = (
@@ -5112,6 +5207,7 @@ def qvq_mlx_gemv(
             and not m1_n64
             and not m1_n64_split2
             and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
             and not m1_n64_n32pair_split8
         )
         m1_fused_split16 = (
@@ -5123,6 +5219,7 @@ def qvq_mlx_gemv(
             and not m1_n64
             and not m1_n64_split2
             and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
             and not m1_n64_n32pair_split8
         )
         m1_n32_fused_split16 = (
@@ -5140,6 +5237,7 @@ def qvq_mlx_gemv(
             and not m1_n64
             and not m1_n64_split2
             and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
             and not m1_n64_n32pair_split8
         )
         m1_n32_fused_split32 = (
@@ -5155,6 +5253,7 @@ def qvq_mlx_gemv(
             and not m1_n64
             and not m1_n64_split2
             and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
             and not m1_n64_n32pair_split8
         )
         m1_n32_fused_split = (
@@ -5170,9 +5269,19 @@ def qvq_mlx_gemv(
             and not m1_n64
             and not m1_n64_split2
             and not m1_n64_shared_split2
+            and not m1_n96_n32triple_split8
             and not m1_n64_n32pair_split8
         )
-        if m1_n64_n32pair_split8:
+        if m1_n96_n32triple_split8:
+            # Three N32 output tiles share one 768-thread launch.  This is a
+            # narrow long-K/N=11008 specialization: N96 improves launch
+            # amortization on the validated Llama-style width, while N128
+            # was neutral and N96 was slower at N=8192.
+            row_tile = 1
+            group_size = 768
+            output_width = 96
+            kernel = _local_ring_m1_n96_n32triple_split8_kernel(alt_bank_id=alt_id)
+        elif m1_n64_n32pair_split8:
             # Two N32 output tiles share one 512-thread launch.  The paired
             # source keeps the proven one-lane-per-output decoder and fused
             # split-8 reduction while halving launches for this shape.
@@ -5376,6 +5485,7 @@ def qvq_mlx_gemv(
             and not m1_n32_fused_split
             and not m1_n32_fused_split16
             and not m1_n32_fused_split32
+            and not m1_n96_n32triple_split8
             and not m1_n64_n32pair_split8
             and not m1_n32_fused_split16_wide
             and not m1_n64_split2
@@ -5383,7 +5493,9 @@ def qvq_mlx_gemv(
         ):
             template.append(("SplitK", split_k))
         output_width = (
-            64
+            96
+            if m1_n96_n32triple_split8
+            else 64
             if m1_n64_split2
             or (m1_n64_shared_split2 and not m1_n64_half2)
             or (m1_n64 and not m1_n32_fused_split16_wide)
@@ -5408,6 +5520,7 @@ def qvq_mlx_gemv(
                 or m1_n32_fused_split16
                 or m1_n32_fused_split32
                 or m1_n32_fused_split16_wide
+                or m1_n96_n32triple_split8
                 or m1_n64_n32pair_split8
                 or m1_n64_split2
                 or (m1_n64_shared_split2 and not m1_n64_half2)
@@ -5417,7 +5530,7 @@ def qvq_mlx_gemv(
         partials = kernel(
             inputs=inputs,
             template=template,
-            grid=(row_blocks * (n // output_width) * launch_split * group_size, 1, 1),
+            grid=(row_blocks * ((n + output_width - 1) // output_width) * launch_split * group_size, 1, 1),
             threadgroup=(group_size, 1, 1),
             output_shapes=[
                 (
@@ -5429,6 +5542,7 @@ def qvq_mlx_gemv(
                     or m1_n32_fused_split16
                     or m1_n32_fused_split32
                     or m1_n32_fused_split16_wide
+                    or m1_n96_n32triple_split8
                     or m1_n64_n32pair_split8
                     or m1_n64_split2
                     or (m1_n64_shared_split2 and not m1_n64_half2)
@@ -5446,6 +5560,7 @@ def qvq_mlx_gemv(
             or m1_n32_fused_split16
             or m1_n32_fused_split32
             or m1_n32_fused_split16_wide
+            or m1_n96_n32triple_split8
             or m1_n64_n32pair_split8
             or m1_n64_split2
             or (m1_n64_shared_split2 and not m1_n64_half2)
