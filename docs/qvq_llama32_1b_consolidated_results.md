@@ -223,17 +223,20 @@ stable cross-reference keys for the companion JSON artifact.
 
 | Arm ID | Allocation | Eff. BPW* | GSM8K Platinum | D300 aligned top-1 | Exact@32 | Mean first divergence |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| 7c91e2 | Up W4, layers 8–15 | pending | 42.9280% (519/1209) | 34.7083% | 20/300 | 10.76 |
-| 4a6d1f | Up W5, layers 12–15 | pending | 41.5219% (502/1209) | 33.2813% | 20/300 | 10.20 |
-| c83b70 | Up W7, layers 14–15 | pending | 41.6873% (504/1209) | 32.1771% | 18/300 | 9.93 |
-| e2f49a | Up W4 L12–13 + W6 L14–15 | pending | 42.3490% (512/1209) | 32.6875% | 19/300 | 10.02 |
-| 91d5c4 | Flat W3.5 + Up W4 L12–15 | pending | 45.5749% (551/1209) | 38.8333% | 38/300 | 11.71 |
-| b6a028 | Flat W3.5 + Up W4.5 L14–15 | pending | 44.5823% (539/1209) | 40.1354% | 35/300 | 11.85 |
-| f04e77 | Flat W3.5 + Up W5.5 L15 | pending | 44.2514% (535/1209) | 39.9479% | 37/300 | 11.84 |
+| 7c91e2 | Up W4, layers 8–15 | **3.1611** | 42.9280% (519/1209) | 34.7083% | 20/300 | 10.76 |
+| 4a6d1f | Up W5, layers 12–15 | **3.1611** | 41.5219% (502/1209) | 33.2813% | 20/300 | 10.20 |
+| c83b70 | Up W7, layers 14–15 | **3.1611** | 41.6873% (504/1209) | 32.1771% | 18/300 | 9.93 |
+| e2f49a | Up W4 L12–13 + W6 L14–15 | **3.1611** | 42.3490% (512/1209) | 32.6875% | 19/300 | 10.02 |
+| 91d5c4 | Flat W3.5 + Up W4 L12–15 | **3.5577** | 45.5749% (551/1209) | 38.8333% | 38/300 | 11.71 |
+| b6a028 | Flat W3.5 + Up W4.5 L14–15 | **3.5577** | 44.5823% (539/1209) | 40.1354% | 35/300 | 11.85 |
+| f04e77 | Flat W3.5 + Up W5.5 L15 | **3.5577** | 44.2514% (535/1209) | 39.9479% | 37/300 | 11.84 |
 
-\*Effective BPW remains pending for these mixed-format checkpoints until the
-serialized module-weight accounting is reconciled; the table intentionally
-does not infer a rate from the failed pre-fix artifacts.
+\*Effective BPW is computed from the exact per-module logical rates weighted by
+Llama-3.2-1B projection parameter counts, plus the measured common auxiliary
+overhead of 0.023168 bpw. The W4+ modules use ordinary QVQ V2 geometry; valid
+L16/V2 rates have the same raw rate accounting as V2B2/P32. For example, the
+first four arms are exactly 3.161099 bpw (reported as 3.1611), and the final
+three are exactly 3.557651 bpw (reported as 3.5577).
 
 This inventory is generated from `/root/qvq-results/llama32-1b*` checkpoint
 directories and is intended to include every quantization artifact, including
