@@ -5375,3 +5375,12 @@ candidate does not improve the complete `QVQMLXLinear` boundary under the
 larger paired sample, split-4 is rejected and is not part of production
 dispatch. This is a useful reminder that an isolated inner-kernel win near
 the M1 launch floor is insufficient evidence for a module-level promotion.
+
+## 156. N32 SIMD packed-load sharing rejection
+
+A proposed M1/N32 W2 optimization attempted to load each packed ring word once
+and distribute it with `simd_shuffle`. The raw oracle rejected the mapping:
+N32 lanes with the same `lane & 7` ring index are assigned to four different
+N8 output tiles, so their `trellis` words are not duplicates. Sharing those
+loads therefore changes the decoded weights and is not a valid optimization
+for this layout. No shuffle-load variant is retained in production.
