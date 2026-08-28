@@ -370,6 +370,44 @@ def marlin_pad_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
     )
 
 
+def marlin_pad_awq_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
+                           padded_n: int, padded_k: int,
+                           num_bits: int) -> torch.Tensor:
+    """Zero-pad an AWQ-layout packed weight before Marlin repacking."""
+    pack_factor = 32 // num_bits
+    expected_shape = (size_k, size_n // pack_factor)
+    if tuple(qweight.shape) != expected_shape:
+        raise ValueError(
+            f"AWQ qweight shape must be {expected_shape}, got {tuple(qweight.shape)}."
+        )
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qweight
+    return torch.nn.functional.pad(
+        qweight,
+        (0, (padded_n - size_n) // pack_factor, 0, padded_k - size_k),
+    )
+
+
+def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                          padded_n: int, padded_k: int, group_size: int,
+                          num_bits: int) -> torch.Tensor:
+    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+    pack_factor = 32 // num_bits
+    groups = size_k // group_size if group_size > 0 else 1
+    padded_groups = padded_k // group_size if group_size > 0 else 1
+    expected_shape = (groups, size_n // pack_factor)
+    if tuple(qzeros.shape) != expected_shape:
+        raise ValueError(
+            f"AWQ qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
+        )
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qzeros
+    return torch.nn.functional.pad(
+        qzeros,
+        (0, (padded_n - size_n) // pack_factor, 0, padded_groups - groups),
+    )
+
+
 def marlin_pad_scales(scales: torch.Tensor, size_n: int, size_k: int,
                       padded_n: int, padded_k: int,
                       group_size: int) -> torch.Tensor:
@@ -678,6 +716,42 @@ def apply_awq_marlin_linear(
                               is_zp_float=False)
 
     return output.reshape(out_shape)
+
+
+def apply_awq_marlin_linear_padded(
+        *,
+        tile_padding: Tuple[int, int],
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        quant_type: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = True,
+) -> torch.Tensor:
+    """Pad one AWQ GEMM around the unchanged Marlin call path."""
+    padded_n, padded_k = tile_padding
+    padded_input = marlin_pad_dim(input, input_size_per_partition, padded_k)
+    output = apply_awq_marlin_linear(
+        input=padded_input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_zp=weight_zp,
+        g_idx=g_idx,
+        g_idx_sort_indices=g_idx_sort_indices,
+        workspace=workspace,
+        quant_type=quant_type,
+        output_size_per_partition=padded_n,
+        input_size_per_partition=padded_k,
+        bias=bias,
+        use_fp32_reduce=use_fp32_reduce,
+    )
+    return marlin_unpad_output(output, output_size_per_partition, padded_n)
 
 
 def gptq_marlin_gemm(a: torch.Tensor,

@@ -18,11 +18,18 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     apply_awq_marlin_linear,
+    apply_awq_marlin_linear_padded,
     awq_marlin_repack,
     awq_to_marlin_zero_points,
     marlin_import_exception,
+    marlin_is_tile_aligned,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
+    marlin_pad_awq_qweight,
+    marlin_pad_awq_qzeros,
+    marlin_pad_dim,
+    marlin_pad_scales,
+    marlin_padded_nk,
     marlin_permute_bias,
     marlin_permute_scales,
     marlin_runtime_available,
@@ -48,7 +55,7 @@ class AwqMarlinLinear(AWQuantLinear):
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
@@ -83,6 +90,17 @@ class AwqMarlinLinear(AWQuantLinear):
         self.max_par = 8  # partitioning for large inputs
         self.compute_dtype = kwargs.get("dtype") or torch.float16
 
+        selected_backend = kwargs.pop("backend", BACKEND.AWQ_MARLIN)
+        # Keep runtime padding opt-in until tail-shape performance is measured.
+        if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
+            out_features, in_features
+        ):
+            raise NotImplementedError(
+                "Automatic AWQ Marlin selection keeps tile-misaligned shapes "
+                "on the next compatible backend; request AWQ_MARLIN explicitly "
+                "to enable runtime tile padding."
+            )
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -92,7 +110,7 @@ class AwqMarlinLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.AWQ_MARLIN),
+            backend=selected_backend,
             adapter=adapter,
             register_buffers=False,
             **kwargs)
@@ -170,6 +188,37 @@ class AwqMarlinLinear(AWQuantLinear):
         return True, None
 
     @classmethod
+    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        bits = args.get("bits", 4)
+        in_features = args.get("in_features")
+        out_features = args.get("out_features")
+        if out_features is None:
+            return True, None
+
+        # AWQ packs N into int32 words; padding cannot repair a partial word.
+        pack_factor = 32 // bits
+        if out_features % pack_factor != 0:
+            return False, NotImplementedError(
+                "AWQ Marlin out_features must be divisible by "
+                f"pack_factor={pack_factor}; got N={out_features}."
+            )
+
+        # Keep uint8 tails on fallback until zero-point thread configs are validated.
+        if bits != 4 and in_features is not None and not marlin_is_tile_aligned(
+            out_features, in_features
+        ):
+            return False, NotImplementedError(
+                "AWQ Marlin runtime tile padding is enabled only for 4-bit "
+                f"weights; got bits={bits}."
+            )
+
+        return True, None
+
+    @classmethod
     def validate_device(cls, device: DEVICE):
         super().validate_device(device)
         CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -197,28 +246,71 @@ class AwqMarlinLinear(AWQuantLinear):
         # Allocate marlin workspace
         self.workspace = marlin_make_workspace_new(device)
 
-        # Repack weights from AWQ format to marlin format.
-        marlin_qweight = awq_marlin_repack(
-            self.qweight,
-            self.in_features,
+        # group_size=K and group_size=-1 both mean one channelwise group.
+        marlin_group_size = (
+            -1
+            if self.requested_group_size == self.in_features
+            else self.requested_group_size
+        )
+        padded_n, padded_k = marlin_padded_nk(
             self.out_features,
+            self.in_features,
+            marlin_group_size,
+        )
+        self._marlin_tile_padding = (
+            None
+            if (padded_n, padded_k) == (self.out_features, self.in_features)
+            else (padded_n, padded_k)
+        )
+
+        # Repack weights from AWQ format to marlin format.
+        padded_qweight = marlin_pad_awq_qweight(
+            self.qweight.contiguous(),
+            self.out_features,
+            self.in_features,
+            padded_n,
+            padded_k,
+            self.bits,
+        )
+        marlin_qweight = awq_marlin_repack(
+            padded_qweight,
+            padded_k,
+            padded_n,
             self.bits,
             dtype=self.compute_dtype)
         replace_parameter(self, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
+        padded_scales = marlin_pad_scales(
+            self.scales.contiguous(),
+            self.out_features,
+            self.in_features,
+            padded_n,
+            padded_k,
+            marlin_group_size,
+        )
         marlin_scales = marlin_permute_scales(
-            self.scales,
-            size_k=self.in_features,
-            size_n=self.out_features,
-            group_size=self.group_size)
+            padded_scales,
+            size_k=padded_k,
+            size_n=padded_n,
+            group_size=marlin_group_size)
         replace_parameter(self, "scales", marlin_scales)
 
         # Permute zero-points from AWQ format to marlin format.
+        padded_qzeros = marlin_pad_awq_qzeros(
+            self.qzeros.contiguous(),
+            self.out_features,
+            self.in_features,
+            padded_n,
+            padded_k,
+            marlin_group_size,
+            self.bits,
+        )
+        padded_groups = 1 if marlin_group_size == -1 else padded_k // marlin_group_size
         marlin_zp = awq_to_marlin_zero_points(
-            self.qzeros,
-            size_k=self.in_features // self.group_size,
-            size_n=self.out_features,
+            padded_qzeros,
+            size_k=padded_groups,
+            size_n=padded_n,
             num_bits=self.bits)
         replace_parameter(self, "qzeros", marlin_zp)
 
@@ -227,7 +319,9 @@ class AwqMarlinLinear(AWQuantLinear):
         self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(self.bias)
+            self.bias.data = marlin_permute_bias(
+                marlin_pad_dim(self.bias, self.out_features, padded_n)
+            )
 
         super().post_init()
 
@@ -255,19 +349,36 @@ class AwqMarlinLinear(AWQuantLinear):
         if self.bias is not None and self.bias.dtype != x.dtype:
             self.bias.data = self.bias.data.to(x.dtype)
 
-        out = apply_awq_marlin_linear(
-            input=x,
-            weight=self.qweight,
-            weight_scale=self.scales,
-            weight_zp=self.qzeros,
-            g_idx=self.g_idx,
-            g_idx_sort_indices=self.g_idx_sort_indices,
-            workspace=self.workspace,
-            quant_type=self.weight_type,
-            output_size_per_partition=self.out_features,
-            input_size_per_partition=self.in_features,
-            bias=self.bias,
-        )
+        # Aligned layers retain the original decode-sensitive call path.
+        if self._marlin_tile_padding is None:
+            out = apply_awq_marlin_linear(
+                input=x,
+                weight=self.qweight,
+                weight_scale=self.scales,
+                weight_zp=self.qzeros,
+                g_idx=self.g_idx,
+                g_idx_sort_indices=self.g_idx_sort_indices,
+                workspace=self.workspace,
+                quant_type=self.weight_type,
+                output_size_per_partition=self.out_features,
+                input_size_per_partition=self.in_features,
+                bias=self.bias,
+            )
+        else:
+            out = apply_awq_marlin_linear_padded(
+                tile_padding=self._marlin_tile_padding,
+                input=x,
+                weight=self.qweight,
+                weight_scale=self.scales,
+                weight_zp=self.qzeros,
+                g_idx=self.g_idx,
+                g_idx_sort_indices=self.g_idx_sort_indices,
+                workspace=self.workspace,
+                quant_type=self.weight_type,
+                output_size_per_partition=self.out_features,
+                input_size_per_partition=self.in_features,
+                bias=self.bias,
+            )
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
