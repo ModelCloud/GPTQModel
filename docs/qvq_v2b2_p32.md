@@ -5959,5 +5959,48 @@ short-wide fallback.
 The separate N32 `uint2` packed-word source was also exact. A standalone
 same-process A/B measured only a mean `1.049x` improvement at short-K M1 with
 neutral p50 (`0.999x`), and neutral long-K behavior (p50 `0.992x`, mean
-`1.006x`). It was not promoted. The current branch therefore contains only
-the verified invariant-hoist optimization from section 175.
+`1.006x`). It was not promoted. The current branch therefore retains the
+verified invariant-hoist optimization from section 175 and the separate
+short-wide activation-broadcast optimization recorded below.
+
+## 177. Promote SIMD-shared activation loads for short-wide M1/N32 W2
+
+The short-wide M1/N32 W2 route now loads each K32 activation tile once per
+SIMD lane and uses `simd_shuffle` for the 16 decoded W2 pairs. The previous
+one-lane-per-output source reloaded the same 32 activation values once for
+each of the 32 output lanes. This optimization is limited to the short-wide
+`(M=1,K=2048,N=8192)` dispatch; the long-K N32 routes retain the scalar source
+until they have independent A/B evidence.
+
+The new source is exact against the scalar source and the full MLX module:
+
+```text
+short-wide module: max_abs=0, relative_l2=0
+```
+
+On the plugged-in, performance-mode M4 Max, a same-process A/B used identical
+inputs and payloads, 20 warmups, and 80 samples per arm:
+
+| `(M,K,N)` | Scalar p50 (ms) | SIMD-shared p50 (ms) | p50 speedup | Scalar p95 (ms) | SIMD-shared p95 (ms) | mean speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| `(1,2048,8192)` complete module | `0.672084` | `0.573541` | `1.172x` | `1.595362` | `0.831967` | `1.354x` |
+
+The production route was then rerun with the paired complete-module harness
+(20 warmups, 80 randomized/interleaved samples, seed `20260828`):
+
+| Shape | LR p50 (ms) | P32 p50 (ms) | LR/P32 speedup | LR p95 (ms) | P32 p95 (ms) |
+|---|---:|---:|---:|---:|---:|
+| `(1,2048,256)` | `0.23331` | `0.32865` | `1.409x` | `0.28927` | `0.46002` |
+| `(1,2048,2048)` | `0.18721` | `0.24602` | `1.314x` | `0.22040` | `0.29403` |
+| `(1,2048,8192)` | `0.20629` | `0.29927` | `1.451x` | `0.24986` | `0.33051` |
+| `(1,8192,2048)` | `0.21529` | `0.31446` | `1.461x` | `0.24380` | `0.34511` |
+| `(4,2048,8192)` | `0.33606` | `0.57117` | `1.700x` | `0.36310` | `0.60102` |
+| `(8,2048,8192)` | `0.37585` | `0.89975` | `2.394x` | `0.41475` | `0.97739` |
+| `(16,8192,8192)` | `2.11548` | `5.17392` | `2.446x` | `2.19724` | `5.23518` |
+
+The focused LR/QVQ suite still passes in full after promotion: `505 passed`
+in `46.63s`. The M1 goal remains open: the current complete-module speedup is
+about `1.45x` for the short-wide shape and below `2x` for the other M1 shapes;
+M8/M16 remain above `2x`. The next meaningful M1 opportunity is a different
+execution mapping (or a combined optimization), not further source-level
+unrolling of this route.

@@ -102,10 +102,10 @@ _LR_M1_FUSED_SPLIT16_KERNELS: dict[int, Any] = {}
 _LR_M1_FUSED_SPLIT16_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N32_FUSED_SPLIT_KERNELS: dict[tuple[int, bool], Any] = {}
 _LR_M1_N32_FUSED_SPLIT_ERRORS: dict[tuple[int, bool], str] = {}
-_LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[tuple[int, bool], Any] = {}
-_LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[tuple[int, bool], str] = {}
-_LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[tuple[int, bool], Any] = {}
-_LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[tuple[int, bool], str] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNELS: dict[tuple[int, bool, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT16_KERNEL_ERRORS: dict[tuple[int, bool, bool], str] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNELS: dict[tuple[int, bool, bool], Any] = {}
+_LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS: dict[tuple[int, bool, bool], str] = {}
 _LR_M1_N64_N32PAIR_SPLIT8_KERNELS: dict[int, Any] = {}
 _LR_M1_N64_N32PAIR_SPLIT8_KERNEL_ERRORS: dict[int, str] = {}
 _LR_M1_N96_N32TRIPLE_SPLIT8_KERNELS: dict[int, Any] = {}
@@ -1280,6 +1280,49 @@ _LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE = _make_lr_m1_n32_fused_split_source(
     "uint simd=simdgroup_index_in_threadgroup,split=simd;",
     "uint simd=thread_index_in_threadgroup/32u,split=simd;",
     1,
+)
+
+
+def _make_lr_m1_n32_activation_broadcast_source(source: str) -> str:
+    """Share each K32 activation across the N32 output lanes.
+
+    The N32 M1 decoder has one lane per output. The scalar implementation
+    consequently reloads the same 32 activation values once per output lane.
+    Each lane already owns one distinct activation position, so a SIMD
+    shuffle turns those 32 loads into one load per K32 tile while preserving
+    the exact FP32 dot-product order.
+    """
+
+    marker = "for(uint base=(K*split)/split_count;base<(K*(split+1u))/split_count;base+=32u){"
+    if marker not in source:
+        raise RuntimeError("QVQ LR32 M1/N32 source is missing its K32 loop")
+    source = source.replace(marker, marker + "\n  float activation=float(x[base+lane]);", 1)
+    for offset in range(16):
+        old = (
+            f"    uint k0=base+{offset * 2}u;\n"
+            "    sum0+=float(x[k0])*value.x+float(x[k0+1u])*value.y;"
+        )
+        new = (
+            f"    sum0+=simd_shuffle(activation,ushort({offset * 2}u))*value.x+"
+            f"simd_shuffle(activation,ushort({offset * 2 + 1}u))*value.y;"
+        )
+        if old not in source:
+            raise RuntimeError(
+                f"QVQ LR32 M1/N32 source is missing explicit pair {offset}"
+            )
+        source = source.replace(old, new, 1)
+    return source
+
+
+# The short-wide M1 route is activation-load bound: every output lane uses
+# the same K32 activation tile. Keep the optimized source separate from the
+# scalar long-K source because the complete-module A/B was positive only for
+# the short-wide route.
+_LR_M1_N32_FUSED_SPLIT16_SHARED_W2_FP32_SOURCE = (
+    _make_lr_m1_n32_activation_broadcast_source(_LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE)
+)
+_LR_M1_N32_FUSED_SPLIT32_SHARED_W2_FP32_SOURCE = (
+    _make_lr_m1_n32_activation_broadcast_source(_LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE)
 )
 
 
@@ -2996,9 +3039,18 @@ def _local_ring_m1_fused_split16_kernel(*, alt_bank_id: int):
 
 
 def _local_ring_m1_n32_fused_split_kernel(
-    *, alt_bank_id: int, split_count: int, inputs_contiguous: bool = False
+    *,
+    alt_bank_id: int,
+    split_count: int,
+    inputs_contiguous: bool = False,
+    activation_broadcast: bool = False,
 ):
-    """Build the barrier-minimal fixed M1/N32 W2 split kernel."""
+    """Build the barrier-minimal fixed M1/N32 W2 split kernel.
+
+    ``activation_broadcast`` is reserved for the short-wide M1 shape where
+    all N32 output lanes consume the same K32 activation tile.  Long-K
+    dispatch keeps the scalar source until it has independent A/B evidence.
+    """
 
     if alt_bank_id not in (1, 2, 3):
         raise ValueError(f"QVQ LR32 alternative-bank ID must be in [1, 3], got {alt_bank_id}")
@@ -3006,6 +3058,8 @@ def _local_ring_m1_n32_fused_split_kernel(
         raise ValueError(f"QVQ LR32 M1/N32 split count must be 8, 16, or 32, got {split_count}")
     if not isinstance(inputs_contiguous, bool):
         raise TypeError("QVQ LR32 inputs_contiguous must be a bool")
+    if not isinstance(activation_broadcast, bool):
+        raise TypeError("QVQ LR32 activation_broadcast must be a bool")
     if split_count == 32:
         kernels = _LR_M1_N32_FUSED_SPLIT32_KERNELS
         errors = _LR_M1_N32_FUSED_SPLIT32_KERNEL_ERRORS
@@ -3015,7 +3069,7 @@ def _local_ring_m1_n32_fused_split_kernel(
     else:
         kernels = _LR_M1_N32_FUSED_SPLIT_KERNELS
         errors = _LR_M1_N32_FUSED_SPLIT_ERRORS
-    key = (alt_bank_id, inputs_contiguous)
+    key = (alt_bank_id, inputs_contiguous, activation_broadcast)
     kernel = kernels.get(key)
     if kernel is not None:
         return kernel
@@ -3030,7 +3084,11 @@ def _local_ring_m1_n32_fused_split_kernel(
 
         try:
             source = (
-                _LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE
+                _LR_M1_N32_FUSED_SPLIT32_SHARED_W2_FP32_SOURCE
+                if split_count == 32 and activation_broadcast
+                else _LR_M1_N32_FUSED_SPLIT16_SHARED_W2_FP32_SOURCE
+                if split_count == 16 and activation_broadcast
+                else _LR_M1_N32_FUSED_SPLIT32_W2_FP32_SOURCE
                 if split_count == 32
                 else _LR_M1_N32_FUSED_SPLIT16_W2_FP32_SOURCE
                 if split_count == 16
@@ -3050,6 +3108,7 @@ def _local_ring_m1_n32_fused_split_kernel(
                 name=(
                     f"gptqmodel_qvq_v2b2_p32_lr_m1_n32_fused_split{split_count}"
                     f"_alt{alt_bank_id}_{'contig' if inputs_contiguous else 'checked'}"
+                    f"_{'actbroadcast' if activation_broadcast else 'scalar'}"
                 ),
                 input_names=["x", "trellis", "bank_ids", "dims"],
                 output_names=["out"],
@@ -5318,6 +5377,7 @@ def qvq_mlx_gemv(
                 alt_bank_id=alt_id,
                 split_count=wide_split_count,
                 inputs_contiguous=_inputs_contiguous,
+                activation_broadcast=True,
             )
         elif m1_n64_uint2:
             # The fixed short-K wide-N source loads each aligned pair of W2

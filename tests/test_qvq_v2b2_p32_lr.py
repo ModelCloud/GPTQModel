@@ -1096,6 +1096,7 @@ def test_lr32_mlx_m1_n32_wide_dispatch_matches_torch_oracle(monkeypatch):
     mx.eval(actual)
     assert selected["called"]
     assert selected["split_count"] == 16
+    assert selected["activation_broadcast"] is True
     torch.testing.assert_close(torch.from_numpy(np.asarray(actual)), expected, rtol=0, atol=2e-2)
 
 
