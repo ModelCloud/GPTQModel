@@ -155,6 +155,20 @@ __device__ __forceinline__ uint32_t pgc16_v2_bank_mask_runtime(int transition_bi
   return masks[transition_bits - 2][bank & 3u];
 }
 
+template <int TransitionBits>
+__device__ __forceinline__ uint32_t pgc16_v2_bank_mask(uint32_t bank) {
+  constexpr uint32_t masks[6][4] = {
+      {0x0000u, 0xA5A5u, 0x5A5Au, 0x3C3Cu},
+      {0x0000u, 0xA5A5u, 0x9696u, 0x6969u},
+      {0x0000u, 0x5A5Au, 0x3C3Cu, 0xC3C3u},
+      {0x0000u, 0x9696u, 0x3C3Cu, 0xC3C3u},
+      {0x0000u, 0x6969u, 0x5A5Au, 0x3C3Cu},
+      {0x0000u, 0xC3C3u, 0x9696u, 0x5A5Au},
+  };
+  static_assert(TransitionBits >= 2 && TransitionBits <= 7);
+  return masks[TransitionBits - 2][bank & 3u];
+}
+
 __device__ __noinline__ uint32_t planar_transition_runtime(
     const uint32_t* words, int edge, int transition_bits) {
   const int block = edge >> 5;
@@ -389,11 +403,28 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
     int k_local,
     int bank_alt_id) {
   uint32_t level_pair = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+  // Blackwell otherwise materializes the constant bank-mask lookup in every
+  // pair-leader lane and spills the unrolled ROWS=16 kernel. One lane resolves
+  // the uniform per-ring mask and broadcasts it across the warp. SM89 keeps
+  // the direct lookup because the additional shuffle regresses Ada.
+  uint32_t bank_mask = 0;
+  if (k_local == 0) {
+    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
+        static_cast<uint32_t>(bank_alt_id);
+    bank_mask = pgc16_v2_bank_mask<TransitionBits>(bank);
+  }
+  bank_mask = __shfl_sync(0xffffffffu, bank_mask, 0);
+#endif
   if ((k_local & 1) == 0) {
     const uint32_t state = qvq_local_ring_state<TransitionBits>(packed_words, ring, k_local >> 1);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+    const uint32_t mixed = pgc16_mix(state ^ bank_mask);
+#else
     const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
         static_cast<uint32_t>(bank_alt_id);
     const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
+#endif
     level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
         (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
   }
