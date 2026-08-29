@@ -965,8 +965,15 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   };
 
   const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
-  const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
-  const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
+  // Promote before multiplying: the public API permits int32-sized K and up
+  // to 64 splits, so the intermediate can exceed INT_MAX even though every
+  // resulting tile boundary still fits in the int32 kernel index range.
+  const int k_tile_begin = SplitK
+      ? static_cast<int>((static_cast<int64_t>(k_tiles) * split) / split_count)
+      : 0;
+  const int k_tile_end = SplitK
+      ? static_cast<int>((static_cast<int64_t>(k_tiles) * (split + 1)) / split_count)
+      : k_tiles;
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
     const int tiles_here = min(kBatchTiles, k_tile_end - kb);
     stage_batch(kb, tiles_here);

@@ -89,6 +89,22 @@ def test_lr32_cuda_repeated_launches_are_deterministic():
     assert (outputs[0] - reference.cuda()).abs().max().item() <= 2e-3
 
 
+def test_lr32_cuda_honors_explicit_split_count():
+    x, trellis, bank_ids, reference = _lr_case(2.0, m=1, k=128, n=32, seed=20260835)
+    actual = qvq_cuda_gemv(
+        x,
+        trellis,
+        2.0,
+        out_features=32,
+        output_fp32=True,
+        bank_ids=bank_ids,
+        v2b2_p32_lr=True,
+        bank_alt_id=3,
+        lr_split_count=4,
+    )
+    assert (actual - reference.cuda()).abs().max().item() <= 2e-3
+
+
 def test_lr32_cuda_uses_current_non_default_stream():
     x, trellis, bank_ids, reference = _lr_case(2.0, m=1, k=2048, n=256, seed=20260831)
     stream = torch.cuda.Stream()
