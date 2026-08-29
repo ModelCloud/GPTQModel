@@ -11,6 +11,7 @@ worker per GPU and verifies the resulting CUDA UUID before timing kernels.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -54,19 +55,50 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=1.0)
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=8)
+    parser.add_argument(
+        "--min-geomean-speedup",
+        type=float,
+        default=1.5,
+        help="Fail paired regressions below this LR/non-LR geometric-mean speedup.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("artifacts/qvq_cuda_lr_sweep"))
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--source-commit", help=argparse.SUPPRESS)
+    parser.add_argument("--source-fingerprint", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.all and args.worker:
         parser.error("--all and --worker are mutually exclusive")
     if not args.all and args.physical_gpu is None:
         parser.error("use --all or --physical-gpu")
+    if not math.isfinite(args.min_geomean_speedup) or args.min_geomean_speedup <= 0:
+        parser.error("--min-geomean-speedup must be a finite positive number")
     return args
 
 
 def _git_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
+
+
+def _source_fingerprint() -> str:
+    """Hash every tracked working-tree input so results cannot be mislabeled."""
+
+    paths = subprocess.check_output(
+        ["git", "ls-files", "-z"], cwd=REPO_ROOT, text=False
+    ).split(b"\0")
+    digest = hashlib.sha256()
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        relative_path = Path(os.fsdecode(raw_path))
+        try:
+            contents = (REPO_ROOT / relative_path).read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"tracked source disappeared while fingerprinting: {relative_path}") from exc
+        digest.update(len(raw_path).to_bytes(8, "big"))
+        digest.update(raw_path)
+        digest.update(len(contents).to_bytes(8, "big"))
+        digest.update(contents)
+    return digest.hexdigest()
 
 
 def _discover_physical_gpus() -> list[int]:
@@ -203,7 +235,7 @@ def _metrics(actual, reference) -> dict[str, float]:
     }
 
 
-def _regression_report(rows: list[dict]) -> dict:
+def _regression_report(rows: list[dict], *, min_geomean_speedup: float = 1.5) -> dict:
     """Pair LR32 and legacy timings using the same shape, data, and device."""
 
     grouped: dict[tuple, dict[str, dict]] = {}
@@ -266,7 +298,28 @@ def _regression_report(rows: list[dict]) -> dict:
         "max_lr_abs": max((row["lr_max_abs"] for row in regressions), default=None),
         "max_non_lr_abs": max((row["non_lr_max_abs"] for row in regressions), default=None),
     }
+    summary["required_min_geomean_speedup"] = min_geomean_speedup
+    summary["meets_min_geomean_speedup"] = (
+        summary["geomean_speedup_vs_non_lr"] is not None
+        and summary["geomean_speedup_vs_non_lr"] >= min_geomean_speedup
+    )
     return {"regression_summary": summary, "regressions": regressions}
+
+
+def _enforce_regression_report(report: dict, *, min_geomean_speedup: float) -> None:
+    summary = report["regression_summary"]
+    if not summary["cases"]:
+        return
+    if not summary["all_accuracy_within_2e-3"]:
+        raise AssertionError(
+            "QVQ LR/non-LR regression failed accuracy gate: maximum absolute error exceeds 2e-3"
+        )
+    geomean = summary["geomean_speedup_vs_non_lr"]
+    if geomean is None or geomean < min_geomean_speedup:
+        raise AssertionError(
+            f"QVQ LR/non-LR regression failed performance gate: "
+            f"geomean={geomean!r}x, required>={min_geomean_speedup}x"
+        )
 
 
 def _print_regression_summary(report: dict) -> None:
@@ -329,12 +382,14 @@ def _print_table(rows: list[dict]) -> None:
 
 
 def _worker(args: argparse.Namespace) -> None:
-    if args.source_commit is not None:
+    if args.source_commit is not None or args.source_fingerprint is not None:
         current_commit = _git_commit()
-        if current_commit != args.source_commit:
+        current_fingerprint = _source_fingerprint()
+        if current_commit != args.source_commit or current_fingerprint != args.source_fingerprint:
             raise RuntimeError(
-                f"repository HEAD changed before GPU {args.physical_gpu} started: "
-                f"expected {args.source_commit}, got {current_commit}"
+                f"repository source changed before GPU {args.physical_gpu} started: "
+                f"expected commit/fingerprint {args.source_commit}/{args.source_fingerprint}, "
+                f"got {current_commit}/{current_fingerprint}"
             )
     hardware = _idle_preflight(
         args.physical_gpu, args.idle_samples, args.idle_interval, args.idle_memory_tolerance_mib
@@ -591,13 +646,14 @@ def _worker(args: argparse.Namespace) -> None:
     payload = {
         "label": "qvq_v2b2_p32_lr_cuda_sweep",
         "commit": args.source_commit or _git_commit(),
+        "source_fingerprint": args.source_fingerprint or _source_fingerprint(),
         "physical_gpu": args.physical_gpu,
         "hardware": hardware,
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "rows": all_rows,
     }
-    payload.update(_regression_report(all_rows))
+    payload.update(_regression_report(all_rows, min_geomean_speedup=args.min_geomean_speedup))
     _write_json(result_path, payload)
     _write_json(progress_path, {**payload, "state": "complete", "completed_rows": len(all_rows)})
     _print_table(all_rows)
@@ -612,6 +668,7 @@ def _all_workers(args: argparse.Namespace) -> None:
     if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
         raise ValueError(f"--gpus must contain unique non-negative physical indices, got {gpus}")
     source_commit = args.source_commit or _git_commit()
+    source_fingerprint = args.source_fingerprint or _source_fingerprint()
     hardware = {
         gpu: _idle_preflight(gpu, args.idle_samples, args.idle_interval, args.idle_memory_tolerance_mib)
         for gpu in gpus
@@ -647,6 +704,10 @@ def _all_workers(args: argparse.Namespace) -> None:
             str(args.out_dir),
             "--source-commit",
             source_commit,
+            "--source-fingerprint",
+            source_fingerprint,
+            "--min-geomean-speedup",
+            str(args.min_geomean_speedup),
         ]
         if args.no_non_lr:
             child_args.append("--no-non-lr")
@@ -691,16 +752,20 @@ def _all_workers(args: argparse.Namespace) -> None:
         result_path = args.out_dir / f"gpu{gpu}.json"
         final_rows.extend(json.loads(result_path.read_text(encoding="utf-8")).get("rows", []))
     _print_table(final_rows)
-    report = _regression_report(final_rows)
+    report = _regression_report(final_rows, min_geomean_speedup=args.min_geomean_speedup)
     current_commit = _git_commit()
-    if current_commit != source_commit:
+    current_fingerprint = _source_fingerprint()
+    if current_commit != source_commit or current_fingerprint != source_fingerprint:
         raise RuntimeError(
-            f"repository HEAD changed during sweep: expected {source_commit}, got {current_commit}; "
+            f"repository source changed during sweep: expected commit/fingerprint "
+            f"{source_commit}/{source_fingerprint}, got {current_commit}/{current_fingerprint}; "
             "discard the summary and rerun"
         )
+    _enforce_regression_report(report, min_geomean_speedup=args.min_geomean_speedup)
     _write_json(args.out_dir / "summary.json", {
         "label": "qvq_v2b2_p32_lr_cuda_regression",
         "commit": source_commit,
+        "source_fingerprint": source_fingerprint,
         "physical_gpus": gpus,
         **report,
     })
@@ -714,6 +779,8 @@ def main() -> None:
     else:
         if args.source_commit is None:
             args.source_commit = _git_commit()
+        if args.source_fingerprint is None:
+            args.source_fingerprint = _source_fingerprint()
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.physical_gpu)
         os.environ.setdefault("GPTQMODEL_QVQ_CUDA_BUILD_ROOT", f"/tmp/qvq-jit-lr-gpu{args.physical_gpu}")
