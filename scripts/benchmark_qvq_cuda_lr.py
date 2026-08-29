@@ -101,6 +101,16 @@ def _source_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def _verify_source(expected_commit: str, expected_fingerprint: str, *, phase: str) -> None:
+    current_commit = _git_commit()
+    current_fingerprint = _source_fingerprint()
+    if current_commit != expected_commit or current_fingerprint != expected_fingerprint:
+        raise RuntimeError(
+            f"repository source changed {phase}: expected commit/fingerprint "
+            f"{expected_commit}/{expected_fingerprint}, got {current_commit}/{current_fingerprint}"
+        )
+
+
 def _discover_physical_gpus() -> list[int]:
     output = subprocess.check_output(
         [
@@ -260,37 +270,40 @@ def _regression_report(rows: list[dict], *, min_geomean_speedup: float = 1.5) ->
 
     regressions = []
     for key, paths in sorted(grouped.items(), key=lambda item: tuple(str(value) for value in item[0])):
-        lr = paths.get("lr_native_auto")
         legacy = paths.get("non_lr_native")
-        if lr is None or legacy is None:
+        if legacy is None:
             continue
-        speedup = legacy["median_ms"] / lr["median_ms"]
-        regressions.append({
-            "physical_gpu": lr["physical_gpu"],
-            "pci_bus_id": lr["pci_bus_id"],
-            "uuid": lr["uuid"],
-            "gpu_name": lr["gpu_name"],
-            "compute_capability": lr["compute_capability"],
-            "sm_count": lr["sm_count"],
-            "shape": lr["shape"],
-            "k": lr["k"],
-            "n": lr["n"],
-            "dtype": lr["dtype"],
-            "bits": lr["bits"],
-            "m": lr["m"],
-            "rows": lr["rows"],
-            "lr_split_count": lr["split_count"],
-            "non_lr_split_count": legacy["split_count"],
-            "lr_median_ms": lr["median_ms"],
-            "non_lr_median_ms": legacy["median_ms"],
-            "speedup_vs_non_lr": speedup,
-            "lr_max_abs": lr["max_abs"],
-            "non_lr_max_abs": legacy["max_abs"],
-            "accuracy_within_2e-3": lr["max_abs"] <= 2e-3 and legacy["max_abs"] <= 2e-3,
-            "meets_1.5x": speedup >= 1.5,
-            "meets_2x": speedup >= 2.0,
-            "meets_4x": speedup >= 4.0,
-        })
+        for lr_path, lr in sorted(paths.items()):
+            if not lr_path.startswith("lr_native_"):
+                continue
+            speedup = legacy["median_ms"] / lr["median_ms"]
+            regressions.append({
+                "physical_gpu": lr["physical_gpu"],
+                "pci_bus_id": lr["pci_bus_id"],
+                "uuid": lr["uuid"],
+                "gpu_name": lr["gpu_name"],
+                "compute_capability": lr["compute_capability"],
+                "sm_count": lr["sm_count"],
+                "shape": lr["shape"],
+                "k": lr["k"],
+                "n": lr["n"],
+                "dtype": lr["dtype"],
+                "bits": lr["bits"],
+                "m": lr["m"],
+                "rows": lr["rows"],
+                "lr_path": lr_path,
+                "lr_split_count": lr["split_count"],
+                "non_lr_split_count": legacy["split_count"],
+                "lr_median_ms": lr["median_ms"],
+                "non_lr_median_ms": legacy["median_ms"],
+                "speedup_vs_non_lr": speedup,
+                "lr_max_abs": lr["max_abs"],
+                "non_lr_max_abs": legacy["max_abs"],
+                "accuracy_within_2e-3": lr["max_abs"] <= 2e-3 and legacy["max_abs"] <= 2e-3,
+                "meets_1.5x": speedup >= 1.5,
+                "meets_2x": speedup >= 2.0,
+                "meets_4x": speedup >= 4.0,
+            })
 
     speedups = [row["speedup_vs_non_lr"] for row in regressions if row["speedup_vs_non_lr"] > 0]
     summary = {
@@ -392,14 +405,11 @@ def _print_table(rows: list[dict]) -> None:
 
 def _worker(args: argparse.Namespace) -> None:
     if args.source_commit is not None or args.source_fingerprint is not None:
-        current_commit = _git_commit()
-        current_fingerprint = _source_fingerprint()
-        if current_commit != args.source_commit or current_fingerprint != args.source_fingerprint:
-            raise RuntimeError(
-                f"repository source changed before GPU {args.physical_gpu} started: "
-                f"expected commit/fingerprint {args.source_commit}/{args.source_fingerprint}, "
-                f"got {current_commit}/{current_fingerprint}"
-            )
+        _verify_source(
+            args.source_commit,
+            args.source_fingerprint,
+            phase=f"before GPU {args.physical_gpu} started",
+        )
     hardware = _idle_preflight(
         args.physical_gpu, args.idle_samples, args.idle_interval, args.idle_memory_tolerance_mib
     )
@@ -652,6 +662,12 @@ def _worker(args: argparse.Namespace) -> None:
                 del legacy_trellis, legacy_bank_ids, legacy_dense
             torch.cuda.empty_cache()
 
+    if args.source_commit is not None or args.source_fingerprint is not None:
+        _verify_source(
+            args.source_commit,
+            args.source_fingerprint,
+            phase=f"after GPU {args.physical_gpu} completed",
+        )
     payload = {
         "label": "qvq_v2b2_p32_lr_cuda_sweep",
         "commit": args.source_commit or _git_commit(),
@@ -663,6 +679,8 @@ def _worker(args: argparse.Namespace) -> None:
         "rows": all_rows,
     }
     payload.update(_regression_report(all_rows, min_geomean_speedup=args.min_geomean_speedup))
+    if not args.worker:
+        _enforce_regression_report(payload, min_geomean_speedup=args.min_geomean_speedup)
     _write_json(result_path, payload)
     _write_json(progress_path, {**payload, "state": "complete", "completed_rows": len(all_rows)})
     _print_table(all_rows)
@@ -766,14 +784,7 @@ def _all_workers(args: argparse.Namespace) -> None:
         final_rows.extend(json.loads(result_path.read_text(encoding="utf-8")).get("rows", []))
     _print_table(final_rows)
     report = _regression_report(final_rows, min_geomean_speedup=args.min_geomean_speedup)
-    current_commit = _git_commit()
-    current_fingerprint = _source_fingerprint()
-    if current_commit != source_commit or current_fingerprint != source_fingerprint:
-        raise RuntimeError(
-            f"repository source changed during sweep: expected commit/fingerprint "
-            f"{source_commit}/{source_fingerprint}, got {current_commit}/{current_fingerprint}; "
-            "discard the summary and rerun"
-        )
+    _verify_source(source_commit, source_fingerprint, phase="during sweep completion")
     _enforce_regression_report(report, min_geomean_speedup=args.min_geomean_speedup)
     _write_json(args.out_dir / "summary.json", {
         "label": "qvq_v2b2_p32_lr_cuda_regression",

@@ -42,9 +42,10 @@ def _row(path: str, median_ms: float, *, max_abs: float = 0.0) -> dict:
 
 def test_regression_gate_rejects_slow_pair():
     report = benchmark_qvq_cuda_lr._regression_report(
-        [_row("lr_native_auto", 2.0), _row("non_lr_native", 1.0)]
+        [_row("lr_native_s2", 2.0), _row("non_lr_native", 1.0)]
     )
 
+    assert report["regression_summary"]["cases"] == 1
     with pytest.raises(AssertionError, match="performance gate"):
         benchmark_qvq_cuda_lr._enforce_regression_report(report, min_geomean_speedup=1.5)
 
