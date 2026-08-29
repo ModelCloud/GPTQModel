@@ -41,13 +41,11 @@ def _repeat(label: str, fn, *, warmup: int, iterations: int) -> None:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
-    torch.cuda.cudart().cudaProfilerStart()
     torch.cuda.nvtx.range_push(label)
     for _ in range(iterations):
         fn()
     torch.cuda.synchronize()
     torch.cuda.nvtx.range_pop()
-    torch.cuda.cudart().cudaProfilerStop()
 
 
 def main() -> None:
@@ -117,13 +115,21 @@ def main() -> None:
             bank_alt_id=3,
         )
 
-    _repeat(f"qvq_lr_w{transition_bits}_m{args.m}", run_lr, warmup=args.warmup, iterations=args.iterations)
-    _repeat(
-        f"qvq_non_lr_w{transition_bits}_m{args.m}",
-        run_legacy,
-        warmup=args.warmup,
-        iterations=args.iterations,
-    )
+    for fn in (run_lr, run_legacy):
+        for _ in range(args.warmup):
+            fn()
+    torch.cuda.synchronize()
+    torch.cuda.cudart().cudaProfilerStart()
+    try:
+        _repeat(f"qvq_lr_w{transition_bits}_m{args.m}", run_lr, warmup=0, iterations=args.iterations)
+        _repeat(
+            f"qvq_non_lr_w{transition_bits}_m{args.m}",
+            run_legacy,
+            warmup=0,
+            iterations=args.iterations,
+        )
+    finally:
+        torch.cuda.cudart().cudaProfilerStop()
     print(
         f"profile harness complete: device={torch.cuda.get_device_name()} cc={torch.cuda.get_device_capability()} "
         f"sms={torch.cuda.get_device_properties().multi_processor_count} "

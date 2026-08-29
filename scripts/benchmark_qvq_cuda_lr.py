@@ -119,6 +119,15 @@ def _discover_physical_gpus() -> list[int]:
     return [physical_gpu for _, physical_gpu in sorted(devices)]
 
 
+def _cuda_ordinals_by_physical_gpu() -> dict[int, int]:
+    """Map nvidia-smi physical indexes to CUDA ordinals under PCI ordering."""
+
+    return {
+        physical_gpu: cuda_ordinal
+        for cuda_ordinal, physical_gpu in enumerate(_discover_physical_gpus())
+    }
+
+
 def _query_gpu(physical_gpu: int) -> dict[str, str]:
     fields = "index,pci.bus_id,uuid,name,memory.total,memory.used,utilization.gpu"
     output = subprocess.check_output(
@@ -662,11 +671,15 @@ def _worker(args: argparse.Namespace) -> None:
 
 def _all_workers(args: argparse.Namespace) -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    gpus = args.gpus if args.gpus is not None else _discover_physical_gpus()
+    cuda_ordinals = _cuda_ordinals_by_physical_gpu()
+    gpus = args.gpus if args.gpus is not None else list(cuda_ordinals)
     if not gpus:
         raise RuntimeError("--all found no NVIDIA GPUs")
     if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
         raise ValueError(f"--gpus must contain unique non-negative physical indices, got {gpus}")
+    missing_gpus = sorted(set(gpus) - set(cuda_ordinals))
+    if missing_gpus:
+        raise ValueError(f"--gpus contains indexes not visible to CUDA: {missing_gpus}")
     source_commit = args.source_commit or _git_commit()
     source_fingerprint = args.source_fingerprint or _source_fingerprint()
     hardware = {
@@ -714,9 +727,9 @@ def _all_workers(args: argparse.Namespace) -> None:
         env = dict(os.environ)
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         # This torch build accepts numeric selectors reliably; UUID selectors
-        # are rejected as an empty device set. PCI_BUS_ID keeps this selector
-        # aligned with nvidia-smi's physical index.
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        # are rejected as an empty device set. Convert the nvidia-smi physical
+        # index to the CUDA ordinal produced by PCI_BUS_ID ordering.
+        env["CUDA_VISIBLE_DEVICES"] = str(cuda_ordinals[gpu])
         env["GPTQMODEL_QVQ_CUDA_BUILD_ROOT"] = f"/tmp/qvq-jit-lr-gpu{gpu}"
         env["MAX_JOBS"] = "8"
         env["NINJAFLAGS"] = "-j8"
@@ -782,7 +795,12 @@ def main() -> None:
         if args.source_fingerprint is None:
             args.source_fingerprint = _source_fingerprint()
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.physical_gpu)
+        cuda_ordinals = _cuda_ordinals_by_physical_gpu()
+        try:
+            cuda_ordinal = cuda_ordinals[args.physical_gpu]
+        except KeyError as exc:
+            raise ValueError(f"physical GPU {args.physical_gpu} is not visible to CUDA") from exc
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_ordinal)
         os.environ.setdefault("GPTQMODEL_QVQ_CUDA_BUILD_ROOT", f"/tmp/qvq-jit-lr-gpu{args.physical_gpu}")
         _worker(args)
 
