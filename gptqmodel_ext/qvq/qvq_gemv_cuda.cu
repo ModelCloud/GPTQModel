@@ -206,24 +206,6 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   return state;
 }
 
-template <int TransitionBits>
-__device__ __forceinline__ uint32_t qvq_local_ring_state_predecoded(
-    const uint32_t* edge_words, int pair_in_ring) {
-  constexpr int total_edges = kLocalRingSteps;
-  constexpr int edge_mask = total_edges - 1;
-  constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
-  const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
-  uint32_t state = 0;
-#pragma unroll
-  for (int j = 0; j < edge_count; ++j) {
-    const int edge = (first + j) & edge_mask;
-    const uint32_t packed = edge_words[edge >> 1];
-    const uint32_t transition = (edge & 1) == 0 ? packed & 0xffffu : packed >> 16;
-    state = ((state << TransitionBits) | transition) & 0xffffu;
-  }
-  return state;
-}
-
 __device__ __noinline__ uint32_t qvq_local_ring_state_runtime(
     const uint32_t* words, int ring, int pair_in_ring, int transition_bits) {
   constexpr int total_edges = kLocalRingSteps;
@@ -386,28 +368,6 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
   uint32_t level_pair = 0;
   if ((k_local & 1) == 0) {
     const uint32_t state = qvq_local_ring_state<TransitionBits>(packed_words, ring, k_local >> 1);
-    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-        static_cast<uint32_t>(bank_alt_id);
-    const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
-    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-  }
-  level_pair = __shfl_sync(0xffffffffu, level_pair, k_local & ~1);
-  const uint32_t level_bits = (k_local & 1) == 0 ? level_pair & 0xffffu : level_pair >> 16;
-  return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
-}
-
-template <int TransitionBits>
-__device__ __forceinline__ float qvq_decode_local_ring_weight_predecoded(
-    const uint32_t* edge_words,
-    uint8_t packed_bank_id,
-    const half* cached_levels,
-    int ring,
-    int k_local,
-    int bank_alt_id) {
-  uint32_t level_pair = 0;
-  if ((k_local & 1) == 0) {
-    const uint32_t state = qvq_local_ring_state_predecoded<TransitionBits>(edge_words, k_local >> 1);
     const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
         static_cast<uint32_t>(bank_alt_id);
     const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
@@ -871,8 +831,7 @@ template <
     int TransitionBits = 0,
     bool SplitK = false,
     int OutputTilesPerBlock = 1,
-    bool VectorStaging = true,
-    bool PredecodedEdges = false>
+    bool VectorStaging = true>
 __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -896,11 +855,6 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTilesPerBlock][kMaxWords];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTilesPerBlock];
   __shared__ __align__(16) Scalar input_tile[kBatchTiles][ROWS * kLocalRingTileRows];
-  // A TB=6 tile has eight unused words in the staging allocation.  This
-  // compact per-ring cache reuses that logical slack in a separate shared
-  // array so each of the sixteen local-ring transitions is decoded once.
-  __shared__ uint32_t predecoded_edges[
-      kBatchTiles][kOutputTilesPerBlock][kLocalRingCount][kLocalRingSteps / 2];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int ring = thread >> 5;
@@ -1000,23 +954,6 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     stage_batch(kb, tiles_here);
     __syncthreads();
 
-    if constexpr (PredecodedEdges) {
-#pragma unroll
-      for (int u = 0; u < kBatchTiles; ++u) {
-        if (u < tiles_here) {
-#pragma unroll
-          for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
-            if (n_tile_base + sub < n_tiles && k_local < kLocalRingSteps / 2) {
-              const uint32_t first = planar_transition<TransitionBits>(packed_words[u][sub], k_local);
-              const uint32_t second = planar_transition<TransitionBits>(packed_words[u][sub], k_local + 8);
-              predecoded_edges[u][sub][ring][k_local] = first | (second << 16);
-            }
-          }
-        }
-        __syncwarp();
-      }
-    }
-
 #pragma unroll
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
@@ -1026,14 +963,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
           }
           float weight;
           if constexpr (TransitionBits != 0) {
-            if constexpr (PredecodedEdges) {
-              weight = qvq_decode_local_ring_weight_predecoded<TransitionBits>(
-                  predecoded_edges[u][sub][ring], packed_bank_ids[u][sub], cached_levels, ring, k_local,
-                  bank_alt_id);
-            } else {
-              weight = qvq_decode_local_ring_weight_fast<TransitionBits>(
-                  packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, bank_alt_id);
-            }
+            weight = qvq_decode_local_ring_weight_fast<TransitionBits>(
+                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, bank_alt_id);
           } else {
             weight = qvq_decode_local_ring_weight_runtime(
                 packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, transition_bits, bank_alt_id);
@@ -1554,13 +1485,7 @@ void launch_qvq_local_ring_gemv_impl(
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
 
 #define QVQ_LR_LAUNCH_TB(ROWS, TB)                                                                                 \
-  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock, VectorStaging, false>    \
-      <<<grid, kThreads, 0, stream>>>(                                                                             \
-      input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, partial_ptr,                                  \
-      static_cast<int>(input.size(0)), static_cast<int>(input.size(1)), static_cast<int>(output.size(1)),          \
-      split_count, transition_bits, bank_alt_id)
-#define QVQ_LR_LAUNCH_TB_PREDECODE(ROWS, TB)                                                                       \
-  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock, VectorStaging, true>     \
+  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock, VectorStaging>          \
       <<<grid, kThreads, 0, stream>>>(                                                                             \
       input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, partial_ptr,                                  \
       static_cast<int>(input.size(0)), static_cast<int>(input.size(1)), static_cast<int>(output.size(1)),          \
@@ -1575,16 +1500,6 @@ void launch_qvq_local_ring_gemv_impl(
     QVQ_LR_LAUNCH_TB(16, M);                                                                                       \
   } else {                                                                                                         \
     QVQ_LR_LAUNCH_TB(kRowsPerBlock, M);                                                                            \
-  }
-#define QVQ_LR_LAUNCH_ROWS_PREDECODE(M)                                                                            \
-  if (rows == 1) {                                                                                                 \
-    QVQ_LR_LAUNCH_TB_PREDECODE(1, M);                                                                              \
-  } else if (rows == 8) {                                                                                          \
-    QVQ_LR_LAUNCH_TB_PREDECODE(8, M);                                                                              \
-  } else if (rows == 16) {                                                                                         \
-    QVQ_LR_LAUNCH_TB_PREDECODE(16, M);                                                                             \
-  } else {                                                                                                         \
-    QVQ_LR_LAUNCH_TB_PREDECODE(kRowsPerBlock, M);                                                                  \
   }
 
   switch (transition_bits) {
@@ -1601,7 +1516,7 @@ void launch_qvq_local_ring_gemv_impl(
       QVQ_LR_LAUNCH_ROWS(5);
       break;
     case 6:
-      QVQ_LR_LAUNCH_ROWS_PREDECODE(6);
+      QVQ_LR_LAUNCH_ROWS(6);
       break;
     case 7:
       QVQ_LR_LAUNCH_ROWS(7);
@@ -1610,8 +1525,6 @@ void launch_qvq_local_ring_gemv_impl(
       TORCH_CHECK(false, "LR32 transition_bits must be in [2, 7]");
   }
 #undef QVQ_LR_LAUNCH_ROWS
-#undef QVQ_LR_LAUNCH_ROWS_PREDECODE
-#undef QVQ_LR_LAUNCH_TB_PREDECODE
 #undef QVQ_LR_LAUNCH
 #undef QVQ_LR_LAUNCH_TB
 
