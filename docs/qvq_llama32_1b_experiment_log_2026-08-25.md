@@ -1536,24 +1536,30 @@ under the 3.2 effective-BPW ceiling. Queue manifest:
 | # | arm_id | allocation | GPU | effective BPW | state |
 | ---: | --- | --- | ---: | ---: | --- |
 | 1 | `5b847c` | Up4 L7 + L8 + L12 | 0 | 3.186961 | evaluation_complete |
-| 2 | `611404` | Up4 L6 + L7 + L8 | 1 | 3.186961 | running |
-| 3 | `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 2 | 3.186961 | running |
-| 4 | `228564` | Up4 L6 + L8; Down3.5 L8 | 3 | 3.186961 | running |
-| 5 | `370c3a` | Up4 L8 + L11 + L12 | 4 | 3.186961 | running |
+| 2 | `611404` | Up4 L6 + L7 + L8 | 1 | 3.186961 | evaluation_complete |
+| 3 | `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 2 | 3.186961 | evaluation_complete |
+| 4 | `228564` | Up4 L6 + L8; Down3.5 L8 | 3 | 3.186961 | evaluation_complete |
+| 5 | `370c3a` | Up4 L8 + L11 + L12 | 4 | 3.186961 | evaluation_complete |
 | 6 | `0ea650` | Up4 L6 + L8 + L11 | 5 | 3.186961 | evaluation_complete |
-| 7 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 6 | 3.195582 | running |
-| 8 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 7 | 3.195582 | running |
+| 7 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 6 | 3.195582 | evaluation_complete |
+| 8 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 7 | 3.195582 | evaluation_complete |
 
 ### Wave-9 partial results (2026-08-29 UTC)
 
-The first two Wave-9 arms completed GSM8K Platinum and Mini-Math. Six arms
-remain in evaluation. Full metric payloads are stored in
+All eight Wave-9 arms completed GSM8K Platinum and Mini-Math. Full metric
+payloads are stored in
 `docs/experiments/frontier_wave9_queue_20260829.json`.
 
 | arm_id | allocation | effective BPW | GSM8K | Mini exact | answer-logprob Δ | answer-margin Δ | state |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `5b847c` | Up4 L7 + L8 + L12 | 3.186961 | 529/1209 (43.7552%) | 6.25% | +0.290639 | −0.265506 | evaluation_complete |
 | `0ea650` | Up4 L6 + L8 + L11 | 3.186961 | 525/1209 (43.4243%) | 6.25% | +0.387690 | −0.225125 | evaluation_complete |
+| `611404` | Up4 L6 + L7 + L8 | 3.186961 | 528/1209 (43.6725%) | 7.8125% | +0.237316 | −0.422956 | evaluation_complete |
+| `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 3.186961 | 529/1209 (43.7552%) | 4.6875% | +0.436002 | −0.064639 | evaluation_complete |
+| `228564` | Up4 L6 + L8; Down3.5 L8 | 3.186961 | 524/1209 (43.3416%) | 9.375% | +0.204094 | −0.556634 | evaluation_complete |
+| `370c3a` | Up4 L8 + L11 + L12 | 3.186961 | 535/1209 (44.2514%) | 6.25% | +0.458041 | −0.030357 | evaluation_complete |
+| `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 3.195582 | 530/1209 (43.8379%) | 6.25% | +0.283112 | −0.399024 | evaluation_complete |
+| `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 3.195582 | 528/1209 (43.6725%) | 6.25% | +0.273898 | −0.297230 | evaluation_complete |
 
 ## Wave-7 evaluation results snapshot (2026-08-29 UTC)
 

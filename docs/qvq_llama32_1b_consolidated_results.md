@@ -646,7 +646,7 @@ All sixteen arms completed both full GSM8K Platinum and Mini-GSM evaluations.
 
 ## Wave-9 local marginal sweep queued (2026-08-29 UTC)
 
-Eight arms are running from the corrected W3.2 anchor. The first six spend one
+Eight arms ran from the corrected W3.2 anchor. The first six spend one
 additional Up4 or Down3.5 promotion (3.186961 effective BPW); the final two
 spend two targeted Down3.5 promotions (3.195582 effective BPW). All arms use
 the same 182-row YAQA calibration and require full GSM8K Platinum plus
@@ -656,18 +656,17 @@ Mini-GSM evaluation. Queue manifest:
 | # | Arm ID | Allocation | GPU | Effective BPW | State |
 | ---: | --- | --- | ---: | ---: | --- |
 | 1 | `5b847c` | Up4 L7 + L8 + L12 | 0 | 3.186961 | evaluation complete |
-| 2 | `611404` | Up4 L6 + L7 + L8 | 1 | 3.186961 | running |
-| 3 | `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 2 | 3.186961 | running |
-| 4 | `228564` | Up4 L6 + L8; Down3.5 L8 | 3 | 3.186961 | running |
-| 5 | `370c3a` | Up4 L8 + L11 + L12 | 4 | 3.186961 | running |
+| 2 | `611404` | Up4 L6 + L7 + L8 | 1 | 3.186961 | evaluation complete |
+| 3 | `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 2 | 3.186961 | evaluation complete |
+| 4 | `228564` | Up4 L6 + L8; Down3.5 L8 | 3 | 3.186961 | evaluation complete |
+| 5 | `370c3a` | Up4 L8 + L11 + L12 | 4 | 3.186961 | evaluation complete |
 | 6 | `0ea650` | Up4 L6 + L8 + L11 | 5 | 3.186961 | evaluation complete |
-| 7 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 6 | 3.195582 | running |
-| 8 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 7 | 3.195582 | running |
+| 7 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 6 | 3.195582 | evaluation complete |
+| 8 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 7 | 3.195582 | evaluation complete |
 
-### Wave-9 completed evaluations (partial, 2026-08-29 UTC)
+### Wave-9 completed evaluations (2026-08-29 UTC)
 
-Two of the eight Wave-9 arms have completed both required held-out evaluations;
-the remaining six are still running. The queue manifest records the full
+All eight Wave-9 arms completed both required held-out evaluations. The queue manifest records the full
 micro-math metrics (including answer-logprob and answer-margin deltas):
 `docs/experiments/frontier_wave9_queue_20260829.json`.
 
@@ -675,3 +674,9 @@ micro-math metrics (including answer-logprob and answer-margin deltas):
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `5b847c` | Up4 L7 + L8 + L12 | 3.186961 | **529/1209 (43.7552%)** | 6.25% | +0.290639 | −0.265506 | evaluation complete |
 | `0ea650` | Up4 L6 + L8 + L11 | 3.186961 | **525/1209 (43.4243%)** | 6.25% | +0.387690 | −0.225125 | evaluation complete |
+| `611404` | Up4 L6 + L7 + L8 | 3.186961 | **528/1209 (43.6725%)** | 7.8125% | +0.237316 | −0.422956 | evaluation complete |
+| `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 3.186961 | **529/1209 (43.7552%)** | 4.6875% | +0.436002 | −0.064639 | evaluation complete |
+| `228564` | Up4 L6 + L8; Down3.5 L8 | 3.186961 | **524/1209 (43.3416%)** | 9.375% | +0.204094 | −0.556634 | evaluation complete |
+| `370c3a` | Up4 L8 + L11 + L12 | 3.186961 | **535/1209 (44.2514%)** | 6.25% | +0.458041 | −0.030357 | evaluation complete |
+| `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 3.195582 | **530/1209 (43.8379%)** | 6.25% | +0.283112 | −0.399024 | evaluation complete |
+| `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 3.195582 | **528/1209 (43.6725%)** | 6.25% | +0.273898 | −0.297230 | evaluation complete |
