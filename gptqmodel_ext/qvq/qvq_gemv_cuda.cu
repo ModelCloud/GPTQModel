@@ -830,7 +830,8 @@ template <
     int ROWS,
     int TransitionBits = 0,
     bool SplitK = false,
-    int OutputTilesPerBlock = 1>
+    int OutputTilesPerBlock = 1,
+    bool VectorStaging = true>
 __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -843,7 +844,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     int size_n,
     int split_count,
     int transition_bits,
-  int bank_alt_id) {
+    int bank_alt_id) {
   constexpr int kBatchTiles = 8;
   constexpr int kOutputTilesPerBlock = OutputTilesPerBlock;
   constexpr int kMaxWords = 32;
@@ -875,9 +876,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     }
   }
 
-  const int words_per_tile = 4 * transition_bits;
+  const int words_per_tile = TransitionBits != 0 ? kWordsPerTile : 4 * transition_bits;
   auto stage_batch = [&](int kb, int tiles_here) {
-    if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
+    if constexpr (TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging) {
       constexpr int words_per_vec = kWordsPerTile / 4;
       const int vec_total = tiles_here * kOutputTilesPerBlock * words_per_vec;
       uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
@@ -914,7 +915,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
       packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
     }
 
-    if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
+    if constexpr (TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging) {
       const int vec_total = tiles_here * ROWS * kInputVecsPerRow;
       uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
       const uint4* input4_base = reinterpret_cast<const uint4*>(input);
@@ -1453,11 +1454,10 @@ void launch_qvq_gemm_wmma_splitk(
       partial_ptr, output_ptr, static_cast<int>(output.size(0)), static_cast<int>(output.size(1)), split_count);
 }
 
-// LR32 deliberately specializes only W2 (transition_bits=4), the production
-// rate used by the layout's first deployment. Other legal rates use the same
-// kernel with runtime edge extraction, avoiding a large Cartesian product of
-// LR row/rate/dtype instantiations while retaining one exact implementation.
-template <typename Scalar, typename OutputScalar, bool SplitK, int OutputTilesPerBlock>
+// LR32 specializes every legal rate (W1 through W3.5) so the planar edge
+// extraction and local-ring recurrence are compile-time unrolled. The host
+// dispatch still keeps the rate/type matrix explicit for predictable kernels.
+template <typename Scalar, typename OutputScalar, bool SplitK, int OutputTilesPerBlock, bool VectorStaging>
 void launch_qvq_local_ring_gemv_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -1483,7 +1483,7 @@ void launch_qvq_local_ring_gemv_impl(
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
 
 #define QVQ_LR_LAUNCH_TB(ROWS, TB)                                                                                 \
-  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock>                         \
+  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock, VectorStaging>          \
       <<<grid, kThreads, 0, stream>>>(                                                                             \
       input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, partial_ptr,                                  \
       static_cast<int>(input.size(0)), static_cast<int>(input.size(1)), static_cast<int>(output.size(1)),          \
@@ -1500,18 +1500,27 @@ void launch_qvq_local_ring_gemv_impl(
     QVQ_LR_LAUNCH_TB(kRowsPerBlock, M);                                                                            \
   }
 
-  if (transition_bits == 4 && qvq_vec_aligned(trellis_ptr, input_ptr)) {
-    QVQ_LR_LAUNCH_ROWS(4);
-  } else {
-    if (rows == 1) {
-      QVQ_LR_LAUNCH(1);
-    } else if (rows == 8) {
-      QVQ_LR_LAUNCH(8);
-    } else if (rows == 16) {
-      QVQ_LR_LAUNCH(16);
-    } else {
-      QVQ_LR_LAUNCH(kRowsPerBlock);
-    }
+  switch (transition_bits) {
+    case 2:
+      QVQ_LR_LAUNCH_ROWS(2);
+      break;
+    case 3:
+      QVQ_LR_LAUNCH_ROWS(3);
+      break;
+    case 4:
+      QVQ_LR_LAUNCH_ROWS(4);
+      break;
+    case 5:
+      QVQ_LR_LAUNCH_ROWS(5);
+      break;
+    case 6:
+      QVQ_LR_LAUNCH_ROWS(6);
+      break;
+    case 7:
+      QVQ_LR_LAUNCH_ROWS(7);
+      break;
+    default:
+      TORCH_CHECK(false, "LR32 transition_bits must be in [2, 7]");
   }
 #undef QVQ_LR_LAUNCH_ROWS
 #undef QVQ_LR_LAUNCH
@@ -1540,8 +1549,33 @@ void launch_qvq_local_ring_gemv(
     int split_count,
     int bank_alt_id,
     cudaStream_t stream) {
-  if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1) {
-    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2>(
+  const bool vector_staging = qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
+  if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1 && vector_staging) {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, true>(
+        input,
+        trellis,
+        bank_ids,
+        levels,
+        partial_output,
+        output,
+        transition_bits,
+        split_count,
+        bank_alt_id,
+        stream);
+  } else if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1) {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, false>(
+        input,
+        trellis,
+        bank_ids,
+        levels,
+        partial_output,
+        output,
+        transition_bits,
+        split_count,
+        bank_alt_id,
+        stream);
+  } else if (vector_staging) {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 1, true>(
         input,
         trellis,
         bank_ids,
@@ -1553,7 +1587,7 @@ void launch_qvq_local_ring_gemv(
         bank_alt_id,
         stream);
   } else {
-    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 1>(
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 1, false>(
         input,
         trellis,
         bank_ids,
