@@ -50,7 +50,7 @@ std::array<std::once_flag, kMaxCachedCudaDevices> qvq_cuda_device_config_once;
 const QvqCudaDeviceConfig& qvq_cuda_device_config(int device) {
   TORCH_CHECK(
       device >= 0 && device < kMaxCachedCudaDevices,
-      "CUDA device ordinal is outside the LR32 config cache: ",
+      "CUDA device ordinal is outside the CUDA device config cache: ",
       device);
   std::call_once(qvq_cuda_device_config_once[device], [device]() {
     cudaDeviceProp properties{};
@@ -1748,9 +1748,8 @@ at::Tensor qvq_gemv_cuda_impl(
   }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
-  cudaDeviceProp properties{};
-  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
-  TORCH_CHECK(properties.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
+  const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
+  TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
@@ -1758,7 +1757,7 @@ at::Tensor qvq_gemv_cuda_impl(
   const int64_t n_tiles = out_features / kTileColumns;
   const int64_t m_stripes = (size_m + kRowsPerBlock - 1) / kRowsPerBlock;
   const int64_t base_blocks = n_tiles * m_stripes;
-  const int64_t target_blocks = static_cast<int64_t>(properties.multiProcessorCount) * 6;
+  const int64_t target_blocks = static_cast<int64_t>(device_config.sm_count) * 6;
   const int64_t k_tiles = size_k / kTileRows;
   const int split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
       std::min((target_blocks + base_blocks - 1) / base_blocks, k_tiles), static_cast<int64_t>(64)));
@@ -1900,15 +1899,14 @@ at::Tensor qvq_gemv_cuda_v4(
   }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
-  cudaDeviceProp properties{};
-  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
-  TORCH_CHECK(properties.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
+  const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
+  TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const int64_t base_blocks = (out_features / kTileColumns) * ((size_m + kRowsPerBlock - 1) / kRowsPerBlock);
-  const int64_t target_blocks = static_cast<int64_t>(properties.multiProcessorCount) * 6;
+  const int64_t target_blocks = static_cast<int64_t>(device_config.sm_count) * 6;
   const int64_t k_tiles = size_k / kTileRows;
   const int split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
       std::min((target_blocks + base_blocks - 1) / base_blocks, k_tiles), static_cast<int64_t>(64)));
