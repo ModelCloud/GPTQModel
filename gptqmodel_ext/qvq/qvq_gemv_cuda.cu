@@ -919,9 +919,10 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
         const int u = tile_slot / kOutputTilesPerBlock;
         const int sub = tile_slot % kOutputTilesPerBlock;
         const int n_tile = n_tile_base + sub;
-        const int tile_index = (kb + u) * n_tiles + n_tile;
+        const int64_t tile_index =
+            static_cast<int64_t>(kb + u) * n_tiles + n_tile;
         packed_words[u][sub][w] =
-            n_tile < n_tiles ? static_cast<uint32_t>(trellis[static_cast<int64_t>(tile_index) * words_per_tile + w])
+            n_tile < n_tiles ? static_cast<uint32_t>(trellis[tile_index * words_per_tile + w])
                              : 0u;
       }
     }
@@ -929,7 +930,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
       const int u = thread / kOutputTilesPerBlock;
       const int sub = thread % kOutputTilesPerBlock;
       const int n_tile = n_tile_base + sub;
-      const int tile_index = (kb + u) * n_tiles + n_tile;
+      const int64_t tile_index =
+          static_cast<int64_t>(kb + u) * n_tiles + n_tile;
       packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
     }
 
