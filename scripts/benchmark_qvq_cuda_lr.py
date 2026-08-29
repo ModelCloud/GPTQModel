@@ -178,6 +178,88 @@ def _metrics(actual, reference) -> dict[str, float]:
     }
 
 
+def _regression_report(rows: list[dict]) -> dict:
+    """Pair LR32 and legacy timings using the same shape, data, and device."""
+
+    grouped: dict[tuple, dict[str, dict]] = {}
+    for row in rows:
+        key = (
+            row.get("physical_gpu"),
+            row.get("shape"),
+            row.get("bits"),
+            row.get("dtype"),
+            row.get("m"),
+        )
+        grouped.setdefault(key, {})[row.get("path", "")] = row
+
+    regressions = []
+    for key, paths in sorted(grouped.items(), key=lambda item: tuple(str(value) for value in item[0])):
+        lr = paths.get("lr_native_auto")
+        legacy = paths.get("non_lr_native")
+        if lr is None or legacy is None:
+            continue
+        speedup = legacy["median_ms"] / lr["median_ms"]
+        regressions.append({
+            "physical_gpu": lr["physical_gpu"],
+            "pci_bus_id": lr["pci_bus_id"],
+            "uuid": lr["uuid"],
+            "gpu_name": lr["gpu_name"],
+            "compute_capability": lr["compute_capability"],
+            "sm_count": lr["sm_count"],
+            "shape": lr["shape"],
+            "k": lr["k"],
+            "n": lr["n"],
+            "dtype": lr["dtype"],
+            "bits": lr["bits"],
+            "m": lr["m"],
+            "rows": lr["rows"],
+            "lr_split_count": lr["split_count"],
+            "non_lr_split_count": legacy["split_count"],
+            "lr_median_ms": lr["median_ms"],
+            "non_lr_median_ms": legacy["median_ms"],
+            "speedup_vs_non_lr": speedup,
+            "lr_max_abs": lr["max_abs"],
+            "non_lr_max_abs": legacy["max_abs"],
+            "accuracy_within_2e-3": lr["max_abs"] <= 2e-3 and legacy["max_abs"] <= 2e-3,
+            "meets_1.5x": speedup >= 1.5,
+            "meets_2x": speedup >= 2.0,
+            "meets_4x": speedup >= 4.0,
+        })
+
+    speedups = [row["speedup_vs_non_lr"] for row in regressions if row["speedup_vs_non_lr"] > 0]
+    summary = {
+        "cases": len(regressions),
+        "geomean_speedup_vs_non_lr": (
+            math.exp(statistics.mean(math.log(speedup) for speedup in speedups)) if speedups else None
+        ),
+        "min_speedup_vs_non_lr": min(speedups) if speedups else None,
+        "max_speedup_vs_non_lr": max(speedups) if speedups else None,
+        "cases_at_least_1.5x": sum(row["meets_1.5x"] for row in regressions),
+        "cases_at_least_2x": sum(row["meets_2x"] for row in regressions),
+        "cases_at_least_4x": sum(row["meets_4x"] for row in regressions),
+        "all_accuracy_within_2e-3": all(row["accuracy_within_2e-3"] for row in regressions),
+        "max_lr_abs": max((row["lr_max_abs"] for row in regressions), default=None),
+        "max_non_lr_abs": max((row["non_lr_max_abs"] for row in regressions), default=None),
+    }
+    return {"regression_summary": summary, "regressions": regressions}
+
+
+def _print_regression_summary(report: dict) -> None:
+    summary = report["regression_summary"]
+    if not summary["cases"]:
+        return
+    print(
+        "regression summary: "
+        f"cases={summary['cases']} geomean={summary['geomean_speedup_vs_non_lr']:.3f}x "
+        f"min={summary['min_speedup_vs_non_lr']:.3f}x "
+        f">=1.5x={summary['cases_at_least_1.5x']} "
+        f">=2x={summary['cases_at_least_2x']} "
+        f">=4x={summary['cases_at_least_4x']} "
+        f"accuracy<=2e-3={summary['all_accuracy_within_2e-3']}",
+        flush=True,
+    )
+
+
 def _print_table(rows: list[dict]) -> None:
     columns = (
         ("GPU", "physical_gpu"),
@@ -483,9 +565,11 @@ def _worker(args: argparse.Namespace) -> None:
         "cuda": torch.version.cuda,
         "rows": all_rows,
     }
+    payload.update(_regression_report(all_rows))
     _write_json(result_path, payload)
     _write_json(progress_path, {**payload, "state": "complete", "completed_rows": len(all_rows)})
     _print_table(all_rows)
+    _print_regression_summary(payload)
 
 
 def _all_workers(args: argparse.Namespace) -> None:
@@ -564,6 +648,14 @@ def _all_workers(args: argparse.Namespace) -> None:
         result_path = args.out_dir / f"gpu{gpu}.json"
         final_rows.extend(json.loads(result_path.read_text(encoding="utf-8")).get("rows", []))
     _print_table(final_rows)
+    report = _regression_report(final_rows)
+    _write_json(args.out_dir / "summary.json", {
+        "label": "qvq_v2b2_p32_lr_cuda_regression",
+        "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "physical_gpus": args.gpus,
+        **report,
+    })
+    _print_regression_summary(report)
 
 
 def main() -> None:
