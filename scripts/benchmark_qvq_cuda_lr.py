@@ -343,7 +343,9 @@ def _regression_report(rows: list[dict], *, min_geomean_speedup: float = 1.5) ->
 def _enforce_regression_report(report: dict, *, min_geomean_speedup: float) -> None:
     summary = report["regression_summary"]
     if not summary["cases"]:
-        return
+        raise AssertionError(
+            "QVQ LR/non-LR regression failed performance gate: no paired LR/non-LR cases were measured"
+        )
     if not summary["all_accuracy_within_2e-3"]:
         raise AssertionError(
             "QVQ LR/non-LR regression failed accuracy gate: maximum absolute error exceeds 2e-3"
@@ -364,10 +366,12 @@ def _print_regression_summary(report: dict) -> None:
     summary = report["regression_summary"]
     if not summary["cases"]:
         return
+    production_geomean = summary["production_geomean_speedup_vs_non_lr"]
+    production_geomean_text = "n/a" if production_geomean is None else f"{production_geomean:.3f}x"
     print(
         "regression summary: "
         f"cases={summary['cases']} production_cases={summary['production_cases']} "
-        f"production_geomean={summary['production_geomean_speedup_vs_non_lr']:.3f}x "
+        f"production_geomean={production_geomean_text} "
         f"all_paths_geomean={summary['geomean_speedup_vs_non_lr']:.3f}x "
         f"min={summary['min_speedup_vs_non_lr']:.3f}x "
         f">=1.5x={summary['cases_at_least_1.5x']} "
@@ -697,7 +701,7 @@ def _worker(args: argparse.Namespace) -> None:
         "rows": all_rows,
     }
     payload.update(_regression_report(all_rows, min_geomean_speedup=args.min_geomean_speedup))
-    if not args.worker:
+    if not args.worker and not args.no_non_lr:
         _enforce_regression_report(payload, min_geomean_speedup=args.min_geomean_speedup)
     _write_json(result_path, payload)
     _write_json(progress_path, {**payload, "state": "complete", "completed_rows": len(all_rows)})
@@ -803,7 +807,8 @@ def _all_workers(args: argparse.Namespace) -> None:
     _print_table(final_rows)
     report = _regression_report(final_rows, min_geomean_speedup=args.min_geomean_speedup)
     _verify_source(source_commit, source_fingerprint, phase="during sweep completion")
-    _enforce_regression_report(report, min_geomean_speedup=args.min_geomean_speedup)
+    if not args.no_non_lr:
+        _enforce_regression_report(report, min_geomean_speedup=args.min_geomean_speedup)
     _write_json(args.out_dir / "summary.json", {
         "label": "qvq_v2b2_p32_lr_cuda_regression",
         "commit": source_commit,
