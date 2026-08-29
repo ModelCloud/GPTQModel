@@ -189,6 +189,26 @@ def test_lr32_cuda_validates_split_count_for_empty_batches():
         )
 
 
+def test_lr32_cuda_rejects_row_grid_overflow_before_launch():
+    # NVIDIA devices expose 65,535 blocks in grid Y; ROWS=32 above M=16.
+    m = 65_535 * 32 + 1
+    x = torch.empty((m, 32), device="cuda", dtype=torch.float16)
+    trellis = torch.zeros((1, 8), device="cuda", dtype=torch.int32)
+    bank_ids = torch.zeros((1,), device="cuda", dtype=torch.uint8)
+
+    with pytest.raises(RuntimeError, match="CUDA grid-Y blocks"):
+        qvq_cuda_gemv(
+            x,
+            trellis,
+            1.0,
+            out_features=8,
+            output_fp32=True,
+            bank_ids=bank_ids,
+            v2b2_p32_lr=True,
+            bank_alt_id=1,
+        )
+
+
 def test_lr32_cuda_rejects_non_lr_layouts():
     x = torch.zeros((1, 32), device="cuda", dtype=torch.float16)
     trellis = torch.zeros((1, 8), device="cuda", dtype=torch.int32)

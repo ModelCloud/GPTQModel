@@ -42,6 +42,7 @@ struct QvqCudaDeviceConfig {
   int major;
   int minor;
   int sm_count;
+  int max_grid_y;
 };
 
 std::array<QvqCudaDeviceConfig, kMaxCachedCudaDevices> qvq_cuda_device_configs{};
@@ -55,7 +56,11 @@ const QvqCudaDeviceConfig& qvq_cuda_device_config(int device) {
   std::call_once(qvq_cuda_device_config_once[device], [device]() {
     cudaDeviceProp properties{};
     C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
-    qvq_cuda_device_configs[device] = {properties.major, properties.minor, properties.multiProcessorCount};
+    qvq_cuda_device_configs[device] = {
+        properties.major,
+        properties.minor,
+        properties.multiProcessorCount,
+        properties.maxGridSize[1]};
   });
   return qvq_cuda_device_configs[device];
 }
@@ -1696,6 +1701,14 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   const c10::cuda::CUDAGuard device_guard(input.device());
   const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
   TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
+  const int rows = qvq_rows_for_m(static_cast<int>(size_m));
+  const int64_t row_blocks = (size_m + rows - 1) / rows;
+  TORCH_CHECK(
+      row_blocks <= device_config.max_grid_y,
+      "LR32 input row count requires ",
+      row_blocks,
+      " CUDA grid-Y blocks, exceeding the device limit of ",
+      device_config.max_grid_y);
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
