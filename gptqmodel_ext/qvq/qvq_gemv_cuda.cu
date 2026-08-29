@@ -1560,6 +1560,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       static_cast<int>(size_k),
       static_cast<int>(out_features),
       device_config);
+  const int64_t k_tiles = size_k / kLocalRingTileRows;
   const int split_count =
       split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
   TORCH_CHECK(split_count >= 1 && split_count <= k_tiles && split_count <= 64,
