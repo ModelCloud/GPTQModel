@@ -6,8 +6,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 
 import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
