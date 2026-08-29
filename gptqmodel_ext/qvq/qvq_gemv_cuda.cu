@@ -1007,8 +1007,10 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
 #pragma unroll
           for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
             if (n_tile_base + sub < n_tiles && k_local < kLocalRingSteps / 2) {
-              const uint32_t first = planar_transition<TransitionBits>(packed_words[u][sub], k_local);
-              const uint32_t second = planar_transition<TransitionBits>(packed_words[u][sub], k_local + 8);
+              const uint32_t first = planar_transition<TransitionBits>(
+                  packed_words[u][sub], ring * kLocalRingSteps + k_local);
+              const uint32_t second = planar_transition<TransitionBits>(
+                  packed_words[u][sub], ring * kLocalRingSteps + k_local + 8);
               predecoded_edges[u][sub][ring][k_local] = first | (second << 16);
             }
           }
