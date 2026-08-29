@@ -34,7 +34,6 @@ from ...utils.qvq_cuda import (
 )
 from . import BaseQuantLinear, FormatSupport
 
-
 _QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id")
 # The real Llama/Qwen transforms that exposed delayed-normalization overflow
 # start at this width. Preserve the original, slightly more accurate FP16
@@ -871,11 +870,11 @@ class QVQLinear(BaseQuantLinear):
 
             # Native GEMV intentionally supports FP16/BF16 inputs. FP32 has no
             # packed native specialization and remains on the dense reference
-            # path; BF16 reaches native GEMV below.
+            # path; BF16 reaches native GEMV below. LR32 uses a dedicated CUDA
+            # K32 x N8 decoder selected by qvq_cuda_gemv.
             if (
                 self.trellis_window != 16
                 or self.dual_v2
-                or self.v2b2_p32_lr
                 or x.dtype == torch.float32
             ):
                 return self._reference_inner_forward(x)
@@ -983,6 +982,7 @@ class QVQLinear(BaseQuantLinear):
                 bank_ids=cuda_bank_ids,
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
+                v2b2_p32_lr=self.v2b2_p32_lr,
                 bank_alt_id=cuda_bank_alt_id,
             )
         if x.device.type == "cpu":
