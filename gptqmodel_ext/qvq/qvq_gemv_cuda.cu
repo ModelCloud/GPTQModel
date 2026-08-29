@@ -994,7 +994,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
               input4_base +
               ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) *
                    static_cast<int>(sizeof(Scalar)) / 16) +
-               vec);
+              vec;
           if constexpr (kAsyncStaging) {
             __pipeline_memcpy_async(input4 + index, src, 16);
           } else {
