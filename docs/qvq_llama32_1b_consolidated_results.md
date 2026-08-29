@@ -655,11 +655,23 @@ Mini-GSM evaluation. Queue manifest:
 
 | # | Arm ID | Allocation | GPU | Effective BPW | State |
 | ---: | --- | --- | ---: | ---: | --- |
-| 1 | `5b847c` | Up4 L7 + L8 + L12 | 0 | 3.186961 | running |
+| 1 | `5b847c` | Up4 L7 + L8 + L12 | 0 | 3.186961 | evaluation complete |
 | 2 | `611404` | Up4 L6 + L7 + L8 | 1 | 3.186961 | running |
 | 3 | `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 2 | 3.186961 | running |
 | 4 | `228564` | Up4 L6 + L8; Down3.5 L8 | 3 | 3.186961 | running |
 | 5 | `370c3a` | Up4 L8 + L11 + L12 | 4 | 3.186961 | running |
-| 6 | `0ea650` | Up4 L6 + L8 + L11 | 5 | 3.186961 | running |
+| 6 | `0ea650` | Up4 L6 + L8 + L11 | 5 | 3.186961 | evaluation complete |
 | 7 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 6 | 3.195582 | running |
 | 8 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 7 | 3.195582 | running |
+
+### Wave-9 completed evaluations (partial, 2026-08-29 UTC)
+
+Two of the eight Wave-9 arms have completed both required held-out evaluations;
+the remaining six are still running. The queue manifest records the full
+micro-math metrics (including answer-logprob and answer-margin deltas):
+`docs/experiments/frontier_wave9_queue_20260829.json`.
+
+| Arm ID | Allocation | Effective BPW | GSM8K Platinum | Mini exact | Answer-logprob Δ | Answer-margin Δ | State |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `5b847c` | Up4 L7 + L8 + L12 | 3.186961 | **529/1209 (43.7552%)** | 6.25% | +0.290639 | −0.265506 | evaluation complete |
+| `0ea650` | Up4 L6 + L8 + L11 | 3.186961 | **525/1209 (43.4243%)** | 6.25% | +0.387690 | −0.225125 | evaluation complete |
