@@ -824,7 +824,13 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
 // warp owns one logical N8 column, and its 32 lanes own the K32 values. This
 // preserves the ring-local state order while making the reduction a single
 // warp shuffle instead of a cross-warp shared-memory reduction.
-template <typename Scalar, typename OutputScalar, int ROWS, int TransitionBits = 0, bool SplitK = false>
+template <
+    typename Scalar,
+    typename OutputScalar,
+    int ROWS,
+    int TransitionBits = 0,
+    bool SplitK = false,
+    int OutputTilesPerBlock = 1>
 __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -837,9 +843,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     int size_n,
     int split_count,
     int transition_bits,
-    int bank_alt_id) {
+  int bank_alt_id) {
   constexpr int kBatchTiles = 8;
-  constexpr int kOutputTilesPerBlock = 2;
+  constexpr int kOutputTilesPerBlock = OutputTilesPerBlock;
   constexpr int kMaxWords = 32;
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kInputVecsPerRow = kLocalRingTileRows * static_cast<int>(sizeof(Scalar)) / sizeof(uint4);
@@ -1451,8 +1457,8 @@ void launch_qvq_gemm_wmma_splitk(
 // rate used by the layout's first deployment. Other legal rates use the same
 // kernel with runtime edge extraction, avoiding a large Cartesian product of
 // LR row/rate/dtype instantiations while retaining one exact implementation.
-template <typename Scalar, typename OutputScalar, bool SplitK>
-void launch_qvq_local_ring_gemv(
+template <typename Scalar, typename OutputScalar, bool SplitK, int OutputTilesPerBlock>
+void launch_qvq_local_ring_gemv_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
     const at::Tensor& bank_ids,
@@ -1465,7 +1471,8 @@ void launch_qvq_local_ring_gemv(
     cudaStream_t stream) {
   const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
   const dim3 grid(
-      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + 1) / 2),
+      static_cast<unsigned int>(
+          (output.size(1) / kLocalRingTileColumns + OutputTilesPerBlock - 1) / OutputTilesPerBlock),
       static_cast<unsigned int>((input.size(0) + rows - 1) / rows),
       static_cast<unsigned int>(SplitK ? split_count : 1));
   const Scalar* input_ptr = reinterpret_cast<const Scalar*>(input.const_data_ptr());
@@ -1476,7 +1483,8 @@ void launch_qvq_local_ring_gemv(
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
 
 #define QVQ_LR_LAUNCH_TB(ROWS, TB)                                                                                 \
-  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK><<<grid, kThreads, 0, stream>>>(              \
+  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock>                         \
+      <<<grid, kThreads, 0, stream>>>(                                                                             \
       input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, partial_ptr,                                  \
       static_cast<int>(input.size(0)), static_cast<int>(input.size(1)), static_cast<int>(output.size(1)),          \
       split_count, transition_bits, bank_alt_id)
@@ -1514,6 +1522,48 @@ void launch_qvq_local_ring_gemv(
     const int reduction_blocks = static_cast<int>((output_values + kThreads - 1) / kThreads);
     qvq_reduce_splitk_kernel<OutputScalar><<<reduction_blocks, kThreads, 0, stream>>>(
         partial_ptr, output_ptr, static_cast<int>(output.size(0)), static_cast<int>(output.size(1)), split_count);
+  }
+}
+
+// Two adjacent N8 tiles amortize the LR32 input staging and launch overhead
+// for M=1. For larger row blocks the second accumulator tile increases
+// register pressure enough to regress throughput, so retain one tile/block.
+template <typename Scalar, typename OutputScalar, bool SplitK>
+void launch_qvq_local_ring_gemv(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& bank_ids,
+    const at::Tensor& levels,
+    at::Tensor* partial_output,
+    at::Tensor& output,
+    int transition_bits,
+    int split_count,
+    int bank_alt_id,
+    cudaStream_t stream) {
+  if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1) {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2>(
+        input,
+        trellis,
+        bank_ids,
+        levels,
+        partial_output,
+        output,
+        transition_bits,
+        split_count,
+        bank_alt_id,
+        stream);
+  } else {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 1>(
+        input,
+        trellis,
+        bank_ids,
+        levels,
+        partial_output,
+        output,
+        transition_bits,
+        split_count,
+        bank_alt_id,
+        stream);
   }
 }
 
