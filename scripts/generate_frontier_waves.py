@@ -27,22 +27,36 @@ BASE = {
     "offload_to_disk": False,
 }
 
-def emit(name, bits, dynamic, seed=0):
+def emit(name, bits, dynamic, seed=0, defaults=None):
     cfg = deepcopy(BASE)
     cfg["bits"] = bits
     cfg["yaqa"]["seed"] = seed
     # The resolver is first-match-wins: arm-specific rules must precede
     # broad defaults or the special allocation is silently shadowed.
     entries = list(dynamic)
-    if bits == 2:
-        entries.extend([
+    if defaults is None and bits == 2:
+        defaults = [
             ("[0-9]+", "self_attn.q_proj|self_attn.k_proj", 2.5),
             ("[0-9]+", "self_attn.v_proj|self_attn.o_proj", 3.5),
             ("[0-9]+", "mlp.gate_proj|mlp.down_proj", 3.0),
             ("[0-9]+", "mlp.up_proj", 3.5),
-        ])
-    cfg["dynamic"] = {"+:^model\\.layers\\.%s\\.(%s)$" % (pat, mod): ({"bits": rate, **({"format": "qvq"} if rate > 3.5 else {})})
-                      for pat, mod, rate in entries}
+        ]
+    if defaults:
+        entries.extend(defaults)
+    # Preserve first-match semantics even when a special rule has the same
+    # regex as a broad fallback (for example V4-all overriding the anchor's
+    # V3.5 rule).  A dict comprehension would silently overwrite the special
+    # value while retaining the original insertion position.
+    dynamic_map = {}
+    for pat, mod, rate in entries:
+        key = "+:^model\\.layers\\.%s\\.(%s)$" % (pat, mod)
+        if key in dynamic_map:
+            continue
+        dynamic_map[key] = {
+            "bits": rate,
+            **({"format": "qvq"} if rate > 3.5 else {}),
+        }
+    cfg["dynamic"] = dynamic_map
     path = OUT / ("llama32_1b_frontier_" + name + ".json")
     path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     return str(path.relative_to(Path.cwd()))
@@ -132,16 +146,111 @@ def main():
             ("[0-9]+", "self_attn.o_proj", 4),
         ]),
     ]
+    wave4_defaults = [
+        ("[0-9]+", "self_attn.q_proj", 2),
+        ("[0-9]+", "self_attn.k_proj", 2.5),
+        ("[0-9]+", "self_attn.v_proj", 3.5),
+        ("[0-9]+", "self_attn.o_proj", 4),
+        ("[0-9]+", "mlp.gate_proj|mlp.down_proj", 3),
+        ("[0-9]+", "mlp.up_proj", 3.5),
+    ]
+    wave4 = [
+        ("w4_anchor_seed1", 2, [], wave4_defaults),
+        ("w4_anchor_v4_all", 2, [("[0-9]+", "self_attn.v_proj", 4)], wave4_defaults),
+        ("w4_anchor_up4_l6", 2, [("6", "mlp.up_proj", 4)], wave4_defaults),
+        ("w4_anchor_up4_l6_7", 2, [("(6|7)", "mlp.up_proj", 4)], wave4_defaults),
+        ("w4_anchor_v4_up4_l6", 2, [
+            ("[0-9]+", "self_attn.v_proj", 4),
+            ("6", "mlp.up_proj", 4),
+        ], wave4_defaults),
+        ("w4_anchor_up4_l6_8", 2, [("(6|7|8)", "mlp.up_proj", 4)], wave4_defaults),
+        ("w4_anchor_up4_l6_9", 2, [("(6|7|8|9)", "mlp.up_proj", 4)], wave4_defaults),
+        ("w4_anchor_v4_up4_l6_8", 2, [
+            ("[0-9]+", "self_attn.v_proj", 4),
+            ("(6|7|8)", "mlp.up_proj", 4),
+        ], wave4_defaults),
+    ]
+    wave5_defaults = wave4_defaults
+    wave5 = [
+        ("w5_anchor_up4_l9", 2, [("9", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l6_l9", 2, [("(6|9)", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l7_l8", 2, [("(7|8)", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l6_l8", 2, [("(6|8)", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l6_l10", 2, [("(6|10)", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l5_l9", 2, [("(5|9)", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l6_l9_l12", 2, [("(6|9|12)", "mlp.up_proj", 4)], wave5_defaults),
+        ("w5_anchor_up4_l6_l9_l12_l15", 2, [("(6|9|12|15)", "mlp.up_proj", 4)], wave5_defaults),
+    ]
+    wave6_defaults = wave4_defaults
+    wave6 = [
+        ("w6_anchor_up4_l8", 2, [("8", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l5_l8", 2, [("(5|8)", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l8_l9", 2, [("(8|9)", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l8_l10", 2, [("(8|10)", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l8_l12", 2, [("(8|12)", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l8_l15", 2, [("(8|15)", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l6_l8_l9", 2, [("(6|8|9)", "mlp.up_proj", 4)], wave6_defaults),
+        ("w6_anchor_up4_l6_l8_l12", 2, [("(6|8|12)", "mlp.up_proj", 4)], wave6_defaults),
+    ]
+    # Full single-layer Up4 sensitivity sweep from the corrected W3.2 anchor.
+    # Each arm changes exactly one Up projection (W3.5 -> W4), so all arms
+    # have the same effective payload budget and are directly comparable.
+    wave7_defaults = wave4_defaults
+    wave7 = [
+        (f"w7_anchor_up4_l{layer}", 2, [(str(layer), "mlp.up_proj", 4)], wave7_defaults)
+        for layer in range(16)
+    ]
+    # Pair-interaction mapping from the corrected W3.2 anchor.  Every arm
+    # promotes exactly two Up projections from W3.5 to W4 so the payload budget
+    # is matched at 3.178340 BPW; repeats are deliberate positive/negative
+    # interaction controls.
+    wave8_defaults = wave4_defaults
+    wave8_pairs = [
+        ("l5_l12", "5|12"), ("l5_l15", "5|15"), ("l12_l15", "12|15"),
+        ("l9_l12", "9|12"), ("l9_l15", "9|15"), ("l6_l8", "6|8"),
+        ("l8_l12", "8|12"), ("l5_l6", "5|6"), ("l6_l12", "6|12"),
+        ("l6_l15", "6|15"), ("l5_l7", "5|7"), ("l7_l12", "7|12"),
+        ("l7_l15", "7|15"), ("l4_l5", "4|5"), ("l4_l12", "4|12"),
+        ("l4_l8", "4|8"),
+    ]
+    wave8 = [
+        (f"w8_anchor_up4_{suffix}", 2, [(f"({layers})", "mlp.up_proj", 4)], wave8_defaults)
+        for suffix, layers in wave8_pairs
+    ]
+    # Local marginal sweep around the two strongest Wave-8 roots.  The first
+    # four arms add one Up4 or Down3.5 promotion (+0.008621 BPW); the final
+    # four test the corresponding two-module Down upgrades (+0.017241 BPW).
+    wave9_defaults = wave4_defaults
+    wave9 = [
+        ("w9_anchor_up4_l7_l8_l12", 2, [("(7|8|12)", "mlp.up_proj", 4)], wave9_defaults),
+        ("w9_anchor_up4_l6_l7_l8", 2, [("(6|7|8)", "mlp.up_proj", 4)], wave9_defaults),
+        ("w9_anchor_up4_l8_l12_down35_l12", 2, [
+            ("(8|12)", "mlp.up_proj", 4), ("12", "mlp.down_proj", 3.5)
+        ], wave9_defaults),
+        ("w9_anchor_up4_l6_l8_down35_l8", 2, [
+            ("(6|8)", "mlp.up_proj", 4), ("8", "mlp.down_proj", 3.5)
+        ], wave9_defaults),
+        ("w9_anchor_up4_l8_l11_l12", 2, [("(8|11|12)", "mlp.up_proj", 4)], wave9_defaults),
+        ("w9_anchor_up4_l6_l8_l11", 2, [("(6|8|11)", "mlp.up_proj", 4)], wave9_defaults),
+        ("w9_anchor_up4_l8_l12_down35_l8_l12", 2, [
+            ("(8|12)", "mlp.up_proj", 4), ("(8|12)", "mlp.down_proj", 3.5)
+        ], wave9_defaults),
+        ("w9_anchor_up4_l6_l8_down35_l6_l8", 2, [
+            ("(6|8)", "mlp.up_proj", 4), ("(6|8)", "mlp.down_proj", 3.5)
+        ], wave9_defaults),
+    ]
     # Dynamic patterns are converted below to the repository's full module regex form.
-    for wave, arms in ((1, wave1), (2, wave2), (3, wave3)):
+    for wave, arms in ((1, wave1), (2, wave2), (3, wave3), (4, wave4), (5, wave5), (6, wave6), (7, wave7), (8, wave8), (9, wave9)):
         manifest = []
         seen = {}
-        for name, bits, entries in arms:
+        for spec in arms:
+            name, bits, entries = spec[:3]
+            defaults = spec[3] if len(spec) > 3 else None
             dynamic = []
             for layer_pat, module, rate in entries:
                 dynamic.append((layer_pat, module, rate))
             seed = 1 if name.endswith("seed1") else 0
-            rel = emit(name, bits, dynamic, seed=seed)
+            rel = emit(name, bits, dynamic, seed=seed, defaults=defaults)
             resolved_fp, effective_fp = resolved_fingerprints(OUT / Path(rel).name)
             # Duplicate effective maps are almost always a shadowed rule bug.
             # The seed1 arm is an intentional same-map reproducibility control.

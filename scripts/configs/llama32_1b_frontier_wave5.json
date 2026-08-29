@@ -1,0 +1,69 @@
+{
+  "wave": 5,
+  "arms": [
+    {
+      "id": "w5_anchor_up4_l9",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l9.json",
+      "wave": 5,
+      "resolved_fingerprint": "d2d899910507",
+      "effective_fingerprint": "9579345459b7",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l6_l9",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l6_l9.json",
+      "wave": 5,
+      "resolved_fingerprint": "b0112f3d76b3",
+      "effective_fingerprint": "1d5180f9fa73",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l7_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l7_l8.json",
+      "wave": 5,
+      "resolved_fingerprint": "171c18c40ee4",
+      "effective_fingerprint": "6087aa9f6117",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l6_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l6_l8.json",
+      "wave": 5,
+      "resolved_fingerprint": "7f0ccfa0cac0",
+      "effective_fingerprint": "3b176cc358bc",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l6_l10",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l6_l10.json",
+      "wave": 5,
+      "resolved_fingerprint": "928d6fdfd9a2",
+      "effective_fingerprint": "2c0005b19f83",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l5_l9",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l5_l9.json",
+      "wave": 5,
+      "resolved_fingerprint": "7995405c9427",
+      "effective_fingerprint": "86ea4e2fbe53",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l6_l9_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l6_l9_l12.json",
+      "wave": 5,
+      "resolved_fingerprint": "54680d30f5aa",
+      "effective_fingerprint": "b1630acac0a2",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w5_anchor_up4_l6_l9_l12_l15",
+      "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l6_l9_l12_l15.json",
+      "wave": 5,
+      "resolved_fingerprint": "fd2590220052",
+      "effective_fingerprint": "4212948a708a",
+      "yaqa_seed": 0
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "wave": 9,
+  "arms": [
+    {
+      "id": "w9_anchor_up4_l7_l8_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l7_l8_l12.json",
+      "wave": 9,
+      "resolved_fingerprint": "ea6d6db1e028",
+      "effective_fingerprint": "62b2dd165e54",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l6_l7_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l6_l7_l8.json",
+      "wave": 9,
+      "resolved_fingerprint": "42763bfcfbf3",
+      "effective_fingerprint": "08eeb352c83b",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l8_l12_down35_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l8_l12_down35_l12.json",
+      "wave": 9,
+      "resolved_fingerprint": "876c11ebc048",
+      "effective_fingerprint": "429e4babcfbf",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l6_l8_down35_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l6_l8_down35_l8.json",
+      "wave": 9,
+      "resolved_fingerprint": "cba53fb676ba",
+      "effective_fingerprint": "09562e5308c6",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l8_l11_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l8_l11_l12.json",
+      "wave": 9,
+      "resolved_fingerprint": "56fca77669f0",
+      "effective_fingerprint": "411b918701b8",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l6_l8_l11",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l6_l8_l11.json",
+      "wave": 9,
+      "resolved_fingerprint": "d37d25694a2a",
+      "effective_fingerprint": "a0fbafe07227",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l8_l12_down35_l8_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l8_l12_down35_l8_l12.json",
+      "wave": 9,
+      "resolved_fingerprint": "1a74ecd8d1fe",
+      "effective_fingerprint": "4cce92579ea1",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w9_anchor_up4_l6_l8_down35_l6_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l6_l8_down35_l6_l8.json",
+      "wave": 9,
+      "resolved_fingerprint": "69cb7464a355",
+      "effective_fingerprint": "83d5eb20b161",
+      "yaqa_seed": 0
+    }
+  ]
+}

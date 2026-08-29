@@ -1,0 +1,69 @@
+{
+  "wave": 6,
+  "arms": [
+    {
+      "id": "w6_anchor_up4_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l8.json",
+      "wave": 6,
+      "resolved_fingerprint": "62b565f0352c",
+      "effective_fingerprint": "646ab151be54",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l5_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l5_l8.json",
+      "wave": 6,
+      "resolved_fingerprint": "50ddc724c034",
+      "effective_fingerprint": "e91bbad6569c",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l8_l9",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l8_l9.json",
+      "wave": 6,
+      "resolved_fingerprint": "d6dca32008a2",
+      "effective_fingerprint": "85024b6082c5",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l8_l10",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l8_l10.json",
+      "wave": 6,
+      "resolved_fingerprint": "c5f4005de9a9",
+      "effective_fingerprint": "38e675d42699",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l8_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l8_l12.json",
+      "wave": 6,
+      "resolved_fingerprint": "a4beedfee595",
+      "effective_fingerprint": "5fe37f86645b",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l8_l15",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l8_l15.json",
+      "wave": 6,
+      "resolved_fingerprint": "85b82cc9b36f",
+      "effective_fingerprint": "c5866d5c95cb",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l6_l8_l9",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l6_l8_l9.json",
+      "wave": 6,
+      "resolved_fingerprint": "668ac3e6c8a6",
+      "effective_fingerprint": "9aaf1d0d13c9",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w6_anchor_up4_l6_l8_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w6_anchor_up4_l6_l8_l12.json",
+      "wave": 6,
+      "resolved_fingerprint": "397ce137bf54",
+      "effective_fingerprint": "7c3c332aab9a",
+      "yaqa_seed": 0
+    }
+  ]
+}
