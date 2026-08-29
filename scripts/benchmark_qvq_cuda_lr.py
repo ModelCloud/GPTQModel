@@ -134,13 +134,28 @@ def _rows_for_m(m: int) -> int:
     return 1 if m <= 1 else 8 if m <= 8 else 16 if m <= 16 else 32
 
 
-def _split_count(m: int, k: int, n: int, sms: int) -> int:
+def _split_count(m: int, k: int, n: int, sms: int, major: int) -> int:
     rows = _rows_for_m(m)
     base_blocks = (n // 8) * ((m + rows - 1) // rows)
     k_tiles = k // 32
-    if base_blocks >= 384:
-        return 1
-    return min((sms * 6 + base_blocks - 1) // base_blocks, k_tiles, 64)
+    if major >= 12:
+        if rows == 1:
+            split_count = 4 if base_blocks < 64 or base_blocks >= 384 else 16
+        elif base_blocks < 64:
+            split_count = 32 if rows <= 8 else 8
+        elif base_blocks < 384:
+            split_count = 16
+        else:
+            split_count = 1
+    elif base_blocks >= 384:
+        split_count = 4 if rows == 1 and k_tiles >= 128 else 1
+    elif rows == 1:
+        split_count = 16 if base_blocks < 64 else 8
+    elif base_blocks < 64:
+        split_count = 8
+    else:
+        split_count = 4
+    return max(1, min(split_count, k_tiles, 64))
 
 
 def _legacy_split_count(m: int, k: int, n: int, sms: int) -> int:
@@ -316,7 +331,13 @@ def _worker(args: argparse.Namespace) -> None:
                         device="cuda", dtype=dtype
                     )
                     reference = x.float() @ dense.float()
-                    automatic_split_count = _split_count(m, k, n, properties.multi_processor_count)
+                    automatic_split_count = _split_count(
+                        m,
+                        k,
+                        n,
+                        properties.multi_processor_count,
+                        properties.major,
+                    )
                     common = {
                         "physical_gpu": args.physical_gpu,
                         "pci_bus_id": hardware["pci.bus_id"],

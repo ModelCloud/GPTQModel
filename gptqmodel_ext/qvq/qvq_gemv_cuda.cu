@@ -12,9 +12,11 @@
 #include <torch/library.h>
 #include <torch/types.h>
 
+#include <array>
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 
 namespace {
 
@@ -34,6 +36,29 @@ constexpr bool kQvqDebugDisableVecStaging = false;
 constexpr int kPgc16LevelCount = 256;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
+constexpr int kMaxCachedCudaDevices = 64;
+
+struct QvqCudaDeviceConfig {
+  int major;
+  int minor;
+  int sm_count;
+};
+
+std::array<QvqCudaDeviceConfig, kMaxCachedCudaDevices> qvq_cuda_device_configs{};
+std::array<std::once_flag, kMaxCachedCudaDevices> qvq_cuda_device_config_once;
+
+const QvqCudaDeviceConfig& qvq_cuda_device_config(int device) {
+  TORCH_CHECK(
+      device >= 0 && device < kMaxCachedCudaDevices,
+      "CUDA device ordinal is outside the LR32 config cache: ",
+      device);
+  std::call_once(qvq_cuda_device_config_once[device], [device]() {
+    cudaDeviceProp properties{};
+    C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
+    qvq_cuda_device_configs[device] = {properties.major, properties.minor, properties.multiProcessorCount};
+  });
+  return qvq_cuda_device_configs[device];
+}
 
 template <typename Scalar>
 struct ScalarTraits;
@@ -1093,6 +1118,45 @@ constexpr int qvq_rows_for_m(int m) {
   return m <= 1 ? 1 : (m <= 8 ? 8 : (m <= 16 ? 16 : kRowsPerBlock));
 }
 
+int qvq_local_ring_split_count(
+    int size_m,
+    int size_k,
+    int size_n,
+    const QvqCudaDeviceConfig& device_config) {
+  const int rows = qvq_rows_for_m(size_m);
+  const int64_t base_blocks =
+      static_cast<int64_t>(size_n / kLocalRingTileColumns) * ((size_m + rows - 1) / rows);
+  const int k_tiles = size_k / kLocalRingTileRows;
+  int split_count;
+  if (device_config.major >= 12) {
+    // Blackwell's one-row scheduler benefits from a few independent K waves
+    // even when N already exposes many resident blocks. For wider row
+    // specializations, keep the split count proportional to the available
+    // blocks and avoid the reduction overhead once N is saturated.
+    if (rows == 1) {
+      split_count = base_blocks < 64 ? 4 : base_blocks < 384 ? 16 : 4;
+    } else if (base_blocks < 64) {
+      split_count = rows <= 8 ? 32 : 8;
+    } else if (base_blocks < 384) {
+      split_count = 16;
+    } else {
+      split_count = 1;
+    }
+  } else if (base_blocks >= 384) {
+    // Ada reaches full residency with one block per N8 tile. The larger
+    // K-width MLP shape is the exception for M=1, where four K waves hide
+    // the long local-ring recurrence.
+    split_count = rows == 1 && k_tiles >= 128 ? 4 : 1;
+  } else if (rows == 1) {
+    split_count = base_blocks < 64 ? 16 : 8;
+  } else if (base_blocks < 64) {
+    split_count = rows <= 8 ? 8 : 8;
+  } else {
+    split_count = 4;
+  }
+  return std::max(1, std::min(split_count, std::min(k_tiles, 64)));
+}
+
 // Transition widths that receive a fully specialized decode instantiation.
 constexpr bool qvq_tb_specialized_v2(int tb) { return tb >= 2 && tb <= 16; }
 constexpr bool qvq_tb_specialized_v4(int tb) {
@@ -1484,22 +1548,20 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
-  cudaDeviceProp properties{};
-  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
-  TORCH_CHECK(properties.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
+  const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
+  TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  const int rows = qvq_rows_for_m(static_cast<int>(size_m));
-  const int64_t base_blocks = (out_features / kLocalRingTileColumns) *
-      ((size_m + rows - 1) / rows);
-  const int64_t target_blocks = static_cast<int64_t>(properties.multiProcessorCount) * 6;
-  const int64_t k_tiles = size_k / kLocalRingTileRows;
   TORCH_CHECK(split_count_override >= 0, "LR32 split_count must be non-negative");
-  const int automatic_split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
-      std::min((target_blocks + base_blocks - 1) / base_blocks, k_tiles), static_cast<int64_t>(64)));
-  const int split_count = split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
+  const int automatic_split_count = qvq_local_ring_split_count(
+      static_cast<int>(size_m),
+      static_cast<int>(size_k),
+      static_cast<int>(out_features),
+      device_config);
+  const int split_count =
+      split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
   TORCH_CHECK(split_count >= 1 && split_count <= k_tiles && split_count <= 64,
               "LR32 split_count must be in [1, min(K/32, 64)]");
 
