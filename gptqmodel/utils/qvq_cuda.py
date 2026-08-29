@@ -763,6 +763,10 @@ def qvq_cuda_gemv(
     lr_split_count = _integer_argument("lr_split_count", lr_split_count)
     if lr_split_count < 0:
         raise ValueError("QVQ CUDA lr_split_count must be non-negative")
+    if lr_split_count > 64:
+        raise ValueError("QVQ CUDA lr_split_count must be in [1, 64] or 0 for automatic selection")
+    if lr_split_count and not v2b2_p32_lr:
+        raise ValueError("QVQ CUDA lr_split_count is valid only for V2B2-P32-LR")
     if v2b2_p32 or v2b2_p32_lr:
         if not 1 <= bank_alt_id <= 3:
             raise ValueError("QVQ CUDA V2B2-P32 bank_alt_id must be in [1, 3]")
@@ -814,8 +818,6 @@ def qvq_cuda_gemv(
         return _qvq_cuda_lr_op()(
             x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_alt_id, lr_split_count
         )
-    if lr_split_count:
-        raise ValueError("QVQ CUDA lr_split_count is valid only for V2B2-P32-LR")
     op = _qvq_cuda_op()
     if vector_size == 4:
         return torch.ops.gptqmodel_qvq.gemv_v4(

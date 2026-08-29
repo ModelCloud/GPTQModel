@@ -130,7 +130,7 @@ def test_lr32_cuda_supports_bfloat16_typed_output():
 
 def test_lr32_cuda_rejects_split_count_before_integer_narrowing():
     x, trellis, bank_ids, _ = _lr_case(1.0, m=1, k=64, n=8, seed=20260833)
-    with pytest.raises(RuntimeError, match="split_count must be in"):
+    with pytest.raises(ValueError, match=r"in \[1, 64\]"):
         qvq_cuda_gemv(
             x,
             trellis,
@@ -141,6 +141,35 @@ def test_lr32_cuda_rejects_split_count_before_integer_narrowing():
             v2b2_p32_lr=True,
             bank_alt_id=3,
             lr_split_count=2**32 + 1,
+        )
+
+
+def test_lr32_cuda_validates_split_count_for_empty_batches():
+    x, trellis, bank_ids, _ = _lr_case(1.0, m=0, k=64, n=8, seed=20260834)
+    with pytest.raises(ValueError, match=r"in \[1, 64\]"):
+        qvq_cuda_gemv(
+            x,
+            trellis,
+            1.0,
+            out_features=8,
+            output_fp32=True,
+            bank_ids=bank_ids,
+            v2b2_p32_lr=True,
+            bank_alt_id=3,
+            lr_split_count=65,
+        )
+
+    with pytest.raises(ValueError, match="valid only for V2B2-P32-LR"):
+        qvq_cuda_gemv(
+            torch.zeros((0, 16), device="cuda", dtype=torch.float16),
+            torch.zeros((1, 8), device="cuda", dtype=torch.int32),
+            1.0,
+            out_features=16,
+            output_fp32=True,
+            v2b2_p32=True,
+            bank_ids=torch.zeros((1,), device="cuda", dtype=torch.uint8),
+            bank_alt_id=3,
+            lr_split_count=1,
         )
 
 
