@@ -209,6 +209,23 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   constexpr int total_edges = kLocalRingSteps;
   constexpr int edge_mask = total_edges - 1;
   constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+  // Blackwell benefits from sharing the overlapping ring edges through the
+  // sixteen pair-leader lanes. Ada's dynamic shuffle path is substantially
+  // slower, so the architecture guard keeps SM89 on the original decoder.
+  constexpr unsigned kPairLeaderMask = 0x55555555u;
+  const uint32_t transition = planar_transition<TransitionBits>(
+      words, ring * total_edges + pair_in_ring);
+  uint32_t state = 0;
+#pragma unroll
+  for (int j = 0; j < edge_count; ++j) {
+    const int source_pair =
+        (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
+    const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
+    state = ((state << TransitionBits) | edge) & 0xffffu;
+  }
+  return state;
+#else
   const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
   uint32_t state = 0;
 #pragma unroll
@@ -218,6 +235,7 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
              planar_transition<TransitionBits>(words, ring * total_edges + edge)) & 0xffffu;
   }
   return state;
+#endif
 }
 
 __device__ __noinline__ uint32_t qvq_local_ring_state_runtime(
