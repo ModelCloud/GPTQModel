@@ -16,13 +16,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from gptqmodel.quantization.qvq import (
-    QVQ_V2B2_P32_LR_RINGS_PER_TILE,
     QVQ_V2B2_P32_LR_RING_STEPS,
+    QVQ_V2B2_P32_LR_RINGS_PER_TILE,
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
-    reconstruct_local_ring_inner_weight,
-    reconstruct_qvq_inner_weight,
 )
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
