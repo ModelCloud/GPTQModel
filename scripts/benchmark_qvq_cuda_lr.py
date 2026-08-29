@@ -38,7 +38,7 @@ DEFAULT_SHAPES = (
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true", help="Launch one UUID-pinned worker for every listed GPU.")
-    parser.add_argument("--gpus", type=int, nargs="+", default=list(range(9)))
+    parser.add_argument("--gpus", type=int, nargs="+", default=None)
     parser.add_argument("--physical-gpu", type=int)
     parser.add_argument("--bits", type=float, nargs="+", default=[2.0, 2.5, 3.0, 3.5])
     parser.add_argument("--dtype", choices=("float16", "bfloat16"), nargs="+", default=["float16", "bfloat16"])
@@ -56,12 +56,35 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=8)
     parser.add_argument("--out-dir", type=Path, default=Path("artifacts/qvq_cuda_lr_sweep"))
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--source-commit", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.all and args.worker:
         parser.error("--all and --worker are mutually exclusive")
     if not args.all and args.physical_gpu is None:
         parser.error("use --all or --physical-gpu")
     return args
+
+
+def _git_commit() -> str:
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
+
+
+def _discover_physical_gpus() -> list[int]:
+    output = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,pci.bus_id",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+    )
+    devices = []
+    for line in output.splitlines():
+        values = [value.strip() for value in line.split(",")]
+        if len(values) != 2:
+            raise RuntimeError(f"unexpected nvidia-smi device output: {line!r}")
+        devices.append((values[1], int(values[0])))
+    return [physical_gpu for _, physical_gpu in sorted(devices)]
 
 
 def _query_gpu(physical_gpu: int) -> dict[str, str]:
@@ -306,6 +329,13 @@ def _print_table(rows: list[dict]) -> None:
 
 
 def _worker(args: argparse.Namespace) -> None:
+    if args.source_commit is not None:
+        current_commit = _git_commit()
+        if current_commit != args.source_commit:
+            raise RuntimeError(
+                f"repository HEAD changed before GPU {args.physical_gpu} started: "
+                f"expected {args.source_commit}, got {current_commit}"
+            )
     hardware = _idle_preflight(
         args.physical_gpu, args.idle_samples, args.idle_interval, args.idle_memory_tolerance_mib
     )
@@ -560,7 +590,7 @@ def _worker(args: argparse.Namespace) -> None:
 
     payload = {
         "label": "qvq_v2b2_p32_lr_cuda_sweep",
-        "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "commit": args.source_commit or _git_commit(),
         "physical_gpu": args.physical_gpu,
         "hardware": hardware,
         "torch": torch.__version__,
@@ -576,10 +606,19 @@ def _worker(args: argparse.Namespace) -> None:
 
 def _all_workers(args: argparse.Namespace) -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    hardware = {gpu: _idle_preflight(gpu, args.idle_samples, args.idle_interval, args.idle_memory_tolerance_mib) for gpu in args.gpus}
+    gpus = args.gpus if args.gpus is not None else _discover_physical_gpus()
+    if not gpus:
+        raise RuntimeError("--all found no NVIDIA GPUs")
+    if len(set(gpus)) != len(gpus) or any(gpu < 0 for gpu in gpus):
+        raise ValueError(f"--gpus must contain unique non-negative physical indices, got {gpus}")
+    source_commit = args.source_commit or _git_commit()
+    hardware = {
+        gpu: _idle_preflight(gpu, args.idle_samples, args.idle_interval, args.idle_memory_tolerance_mib)
+        for gpu in gpus
+    }
     processes = []
     script = Path(__file__).resolve()
-    for gpu in args.gpus:
+    for gpu in gpus:
         child_args = [
             sys.executable,
             str(script),
@@ -606,6 +645,8 @@ def _all_workers(args: argparse.Namespace) -> None:
             str(args.idle_memory_tolerance_mib),
             "--out-dir",
             str(args.out_dir),
+            "--source-commit",
+            source_commit,
         ]
         if args.no_non_lr:
             child_args.append("--no-non-lr")
@@ -624,7 +665,7 @@ def _all_workers(args: argparse.Namespace) -> None:
         log = log_path.open("w", encoding="utf-8")
         processes.append((gpu, subprocess.Popen(child_args, cwd=REPO_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT), log))
 
-    print("launched workers:", ", ".join(f"GPU {gpu} ({hardware[gpu]['uuid']})" for gpu in args.gpus), flush=True)
+    print("launched workers:", ", ".join(f"GPU {gpu} ({hardware[gpu]['uuid']})" for gpu in gpus), flush=True)
     while any(process.poll() is None for _, process, _ in processes):
         live_rows = []
         for gpu, _, _ in processes:
@@ -646,15 +687,21 @@ def _all_workers(args: argparse.Namespace) -> None:
     if failures:
         raise RuntimeError(f"GPU workers failed: {failures}")
     final_rows = []
-    for gpu in args.gpus:
+    for gpu in gpus:
         result_path = args.out_dir / f"gpu{gpu}.json"
         final_rows.extend(json.loads(result_path.read_text(encoding="utf-8")).get("rows", []))
     _print_table(final_rows)
     report = _regression_report(final_rows)
+    current_commit = _git_commit()
+    if current_commit != source_commit:
+        raise RuntimeError(
+            f"repository HEAD changed during sweep: expected {source_commit}, got {current_commit}; "
+            "discard the summary and rerun"
+        )
     _write_json(args.out_dir / "summary.json", {
         "label": "qvq_v2b2_p32_lr_cuda_regression",
-        "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-        "physical_gpus": args.gpus,
+        "commit": source_commit,
+        "physical_gpus": gpus,
         **report,
     })
     _print_regression_summary(report)
@@ -665,6 +712,8 @@ def main() -> None:
     if args.all:
         _all_workers(args)
     else:
+        if args.source_commit is None:
+            args.source_commit = _git_commit()
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.physical_gpu)
         os.environ.setdefault("GPTQMODEL_QVQ_CUDA_BUILD_ROOT", f"/tmp/qvq-jit-lr-gpu{args.physical_gpu}")

@@ -1692,9 +1692,13 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       static_cast<int>(out_features),
       device_config);
   const int64_t k_tiles = size_k / kLocalRingTileRows;
+  const int64_t max_split_count = std::min<int64_t>(k_tiles, 64);
+  TORCH_CHECK(
+      split_count_override == 0 || split_count_override <= max_split_count,
+      "LR32 split_count must be in [1, min(K/32, 64)]");
   const int split_count =
       split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
-  TORCH_CHECK(split_count >= 1 && split_count <= k_tiles && split_count <= 64,
+  TORCH_CHECK(split_count >= 1 && split_count <= max_split_count,
               "LR32 split_count must be in [1, min(K/32, 64)]");
 
   if (split_count > 1) {

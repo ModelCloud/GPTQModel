@@ -23,7 +23,7 @@ pytestmark = [
 ]
 
 
-def _lr_case(bits: float, *, m: int, k: int, n: int, seed: int):
+def _lr_case(bits: float, *, m: int, k: int, n: int, seed: int, dtype=torch.float16):
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     generator = torch.Generator().manual_seed(seed)
     tiles = (k // 32) * (n // 8)
@@ -38,7 +38,7 @@ def _lr_case(bits: float, *, m: int, k: int, n: int, seed: int):
     trellis = pack_local_ring_states(states, bits=bits)
     selectors = torch.randint(0, 2, (tiles * QVQ_V2B2_P32_LR_RINGS_PER_TILE,), generator=generator, dtype=torch.uint8)
     packed_selectors = pack_qvq_binary_bank_ids(selectors)
-    x = torch.randn((m, k), generator=generator, dtype=torch.float16)
+    x = torch.randn((m, k), generator=generator, dtype=dtype)
     inner = reconstruct_local_ring_inner_weight(
         trellis,
         bits=bits,
@@ -107,6 +107,40 @@ def test_lr32_cuda_uses_current_non_default_stream():
         completion.record(stream)
     completion.synchronize()
     assert (actual - reference.cuda()).abs().max().item() <= 2e-3
+
+
+def test_lr32_cuda_supports_bfloat16_typed_output():
+    x, trellis, bank_ids, reference = _lr_case(
+        2.0, m=4, k=128, n=32, seed=20260832, dtype=torch.bfloat16
+    )
+    actual = qvq_cuda_gemv(
+        x,
+        trellis,
+        2.0,
+        out_features=32,
+        output_fp32=False,
+        bank_ids=bank_ids,
+        v2b2_p32_lr=True,
+        bank_alt_id=3,
+    )
+    assert actual.dtype == torch.bfloat16
+    assert (actual.float() - reference.cuda()).abs().max().item() <= 2e-2
+
+
+def test_lr32_cuda_rejects_split_count_before_integer_narrowing():
+    x, trellis, bank_ids, _ = _lr_case(1.0, m=1, k=64, n=8, seed=20260833)
+    with pytest.raises(RuntimeError, match="split_count must be in"):
+        qvq_cuda_gemv(
+            x,
+            trellis,
+            1.0,
+            out_features=8,
+            output_fp32=True,
+            bank_ids=bank_ids,
+            v2b2_p32_lr=True,
+            bank_alt_id=3,
+            lr_split_count=2**32 + 1,
+        )
 
 
 def test_lr32_cuda_rejects_non_lr_layouts():
