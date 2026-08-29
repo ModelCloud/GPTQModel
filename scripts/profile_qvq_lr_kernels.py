@@ -34,7 +34,27 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--m", type=int, default=16)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=20)
-    return parser.parse_args()
+    return _validate_args(parser.parse_args())
+
+
+def _validate_args(args: argparse.Namespace) -> argparse.Namespace:
+    if args.m <= 0:
+        raise ValueError("--m must be positive")
+    if args.k <= 0 or args.n <= 0:
+        raise ValueError("--k and --n must be positive")
+    if args.k % 32 or args.n % 8 or args.k % 16 or args.n % 16:
+        raise ValueError("--k and --n must be divisible by both LR K32/N8 and legacy K16/N16 tiles")
+    if args.warmup < 0:
+        raise ValueError("--warmup must be non-negative")
+    if args.iterations <= 0:
+        raise ValueError("--iterations must be positive")
+    return args
+
+
+def _cuda_profiler_call(name: str) -> None:
+    result = getattr(torch.cuda.cudart(), name)()
+    if result not in (None, 0):
+        raise RuntimeError(f"{name} failed with CUDA status {result}")
 
 
 def _repeat(label: str, fn, *, warmup: int, iterations: int) -> None:
@@ -42,18 +62,18 @@ def _repeat(label: str, fn, *, warmup: int, iterations: int) -> None:
         fn()
     torch.cuda.synchronize()
     torch.cuda.nvtx.range_push(label)
-    for _ in range(iterations):
-        fn()
-    torch.cuda.synchronize()
-    torch.cuda.nvtx.range_pop()
+    try:
+        for _ in range(iterations):
+            fn()
+        torch.cuda.synchronize()
+    finally:
+        torch.cuda.nvtx.range_pop()
 
 
 def main() -> None:
     args = _args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    if args.k % 32 or args.n % 8 or args.k % 16 or args.n % 16:
-        raise ValueError("--k and --n must be divisible by both LR K32/N8 and legacy K16/N16 tiles")
     if not prewarm_qvq_cuda():
         raise RuntimeError("QVQ CUDA extension failed to load")
 
@@ -119,7 +139,7 @@ def main() -> None:
         for _ in range(args.warmup):
             fn()
     torch.cuda.synchronize()
-    torch.cuda.cudart().cudaProfilerStart()
+    _cuda_profiler_call("cudaProfilerStart")
     try:
         _repeat(f"qvq_lr_w{transition_bits}_m{args.m}", run_lr, warmup=0, iterations=args.iterations)
         _repeat(
@@ -129,7 +149,7 @@ def main() -> None:
             iterations=args.iterations,
         )
     finally:
-        torch.cuda.cudart().cudaProfilerStop()
+        _cuda_profiler_call("cudaProfilerStop")
     print(
         f"profile harness complete: device={torch.cuda.get_device_name()} cc={torch.cuda.get_device_capability()} "
         f"sms={torch.cuda.get_device_properties().multi_processor_count} "
