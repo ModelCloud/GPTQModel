@@ -44,6 +44,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float16", "bfloat16"), nargs="+", default=["float16", "bfloat16"])
     parser.add_argument("--m", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32])
     parser.add_argument("--split-counts", type=int, nargs="+", default=[0], help="0 selects the automatic split policy.")
+    parser.add_argument(
+        "--no-non-lr",
+        action="store_true",
+        help="Skip the legacy V2B2-P32 regression path.",
+    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=60)
     parser.add_argument("--idle-samples", type=int, default=3)
@@ -138,6 +143,16 @@ def _split_count(m: int, k: int, n: int, sms: int) -> int:
     return min((sms * 6 + base_blocks - 1) // base_blocks, k_tiles, 64)
 
 
+def _legacy_split_count(m: int, k: int, n: int, sms: int) -> int:
+    """Mirror the legacy V2B2-P32 launch policy for regression labels."""
+
+    base_blocks = (n // 16) * ((m + 31) // 32)
+    k_tiles = k // 16
+    if base_blocks >= 384:
+        return 1
+    return min((sms * 6 + base_blocks - 1) // base_blocks, k_tiles, 64)
+
+
 def _metrics(actual, reference) -> dict[str, float]:
     delta = actual.float() - reference.float()
     return {
@@ -206,7 +221,9 @@ def _worker(args: argparse.Namespace) -> None:
         pack_local_ring_states,
         pack_qvq_binary_bank_ids,
         reconstruct_local_ring_inner_weight,
+        reconstruct_qvq_inner_weight,
     )
+    from gptqmodel.utils.planar_packing import planar_pack_rows
     from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
 
     if torch.cuda.device_count() != 1:
@@ -263,6 +280,35 @@ def _worker(args: argparse.Namespace) -> None:
             ).cuda()
             trellis = trellis_cpu.cuda()
             bank_ids = bank_ids_cpu.cuda()
+            if args.no_non_lr:
+                legacy_trellis = legacy_bank_ids = legacy_dense = None
+            else:
+                legacy_tiles = (k // 16) * (n // 16)
+                legacy_edges = torch.randint(
+                    0,
+                    1 << transition_bits,
+                    (128, legacy_tiles),
+                    generator=generator,
+                    dtype=torch.int32,
+                )
+                legacy_trellis_cpu = planar_pack_rows(legacy_edges, transition_bits).T.contiguous()
+                legacy_selectors = torch.randint(
+                    0, 2, (legacy_tiles * 8,), generator=generator, dtype=torch.uint8
+                )
+                legacy_bank_ids_cpu = pack_qvq_binary_bank_ids(legacy_selectors)
+                legacy_dense = reconstruct_qvq_inner_weight(
+                    legacy_trellis_cpu,
+                    bits=bits,
+                    in_features=k,
+                    out_features=n,
+                    vector_size=2,
+                    trellis_window=16,
+                    bank_ids=legacy_bank_ids_cpu,
+                    v2b2_p32=True,
+                    bank_alt_id=torch.tensor([3], dtype=torch.uint8),
+                ).cuda()
+                legacy_trellis = legacy_trellis_cpu.cuda()
+                legacy_bank_ids = legacy_bank_ids_cpu.cuda()
             for dtype_name in args.dtype:
                 dtype = getattr(torch, dtype_name)
                 for m in args.m:
@@ -329,6 +375,55 @@ def _worker(args: argparse.Namespace) -> None:
                             **timing,
                         })
 
+                    if not args.no_non_lr:
+                        legacy_reference = x.float() @ legacy_dense.float()
+
+                        def legacy_call(
+                            x=x,
+                            legacy_trellis=legacy_trellis,
+                            bits=bits,
+                            n=n,
+                            legacy_bank_ids=legacy_bank_ids,
+                        ):
+                            return qvq_cuda_gemv(
+                                x,
+                                legacy_trellis,
+                                bits,
+                                out_features=n,
+                                output_fp32=True,
+                                bank_ids=legacy_bank_ids,
+                                v2b2_p32=True,
+                                bank_alt_id=3,
+                            )
+
+                        legacy_actual = legacy_call()
+                        torch.cuda.synchronize()
+                        legacy_metrics = _metrics(legacy_actual, legacy_reference)
+                        if (
+                            not math.isfinite(legacy_metrics["max_abs"])
+                            or legacy_metrics["max_abs"] > 2e-3
+                        ):
+                            raise AssertionError(
+                                f"legacy V2B2-P32 correctness failed for {shape_name} W{bits} "
+                                f"{dtype_name} M{m}: {legacy_metrics}"
+                            )
+                        legacy_timing = _event_timing(
+                            torch,
+                            legacy_call,
+                            warmup=args.warmup,
+                            iterations=args.iterations,
+                        )
+                        all_rows.append({
+                            **common,
+                            "split_count": _legacy_split_count(
+                                m, k, n, properties.multi_processor_count
+                            ),
+                            "requested_split_count": 0,
+                            "path": "non_lr_native",
+                            **legacy_metrics,
+                            **legacy_timing,
+                        })
+
                     def dense_call(x=x, dense=dense):
                         return x.float() @ dense.float()
 
@@ -354,6 +449,8 @@ def _worker(args: argparse.Namespace) -> None:
                         "rows": all_rows,
                     })
             del trellis, bank_ids, dense
+            if not args.no_non_lr:
+                del legacy_trellis, legacy_bank_ids, legacy_dense
             torch.cuda.empty_cache()
 
     payload = {
@@ -403,6 +500,8 @@ def _all_workers(args: argparse.Namespace) -> None:
             "--out-dir",
             str(args.out_dir),
         ]
+        if args.no_non_lr:
+            child_args.append("--no-non-lr")
         env = dict(os.environ)
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         # This torch build accepts numeric selectors reliably; UUID selectors
