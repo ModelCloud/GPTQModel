@@ -1,0 +1,69 @@
+{
+  "wave": 2,
+  "arms": [
+    {
+      "id": "w2_flat35_up4_l8_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l8_15.json",
+      "wave": 2,
+      "resolved_fingerprint": "b5a6593a9d82",
+      "effective_fingerprint": "42c2fc67f349",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_up4_l6_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l6_15.json",
+      "wave": 2,
+      "resolved_fingerprint": "b0ade5064349",
+      "effective_fingerprint": "e55f4d3f16ac",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_up4_l4_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l4_15.json",
+      "wave": 2,
+      "resolved_fingerprint": "0273f1f9941c",
+      "effective_fingerprint": "428e4d90b5dc",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_up4_down4_l12_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_down4_l12_15.json",
+      "wave": 2,
+      "resolved_fingerprint": "7e8169806be9",
+      "effective_fingerprint": "a7e34b6851cf",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_up4_gate4_l12_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_gate4_l12_15.json",
+      "wave": 2,
+      "resolved_fingerprint": "b707740dd060",
+      "effective_fingerprint": "7cf6caa5b433",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_up4_o4_all",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_o4_all.json",
+      "wave": 2,
+      "resolved_fingerprint": "7c7968ebaf97",
+      "effective_fingerprint": "f7f157bc6b05",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_up4_v4_l9_15",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_v4_l9_15.json",
+      "wave": 2,
+      "resolved_fingerprint": "21df1874e1c7",
+      "effective_fingerprint": "049d0c3709a1",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w2_flat35_seed1",
+      "config": "scripts/configs/llama32_1b_frontier_w2_flat35_seed1.json",
+      "wave": 2,
+      "resolved_fingerprint": "343e37b92096",
+      "effective_fingerprint": "9769b10aee0e",
+      "yaqa_seed": 1
+    }
+  ]
+}

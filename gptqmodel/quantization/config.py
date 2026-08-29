@@ -6370,32 +6370,44 @@ class QVQConfig(BaseQuantizeConfig):
         if not isinstance(layer_dict, dict):
             return
 
-        del valid_bit_widths, checkpoint_format
-        unsupported = set(layer_dict) - {"bits", "yaqa_regularization"}
+        del valid_bit_widths
+        unsupported = set(layer_dict) - {"bits", "format", "yaqa_regularization"}
         if unsupported:
             raise ValueError(
-                f"QVQConfig: layer `{layer_name}` only supports `bits` and `yaqa_regularization` overrides; "
+                f"QVQConfig: layer `{layer_name}` only supports `bits`, `format`, and `yaqa_regularization` overrides; "
                 f"got {sorted(unsupported)}."
             )
+        layer_format = checkpoint_format
+        if "format" in layer_dict:
+            raw_format = layer_dict["format"]
+            try:
+                layer_format = raw_format if isinstance(raw_format, FORMAT) else FORMAT(str(raw_format).strip().lower())
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"QVQConfig: layer `{layer_name}` has unsupported dynamic format `{raw_format}`."
+                ) from exc
+            if layer_format not in QVQ_EXPORT_FORMATS:
+                raise ValueError(f"QVQConfig: layer `{layer_name}` cannot use format `{layer_format.value}`.")
+            layer_dict["format"] = layer_format.value
         if "bits" in layer_dict:
-            layer_bits = _normalize_quant_bits(layer_dict["bits"], format_value=FORMAT.QVQ)
+            layer_bits = _normalize_quant_bits(layer_dict["bits"], format_value=layer_format)
             if layer_bits not in QVQ_BITS:
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` only supports integer or half-integer rates from 1 through 8."
                 )
-            if self.format == FORMAT.QVQ_V4 and layer_bits > 4:
+            if layer_format == FORMAT.QVQ_V4 and layer_bits > 4:
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v4` only supports rates W1 through W4."
                 )
-            if self.format == FORMAT.QVQ_V4_L18 and layer_bits > 2.5:
+            if layer_format == FORMAT.QVQ_V4_L18 and layer_bits > 2.5:
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v4_l18` only supports rates W1 through W2.5."
                 )
-            if self.format == FORMAT.QVQ_V2B4_P64 and layer_bits > 3.5:
+            if layer_format == FORMAT.QVQ_V2B4_P64 and layer_bits > 3.5:
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b4_p64` only supports W1 through W3.5."
                 )
-            if self.format == FORMAT.QVQ_V2B2_P32 and layer_bits > 3.5:
+            if layer_format == FORMAT.QVQ_V2B2_P32 and layer_bits > 3.5:
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32` only supports W1 through W3.5."
                 )

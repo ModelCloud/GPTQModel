@@ -70,7 +70,7 @@ def _iter_dynamic_contracts(
         yield base_contract
         return
 
-    seen = {(bits, group_size, desc_act, sym, pack_dtype)}
+    seen = {(bits, group_size, desc_act, sym, pack_dtype, format_value)}
     yield base_contract
 
     for pattern, overrides in dynamic.items():
@@ -81,10 +81,13 @@ def _iter_dynamic_contracts(
         if overrides is None:
             continue
 
+        contract_format = overrides.get("format", format_value)
+        if not isinstance(contract_format, FORMAT):
+            contract_format = FORMAT(str(contract_format).strip().lower())
         contract_bits = overrides.get("bits", bits)
         if contract_bits is not None:
-            contract_bits = _normalize_quant_bits(contract_bits, format_value=format_value)
-            if format_value not in (
+            contract_bits = _normalize_quant_bits(contract_bits, format_value=contract_format)
+            if contract_format not in (
                 FORMAT.QVQ,
                 FORMAT.QVQ_V4,
                 FORMAT.QVQ_V4_L18,
@@ -104,12 +107,14 @@ def _iter_dynamic_contracts(
             "sym": overrides.get("sym", sym),
             "pack_dtype": overrides.get("pack_dtype", pack_dtype),
         }
+        if "format" in overrides:
+            contract["format"] = contract_format
         key = (
             contract["bits"],
             contract["group_size"],
             contract["desc_act"],
             contract["sym"],
-            contract["pack_dtype"],
+            contract["pack_dtype"], contract.get("format", format_value),
         )
         if key in seen:
             continue
@@ -601,7 +606,7 @@ def select_quant_linear(
                             device=device,
                             trainable=trainable,
                             adapter=adapter,
-                            format=format,
+                            format=contract.get("format", format),
                         )
                         if validated:
                             break

@@ -213,6 +213,31 @@ estimates only and are not directly comparable to the segmented V2B2 rows.
 
 ## Complete artifact inventory (live reconciliation)
 
+### Corrected mixed-format high-rate reruns (2026-08-28)
+
+The original high-rate evaluations that returned all-zero/invalid outputs are
+excluded. These reruns use the corrected mixed-format loader and independent
+GPU-pinned evaluation processes. GSM8K Platinum has 1,209 held-out questions;
+D300 uses the disjoint 300-prompt development manifest. Arm IDs below are the
+stable cross-reference keys for the companion JSON artifact.
+
+| Arm ID | Allocation | Eff. BPW* | GSM8K Platinum | D300 aligned top-1 | Exact@32 | Mean first divergence |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 7c91e2 | Up W4, layers 8–15 | **3.1611** | 42.9280% (519/1209) | 34.7083% | 20/300 | 10.76 |
+| 4a6d1f | Up W5, layers 12–15 | **3.1611** | 41.5219% (502/1209) | 33.2813% | 20/300 | 10.20 |
+| c83b70 | Up W7, layers 14–15 | **3.1611** | 41.6873% (504/1209) | 32.1771% | 18/300 | 9.93 |
+| e2f49a | Up W4 L12–13 + W6 L14–15 | **3.1611** | 42.3490% (512/1209) | 32.6875% | 19/300 | 10.02 |
+| 91d5c4 | Flat W3.5 + Up W4 L12–15 | **3.5577** | 45.5749% (551/1209) | 38.8333% | 38/300 | 11.71 |
+| b6a028 | Flat W3.5 + Up W4.5 L14–15 | **3.5577** | 44.5823% (539/1209) | 40.1354% | 35/300 | 11.85 |
+| f04e77 | Flat W3.5 + Up W5.5 L15 | **3.5577** | 44.2514% (535/1209) | 39.9479% | 37/300 | 11.84 |
+
+\*Effective BPW is computed from the exact per-module logical rates weighted by
+Llama-3.2-1B projection parameter counts, plus the measured common auxiliary
+overhead of 0.023168 bpw. The W4+ modules use ordinary QVQ V2 geometry; valid
+L16/V2 rates have the same raw rate accounting as V2B2/P32. For example, the
+first four arms are exactly 3.161099 bpw (reported as 3.1611), and the final
+three are exactly 3.557651 bpw (reported as 3.5577).
+
 This inventory is generated from `/root/qvq-results/llama32-1b*` checkpoint
 directories and is intended to include every quantization artifact, including
 experiments that have not yet produced canonical evaluations. `active` means a
@@ -220,6 +245,31 @@ quantizer or evaluator process currently references the artifact; `pending`
 means no result file has been observed yet. The six-character path keys are
 stable local cross-reference IDs for artifacts that do not yet have a ledger Arm
 ID.
+
+### Corrected Wave-1 dynamic-allocation reruns (2026-08-28)
+
+The first Wave-1 batch was invalid because broad dynamic rules shadowed the
+arm-specific rules. These fresh checkpoints were generated after fixing
+first-match precedence, adding the W4 YAQA regularization override (`0.02`),
+and validating resolved allocation fingerprints. Quantization, the 64-row
+disjoint micro-math probe, and full GSM8K Platinum evaluation are complete;
+canonical D300 remains pending.
+
+| Arm ID | Allocation | Eff. BPW | Quant | Micro-math exact | ΔCE | ΔKL | Answer logprob Δ | Critical top-1 | D300 | GSM8K Platinum |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| `fd7dfc` | Up W4, layers 12–15 | **3.1956** | complete | 3.125% | 0.01725 | 0.04014 | +0.00476 | 97.19% | **35.2708% (19/300 exact)** | **41.8528% (506/1209)** |
+| `1e2a4d` | Up W4, layers 10–13 | **3.1956** | complete | 7.8125% | 0.01569 | 0.04056 | −0.04216 | 97.35% | **35.3333% (18/300 exact)** | **42.3490% (512/1209)** |
+| `fe7561` | Up W4, layers 8–11 | **3.1956** | complete | 3.125% | 0.01944 | 0.04051 | −0.03588 | 97.09% | **35.2604% (18/300 exact)** | **43.0935% (521/1209)** |
+| `f65579` | Up W4, layers 8,10,12,14 | **3.1956** | complete | 4.6875% | 0.02075 | 0.04066 | −0.17996 | 97.22% | **35.3958% (20/300 exact)** | **42.0182% (508/1209)** |
+| `0f1294` | Up W4 + Down W3.5, layers 14–15 | **3.1956** | complete | 7.8125% | 0.01883 | 0.04058 | −0.01077 | 97.09% | **35.7396% (20/300 exact)** | **42.6799% (516/1209)** |
+| `47f9f1` | Up W4 + Gate W3.5, layers 14–15 | **3.1956** | complete | 7.8125% | 0.01935 | 0.04109 | −0.14875 | 97.16% | **37.3438% (20/300 exact)** | **42.0182% (508/1209)** |
+| `b82726` | O W4, all layers | **3.1956** | complete | 6.25% | 0.02224 | 0.03841 | −0.00970 | 97.28% | **34.8646% (16/300 exact)** | **43.7552% (529/1209)** |
+| `c58c0a` | V W4 + Up W4, layers 13–15 | **3.1956** | complete | 6.25% | 0.01277 | 0.03994 | +0.04268 | 97.00% | **37.1146% (20/300 exact)** | **42.7626% (517/1209)** |
+
+Machine-readable results and report paths are in
+`docs/experiments/frontier_wave1_fixed_micro_math_results.json`. The prior
+shadowed Wave-1 artifacts and their identical GSM8K results remain invalid and
+are intentionally not merged into this table.
 
 | Artifact ID | Checkpoint / experiment | Quant | D300 | GSM8K Platinum |
 | --- | --- | --- | --- | --- |
@@ -343,3 +393,53 @@ strict audit at `docs/experiments/disjointness-div300-sources-v2.json`.
 Arm `4aa38f`, which used the ineligible 993-row artifact, is therefore listed
 in the "Invalidated arms" section above and should not be compared as a
 completed flat-W2 result.
+## Corrected Wave-2 matched-budget rerun (2026-08-28 UTC)
+
+The first Wave-2 launch was invalid because stale configurations required 2,000
+YAQA sequences while the run supplied 182. It produced no checkpoints or
+metrics. The corrected launch uses regenerated configs with
+`minimum_sequences=182`, W4 regularization `0.02`, the corrected dynamic-rule
+precedence, and the seed-1 control. A launcher preflight now refuses any config
+whose sequence floor exceeds the supplied YAQA slice.
+
+| Arm ID | GPU | Allocation | Effective BPW | State | D300 | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | --- | --- |
+| `42c2fc` | 0 | Flat W3.5 + Up W4 layers 8–15 | 3.5921 | evaluation complete (Mini-GSM 4.69%) | pending | **44.25% (535/1209)** |
+| `e55f4d` | 1 | Flat W3.5 + Up W4 layers 6–15 | 3.6094 | evaluation complete (Mini-GSM 3.13%) | pending | **45.82% (554/1209)** |
+| `428e4d` | 2 | Flat W3.5 + Up W4 layers 4–15 | 3.6266 | evaluation complete (Mini-GSM 1.56%) | pending | **45.57% (551/1209)** |
+| `a7e34b` | 3 | Flat W3.5 + Up/Down W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 3.13%) | pending | **44.00% (532/1209)** |
+| `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 7.81%) | pending | **43.59% (527/1209)** |
+| `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | evaluation complete (Mini-GSM 4.69%) | pending | **44.42% (537/1209)** |
+| `049d0c` | 6 | Flat W3.5 + Up W4 layers 9–15 + V W4 all | 3.6266 | evaluation complete (Mini-GSM 4.69%) | pending | **45.99% (556/1209)** |
+| `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | GSM8K running (Mini-GSM 3.13%) | pending | pending |
+
+Machine-readable status and cross-references: `docs/experiments/frontier_wave2_rerun_20260828.json` and `docs/experiments/arm_id_index.json`.
+
+## Wave-3 control/reallocation queue (2026-08-28 UTC)
+
+These eight arms were queued behind the corrected Wave-2 quantizations; six
+unique allocations have now completed Mini-GSM and GSM8K Platinum, and two
+duplicate allocations are reused from Wave-2.
+The batch includes a current-
+code replication of the historical `2ae00f` allocation, exact-budget O/Up
+reallocations, and high-frontier late-Up breadth/seed controls. Mini-GSM and
+full GSM8K Platinum are required after each checkpoint; D300 remains
+diagnostic.
+
+| Arm ID | GPU | Allocation | Target BPW | State | Mini-GSM | GSM8K Platinum |
+| --- | ---: | --- | ---: | --- | ---: | ---: |
+| `b6429f` | 0 | Current-code QK2.5 / VO3.5 / G3 / U3.5 / D3 replication | 3.1611 | evaluation complete | 4.69% (3/64) | **42.85% (518/1209)** |
+| `42a659` | 1 | O4 all, early Up W3 | 3.1611 | evaluation complete | 6.25% (4/64) | **42.18% (510/1209)** |
+| `5dc744` | 2 | O4 all, early Gate W2.5 | 3.1611 | evaluation complete | 4.69% (3/64) | **42.02% (508/1209)** |
+| `286d6d` | 3 | O4 all, Q W2, K W2.5 | 3.1611 | evaluation complete | 4.69% (3/64) | **43.59% (527/1209)** |
+| `4e7424` | 4 | Flat W3.5, Up W4 layers 12–15, seed 1 | 3.5577 | evaluation complete | 3.13% (2/64) | **46.15% (558/1209)** |
+| `d64179` | 5 | Flat W3.5, Up W4 layers 8–15 | 3.5921 | reused Wave-2 arm `42c2fc` | 4.69% (3/64) | **44.25% (535/1209)** |
+| `d0be49` | 6 | Flat W3.5, Up W4 layers 7–15 | 3.6008 | evaluation complete | 3.13% (2/64) | **44.09% (533/1209)** |
+| `e9c194` | 7 | Flat W3.5, Up W4 layers 12–15 plus O4 all | 3.5921 | reused Wave-2 arm `f7f157` | 4.69% (3/64) | **44.42% (537/1209)** |
+
+Wave-3 GSM8K reports are recorded in
+`docs/experiments/frontier_wave3_queue_20260828.json`; all six unique runs
+completed with zero invalid generations. The seed-1 high-frontier control
+(`4e7424`) currently leads this wave at 558/1209 (46.15%).
+
+Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.

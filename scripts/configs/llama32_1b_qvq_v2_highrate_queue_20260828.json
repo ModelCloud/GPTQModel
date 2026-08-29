@@ -1,0 +1,14 @@
+{
+  "description": "Matched-BPW concentration study; each entry is a complete QVQ config override map.",
+  "base": {"bits": 2, "format": "qvq_v2b2_p32", "bank_count": 2, "rounding": "yaqa", "regularization": 0.15},
+  "arms": [
+    {"id": "up4_l8_15", "bits": 2, "dynamic": {"+:^model\\.layers\\.(8|9|10|11|12|13|14|15)\\.mlp\\.up_proj$": {"bits": 4, "format": "qvq"}}},
+    {"id": "up5_l12_15", "bits": 2, "dynamic": {"+:^model\\.layers\\.(12|13|14|15)\\.mlp\\.up_proj$": {"bits": 5, "format": "qvq"}}},
+    {"id": "up7_l14_15", "bits": 2, "dynamic": {"+:^model\\.layers\\.(14|15)\\.mlp\\.up_proj$": {"bits": 7, "format": "qvq"}}},
+    {"id": "up4_l12_13_up6_l14_15", "bits": 2, "dynamic": {"+:^model\\.layers\\.(12|13)\\.mlp\\.up_proj$": {"bits": 4, "format": "qvq"}, "+:^model\\.layers\\.(14|15)\\.mlp\\.up_proj$": {"bits": 6, "format": "qvq"}}},
+    {"id": "flat35_up4_l12_15", "bits": 3.5, "dynamic": {"+:^model\\.layers\\.(12|13|14|15)\\.mlp\\.up_proj$": {"bits": 4, "format": "qvq"}}},
+    {"id": "flat35_up45_l14_15", "bits": 3.5, "dynamic": {"+:^model\\.layers\\.(14|15)\\.mlp\\.up_proj$": {"bits": 4.5, "format": "qvq"}}},
+    {"id": "flat35_up55_l15", "bits": 3.5, "dynamic": {"+:^model\\.layers\\.15\\.mlp\\.up_proj$": {"bits": 5.5, "format": "qvq"}}},
+    {"id": "flat35_up4_l14_up5_l15", "bits": 3.5, "dynamic": {"+:^model\\.layers\\.14\\.mlp\\.up_proj$": {"bits": 4, "format": "qvq"}, "+:^model\\.layers\\.15\\.mlp\\.up_proj$": {"bits": 5, "format": "qvq"}}}
+  ]
+}

@@ -13,7 +13,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.qvq_processor import QVQProcessor, clone_qvq_config_for_module
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization import OutputAlignConfig, QVQConfig, YaqaConfig
+from gptqmodel.quantization import FORMAT, OutputAlignConfig, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import quantize_qvq_linear
 
 
@@ -134,6 +134,23 @@ def test_qvq_dynamic_clone_preserves_fractional_rate_and_skip_contract():
 
     assert overridden.bits == 2.5
     assert clone_qvq_config_for_module(cfg, "model.layers.1.self_attn.q_proj") is None
+
+
+def test_qvq_dynamic_clone_applies_format_and_geometry_defaults():
+    cfg = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        bank_count=2,
+        rounding="block_ldlq",
+        dynamic={"+:model.layers.0.*": {"bits": 5, "format": "qvq"}},
+        offload_to_disk=False,
+    )
+    overridden = clone_qvq_config_for_module(cfg, "model.layers.0.mlp.up_proj")
+    assert overridden.bits == 5
+    assert overridden.format == FORMAT.QVQ
+    assert overridden.bank_count == 1
+    assert overridden.vector_size == 2
+    assert overridden.trellis_window == 16
 
 
 def test_qvq_dynamic_clone_materializes_yaqa_rate_regularization():
