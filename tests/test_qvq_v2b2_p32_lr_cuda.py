@@ -227,6 +227,25 @@ def test_lr32_cuda_rejects_tile_index_overflow_before_shape_check():
         )
 
 
+def test_lr32_cuda_rejects_split_partition_overflow_before_shape_check():
+    x = torch.empty((0, 2_147_483_616), device="cuda", dtype=torch.float16)
+    trellis = torch.empty((0, 8), device="cuda", dtype=torch.int32)
+    bank_ids = torch.empty((0,), device="cuda", dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="split_count overflows the int32 kernel partition limit"):
+        qvq_cuda_gemv(
+            x,
+            trellis,
+            1.0,
+            out_features=8,
+            output_fp32=True,
+            bank_ids=bank_ids,
+            v2b2_p32_lr=True,
+            bank_alt_id=1,
+            lr_split_count=64,
+        )
+
+
 def test_lr32_cuda_rejects_non_lr_layouts():
     x = torch.zeros((1, 32), device="cuda", dtype=torch.float16)
     trellis = torch.zeros((1, 8), device="cuda", dtype=torch.int32)

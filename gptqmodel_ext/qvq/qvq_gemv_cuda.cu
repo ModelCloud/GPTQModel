@@ -970,15 +970,10 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   };
 
   const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
-  // Promote before multiplying: the public API permits int32-sized K and up
-  // to 64 splits, so the intermediate can exceed INT_MAX even though every
-  // resulting tile boundary still fits in the int32 kernel index range.
-  const int k_tile_begin = SplitK
-      ? static_cast<int>((static_cast<int64_t>(k_tiles) * split) / split_count)
-      : 0;
-  const int k_tile_end = SplitK
-      ? static_cast<int>((static_cast<int64_t>(k_tiles) * (split + 1)) / split_count)
-      : k_tiles;
+  // The host rejects split products above INT_MAX so this latency-sensitive
+  // partitioning stays in 32-bit registers.
+  const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
+  const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
     const int tiles_here = min(kBatchTiles, k_tile_end - kb);
     stage_batch(kb, tiles_here);
@@ -1679,20 +1674,24 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
                   out_features <= std::numeric_limits<int>::max(),
               "LR32 dimensions exceed the int32 kernel limit");
   TORCH_CHECK(levels.numel() == kPgc16LevelCount, "PGC16 levels must have shape (256)");
+  const int64_t k_tiles = size_k / kLocalRingTileRows;
   const int64_t tile_count = (size_k / kLocalRingTileRows) * (out_features / kLocalRingTileColumns);
   TORCH_CHECK(
       tile_count <= std::numeric_limits<int>::max(),
       "LR32 tile count exceeds the int32 kernel index limit");
-  TORCH_CHECK(trellis.sizes() == at::IntArrayRef({tile_count, 4 * transition_bits}),
-              "LR32 trellis shape must match K32, N8, and transition_bits");
-  TORCH_CHECK(bank_ids.numel() == tile_count,
-              "LR32 bank selectors must contain one packed byte per K32 x N8 trellis tile");
   TORCH_CHECK(split_count_override >= 0, "LR32 split_count must be non-negative");
-  const int64_t k_tiles = size_k / kLocalRingTileRows;
   const int64_t max_split_count = std::min<int64_t>(k_tiles, 64);
   TORCH_CHECK(
       split_count_override == 0 || split_count_override <= max_split_count,
       "LR32 split_count must be in [1, min(K/32, 64)]");
+  TORCH_CHECK(
+      split_count_override == 0 ||
+          k_tiles <= std::numeric_limits<int>::max() / split_count_override,
+      "LR32 split_count overflows the int32 kernel partition limit");
+  TORCH_CHECK(trellis.sizes() == at::IntArrayRef({tile_count, 4 * transition_bits}),
+              "LR32 trellis shape must match K32, N8, and transition_bits");
+  TORCH_CHECK(bank_ids.numel() == tile_count,
+              "LR32 bank selectors must contain one packed byte per K32 x N8 trellis tile");
 
   if (size_m == 0) {
     return at::empty(
@@ -1723,6 +1722,9 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
   TORCH_CHECK(split_count >= 1 && split_count <= max_split_count,
               "LR32 split_count must be in [1, min(K/32, 64)]");
+  TORCH_CHECK(
+      k_tiles <= std::numeric_limits<int>::max() / split_count,
+      "LR32 split_count overflows the int32 kernel partition limit");
 
   if (split_count > 1) {
     at::Tensor partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));

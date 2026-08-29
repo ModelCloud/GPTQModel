@@ -797,6 +797,8 @@ def qvq_cuda_gemv(
         raise ValueError("QVQ CUDA LR32 tile count exceeds the int32 kernel index limit")
     if v2b2_p32_lr and lr_split_count and lr_split_count > min(k // 32, 64):
         raise ValueError("QVQ CUDA lr_split_count must be in [1, min(K/32, 64)]")
+    if v2b2_p32_lr and lr_split_count and (k // 32) * lr_split_count > 2**31 - 1:
+        raise ValueError("QVQ CUDA lr_split_count overflows the int32 kernel partition limit")
     expected = (tile_count, qvq_words_per_tile(bits, vector_size=vector_size))
     if tuple(trellis.shape) != expected:
         raise ValueError(f"QVQ planar trellis must have shape {expected}, got {tuple(trellis.shape)}")
