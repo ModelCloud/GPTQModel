@@ -217,8 +217,8 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state_predecoded(
 #pragma unroll
   for (int j = 0; j < edge_count; ++j) {
     const int edge = (first + j) & edge_mask;
-    const uint32_t packed = edge_words[edge & 7];
-    const uint32_t transition = edge < 8 ? packed & 0xffffu : packed >> 16;
+    const uint32_t packed = edge_words[edge >> 1];
+    const uint32_t transition = (edge & 1) == 0 ? packed & 0xffffu : packed >> 16;
     state = ((state << TransitionBits) | transition) & 0xffffu;
   }
   return state;
