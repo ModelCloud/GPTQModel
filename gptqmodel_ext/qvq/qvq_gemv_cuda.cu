@@ -215,22 +215,24 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   constexpr int edge_mask = total_edges - 1;
   constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  // Blackwell benefits from sharing the overlapping ring edges through the
-  // sixteen pair-leader lanes. Ada's dynamic shuffle path is substantially
-  // slower, so the architecture guard keeps SM89 on the original decoder.
-  constexpr unsigned kPairLeaderMask = 0x55555555u;
-  const uint32_t transition = planar_transition<TransitionBits>(
-      words, ring * total_edges + pair_in_ring);
-  uint32_t state = 0;
+  if constexpr (TransitionBits == 2) {
+    // Blackwell W2 benefits from sharing the eight overlapping ring edges
+    // through the sixteen pair-leader lanes. Higher rates have shorter
+    // recurrences and run faster with direct extraction, as on Ada.
+    constexpr unsigned kPairLeaderMask = 0x55555555u;
+    const uint32_t transition = planar_transition<TransitionBits>(
+        words, ring * total_edges + pair_in_ring);
+    uint32_t state = 0;
 #pragma unroll
-  for (int j = 0; j < edge_count; ++j) {
-    const int source_pair =
-        (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
-    const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
-    state = ((state << TransitionBits) | edge) & 0xffffu;
+    for (int j = 0; j < edge_count; ++j) {
+      const int source_pair =
+          (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
+      const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
+      state = ((state << TransitionBits) | edge) & 0xffffu;
+    }
+    return state;
   }
-  return state;
-#else
+#endif
   const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
   uint32_t state = 0;
 #pragma unroll
@@ -240,7 +242,6 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
              planar_transition<TransitionBits>(words, ring * total_edges + edge)) & 0xffffu;
   }
   return state;
-#endif
 }
 
 __device__ __noinline__ uint32_t qvq_local_ring_state_runtime(
@@ -404,7 +405,7 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
     int bank_alt_id) {
   uint32_t level_pair = 0;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  constexpr bool kBroadcastBankMask = true;
+  constexpr bool kBroadcastBankMask = TransitionBits == 2;
 #else
   // TB7 spills its unrolled mask lookup on Ada. Broadcasting the uniform
   // per-ring value removes that spill, while lower rates retain the direct
@@ -910,11 +911,12 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     int bank_alt_id) {
   // ROWS=16 has enough shared-memory headroom to amortize each synchronization
   // pair across twice as many K32 tiles without reducing register occupancy.
-  // Blackwell also benefits at ROWS=8; Ada and the launch-bound ROWS=1 path do
-  // better with the smaller shared-memory image. Keep ROWS=32 at eight tiles
-  // because its wider activation stripe would lower resident block count.
+  // Blackwell W2 also benefits at ROWS=8; higher rates, Ada small-row paths,
+  // and the launch-bound ROWS=1 path do better with the smaller shared-memory
+  // image. Keep ROWS=32 at eight tiles because its wider activation stripe
+  // would lower resident block count.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  constexpr int kBatchTiles = ROWS == 8 || ROWS == 16 ? 16 : 8;
+  constexpr int kBatchTiles = TransitionBits == 2 && (ROWS == 8 || ROWS == 16) ? 16 : 8;
 #else
   constexpr int kBatchTiles = ROWS == 16 ? 16 : 8;
 #endif
