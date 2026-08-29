@@ -138,20 +138,22 @@ def _split_count(m: int, k: int, n: int, sms: int, major: int) -> int:
     rows = _rows_for_m(m)
     base_blocks = (n // 8) * ((m + rows - 1) // rows)
     k_tiles = k // 32
+    low_residency_blocks = max(32, sms // 2)
+    saturated_blocks = sms * 3
     if major >= 12:
         if rows == 1:
-            split_count = 4 if base_blocks < 64 or base_blocks >= 384 else 16
-        elif base_blocks < 64:
+            split_count = 4 if base_blocks < low_residency_blocks or base_blocks >= saturated_blocks else 16
+        elif base_blocks < low_residency_blocks:
             split_count = 32 if rows <= 8 else 8
-        elif base_blocks < 384:
+        elif base_blocks < saturated_blocks:
             split_count = 16
         else:
             split_count = 1
-    elif base_blocks >= 384:
+    elif base_blocks >= saturated_blocks:
         split_count = 4 if rows == 1 and k_tiles >= 128 else 1
     elif rows == 1:
         split_count = 16 if base_blocks < 64 else 8
-    elif base_blocks < 64:
+    elif base_blocks < low_residency_blocks:
         split_count = 8
     else:
         split_count = 4

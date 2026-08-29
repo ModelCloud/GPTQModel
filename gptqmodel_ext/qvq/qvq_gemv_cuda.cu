@@ -1157,6 +1157,8 @@ int qvq_local_ring_split_count(
   const int64_t base_blocks =
       static_cast<int64_t>(size_n / kLocalRingTileColumns) * ((size_m + rows - 1) / rows);
   const int k_tiles = size_k / kLocalRingTileRows;
+  const int64_t low_residency_blocks = std::max<int64_t>(32, device_config.sm_count / 2);
+  const int64_t saturated_blocks = static_cast<int64_t>(device_config.sm_count) * 3;
   int split_count;
   if (device_config.major >= 12) {
     // Blackwell's one-row scheduler benefits from a few independent K waves
@@ -1164,22 +1166,22 @@ int qvq_local_ring_split_count(
     // specializations, keep the split count proportional to the available
     // blocks and avoid the reduction overhead once N is saturated.
     if (rows == 1) {
-      split_count = base_blocks < 64 ? 4 : base_blocks < 384 ? 16 : 4;
-    } else if (base_blocks < 64) {
+      split_count = base_blocks < low_residency_blocks ? 4 : base_blocks < saturated_blocks ? 16 : 4;
+    } else if (base_blocks < low_residency_blocks) {
       split_count = rows <= 8 ? 32 : 8;
-    } else if (base_blocks < 384) {
+    } else if (base_blocks < saturated_blocks) {
       split_count = 16;
     } else {
       split_count = 1;
     }
-  } else if (base_blocks >= 384) {
+  } else if (base_blocks >= saturated_blocks) {
     // Ada reaches full residency with one block per N8 tile. The larger
     // K-width MLP shape is the exception for M=1, where four K waves hide
     // the long local-ring recurrence.
     split_count = rows == 1 && k_tiles >= 128 ? 4 : 1;
   } else if (rows == 1) {
     split_count = base_blocks < 64 ? 16 : 8;
-  } else if (base_blocks < 64) {
+  } else if (base_blocks < low_residency_blocks) {
     split_count = rows <= 8 ? 8 : 8;
   } else {
     split_count = 4;
