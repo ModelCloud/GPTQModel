@@ -124,7 +124,8 @@ def test_lr32_cuda_supports_bfloat16_typed_output():
         bank_alt_id=3,
     )
     assert actual.dtype == torch.bfloat16
-    assert (actual.float() - reference.cuda()).abs().max().item() <= 2e-2
+    typed_reference = reference.cuda().to(actual.dtype).float()
+    assert (actual.float() - typed_reference).abs().max().item() <= 2e-2
 
 
 def test_lr32_cuda_rejects_split_count_before_integer_narrowing():
