@@ -50,6 +50,21 @@ def test_regression_gate_rejects_slow_pair():
         benchmark_qvq_cuda_lr._enforce_regression_report(report, min_geomean_speedup=1.5)
 
 
+def test_regression_gate_cannot_hide_slow_auto_behind_tuning_candidate():
+    report = benchmark_qvq_cuda_lr._regression_report(
+        [
+            _row("lr_native_auto", 2.0),
+            _row("lr_native_s2", 0.125, max_abs=0.0),
+            _row("non_lr_native", 1.0),
+        ]
+    )
+
+    assert report["regression_summary"]["geomean_speedup_vs_non_lr"] == pytest.approx(2.0)
+    assert report["regression_summary"]["production_geomean_speedup_vs_non_lr"] == pytest.approx(0.5)
+    with pytest.raises(AssertionError, match="performance gate"):
+        benchmark_qvq_cuda_lr._enforce_regression_report(report, min_geomean_speedup=1.5)
+
+
 def test_regression_gate_rejects_accuracy_failure():
     report = benchmark_qvq_cuda_lr._regression_report(
         [_row("lr_native_auto", 1.0, max_abs=3e-3), _row("non_lr_native", 2.0)]

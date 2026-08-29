@@ -306,6 +306,10 @@ def _regression_report(rows: list[dict], *, min_geomean_speedup: float = 1.5) ->
             })
 
     speedups = [row["speedup_vs_non_lr"] for row in regressions if row["speedup_vs_non_lr"] > 0]
+    production_regressions = [row for row in regressions if row["lr_path"] == "lr_native_auto"]
+    production_speedups = [
+        row["speedup_vs_non_lr"] for row in production_regressions if row["speedup_vs_non_lr"] > 0
+    ]
     summary = {
         "cases": len(regressions),
         "geomean_speedup_vs_non_lr": (
@@ -319,11 +323,19 @@ def _regression_report(rows: list[dict], *, min_geomean_speedup: float = 1.5) ->
         "all_accuracy_within_2e-3": all(row["accuracy_within_2e-3"] for row in regressions),
         "max_lr_abs": max((row["lr_max_abs"] for row in regressions), default=None),
         "max_non_lr_abs": max((row["non_lr_max_abs"] for row in regressions), default=None),
+        "production_cases": len(production_regressions),
+        "production_geomean_speedup_vs_non_lr": (
+            math.exp(statistics.mean(math.log(speedup) for speedup in production_speedups))
+            if production_speedups
+            else None
+        ),
+        "production_min_speedup_vs_non_lr": min(production_speedups) if production_speedups else None,
+        "production_max_speedup_vs_non_lr": max(production_speedups) if production_speedups else None,
     }
     summary["required_min_geomean_speedup"] = min_geomean_speedup
     summary["meets_min_geomean_speedup"] = (
-        summary["geomean_speedup_vs_non_lr"] is not None
-        and summary["geomean_speedup_vs_non_lr"] >= min_geomean_speedup
+        summary["production_geomean_speedup_vs_non_lr"] is not None
+        and summary["production_geomean_speedup_vs_non_lr"] >= min_geomean_speedup
     )
     return {"regression_summary": summary, "regressions": regressions}
 
@@ -336,7 +348,11 @@ def _enforce_regression_report(report: dict, *, min_geomean_speedup: float) -> N
         raise AssertionError(
             "QVQ LR/non-LR regression failed accuracy gate: maximum absolute error exceeds 2e-3"
         )
-    geomean = summary["geomean_speedup_vs_non_lr"]
+    if not summary["production_cases"]:
+        raise AssertionError(
+            "QVQ LR/non-LR regression failed performance gate: no lr_native_auto cases were measured"
+        )
+    geomean = summary["production_geomean_speedup_vs_non_lr"]
     if geomean is None or geomean < min_geomean_speedup:
         raise AssertionError(
             f"QVQ LR/non-LR regression failed performance gate: "
@@ -350,7 +366,9 @@ def _print_regression_summary(report: dict) -> None:
         return
     print(
         "regression summary: "
-        f"cases={summary['cases']} geomean={summary['geomean_speedup_vs_non_lr']:.3f}x "
+        f"cases={summary['cases']} production_cases={summary['production_cases']} "
+        f"production_geomean={summary['production_geomean_speedup_vs_non_lr']:.3f}x "
+        f"all_paths_geomean={summary['geomean_speedup_vs_non_lr']:.3f}x "
         f"min={summary['min_speedup_vs_non_lr']:.3f}x "
         f">=1.5x={summary['cases_at_least_1.5x']} "
         f">=2x={summary['cases_at_least_2x']} "
