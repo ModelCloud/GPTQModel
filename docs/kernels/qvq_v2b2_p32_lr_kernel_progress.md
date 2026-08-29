@@ -58,7 +58,8 @@ tables below every row was intentionally measured at M=16.
 | `0480f5c8` | 4090/5090, W3.5 | Broadcast the TB7 bank mask on Ada | 4090 substantial shapes rose from about 1x to 2.28-2.53x; 5090 remained 4.99-5.85x | accepted |
 | `73c3cc86` | 5090, W2-W3.5 | Direct higher-rate recurrence in the shared specialization | Recovered W2.5/W3/W3.5 non-split rates, but compiler rescheduled W2 and W2.5 split-K; W2 wide/down fell near 2x and W2.5 mid to 1.41x | superseded |
 | `294f15f4` | 4090/5090, W2-W3.5 | Isolate rate code generation; preserve batch 16 for Blackwell split-K | Higher rates recovered to 4.98-6.50x, but the specialization used TB2 instead of W2's TB4; W2 non-split remained 1.95-2.03x | superseded |
-| `e4b1006c` | 4090/5090, W2-W3.5 | Attach the Blackwell shuffle/broadcast/deep-batch path to W2's actual TB4 width | 5090: all 16 substantial cells pass >=4x, 4.054x geomean including canaries, max error 1.53e-4; 4090 W3.5 remains 2.43-2.53x | accepted candidate |
+| `e4b1006c` | 4090/5090, W2-W3.5 | Attach the Blackwell shuffle/broadcast/deep-batch path to W2's actual TB4 width | 5090: all 16 substantial cells pass >=4x, 4.054x geomean including canaries, max error 1.53e-4; 4090 W3.5 remains 2.43-2.53x | accepted source |
+| `18389b4d` | all nine, W2-W3.5 | Final UUID-pinned simultaneous sweep of `e4b1006c` plus the ledger | 180/180 accurate; 4.457x overall geomean; all 144 substantial cells >=2x and 112 >=4x | accepted system gate |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -119,16 +120,43 @@ launch-bound canaries.
 | 3.5 | `m16_mid` | 16 | 8,192 | 2,048 | `e4b1006c` | 0.0938 | 0.4973 | 5.30x | pass >=4x |
 | 3.5 | `mlp_down` | 16 | 4,096 | 11,008 | `e4b1006c` | 0.2202 | 1.3554 | 6.15x | pass >=4x |
 
+## Final all-device aggregate
+
+The simultaneous run at `18389b4d`, fingerprint
+`7cd6585215bd3b95557a910b3b787d597c3ca3989e98e40901665d2c5b380c5a`,
+contains 180 LR/non-LR pairs (540 timed path rows). The aggregate below excludes
+the narrow canary and covers the four substantial K/N cells in the shape table.
+Running all nine boards together exposes system power/thermal contention and is
+therefore kept distinct from the isolated-device matrix above.
+
+| Device group | W | M | K/N cells | Cells | LR ms range | Geomean speedup | Min-max speedup | Gate |
+|---|---:|---:|---|---:|---:|---:|---:|---|
+| 8x RTX 4090 | 2 | 16 | wide A/B, mid, down | 32 | 0.1014-0.2621 | 9.099x | 8.541-9.461x | all >=4x |
+| 8x RTX 4090 | 2.5 | 16 | wide A/B, mid, down | 32 | 0.1044-0.2684 | 8.936x | 8.588-9.199x | all >=4x |
+| 8x RTX 4090 | 3 | 16 | wide A/B, mid, down | 32 | 0.1300-0.3432 | 7.094x | 6.691-7.267x | all >=4x |
+| 8x RTX 4090 | 3.5 | 16 | wide A/B, mid, down | 32 | 0.3707-1.0071 | 2.459x | 2.269-2.520x | all >=2x |
+| 1x RTX 5090 | 2 | 16 | wide A/B, mid, down | 4 | 0.0939-0.2311 | 5.434x | 5.120-5.893x | all >=4x |
+| 1x RTX 5090 | 2.5 | 16 | wide A/B, mid, down | 4 | 0.0977-0.2413 | 5.285x | 4.944-5.723x | all >=4x |
+| 1x RTX 5090 | 3 | 16 | wide A/B, mid, down | 4 | 0.1224-0.3065 | 4.205x | 4.091-4.455x | all >=4x |
+| 1x RTX 5090 | 3.5 | 16 | wide A/B, mid, down | 4 | 0.1020-0.2536 | 5.045x | 4.728-5.450x | all >=4x |
+
+Against exact merged main `24601c7a`, the accepted W2 kernel's substantial LR
+geomean improves by 2.722x on the 5090 and 1.063-1.071x on each 4090. The Ada
+baseline already ran W2 at roughly 9x versus non-LR; the large Ada gains in this
+series are W2.5 (about 8.6-9.2x versus non-LR), W3 (about 6.7-7.3x), and W3.5
+(about 2.3-2.5x).
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
 | 1 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
-| 2 | all nine installed GPUs, W2-W3.5 | W2 has all-device coverage; higher rates have representative 4090/5090 coverage | final UUID-pinned all-device FP16 M=16 sweep |
-| 3 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for this branch head | expanded accuracy/performance regression |
-| 4 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
-| 5 | launch-bound narrow shapes | typically 0.98-1.52x | reduce launch/split overhead without regressing substantial shapes |
-| 6 | hardware-counter attribution | Nsight Systems works; Nsight Compute reports `ERR_NVGPUCTRPERM`, with `RmProfilingAdminOnly: 1` | rerun NCU after the driver exposes counters |
+| 2 | all nine installed GPUs, W2-W3.5 | `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the branch acceptance gate |
+| 3 | RTX 4090 W3.5 substantial shapes | 2.269-2.520x in the simultaneous run | target the 4x stretch goal |
+| 4 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for this branch head | expanded accuracy/performance regression |
+| 5 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
+| 6 | launch-bound narrow shapes | typically 1.00-1.52x | reduce launch/split overhead without regressing substantial shapes |
+| 7 | hardware-counter attribution | Nsight Systems works; Nsight Compute reports `ERR_NVGPUCTRPERM`, with `RmProfilingAdminOnly: 1` | rerun NCU after the driver exposes counters |
 
 ## Reproduction
 
