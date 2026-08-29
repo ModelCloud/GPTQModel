@@ -793,6 +793,8 @@ def qvq_cuda_gemv(
         divisor = "K32/N8" if v2b2_p32_lr else "16"
         raise ValueError(f"QVQ CUDA requires positive dimensions divisible by {divisor}, got K={k}, N={n}")
     tile_count = (k // 32) * (n // 8) if v2b2_p32_lr else (k // 16) * (n // 16)
+    if v2b2_p32_lr and lr_split_count and lr_split_count > min(k // 32, 64):
+        raise ValueError("QVQ CUDA lr_split_count must be in [1, min(K/32, 64)]")
     expected = (tile_count, qvq_words_per_tile(bits, vector_size=vector_size))
     if tuple(trellis.shape) != expected:
         raise ValueError(f"QVQ planar trellis must have shape {expected}, got {tuple(trellis.shape)}")

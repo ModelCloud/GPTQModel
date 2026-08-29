@@ -1672,6 +1672,12 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
               "LR32 trellis shape must match K32, N8, and transition_bits");
   TORCH_CHECK(bank_ids.numel() == tile_count,
               "LR32 bank selectors must contain one packed byte per K32 x N8 trellis tile");
+  TORCH_CHECK(split_count_override >= 0, "LR32 split_count must be non-negative");
+  const int64_t k_tiles = size_k / kLocalRingTileRows;
+  const int64_t max_split_count = std::min<int64_t>(k_tiles, 64);
+  TORCH_CHECK(
+      split_count_override == 0 || split_count_override <= max_split_count,
+      "LR32 split_count must be in [1, min(K/32, 64)]");
 
   if (size_m == 0) {
     return at::empty(
@@ -1685,17 +1691,11 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  TORCH_CHECK(split_count_override >= 0, "LR32 split_count must be non-negative");
   const int automatic_split_count = qvq_local_ring_split_count(
       static_cast<int>(size_m),
       static_cast<int>(size_k),
       static_cast<int>(out_features),
       device_config);
-  const int64_t k_tiles = size_k / kLocalRingTileRows;
-  const int64_t max_split_count = std::min<int64_t>(k_tiles, 64);
-  TORCH_CHECK(
-      split_count_override == 0 || split_count_override <= max_split_count,
-      "LR32 split_count must be in [1, min(K/32, 64)]");
   const int split_count =
       split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
   TORCH_CHECK(split_count >= 1 && split_count <= max_split_count,

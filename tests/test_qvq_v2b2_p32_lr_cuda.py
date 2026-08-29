@@ -145,8 +145,8 @@ def test_lr32_cuda_rejects_split_count_before_integer_narrowing():
 
 
 def test_lr32_cuda_validates_split_count_for_empty_batches():
-    x, trellis, bank_ids, _ = _lr_case(1.0, m=0, k=64, n=8, seed=20260834)
-    with pytest.raises(ValueError, match=r"in \[1, 64\]"):
+    x, trellis, bank_ids, _ = _lr_case(1.0, m=0, k=32, n=8, seed=20260834)
+    with pytest.raises(ValueError, match=r"in \[1, min\(K/32, 64\)\]"):
         qvq_cuda_gemv(
             x,
             trellis,
@@ -156,7 +156,7 @@ def test_lr32_cuda_validates_split_count_for_empty_batches():
             bank_ids=bank_ids,
             v2b2_p32_lr=True,
             bank_alt_id=3,
-            lr_split_count=65,
+            lr_split_count=2,
         )
 
     with pytest.raises(ValueError, match="valid only for V2B2-P32-LR"):
