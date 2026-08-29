@@ -1549,7 +1549,11 @@ void launch_qvq_local_ring_gemv(
     int split_count,
     int bank_alt_id,
     cudaStream_t stream) {
-  const bool vector_staging = qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
+  // A 24-word TB=6 tile has a six-vector stride. On SM89/SM120 this access
+  // pattern defeats the coalescer for the wider row specializations; scalar
+  // staging is measurably faster and avoids the TB=6 occupancy cliff.
+  const bool vector_staging =
+      transition_bits != 6 && qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
   if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1 && vector_staging) {
     launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, true>(
         input,

@@ -663,6 +663,9 @@ def main() -> None:
     if args.all:
         _all_workers(args)
     else:
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.physical_gpu)
+        os.environ.setdefault("GPTQMODEL_QVQ_CUDA_BUILD_ROOT", f"/tmp/qvq-jit-lr-gpu{args.physical_gpu}")
         _worker(args)
 
 
