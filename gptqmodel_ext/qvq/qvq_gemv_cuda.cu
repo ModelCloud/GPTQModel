@@ -924,10 +924,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
         const int u = tile_slot / kOutputTilesPerBlock;
         const int sub = tile_slot % kOutputTilesPerBlock;
         const int n_tile = n_tile_base + sub;
-        const int64_t tile_index =
-            static_cast<int64_t>(kb + u) * n_tiles + n_tile;
+        const int tile_index = (kb + u) * n_tiles + n_tile;
         packed_words[u][sub][w] =
-            n_tile < n_tiles ? static_cast<uint32_t>(trellis[tile_index * words_per_tile + w])
+            n_tile < n_tiles ? static_cast<uint32_t>(trellis[static_cast<int64_t>(tile_index) * words_per_tile + w])
                              : 0u;
       }
     }
@@ -935,8 +934,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
       const int u = thread / kOutputTilesPerBlock;
       const int sub = thread % kOutputTilesPerBlock;
       const int n_tile = n_tile_base + sub;
-      const int64_t tile_index =
-          static_cast<int64_t>(kb + u) * n_tiles + n_tile;
+      const int tile_index = (kb + u) * n_tiles + n_tile;
       packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
     }
 
@@ -1682,6 +1680,9 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
               "LR32 dimensions exceed the int32 kernel limit");
   TORCH_CHECK(levels.numel() == kPgc16LevelCount, "PGC16 levels must have shape (256)");
   const int64_t tile_count = (size_k / kLocalRingTileRows) * (out_features / kLocalRingTileColumns);
+  TORCH_CHECK(
+      tile_count <= std::numeric_limits<int>::max(),
+      "LR32 tile count exceeds the int32 kernel index limit");
   TORCH_CHECK(trellis.sizes() == at::IntArrayRef({tile_count, 4 * transition_bits}),
               "LR32 trellis shape must match K32, N8, and transition_bits");
   TORCH_CHECK(bank_ids.numel() == tile_count,

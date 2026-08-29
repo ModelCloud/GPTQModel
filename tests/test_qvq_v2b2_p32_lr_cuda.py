@@ -209,6 +209,24 @@ def test_lr32_cuda_rejects_row_grid_overflow_before_launch():
         )
 
 
+def test_lr32_cuda_rejects_tile_index_overflow_before_shape_check():
+    x = torch.empty((0, 8192), device="cuda", dtype=torch.float16)
+    trellis = torch.empty((0, 8), device="cuda", dtype=torch.int32)
+    bank_ids = torch.empty((0,), device="cuda", dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="tile count exceeds the int32 kernel index limit"):
+        qvq_cuda_gemv(
+            x,
+            trellis,
+            1.0,
+            out_features=67_108_872,
+            output_fp32=True,
+            bank_ids=bank_ids,
+            v2b2_p32_lr=True,
+            bank_alt_id=1,
+        )
+
+
 def test_lr32_cuda_rejects_non_lr_layouts():
     x = torch.zeros((1, 32), device="cuda", dtype=torch.float16)
     trellis = torch.zeros((1, 8), device="cuda", dtype=torch.int32)
