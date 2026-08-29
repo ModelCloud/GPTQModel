@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
+    QVQ_V2B2_P32_LR_RING_STEPS,
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
@@ -68,7 +69,7 @@ def main() -> None:
     edges = torch.randint(
         0,
         1 << transition_bits,
-        (lr_tiles, QVQ_V2B2_P32_LR_RINGS_PER_TILE, 8),
+        (lr_tiles, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
         generator=generator,
         dtype=torch.int64,
     )
