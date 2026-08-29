@@ -904,11 +904,15 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   constexpr int kMaxWords = 32;
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kInputVecsPerRow = kLocalRingTileRows * static_cast<int>(sizeof(Scalar)) / sizeof(uint4);
+  constexpr bool kAsyncStaging =
+      ROWS >= 16 && TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging;
+  constexpr int kStageBuffers = kAsyncStaging ? 2 : 1;
 
   __shared__ half cached_levels[kPgc16LevelCount];
-  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTilesPerBlock][kMaxWords];
-  __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTilesPerBlock];
-  __shared__ __align__(16) Scalar input_tile[kBatchTiles][ROWS * kLocalRingTileRows];
+  __shared__ __align__(16)
+      uint32_t packed_words[kStageBuffers][kBatchTiles][kOutputTilesPerBlock][kMaxWords];
+  __shared__ uint8_t packed_bank_ids[kStageBuffers][kBatchTiles][kOutputTilesPerBlock];
+  __shared__ __align__(16) Scalar input_tile[kStageBuffers][kBatchTiles][ROWS * kLocalRingTileRows];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int ring = thread >> 5;
@@ -931,11 +935,11 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   }
 
   const int words_per_tile = TransitionBits != 0 ? kWordsPerTile : 4 * transition_bits;
-  auto stage_batch = [&](int kb, int tiles_here) {
+  auto stage_batch = [&](int kb, int tiles_here, int dst) {
     if constexpr (TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging) {
       constexpr int words_per_vec = kWordsPerTile / 4;
       const int vec_total = tiles_here * kOutputTilesPerBlock * words_per_vec;
-      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
+      uint4* words4 = reinterpret_cast<uint4*>(packed_words[dst][0][0]);
       const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
       for (int index = thread; index < vec_total; index += kThreads) {
         const int tile_slot = index / words_per_vec;
@@ -943,10 +947,17 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
         const int u = tile_slot / kOutputTilesPerBlock;
         const int sub = tile_slot % kOutputTilesPerBlock;
         const int n_tile = n_tile_base + sub;
-        words4[tile_slot * (kMaxWords / 4) + w4] =
-            n_tile < n_tiles
-                ? trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4]
-                : make_uint4(0u, 0u, 0u, 0u);
+        if (n_tile < n_tiles) {
+          const uint4* src =
+              trellis4 + (static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4;
+          if constexpr (kAsyncStaging) {
+            __pipeline_memcpy_async(words4 + tile_slot * (kMaxWords / 4) + w4, src, 16);
+          } else {
+            words4[tile_slot * (kMaxWords / 4) + w4] = *src;
+          }
+        } else {
+          words4[tile_slot * (kMaxWords / 4) + w4] = make_uint4(0u, 0u, 0u, 0u);
+        }
       }
     } else {
       for (int index = thread; index < tiles_here * kOutputTilesPerBlock * words_per_tile; index += kThreads) {
@@ -956,7 +967,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
         const int sub = tile_slot % kOutputTilesPerBlock;
         const int n_tile = n_tile_base + sub;
         const int tile_index = (kb + u) * n_tiles + n_tile;
-        packed_words[u][sub][w] =
+        packed_words[dst][u][sub][w] =
             n_tile < n_tiles ? static_cast<uint32_t>(trellis[static_cast<int64_t>(tile_index) * words_per_tile + w])
                              : 0u;
       }
@@ -966,12 +977,12 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
       const int sub = thread % kOutputTilesPerBlock;
       const int n_tile = n_tile_base + sub;
       const int tile_index = (kb + u) * n_tiles + n_tile;
-      packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
+      packed_bank_ids[dst][u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
     }
 
     if constexpr (TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging) {
       const int vec_total = tiles_here * ROWS * kInputVecsPerRow;
-      uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
+      uint4* input4 = reinterpret_cast<uint4*>(input_tile[dst][0]);
       const uint4* input4_base = reinterpret_cast<const uint4*>(input);
       for (int index = thread; index < vec_total; index += kThreads) {
         const int u = index / (ROWS * kInputVecsPerRow);
@@ -979,10 +990,16 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
         const int row = cell / kInputVecsPerRow;
         const int vec = cell - row * kInputVecsPerRow;
         if (row < block_rows) {
-          input4[index] = input4_base[
+          const uint4* src =
+              input4_base +
               ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) *
                    static_cast<int>(sizeof(Scalar)) / 16) +
-              vec];
+               vec);
+          if constexpr (kAsyncStaging) {
+            __pipeline_memcpy_async(input4 + index, src, 16);
+          } else {
+            input4[index] = *src;
+          }
         } else {
           input4[index] = make_uint4(0u, 0u, 0u, 0u);
         }
@@ -993,10 +1010,13 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
         const int cell = index - u * (ROWS * kLocalRingTileRows);
         const int row = cell / kLocalRingTileRows;
         const int k_local_tile = cell - row * kLocalRingTileRows;
-        input_tile[u][cell] = row < block_rows
+        input_tile[dst][u][cell] = row < block_rows
             ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows + k_local_tile]
             : ScalarTraits<Scalar>::from_float(0.0f);
       }
+    }
+    if constexpr (kAsyncStaging) {
+      __pipeline_commit();
     }
   };
 
@@ -1005,9 +1025,17 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   // partitioning stays in 32-bit registers.
   const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
   const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
+  stage_batch(k_tile_begin, min(kBatchTiles, k_tile_end - k_tile_begin), 0);
+  int parity = 0;
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
     const int tiles_here = min(kBatchTiles, k_tile_end - kb);
-    stage_batch(kb, tiles_here);
+    const bool has_next = kb + kBatchTiles < k_tile_end;
+    if constexpr (kAsyncStaging) {
+      if (has_next) {
+        stage_batch(kb + kBatchTiles, min(kBatchTiles, k_tile_end - kb - kBatchTiles), parity ^ 1);
+      }
+      __pipeline_wait_prior(has_next ? 1 : 0);
+    }
     __syncthreads();
 
 #pragma unroll
@@ -1020,22 +1048,41 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
           float weight;
           if constexpr (TransitionBits != 0) {
             weight = qvq_decode_local_ring_weight_fast<TransitionBits>(
-                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, bank_alt_id);
+                packed_words[parity][u][sub],
+                packed_bank_ids[parity][u][sub],
+                cached_levels,
+                ring,
+                k_local,
+                bank_alt_id);
           } else {
             weight = qvq_decode_local_ring_weight_runtime(
-                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, transition_bits, bank_alt_id);
+                packed_words[parity][u][sub],
+                packed_bank_ids[parity][u][sub],
+                cached_levels,
+                ring,
+                k_local,
+                transition_bits,
+                bank_alt_id);
           }
 #pragma unroll
           for (int r = 0; r < ROWS; ++r) {
             accumulator[r][sub] = fmaf(
-                ScalarTraits<Scalar>::to_float(input_tile[u][r * kLocalRingTileRows + k_local]),
+                ScalarTraits<Scalar>::to_float(input_tile[parity][u][r * kLocalRingTileRows + k_local]),
                 weight,
                 accumulator[r][sub]);
           }
         }
       }
     }
-    __syncthreads();
+    if (has_next) {
+      __syncthreads();
+      if constexpr (!kAsyncStaging) {
+        stage_batch(kb + kBatchTiles, min(kBatchTiles, k_tile_end - kb - kBatchTiles), 0);
+      }
+    }
+    if constexpr (kAsyncStaging) {
+      parity ^= 1;
+    }
   }
 
   for (int r = 0; r < block_rows; ++r) {
