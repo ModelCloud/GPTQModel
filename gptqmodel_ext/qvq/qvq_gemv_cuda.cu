@@ -214,25 +214,6 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   constexpr int total_edges = kLocalRingSteps;
   constexpr int edge_mask = total_edges - 1;
   constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  if constexpr (TransitionBits == 2) {
-    // Blackwell W2 benefits from sharing the eight overlapping ring edges
-    // through the sixteen pair-leader lanes. Higher rates have shorter
-    // recurrences and run faster with direct extraction, as on Ada.
-    constexpr unsigned kPairLeaderMask = 0x55555555u;
-    const uint32_t transition = planar_transition<TransitionBits>(
-        words, ring * total_edges + pair_in_ring);
-    uint32_t state = 0;
-#pragma unroll
-    for (int j = 0; j < edge_count; ++j) {
-      const int source_pair =
-          (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
-      const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
-      state = ((state << TransitionBits) | edge) & 0xffffu;
-    }
-    return state;
-  }
-#endif
   const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
   uint32_t state = 0;
 #pragma unroll
@@ -242,6 +223,42 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
              planar_transition<TransitionBits>(words, ring * total_edges + edge)) & 0xffffu;
   }
   return state;
+}
+
+// Keep the Blackwell W2 recurrence in a separate specialization. CUDA 13
+// otherwise reschedules the much longer eight-edge recurrence when direct
+// higher-rate paths share the primary template, cutting non-split throughput
+// by more than half despite identical resource counts.
+template <>
+__device__ __forceinline__ uint32_t qvq_local_ring_state<2>(
+    const uint32_t* words, int ring, int pair_in_ring) {
+  constexpr int total_edges = kLocalRingSteps;
+  constexpr int edge_mask = total_edges - 1;
+  constexpr int edge_count = (15 + 2) / 2;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+  constexpr unsigned kPairLeaderMask = 0x55555555u;
+  const uint32_t transition = planar_transition<2>(
+      words, ring * total_edges + pair_in_ring);
+  uint32_t state = 0;
+#pragma unroll
+  for (int j = 0; j < edge_count; ++j) {
+    const int source_pair =
+        (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
+    const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
+    state = ((state << 2) | edge) & 0xffffu;
+  }
+  return state;
+#else
+  const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
+  uint32_t state = 0;
+#pragma unroll
+  for (int j = 0; j < edge_count; ++j) {
+    const int edge = (first + j) & edge_mask;
+    state = ((state << 2) |
+             planar_transition<2>(words, ring * total_edges + edge)) & 0xffffu;
+  }
+  return state;
+#endif
 }
 
 __device__ __noinline__ uint32_t qvq_local_ring_state_runtime(
@@ -404,20 +421,13 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
     int k_local,
     int bank_alt_id) {
   uint32_t level_pair = 0;
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  constexpr bool kBroadcastBankMask = TransitionBits == 2;
-#else
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 1200
   // TB7 spills its unrolled mask lookup on Ada. Broadcasting the uniform
   // per-ring value removes that spill, while lower rates retain the direct
   // lookup that is faster on SM89.
   constexpr bool kBroadcastBankMask = TransitionBits == 7;
-#endif
   uint32_t bank_mask = 0;
   if constexpr (kBroadcastBankMask) {
-    // Blackwell otherwise materializes the constant bank-mask lookup in every
-    // pair-leader lane and spills the unrolled ROWS=16 kernel. One lane resolves
-    // the uniform per-ring mask and broadcasts it across the warp. SM89 keeps
-    // the direct lookup except for the spill-prone TB7 specialization.
     if (k_local == 0) {
       const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
           static_cast<uint32_t>(bank_alt_id);
@@ -435,6 +445,53 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
           static_cast<uint32_t>(bank_alt_id);
       mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
     }
+    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
+        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
+  }
+#else
+  // W2 has a dedicated broadcast specialization below. Higher Blackwell
+  // rates avoid the broadcast and use their shorter direct recurrences.
+  if ((k_local & 1) == 0) {
+    const uint32_t state = qvq_local_ring_state<TransitionBits>(packed_words, ring, k_local >> 1);
+    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
+        static_cast<uint32_t>(bank_alt_id);
+    const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
+    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
+        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
+  }
+#endif
+  level_pair = __shfl_sync(0xffffffffu, level_pair, k_local & ~1);
+  const uint32_t level_bits = (k_local & 1) == 0 ? level_pair & 0xffffu : level_pair >> 16;
+  return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
+}
+
+template <>
+__device__ __forceinline__ float qvq_decode_local_ring_weight_fast<2>(
+    const uint32_t* packed_words,
+    uint8_t packed_bank_id,
+    const half* cached_levels,
+    int ring,
+    int k_local,
+    int bank_alt_id) {
+  uint32_t level_pair = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+  uint32_t bank_mask = 0;
+  if (k_local == 0) {
+    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
+        static_cast<uint32_t>(bank_alt_id);
+    bank_mask = pgc16_v2_bank_mask<2>(bank);
+  }
+  bank_mask = __shfl_sync(0xffffffffu, bank_mask, 0);
+#endif
+  if ((k_local & 1) == 0) {
+    const uint32_t state = qvq_local_ring_state<2>(packed_words, ring, k_local >> 1);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+    const uint32_t mixed = pgc16_mix(state ^ bank_mask);
+#else
+    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
+        static_cast<uint32_t>(bank_alt_id);
+    const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(2, bank));
+#endif
     level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
         (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
   }
@@ -916,7 +973,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   // image. Keep ROWS=32 at eight tiles because its wider activation stripe
   // would lower resident block count.
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  constexpr int kBatchTiles = TransitionBits == 2 && (ROWS == 8 || ROWS == 16) ? 16 : 8;
+  constexpr int kBatchTiles =
+      (TransitionBits == 2 || SplitK) && (ROWS == 8 || ROWS == 16) ? 16 : 8;
 #else
   constexpr int kBatchTiles = ROWS == 16 ? 16 : 8;
 #endif
