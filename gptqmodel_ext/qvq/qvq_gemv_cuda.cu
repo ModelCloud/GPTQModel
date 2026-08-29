@@ -195,22 +195,13 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   constexpr int total_edges = kLocalRingSteps;
   constexpr int edge_mask = total_edges - 1;
   constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
-  // Pair p's state is a sliding window over the ring edges.  The sixteen
-  // even lanes are the pair leaders, so load each edge once and exchange the
-  // preceding window edges from those leaders.  The old implementation
-  // independently decoded edge_count overlapping windows for every pair;
-  // this keeps the recurrence identical while reducing the planar extraction
-  // and shared-memory traffic by edge_count for the common W2-W3.5 paths.
-  constexpr unsigned kPairLeaderMask = 0x55555555u;
-  const uint32_t transition = planar_transition<TransitionBits>(
-      words, ring * total_edges + pair_in_ring);
+  const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
   uint32_t state = 0;
 #pragma unroll
   for (int j = 0; j < edge_count; ++j) {
-    const int source_pair =
-        (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
-    const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
-    state = ((state << TransitionBits) | edge) & 0xffffu;
+    const int edge = (first + j) & edge_mask;
+    state = ((state << TransitionBits) |
+             planar_transition<TransitionBits>(words, ring * total_edges + edge)) & 0xffffu;
   }
   return state;
 }
