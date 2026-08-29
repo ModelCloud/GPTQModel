@@ -899,9 +899,11 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     int split_count,
     int transition_bits,
     int bank_alt_id) {
-  // ROWS=16 has enough shared-memory headroom to amortize each synchronization
+  // ROWS<=16 has enough shared-memory headroom to amortize each synchronization
   // pair across twice as many K32 tiles without reducing register occupancy.
-  constexpr int kBatchTiles = ROWS == 16 ? 16 : 8;
+  // Keep ROWS=32 at eight tiles because its wider activation stripe would
+  // lower the number of resident blocks.
+  constexpr int kBatchTiles = ROWS <= 16 ? 16 : 8;
   constexpr int kOutputTilesPerBlock = OutputTilesPerBlock;
   constexpr int kMaxWords = 32;
   constexpr int kWordsPerTile = 4 * TransitionBits;
