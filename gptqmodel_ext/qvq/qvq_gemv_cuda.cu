@@ -839,19 +839,20 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
     int transition_bits,
     int bank_alt_id) {
   constexpr int kBatchTiles = 8;
+  constexpr int kOutputTilesPerBlock = 2;
   constexpr int kMaxWords = 32;
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kInputVecsPerRow = kLocalRingTileRows * static_cast<int>(sizeof(Scalar)) / sizeof(uint4);
 
   __shared__ half cached_levels[kPgc16LevelCount];
-  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kMaxWords];
-  __shared__ uint8_t packed_bank_ids[kBatchTiles];
+  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTilesPerBlock][kMaxWords];
+  __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTilesPerBlock];
   __shared__ __align__(16) Scalar input_tile[kBatchTiles][ROWS * kLocalRingTileRows];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int ring = thread >> 5;
   const int k_local = thread & 31;
-  const int n_tile = static_cast<int>(blockIdx.x);
+  const int n_tile_base = static_cast<int>(blockIdx.x) * kOutputTilesPerBlock;
   const int m0 = static_cast<int>(blockIdx.y) * ROWS;
   const int block_rows = min(ROWS, size_m - m0);
   const int n_tiles = size_n / kLocalRingTileColumns;
@@ -860,36 +861,51 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   cached_levels[thread] = levels[thread];
   __syncthreads();
 
-  float accumulator[ROWS];
+  float accumulator[ROWS][kOutputTilesPerBlock];
 #pragma unroll
   for (int r = 0; r < ROWS; ++r) {
-    accumulator[r] = 0.0f;
+    for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
+      accumulator[r][sub] = 0.0f;
+    }
   }
 
   const int words_per_tile = 4 * transition_bits;
   auto stage_batch = [&](int kb, int tiles_here) {
     if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
       constexpr int words_per_vec = kWordsPerTile / 4;
-      const int vec_total = tiles_here * words_per_vec;
-      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0]);
+      const int vec_total = tiles_here * kOutputTilesPerBlock * words_per_vec;
+      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
       const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
       for (int index = thread; index < vec_total; index += kThreads) {
-        const int u = index / words_per_vec;
-        const int w4 = index - u * words_per_vec;
-        words4[u * (kMaxWords / 4) + w4] =
-            trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4];
+        const int tile_slot = index / words_per_vec;
+        const int w4 = index - tile_slot * words_per_vec;
+        const int u = tile_slot / kOutputTilesPerBlock;
+        const int sub = tile_slot % kOutputTilesPerBlock;
+        const int n_tile = n_tile_base + sub;
+        words4[tile_slot * (kMaxWords / 4) + w4] =
+            n_tile < n_tiles
+                ? trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4]
+                : make_uint4(0u, 0u, 0u, 0u);
       }
     } else {
-      for (int index = thread; index < tiles_here * words_per_tile; index += kThreads) {
-        const int u = index / words_per_tile;
-        const int w = index - u * words_per_tile;
+      for (int index = thread; index < tiles_here * kOutputTilesPerBlock * words_per_tile; index += kThreads) {
+        const int tile_slot = index / words_per_tile;
+        const int w = index - tile_slot * words_per_tile;
+        const int u = tile_slot / kOutputTilesPerBlock;
+        const int sub = tile_slot % kOutputTilesPerBlock;
+        const int n_tile = n_tile_base + sub;
         const int tile_index = (kb + u) * n_tiles + n_tile;
-        packed_words[u][w] = static_cast<uint32_t>(trellis[static_cast<int64_t>(tile_index) * words_per_tile + w]);
+        packed_words[u][sub][w] =
+            n_tile < n_tiles ? static_cast<uint32_t>(trellis[static_cast<int64_t>(tile_index) * words_per_tile + w])
+                             : 0u;
       }
     }
-    if (thread < tiles_here) {
-      const int tile_index = (kb + thread) * n_tiles + n_tile;
-      packed_bank_ids[thread] = bank_ids[tile_index];
+    if (thread < tiles_here * kOutputTilesPerBlock) {
+      const int u = thread / kOutputTilesPerBlock;
+      const int sub = thread % kOutputTilesPerBlock;
+      const int n_tile = n_tile_base + sub;
+      const int tile_index = (kb + u) * n_tiles + n_tile;
+      packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
     }
 
     if constexpr (TransitionBits != 0 && !kQvqDebugDisableVecStaging) {
@@ -934,20 +950,25 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
 #pragma unroll
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
-        float weight;
-        if constexpr (TransitionBits != 0) {
-          weight = qvq_decode_local_ring_weight_fast<TransitionBits>(
-              packed_words[u], packed_bank_ids[u], cached_levels, ring, k_local, bank_alt_id);
-        } else {
-          weight = qvq_decode_local_ring_weight_runtime(
-              packed_words[u], packed_bank_ids[u], cached_levels, ring, k_local, transition_bits, bank_alt_id);
-        }
+        for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
+          if (n_tile_base + sub >= n_tiles) {
+            continue;
+          }
+          float weight;
+          if constexpr (TransitionBits != 0) {
+            weight = qvq_decode_local_ring_weight_fast<TransitionBits>(
+                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, bank_alt_id);
+          } else {
+            weight = qvq_decode_local_ring_weight_runtime(
+                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, transition_bits, bank_alt_id);
+          }
 #pragma unroll
-        for (int r = 0; r < ROWS; ++r) {
-          accumulator[r] = fmaf(
-              ScalarTraits<Scalar>::to_float(input_tile[u][r * kLocalRingTileRows + k_local]),
-              weight,
-              accumulator[r]);
+          for (int r = 0; r < ROWS; ++r) {
+            accumulator[r][sub] = fmaf(
+                ScalarTraits<Scalar>::to_float(input_tile[u][r * kLocalRingTileRows + k_local]),
+                weight,
+                accumulator[r][sub]);
+          }
         }
       }
     }
@@ -955,18 +976,20 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
   }
 
   for (int r = 0; r < block_rows; ++r) {
-    float total = accumulator[r];
+    for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
+      float total = accumulator[r][sub];
 #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-      total += __shfl_down_sync(0xffffffffu, total, offset);
-    }
-    if (k_local == 0) {
-      const int64_t output_index = static_cast<int64_t>(m0 + r) * size_n +
-          n_tile * kLocalRingTileColumns + ring;
-      if constexpr (SplitK) {
-        partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = total;
-      } else {
-        output[output_index] = ScalarTraits<OutputScalar>::from_float(total);
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        total += __shfl_down_sync(0xffffffffu, total, offset);
+      }
+      if (k_local == 0 && n_tile_base + sub < n_tiles) {
+        const int64_t output_index = static_cast<int64_t>(m0 + r) * size_n +
+            (n_tile_base + sub) * kLocalRingTileColumns + ring;
+        if constexpr (SplitK) {
+          partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = total;
+        } else {
+          output[output_index] = ScalarTraits<OutputScalar>::from_float(total);
+        }
       }
     }
   }
@@ -1442,7 +1465,7 @@ void launch_qvq_local_ring_gemv(
     cudaStream_t stream) {
   const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
   const dim3 grid(
-      static_cast<unsigned int>(output.size(1) / kLocalRingTileColumns),
+      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + 1) / 2),
       static_cast<unsigned int>((input.size(0) + rows - 1) / rows),
       static_cast<unsigned int>(SplitK ? split_count : 1));
   const Scalar* input_ptr = reinterpret_cast<const Scalar*>(input.const_data_ptr());
