@@ -214,6 +214,17 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   constexpr int total_edges = kLocalRingSteps;
   constexpr int edge_mask = total_edges - 1;
   constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
+  if constexpr (TransitionBits == 2) {
+    // A W2 ring's sixteen 2-bit transitions occupy exactly one packed word.
+    // Rotate the eight-edge recurrence window into the low half, reverse its
+    // 2-bit groups, and preserve each transition's bit order. This replaces
+    // eight overlapping planar extractions per pair leader with one shared
+    // load and a fixed integer permutation.
+    const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
+    const uint32_t window = __funnelshift_r(words[ring], words[ring], first * TransitionBits) & 0xffffu;
+    const uint32_t reversed_bits = __brev(window) >> 16;
+    return ((reversed_bits & 0xaaaau) >> 1) | ((reversed_bits & 0x5555u) << 1);
+  } else {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
   // Blackwell benefits from sharing the overlapping ring edges through the
   // sixteen pair-leader lanes. Ada's dynamic shuffle path is substantially
@@ -241,6 +252,7 @@ __device__ __forceinline__ uint32_t qvq_local_ring_state(
   }
   return state;
 #endif
+  }
 }
 
 __device__ __noinline__ uint32_t qvq_local_ring_state_runtime(
