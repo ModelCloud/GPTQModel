@@ -57,7 +57,8 @@ tables below every row was intentionally measured at M=16.
 | `bcf4d05d` | all nine, W2 | Architecture/row-specific batch depth | 5.999x all-device geomean versus non-LR; 5090 LR geomean gained 2.316x versus `24601c7a` | accepted |
 | `0480f5c8` | 4090/5090, W3.5 | Broadcast the TB7 bank mask on Ada | 4090 substantial shapes rose from about 1x to 2.28-2.53x; 5090 remained 4.99-5.85x | accepted |
 | `73c3cc86` | 5090, W2-W3.5 | Direct higher-rate recurrence in the shared specialization | Recovered W2.5/W3/W3.5 non-split rates, but compiler rescheduled W2 and W2.5 split-K; W2 wide/down fell near 2x and W2.5 mid to 1.41x | superseded |
-| `294f15f4` | 4090/5090, W2-W3.5 | Isolate W2 code generation; preserve batch 16 for Blackwell split-K | measurement in progress | candidate |
+| `294f15f4` | 4090/5090, W2-W3.5 | Isolate rate code generation; preserve batch 16 for Blackwell split-K | Higher rates recovered to 4.98-6.50x, but the specialization used TB2 instead of W2's TB4; W2 non-split remained 1.95-2.03x | superseded |
+| `e4b1006c` | 4090/5090, W2-W3.5 | Attach the Blackwell shuffle/broadcast/deep-batch path to W2's actual TB4 width | 5090: all 16 substantial cells pass >=4x, 4.054x geomean including canaries, max error 1.53e-4; 4090 W3.5 remains 2.43-2.53x | accepted candidate |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -88,41 +89,41 @@ lineage as merged main and is included for completeness.
 | 3.5 | `m16_mid` | 16 | 8,192 | 2,048 | `0480f5c8` | 0.3779 | 0.9226 | 2.44x | 0.8387 | 2.22x | pass >=2x |
 | 3.5 | `mlp_down` | 16 | 4,096 | 11,008 | `0480f5c8` | 0.9974 | 2.2743 | 2.28x | 2.2211 | 2.23x | pass >=2x |
 
-## RTX 5090 best-known M=16 matrix before `294f15f4`
+## RTX 5090 accepted M=16 matrix
 
-W2 is the accepted isolated-rate result from `bcf4d05d`. Higher-rate rows are
-the direct-recurrence reference from `bd625c15`; `73c3cc86` reproduced their
-non-split medians but exposed the split-K/code-generation regressions recorded
-above. This table will move to one commit only after `294f15f4` passes.
+All rows below come from `e4b1006c`, source fingerprint
+`176b415b6b673bea64ab91d4c1e56f97e72c8ff1dd90597a690718a9ba4069fc`.
+Every substantial shape clears the 4x stretch target; narrow rows remain
+launch-bound canaries.
 
 | W | Shape | M | K | N | Result commit | LR ms | non-LR ms | Speedup | Status |
 |---:|---|---:|---:|---:|---|---:|---:|---:|---|
-| 2 | `m1_narrow` | 16 | 2,048 | 256 | `bcf4d05d` | 0.0245 | 0.0269 | 1.10x | canary |
-| 2 | `m1_wide` | 16 | 2,048 | 8,192 | `bcf4d05d` | 0.0947 | 0.4973 | 5.25x | pass >=4x |
-| 2 | `m4_wide` | 16 | 2,048 | 8,192 | `bcf4d05d` | 0.0948 | 0.4994 | 5.27x | pass >=4x |
-| 2 | `m16_mid` | 16 | 8,192 | 2,048 | `bcf4d05d` | 0.0968 | 0.4978 | 5.14x | pass >=4x |
-| 2 | `mlp_down` | 16 | 4,096 | 11,008 | `bcf4d05d` | 0.2330 | 1.3210 | 5.67x | pass >=4x |
-| 2.5 | `m1_narrow` | 16 | 2,048 | 256 | `bd625c15` | 0.0228 | 0.0269 | 1.18x | canary |
-| 2.5 | `m1_wide` | 16 | 2,048 | 8,192 | `bd625c15` | 0.0836 | 0.5034 | 6.02x | pass >=4x |
-| 2.5 | `m4_wide` | 16 | 2,048 | 8,192 | `bd625c15` | 0.0836 | 0.5055 | 6.05x | pass >=4x |
-| 2.5 | `m16_mid` | 16 | 8,192 | 2,048 | `bd625c15` | 0.0917 | 0.4943 | 5.39x | pass >=4x |
-| 2.5 | `mlp_down` | 16 | 4,096 | 11,008 | `bd625c15` | 0.2085 | 1.3265 | 6.36x | pass >=4x |
-| 3 | `m1_narrow` | 16 | 2,048 | 256 | `bd625c15` | 0.0226 | 0.0259 | 1.15x | canary |
-| 3 | `m1_wide` | 16 | 2,048 | 8,192 | `bd625c15` | 0.0939 | 0.4932 | 5.25x | pass >=4x |
-| 3 | `m4_wide` | 16 | 2,048 | 8,192 | `bd625c15` | 0.0939 | 0.5014 | 5.34x | pass >=4x |
-| 3 | `m16_mid` | 16 | 8,192 | 2,048 | `bd625c15` | 0.0904 | 0.4946 | 5.47x | pass >=4x |
-| 3 | `mlp_down` | 16 | 4,096 | 11,008 | `bd625c15` | 0.2352 | 1.3421 | 5.71x | pass >=4x |
-| 3.5 | `m1_narrow` | 16 | 2,048 | 256 | `bd625c15` | 0.0228 | 0.0270 | 1.19x | canary |
-| 3.5 | `m1_wide` | 16 | 2,048 | 8,192 | `bd625c15` | 0.0877 | 0.4950 | 5.64x | pass >=4x |
-| 3.5 | `m4_wide` | 16 | 2,048 | 8,192 | `bd625c15` | 0.0877 | 0.5055 | 5.76x | pass >=4x |
-| 3.5 | `m16_mid` | 16 | 8,192 | 2,048 | `bd625c15` | 0.0938 | 0.4932 | 5.26x | pass >=4x |
-| 3.5 | `mlp_down` | 16 | 4,096 | 11,008 | `bd625c15` | 0.2188 | 1.3584 | 6.21x | pass >=4x |
+| 2 | `m1_narrow` | 16 | 2,048 | 256 | `e4b1006c` | 0.0248 | 0.0279 | 1.13x | canary |
+| 2 | `m1_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0959 | 0.5001 | 5.21x | pass >=4x |
+| 2 | `m4_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0955 | 0.4963 | 5.20x | pass >=4x |
+| 2 | `m16_mid` | 16 | 8,192 | 2,048 | `e4b1006c` | 0.0916 | 0.4993 | 5.45x | pass >=4x |
+| 2 | `mlp_down` | 16 | 4,096 | 11,008 | `e4b1006c` | 0.2347 | 1.3477 | 5.74x | pass >=4x |
+| 2.5 | `m1_narrow` | 16 | 2,048 | 256 | `e4b1006c` | 0.0249 | 0.0279 | 1.12x | canary |
+| 2.5 | `m1_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0836 | 0.4988 | 5.96x | pass >=4x |
+| 2.5 | `m4_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0838 | 0.5064 | 6.04x | pass >=4x |
+| 2.5 | `m16_mid` | 16 | 8,192 | 2,048 | `e4b1006c` | 0.0897 | 0.4977 | 5.55x | pass >=4x |
+| 2.5 | `mlp_down` | 16 | 4,096 | 11,008 | `e4b1006c` | 0.2085 | 1.3563 | 6.50x | pass >=4x |
+| 3 | `m1_narrow` | 16 | 2,048 | 256 | `e4b1006c` | 0.0243 | 0.0279 | 1.15x | canary |
+| 3 | `m1_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0978 | 0.5056 | 5.17x | pass >=4x |
+| 3 | `m4_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0979 | 0.5007 | 5.11x | pass >=4x |
+| 3 | `m16_mid` | 16 | 8,192 | 2,048 | `e4b1006c` | 0.1019 | 0.4984 | 4.89x | pass >=4x |
+| 3 | `mlp_down` | 16 | 4,096 | 11,008 | `e4b1006c` | 0.2450 | 1.3584 | 5.54x | pass >=4x |
+| 3.5 | `m1_narrow` | 16 | 2,048 | 256 | `e4b1006c` | 0.0249 | 0.0289 | 1.16x | canary |
+| 3.5 | `m1_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0877 | 0.5076 | 5.79x | pass >=4x |
+| 3.5 | `m4_wide` | 16 | 2,048 | 8,192 | `e4b1006c` | 0.0886 | 0.5076 | 5.73x | pass >=4x |
+| 3.5 | `m16_mid` | 16 | 8,192 | 2,048 | `e4b1006c` | 0.0938 | 0.4973 | 5.30x | pass >=4x |
+| 3.5 | `mlp_down` | 16 | 4,096 | 11,008 | `e4b1006c` | 0.2202 | 1.3554 | 6.15x | pass >=4x |
 
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `294f15f4` candidate | prove one source commit retains W2 and direct higher-rate winners |
+| 1 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
 | 2 | all nine installed GPUs, W2-W3.5 | W2 has all-device coverage; higher rates have representative 4090/5090 coverage | final UUID-pinned all-device FP16 M=16 sweep |
 | 3 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for this branch head | expanded accuracy/performance regression |
 | 4 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
