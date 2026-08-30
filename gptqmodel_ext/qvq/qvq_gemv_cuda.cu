@@ -1313,9 +1313,13 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const int pair_base = edge_group * 4;
         uint32_t state = ((edge_at((pair_base + 14) & 15) << 12) |
             (edge_at((pair_base + 15) & 15) << 6) | edge_at(pair_base)) & 0xffffu;
-        const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
-            static_cast<uint32_t>(bank_alt_id);
-        const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
+        uint32_t bank_mask = 0;
+        if (edge_group == 0) {
+          const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
+              static_cast<uint32_t>(bank_alt_id);
+          bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
+        }
+        bank_mask = __shfl_sync(0xffffffffu, bank_mask, col);
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           const int pair = pair_base + q;
