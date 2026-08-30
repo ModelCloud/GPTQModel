@@ -980,6 +980,11 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
   constexpr int kBatchTiles =
       (TransitionBits == 4 || SplitK) && (ROWS == 8 || ROWS == 16) ? 16 : 8;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // Hopper's larger shared-memory budget keeps ROWS=32 register-limited when
+  // the activation/trellis batch doubles, so amortize its synchronization in
+  // the same way as ROWS=16. Pre-Hopper paths retain their measured depth.
+  constexpr int kBatchTiles = ROWS == 16 || ROWS == 32 ? 16 : 8;
 #else
   constexpr int kBatchTiles = ROWS == 16 ? 16 : 8;
 #endif
