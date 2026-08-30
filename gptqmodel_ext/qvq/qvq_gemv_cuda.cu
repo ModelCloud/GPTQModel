@@ -40,9 +40,7 @@ constexpr int kMaxCachedCudaDevices = 64;
 
 // Hopper WMMA blocks trade activation reuse against grid parallelism. Two N8
 // tiles per block keeps one staged K32 stripe shared by adjacent outputs while
-// providing enough blocks to fill the H200's 132 SMs. The block uses an equal
-// number of producer and consumer warps so the next K batch can be fetched
-// asynchronously while the current batch is decoded and multiplied.
+// providing enough blocks to fill the H200's 132 SMs.
 constexpr int kHopperWmmaOutputTiles = 2;
 
 struct QvqCudaDeviceConfig {
@@ -1189,29 +1187,21 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kTransitionBits = 6;
   constexpr int kRows = 16;
   constexpr int kBatchTiles = 16;
-  constexpr int kConsumerWarps = OutputTiles;
-  // The consumer warps also issue cp.async copies.  Keeping one logical warp
-  // group avoids the extra producer registers and block-wide barrier tail of
-  // a dedicated producer group while preserving asynchronous stage overlap.
-  constexpr int kProducerWarps = OutputTiles;
-  constexpr int kWmmaThreads = kConsumerWarps * 32;
-  constexpr int kStageCount = 2;
+  constexpr int kWmmaThreads = OutputTiles * 32;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
 
   __shared__ half cached_levels[kPgc16LevelCount];
-  __shared__ __align__(16)
-      uint32_t packed_words[kStageCount][kBatchTiles][kOutputTiles][kWordsPerTile];
-  __shared__ uint8_t packed_bank_ids[kStageCount][kBatchTiles][kOutputTiles];
-  __shared__ __align__(16) half input_tile[kStageCount][kBatchTiles][kRows * kLocalRingTileRows];
+  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
+  __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
+  __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
   __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows][kPaddedColumns];
   __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
   const int lane = thread & 31;
-  const int loader_thread = thread;
   const int n_tile_base = static_cast<int>(blockIdx.x) * kOutputTiles;
   const int m0 = static_cast<int>(blockIdx.y) * kRows;
   const int block_rows = min(kRows, size_m - m0);
@@ -1242,74 +1232,55 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
   wmma::fill_fragment(accumulator, 0.0f);
 
-  auto stage_batch = [&](int kb, int tiles_here, int stage) {
+  auto stage_batch = [&](int kb, int tiles_here) {
     constexpr int words_per_vec = kWordsPerTile / 4;
     const int vec_total = tiles_here * kOutputTiles * words_per_vec;
-    uint4* words4 = reinterpret_cast<uint4*>(packed_words[stage][0][0]);
+    uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
     const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
-    for (int index = loader_thread; index < vec_total; index += kProducerWarps * 32) {
+    for (int index = thread; index < vec_total; index += kWmmaThreads) {
       const int tile_slot = index / words_per_vec;
       const int w4 = index - tile_slot * words_per_vec;
       const int u = tile_slot / kOutputTiles;
       const int sub = tile_slot % kOutputTiles;
       const int n_tile = n_tile_base + sub;
-      if (n_tile < n_tiles) {
-        __pipeline_memcpy_async(
-            words4 + tile_slot * words_per_vec + w4,
-            trellis4 + (static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4,
-            16);
-      } else {
-        words4[tile_slot * words_per_vec + w4] = make_uint4(0u, 0u, 0u, 0u);
-      }
+      words4[tile_slot * words_per_vec + w4] =
+          n_tile < n_tiles
+              ? trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4]
+              : make_uint4(0u, 0u, 0u, 0u);
     }
-    if (loader_thread >= 0 && loader_thread < tiles_here * kOutputTiles) {
-      const int u = loader_thread / kOutputTiles;
-      const int sub = loader_thread % kOutputTiles;
+    if (thread < tiles_here * kOutputTiles) {
+      const int u = thread / kOutputTiles;
+      const int sub = thread % kOutputTiles;
       const int n_tile = n_tile_base + sub;
       const int tile_index = (kb + u) * n_tiles + n_tile;
-      packed_bank_ids[stage][u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
+      packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
     }
 
     constexpr int input_vecs_per_row = kLocalRingTileRows * sizeof(half) / sizeof(uint4);
     const int input_vec_total = tiles_here * kRows * input_vecs_per_row;
-    uint4* input4 = reinterpret_cast<uint4*>(input_tile[stage][0]);
+    uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
     const uint4* input4_base = reinterpret_cast<const uint4*>(input);
-    for (int index = loader_thread; index < input_vec_total; index += kProducerWarps * 32) {
+    for (int index = thread; index < input_vec_total; index += kWmmaThreads) {
       const int u = index / (kRows * input_vecs_per_row);
       const int cell = index - u * (kRows * input_vecs_per_row);
       const int row = cell / input_vecs_per_row;
       const int vec = cell - row * input_vecs_per_row;
-      if (row < block_rows) {
-        __pipeline_memcpy_async(
-            input4 + index,
-            input4_base +
+      input4[index] = row < block_rows
+          ? input4_base[
                 ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) * sizeof(half) / 16) +
-                vec,
-            16);
-      } else {
-        input4[index] = make_uint4(0u, 0u, 0u, 0u);
-      }
+                vec]
+          : make_uint4(0u, 0u, 0u, 0u);
     }
   };
 
-  int stage = 0;
-  const int first_tiles = min(kBatchTiles, k_tile_end - k_tile_begin);
-  stage_batch(k_tile_begin, first_tiles, stage);
-  __pipeline_commit();
-  __pipeline_wait_prior(0);
-  __syncthreads();
-
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
     const int tiles_here = min(kBatchTiles, k_tile_end - kb);
-    const bool has_next = kb + kBatchTiles < k_tile_end;
-    if (has_next) {
-      stage_batch(kb + kBatchTiles, min(kBatchTiles, k_tile_end - kb - kBatchTiles), stage ^ 1);
-      __pipeline_commit();
-    }
+    stage_batch(kb, tiles_here);
+    __syncthreads();
 
 #pragma unroll 1
     for (int u = 0; u < kBatchTiles; ++u) {
-      if (warp < kConsumerWarps && u < tiles_here) {
+      if (u < tiles_here) {
         const int sub = warp;
         const int n_tile = n_tile_base + sub;
         // W3 packs two adjacent output rows from one 16-bit recurrence state.
@@ -1321,8 +1292,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           if (lane >= 16) {
             continue;
           }
-          uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[stage][u][sub], col, pair);
-          const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[stage][u][sub]) >> col) & 1u) *
+          uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[u][sub], col, pair);
+          const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
               static_cast<uint32_t>(bank_alt_id);
           const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask<kTransitionBits>(bank));
           decoded_weight[sub][pair * 2][col] = cached_levels[mixed >> 8];
@@ -1331,30 +1302,26 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       }
       __syncwarp();
 
-      if (warp < kConsumerWarps && n_tile_base + warp < n_tiles) {
-        wmma::load_matrix_sync(input_fragment, input_tile[stage][u], kLocalRingTileRows);
+      if (n_tile_base + warp < n_tiles) {
+        wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
         wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0][0], kPaddedColumns);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
         wmma::load_matrix_sync(
-            input_fragment, input_tile[stage][u] + 16, kLocalRingTileRows);
+            input_fragment, input_tile[u] + 16, kLocalRingTileRows);
         wmma::load_matrix_sync(
             weight_fragment, &decoded_weight[warp][16][0], kPaddedColumns);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
       }
       __syncwarp();
     }
-    if (has_next) {
-      __pipeline_wait_prior(0);
-    }
     __syncthreads();
-    stage ^= 1;
   }
 
-  if (warp < kConsumerWarps && n_tile_base + warp < n_tiles) {
+  if (n_tile_base + warp < n_tiles) {
     wmma::store_matrix_sync(&output_tile[warp][0][0], accumulator, kPaddedColumns, wmma::mem_row_major);
   }
   __syncthreads();
-  if (warp < kConsumerWarps && n_tile_base + warp < n_tiles) {
+  if (n_tile_base + warp < n_tiles) {
     for (int index = lane; index < block_rows * kLocalRingTileColumns; index += 32) {
       const int row = index / kLocalRingTileColumns;
       const int col = index % kLocalRingTileColumns;
