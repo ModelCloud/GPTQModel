@@ -49,13 +49,13 @@ run_one() {
     echo "[$(date -u +%FT%TZ)] start arm=$arm gpu=$gpu commit=$commit"
     env PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
       CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
-      python "$wt/scripts/qvq_quantize.py" \
+      python "$ROOT/scripts/run_in_worktree.py" --worktree "$wt" --script scripts/qvq_quantize.py -- \
         --model "$MODEL" --output "$out" --quant-config "$ROOT/$CONFIG_REL" \
         --calibration-dataset "$CAL" --calibration-row-start 0 --calibration-rows 128 \
         --yaqa-dataset "$YAQA" --yaqa-row-start 0 --yaqa-rows 182 --device cuda:0 \
         --disjointness-manifest "$DISJOINTNESS" --require-disjointness --qvq-telemetry
     env PYTHONHASHSEED=0 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
-      python "$EVAL_WT/scripts/qvq_evaluate.py" tasks \
+      python "$ROOT/scripts/run_in_worktree.py" --worktree "$EVAL_WT" --script scripts/qvq_evaluate.py -- tasks \
         --checkpoint "$out" --output "$out/post_quant_eval_result_wave11_gsm8k.json" \
         --task gsm8k_platinum_cot --batch-size 8 --device cuda:0 \
         --attn-implementation 'paged|sdpa'
