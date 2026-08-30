@@ -1,0 +1,380 @@
+{
+  "artifacts": [
+    {
+      "artifact": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm128.parquet",
+        "sha256": "eddd5bd1fbfbc45861cf1c57f1226bffd122864c29c8be04d26e85b7f7a118c0",
+        "size_bytes": 629872
+      },
+      "config": {
+        "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nm128.json",
+        "sha256": "90494d741a769e0e1629f4cdfbb933464f922b47d1ae99f2902da65e17e0e967",
+        "size_bytes": 1270
+      },
+      "coverage": {
+        "after_dedup_rows": 310,
+        "before_dedup_rows": 310,
+        "by_source": {
+          "nm": {
+            "independent_sequences": 128,
+            "kept_valid_fisher_output_token_samples": 49725,
+            "kept_valid_input_tokens": 49725,
+            "rows_kept_after_dedup": 128,
+            "selected_rows": 128,
+            "valid_fisher_output_token_samples": 49725,
+            "valid_input_tokens": 49725
+          },
+          "yaqa": {
+            "independent_sequences": 182,
+            "kept_valid_fisher_output_token_samples": 302193,
+            "kept_valid_input_tokens": 302193,
+            "rows_kept_after_dedup": 182,
+            "selected_rows": 182,
+            "valid_fisher_output_token_samples": 302193,
+            "valid_input_tokens": 302193
+          }
+        },
+        "independent_sequences": 310,
+        "valid_fisher_output_token_samples": 351918,
+        "valid_input_tokens": 351918
+      },
+      "disjointness": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm128.disjointness.json",
+        "sha256": "01f524326b9aa047358208088a45fd1ba9ab037ff9898619db376d2eae51716f",
+        "size_bytes": 2518
+      },
+      "duplicate_group_count": 0,
+      "key": "yaqa182_nm128",
+      "manifest": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm128.manifest.json",
+        "sha256": "24fa5c60b41f3d834bd32a05d0034e93f1891c5a0ebe6024d5f9dfb2f95bef92",
+        "size_bytes": 177678
+      },
+      "ordered_calibration_manifest_sha256": "dba3f5632e54965eb0cb1ecdbe2bdfb3aa5e5943a195b2e87603ff3658cd06c8",
+      "selected_nm_rows": 128,
+      "selected_nm_rows_sha256": "4497d32c822ad4ae57132a3462f6a0630d5d4a7863915c4ee08634841c4fee9f",
+      "selection": {
+        "row_start": 0,
+        "rows": 128,
+        "strategy": "prefix"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm256.parquet",
+        "sha256": "3fd0e9dfef53a9ce6b27418a54dd6d8535f04519a2014d6e5b0b523cc287adb8",
+        "size_bytes": 699676
+      },
+      "config": {
+        "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nm256.json",
+        "sha256": "324c5773c446a2c9dae7c8b3bad5cd9642254c2b6bb3a37ed0563f20dfb30eaa",
+        "size_bytes": 1270
+      },
+      "coverage": {
+        "after_dedup_rows": 438,
+        "before_dedup_rows": 438,
+        "by_source": {
+          "nm": {
+            "independent_sequences": 256,
+            "kept_valid_fisher_output_token_samples": 94939,
+            "kept_valid_input_tokens": 94939,
+            "rows_kept_after_dedup": 256,
+            "selected_rows": 256,
+            "valid_fisher_output_token_samples": 94939,
+            "valid_input_tokens": 94939
+          },
+          "yaqa": {
+            "independent_sequences": 182,
+            "kept_valid_fisher_output_token_samples": 302193,
+            "kept_valid_input_tokens": 302193,
+            "rows_kept_after_dedup": 182,
+            "selected_rows": 182,
+            "valid_fisher_output_token_samples": 302193,
+            "valid_input_tokens": 302193
+          }
+        },
+        "independent_sequences": 438,
+        "valid_fisher_output_token_samples": 397132,
+        "valid_input_tokens": 397132
+      },
+      "disjointness": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm256.disjointness.json",
+        "sha256": "5f59e936259c2600088d08017521eb9b38181b783c2d10d8ac37ee12157876e8",
+        "size_bytes": 2518
+      },
+      "duplicate_group_count": 0,
+      "key": "yaqa182_nm256",
+      "manifest": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm256.manifest.json",
+        "sha256": "8653107a35aad2e93760fceb0a7d37bbd8ae166c8fa8bc4e71e5d384b5c2d057",
+        "size_bytes": 249356
+      },
+      "ordered_calibration_manifest_sha256": "0e946486a7bc84917b8cec601f14862eedfe1baa2597bab920f70b5aa1601acd",
+      "selected_nm_rows": 256,
+      "selected_nm_rows_sha256": "be66c2867e103fa00c88539675e5cd95f52ec5e38d9038e6d3710539f6c0aec1",
+      "selection": {
+        "row_start": 0,
+        "rows": 256,
+        "strategy": "prefix"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm512.parquet",
+        "sha256": "05288e83a8ce4cc7a607d7d19bfd48eeb0b45055ca7cc4f4b20d5f037266f2dc",
+        "size_bytes": 845588
+      },
+      "config": {
+        "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nm512.json",
+        "sha256": "7e896ab86e57dcb54f6699da028053864a9d914436ab42b2d86319b4297e4f40",
+        "size_bytes": 1270
+      },
+      "coverage": {
+        "after_dedup_rows": 694,
+        "before_dedup_rows": 694,
+        "by_source": {
+          "nm": {
+            "independent_sequences": 512,
+            "kept_valid_fisher_output_token_samples": 188256,
+            "kept_valid_input_tokens": 188256,
+            "rows_kept_after_dedup": 512,
+            "selected_rows": 512,
+            "valid_fisher_output_token_samples": 188256,
+            "valid_input_tokens": 188256
+          },
+          "yaqa": {
+            "independent_sequences": 182,
+            "kept_valid_fisher_output_token_samples": 302193,
+            "kept_valid_input_tokens": 302193,
+            "rows_kept_after_dedup": 182,
+            "selected_rows": 182,
+            "valid_fisher_output_token_samples": 302193,
+            "valid_input_tokens": 302193
+          }
+        },
+        "independent_sequences": 694,
+        "valid_fisher_output_token_samples": 490449,
+        "valid_input_tokens": 490449
+      },
+      "disjointness": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm512.disjointness.json",
+        "sha256": "943485f3db48aa7ee3e49caa378aa4b70ca4b0b9f58c954d11babfb261d956e1",
+        "size_bytes": 2518
+      },
+      "duplicate_group_count": 0,
+      "key": "yaqa182_nm512",
+      "manifest": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm512.manifest.json",
+        "sha256": "5fa877ece98a8a2f046a438942324488c4289991cec800a3e9c84fc1fd0937be",
+        "size_bytes": 392734
+      },
+      "ordered_calibration_manifest_sha256": "143570311180630b6039569992ba0709e8268ef9c73491b2cf8f756b3aca343e",
+      "selected_nm_rows": 512,
+      "selected_nm_rows_sha256": "61f3f6fd3aa109e05aa31cc4d74f333d17c8f73ced22284db2209e96a39884af",
+      "selection": {
+        "row_start": 0,
+        "rows": 512,
+        "strategy": "prefix"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm1024.parquet",
+        "sha256": "a0ffad0d2dde12a1da7da50475fe9c585114c98fad43ca9c167a6c9bde4b60de",
+        "size_bytes": 1136508
+      },
+      "config": {
+        "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nm1024.json",
+        "sha256": "a925e6c9ea85f237a11eb43badf7f67ea587d9678637f895d6ac2797d57bea40",
+        "size_bytes": 1271
+      },
+      "coverage": {
+        "after_dedup_rows": 1206,
+        "before_dedup_rows": 1206,
+        "by_source": {
+          "nm": {
+            "independent_sequences": 1024,
+            "kept_valid_fisher_output_token_samples": 375715,
+            "kept_valid_input_tokens": 375715,
+            "rows_kept_after_dedup": 1024,
+            "selected_rows": 1024,
+            "valid_fisher_output_token_samples": 375715,
+            "valid_input_tokens": 375715
+          },
+          "yaqa": {
+            "independent_sequences": 182,
+            "kept_valid_fisher_output_token_samples": 302193,
+            "kept_valid_input_tokens": 302193,
+            "rows_kept_after_dedup": 182,
+            "selected_rows": 182,
+            "valid_fisher_output_token_samples": 302193,
+            "valid_input_tokens": 302193
+          }
+        },
+        "independent_sequences": 1206,
+        "valid_fisher_output_token_samples": 677908,
+        "valid_input_tokens": 677908
+      },
+      "disjointness": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm1024.disjointness.json",
+        "sha256": "cc2ae3d42e590209d3233963c18c2e516d2018b9f192b0e53f9e3094ff650efc",
+        "size_bytes": 2525
+      },
+      "duplicate_group_count": 0,
+      "key": "yaqa182_nm1024",
+      "manifest": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm1024.manifest.json",
+        "sha256": "365b0d45de8abd0f3224cb65b3621f3f4f6922d36a2bb653da1ac5469074ab07",
+        "size_bytes": 679728
+      },
+      "ordered_calibration_manifest_sha256": "1be7ad91217e72c885136586da637834513e6febd9e3174b0daf110565c3db4b",
+      "selected_nm_rows": 1024,
+      "selected_nm_rows_sha256": "fc62683cb885804aa761521dac50ca182266277dfd9a25d937c70969d3e37362",
+      "selection": {
+        "row_start": 0,
+        "rows": 1024,
+        "strategy": "prefix"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.parquet",
+        "sha256": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+        "size_bytes": 6283798
+      },
+      "config": {
+        "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nm10000.json",
+        "sha256": "fe66d8969f8efea66cb37febf050144d474109caa6d85ec3df008b48da046a22",
+        "size_bytes": 1272
+      },
+      "coverage": {
+        "after_dedup_rows": 10178,
+        "before_dedup_rows": 10182,
+        "by_source": {
+          "nm": {
+            "independent_sequences": 10000,
+            "kept_valid_fisher_output_token_samples": 3659067,
+            "kept_valid_input_tokens": 3659067,
+            "rows_kept_after_dedup": 9996,
+            "selected_rows": 10000,
+            "valid_fisher_output_token_samples": 3661493,
+            "valid_input_tokens": 3661493
+          },
+          "yaqa": {
+            "independent_sequences": 182,
+            "kept_valid_fisher_output_token_samples": 302193,
+            "kept_valid_input_tokens": 302193,
+            "rows_kept_after_dedup": 182,
+            "selected_rows": 182,
+            "valid_fisher_output_token_samples": 302193,
+            "valid_input_tokens": 302193
+          }
+        },
+        "independent_sequences": 10178,
+        "valid_fisher_output_token_samples": 3961260,
+        "valid_input_tokens": 3961260
+      },
+      "disjointness": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.json",
+        "sha256": "f283eca649cbf1d2dcc160c202bc131c2462d4b3485b34c0d4bb5237d85a9d4e",
+        "size_bytes": 2531
+      },
+      "duplicate_group_count": 4,
+      "key": "yaqa182_nm10000",
+      "manifest": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.manifest.json",
+        "sha256": "90f17c84200edc4cf25bd745729507c6e32b76f34622b3f44b34aabe8e10131e",
+        "size_bytes": 5738924
+      },
+      "ordered_calibration_manifest_sha256": "330c1039a50d8a71b7a64255f4084187594471b25183feadeecfb0a6568e61d7",
+      "selected_nm_rows": 10000,
+      "selected_nm_rows_sha256": "a74675bfed3834ac1c3140b2d7fb7d93d90a76608cc08515a5019a1cb2075ff4",
+      "selection": {
+        "row_start": 0,
+        "rows": 10000,
+        "strategy": "prefix"
+      }
+    },
+    {
+      "artifact": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nmrandom_token188256_seed20260830.parquet",
+        "sha256": "762bce57198bb1be12eb1ec86a184a5c38c55b7c7d2ae12c9ba264a3764904e4",
+        "size_bytes": 844120
+      },
+      "config": {
+        "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nmrandom_token188256_seed20260830.json",
+        "sha256": "bd991ed8c78d860a94696e0703ee7da2575110a6278db2f6e3dc29beb03b42e7",
+        "size_bytes": 1270
+      },
+      "coverage": {
+        "after_dedup_rows": 704,
+        "before_dedup_rows": 704,
+        "by_source": {
+          "nm": {
+            "independent_sequences": 522,
+            "kept_valid_fisher_output_token_samples": 188288,
+            "kept_valid_input_tokens": 188288,
+            "rows_kept_after_dedup": 522,
+            "selected_rows": 522,
+            "valid_fisher_output_token_samples": 188288,
+            "valid_input_tokens": 188288
+          },
+          "yaqa": {
+            "independent_sequences": 182,
+            "kept_valid_fisher_output_token_samples": 302193,
+            "kept_valid_input_tokens": 302193,
+            "rows_kept_after_dedup": 182,
+            "selected_rows": 182,
+            "valid_fisher_output_token_samples": 302193,
+            "valid_input_tokens": 302193
+          }
+        },
+        "independent_sequences": 704,
+        "valid_fisher_output_token_samples": 490481,
+        "valid_input_tokens": 490481
+      },
+      "disjointness": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nmrandom_token188256_seed20260830.disjointness.json",
+        "sha256": "0e1857f192b6cd6cf8c9863eccb26db9be2d038dc55725a7c6eb7cc8c516f42c",
+        "size_bytes": 2710
+      },
+      "duplicate_group_count": 0,
+      "key": "yaqa182_nmrandom_token188256_seed20260830",
+      "manifest": {
+        "path": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nmrandom_token188256_seed20260830.manifest.json",
+        "sha256": "3439590998e94248c0399046a518c7aa95616c1a09dbdc93c5f56a4fb2fbb653",
+        "size_bytes": 399628
+      },
+      "ordered_calibration_manifest_sha256": "bbb21c44b76a57bcf201ea92467d459ccbd6a4c68eab4140924e2e9e42e1b3e1",
+      "selected_nm_rows": 522,
+      "selected_nm_rows_sha256": "12baf955800f485fc62956082105b462ce6eac18a4ba45ddbba0e3a551e556ac",
+      "selection": {
+        "candidate_rows": 10000,
+        "seed": 20260830,
+        "selected_tokens": 188288,
+        "strategy": "deterministic_random_token_match",
+        "target_tokens": 188256
+      }
+    }
+  ],
+  "created_at_utc": "2026-08-30T09:00:01.171261+00:00",
+  "full_replica_seed1_config": {
+    "path": "/root/QvQ-score-updates/scripts/configs/llama32_1b_fisher_scaling_yaqa182_nm10000_seed1.json",
+    "sha256": "dc854aba047ef639e8f6029ba3871d9a3af319bbc8e46ecc9306aaff0eee53c6",
+    "size_bytes": 1272
+  },
+  "nm_full_definition": {
+    "path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "rows": 10000,
+    "sha256": "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef",
+    "split": "train"
+  },
+  "random_token_match_target": 188256,
+  "schema": "qvq.calibration_fisher_scaling_registry.v1",
+  "yaqa_definition": {
+    "path": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
+    "rows": 182,
+    "sha256": "2140541facb66112428212b3a36d51a7735393b28c79db59c2429f6e51ed57ef",
+    "split": "train"
+  }
+}

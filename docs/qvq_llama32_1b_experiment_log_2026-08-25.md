@@ -98,6 +98,23 @@ See
 [`calibration_union_v1.json`](experiments/calibration_union_v1.json) and
 [`calibration_ablation_v1_results_20260830.json`](experiments/calibration_ablation_v1_results_20260830.json).
 
+### Fisher scaling v2 (prepared, 2026-08-30)
+
+The next eight arms hold lifecycle calibration at NM rows `0..127` and hold
+the 3.178340-BPW `Up4 L6,L8` allocation fixed while scaling only the YAQA
+Fisher corpus. The curve covers YAQA182 alone and YAQA182 plus NM prefixes of
+128, 256, 512, 1,024, and all 10,000 local train rows. A deterministic random
+522-row NM selection contributes 188,288 tokens versus 188,256 for the NM512
+prefix, and a seed-1 full-corpus replica tests the largest feasible corpus.
+
+The generated Fisher inputs range from 302,193 to 3,961,260 valid token
+samples. The NM-full union deduplicates 10,182 source rows to 10,178 sequences;
+all other unions have zero duplicate groups. Every artifact and its full local
+ordered-row manifest/disjointness contract is bound by the compact committed
+[`Fisher-scaling registry`](experiments/calibration_fisher_scaling_v2_registry_20260830.json).
+The eight-arm GPU/slot assignment is recorded in
+[`calibration_fisher_scaling_v2_queue_20260830.json`](experiments/calibration_fisher_scaling_v2_queue_20260830.json).
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.
