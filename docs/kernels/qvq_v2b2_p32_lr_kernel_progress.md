@@ -116,6 +116,7 @@ tables below every row was intentionally measured at M=16.
 | `7f233216` uncommitted A/B | H200, W3 gate/up M1-M16 | Use a dedicated producer warp, two K256 shared stages, SM90 bulk async copies, and transaction barriers to overlap aligned activation/trellis fetch with eight decode/MMA warps | Accurate, but CUDA-event medians regressed 2.7-10.6% to 0.02760-0.02858 ms; instructions rose to 10.95M and barrier/wait stalls outweighed 0.795% TMA-pipe use | rejected; source restored before next experiment |
 | `4613a5be` uncommitted A/B | H200, W3 gate/up M1-M16 | Pair adjacent K32 tiles so both tiles' independent level loads issue before either decoded fragment is consumed, then overlap the second lookup with the first tile's MMA | Accurate, but all rows regressed 1.7-2.2%; registers rose 63 to 80, instructions rose 7.8% to 11.64M, and long-scoreboard/wait samples increased | rejected; source restored before next experiment |
 | `b3edc2a7` uncommitted A/B | H200, W3 gate/up M16 | Fuse PGC16 mixing and two 512-byte-table level loads into one read-only lookup from a cached 65,536-entry packed decoded-state LUT | Instructions fell 32.1% to 7.34M with unchanged registers, but L1 hit rate collapsed to 7.8%, L2 utilization reached 67.6%, and CUDA-event latency regressed 2.59x to 0.0698 ms | rejected; source restored before next experiment |
+| `7eeaf4da` | H200, Hopper cooperative W2-W3.5 | Overlay the decoded-B fragment scratch with the equally sized clustered split-K epilogue scratch because their lifetimes are disjoint | Static shared memory fell exactly 4 KiB (41.088 to 36.992 KiB for W3 gate/up) with 63 registers and 10.80M instructions unchanged; 60-sample latency was within +0.4-1.1% and 108/108 H200 CUDA tests passed | accepted and pushed as structural headroom for bank-aware level layouts |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -977,6 +978,18 @@ rises from 26.53 to 73.47 us. The original mixer is cheaper than expanding a
 evidence that future instruction fusion must preserve the tiny lookup working
 set and conflict-light access pattern; recomputation wins over random L2
 traffic for this codec on H200.
+
+The disjoint shared-scratch overlay at `7eeaf4da` reuses the same 4 KiB for
+decoded B fragments during the K loop and for clustered split-K partials only
+after that loop. On W3 gate/up, ptxas static shared memory falls exactly from
+41.088 to 36.992 KiB while holding 63 registers/thread and 10.798M executed
+instructions. The exact 60-iteration M1/M2/M4/M8/M16 medians are
+0.026144/0.026144/0.026400/0.026480/0.027008 ms, within +0.4-1.1% of the
+preceding production medians and therefore latency-neutral rather than a
+claimed timing win. All 108 H200 CUDA tests pass. The recovered capacity is a
+measured resource improvement intended for a compact, bank-aware replicated
+512-byte level table; it is not permission to repeat the rejected 256 KiB
+random decoded-state LUT.
 
 ## Coverage and targeting queue
 
