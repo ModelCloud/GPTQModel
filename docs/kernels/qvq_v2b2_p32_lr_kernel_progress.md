@@ -1330,6 +1330,42 @@ checkpoint. It is not yet a production dispatch replacement: the remaining
 3.63x gap to Machete and exact instruction/stall changes must be explained by a
 matched NCU capture first.
 
+Matched NCU 2026.2.1 captures at `e050e8da` used base clocks and hot-cache
+replay. The TMA report is
+`artifacts/h200_lr_next4x/profiles/qwen38_down_w3_tma_rs_wgmma_split4_e050e8da.ncu-rep`.
+
+| NCU metric | Synchronous RS split4 | TMA RS split4 | Change |
+|---|---:|---:|---:|
+| Replay duration | 250.98 us | **193.38 us** | **1.298x faster** |
+| Executed instructions | 84.134M | **60.779M** | **-27.8%** |
+| ALU instructions | 49.491M | **34.739M** | **-29.8%** |
+| LSU instructions | 8.552M | **7.696M** | **-10.0%** |
+| Tensor instructions | 0.348M | 0.348M | unchanged |
+| TMA instructions | 0 | 27.2K | producer-only |
+| Global-load instructions | 3.558M | **3.482M** | -2.1% |
+| Shared-load instructions | 2.089M | **1.393M** | **-33.3%** |
+| Shared-store instructions | 0.772M | **0** | **eliminated** |
+| Shared-bank conflicts | 1,844 | 7,687 | 4.2x, still negligible versus production's 5.665M |
+| Registers/thread | 80 | **78** | -2 |
+| Static shared memory | 14.46 KiB | 28.80 KiB | two K256 stages |
+| Theoretical occupancy | 37.50% | 31.25% | producer warp/shared-memory cost |
+| Achieved occupancy | 14.19% | **18.43%** | wider live grid overlap |
+| No eligible scheduler cycles | 44.43% | 49.57% | residual dependencies exposed |
+| Long-scoreboard stall | 15.12% | 28.54% | level/bank lookup is now primary |
+| Short-scoreboard stall | 3.74% | 8.89% | low absolute bank conflicts remain |
+| Barrier stall | 1.92% | **0.30%** | transaction pipeline amortizes synchronization |
+| Fixed-latency wait stall | 24.50% | 25.63% | recurrence/lookup dependency remains |
+| GMMA stall | 2.72% | **1.60%** | consumer scheduling improves |
+| DRAM throughput | 0.41% | 0.88% | still nowhere near HBM-bound |
+| TMA pipe active | 0% | 0.15% | little pipe pressure despite useful instruction removal |
+
+The remaining 3.4816M global-load instructions decompose exactly from the
+source geometry: 2.78528M per-thread PGC level loads plus 0.69632M warp-level
+bank-selector loads. The first safe follow-up is therefore to add the tiny
+bank-selector tile to the same TMA transaction, removing its long-scoreboard
+dependency without changing recurrence or level algebra. The random 256-entry
+PGC lookup remains the dominant 2.785M-load problem after that.
+
 The JIT cache key now excludes the build-only `--threads` and
 `--split-compile` settings (`3408cea6`). The monolithic production QVQ binary
 took 254 seconds and Machete's eight generated translation units took 531

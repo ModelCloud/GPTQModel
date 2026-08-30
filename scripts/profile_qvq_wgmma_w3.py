@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""One-kernel NCU harness for Qwen3.8 W3 production LR or RS-WGMMA."""
+"""One-kernel NCU harness for Qwen3.8 W3 production or RS-WGMMA variants."""
 
 from __future__ import annotations
 
@@ -26,13 +26,13 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
-from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16
+from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16, qvq_wgmma_w3_m16_tma
 from scripts.benchmark_qvq_lr_vs_gptq_llama32_1b import QWEN38_27B_SHAPES
 
 
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kernel", choices=("production", "wgmma"), required=True)
+    parser.add_argument("--kernel", choices=("production", "wgmma", "tma_wgmma"), required=True)
     parser.add_argument(
         "--shape",
         choices=tuple(case.name for case in QWEN38_27B_SHAPES),
@@ -100,9 +100,20 @@ def main() -> None:
                 v2b2_p32_lr=True,
                 bank_alt_id=3,
             )
-    else:
+    elif args.kernel == "wgmma":
         def call():
             return qvq_wgmma_w3_m16(
+                x,
+                trellis,
+                levels,
+                bank_ids,
+                out_features=case.out_features,
+                bank_alt_id=3,
+                split_count=args.split,
+            )
+    else:
+        def call():
+            return qvq_wgmma_w3_m16_tma(
                 x,
                 trellis,
                 levels,
