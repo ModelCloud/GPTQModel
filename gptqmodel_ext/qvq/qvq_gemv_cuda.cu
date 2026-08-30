@@ -1910,7 +1910,7 @@ void launch_qvq_local_ring_wmma_hopper_w3(
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
   qvq_gemv_local_ring_wmma_hopper_w3_kernel<OutputScalar, SplitK, kHopperWmmaOutputTiles>
-      <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
+      <<<grid, (2 * kHopperWmmaOutputTiles) * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
           bank_ids_ptr,
