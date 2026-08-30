@@ -1292,12 +1292,12 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
 
       if (n_tile_base + warp < n_tiles) {
         wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
-        wmma::load_matrix_sync(weight_fragment, decoded_weight[warp], kPaddedColumns);
+        wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0][0], kPaddedColumns);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
         wmma::load_matrix_sync(
             input_fragment, input_tile[u] + 16, kLocalRingTileRows);
         wmma::load_matrix_sync(
-            weight_fragment, decoded_weight[warp] + 16 * kPaddedColumns, kPaddedColumns);
+            weight_fragment, &decoded_weight[warp][16][0], kPaddedColumns);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
       }
       __syncwarp();
