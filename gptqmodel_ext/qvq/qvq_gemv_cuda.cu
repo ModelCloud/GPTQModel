@@ -1278,7 +1278,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
         const int sub = warp;
         const int n_tile = n_tile_base + sub;
         for (int j = 0; j < 8; ++j) {
-          const int k_local = (lane >> 3) + (j << 3);
+          const int k_local = (lane >> 3) + (j << 2);
           const int col = lane & 7;
           uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[u][sub], col, k_local >> 1);
           const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
