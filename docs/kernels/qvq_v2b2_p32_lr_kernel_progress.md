@@ -70,6 +70,7 @@ tables below every row was intentionally measured at M=16.
 | `82cfba57` | H100, W2/W2.5 M1-M16 | Storage-neutral cooperative local-ring prototype reconstructs each unique transition once per warp and advances four adjacent states by recurrence | Up to 11.40x faster than production; M16 substantial shapes gained 1.29-2.23x with unchanged checkpoint storage | accepted prototype evidence |
 | `41ffd8db` | H200, W2/W2.5 M16 | Pulled prototype head reproduced on physical GPU 0 before production integration | All eight shape/rate cells accurate; 1.28-2.26x faster than production. NCU gate/up W2: 105.48M to 18.48M instructions (-82.5%) | authoritative new-head baseline |
 | `f7f29083` | H200, W2/W2.5 M16 | Integrate cooperative TB4/TB5 reconstruction into the production Hopper WMMA path; retain compile-time-specialized TB6 unpack | Production matches the isolated prototype within 0.1%; 36 CUDA cases pass, including FP16/FP32 output and split-1/split-3; W3 timing unchanged | accepted and pushed |
+| `f7ae7daf` | H200, W2/W2.5 M16 | Store each decoded half2 pair contiguously in a TB4/TB5-only column-major WMMA tile; TB6 remains row-major | All eight cells gain 1-3%; shared-store conflicts halve; 36 CUDA tests pass and W3 remains unchanged | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -191,6 +192,26 @@ The K/V W2 path now matches or exceeds Machete W4. Attention Q/O is within
 about 27-31%; MLP remains 2.6-3.4x slower than Machete despite the decode
 instruction collapse. That residual gap is therefore in the padded WMMA/shared
 consumer and launch structure, not the eliminated redundant state windows.
+
+Commit `f7ae7daf` packs each cooperative TB4/TB5 decoded pair as one `half2`
+in the column-major WMMA B tile. The arithmetic and TB6 path are unchanged.
+These medians use the same H200 protocol; `Prior LR` is the production result
+from `f7f29083` measured before the layout change.
+
+| W | Shape | M | K | N | Result commit | LR ms | Prior LR ms | LR gain | xMarlin W4 | xMachete W4 | Max abs |
+|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 2 | `attn_qo` | 16 | 2,048 | 2,048 | `f7ae7daf` | 0.0204 | 0.0209 | 1.020x | 0.766x | 0.734x | 1.43e-5 |
+| 2.5 | `attn_qo` | 16 | 2,048 | 2,048 | `f7ae7daf` | 0.0217 | 0.0221 | 1.018x | 0.720x | 0.690x | 1.43e-5 |
+| 2 | `attn_kv` | 16 | 2,048 | 512 | `f7ae7daf` | 0.0134 | 0.0137 | 1.018x | 1.777x | 1.117x | 7.63e-6 |
+| 2.5 | `attn_kv` | 16 | 2,048 | 512 | `f7ae7daf` | 0.0143 | 0.0144 | 1.007x | 1.666x | 1.047x | 8.11e-6 |
+| 2 | `mlp_gate_up` | 16 | 2,048 | 8,192 | `f7ae7daf` | 0.0560 | 0.0577 | 1.030x | 0.194x | 0.318x | 7.63e-5 |
+| 2.5 | `mlp_gate_up` | 16 | 2,048 | 8,192 | `f7ae7daf` | 0.0592 | 0.0607 | 1.027x | 0.183x | 0.301x | 6.29e-5 |
+| 2 | `mlp_down` | 16 | 8,192 | 2,048 | `f7ae7daf` | 0.0572 | 0.0587 | 1.025x | 0.317x | 0.387x | 9.92e-5 |
+| 2.5 | `mlp_down` | 16 | 8,192 | 2,048 | `f7ae7daf` | 0.0614 | 0.0627 | 1.021x | 0.296x | 0.361x | 1.09e-4 |
+
+All eight cells improve by 1-3% and the K/V no-regression gate now exceeds
+Machete W4 for both rates. The MLP gap remains 2.6-3.3x, so this is an accepted
+layout improvement rather than the final consumer architecture.
 
 ### H100 same-CC regression
 
@@ -326,12 +347,29 @@ remove the N8-to-N16 padding, decoded-weight shared round trip, and conflicting
 WMMA fragment loads. Machete's one-block-per-SM TMA/WGMMA pipeline is the
 longer-term structure once the native N8 consumer is proven.
 
+The packed-pair follow-up was captured on the same H200 W2/M16/K2048/N8192
+case. It reduces the decoded-weight store cost but moves some conflict pressure
+to WMMA fragment loads:
+
+| Metric | `f7f29083` row-major pairs | `f7ae7daf` packed column-major pairs | Delta |
+|---|---:|---:|---:|
+| executed instructions | 18,484,224 | 18,549,760 | +0.35% |
+| NCU duration | 58.464 us | 56.608 us | -3.18% |
+| issue active | 35.09% | 36.66% | +1.57 points |
+| shared-load bank conflicts | 3,154,223 | 4,226,889 | +34.00% |
+| shared-store bank conflicts | 1,581,056 | 794,624 | -49.75% |
+| shared-store wavefronts | 2,297,856 | 1,241,088 | -45.99% |
+
+The net latency win is accepted, but the increased load conflicts rule out
+further blind layout permutations. The next consumer change must be validated
+against a dense native-N8 MMA microtest before replacing production WMMA.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W2/W2.5 M16 MLP | `f7f29083`: decode instructions reduced 82.5%, but only 0.289-0.382x Machete W4 on MLP | preserve cooperative recurrence; eliminate padded N16/shared decoded-weight consumer conflicts |
-| 2 | H200 W2/W2.5 M16 attention/KV | K/V reaches 0.993-1.048x Machete; Q/O reaches 0.689-0.732x | native N8 consumer first; keep K/V as a no-regression parity gate |
+| 1 | H200 W2/W2.5 M16 MLP | `f7ae7daf`: decode remains reduced 82.5%, but only 0.301-0.387x Machete W4 on MLP | preserve cooperative recurrence; prove native N8 MMA mapping, then eliminate padded N16/shared decoded-weight consumer conflicts |
+| 2 | H200 W2/W2.5 M16 attention/KV | K/V reaches 1.047-1.117x Machete; Q/O reaches 0.690-0.734x | keep K/V as a no-regression parity gate while replacing the padded consumer |
 | 3 | H200 W3 M32/K8192/N2048, FP16/BF16 | 1.76x versus non-LR; split 4 is best; 16-tile batch rejected | reduce L2 request/scoreboard pressure without raising ROWS32 registers |
 | 4 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
 | 5 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
