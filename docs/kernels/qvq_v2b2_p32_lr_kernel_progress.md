@@ -1264,6 +1264,38 @@ RS-WGMMA with production LR before adding a producer warp and two-stage TMA;
 the next gate is lower instructions/LSU/scoreboard pressure without losing the
 10.2% latency win.
 
+Matched NCU 2026.2.1 captures at the subsequently merged head `db9b7cea`
+(kernel sources unchanged from `4459e1b4`) used base clocks, hot-cache replay,
+and the exact Qwen3.8 down shape. NCU replay durations are slower than CUDA
+events, but preserve the RS-WGMMA advantage (250.98 us versus 280.83 us).
+
+| NCU metric | Production LR | RS-WGMMA split4 | Interpretation |
+|---|---:|---:|---|
+| Grid / block | 160 / 128 | 320 / 128 | RS split4 supplies more tail-wave work |
+| Executed instructions | 54.326M | 84.134M | synchronous RS staging adds too much scalar work |
+| ALU instructions | 28.332M | 49.491M | address generation plus W3 fragment construction is the main excess |
+| LSU instructions | 7.166M | 8.552M | RS has not yet removed staging traffic |
+| Global-load instructions | 0.252M | 3.558M | distributed scalar activation/trellis staging is the clearest TMA target |
+| Shared-load instructions | 5.222M | 2.089M | direct register-sourced WGMMA removes much of the B round trip |
+| Shared-store instructions | 0.600M | 0.772M | RS still materializes staged input/payload |
+| Shared-bank conflicts | 5.665M | **1,844** | CuTe swizzle/direct fragments solve the production conflict cliff |
+| Registers/thread | 81 | 80 | neither kernel spills local memory |
+| Achieved occupancy | 7.70% | 14.19% | wider output reuse plus split4 improves active work |
+| No eligible scheduler cycles | 69.20% | 44.43% | RS has substantially better schedulability |
+| Long-scoreboard stall | 8.97% | 15.12% | scalar global staging is now exposed |
+| Short-scoreboard stall | 21.51% | 3.74% | conflict-free CuTe shared layout works |
+| Fixed-latency wait stall | 36.85% | 24.50% | decode/WGMMA dependencies remain significant |
+| ALU pipe active | 26.98% | 53.98% | RS moves the bottleneck from shared conflicts to scalar decode/staging |
+| Tensor pipe active | 1.99% | 1.52% | tensor math is not the limiter |
+| DRAM throughput | 0.25% | 0.41% | neither kernel approaches H200 HBM bandwidth |
+
+The result supports the architectural direction but rejects the present
+synchronous staging as the final design. The next experiment should preserve
+the conflict-free CuTe B layout and register-sourced decoded A fragment while
+replacing the 3.558M distributed global loads and their address ALU with a
+producer-initiated, two-stage TMA pipeline. Success requires lower instructions
+and long-scoreboard/wait stalls in addition to event latency.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
