@@ -87,6 +87,7 @@ tables below every row was intentionally measured at M=16.
 | `65743ae8` | H200, W3/W3.5 | Repair the concurrent W3.5 native-N8 merge by supplying its four-tile launcher argument | Full 20-cell W3 matrix remained accurate; W3.5 M16/K2,048/N8,192 passed at 0.0392 ms with 6.29e-05 max error | accepted integration fix and pushed |
 | `65743ae8` uncommitted A/B | H200, W3 gate/up | Machete-inspired two-stage `cp.async`: split the N64 batch into alternating eight-tile buffers and issue batch i+1 before decoding/MMA of batch i | Accurate, but gate/up regressed from 0.0318-0.0325 ms to 0.0593-0.0641 ms; extra synchronization/bookkeeping could not be amortized by each short split-K partition | rejected; source restored before next experiment |
 | `34aac964` uncommitted A/B | H200, W3 gate/up | Compose the earlier XOR activation-segment swizzle with the accepted stride-40 native-N8 layout | Accurate but 3.2-3.6% slower; NCU shared-load conflicts rose from 0.936M to 1.985M and memory throughput fell from 210.8 to 200.7 GB/s | rejected; source restored before next experiment |
+| `548c5c73` | H200, W3 gate/up | Bypass the random shared level-table lookup in the N64 specialization and use Hopper's read-only/L1 path | All five M1-M16 rows gained 0.3-0.9%; shared-load bank conflicts fell 936,250 to 483 and L1 hit rate rose 11.3% to 93.9%; 108 CUDA tests passed | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -458,6 +459,15 @@ MMA kernel paid an extra block barrier per eight K32 tiles, while each split-K
 partition held only 32 tiles. That experiment is rejected; future overlap work
 must avoid increasing block-wide synchronization frequency.
 
+Source-correlated NCU showed that the accepted stride-40 `ldmatrix.x4` A load
+was already conflict-free. Eight divergent `LDS.U16` level-table lookups caused
+approximately 934k of the remaining 936k shared-load conflicts. Commit
+`548c5c73` instead reads that immutable 512-byte table through Hopper's
+read-only/L1 path for W3 N64 only and removes its two now-unneeded setup
+barriers. Across M1/M2/M4/M8/M16, gate/up medians become
+0.031600/0.031792/0.031792/0.032032/0.032416 ms, a consistent 0.3-0.9% gain
+from the merged N64 baseline with worst max error 3.43e-05.
+
 ### H100 same-CC regression
 
 The H100 run uses physical GPU 1, CC 9.0, 132 SMs, and the same accepted
@@ -664,11 +674,22 @@ from 45.02% to 48.10%. This proves the two permutations cannot be composed
 blindly: the next activation layout must be solved against the native
 `ldmatrix.x4` lane-to-bank mapping as one transform.
 
+The accepted read-only level-table capture at `548c5c73` changes shared-load
+conflicts from 936,250 to 483 (-99.95%), shared-load wavefronts from 2,443,578
+to 983,523 (-59.75%), and L1 hit rate from 11.31% to 93.94%. It deliberately
+executes slightly more work (14.53M to 14.86M instructions), yet NCU duration
+falls 30.592 to 30.400 us, issue availability rises 54.98% to 56.46%, and
+measured memory throughput rises 210.75 to 212.10 GB/s. Registers remain 64,
+static shared memory falls 37.50 to 36.99 KiB, and no local spilling appears.
+The report is `/tmp/ncu-h200-w3-global-levels-09ab284a.ncu-rep`. This is the
+desired Machete-style trade: spend cheap cache-resident instructions to remove
+serialized shared-memory traffic.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | gate/up N64 is 0.0318-0.0325 ms and 14.53M instructions; down is 0.0327-0.0390 ms | remove the remaining shared round trip/conflicts or change to persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
+| 1 | H200 W3 M1-M16 MLP | gate/up N64 is 0.0316-0.0324 ms; random level-table conflicts are eliminated, but only 212 GB/s is measured and down remains 0.0327-0.0390 ms | widen/repack the remaining aligned weight fetch and move toward persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
 | 2 | H200 W3.5 M1-M16 MLP | concurrent native-N8 path now reaches 0.0392 ms for the H200 M16 gate canary | run the full H200 W3.5 matrix from the merged head after the current W3 focus and profile its remaining TB7 arithmetic |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
