@@ -1219,7 +1219,7 @@ __device__ __forceinline__ void qvq_mma_m16n8k16(
         "f"(c.values[3]));
 }
 
-// Hopper-only cooperative tensor-core path for W2/W2.5 at M<=16 and W3 at M16.
+// Hopper-only cooperative tensor-core path for W2/W2.5/W3 at M<=16.
 // One warp owns one N8 output tile; a small warp group therefore reuses the
 // staged activation stripe across adjacent tiles. Each rate reconstructs the
 // 16 unique ring transitions cooperatively, advances four adjacent states by
@@ -2293,7 +2293,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
 
   const bool use_hopper_cooperative_wmma = device_config.major == 9 &&
       transition_bits >= 4 && transition_bits <= 6 &&
-      (transition_bits <= 5 ? size_m <= 16 : rows == 16) &&
+      size_m <= 16 &&
       (transition_bits == 6 ? out_features >= 2048 : out_features >= 512) &&
       input.scalar_type() == at::kHalf && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
   // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
