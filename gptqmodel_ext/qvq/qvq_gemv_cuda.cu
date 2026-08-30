@@ -1282,22 +1282,41 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
         const int sub = warp;
-        const int n_tile = n_tile_base + sub;
         // W3 packs two adjacent output rows from one 16-bit recurrence state.
-        // Decode each state once (lanes 0..15) and materialize both levels;
-        // the previous row-wise mapping recomputed every state twice.
-        for (int j = 0; j < 8; ++j) {
-          const int pair = (lane >> 3) + (j << 1);
-          const int col = lane & 7;
-          if (lane >= 16) {
-            continue;
-          }
-          uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[u][sub], col, pair);
-          const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
-              static_cast<uint32_t>(bank_alt_id);
-          const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask<kTransitionBits>(bank));
+        // Four lanes cooperate on each ring.  Each lane extracts four
+        // disjoint planar edges once, broadcasts the packed 24-bit edge word,
+        // and advances a three-edge sliding state across four adjacent pairs.
+        // The old mapping performed 3 extractions for each of 16 states;
+        // this mapping performs one extraction for each of the 16 edges.
+        const int col = lane & 7;
+        const int edge_group = lane >> 3;
+        uint32_t edge_pack = 0;
+#pragma unroll
+        for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
+          const uint32_t edge = planar_transition<kTransitionBits>(
+              packed_words[u][sub], col * kLocalRingSteps + edge_group * 4 + edge_in_group);
+          edge_pack |= edge << (edge_in_group * kTransitionBits);
+        }
+        auto edge_at = [&](int edge_index) {
+          const int source_lane = col + (edge_index >> 2) * 8;
+          const uint32_t source_pack = __shfl_sync(0xffffffffu, edge_pack, source_lane);
+          return (source_pack >> ((edge_index & 3) * kTransitionBits)) & 0x3fu;
+        };
+        const int pair_base = edge_group * 4;
+        uint32_t state = (edge_at((pair_base + 14) & 15) << 12) |
+            (edge_at((pair_base + 15) & 15) << 6) | edge_at(pair_base);
+        const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
+            static_cast<uint32_t>(bank_alt_id);
+        const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          const int pair = pair_base + q;
+          const uint32_t mixed = pgc16_mix(state ^ bank_mask);
           decoded_weight[sub][pair * 2][col] = cached_levels[mixed >> 8];
           decoded_weight[sub][pair * 2 + 1][col] = cached_levels[mixed & 0xffu];
+          if (q < 3) {
+            state = ((state << kTransitionBits) | edge_at((pair + 1) & 15)) & 0xffffu;
+          }
         }
       }
       __syncwarp();
