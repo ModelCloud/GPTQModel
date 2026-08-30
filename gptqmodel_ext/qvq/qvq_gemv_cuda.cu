@@ -1176,7 +1176,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
-    const half* __restrict__ levels,
+    const uint32_t* __restrict__ pair_lut,
     OutputScalar* __restrict__ output,
     float* __restrict__ partial_output,
     int size_m,
@@ -1192,7 +1192,6 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
 
-  __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
@@ -1210,11 +1209,6 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
   const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
   const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
-
-  for (int index = thread; index < kPgc16LevelCount; index += kWmmaThreads) {
-    cached_levels[index] = levels[index];
-  }
-  __syncthreads();
 
   // Initialize the padded N16 columns once. The first eight columns are
   // overwritten for every decoded K32 tile below.
@@ -1319,9 +1313,11 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           const int pair = pair_base + q;
-          const uint32_t mixed = pgc16_mix(state ^ bank_mask);
-          decoded_weight[sub][pair * 2][col] = cached_levels[mixed >> 8];
-          decoded_weight[sub][pair * 2 + 1][col] = cached_levels[mixed & 0xffu];
+          const uint32_t level_pair = __ldg(pair_lut + ((state ^ bank_mask) & 0xffffu));
+          decoded_weight[sub][pair * 2][col] =
+              __ushort_as_half(static_cast<unsigned short>(level_pair));
+          decoded_weight[sub][pair * 2 + 1][col] =
+              __ushort_as_half(static_cast<unsigned short>(level_pair >> 16));
           if (q < 3) {
             state = ((state << kTransitionBits) | edge_at((pair + 1) & 15)) & 0xffffu;
           }
@@ -1884,6 +1880,7 @@ void launch_qvq_local_ring_wmma_hopper_w3(
     const at::Tensor& trellis,
     const at::Tensor& bank_ids,
     const at::Tensor& levels,
+    const at::Tensor& pair_lut,
     at::Tensor* partial_output,
     at::Tensor& output,
     int split_count,
@@ -1895,7 +1892,7 @@ void launch_qvq_local_ring_wmma_hopper_w3(
       static_cast<unsigned int>((input.size(0) + 15) / 16),
       static_cast<unsigned int>(SplitK ? split_count : 1));
   const half* input_ptr = reinterpret_cast<const half*>(input.const_data_ptr());
-  const half* levels_ptr = reinterpret_cast<const half*>(levels.const_data_ptr());
+  const uint32_t* pair_lut_ptr = reinterpret_cast<const uint32_t*>(pair_lut.const_data_ptr());
   OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
@@ -1905,7 +1902,7 @@ void launch_qvq_local_ring_wmma_hopper_w3(
           input_ptr,
           trellis_ptr,
           bank_ids_ptr,
-          levels_ptr,
+          pair_lut_ptr,
           output_ptr,
           partial_ptr,
           static_cast<int>(input.size(0)),
@@ -2002,6 +1999,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
     const at::Tensor& levels,
+    const at::Tensor& pair_lut,
     int64_t transition_bits,
     int64_t out_features,
     bool output_fp32,
@@ -2011,8 +2009,10 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
   TORCH_CHECK(trellis.is_cuda(), "trellis must be a CUDA tensor");
   TORCH_CHECK(levels.is_cuda(), "PGC16 levels must be a CUDA tensor");
+  TORCH_CHECK(pair_lut.is_cuda(), "PGC16 pair LUT must be a CUDA tensor");
   TORCH_CHECK(bank_ids.is_cuda(), "LR32 bank selectors must be a CUDA tensor");
-  TORCH_CHECK(input.dim() == 2 && trellis.dim() == 2 && levels.dim() == 1 && bank_ids.dim() == 1,
+  TORCH_CHECK(input.dim() == 2 && trellis.dim() == 2 && levels.dim() == 1 && pair_lut.dim() == 1 &&
+                  bank_ids.dim() == 1,
               "LR32 GEMV expects rank-two input/trellis and rank-one levels/selectors");
   TORCH_CHECK(transition_bits >= 2 && transition_bits <= 7,
               "LR32 transition_bits must be in [2, 7] for W1 through W3.5");
@@ -2020,12 +2020,15 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
               "LR32 input must have dtype float16 or bfloat16");
   TORCH_CHECK(levels.scalar_type() == at::kHalf,
               "PGC16 levels must preserve the canonical float16 bit patterns");
+  TORCH_CHECK(pair_lut.scalar_type() == at::kInt, "PGC16 pair LUT must use int32");
   TORCH_CHECK(trellis.scalar_type() == at::kInt, "LR32 trellis must have dtype int32");
   TORCH_CHECK(bank_ids.scalar_type() == at::kByte, "LR32 bank selectors must use uint8");
   TORCH_CHECK(input.device() == trellis.device() && input.device() == levels.device() &&
+                  input.device() == pair_lut.device() &&
                   input.device() == bank_ids.device(),
               "LR32 tensors must share one CUDA device");
-  TORCH_CHECK(input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() && bank_ids.is_contiguous(),
+  TORCH_CHECK(input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() &&
+                  pair_lut.is_contiguous() && bank_ids.is_contiguous(),
               "LR32 tensors must be contiguous");
   TORCH_CHECK(bank_alt_id >= 1 && bank_alt_id <= 3, "LR32 alternative-bank ID must be in [1, 3]");
 
@@ -2040,6 +2043,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
                   out_features <= std::numeric_limits<int>::max(),
               "LR32 dimensions exceed the int32 kernel limit");
   TORCH_CHECK(levels.numel() == kPgc16LevelCount, "PGC16 levels must have shape (256)");
+  TORCH_CHECK(pair_lut.numel() == (1 << 16), "PGC16 pair LUT must have shape (65536)");
   const int64_t k_tiles = size_k / kLocalRingTileRows;
   const int64_t tile_count = (size_k / kLocalRingTileRows) * (out_features / kLocalRingTileColumns);
   TORCH_CHECK(
@@ -2106,17 +2110,19 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   if (use_hopper_w3_wmma && split_count > 1 && output_fp32) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     launch_qvq_local_ring_wmma_hopper_w3<float, true>(
-        input, trellis, bank_ids, levels, &partial_output, output, split_count, static_cast<int>(bank_alt_id), stream);
+        input, trellis, bank_ids, levels, pair_lut, &partial_output, output, split_count,
+        static_cast<int>(bank_alt_id), stream);
   } else if (use_hopper_w3_wmma && split_count > 1) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     launch_qvq_local_ring_wmma_hopper_w3<half, true>(
-        input, trellis, bank_ids, levels, &partial_output, output, split_count, static_cast<int>(bank_alt_id), stream);
+        input, trellis, bank_ids, levels, pair_lut, &partial_output, output, split_count,
+        static_cast<int>(bank_alt_id), stream);
   } else if (use_hopper_w3_wmma && output_fp32) {
     launch_qvq_local_ring_wmma_hopper_w3<float, false>(
-        input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+        input, trellis, bank_ids, levels, pair_lut, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
   } else if (use_hopper_w3_wmma) {
     launch_qvq_local_ring_wmma_hopper_w3<half, false>(
-        input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+        input, trellis, bank_ids, levels, pair_lut, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
   } else if (split_count > 1) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     if (input.scalar_type() == at::kHalf && output_fp32) {
@@ -2437,12 +2443,12 @@ at::Tensor qvq_gemv_cuda_v4(
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("gemv(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None, int bank_mode=0, int bank_alt_id=0) -> Tensor");
-  m.def("gemv_lr(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, int bank_alt_id, int split_count=0) -> Tensor");
+  m.def("gemv_lr(Tensor input, Tensor trellis, Tensor levels, Tensor pair_lut, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, int bank_alt_id, int split_count=0) -> Tensor");
   m.def("gemv_v4(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids, int64_t bank_mode, int64_t bank_alt_id) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, bank_mode, bank_alt_id); });
-  m.impl("gemv_lr", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, int64_t bank_alt_id, int64_t split_count) { return qvq_gemv_cuda_local_ring_impl(input, trellis, levels, transition_bits, out_features, output_fp32, bank_ids, bank_alt_id, split_count); });
+  m.impl("gemv_lr", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, const at::Tensor& pair_lut, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, int64_t bank_alt_id, int64_t split_count) { return qvq_gemv_cuda_local_ring_impl(input, trellis, levels, pair_lut, transition_bits, out_features, output_fp32, bank_ids, bank_alt_id, split_count); });
   m.impl("gemv_v4", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids) { return qvq_gemv_cuda_v4(input, trellis, levels, transition_bits, out_features, output_fp32, 4, bank_ids); });
 }
