@@ -1689,7 +1689,8 @@ void launch_qvq_local_ring_gemv(
     int transition_bits,
     int split_count,
     int bank_alt_id,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    bool fuse_output_tiles) {
   // A 24-word TB=6 tile has a six-vector stride. On SM89/SM120 this access
   // pattern defeats the coalescer for the wider row specializations; scalar
   // staging is measurably faster and avoids the TB=6 occupancy cliff.
@@ -1708,6 +1709,30 @@ void launch_qvq_local_ring_gemv(
         bank_alt_id,
         stream);
   } else if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1) {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, false>(
+        input,
+        trellis,
+        bank_ids,
+        levels,
+        partial_output,
+        output,
+        transition_bits,
+        split_count,
+        bank_alt_id,
+        stream);
+  } else if (fuse_output_tiles && vector_staging) {
+    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, true>(
+        input,
+        trellis,
+        bank_ids,
+        levels,
+        partial_output,
+        output,
+        transition_bits,
+        split_count,
+        bank_alt_id,
+        stream);
+  } else if (fuse_output_tiles) {
     launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, false>(
         input,
         trellis,
@@ -1840,41 +1865,47 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       k_tiles <= std::numeric_limits<int>::max() / split_count,
       "LR32 split_count overflows the int32 kernel partition limit");
 
+  // Hopper W3 is L2-request limited at M=16. Fuse adjacent N8 tiles only for
+  // this CC/rate/row combination so one block reuses each staged K32 input
+  // tile; Ada and Blackwell retain their measured one-tile mapping.
+  const bool fuse_hopper_w3_tiles = device_config.major == 9 &&
+      transition_bits == 6 && rows == 16;
+
   if (split_count > 1) {
     at::Tensor partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     if (input.scalar_type() == at::kHalf && output_fp32) {
       launch_qvq_local_ring_gemv<half, float, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
     } else if (input.scalar_type() == at::kHalf) {
       launch_qvq_local_ring_gemv<half, half, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
     } else if (output_fp32) {
       launch_qvq_local_ring_gemv<nv_bfloat16, float, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
     } else {
       launch_qvq_local_ring_gemv<nv_bfloat16, nv_bfloat16, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
     }
   } else if (input.scalar_type() == at::kHalf && output_fp32) {
     launch_qvq_local_ring_gemv<half, float, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
   } else if (input.scalar_type() == at::kHalf) {
     launch_qvq_local_ring_gemv<half, half, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
   } else if (output_fp32) {
     launch_qvq_local_ring_gemv<nv_bfloat16, float, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
   } else {
     launch_qvq_local_ring_gemv<nv_bfloat16, nv_bfloat16, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, fuse_hopper_w3_tiles);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
