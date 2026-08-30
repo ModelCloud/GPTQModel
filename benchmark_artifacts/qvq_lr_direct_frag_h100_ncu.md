@@ -20,3 +20,17 @@ spacing the next isolated experiment.
 The NCU duration includes profiler replay overhead and is not the latency used
 for the Marlin/Machete comparison. Formal latency remains the CUDA Graph replay
 with internal CUDA events in the companion benchmark artifact.
+
+## Activation-row padding follow-up
+
+The accepted 40-half activation row spacing was profiled with the same W2.5
+M=16, K=2,048, N=8,192 command and metrics.
+
+| Variant | Executed instructions | Registers/thread | Static shared KiB | Shared-load conflicts | Shared-store conflicts | Issue active | NCU duration us | Better than last |
+|---|---:|---:|---:|---:|---:|---:|---:|:---:|
+| Direct fragment, stride 32 | 15,086,080 | 78 | 36.96 | 2,507,503 | 0 | 34.00% | 47.81 | no |
+| Padded activation, stride 40 | 15,215,104 | 91 | 43.10 | 934,876 | 131,072 | 45.36% | 37.57 | yes |
+
+The padding reduces shared-load conflicts by 62.7% and raises issue activity by
+11.36 percentage points. It trades 13 registers/thread, 6.14 KiB of static
+shared memory, and 0.85% more instructions for a 21.4% shorter profiled kernel.
