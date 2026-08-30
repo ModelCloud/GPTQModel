@@ -78,6 +78,7 @@ tables below every row was intentionally measured at M=16.
 | `3997021c` / `ac440de3` | H200, W2/W2.5 M16 | XOR-swizzle the four 16-byte activation segments by row and remap native-N8 A-fragment loads | 0.0115-0.0400 ms; `ldmatrix` conflicts fell 66.7% and total load conflicts 42.8%; 69/69 CUDA tests | accepted, merged, and pushed |
 | `6f4e4b72` / `e944e528` | H200, W2/W2.5 M16 | Pad native-N8 activation rows from 32 to 40 half values; merge the upstream H100 lead and validate locally on H200 GPU 0 | MLP gained 2.6-5.8%; NCU gate/up fell 6.9% with 35.9% fewer load conflicts; 69/69 CUDA tests passed | accepted, merged, and pushed |
 | `603a3e64` uncommitted A/B | H200, W2/W2.5 M16 | Replace each synchronous 16-byte activation copy with `cp.async`, then immediately commit/wait before the existing barrier | Accurate, but Q/O rose to 0.024 ms and MLP to 0.069-0.071 ms, roughly 1.5-1.9x slower | rejected; source restored before next experiment |
+| `e0c29e60` | H200, W2-W3.5 M1/M2/M4/M8/M16 | Full four-rate, four-K/N projection matrix against matched Machete/Marlin W4 | 120/120 rows passed their dense-reference gates; QVQ/Machete geomeans were 0.787x, 0.790x, 0.241x, and 0.197x from W2 through W3.5 | accepted full-M/K/N targeting baseline |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -263,6 +264,46 @@ flat-to-better, while every MLP cell moves forward. The change is accepted for
 the throughput target because its NCU improvement is structural and the small
 attention paths remain within 4.5% of Machete or 1.25x faster. Future changes
 must recover Q/O W2 without surrendering the MLP gain.
+
+### H200 full W2-W3.5 M/K/N matrix versus Machete
+
+Pushed head `e0c29e60`, source fingerprint
+`f911d8d851dd21a01e813c7d789ffaa8e9e86a89a98b6c8b9d410b962e50f05b`,
+was measured on H200 GPU 0 at M1/M2/M4/M8/M16 across all four distinct Llama
+3.2 1B K/N geometries. Every one of the 80 QVQ rows passed the `2e-3` dense-
+reference gate; all 40 matched W4 rows also passed their reference gate.
+`xMachete` is Machete W4 latency divided by QVQ LR latency.
+
+| W | QVQ rows | xMachete geomean | Min-max | Rows >= Machete | Worst max abs |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 20 | 0.787x | 0.491-1.289x | 8/20 | 1.01e-4 |
+| 2.5 | 20 | 0.790x | 0.502-1.266x | 7/20 | 1.13e-4 |
+| 3 | 20 | 0.241x | 0.085-0.716x | 0/20 | 1.22e-4 |
+| 3.5 | 20 | 0.197x | 0.074-0.718x | 0/20 | 1.72e-5 |
+
+| W | M1 geo | M2 geo | M4 geo | M8 geo | M16 geo |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 0.832x | 0.787x | 0.775x | 0.774x | 0.770x |
+| 2.5 | 0.825x | 0.789x | 0.783x | 0.780x | 0.774x |
+| 3 | 0.201x | 0.205x | 0.202x | 0.199x | 0.493x |
+| 3.5 | 0.181x | 0.208x | 0.205x | 0.203x | 0.192x |
+
+Geomeans by K/N geometry across M expose the rate-specific priorities:
+
+| W | Q/O 2048x2048 | K/V 2048x512 | Gate/up 2048x8192 | Down 8192x2048 |
+|---:|---:|---:|---:|---:|
+| 2 | 1.010x | 1.260x | 0.499x | 0.606x |
+| 2.5 | 1.002x | 1.255x | 0.510x | 0.608x |
+| 3 | 0.322x | 0.679x | 0.114x | 0.136x |
+| 3.5 | 0.258x | 0.665x | 0.085x | 0.104x |
+
+The complete per-row latency, P95, payload rate, xMarlin, xMachete, and error
+record is in
+`artifacts/h200_lr_next4x/full_w2_w35_mkn_e0c29e60/gpu0.json` and its Markdown
+rendering. The next high-impact path is W3.5 MLP at every M, followed by W3
+M1-M8 MLP. W3 M16 already dispatches the specialized Hopper cooperative path
+and is 3-4x faster than the scalar lower-M path, but still only 0.361-0.374x
+Machete on MLP.
 
 ### H100 same-CC regression
 
@@ -457,16 +498,15 @@ again. Raw captures are
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W2/W2.5 M16 MLP | `e944e528`: stride 40 reaches 0.496-0.583x Machete W4; NCU reports 14.45M instructions, 0.94M load conflicts, and 0.13M new store conflicts | make staging contiguous/conflict-free, then overlap fetch/dequant/MMA with a Hopper TMA or staged pipeline and wider N tile |
-| 2 | H200 W2/W2.5 M16 attention/KV | Q/O reaches 0.955-0.965x Machete; K/V reaches 1.254-1.256x; Q/O W2 regressed 0.48 us versus `ac440de3` | recover the Q/O W2 delta while enforcing K/V as the no-regression gate |
-| 3 | H200 W3 M32/K8192/N2048, FP16/BF16 | 1.76x versus non-LR; split 4 is best; 16-tile batch rejected | reduce L2 request/scoreboard pressure without raising ROWS32 registers |
-| 4 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
-| 5 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
-| 6 | RTX 4090 W3.5 substantial shapes | 2.269-2.520x in the simultaneous run | target the 4x stretch goal |
-| 7 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for PR #60 source | expanded accuracy/performance regression |
-| 8 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
-| 9 | launch-bound narrow shapes | 0.72-1.04x on Hopper M16 | reduce launch/split overhead without regressing substantial shapes |
-| 10 | H200 W3, FP16/BF16 M1/M4/M8/M16 | accepted TB6 path remains compile-time unchanged at `ac440de3`; explicit W3 regression passes | retain as a rate-specific no-regression gate while optimizing TB4/TB5 |
+| 1 | H200 W3.5 M1-M16 MLP | full matrix: 0.074-0.108x Machete, 0.203-0.244 ms gate/up and 0.205-0.231 ms down | add a TB7-specific cooperative/tensor path; profile its instruction/local-memory image before sharing TB6 code |
+| 2 | H200 W3 M1-M8 MLP | full matrix: 0.085-0.107x Machete at about 0.208-0.213 ms; M16 specialization is 3-4x faster | extend the cooperative TB6 path to small rows without materializing local accumulators |
+| 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
+| 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
+| 5 | H200 W3 M16 and M32 | M16 is 0.361-0.709x Machete by K/N; prior M32 K8192/N2048 is 1.76x versus non-LR | reduce TB6 cache/scoreboard pressure; retain split 4 for the M32 down-like case |
+| 6 | RTX 5090 W2-W3.5, all substantial M=16 shapes | historical `e4b1006c`: all 16 pass >=4x | retain as historical coverage; current local work remains H200-only |
+| 7 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | historical `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
+| 8 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | pending hardware; do not infer from Hopper results |
+| 9 | launch-bound narrow shapes | W2/W2.5 attention is already at or above Machete across M | avoid trading these wins for MLP throughput |
 
 ## Reproduction
 
@@ -476,9 +516,10 @@ Current H200 sweep:
 CUDA_DEVICE_ORDER=PCI_BUS_ID \
 CUDA_VISIBLE_DEVICES=GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea \
 GPTQMODEL_QVQ_CUDA_BUILD_ROOT=/tmp/qvq-jit-hopper-current \
-python scripts/benchmark_qvq_cuda_lr.py \
-  --physical-gpu 0 --bits 2 2.5 3 3.5 --dtype float16 --m 16 \
-  --warmup 10 --iterations 60 --out-dir artifacts/<stamp>
+python scripts/benchmark_qvq_lr_vs_gptq_llama32_1b.py \
+  --physical-gpu 0 --shapes attn_qo attn_kv mlp_gate_up mlp_down \
+  --m 1 2 4 8 16 --qvq-bits 2 2.5 3 3.5 --dtype float16 \
+  --warmup 10 --iterations 60 --output artifacts/<stamp>/gpu0.json
 ```
 
 Prior RTX 5090 representative sweep:
