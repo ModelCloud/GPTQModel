@@ -1306,7 +1306,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
   }
 
   if (n_tile_base + warp < n_tiles) {
-    wmma::store_matrix_sync(&output_tile[warp][0][0], accumulator, kPaddedColumns, wmma::mem_row_major);
+    wmma::store_matrix_sync(output_tile[warp], accumulator, kPaddedColumns, wmma::mem_row_major);
   }
   __syncthreads();
   if (n_tile_base + warp < n_tiles) {
