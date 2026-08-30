@@ -1,0 +1,63 @@
+{
+  "schema": "qvq.frontier-wave11-causality.v1",
+  "wave": 11,
+  "status": "queued",
+  "queued_at_utc": "2026-08-30T01:10:00Z",
+  "queue_branch": "feat/qvq-frontier-score-updates",
+  "purpose": "Separate upstream calibration/Hessian drift from discrete QVQ bank/trellis solver drift using one frozen W3.2 Up4 L6,L8 canary.",
+  "canary": {
+    "allocation": "Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3, with Up4 at layers 6 and 8",
+    "config": "scripts/configs/llama32_1b_frontier_w5_anchor_up4_l6_l8.json",
+    "config_sha256": "813808cc0c6375e80007bbf710caa4871d81648dcd34ed9f5b84e9b596d93799",
+    "effective_bpw": 3.178340,
+    "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+    "calibration_sha256": "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef",
+    "calibration_rows": 128,
+    "yaqa_sha256": "2140541facb66112428212b3a36d51a7735393b28c79db59c2429f6e51ed57ef",
+    "yaqa_rows": 182,
+    "yaqa_seed": 0,
+    "evaluator_commit": "e45e44f321d39baa55aee15e151aa54535b2530c",
+    "evaluator_task": "gsm8k_platinum_cot",
+    "decode": "do_sample=false,temperature=0.0,top_p=1.0,top_k=50,batch_size=8"
+  },
+  "hash_stages": [
+    "model/config and resolved allocation",
+    "calibration token IDs/order",
+    "input/output Hessian or Gram factors",
+    "SU/SV",
+    "bank_ids",
+    "bank_alt_id",
+    "trellis",
+    "reconstructed weight",
+    "serialized checkpoint tensors",
+    "per-question evaluator predictions"
+  ],
+  "full_end_to_end": {
+    "state": "queued",
+    "requirement": "Run each recorded quantizer commit normally, one process per physical GPU, then evaluate all checkpoints with evaluator_commit.",
+    "arms": [
+      {"arm_id":"w11-old-full-a","gpu":0,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"queued","checkpoint":"/root/qvq-results/wave11-old-full-a"},
+      {"arm_id":"w11-old-full-b","gpu":1,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"queued","checkpoint":"/root/qvq-results/wave11-old-full-b"},
+      {"arm_id":"w11-new-full-a","gpu":2,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"queued","checkpoint":"/root/qvq-results/wave11-new-full-a"},
+      {"arm_id":"w11-new-full-b","gpu":3,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"queued","checkpoint":"/root/qvq-results/wave11-new-full-b"}
+    ]
+  },
+  "frozen_first_module": {
+    "state": "blocked_instrumentation",
+    "module": "model.layers.0.self_attn.q_proj",
+    "requirement": "Feed byte-identical W, H, SU, SV, and resolved config to the solver; bypass model forward, calibration, and data loading.",
+    "arms": [
+      {"arm_id":"w11-old-frozen-a","gpu":4,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"blocked_instrumentation"},
+      {"arm_id":"w11-old-frozen-b","gpu":5,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"blocked_instrumentation"},
+      {"arm_id":"w11-new-frozen-a","gpu":6,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"blocked_instrumentation"},
+      {"arm_id":"w11-new-frozen-b","gpu":7,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"blocked_instrumentation"}
+    ],
+    "blocker": "Existing checkpoints retain packed outputs and run telemetry but do not retain the exact first-module H/Gram inputs or solver candidate/state tables. Add a snapshot exporter and frozen-input solver entry point before launching these four canaries."
+  },
+  "interpretation": {
+    "full_replicates_equal_old_and_new_different": "within-commit deterministic; commit/runtime provenance drift",
+    "frozen_replicates_equal_with_old_new_different": "discrete solver/state-selection divergence",
+    "full_differs_but_frozen_equal": "upstream calibration/Hessian or runtime preparation divergence",
+    "same_commit_replicates_differ": "within-commit nondeterminism; inspect first differing hash"
+  }
+}
