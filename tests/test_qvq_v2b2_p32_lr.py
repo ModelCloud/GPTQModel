@@ -170,6 +170,8 @@ def test_lr32_same_payload_changes_only_local_history_boundaries_before_matrix_m
     assert torch.equal(global_states[:, :, 3:], local_states[:, :, 3:])
     assert not torch.equal(global_values[:, :, :3], local_values[:, :, :3])
     assert torch.equal(global_values[:, :, 3:], local_values[:, :, 3:])
+    with pytest.raises(ValueError, match="eight transition-consistent local rings"):
+        pack_local_ring_states(global_states, bits=bits)
 
 
 @pytest.mark.parametrize(

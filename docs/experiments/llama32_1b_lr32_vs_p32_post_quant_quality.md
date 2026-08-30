@@ -105,7 +105,24 @@ Standard P32 quantizes each 16×16 weight tile as one 128-step trellis history. 
 
 That shorter history changes the set of reachable quantized vectors and therefore changes the reconstructed weights. The nearly uniform 13–14% weight-error increase across all seven shapes, under both rounding methods, is strong evidence that the loss is caused by this shared LR32 history constraint rather than one projection or one calibration sample.
 
-The next quantizer experiment should keep the LR32 packed/runtime layout but solve all eight 16-step segments as one continuous 128-step history with bank decisions every 16 steps. Runtime decoding uses the stored states and selectors and does not need to reproduce the encoder's recurrence. That experiment can test whether the low-conflict LR32 memory layout can retain standard P32 quantization quality without changing the CUDA kernel.
+## Continuous-history experiment
+
+The proposed continuous 128-step LR32 encoder is **incompatible with the current payload** and cannot be evaluated as a quantizer-only change.
+
+LR32 does not store each full 16-bit trellis state. It stores only the new transition bits at each step. The decoder reconstructs the remaining history by wrapping independently inside each 16-step ring. A continuous 128-step encoder therefore produces different boundary states for the first history-dependent steps of every ring. Packing rejects those states because unpacking would silently reconstruct different weights.
+
+At W2, three of the first 16 value pairs in each ring depend on this boundary history. The existing algebraic control observes 24 changed states across the eight ring boundaries and now asserts that the local-ring packer rejects the continuous-history state stream.
+
+| Experiment | Packed round trip | Kernel compatible | Quality run |
+|---|---|---|---|
+| Continuous 128-step history in the existing LR32 payload | No | No | Blocked before model evaluation |
+
+Retaining continuous history requires one of these format changes:
+
+1. Store the 12 missing history bits for all eight ring starts. At W2 this costs 96 extra bits per 256-weight tile, or 0.375 additional bits per weight.
+2. Restore one global 128-step history in the decoder, which changes LR32 decoding and therefore requires kernel changes.
+
+Neither is acceptable under the current no-kernel-change and near-native-storage constraints. Quantizer-only work must instead improve the solution inside the representable eight-local-ring space.
 
 ## Raw reports
 
