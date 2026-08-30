@@ -79,6 +79,7 @@ tables below every row was intentionally measured at M=16.
 | `6f4e4b72` / `e944e528` | H200, W2/W2.5 M16 | Pad native-N8 activation rows from 32 to 40 half values; merge the upstream H100 lead and validate locally on H200 GPU 0 | MLP gained 2.6-5.8%; NCU gate/up fell 6.9% with 35.9% fewer load conflicts; 69/69 CUDA tests passed | accepted, merged, and pushed |
 | `603a3e64` uncommitted A/B | H200, W2/W2.5 M16 | Replace each synchronous 16-byte activation copy with `cp.async`, then immediately commit/wait before the existing barrier | Accurate, but Q/O rose to 0.024 ms and MLP to 0.069-0.071 ms, roughly 1.5-1.9x slower | rejected; source restored before next experiment |
 | `e0c29e60` | H200, W2-W3.5 M1/M2/M4/M8/M16 | Full four-rate, four-K/N projection matrix against matched Machete/Marlin W4 | 120/120 rows passed their dense-reference gates; QVQ/Machete geomeans were 0.787x, 0.790x, 0.241x, and 0.197x from W2 through W3.5 | accepted full-M/K/N targeting baseline |
+| `54e2e3ac` / `efe8ae70` | H200, W3 M1-M16 | Permit the existing cooperative Hopper TB6 kernel for every M<=16 instead of only the ROWS16 dispatch | All 20 W3 cells accurate; Q/O M1-M8 gained 2.74-2.99x and MLP M1-M8 gained 3.51-4.37x versus `e0c29e60`; K/V and M16 stayed within normal variance | accepted, merged, and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -305,6 +306,45 @@ M1-M8 MLP. W3 M16 already dispatches the specialized Hopper cooperative path
 and is 3-4x faster than the scalar lower-M path, but still only 0.361-0.374x
 Machete on MLP.
 
+### H200 W3 small-row cooperative dispatch
+
+Source commit `54e2e3ac`, merged/pushed as `efe8ae70`, removes the host-side
+restriction that sent W3 M1-M8 to the scalar LR kernel. The measured source
+fingerprint was
+`ddc8cabd3ff4e75e0b2a3ca481fbb1ca7dc657011fb57dc6f51b3990445845a8`.
+These H200 GPU 0 results use 10 warm-ups and 60 graph-timed launches. `Prior`
+is the exact full-matrix result above. K/V remains scalar because N=512 is
+below the cooperative TB6 threshold.
+
+| Shape | M | K | N | LR ms | Prior ms | LR gain | xMachete W4 | Max abs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `attn_qo` | 1 | 2,048 | 2,048 | 0.019808 | 0.059200 | 2.989x | 0.767x | 8.58e-06 |
+| `attn_qo` | 2 | 2,048 | 2,048 | 0.021296 | 0.058304 | 2.738x | 0.723x | 1.24e-05 |
+| `attn_qo` | 4 | 2,048 | 2,048 | 0.021248 | 0.059104 | 2.782x | 0.718x | 1.34e-05 |
+| `attn_qo` | 8 | 2,048 | 2,048 | 0.021376 | 0.060320 | 2.822x | 0.722x | 1.53e-05 |
+| `attn_qo` | 16 | 2,048 | 2,048 | 0.021680 | 0.022016 | 1.015x | 0.708x | 1.34e-05 |
+| `attn_kv` | 1 | 2,048 | 512 | 0.021312 | 0.021808 | 1.023x | 0.664x | 1.91e-06 |
+| `attn_kv` | 2 | 2,048 | 512 | 0.020464 | 0.021024 | 1.027x | 0.714x | 3.81e-06 |
+| `attn_kv` | 4 | 2,048 | 512 | 0.020768 | 0.021488 | 1.035x | 0.700x | 4.77e-06 |
+| `attn_kv` | 8 | 2,048 | 512 | 0.021824 | 0.022192 | 1.017x | 0.650x | 4.77e-06 |
+| `attn_kv` | 16 | 2,048 | 512 | 0.024320 | 0.024448 | 1.005x | 0.599x | 3.81e-06 |
+| `mlp_gate_up` | 1 | 2,048 | 8,192 | 0.048512 | 0.211952 | 4.369x | 0.367x | 2.48e-05 |
+| `mlp_gate_up` | 2 | 2,048 | 8,192 | 0.048624 | 0.207920 | 4.276x | 0.366x | 2.67e-05 |
+| `mlp_gate_up` | 4 | 2,048 | 8,192 | 0.048832 | 0.208960 | 4.279x | 0.370x | 2.57e-05 |
+| `mlp_gate_up` | 8 | 2,048 | 8,192 | 0.049120 | 0.211488 | 4.306x | 0.364x | 3.43e-05 |
+| `mlp_gate_up` | 16 | 2,048 | 8,192 | 0.049600 | 0.049696 | 1.002x | 0.365x | 3.05e-05 |
+| `mlp_down` | 1 | 8,192 | 2,048 | 0.048512 | 0.208224 | 4.292x | 0.466x | 4.58e-05 |
+| `mlp_down` | 2 | 8,192 | 2,048 | 0.059296 | 0.208032 | 3.508x | 0.372x | 8.58e-05 |
+| `mlp_down` | 4 | 8,192 | 2,048 | 0.059392 | 0.209232 | 3.523x | 0.379x | 8.58e-05 |
+| `mlp_down` | 8 | 8,192 | 2,048 | 0.059504 | 0.212528 | 3.572x | 0.375x | 9.35e-05 |
+| `mlp_down` | 16 | 8,192 | 2,048 | 0.059872 | 0.059280 | 0.990x | 0.375x | 1.22e-04 |
+
+NCU explains the gain rather than merely correlating with it: W3 M4
+K2048/N8192 scalar executes 74.15M instructions in 201.6 us, while the
+cooperative M16 implementation executes 19.68M in 46.5 us. Small M can reuse
+that same zero-padded M16 arithmetic, avoiding the redundant TB6 decode and
+cutting the measured MLP latency by up to 4.37x.
+
 ### H100 same-CC regression
 
 The H100 run uses physical GPU 1, CC 9.0, 132 SMs, and the same accepted
@@ -498,8 +538,8 @@ again. Raw captures are
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3.5 M1-M16 MLP | full matrix: 0.074-0.108x Machete, 0.203-0.244 ms gate/up and 0.205-0.231 ms down | add a TB7-specific cooperative/tensor path; profile its instruction/local-memory image before sharing TB6 code |
-| 2 | H200 W3 M1-M8 MLP | full matrix: 0.085-0.107x Machete at about 0.208-0.213 ms; M16 specialization is 3-4x faster | extend the cooperative TB6 path to small rows without materializing local accumulators |
+| 1 | H200 W3 M1-M16 MLP | small-row cooperative dispatch is now 0.0485-0.0599 ms and 3.51-4.37x faster than the scalar baseline, but only 0.364-0.466x Machete | replace padded-N16 TB6 WMMA with an exact native-N8 consumer and reduce two-plane reconstruction/shuffle work |
+| 2 | H200 W3.5 M1-M16 MLP | full matrix: 0.074-0.108x Machete, 0.203-0.244 ms gate/up and 0.205-0.231 ms down | add a TB7-specific cooperative/tensor path after the current W3 focus; profile its instruction/local-memory image before sharing TB6 code |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
 | 5 | H200 W3 M16 and M32 | M16 is 0.361-0.709x Machete by K/N; prior M32 K8192/N2048 is 1.76x versus non-LR | reduce TB6 cache/scoreboard pressure; retain split 4 for the M32 down-like case |
