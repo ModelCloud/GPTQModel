@@ -106,7 +106,7 @@ def _run(args: argparse.Namespace) -> dict:
     )
     from gptqmodel.utils.marlin_scalar_type import scalar_types
     from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
-    from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16
+    from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16, qvq_wgmma_w3_m16_tma
 
     comparison._visible_gpu_matches(torch, hardware)
     properties = torch.cuda.get_device_properties(0)
@@ -229,6 +229,37 @@ def _run(args: argparse.Namespace) -> dict:
             split=split,
             timing=comparison._cuda_graph_event_timing(
                 torch, wgmma_call, warmup=args.warmup, iterations=args.iterations
+            ),
+            metrics=metrics,
+        ))
+
+        def tma_wgmma_call(split=split):
+            return qvq_wgmma_w3_m16_tma(
+                x,
+                trellis,
+                levels,
+                bank_ids,
+                out_features=case.out_features,
+                bank_alt_id=3,
+                split_count=split,
+            )
+
+        actual = tma_wgmma_call()
+        torch.cuda.synchronize()
+        metrics = comparison._assert_correct(
+            kernel=f"QVQ TMA RS-WGMMA W3 split{split}",
+            actual=actual,
+            reference=qvq_reference,
+            expected_shape=(16, case.out_features),
+            expected_dtype=torch.float32,
+            atol=2e-3,
+            rtol=0.0,
+        )
+        rows.append(_row(
+            kernel="qvq_tma_rs_wgmma_w3",
+            split=split,
+            timing=comparison._cuda_graph_event_timing(
+                torch, tma_wgmma_call, warmup=args.warmup, iterations=args.iterations
             ),
             metrics=metrics,
         ))

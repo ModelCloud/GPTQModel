@@ -11,6 +11,7 @@
 #include <cute/algorithm/gemm.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/cutlass.h>
+#include <cutlass/pipeline/sm90_pipeline.hpp>
 #include <cutlass/gemm/collective/builders/sm90_common.inl>
 #include <cutlass/numeric_types.h>
 
@@ -40,6 +41,7 @@ using WgmmaSmemLayoutB = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{}, cute::make_shape(cute::_16{}, cute::_256{})));
 
 constexpr int kThreads = 128;
+constexpr int kTmaThreads = 160;
 constexpr int kRows = 16;
 constexpr int kOutputColumns = 64;
 constexpr int kK32Rows = 32;
@@ -49,8 +51,32 @@ constexpr int kWordsPerTile = 4 * kW3TransitionBits;
 constexpr int kK32TilesPerStage = 8;
 constexpr int kKPerStage = kK32TilesPerStage * kK32Rows;
 constexpr int kN8TilesPerBlock = kOutputColumns / kN8Columns;
+constexpr int kTmaStages = 2;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
+
+using WgmmaTmaSmemLayoutB = decltype(cute::tile_to_shape(
+    WgmmaSmemLayoutAtomB{},
+    cute::make_shape(cute::_16{}, cute::_256{}, cute::Int<kTmaStages>{})));
+using TrellisTmaSmemLayout = decltype(cute::make_layout(
+    cute::make_shape(
+        cute::Int<kWordsPerTile>{},
+        cute::Int<kN8TilesPerBlock>{},
+        cute::Int<kK32TilesPerStage>{},
+        cute::Int<kTmaStages>{}),
+    cute::make_stride(
+        cute::_1{},
+        cute::Int<kWordsPerTile>{},
+        cute::Int<kWordsPerTile * kN8TilesPerBlock>{},
+        cute::Int<kWordsPerTile * kN8TilesPerBlock * kK32TilesPerStage>{})));
+using WgmmaTmaPipeline = cutlass::PipelineTmaAsync<kTmaStages>;
+using WgmmaTmaPipelineState = cutlass::PipelineState<kTmaStages>;
+
+struct alignas(128) WgmmaTmaSharedStorage {
+  typename WgmmaTmaPipeline::SharedStorage pipeline;
+  alignas(128) cute::ArrayEngine<Element, cute::cosize_v<WgmmaTmaSmemLayoutB>> input;
+  alignas(128) cute::ArrayEngine<uint32_t, cute::cosize_v<TrellisTmaSmemLayout>> trellis;
+};
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
 
@@ -284,6 +310,210 @@ __global__ __launch_bounds__(kThreads) void qvq_wgmma_w3_m16_kernel(
 #endif
 }
 
+template <class InputTma, class TrellisTma>
+__global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
+    CUTE_GRID_CONSTANT InputTma const input_tma,
+    CUTE_GRID_CONSTANT TrellisTma const trellis_tma,
+    const uint8_t* __restrict__ bank_ids,
+    const Element* __restrict__ levels,
+    float* __restrict__ partial_output,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+#if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
+  __shared__ __align__(128) char shared_buffer[sizeof(WgmmaTmaSharedStorage)];
+  auto& shared = *reinterpret_cast<WgmmaTmaSharedStorage*>(shared_buffer);
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const bool is_consumer = thread < kThreads;
+  const bool is_producer = !is_consumer;
+  const int n64_block = static_cast<int>(blockIdx.x);
+  const int n8_tile_base = n64_block * kN8TilesPerBlock;
+  const int n_tiles = size_n / kN8Columns;
+  const int k_tiles = size_k / kK32Rows;
+  const int split = static_cast<int>(blockIdx.z);
+  const int k_tile_begin = (k_tiles * split) / split_count;
+  const int k_tile_end = (k_tiles * (split + 1)) / split_count;
+  const int stage_begin = k_tile_begin / kK32TilesPerStage;
+  const int stage_count = (k_tile_end - k_tile_begin) / kK32TilesPerStage;
+  const uint32_t alternate_bank_mask = bank_alt_id == 0 ? 0u
+      : bank_alt_id == 1 ? 0x6969u
+      : bank_alt_id == 2 ? 0x5a5au
+      : 0x3c3cu;
+
+  typename WgmmaTmaPipeline::Params pipeline_params;
+  pipeline_params.role = is_producer
+      ? WgmmaTmaPipeline::ThreadCategory::Producer
+      : WgmmaTmaPipeline::ThreadCategory::Consumer;
+  pipeline_params.is_leader = thread == kThreads;
+  pipeline_params.num_consumers = kThreads;
+  pipeline_params.transaction_bytes =
+      kRows * kKPerStage * sizeof(Element) +
+      kWordsPerTile * kN8TilesPerBlock * kK32TilesPerStage * sizeof(uint32_t);
+  WgmmaTmaPipeline pipeline(
+      shared.pipeline,
+      pipeline_params,
+      cute::Shape<cute::_1, cute::_1, cute::_1>{});
+
+  auto s_input = cute::make_tensor(
+      cute::make_smem_ptr(shared.input.begin()), WgmmaTmaSmemLayoutB{});
+  auto s_trellis = cute::make_tensor(
+      cute::make_smem_ptr(shared.trellis.begin()), TrellisTmaSmemLayout{});
+
+  auto full_input = input_tma.get_tma_tensor(cute::make_shape(cute::_16{}, size_k));
+  auto tiled_input = cute::local_tile(
+      full_input,
+      cute::make_shape(cute::_16{}, cute::_256{}),
+      cute::make_coord(cute::_0{}, cute::_));
+  auto [tma_global_input, tma_shared_input] = cute::tma_partition(
+      input_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 2>(s_input),
+      cute::group_modes<0, 2>(tiled_input));
+
+  auto full_trellis = trellis_tma.get_tma_tensor(
+      cute::make_shape(cute::Int<kWordsPerTile>{}, n_tiles, k_tiles));
+  auto tiled_trellis = cute::local_tile(
+      full_trellis,
+      cute::make_shape(
+          cute::Int<kWordsPerTile>{},
+          cute::Int<kN8TilesPerBlock>{},
+          cute::Int<kK32TilesPerStage>{}),
+      cute::make_coord(cute::_0{}, n64_block, cute::_));
+  auto [tma_global_trellis, tma_shared_trellis] = cute::tma_partition(
+      trellis_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 3>(s_trellis),
+      cute::group_modes<0, 3>(tiled_trellis));
+
+  // PipelineTmaAsync initializes its transaction and empty barriers from warp
+  // zero.  All roles must observe that initialization before the producer and
+  // consumer control flows diverge, especially once a two-stage buffer wraps.
+  __syncthreads();
+
+  if (is_producer) {
+    if (cute::elect_one_sync()) {
+      auto write_state = cutlass::make_producer_start_state<WgmmaTmaPipeline>();
+      for (int stage_offset = 0; stage_offset < stage_count; ++stage_offset) {
+        pipeline.producer_acquire(write_state);
+        using Barrier = typename WgmmaTmaPipeline::ProducerBarrierType;
+        Barrier* barrier = pipeline.producer_get_barrier(write_state);
+        const int global_stage = stage_begin + stage_offset;
+        const int write_stage = write_state.index();
+        cute::copy(
+            input_tma.with(*barrier),
+            tma_global_input(cute::_, global_stage),
+            tma_shared_input(cute::_, write_stage));
+        cute::copy(
+            trellis_tma.with(*barrier),
+            tma_global_trellis(cute::_, global_stage),
+            tma_shared_trellis(cute::_, write_stage));
+        ++write_state;
+      }
+      pipeline.producer_tail(write_state);
+    }
+    return;
+  }
+
+  WgmmaTiledMma tiled_mma;
+  auto thread_mma = tiled_mma.get_thread_slice(thread);
+  auto thread_shared_b = thread_mma.partition_B(s_input);
+  auto fragment_b = thread_mma.make_fragment_B(thread_shared_b);
+  static_assert(cute::size<2>(decltype(fragment_b){}) == 16);
+
+  auto coordinate_a = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
+  auto fragment_a0 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  auto fragment_a1 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  static_assert(cute::size(decltype(fragment_a0){}) == 8);
+
+  auto coordinate_c = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_c = thread_mma.partition_C(coordinate_c);
+  auto accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
+  cute::clear(accumulator);
+  tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+
+  const int warp = thread >> 5;
+  const int lane = thread & 31;
+  const int column_in_n8 = lane >> 2;
+  const int first_n8_tile = warp * 2;
+  const int second_n8_tile = first_n8_tile + 1;
+  WgmmaTmaPipelineState read_state;
+  WgmmaTmaPipelineState release_state;
+
+  for (int stage_offset = 0; stage_offset < stage_count; ++stage_offset) {
+    auto wait_token = pipeline.consumer_try_wait(read_state);
+    pipeline.consumer_wait(read_state, wait_token);
+    const int read_stage = read_state.index();
+    const int global_k32_base = k_tile_begin + stage_offset * kK32TilesPerStage;
+
+#pragma unroll
+    for (int k_block = 0; k_block < 16; ++k_block) {
+      const int k32_in_stage = k_block >> 1;
+      const int k16_half = k_block & 1;
+      auto& fragment_a = (k_block & 1) == 0 ? fragment_a0 : fragment_a1;
+      uint32_t first_bank_id = 0;
+      uint32_t second_bank_id = 0;
+      if (lane == 0) {
+        const int64_t global_tile_base =
+            static_cast<int64_t>(global_k32_base + k32_in_stage) * n_tiles + n8_tile_base;
+        first_bank_id = bank_ids[global_tile_base + first_n8_tile];
+        second_bank_id = bank_ids[global_tile_base + second_n8_tile];
+      }
+      first_bank_id = __shfl_sync(0xffffffffu, first_bank_id, 0);
+      second_bank_id = __shfl_sync(0xffffffffu, second_bank_id, 0);
+
+      if (k_block >= 2) {
+        cute::warpgroup_wait<1>();
+      }
+      const auto trellis_layout = TrellisTmaSmemLayout{};
+      const uint32_t* packed_first = shared.trellis.begin() +
+          trellis_layout(0, first_n8_tile, k32_in_stage, read_stage);
+      const uint32_t* packed_second = shared.trellis.begin() +
+          trellis_layout(0, second_n8_tile, k32_in_stage, read_stage);
+      qvq_wgmma_decode_w3_fragment(
+          fragment_a,
+          packed_first,
+          packed_second,
+          static_cast<uint8_t>(first_bank_id),
+          static_cast<uint8_t>(second_bank_id),
+          levels,
+          column_in_n8,
+          k16_half,
+          alternate_bank_mask);
+      cute::warpgroup_fence_operand(fragment_a);
+      cute::warpgroup_arrive();
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b(cute::_, cute::_, k_block, read_stage),
+          accumulator);
+      tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
+      cute::warpgroup_commit_batch();
+    }
+    cute::warpgroup_wait<0>();
+    cute::warpgroup_fence_operand(accumulator);
+    pipeline.consumer_release(release_state);
+    ++read_state;
+    ++release_state;
+  }
+
+  constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
+#pragma unroll
+  for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
+    const auto coordinate = thread_coordinate_c(index);
+    const int output_column_in_block = static_cast<int>(cute::get<0>(coordinate));
+    const int output_row = static_cast<int>(cute::get<1>(coordinate));
+    const int64_t output_index =
+        static_cast<int64_t>(output_row) * size_n + n64_block * kOutputColumns + output_column_in_block;
+    partial_output[static_cast<int64_t>(split) * kRows * size_n + output_index] = accumulator(index);
+  }
+#endif
+}
+
 __global__ void qvq_wgmma_reduce_split_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -385,12 +615,122 @@ at::Tensor qvq_wgmma_w3_m16(
   return output;
 }
 
+at::Tensor qvq_wgmma_w3_m16_tma(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    int64_t split_count) {
+  TORCH_CHECK(input.is_cuda(), "QVQ TMA WGMMA input must be CUDA");
+  c10::cuda::CUDAGuard device_guard(input.device());
+  TORCH_CHECK(trellis.device() == input.device() && levels.device() == input.device() &&
+                  bank_ids.device() == input.device(),
+              "QVQ TMA WGMMA tensors must share one CUDA device");
+  TORCH_CHECK(input.scalar_type() == at::kHalf && levels.scalar_type() == at::kHalf,
+              "QVQ TMA WGMMA prototype requires FP16 input and levels");
+  TORCH_CHECK(trellis.scalar_type() == at::kInt, "QVQ TMA WGMMA trellis must be int32");
+  TORCH_CHECK(bank_ids.scalar_type() == at::kByte, "QVQ TMA WGMMA bank ids must be uint8");
+  TORCH_CHECK(input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() &&
+                  bank_ids.is_contiguous(),
+              "QVQ TMA WGMMA tensors must be contiguous");
+  TORCH_CHECK(input.dim() == 2 && input.size(0) == kRows,
+              "QVQ TMA WGMMA prototype requires M=16");
+  TORCH_CHECK(out_features > 0 && out_features % kOutputColumns == 0,
+              "QVQ TMA WGMMA output features must be a positive multiple of 64");
+  TORCH_CHECK(input.size(1) > 0 && input.size(1) % kKPerStage == 0,
+              "QVQ TMA WGMMA input features must be a positive multiple of 256");
+  TORCH_CHECK(split_count >= 1 && split_count <= 64,
+              "QVQ TMA WGMMA split count must be in [1, 64]");
+  TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3,
+              "QVQ TMA WGMMA alternate bank id must be in [0, 3]");
+
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(properties.major == 9 && properties.minor == 0,
+              "QVQ TMA WGMMA prototype requires an SM90 H100/H200 device");
+
+  const int size_k = static_cast<int>(input.size(1));
+  const int size_n = static_cast<int>(out_features);
+  const int k_tiles = size_k / kK32Rows;
+  const int n_tiles = size_n / kN8Columns;
+  TORCH_CHECK(k_tiles % split_count == 0 && (k_tiles / split_count) % kK32TilesPerStage == 0,
+              "QVQ TMA WGMMA split partitions must contain a multiple of eight K32 tiles");
+  const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * n_tiles;
+  TORCH_CHECK(trellis.numel() == expected_tiles * kWordsPerTile,
+              "QVQ TMA WGMMA trellis size mismatch");
+  TORCH_CHECK(bank_ids.numel() == expected_tiles,
+              "QVQ TMA WGMMA bank-id size mismatch");
+  TORCH_CHECK(levels.numel() == 256, "QVQ TMA WGMMA requires 256 PGC16 levels");
+
+  const auto* input_ptr = reinterpret_cast<const Element*>(input.data_ptr<at::Half>());
+  const auto* trellis_ptr = reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>());
+  auto input_tensor = cute::make_tensor(
+      input_ptr,
+      cute::make_shape(kRows, size_k),
+      cute::make_stride(static_cast<int64_t>(size_k), cute::_1{}));
+  auto trellis_tensor = cute::make_tensor(
+      trellis_ptr,
+      cute::make_shape(kWordsPerTile, n_tiles, k_tiles),
+      cute::make_stride(
+          cute::_1{},
+          cute::Int<kWordsPerTile>{},
+          static_cast<int64_t>(n_tiles) * kWordsPerTile));
+  auto input_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      input_tensor,
+      WgmmaTmaSmemLayoutB{}(cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::_16{}, cute::_256{}));
+  auto trellis_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      trellis_tensor,
+      TrellisTmaSmemLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
+      cute::make_shape(
+          cute::Int<kWordsPerTile>{},
+          cute::Int<kN8TilesPerBlock>{},
+          cute::Int<kK32TilesPerStage>{}));
+
+  auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
+  auto partial_output = split_count == 1
+      ? output
+      : at::empty({split_count, kRows, size_n}, input.options().dtype(at::kFloat));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
+  qvq_wgmma_w3_m16_tma_kernel<<<grid, kTmaThreads, 0, stream>>>(
+      input_tma,
+      trellis_tma,
+      bank_ids.data_ptr<uint8_t>(),
+      reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+      partial_output.data_ptr<float>(),
+      size_k,
+      size_n,
+      static_cast<int>(split_count),
+      static_cast<int>(bank_alt_id));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  if (split_count > 1) {
+    constexpr int kReductionThreads = 256;
+    const int output_values = kRows * size_n;
+    const int reduction_blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    qvq_wgmma_reduce_split_kernel<<<reduction_blocks, kReductionThreads, 0, stream>>>(
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        output_values,
+        static_cast<int>(split_count));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return output;
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("w3_m16", qvq_wgmma_w3_m16);
+  m.impl("w3_m16_tma", qvq_wgmma_w3_m16_tma);
 }

@@ -15,7 +15,7 @@ from gptqmodel.quantization.qvq import (
     reconstruct_local_ring_inner_weight,
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
-from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16
+from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16, qvq_wgmma_w3_m16_tma
 
 
 pytestmark = [
@@ -58,12 +58,15 @@ def _w3_case(*, k: int, n: int, seed: int):
     return input.cuda(), trellis.cuda(), levels.cuda(), bank_ids.cuda(), reference.cuda()
 
 
+@pytest.mark.parametrize("kernel", (qvq_wgmma_w3_m16, qvq_wgmma_w3_m16_tma))
 @pytest.mark.parametrize("split_count", (1, 2))
-def test_qvq_wgmma_w3_m16_matches_dense_reference(split_count):
+def test_qvq_wgmma_w3_m16_matches_dense_reference(kernel, split_count):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 H100/H200 required")
-    input, trellis, levels, bank_ids, reference = _w3_case(k=512, n=512, seed=20260830 + split_count)
-    actual = qvq_wgmma_w3_m16(
+    # K=1024 gives split1 four K256 stages, so the test exercises two-stage
+    # pipeline reuse instead of merely filling each stage once.
+    input, trellis, levels, bank_ids, reference = _w3_case(k=1024, n=512, seed=20260830 + split_count)
+    actual = kernel(
         input,
         trellis,
         levels,
