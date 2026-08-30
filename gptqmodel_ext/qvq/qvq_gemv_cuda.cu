@@ -2136,7 +2136,7 @@ void launch_qvq_local_ring_wmma_hopper_dispatch(
       }
       break;
     case 7:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(7);
+      QVQ_LR_LAUNCH_HOPPER_WMMA(7, 4);
       break;
     default:
       TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 7]");
