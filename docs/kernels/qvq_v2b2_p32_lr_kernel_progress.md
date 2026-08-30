@@ -1117,19 +1117,138 @@ cell. All 40 MLP cells remain below Machete. W3 is the best aggregate rate at
 0.938x Machete, and its K/V path is the strongest shape at 1.485x. The primary
 remaining target is MLP, especially W3.5 gate/up (0.573x) and down (0.682x).
 
+## Qwen3.8-27B exact-shape H200 matrix (`81b5ce65`, 2026-08-30)
+
+This sweep uses the official `Qwen/Qwen3.8-27B` text configuration observed at
+Hugging Face config revision `72a217a`: hidden size 5120, 24 Q heads, 4 KV
+heads, head dimension 256, linear-attention K/Q dimensions 16x128,
+linear-attention V dimension 48x128, and intermediate size 17408. The seven
+rows cover all distinct quantized text-decoder M/K/N geometries; tiny control
+projections, depthwise convolution, vision encoder, embeddings, and LM head
+are outside this kernel comparison.
+
+The physical H200 (132 SMs, UUID
+`GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea`) ran kernel-source commit
+`81b5ce65` with FP16 input, 10 warmups, and 60 timed CUDA-graph launches. All
+140 QVQ cells passed the dense-reference gate; maximum absolute error was
+0.001308441162109375. Machete is W4 FP16. Each QVQ cell is
+`median ms / xMachete`, where values above 1.0 mean QVQ is faster.
+
+| Rate | Unweighted 35-cell geomean | 64-layer projection-sum geomean |
+|---|---:|---:|
+| W2 | 0.429x | 0.353x |
+| W2.5 | 0.415x | 0.341x |
+| W3 | 0.414x | 0.339x |
+| W3.5 | 0.381x | 0.298x |
+| **All rates** | **0.409x** | **0.332x** |
+
+The projection-sum comparison weights the hybrid decoder exactly: 16
+full-attention Q projections, 32 K/V projections, 64 attention/linear output
+projections, 48 linear QKV projections, 48 linear Z projections, 128 MLP
+gate/up projections, and 64 MLP down projections. Its per-M speed ratios are:
+
+| Rate | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| W2 | 0.490x | 0.329x | 0.328x | 0.324x | 0.318x |
+| W2.5 | 0.473x | 0.318x | 0.318x | 0.314x | 0.307x |
+| W3 | 0.468x | 0.317x | 0.317x | 0.313x | 0.305x |
+| W3.5 | 0.411x | 0.280x | 0.277x | 0.268x | 0.274x |
+
+Per-shape M1-M16 geomeans:
+
+| Shape (K,N) | W2 | W2.5 | W3 | W3.5 | All rates |
+|---|---:|---:|---:|---:|---:|
+| Full Q+gate (5120,12288) | 0.446x | 0.431x | 0.430x | 0.406x | 0.428x |
+| Full K/V (5120,1024) | 1.051x | 1.008x | 1.008x | 0.991x | 1.014x |
+| Attention/linear out (6144,5120) | 0.350x | 0.342x | 0.341x | 0.315x | 0.337x |
+| Linear QKV (5120,10240) | 0.460x | 0.444x | 0.443x | 0.418x | 0.441x |
+| Linear Z (5120,6144) | 0.394x | 0.382x | 0.382x | 0.366x | 0.381x |
+| MLP gate/up (5120,17408) | 0.378x | 0.362x | 0.360x | 0.290x | 0.346x |
+| MLP down (17408,5120) | 0.238x | 0.231x | 0.230x | 0.206x | 0.226x |
+
+Machete W4 medians:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Full Q+gate (5120,12288) | 0.03437 | 0.03446 | 0.03440 | 0.03438 | 0.03443 |
+| Full K/V (5120,1024) | 0.01989 | 0.01984 | 0.02024 | 0.01997 | 0.01995 |
+| Attention/linear out (6144,5120) | 0.02336 | 0.02336 | 0.02358 | 0.02341 | 0.02347 |
+| Linear QKV (5120,10240) | 0.03430 | 0.03443 | 0.03434 | 0.03429 | 0.03434 |
+| Linear Z (5120,6144) | 0.02344 | 0.02342 | 0.02355 | 0.02357 | 0.02349 |
+| MLP gate/up (5120,17408) | 0.04101 | 0.04109 | 0.04114 | 0.04122 | 0.04120 |
+| MLP down (17408,5120) | 0.04238 | 0.04211 | 0.04237 | 0.04237 | 0.04226 |
+
+W2 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Full Q+gate (5120,12288) | 0.06982 / 0.492x | 0.07806 / 0.441x | 0.07835 / 0.439x | 0.07923 / 0.434x | 0.08077 / 0.426x |
+| Full K/V (5120,1024) | 0.01515 / 1.313x | 0.01995 / 0.994x | 0.02008 / 1.008x | 0.02006 / 0.995x | 0.02038 / 0.979x |
+| Attention/linear out (6144,5120) | 0.03947 / 0.592x | 0.07539 / 0.310x | 0.07581 / 0.311x | 0.07699 / 0.304x | 0.07771 / 0.302x |
+| Linear QKV (5120,10240) | 0.05971 / 0.574x | 0.07787 / 0.442x | 0.07842 / 0.438x | 0.07918 / 0.433x | 0.08066 / 0.426x |
+| Linear Z (5120,6144) | 0.04274 / 0.548x | 0.06379 / 0.367x | 0.06419 / 0.367x | 0.06522 / 0.361x | 0.06594 / 0.356x |
+| MLP gate/up (5120,17408) | 0.09406 / 0.436x | 0.11133 / 0.369x | 0.11181 / 0.368x | 0.11296 / 0.365x | 0.11579 / 0.356x |
+| MLP down (17408,5120) | 0.09787 / 0.433x | 0.20314 / 0.207x | 0.20462 / 0.207x | 0.20742 / 0.204x | 0.21114 / 0.200x |
+
+W2.5 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Full Q+gate (5120,12288) | 0.07242 / 0.475x | 0.08080 / 0.427x | 0.08112 / 0.424x | 0.08189 / 0.420x | 0.08352 / 0.412x |
+| Full K/V (5120,1024) | 0.01630 / 1.220x | 0.02035 / 0.975x | 0.02083 / 0.972x | 0.02070 / 0.964x | 0.02133 / 0.935x |
+| Attention/linear out (6144,5120) | 0.04062 / 0.575x | 0.07699 / 0.303x | 0.07744 / 0.305x | 0.07862 / 0.298x | 0.07960 / 0.295x |
+| Linear QKV (5120,10240) | 0.06166 / 0.556x | 0.08069 / 0.427x | 0.08115 / 0.423x | 0.08179 / 0.419x | 0.08352 / 0.411x |
+| Linear Z (5120,6144) | 0.04416 / 0.531x | 0.06570 / 0.357x | 0.06611 / 0.356x | 0.06717 / 0.351x | 0.06787 / 0.346x |
+| MLP gate/up (5120,17408) | 0.09774 / 0.420x | 0.11653 / 0.353x | 0.11677 / 0.352x | 0.11782 / 0.350x | 0.12102 / 0.340x |
+| MLP down (17408,5120) | 0.10186 / 0.416x | 0.20790 / 0.203x | 0.20947 / 0.202x | 0.21226 / 0.200x | 0.21757 / 0.194x |
+
+W3 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Full Q+gate (5120,12288) | 0.07294 / 0.471x | 0.08123 / 0.424x | 0.08134 / 0.423x | 0.08192 / 0.420x | 0.08342 / 0.413x |
+| Full K/V (5120,1024) | 0.01547 / 1.285x | 0.02098 / 0.946x | 0.02104 / 0.962x | 0.02109 / 0.947x | 0.02118 / 0.942x |
+| Attention/linear out (6144,5120) | 0.04096 / 0.570x | 0.07693 / 0.304x | 0.07726 / 0.305x | 0.07814 / 0.300x | 0.08019 / 0.293x |
+| Linear QKV (5120,10240) | 0.06214 / 0.552x | 0.08109 / 0.425x | 0.08131 / 0.422x | 0.08198 / 0.418x | 0.08344 / 0.412x |
+| Linear Z (5120,6144) | 0.04453 / 0.526x | 0.06566 / 0.357x | 0.06602 / 0.357x | 0.06669 / 0.353x | 0.06798 / 0.345x |
+| MLP gate/up (5120,17408) | 0.09894 / 0.414x | 0.11696 / 0.351x | 0.11731 / 0.351x | 0.11882 / 0.347x | 0.12147 / 0.339x |
+| MLP down (17408,5120) | 0.10270 / 0.413x | 0.20891 / 0.202x | 0.20987 / 0.202x | 0.21269 / 0.199x | 0.21986 / 0.192x |
+
+W3.5 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Full Q+gate (5120,12288) | 0.07856 / 0.437x | 0.08458 / 0.407x | 0.08571 / 0.401x | 0.08875 / 0.387x | 0.08691 / 0.396x |
+| Full K/V (5120,1024) | 0.01544 / 1.288x | 0.02123 / 0.934x | 0.02133 / 0.949x | 0.02163 / 0.923x | 0.02200 / 0.907x |
+| Attention/linear out (6144,5120) | 0.04896 / 0.477x | 0.08131 / 0.287x | 0.08246 / 0.286x | 0.08450 / 0.277x | 0.08203 / 0.286x |
+| Linear QKV (5120,10240) | 0.06779 / 0.506x | 0.08442 / 0.408x | 0.08554 / 0.401x | 0.08848 / 0.388x | 0.08672 / 0.396x |
+| Linear Z (5120,6144) | 0.04531 / 0.517x | 0.06896 / 0.340x | 0.06978 / 0.338x | 0.07162 / 0.329x | 0.06952 / 0.338x |
+| MLP gate/up (5120,17408) | 0.10960 / 0.374x | 0.14725 / 0.279x | 0.15002 / 0.274x | 0.15597 / 0.264x | 0.15186 / 0.271x |
+| MLP down (17408,5120) | 0.12904 / 0.328x | 0.22496 / 0.187x | 0.22846 / 0.185x | 0.23475 / 0.180x | 0.23221 / 0.182x |
+
+This changes the optimization priority. The current LR launch/split policy is
+well matched to the previous 2048-based proxy but poorly matched to Qwen3.8's
+K=5120/6144/17408 geometries. Full K/V remains at parity overall, while the
+model-dominant MLP down path is only 0.226x Machete and the shared
+attention/linear output path is 0.337x. The next H200 profiles should therefore
+start with M16 K17408/N5120 and M16 K6144/N5120, then test split-count and K
+batch policies before changing decode algebra.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | invariant bank-mask hoisting reaches 0.02587-0.02691 ms gate/up at up to 245.71 GB/s and 0.02675-0.03357 ms down; both paths now execute about 10.5-10.8M instructions, while down retains its 936,528 shared-load-conflict baseline | keep four-output scheduling depth while overlapping or replacing its random shared level lookups; then move toward persistent producer/consumer TMA/WGMMA without added whole-block barriers |
-| 2 | H200 W3.5 M1-M16 MLP | uniform-mask hoisting reaches 0.03133-0.03270 ms gate/up (0.582x Machete) and 0.02822-0.03605 ms down (0.683x), with 11.26M gate/up instructions | profile the remaining TB7 arithmetic and shared-conflict stalls before any wider pipeline change |
-| 3 | H200 W2/W2.5 M1-M16 MLP | gate/up is 0.603x/0.579x Machete and down is 0.727x/0.691x; mask hoisting reduces gate/up to 9.57M/10.39M instructions while shared conflicts remain | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
-| 4 | H200 W2/W2.5 attention/KV | Q/O is 1.125x/1.099x and K/V is 1.434x/1.389x Machete by per-shape M1-M16 geomean | enforce as the rate-specific latency/no-regression gate |
-| 5 | H200 W3 M16 and M32 | M16 is 0.361-0.709x Machete by K/N; prior M32 K8192/N2048 is 1.76x versus non-LR | reduce TB6 cache/scoreboard pressure; retain split 4 for the M32 down-like case |
-| 6 | RTX 5090 W2-W3.5, all substantial M=16 shapes | historical `e4b1006c`: all 16 pass >=4x | retain as historical coverage; current local work remains H200-only |
-| 7 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | historical `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
-| 8 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | pending hardware; do not infer from Hopper results |
-| 9 | launch-bound narrow shapes | W2/W2.5 attention is already at or above Machete across M | avoid trading these wins for MLP throughput |
+| 1 | H200 Qwen3.8 MLP down K17408/N5120, W2-W3.5, M1-M16 | 0.226x Machete geomean; M>=2 cells are only 0.180-0.207x | NCU M16 W3 alongside split/K-batch sweep; determine why K17408 creates the large M1-to-M2 cliff before changing decode algebra |
+| 2 | H200 Qwen3.8 attention/linear out K6144/N5120 | 0.337x Machete; M1 is 0.477-0.592x but M>=2 falls to 0.277-0.311x | NCU M16 W3 and split sweep; compare dispatch against the successful K5120/N1024 path |
+| 3 | H200 Qwen3.8 full Q, linear QKV/Z, and MLP gate/up | 0.346-0.441x Machete overall; W3.5 gate/up is the weakest at 0.290x | profile representative M16 W3 and W3.5; tune split count and batch depth for K5120 before a wider pipeline rewrite |
+| 4 | H200 Qwen3.8 full K/V K5120/N1024 | 1.014x Machete overall; W2-W3 M1 is 1.22-1.31x, with small M>=2 deficits | preserve as the Qwen3.8 no-regression gate while changing general dispatch |
+| 5 | H200 W3 M1-M16 prior 2048-based proxy | invariant bank-mask hoisting reaches 0.02587-0.02691 ms gate/up and 0.02675-0.03357 ms down at about 10.5-10.8M instructions | retain as historical microarchitecture evidence, but optimize Qwen3.8 shapes first |
+| 6 | H200 W3.5 prior 2048-based proxy | gate/up is 0.582x and down 0.683x Machete, with 11.26M gate/up instructions | retain the TB7 evidence while targeting Qwen3.8 W3.5 MLP |
+| 7 | H200 W2/W2.5 prior 2048-based proxy | gate/up is 0.603x/0.579x and down 0.727x/0.691x Machete | preserve native N8 and accepted mask hoisting as historical baselines |
+| 8 | H200 W2/W2.5 prior attention/KV proxy | Q/O is 1.125x/1.099x and K/V is 1.434x/1.389x Machete | retain as a secondary no-regression gate |
+| 9 | RTX 5090 W2-W3.5, all substantial M=16 shapes | historical `e4b1006c`: all 16 pass >=4x | retain as historical coverage; current local work remains H200-only |
+| 10 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | historical `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
+| 11 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | pending hardware; do not infer from Hopper results |
 
 ## Reproduction
 
@@ -1140,7 +1259,7 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID \
 CUDA_VISIBLE_DEVICES=GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea \
 GPTQMODEL_QVQ_CUDA_BUILD_ROOT=/tmp/qvq-jit-hopper-current \
 python scripts/benchmark_qvq_lr_vs_gptq_llama32_1b.py \
-  --physical-gpu 0 --shapes attn_qo attn_kv mlp_gate_up mlp_down \
+  --physical-gpu 0 --model-shapes qwen38_27b \
   --m 1 2 4 8 16 --qvq-bits 2 2.5 3 3.5 --dtype float16 \
   --warmup 10 --iterations 60 --output artifacts/<stamp>/gpu0.json
 ```
