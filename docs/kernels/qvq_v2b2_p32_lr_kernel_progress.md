@@ -97,6 +97,7 @@ tables below every row was intentionally measured at M=16.
 | `1f834abf` | H100, W2-W3.5 gate/up M1-M16 | Remove the trailing warp barrier after each private decoded-weight tile; the next uniform warp iteration cannot overwrite shared storage before the prior loads complete | All 20 CUDA-event rows improved to 0.0309-0.0357 ms; 80/80 Hopper correctness cases passed across FP16/FP32 output and split-1/split-3 | accepted and pushed |
 | `f254003d` | H100, W2-W3.5 gate/up M1-M16 | Stop the cooperative decode loop at the runtime tail length instead of executing every compile-time batch slot | All 20 exact CUDA Graph rows improved again to 0.0304-0.0338 ms; 80/80 Hopper correctness cases passed, including split-3 tails | accepted and pushed |
 | `2cc545da` / `22148017` | H200, W3 gate/up M1-M16 | Pair the two split-K CTAs in a Hopper z-cluster, keep one partial accumulator in DSM, and let rank zero write the reduced output directly | Exact merged-head CUDA Graph rows improved 4.45-5.41% to 0.02957-0.03062 ms; 108/108 H200 CUDA tests passed and NCU reports 64 registers with no spilling | accepted, merged, and pushed |
+| `a039a97b` uncommitted A/B | H200, W3 down M1-M16 | Generalize DSM reduction from the successful split-2 gate path to split-8 M1 and split-4 M2-M16 clusters | Accurate, but cluster placement plus three/seven remote reductions slowed M1 32.8% (0.02963 to 0.03936 ms) and M2-M16 19.5-20.8% (0.03376-0.03430 to 0.04038-0.04144 ms) | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
