@@ -1,0 +1,137 @@
+{
+  "schema": "qvq.calibration-ablation.v1",
+  "status": "prepared",
+  "prepared_at_utc": "2026-08-30T06:07:35Z",
+  "launch_commit": null,
+  "branch": "feat/qvq-frontier-score-updates",
+  "purpose": "Measure lifecycle-calibration and YAQA-Fisher corpus effects independently using one fixed W3.2 allocation and a clean pinned runtime.",
+  "fixed_model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "fixed_allocation": "Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3, with Up4 at layers 6 and 8",
+  "effective_bpw": 3.17834,
+  "artifact": {
+    "name": "calibration_union_v1",
+    "path": "/root/qvq-data/calibration_union_v1/calibration_union_v1.parquet",
+    "sha256": "05288e83a8ce4cc7a607d7d19bfd48eeb0b45055ca7cc4f4b20d5f037266f2dc",
+    "rows": 694,
+    "independent_sequences": 694,
+    "valid_input_tokens": 490449,
+    "valid_fisher_output_token_samples": 490449,
+    "ordered_calibration_manifest_sha256": "143570311180630b6039569992ba0709e8268ef9c73491b2cf8f756b3aca343e",
+    "manifest": "docs/experiments/calibration_union_v1.json",
+    "disjointness_manifest": "docs/experiments/disjointness-calibration-union-v1.json"
+  },
+  "sources": {
+    "nm128": {
+      "path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "split": "train",
+      "row_start": 0,
+      "rows": 128,
+      "source_sha256": "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef"
+    },
+    "nm512": {
+      "path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "split": "train",
+      "row_start": 0,
+      "rows": 512,
+      "source_sha256": "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef"
+    },
+    "yaqa182": {
+      "path": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
+      "split": "train",
+      "row_start": 0,
+      "rows": 182,
+      "independent_sequences": 182,
+      "valid_fisher_output_token_samples": 302193,
+      "source_sha256": "2140541facb66112428212b3a36d51a7735393b28c79db59c2429f6e51ed57ef"
+    },
+    "union694": {
+      "path": "/root/qvq-data/calibration_union_v1/calibration_union_v1.parquet",
+      "split": "train",
+      "row_start": 0,
+      "rows": 694,
+      "source_sha256": "05288e83a8ce4cc7a607d7d19bfd48eeb0b45055ca7cc4f4b20d5f037266f2dc"
+    }
+  },
+  "arms": [
+    {
+      "arm_id": "c1_nm128__yaqa182",
+      "gpu": 0,
+      "lifecycle": "nm128",
+      "yaqa_fisher": "yaqa182",
+      "minimum_sequences": 182,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c2_nm512__yaqa182",
+      "gpu": 1,
+      "lifecycle": "nm512",
+      "yaqa_fisher": "yaqa182",
+      "minimum_sequences": 182,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c3_yaqa182__yaqa182",
+      "gpu": 2,
+      "lifecycle": "yaqa182",
+      "yaqa_fisher": "yaqa182",
+      "minimum_sequences": 182,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c4_union694__yaqa182",
+      "gpu": 3,
+      "lifecycle": "union694",
+      "yaqa_fisher": "yaqa182",
+      "minimum_sequences": 182,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c5_nm128__union694",
+      "gpu": 4,
+      "lifecycle": "nm128",
+      "yaqa_fisher": "union694",
+      "minimum_sequences": 694,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c6_nm512__union694",
+      "gpu": 5,
+      "lifecycle": "nm512",
+      "yaqa_fisher": "union694",
+      "minimum_sequences": 694,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c7_yaqa182__union694",
+      "gpu": 6,
+      "lifecycle": "yaqa182",
+      "yaqa_fisher": "union694",
+      "minimum_sequences": 694,
+      "state": "prepared"
+    },
+    {
+      "arm_id": "c8_union694__union694",
+      "gpu": 7,
+      "lifecycle": "union694",
+      "yaqa_fisher": "union694",
+      "minimum_sequences": 694,
+      "state": "prepared"
+    }
+  ],
+  "evaluation": {
+    "primary": {
+      "task": "gsm8k_platinum_cot",
+      "dataset": "madrylab/gsm8k-platinum",
+      "config": "main",
+      "split": "test",
+      "rows": 1209
+    },
+    "diagnostic": {
+      "task": "divergence300",
+      "path": "/root/qvq-data/divergence300-v1/divergence300-development.jsonl",
+      "prompts": 300,
+      "tokens_per_prompt": 32
+    }
+  },
+  "launcher": "scripts/run_llama32_calibration_ablation_v1.sh"
+}
