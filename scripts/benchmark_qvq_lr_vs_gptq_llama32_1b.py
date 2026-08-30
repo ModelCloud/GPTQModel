@@ -22,6 +22,7 @@ import argparse
 import hashlib
 import math
 import os
+import statistics
 import subprocess
 import sys
 import threading
@@ -462,6 +463,43 @@ def _row_from_timing(
     }
 
 
+def _cuda_graph_event_timing(torch, fn, *, warmup: int, iterations: int) -> dict[str, float]:
+    """Measure device work without host launch gaps in the timed intervals.
+
+    All event/kernel/event triplets are captured into one CUDA Graph.  The
+    graph is then submitted with a single host call, so a CPU-starved runner
+    cannot delay a kernel after its start timestamp has reached the GPU.
+    External events become explicit graph nodes and retain per-launch timing.
+    """
+
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+
+    starts = [torch.cuda.Event(enable_timing=True, external=True) for _ in range(iterations)]
+    ends = [torch.cuda.Event(enable_timing=True, external=True) for _ in range(iterations)]
+    graph = torch.cuda.CUDAGraph()
+    captured_output = None
+    with torch.cuda.graph(graph):
+        for start, end in zip(starts, ends, strict=True):
+            start.record()
+            captured_output = fn()
+            end.record()
+
+    graph.replay()
+    torch.cuda.synchronize()
+    values = sorted(start.elapsed_time(end) for start, end in zip(starts, ends, strict=True))
+    # Keep graph-owned output storage alive through replay and timestamp reads.
+    del captured_output
+    return {
+        "mean_ms": statistics.mean(values),
+        "median_ms": statistics.median(values),
+        "p95_ms": values[min(len(values) - 1, math.ceil(len(values) * 0.95) - 1)],
+        "min_ms": values[0],
+        "max_ms": values[-1],
+    }
+
+
 def _row_key(row: dict) -> tuple:
     return row["name"], row["m"], row["kernel"], float(row["bits"])
 
@@ -600,7 +638,8 @@ def _markdown_report(payload: dict) -> str:
             "no activation order; Marlin and Machete use the same W4 source payload"
         ),
         (
-            "- Latency is CUDA-event median/P95. Logical TFLOP/s is `2*M*K*N / median_ms`; "
+            "- Latency is CUDA-event median/P95 from one CUDA Graph replay containing every measured launch. "
+            "CPU scheduling and host launch gaps are outside each timed interval. Logical TFLOP/s is `2*M*K*N / median_ms`; "
             "payload GB/s is packed payload bytes divided by median latency."
         ),
         (
@@ -819,7 +858,7 @@ def _run(args: argparse.Namespace) -> dict:
                         atol=2e-3,
                         rtol=0.0,
                     )
-                    timing = benchmark_utils._event_timing(
+                    timing = _cuda_graph_event_timing(
                         torch,
                         qvq_call,
                         warmup=args.warmup,
@@ -862,7 +901,7 @@ def _run(args: argparse.Namespace) -> dict:
                         atol=2e-2,
                         rtol=2e-2,
                     )
-                    timing = benchmark_utils._event_timing(
+                    timing = _cuda_graph_event_timing(
                         torch,
                         gptq_call,
                         warmup=args.warmup,
@@ -903,6 +942,10 @@ def _run(args: argparse.Namespace) -> dict:
                 "total_memory_bytes": properties.total_memory,
             },
             "software": {"torch": torch.__version__, "cuda": torch.version.cuda},
+            "timing": {
+                "mode": "single_cuda_graph_replay_with_internal_external_events",
+                "host_launch_gaps_included": False,
+            },
             "qvq": {
                 "format": "qvq_v2b2_p32_lr",
                 "rates": args.qvq_bits,

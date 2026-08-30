@@ -129,5 +129,7 @@ def test_markdown_report_contains_complete_comparison_columns():
     }
 
     report = benchmark._markdown_report(payload)
+    assert "CUDA Graph replay" in report
+    assert "CPU scheduling and host launch gaps are outside each timed interval" in report
     assert "| Shape | Roles | M | K | N | Kernel | W | Group |" in report
     assert "| attn_qo | q_proj/o_proj | 1 | 2048 | 2048 | qvq_lr | 3 | P32 |" in report
