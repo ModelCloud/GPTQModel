@@ -1304,10 +1304,6 @@ __global__ __launch_bounds__((2 * OutputTiles) * 32) void qvq_gemv_local_ring_wm
     if (has_next && warp >= kConsumerWarps) {
       stage_batch(kb + kBatchTiles, min(kBatchTiles, k_tile_end - kb - kBatchTiles), stage ^ 1);
       __pipeline_commit();
-      // Debug/validation fence: ensure the producer's asynchronous copies are
-      // complete before consumers proceed. The production variant moves this
-      // wait to the stage boundary below to overlap fetch with computation.
-      __pipeline_wait_prior(0);
     }
 
 #pragma unroll 1
