@@ -2084,7 +2084,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       static_cast<int>(size_k),
       static_cast<int>(out_features),
       device_config);
-  const int split_count =
+  int split_count =
       split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
   TORCH_CHECK(split_count >= 1 && split_count <= max_split_count,
               "LR32 split_count must be in [1, min(K/32, 64)]");
@@ -2095,6 +2095,12 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   const bool use_hopper_w3_wmma = device_config.major == 9 &&
       transition_bits == 6 && rows == 16 && out_features >= 2048 && input.scalar_type() == at::kHalf &&
       qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
+  // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
+  // projection on a 132-SM H200. Two K partitions supply a second scheduling
+  // wave and are consistently faster than either one or four partitions.
+  if (split_count_override == 0 && use_hopper_w3_wmma && size_k <= 2048 && out_features >= 8192) {
+    split_count = 2;
+  }
   at::Tensor partial_output;
 
   if (use_hopper_w3_wmma && split_count > 1 && output_fp32) {
