@@ -107,6 +107,7 @@ tables below every row was intentionally measured at M=16.
 | `ec525505` uncommitted A/B | H200, W3 gate/up M1-M16 | Keep activation `uint4` global loads coalesced, then shuffle each vector to the existing conflict-free shared-store lane permutation | Accurate, but removing the remaining 65,536 staging-store conflicts regressed 0.02826-0.02933 ms to 0.02923-0.03011 ms (2.7-3.5%); staging-only shuffle routing costs more than these stores serialize | rejected; source restored before next experiment |
 | `ee3499ad` uncommitted A/B | H200, W3 cached-level paths M1-M16 | Remove the first of two adjacent initialization barriers after filling the shared level table; the remaining barrier still protects both the table and padded native-N16 initialization | Accurate, but Q/O was neutral at 0.01389-0.01486 ms, K/V regressed in four of five rows by up to 3.5% to 0.00965-0.01003 ms, and down regressed slightly in every row to 0.02965-0.03456 ms | rejected; source restored before next experiment |
 | `0aee81ed` uncommitted A/B | H200, W3 down M1-M16 | Dispatch K8,192/N2,048 to the existing N64/output-eight specialization so each CTA has eight lookup/MMA warps and uses read-only/L1 levels instead of the conflicting shared table | M1 improved 0.9% to 0.02931 ms, but M2-M16 regressed 9.4-10.5% to 0.03701-0.03755 ms; halving the block count exposes global lookup latency despite removing shared conflicts | rejected; source restored before next experiment |
+| `3ed40c56` uncommitted A/B | H200, W3 output-four paths M1-M16 | Route each decoded pair's high level through read-only/L1 and low level through the shared table so the two independent memory pipelines can overlap | Shared-load conflicts halved from 936,528 to 468,131, but down regressed 1.7-3.3% to 0.03006-0.03554 ms; NCU duration rose 33.06 to 34.18 us as long-scoreboard stalls increased | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -793,6 +794,16 @@ wavefronts. The source-counter capture also records 1,356 long-scoreboard, 538
 short-scoreboard, and 222 barrier not-issued samples. This path therefore needs
 more independent lookup work or a conflict-resistant on-chip table access, not
 a simple move to global levels that reduces scheduling depth.
+
+The rejected half-global/half-shared lookup report is
+`/tmp/ncu-h200-w3-down-hybrid-levels-3ed40c56.ncu-rep`. It proves that shared
+conflict removal alone is insufficient: shared-load conflicts fall 50.0% to
+468,131 and excessive shared wavefronts fall 43.9% to 598,160, while registers,
+shared memory, and achieved occupancy remain 83/thread, 44.64 KiB, and 12.00%.
+Nevertheless long-scoreboard not-issued samples rise from 1,356 to 1,512,
+no-eligible cycles rise 53.81% to 55.01%, and NCU duration rises 33.06 to 34.18
+us. A successful replacement must keep table latency on chip or overlap it with
+substantial independent work rather than merely moving requests to L1.
 
 ## Coverage and targeting queue
 
