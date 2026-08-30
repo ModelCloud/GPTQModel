@@ -2175,7 +2175,7 @@ void launch_qvq_local_ring_wmma_hopper_dispatch(
       }
       break;
     case 7:
-      if (input.size(0) == 1) {
+      if (input.size(0) <= 8) {
         launch_qvq_local_ring_wmma_hopper<7, OutputScalar, SplitK, 4, true>(
             input, trellis, bank_ids, levels, partial_output, output, split_count, bank_alt_id, stream);
       } else {
