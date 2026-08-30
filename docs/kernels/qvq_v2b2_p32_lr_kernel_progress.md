@@ -492,6 +492,11 @@ measured automatic medians of 0.011264/0.011312/0.011264/0.011440/0.011520 ms;
 forced split 8 measured 0.011760/0.011808/0.011824/0.012016/0.012048 ms in the
 same run. Automatic and explicit split 16 agree within timing variance, all
 five rows are 4.4-5.0% faster than split 8, and worst max error is 6.68e-06.
+The exact merged-head `2c56f0d5` QVQ/Marlin/Machete CUDA Graph run, which also
+includes the accepted trailing-barrier removal, measures W3 K/V at
+0.010592/0.010512/0.010544/0.010624/0.010832 ms for M1/M2/M4/M8/M16. These
+rows sustain 36.68-37.80 GB/s of effective compressed-payload bandwidth and
+reach 1.367/1.428/1.411/1.364/1.387x Machete W4, with worst max error 6.68e-06.
 
 ### H100 same-CC regression
 
