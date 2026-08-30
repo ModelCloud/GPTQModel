@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string_view>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -118,7 +119,7 @@ void check_cuda(cudaError_t status, const char* operation) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   cudaDeviceProp properties{};
   check_cuda(cudaGetDeviceProperties(&properties, 0), "cudaGetDeviceProperties");
   if (properties.major != 9 || properties.minor != 0) {
@@ -176,6 +177,17 @@ int main() {
   check_cuda(cudaMemcpy(&values_per_thread, device_values_per_thread,
                         sizeof(int), cudaMemcpyDeviceToHost),
              "cudaMemcpy fragment size");
+
+  if (argc == 2 && std::string_view(argv[1]) == "--dump-layout") {
+    for (int thread = 0; thread < 128; ++thread) {
+      std::printf("thread=%03d", thread);
+      for (int value = 0; value < values_per_thread; ++value) {
+        const int index = thread * values_per_thread + value;
+        std::printf(" (%d,%d)", host_rows[index], host_columns[index]);
+      }
+      std::printf("\n");
+    }
+  }
 
   for (int index = 0; index < kCValues; ++index) {
     if (std::abs(host_c[index] - 16.0f) > 1.0e-4f) {
