@@ -118,6 +118,7 @@ tables below every row was intentionally measured at M=16.
 | `b3edc2a7` uncommitted A/B | H200, W3 gate/up M16 | Fuse PGC16 mixing and two 512-byte-table level loads into one read-only lookup from a cached 65,536-entry packed decoded-state LUT | Instructions fell 32.1% to 7.34M with unchanged registers, but L1 hit rate collapsed to 7.8%, L2 utilization reached 67.6%, and CUDA-event latency regressed 2.59x to 0.0698 ms | rejected; source restored before next experiment |
 | `7eeaf4da` | H200, Hopper cooperative W2-W3.5 | Overlay the decoded-B fragment scratch with the equally sized clustered split-K epilogue scratch because their lifetimes are disjoint | Static shared memory fell exactly 4 KiB (41.088 to 36.992 KiB for W3 gate/up) with 63 registers and 10.80M instructions unchanged; 60-sample latency was within +0.4-1.1% and 108/108 H200 CUDA tests passed | accepted and pushed as structural headroom for bank-aware level layouts |
 | `24735ba7` uncommitted A/B | H200, W3 gate/up M16 | Replace the read-only/L1 level lookups with eight aligned shared-memory replicas selected by lane, using the scratch overlay's recovered capacity | Accurate, but latency regressed 7.4% to 0.0289 ms; NCU found 1.11M shared-read bank conflicts, 11.39M instructions, and 28.99 us versus production's 10.80M and 26.53 us | rejected; source restored before next experiment |
+| `59d94659` uncommitted A/B | H200, W3 down M16 | Pack mirrored level pairs and replicate them once per warp lane so every random lookup maps to bank `lane`; reduce K batching from 24 to 17 tiles to fit the 48 KiB static limit | Shared-read conflicts fell 936K to 163K, but latency regressed about 20% to 0.0404 ms as instructions rose 44% to 15.11M and an extra K-batch barrier was required | rejected; source restored; conflict-free lookup requires persistent setup amortization |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -1003,6 +1004,20 @@ shared-read bank conflicts, 11.39M instructions, and 28.99 us, compared with
 map each random index into four bank groups, so MIO serialization outweighs
 the removed cache dependency. The source was restored; future level-table
 work must avoid indexed shared loads rather than add more shared replicas.
+
+A stronger W3 down experiment made the lookup itself conflict-free. It packed
+caller-provided mirrored level pairs into 32-bit words and replicated the 128
+pairs once per warp lane, making the selected shared bank equal to `lane` for
+every random index. Fitting the resulting 16 KiB table below Hopper's 48 KiB
+static limit required reducing the K batch from 24 to 17 tiles. NCU report
+`/tmp/ncu-h200-w3-down-lane-levels1.ncu-rep` confirms total shared-read
+conflicts fell from 936K to 162,835, but instructions rose from 10.49M to
+15.11M, static shared reached 48,848 bytes, and profile duration rose 32.64 to
+41.86 us. The M16 CUDA-event median regressed about 20% from 0.03357 to 0.0404
+ms. The table setup and added fourth K batch outweigh the removed serialization
+when repeated per N32 CTA. The source was restored. This layout should only be
+reconsidered inside a persistent CTA that reuses its setup across multiple N
+work units without shrinking the K batch.
 
 ## Coverage and targeting queue
 
