@@ -114,6 +114,7 @@ tables below every row was intentionally measured at M=16.
 | `f98ceb36` | H200, W3.5 M1-M16 | Extend the same launch-uniform alternate-mask hoist to TB7 after an exact-head counter A/B | Gate/up instructions fell 21.9% and NCU duration 6.4% with unchanged registers/shared memory; 20/20 W3.5 cells and 108/108 CUDA tests passed | accepted and pushed |
 | `4b07d5e9` profile | H200, W3 versus Machete W4, M16/K2,048/N8,192 | Capture matched detailed NCU reports at the same pushed QVQ head and physical GPU | QVQ executes 10.80M versus Machete's 3.06M instructions, reaches 242.8 versus 603.6 GB/s DRAM throughput, and records 440 versus 102 long-scoreboard samples | architectural baseline for TMA producer/consumer work |
 | `7f233216` uncommitted A/B | H200, W3 gate/up M1-M16 | Use a dedicated producer warp, two K256 shared stages, SM90 bulk async copies, and transaction barriers to overlap aligned activation/trellis fetch with eight decode/MMA warps | Accurate, but CUDA-event medians regressed 2.7-10.6% to 0.02760-0.02858 ms; instructions rose to 10.95M and barrier/wait stalls outweighed 0.795% TMA-pipe use | rejected; source restored before next experiment |
+| `4613a5be` uncommitted A/B | H200, W3 gate/up M1-M16 | Pair adjacent K32 tiles so both tiles' independent level loads issue before either decoded fragment is consumed, then overlap the second lookup with the first tile's MMA | Accurate, but all rows regressed 1.7-2.2%; registers rose 63 to 80, instructions rose 7.8% to 11.64M, and long-scoreboard/wait samples increased | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -944,6 +945,20 @@ capture, long-scoreboard samples increase 440 to 490, barrier samples 164 to
 transaction-barrier round trips. The source was restored. Future asynchronous
 work must increase persistent work per CTA or move to WGMMA warpgroup-scale
 consumption; adding finer stages to the current short split is ruled out.
+
+The subsequent warp-local lookup-overlap experiment is retained as
+`artifacts/h200_lr_next4x/w3_pair_prefetch_candidate.json`, with NCU report
+`/tmp/ncu-h200-w3-gate-pair-prefetch1.ncu-rep`. It issued the independent
+read-only level loads for two adjacent K32 tiles before consuming either tile,
+so the first tile's shared-fragment loads and MMA could theoretically cover the
+second tile's lookup latency. All five rows were accurate, but production's
+M1/M2/M4/M8/M16 medians regressed to 0.026432/0.026432/0.026688/0.026784/
+0.027408 ms (1.7-2.2%). NCU shows why: ptxas carries 80 instead of 63
+registers/thread, instructions rise 10.80M to 11.64M, long-scoreboard samples
+rise 440 to 531, and wait samples rise 229 to 596. Holding two tiles' random
+lookup results expands live ranges and dependency pressure rather than hiding
+them. Future W3 work must shorten or remove the lookup dependency, not widen
+the number of outstanding scalar results within one warp.
 
 ## Coverage and targeting queue
 
