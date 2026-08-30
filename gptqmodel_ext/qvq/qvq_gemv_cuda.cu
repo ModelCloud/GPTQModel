@@ -1166,6 +1166,66 @@ __global__ void qvq_reduce_splitk_kernel(
   output[index] = ScalarTraits<OutputScalar>::from_float(accumulator);
 }
 
+struct QvqN8MmaFragmentA {
+  uint32_t values[4];
+};
+
+struct QvqN8MmaFragmentB {
+  uint32_t values[2];
+};
+
+struct QvqN8MmaFragmentC {
+  float values[4];
+};
+
+__device__ __forceinline__ void qvq_n8_load_a(
+    QvqN8MmaFragmentA& fragment,
+    const half* shared_source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(shared_source));
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+      : "=r"(fragment.values[0]),
+        "=r"(fragment.values[1]),
+        "=r"(fragment.values[2]),
+        "=r"(fragment.values[3])
+      : "r"(shared_address));
+}
+
+__device__ __forceinline__ void qvq_n8_load_b(
+    QvqN8MmaFragmentB& fragment,
+    const half* shared_source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(shared_source));
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
+      : "=r"(fragment.values[0]), "=r"(fragment.values[1])
+      : "r"(shared_address));
+}
+
+__device__ __forceinline__ void qvq_n8_mma(
+    const QvqN8MmaFragmentA& a,
+    const QvqN8MmaFragmentB& b,
+    QvqN8MmaFragmentC& c) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+      : "=f"(c.values[0]),
+        "=f"(c.values[1]),
+        "=f"(c.values[2]),
+        "=f"(c.values[3])
+      : "r"(a.values[0]),
+        "r"(a.values[1]),
+        "r"(a.values[2]),
+        "r"(a.values[3]),
+        "r"(b.values[0]),
+        "r"(b.values[1]),
+        "f"(c.values[0]),
+        "f"(c.values[1]),
+        "f"(c.values[2]),
+        "f"(c.values[3]));
+}
+
 // Hopper-only cooperative tensor-core path for W2/W2.5 at M<=16 and W3 at M16.
 // One warp owns one N8 output tile; a small warp group therefore reuses the
 // staged activation stripe across adjacent tiles. Each rate reconstructs the
@@ -1173,7 +1233,7 @@ __global__ void qvq_reduce_splitk_kernel(
 // recurrence, and consumes the decoded FP16 weights through WMMA. The scalar
 // LR kernel remains the fallback for other rates, row counts, dtypes, and
 // unaligned views.
-template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles>
+template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles, bool NativeN8 = false>
 __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -1188,13 +1248,16 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int bank_alt_id) {
   constexpr int kTransitionBits = TransitionBits;
   static_assert(kTransitionBits >= 4 && kTransitionBits <= 6);
+  static_assert(!NativeN8 || kTransitionBits <= 5);
   constexpr int kRows = 16;
   constexpr int kBatchTiles = 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
-  constexpr bool kPackDecodedPairs = kTransitionBits <= 5;
+  constexpr int kDecodedColumns = NativeN8 ? kLocalRingTileColumns : kPaddedColumns;
+  constexpr int kOutputStorageColumns = NativeN8 ? 1 : kPaddedColumns;
+  constexpr bool kPackDecodedPairs = !NativeN8 && kTransitionBits <= 5;
   constexpr int kWeightLdm = kPackDecodedPairs ? kLocalRingTileRows : kPaddedColumns;
   constexpr int kSecondWeightOffset = kPackDecodedPairs ? 16 : 16 * kPaddedColumns;
 
@@ -1202,8 +1265,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
-  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kPaddedColumns];
-  __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
+  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kDecodedColumns];
+  __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kOutputStorageColumns];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -1222,22 +1285,27 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   }
   __syncthreads();
 
-  // Initialize the padded N16 columns once. The first eight columns are
-  // overwritten for every decoded K32 tile below.
-  for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kWmmaThreads) {
-    const int cell = index % (kLocalRingTileRows * kPaddedColumns);
-    const int col = kPackDecodedPairs ? cell / kLocalRingTileRows : cell % kPaddedColumns;
-    if (col >= kLocalRingTileColumns) {
-      reinterpret_cast<half*>(decoded_weight)[index] = __float2half(0.0f);
+  if constexpr (!NativeN8) {
+    // Initialize the padded N16 columns once. The first eight columns are
+    // overwritten for every decoded K32 tile below.
+    for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kWmmaThreads) {
+      const int cell = index % (kLocalRingTileRows * kPaddedColumns);
+      const int col = kPackDecodedPairs ? cell / kLocalRingTileRows : cell % kPaddedColumns;
+      if (col >= kLocalRingTileColumns) {
+        reinterpret_cast<half*>(decoded_weight)[index] = __float2half(0.0f);
+      }
     }
+    __syncthreads();
   }
-  __syncthreads();
 
-  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> input_fragment;
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> wmma_input_fragment;
   using WeightLayout = std::conditional_t<kPackDecodedPairs, wmma::col_major, wmma::row_major>;
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, WeightLayout> weight_fragment;
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
-  wmma::fill_fragment(accumulator, 0.0f);
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, WeightLayout> wmma_weight_fragment;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> wmma_accumulator;
+  QvqN8MmaFragmentC n8_accumulator = {};
+  if constexpr (!NativeN8) {
+    wmma::fill_fragment(wmma_accumulator, 0.0f);
+  }
 
   auto stage_batch = [&](int kb, int tiles_here) {
     constexpr int words_per_vec = kWordsPerTile / 4;
@@ -1369,7 +1437,10 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         for (int q = 0; q < 4; ++q) {
           const int pair = pair_base + q;
           const uint32_t mixed = pgc16_mix(state ^ bank_mask);
-          if constexpr (kPackDecodedPairs) {
+          if constexpr (NativeN8) {
+            decoded_weight[sub][pair * 2 * kLocalRingTileColumns + col] = cached_levels[mixed >> 8];
+            decoded_weight[sub][(pair * 2 + 1) * kLocalRingTileColumns + col] = cached_levels[mixed & 0xffu];
+          } else if constexpr (kPackDecodedPairs) {
             const uint32_t level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
                 (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
             *reinterpret_cast<uint32_t*>(&decoded_weight[sub][col * kLocalRingTileRows + pair * 2]) = level_pair;
@@ -1391,34 +1462,86 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       __syncwarp();
 
       if (u < tiles_here && n_tile_base + warp < n_tiles) {
-        wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
-        wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0], kWeightLdm);
-        wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
-        wmma::load_matrix_sync(
-            input_fragment, input_tile[u] + 16, kLocalRingTileRows);
-        wmma::load_matrix_sync(
-            weight_fragment, &decoded_weight[warp][kSecondWeightOffset], kWeightLdm);
-        wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
+        if constexpr (NativeN8) {
+          const int matrix_row = lane & 15;
+          const int matrix_column = (lane >> 4) * 8;
+          QvqN8MmaFragmentA input_fragment;
+          QvqN8MmaFragmentB weight_fragment;
+          qvq_n8_load_a(
+              input_fragment,
+              input_tile[u] + matrix_row * kLocalRingTileRows + matrix_column);
+          qvq_n8_load_b(
+              weight_fragment,
+              &decoded_weight[warp][matrix_row * kLocalRingTileColumns]);
+          qvq_n8_mma(input_fragment, weight_fragment, n8_accumulator);
+          qvq_n8_load_a(
+              input_fragment,
+              input_tile[u] + matrix_row * kLocalRingTileRows + 16 + matrix_column);
+          qvq_n8_load_b(
+              weight_fragment,
+              &decoded_weight[warp][(16 + matrix_row) * kLocalRingTileColumns]);
+          qvq_n8_mma(input_fragment, weight_fragment, n8_accumulator);
+        } else {
+          wmma::load_matrix_sync(wmma_input_fragment, input_tile[u], kLocalRingTileRows);
+          wmma::load_matrix_sync(wmma_weight_fragment, &decoded_weight[warp][0], kWeightLdm);
+          wmma::mma_sync(wmma_accumulator, wmma_input_fragment, wmma_weight_fragment, wmma_accumulator);
+          wmma::load_matrix_sync(
+              wmma_input_fragment, input_tile[u] + 16, kLocalRingTileRows);
+          wmma::load_matrix_sync(
+              wmma_weight_fragment, &decoded_weight[warp][kSecondWeightOffset], kWeightLdm);
+          wmma::mma_sync(wmma_accumulator, wmma_input_fragment, wmma_weight_fragment, wmma_accumulator);
+        }
       }
       __syncwarp();
     }
     __syncthreads();
   }
 
-  if (n_tile_base + warp < n_tiles) {
-    wmma::store_matrix_sync(&output_tile[warp][0][0], accumulator, kPaddedColumns, wmma::mem_row_major);
-  }
-  __syncthreads();
-  if (n_tile_base + warp < n_tiles) {
-    for (int index = lane; index < block_rows * kLocalRingTileColumns; index += 32) {
-      const int row = index / kLocalRingTileColumns;
-      const int col = index % kLocalRingTileColumns;
-      const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
-          (n_tile_base + warp) * kLocalRingTileColumns + col;
-      if constexpr (SplitK) {
-        partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = output_tile[warp][row][col];
-      } else {
-        output[output_index] = ScalarTraits<OutputScalar>::from_float(output_tile[warp][row][col]);
+  if constexpr (NativeN8) {
+    if (n_tile_base + warp < n_tiles) {
+      const int row0 = lane >> 2;
+      const int row1 = row0 + 8;
+      const int col = (lane & 3) * 2;
+      const int output_column = (n_tile_base + warp) * kLocalRingTileColumns + col;
+      if (row0 < block_rows) {
+        const int64_t output_index = static_cast<int64_t>(m0 + row0) * size_n + output_column;
+        if constexpr (SplitK) {
+          const int64_t partial_index = static_cast<int64_t>(split) * size_m * size_n + output_index;
+          partial_output[partial_index] = n8_accumulator.values[0];
+          partial_output[partial_index + 1] = n8_accumulator.values[1];
+        } else {
+          output[output_index] = ScalarTraits<OutputScalar>::from_float(n8_accumulator.values[0]);
+          output[output_index + 1] = ScalarTraits<OutputScalar>::from_float(n8_accumulator.values[1]);
+        }
+      }
+      if (row1 < block_rows) {
+        const int64_t output_index = static_cast<int64_t>(m0 + row1) * size_n + output_column;
+        if constexpr (SplitK) {
+          const int64_t partial_index = static_cast<int64_t>(split) * size_m * size_n + output_index;
+          partial_output[partial_index] = n8_accumulator.values[2];
+          partial_output[partial_index + 1] = n8_accumulator.values[3];
+        } else {
+          output[output_index] = ScalarTraits<OutputScalar>::from_float(n8_accumulator.values[2]);
+          output[output_index + 1] = ScalarTraits<OutputScalar>::from_float(n8_accumulator.values[3]);
+        }
+      }
+    }
+  } else {
+    if (n_tile_base + warp < n_tiles) {
+      wmma::store_matrix_sync(&output_tile[warp][0][0], wmma_accumulator, kPaddedColumns, wmma::mem_row_major);
+    }
+    __syncthreads();
+    if (n_tile_base + warp < n_tiles) {
+      for (int index = lane; index < block_rows * kLocalRingTileColumns; index += 32) {
+        const int row = index / kLocalRingTileColumns;
+        const int col = index % kLocalRingTileColumns;
+        const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
+            (n_tile_base + warp) * kLocalRingTileColumns + col;
+        if constexpr (SplitK) {
+          partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = output_tile[warp][row][col];
+        } else {
+          output[output_index] = ScalarTraits<OutputScalar>::from_float(output_tile[warp][row][col]);
+        }
       }
     }
   }
@@ -1939,7 +2062,7 @@ void launch_qvq_local_ring_gemv_impl(
   }
 }
 
-template <int TransitionBits, typename OutputScalar, bool SplitK>
+template <int TransitionBits, typename OutputScalar, bool SplitK, bool NativeN8 = false>
 void launch_qvq_local_ring_wmma_hopper(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -1961,7 +2084,8 @@ void launch_qvq_local_ring_wmma_hopper(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_kernel<TransitionBits, OutputScalar, SplitK, kHopperWmmaOutputTiles>
+  qvq_gemv_local_ring_wmma_hopper_kernel<
+      TransitionBits, OutputScalar, SplitK, kHopperWmmaOutputTiles, NativeN8>
       <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
@@ -1984,6 +2108,34 @@ void launch_qvq_local_ring_wmma_hopper(
         static_cast<int>(output.size(1)),
         split_count);
   }
+}
+
+template <typename OutputScalar, bool SplitK>
+void launch_qvq_local_ring_n8_hopper_dispatch(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& bank_ids,
+    const at::Tensor& levels,
+    at::Tensor* partial_output,
+    at::Tensor& output,
+    int transition_bits,
+    int split_count,
+    int bank_alt_id,
+    cudaStream_t stream) {
+#define QVQ_LR_LAUNCH_HOPPER_N8(BITS)                                                                              \
+  launch_qvq_local_ring_wmma_hopper<BITS, OutputScalar, SplitK, true>(                                             \
+      input, trellis, bank_ids, levels, partial_output, output, split_count, bank_alt_id, stream)
+  switch (transition_bits) {
+    case 4:
+      QVQ_LR_LAUNCH_HOPPER_N8(4);
+      break;
+    case 5:
+      QVQ_LR_LAUNCH_HOPPER_N8(5);
+      break;
+    default:
+      TORCH_CHECK(false, "Hopper native N8 MMA requires transition_bits 4 or 5");
+  }
+#undef QVQ_LR_LAUNCH_HOPPER_N8
 }
 
 template <typename OutputScalar, bool SplitK>
@@ -2189,6 +2341,12 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       (transition_bits <= 5 ? size_m <= 16 : rows == 16) &&
       (transition_bits == 6 ? out_features >= 2048 : out_features >= 512) &&
       input.scalar_type() == at::kHalf && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
+  // Native N8 MMA removes the padded weight half and the shared-memory output
+  // round trip. Retain the packed N16 consumer for the two W2.5 regimes where
+  // the H100 experiment measured an equal or slower result.
+  const bool use_hopper_native_n8 = use_hopper_cooperative_wmma && transition_bits <= 5 &&
+      !(transition_bits == 5 &&
+        ((size_k >= 8192 && size_m >= 2) || (size_k == 2048 && out_features == 512 && size_m == 2)));
   // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
   // projection on a 132-SM H200. Two K partitions supply a second scheduling
   // wave and are consistently faster than either one or four partitions.
@@ -2198,7 +2356,25 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   }
   at::Tensor partial_output;
 
-  if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
+  if (use_hopper_native_n8 && split_count > 1 && output_fp32) {
+    partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
+    launch_qvq_local_ring_n8_hopper_dispatch<float, true>(
+        input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_native_n8 && split_count > 1) {
+    partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
+    launch_qvq_local_ring_n8_hopper_dispatch<half, true>(
+        input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_native_n8 && output_fp32) {
+    launch_qvq_local_ring_n8_hopper_dispatch<float, false>(
+        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_native_n8) {
+    launch_qvq_local_ring_n8_hopper_dispatch<half, false>(
+        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     launch_qvq_local_ring_wmma_hopper_dispatch<float, true>(
         input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,

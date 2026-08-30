@@ -98,6 +98,27 @@ def test_lr32_cuda_hopper_cooperative_small_m(bits, m, output_fp32, split_count)
     assert error.max().item() <= (2e-3 if output_fp32 else 2e-2)
 
 
+def test_lr32_cuda_hopper_w3_m16_path_is_unchanged():
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.major != 9:
+        pytest.skip("requires Hopper cooperative WMMA path")
+    x, trellis, bank_ids, reference = _lr_case(3.0, m=16, k=256, n=2048, seed=20260863)
+    actual = qvq_cuda_gemv(
+        x,
+        trellis,
+        3.0,
+        out_features=2048,
+        output_fp32=True,
+        bank_ids=bank_ids,
+        v2b2_p32_lr=True,
+        bank_alt_id=3,
+        lr_split_count=1,
+    )
+    error = (actual - reference.cuda()).abs()
+    assert torch.isfinite(actual).all()
+    assert error.max().item() <= 2e-3
+
+
 def test_lr32_cuda_repeated_launches_are_deterministic():
     x, trellis, bank_ids, reference = _lr_case(2.0, m=4, k=512, n=64, seed=20260830)
     outputs = [
