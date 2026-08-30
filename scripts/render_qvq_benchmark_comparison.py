@@ -17,19 +17,29 @@ def _key(row: dict) -> tuple:
     )
 
 
-def render(current: dict, previous: dict) -> str:
-    previous_candidates = [
+def _candidate_rows(benchmark: dict) -> list[dict]:
+    candidates = [
         row
-        for row in previous["rows"]
+        for row in benchmark["rows"]
         if row.get("state") == "complete" and row.get("kernel") == "qvq_lr"
     ]
-    if not previous_candidates:
+    if not candidates:
         # Standalone optimization experiments label the candidate instead of
         # the production kernel. Exclude their same-run control rows.
-        previous_candidates = [
-            row for row in previous["rows"] if row.get("candidate") not in (None, "last_packed")
+        candidates = [
+            row for row in benchmark["rows"] if row.get("candidate") not in (None, "last_packed")
         ]
-    previous_rows = {_key(row): row for row in previous_candidates}
+    return candidates
+
+
+def render(current: dict, previous: dict, previous_fallbacks: tuple[dict, ...] = ()) -> str:
+    previous_sources = (previous, *previous_fallbacks)
+    previous_rows = {}
+    for source in previous_sources:
+        for row in _candidate_rows(source):
+            # Sources are ordered newest/most specific first. A fallback fills
+            # only rates or shapes absent from every higher-priority artifact.
+            previous_rows.setdefault(_key(row), row)
     rows = [
         row
         for row in current["rows"]
@@ -51,7 +61,8 @@ def render(current: dict, previous: dict) -> str:
         "## Measurement contract",
         "",
         f"- Current benchmark commit: `{current['commit']}`",
-        f"- Previous benchmark commit: `{previous['commit']}`",
+        "- Previous benchmark commits, in lookup priority: "
+        + ", ".join(f"`{source['commit']}`" for source in previous_sources),
         (
             f"- GPU: physical `{current['physical_gpu']}`, `{device['name']}`, "
             f"PCI `{hardware['pci.bus_id']}`, UUID `{hardware['uuid']}`, "
@@ -91,11 +102,21 @@ def main() -> None:
     parser.add_argument("current", type=Path)
     parser.add_argument("previous", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--previous-fallback",
+        action="append",
+        default=[],
+        type=Path,
+        help="Older or less-specific previous artifact used only for missing comparison rows.",
+    )
     args = parser.parse_args()
     current = json.loads(args.current.read_text(encoding="utf-8"))
     previous = json.loads(args.previous.read_text(encoding="utf-8"))
+    previous_fallbacks = tuple(
+        json.loads(path.read_text(encoding="utf-8")) for path in args.previous_fallback
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render(current, previous), encoding="utf-8")
+    args.output.write_text(render(current, previous, previous_fallbacks), encoding="utf-8")
 
 
 if __name__ == "__main__":
