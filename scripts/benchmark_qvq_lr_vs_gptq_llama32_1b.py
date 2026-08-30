@@ -244,25 +244,33 @@ def _pre_timing_exclusivity_gate(
     interval: float,
 ) -> dict[str, str]:
     accepted = None
-    for sample in range(samples):
+    idle_samples = 0
+    attempts = 0
+    max_attempts = samples * 10
+    while idle_samples < samples and attempts < max_attempts:
+        attempts += 1
         processes = _compute_processes_for_uuid(gpu_uuid)
         foreign = [process for process in processes if int(process["pid"]) != os.getpid()]
         if foreign:
             raise RuntimeError(f"physical GPU {physical_gpu} has foreign compute processes: {foreign}")
         accepted = benchmark_utils._query_gpu(physical_gpu)
-        if int(accepted["utilization.gpu"]) != 0:
-            raise RuntimeError(
-                f"physical GPU {physical_gpu} failed pre-timing idle gate: "
-                f"utilization={accepted['utilization.gpu']}%"
-            )
-        if sample + 1 < samples:
+        if int(accepted["utilization.gpu"]) == 0:
+            idle_samples += 1
+        else:
+            idle_samples = 0
+        if idle_samples < samples and attempts < max_attempts:
             threading.Event().wait(interval)
-    assert accepted is not None
+    if accepted is None or idle_samples < samples:
+        utilization = accepted["utilization.gpu"] if accepted is not None else "unknown"
+        raise RuntimeError(
+            f"physical GPU {physical_gpu} failed pre-timing idle gate after {attempts} samples: "
+            f"utilization={utilization}%"
+        )
     print(
         "pre-timing gate: "
         f"physical={physical_gpu} pci={accepted['pci.bus_id']} uuid={gpu_uuid} "
         f"memory={accepted['memory.used']}MiB utilization={accepted['utilization.gpu']}% "
-        f"samples={samples} allowed_compute_pid={os.getpid()}",
+        f"consecutive_idle_samples={idle_samples} attempts={attempts} allowed_compute_pid={os.getpid()}",
         flush=True,
     )
     return accepted

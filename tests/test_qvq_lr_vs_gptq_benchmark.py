@@ -99,6 +99,41 @@ def test_expected_matrix_contains_every_candidate_for_each_mkn():
     assert {row["kernel"] for row in rows} == {"qvq_lr", "gptq_marlin", "gptq_machete"}
 
 
+def test_pre_timing_gate_waits_for_consecutive_idle_samples(monkeypatch, capsys):
+    readings = iter([2, 0, 0, 0])
+    waits = []
+
+    monkeypatch.setattr(benchmark, "_compute_processes_for_uuid", lambda _uuid: [])
+    monkeypatch.setattr(
+        benchmark.benchmark_utils,
+        "_query_gpu",
+        lambda _gpu: {
+            "index": "1",
+            "pci.bus_id": "0000:44:00.0",
+            "uuid": "GPU-test",
+            "memory.used": "527",
+            "utilization.gpu": str(next(readings)),
+        },
+    )
+
+    class FakeEvent:
+        def wait(self, interval):
+            waits.append(interval)
+
+    monkeypatch.setattr(benchmark.threading, "Event", FakeEvent)
+
+    accepted = benchmark._pre_timing_exclusivity_gate(
+        physical_gpu=1,
+        gpu_uuid="GPU-test",
+        samples=3,
+        interval=0.25,
+    )
+
+    assert accepted["utilization.gpu"] == "0"
+    assert waits == [0.25, 0.25, 0.25]
+    assert "consecutive_idle_samples=3 attempts=4" in capsys.readouterr().out
+
+
 def test_markdown_report_contains_complete_comparison_columns():
     payload = {
         "commit": "deadbeef",
