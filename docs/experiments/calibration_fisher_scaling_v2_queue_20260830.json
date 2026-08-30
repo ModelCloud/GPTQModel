@@ -2,7 +2,7 @@
   "schema": "qvq.calibration-fisher-scaling-queue.v2",
   "status": "running",
   "prepared_at_utc": "2026-08-30T09:00:01Z",
-  "launched_at_utc": "2026-08-30T09:02:31Z",
+  "launched_at_utc": "2026-08-30T09:03:39Z",
   "launch_commit": "3ebcf9a307231187178e29ae7ad91e156a84d6ef",
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "Measure GSM8K response to YAQA Fisher sequence/token coverage while holding lifecycle calibration and the W3.2 allocation fixed.",

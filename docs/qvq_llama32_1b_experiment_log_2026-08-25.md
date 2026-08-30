@@ -114,7 +114,7 @@ ordered-row manifest/disjointness contract is bound by the compact committed
 [`Fisher-scaling registry`](experiments/calibration_fisher_scaling_v2_registry_20260830.json).
 The eight-arm GPU/slot assignment is recorded in
 [`calibration_fisher_scaling_v2_queue_20260830.json`](experiments/calibration_fisher_scaling_v2_queue_20260830.json).
-All eight arms launched at `2026-08-30T09:02:31Z` from pinned commit
+All eight arms launched at `2026-08-30T09:03:39Z` from pinned commit
 `3ebcf9a3`. The current host exposes four 96 GiB physical GPUs, so two
 small-model pipelines run per GPU with the two NM-full replicas separated.
 
