@@ -1242,20 +1242,23 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kTransitionBits = TransitionBits;
   static_assert(kTransitionBits >= 4 && kTransitionBits <= 6);
   constexpr int kRows = 16;
-  constexpr int kBatchTiles = 24;
+  constexpr int kBatchTiles = OutputTiles >= 8 ? 16 : 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
   constexpr bool kNativeN8 = true;
+  constexpr bool kCompactNativeN8Storage = kNativeN8 && OutputTiles >= 8;
+  constexpr int kDecodedColumns = kCompactNativeN8Storage ? kLocalRingTileColumns : kPaddedColumns;
+  constexpr int kOutputColumns = kCompactNativeN8Storage ? 1 : kPaddedColumns;
   constexpr int kInputStride = kNativeN8 ? 40 : kLocalRingTileRows;
 
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kInputStride];
-  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kPaddedColumns];
-  __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
+  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kDecodedColumns];
+  __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kOutputColumns];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -2034,7 +2037,7 @@ void launch_qvq_local_ring_gemv_impl(
   }
 }
 
-template <int TransitionBits, typename OutputScalar, bool SplitK>
+template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles = kHopperWmmaOutputTiles>
 void launch_qvq_local_ring_wmma_hopper(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -2046,8 +2049,7 @@ void launch_qvq_local_ring_wmma_hopper(
     int bank_alt_id,
     cudaStream_t stream) {
   const dim3 grid(
-      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + kHopperWmmaOutputTiles - 1) /
-                                kHopperWmmaOutputTiles),
+      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + OutputTiles - 1) / OutputTiles),
       static_cast<unsigned int>((input.size(0) + 15) / 16),
       static_cast<unsigned int>(SplitK ? split_count : 1));
   const half* input_ptr = reinterpret_cast<const half*>(input.const_data_ptr());
@@ -2056,8 +2058,8 @@ void launch_qvq_local_ring_wmma_hopper(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_kernel<TransitionBits, OutputScalar, SplitK, kHopperWmmaOutputTiles>
-      <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
+  qvq_gemv_local_ring_wmma_hopper_kernel<TransitionBits, OutputScalar, SplitK, OutputTiles>
+      <<<grid, OutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
           bank_ids_ptr,
@@ -2093,18 +2095,22 @@ void launch_qvq_local_ring_wmma_hopper_dispatch(
     int split_count,
     int bank_alt_id,
     cudaStream_t stream) {
-#define QVQ_LR_LAUNCH_HOPPER_WMMA(BITS)                                                                            \
-  launch_qvq_local_ring_wmma_hopper<BITS, OutputScalar, SplitK>(                                                   \
+#define QVQ_LR_LAUNCH_HOPPER_WMMA(BITS, TILES)                                                                     \
+  launch_qvq_local_ring_wmma_hopper<BITS, OutputScalar, SplitK, TILES>(                                            \
       input, trellis, bank_ids, levels, partial_output, output, split_count, bank_alt_id, stream)
   switch (transition_bits) {
     case 4:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(4);
+      QVQ_LR_LAUNCH_HOPPER_WMMA(4, 4);
       break;
     case 5:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(5);
+      QVQ_LR_LAUNCH_HOPPER_WMMA(5, 4);
       break;
     case 6:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(6);
+      if (input.size(1) <= 2048 && output.size(1) >= 8192) {
+        QVQ_LR_LAUNCH_HOPPER_WMMA(6, 8);
+      } else {
+        QVQ_LR_LAUNCH_HOPPER_WMMA(6, 4);
+      }
       break;
     default:
       TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 6]");
