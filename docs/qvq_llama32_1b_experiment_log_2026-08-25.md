@@ -52,16 +52,19 @@ shows no solver or runtime nondeterminism for the frozen input.
 See [`frontier_wave11_frozen_solver_results_20260830.json`](experiments/frontier_wave11_frozen_solver_results_20260830.json)
 and the queue manifest [`frontier_wave11_causality_queue_20260830.json`](experiments/frontier_wave11_causality_queue_20260830.json).
 
-### Wave-11 full end-to-end controls (partial, 2026-08-30)
+### Wave-11 full end-to-end controls (complete, 2026-08-30)
 
-The corrected detached-worktree launcher completed `w11-new-full-a`
-(`a1e0c504`, GPU2).  Under pinned evaluator commit `e45e44f3`,
-`gsm8k_platinum_cot` scored **499/1209 (41.2738%)**, with zero invalid
-answers.  The checkpoint has 112 quantized modules and model-index SHA
-`6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697`; its
-full tensor-hash manifest is recorded in the queue arm.  The other three
-full controls are still running or post-processing, so no old/new
-end-to-end conclusion is drawn yet.
+The corrected detached-worktree launcher completed all four controls under
+pinned evaluator `e45e44f3`.  Each old/new replicate scored **499/1209
+(41.2738%)** on `gsm8k_platinum_cot`, with zero invalid answers.  The two
+replicas of each commit are byte-identical at the packed-module level, and
+old/new share the same 112-module model-index SHA
+`6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697` and
+per-module tensor hashes.  The corrected run therefore shows no old/new
+solver or evaluator nondeterminism for this canary.  Its regenerated
+checkpoint remains distinct from the historical 551/519 checkpoints, so that
+cross-wave discrepancy remains provenance-sensitive.  See the queue manifest
+for all checkpoint/report/hash paths.
 
 ## Frozen data and evaluation protocol
 

@@ -1,7 +1,7 @@
 {
   "schema": "qvq.frontier-wave11-causality.v1",
   "wave": 11,
-  "status": "frozen_canary_complete_full_end_to_end_partial",
+  "status": "complete",
   "queued_at_utc": "2026-08-30T01:10:00Z",
   "queue_branch": "feat/qvq-frontier-score-updates",
   "worktree_bootstrap_commit": "044c507f",
@@ -41,14 +41,21 @@
     "per-question evaluator predictions"
   ],
   "full_end_to_end": {
-    "state": "running",
+    "state": "complete",
     "requirement": "Run each recorded quantizer commit normally, one process per physical GPU, then evaluate all checkpoints with evaluator_commit.",
     "arms": [
-      {"arm_id":"w11-old-full-a","gpu":0,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-old-full-a-anchor_up4_l6_l8"},
-      {"arm_id":"w11-old-full-b","gpu":1,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-old-full-b-anchor_up4_l6_l8"},
+      {"arm_id":"w11-old-full-a","gpu":0,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"complete","checkpoint":"/root/qvq-results/llama32-1b-w11-old-full-a-anchor_up4_l6_l8","evaluation":{"task":"gsm8k_platinum_cot","correct":499,"total":1209,"accuracy":0.41273779983457404,"report":"/root/qvq-results/llama32-1b-w11-old-full-a-anchor_up4_l6_l8/post_quant_eval_result_wave11_gsm8k.json","evaluator_commit":"e45e44f321d39baa55aee15e151aa54535b2530c"},"checkpoint_hash_manifest":"/root/qvq-results/llama32-1b-w11-old-full-a-anchor_up4_l6_l8/wave11_checkpoint_hashes.json","checkpoint_hash_manifest_sha256":"b425cc8a1c282d8c7c690ab58e03ac48204f6bcae0331bbcb429c4a19d02cb36","model_index_sha256":"6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697","completed_at_utc":"2026-08-30T04:38:47Z"},
+      {"arm_id":"w11-old-full-b","gpu":1,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"complete","checkpoint":"/root/qvq-results/llama32-1b-w11-old-full-b-anchor_up4_l6_l8","evaluation":{"task":"gsm8k_platinum_cot","correct":499,"total":1209,"accuracy":0.41273779983457404,"report":"/root/qvq-results/llama32-1b-w11-old-full-b-anchor_up4_l6_l8/post_quant_eval_result_wave11_gsm8k.json","evaluator_commit":"e45e44f321d39baa55aee15e151aa54535b2530c"},"checkpoint_hash_manifest":"/root/qvq-results/llama32-1b-w11-old-full-b-anchor_up4_l6_l8/wave11_checkpoint_hashes.json","checkpoint_hash_manifest_sha256":"efd2b675bd73cd65c1940a90f0b9b0242d363e07267800fd033f72f5d8ee6a87","model_index_sha256":"6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697","completed_at_utc":"2026-08-30T04:39:55Z"},
       {"arm_id":"w11-new-full-a","gpu":2,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"complete","checkpoint":"/root/qvq-results/llama32-1b-w11-new-full-a-anchor_up4_l6_l8","evaluation":{"task":"gsm8k_platinum_cot","correct":499,"total":1209,"accuracy":0.41273779983457404,"report":"/root/qvq-results/llama32-1b-w11-new-full-a-anchor_up4_l6_l8/post_quant_eval_result_wave11_gsm8k.json","evaluator_commit":"e45e44f321d39baa55aee15e151aa54535b2530c"},"checkpoint_hash_manifest":"/root/qvq-results/llama32-1b-w11-new-full-a-anchor_up4_l6_l8/wave11_checkpoint_hashes.json","checkpoint_hash_manifest_sha256":"c5729767aeba67962b3e7a21b5274c54ac5bdaf141cecef7edfac09de07ed234","model_index_sha256":"6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697","completed_at_utc":"2026-08-30T04:38:04Z"},
-      {"arm_id":"w11-new-full-b","gpu":3,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-new-full-b-anchor_up4_l6_l8"}
-    ]
+      {"arm_id":"w11-new-full-b","gpu":3,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"complete","checkpoint":"/root/qvq-results/llama32-1b-w11-new-full-b-anchor_up4_l6_l8","evaluation":{"task":"gsm8k_platinum_cot","correct":499,"total":1209,"accuracy":0.41273779983457404,"report":"/root/qvq-results/llama32-1b-w11-new-full-b-anchor_up4_l6_l8/post_quant_eval_result_wave11_gsm8k.json","evaluator_commit":"e45e44f321d39baa55aee15e151aa54535b2530c"},"checkpoint_hash_manifest":"/root/qvq-results/llama32-1b-w11-new-full-b-anchor_up4_l6_l8/wave11_checkpoint_hashes.json","checkpoint_hash_manifest_sha256":"5e13acea0da1687b97440e6d51926b6c13d95e13c3bb268c2be1ccc1405f0773","model_index_sha256":"6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697","completed_at_utc":"2026-08-30T04:38:26Z"}
+    ],
+    "comparison": {
+      "all_gsm8k_identical": true,
+      "all_quantized_module_hashes_identical": true,
+      "model_index_sha256": "6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697",
+      "first_differing_module": null,
+      "interpretation": "With explicit detached-worktree package binding, old/new commits and A/B replicas produced byte-identical packed tensors and 499/1209 GSM8K under the pinned evaluator. This canary shows no old/new solver or evaluator nondeterminism; the regenerated checkpoint is distinct from historical 551/519 checkpoints, so the cross-wave discrepancy remains provenance-sensitive and is not fully localized by Wave-11."
+    }
   },
   "frozen_first_module": {
     "state": "complete",

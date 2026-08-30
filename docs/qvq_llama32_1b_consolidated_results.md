@@ -81,19 +81,22 @@ of the historical checkpoint differences. See the machine-readable
 [`Wave-11 frozen solver result`](experiments/frontier_wave11_frozen_solver_results_20260830.json)
 and [`Wave-11 queue`](experiments/frontier_wave11_causality_queue_20260830.json).
 
-### Wave-11 full end-to-end controls (partial, 2026-08-30 UTC)
+### Wave-11 full end-to-end controls (complete, 2026-08-30 UTC)
 
-The corrected detached-worktree launcher completed `w11-new-full-a`
-(`a1e0c504`, GPU2).  The pinned `e45e44f3` evaluator reports **499/1209
-(41.2738%) GSM8K Platinum**, with zero invalid answers.  Its checkpoint has
-112 quantized modules and model-index SHA-256
-`6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697`;
-the complete tensor-hash manifest is retained with the local checkpoint and
-the arm record in the queue manifest.  The other three end-to-end controls
-remain in evaluation or post-processing and are not yet included in the
-comparison.  This is a provenance-control result, not a new allocation
-winner; it supersedes neither the historical 551/519 scores nor the frozen
-solver conclusion until all four arms are complete.
+The corrected detached-worktree launcher completed all four controls under
+the pinned `e45e44f3` evaluator.  Every arm scored **499/1209 (41.2738%)
+GSM8K Platinum**, with zero invalid answers.  The old commit (`07517d85`)
+and new commit (`a1e0c504`) each reproduced exactly across two replicas;
+all four checkpoints have 112 quantized modules, the same model-index SHA-256
+`6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697`, and
+identical per-module packed tensor hashes.  Thus, with explicit worktree
+package binding, this canary shows no old/new solver drift or evaluator
+nondeterminism.  The regenerated checkpoint is nevertheless distinct from
+the historical 551/519 checkpoints, so that cross-wave discrepancy remains
+provenance-sensitive and is not fully localized by this run.  These are
+causality controls, not a new allocation winner; the machine-readable arm
+paths and hash-manifest digests are in the
+[`Wave-11 queue`](experiments/frontier_wave11_causality_queue_20260830.json).
 
 ## Current budget anchors (updated 2026-08-28 UTC)
 
