@@ -1421,18 +1421,14 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
             static_cast<uint32_t>(bank_alt_id);
         const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
+        uint32_t decoded_pairs[4] = {};
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           const int pair = pair_base + q;
           const uint32_t mixed = pgc16_mix(state ^ bank_mask);
           if constexpr (kNativeN8) {
-            const uint32_t level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
+            decoded_pairs[q] = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
                 (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-            // Transpose producer lanes into the exact native B-fragment
-            // layout. Each consumer lane then reads four contiguous,
-            // conflict-free fragment planes: two for each K16 instruction.
-            reinterpret_cast<uint32_t*>(&decoded_weight[sub][0])[edge_group * 32 + col * 4 + q] =
-                level_pair;
           } else {
             decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
             decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
@@ -1446,6 +1442,13 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
             }
             state = ((state << kTransitionBits) | transition) & 0xffffu;
           }
+        }
+        if constexpr (kNativeN8) {
+          // Transpose producer lanes into the exact native B-fragment layout.
+          // The four adjacent pairs form one aligned vector store; consumer
+          // lanes then read four conflict-free fragment planes.
+          reinterpret_cast<uint4*>(&decoded_weight[sub][0])[edge_group * 8 + col] =
+              make_uint4(decoded_pairs[0], decoded_pairs[1], decoded_pairs[2], decoded_pairs[3]);
         }
       }
       __syncwarp();
