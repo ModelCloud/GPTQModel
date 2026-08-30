@@ -34,3 +34,21 @@ M=16, K=2,048, N=8,192 command and metrics.
 The padding reduces shared-load conflicts by 62.7% and raises issue activity by
 11.36 percentage points. It trades 13 registers/thread, 6.14 KiB of static
 shared memory, and 0.85% more instructions for a 21.4% shorter profiled kernel.
+
+## Vector-store follow-up
+
+The accepted aligned `uint4` decoded-fragment store was profiled at the same
+W2.5 M=16, K=2,048, N=8,192 geometry on physical GPU 1.
+
+| Variant | Executed instructions | Registers/thread | Static shared KiB | Shared-load conflicts | Shared-store conflicts | Issue active | NCU duration us | Better than last |
+|---|---:|---:|---:|---:|---:|---:|---:|:---:|
+| Padded activation, scalar source | 15,215,104 | 91 | 43.10 | 934,876 | 131,072 | 45.36% | 37.57 | no |
+| Explicit vector fragment store | 15,214,080 | 91 | 43.10 | 934,760 | 131,072 | 45.68% | 37.54 | yes |
+
+The explicit vector form saves 1,024 executed instructions (0.007%). This is
+far smaller than the source-level four-to-one store reduction because the CUDA
+compiler had already combined nearly all adjacent scalar stores. The profile
+therefore keeps decode arithmetic and indexed level-table reads as the next
+material instruction-reduction targets. Nsight Compute duration includes
+profiler overhead; the benchmark decision remains based on CUDA Graph replay
+timed by CUDA events.
