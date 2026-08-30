@@ -112,6 +112,7 @@ tables below every row was intentionally measured at M=16.
 | `93e135d7` | H200, W3 M1-M16 | Resolve the launch-uniform alternate bank mask once outside the K loop, then apply each tile's ring selector with a branch-free bit mask | All 20 W3 cells improved (1.047x latency geomean); gate/up gained 1.090-1.094x, NCU instructions fell 22.4% to 10.80M, and 108/108 H200 CUDA tests passed | accepted and pushed |
 | `a3fb8c55` | H200, W2/W2.5 M1-M16 | Extend the launch-uniform alternate-mask hoist to TB4/TB5 while retaining TB7's prior code generation | 80/80 LR cells accurate; exact NCU gate/up instructions fell 24.8% for W2 and 23.3% for W2.5, NCU duration fell 6.5% and 4.0%, and 108/108 H200 CUDA tests passed | accepted and pushed |
 | `f98ceb36` | H200, W3.5 M1-M16 | Extend the same launch-uniform alternate-mask hoist to TB7 after an exact-head counter A/B | Gate/up instructions fell 21.9% and NCU duration 6.4% with unchanged registers/shared memory; 20/20 W3.5 cells and 108/108 CUDA tests passed | accepted and pushed |
+| `4b07d5e9` profile | H200, W3 versus Machete W4, M16/K2,048/N8,192 | Capture matched detailed NCU reports at the same pushed QVQ head and physical GPU | QVQ executes 10.80M versus Machete's 3.06M instructions, reaches 242.8 versus 603.6 GB/s DRAM throughput, and records 440 versus 102 long-scoreboard samples | architectural baseline for TMA producer/consumer work |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -893,6 +894,35 @@ memory. The exact 60-row matrix is
 20 W3.5 LR cells pass with 1.03e-04 worst max error; the W3.5 throughput
 geomean is 0.887x Machete W4, including 1.097x Q/O, 1.420x K/V, 0.582x
 gate/up, and 0.683x down. The full H200 CUDA suite again passes 108/108 cases.
+
+### Matched H200 W3 and Machete pipeline profile
+
+Detailed NCU captures at pushed head `4b07d5e9` compare the same physical H200
+GPU 0 and M16/K2,048/N8,192 gate/up geometry. The QVQ report is
+`/tmp/ncu-h200-w3-gate-detailed-4b07d5e9.ncu-rep`; the Machete W4 reference is
+`/tmp/ncu-h200-machete-w4-gate-detailed-4b07d5e9.ncu-rep`. NCU replay duration
+is attribution evidence only; CUDA Graph medians remain the acceptance timing.
+
+| Counter | QVQ W3 LR | Machete W4 | Ratio / implication |
+|---|---:|---:|---|
+| NCU duration | 26.53 us | 14.56 us | QVQ is 1.82x slower |
+| Executed instructions | 10,800,128 | 3,059,441 | QVQ executes 3.53x as many |
+| DRAM throughput | 242.78 GB/s | 603.59 GB/s | QVQ reaches 40.2% of Machete bandwidth |
+| DRAM utilization | 5.05% | 12.59% | neither is HBM-capacity bound, but Machete moves data far more efficiently |
+| LSU instruction-pipe utilization | 21.16% | 2.16% | QVQ spends much more scalar issue bandwidth on movement/lookup work |
+| TMA utilization | 0% | 0.37% | Machete offloads tile movement; QVQ uses per-thread loads and stores |
+| Long-scoreboard samples | 440 | 102 | QVQ has 4.31x the dependency-stall samples |
+| No-eligible-warp cycles | 52.56% | not directly ratioed | QVQ cannot hide its lookup/staging dependencies |
+| Registers/thread | 63 | 168 | QVQ has register headroom; Machete intentionally runs a persistent one-CTA/SM design |
+| Grid/block | 256 x 256 | 132 x 384 | Machete launches exactly one persistent CTA per H200 SM |
+
+The comparison rules out HBM capacity as the current limiter and points to the
+common LR execution architecture: per-thread staging/address generation,
+level-lookup dependency chains, synchronization, and the lack of overlap
+between fetch, dequantization, and MMA. The next structural experiment must
+therefore resemble Machete's elected TMA producer plus multistage consumer
+pipeline. An immediate `cp.async` followed by a wait and whole-block barrier is
+already known to regress and is not a valid substitute for overlap.
 
 ## Coverage and targeting queue
 
