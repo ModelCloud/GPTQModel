@@ -41,7 +41,7 @@ constexpr int kMaxCachedCudaDevices = 64;
 // Hopper WMMA blocks trade activation reuse against grid parallelism. Two N8
 // tiles per block keeps one staged K32 stripe shared by adjacent outputs while
 // providing enough blocks to fill the H200's 132 SMs.
-constexpr int kHopperWmmaOutputTiles = 8;
+constexpr int kHopperWmmaOutputTiles = 4;
 
 struct QvqCudaDeviceConfig {
   int major;
@@ -1186,7 +1186,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int bank_alt_id) {
   constexpr int kTransitionBits = 6;
   constexpr int kRows = 16;
-  constexpr int kBatchTiles = 16;
+  constexpr int kBatchTiles = 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
