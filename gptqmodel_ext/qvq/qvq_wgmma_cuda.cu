@@ -55,6 +55,16 @@ constexpr int kTmaStages = 2;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
 
+// Standard P32 uses K16 x N16 tiles.  Four adjacent tiles form the register
+// sourced A operand of one m64n16k16 WGMMA.  The continuous-window payload is
+// storage-neutral with canonical planar P32, but makes every 16-bit state a
+// direct circular bit-window load instead of a reconstructed recurrence.
+constexpr int kP32TileRows = 16;
+constexpr int kP32TileColumns = 16;
+constexpr int kP32PairsPerTile = 128;
+constexpr int kP32N16TilesPerBlock = kOutputColumns / kP32TileColumns;
+constexpr int kP32K16TilesPerStage = kKPerStage / kP32TileRows;
+
 using WgmmaTmaSmemLayoutB = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{},
     cute::make_shape(cute::_16{}, cute::_256{}, cute::Int<kTmaStages>{})));
@@ -179,6 +189,60 @@ __device__ __forceinline__ void qvq_wgmma_decode_w3_fragment(
   fragment(5) = levels[first_mixed1 & 0xffu];
   fragment(6) = levels[second_mixed1 >> 8];
   fragment(7) = levels[second_mixed1 & 0xffu];
+}
+
+__device__ __forceinline__ uint32_t qvq_p32_window_w3_state(
+    const uint32_t* __restrict__ window_words,
+    int pair) {
+  constexpr int kWordsPerP32Tile = 4 * kW3TransitionBits;
+  const int bit_position = (kP32PairsPerTile - 1 - pair) * kW3TransitionBits;
+  const int word = bit_position >> 5;
+  const int shift = bit_position & 31;
+  const int next_word = word + 1 == kWordsPerP32Tile ? 0 : word + 1;
+  const uint64_t window = static_cast<uint64_t>(window_words[word]) |
+      (static_cast<uint64_t>(window_words[next_word]) << 32);
+  return static_cast<uint32_t>((window >> shift) & 0xffffu);
+}
+
+template <class FragmentA>
+__device__ __forceinline__ void qvq_p32_window_decode_w3_fragment(
+    FragmentA& fragment,
+    const uint32_t* __restrict__ window_words,
+    uint8_t bank_id,
+    const Element* __restrict__ levels,
+    uint32_t alternate_bank_mask) {
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int n_pair = lane >> 2;
+  const int k_pair0 = lane & 3;
+  const int k_pair1 = k_pair0 + 4;
+  const int pair00 = k_pair0 * 16 + n_pair;
+  const int pair01 = pair00 + 8;
+  const int pair10 = k_pair1 * 16 + n_pair;
+  const int pair11 = pair10 + 8;
+  const uint32_t bank_mask0 =
+      (0u - ((static_cast<uint32_t>(bank_id) >> k_pair0) & 1u)) & alternate_bank_mask;
+  const uint32_t bank_mask1 =
+      (0u - ((static_cast<uint32_t>(bank_id) >> k_pair1) & 1u)) & alternate_bank_mask;
+
+  const uint32_t mixed00 = qvq_wgmma_pgc16_mix(
+      qvq_p32_window_w3_state(window_words, pair00) ^ bank_mask0);
+  const uint32_t mixed01 = qvq_wgmma_pgc16_mix(
+      qvq_p32_window_w3_state(window_words, pair01) ^ bank_mask0);
+  const uint32_t mixed10 = qvq_wgmma_pgc16_mix(
+      qvq_p32_window_w3_state(window_words, pair10) ^ bank_mask1);
+  const uint32_t mixed11 = qvq_wgmma_pgc16_mix(
+      qvq_p32_window_w3_state(window_words, pair11) ^ bank_mask1);
+
+  // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
+  // adjacent P32 N values so each decoded state feeds both output columns.
+  fragment(0) = levels[mixed00 >> 8];
+  fragment(1) = levels[mixed01 >> 8];
+  fragment(2) = levels[mixed00 & 0xffu];
+  fragment(3) = levels[mixed01 & 0xffu];
+  fragment(4) = levels[mixed10 >> 8];
+  fragment(5) = levels[mixed11 >> 8];
+  fragment(6) = levels[mixed10 & 0xffu];
+  fragment(7) = levels[mixed11 & 0xffu];
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_wgmma_w3_m16_kernel(
@@ -309,6 +373,130 @@ __global__ __launch_bounds__(kThreads) void qvq_wgmma_w3_m16_kernel(
     const int output_row = static_cast<int>(cute::get<1>(coordinate));
     const int64_t output_index =
         static_cast<int64_t>(output_row) * size_n + n64_block * kOutputColumns + output_column_in_block;
+    partial_output[static_cast<int64_t>(split) * kRows * size_n + output_index] = accumulator(index);
+  }
+#endif
+}
+
+__global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
+    const Element* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const uint8_t* __restrict__ bank_ids,
+    const Element* __restrict__ levels,
+    float* __restrict__ partial_output,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+#if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
+  constexpr int kWordsPerP32Tile = 4 * kW3TransitionBits;
+  __shared__ __align__(16) uint32_t packed_words
+      [kP32K16TilesPerStage][kP32N16TilesPerBlock][kWordsPerP32Tile];
+  __shared__ uint8_t packed_bank_ids[kP32K16TilesPerStage][kP32N16TilesPerBlock];
+  __shared__ __align__(128) Element shared_input[cute::cosize_v<WgmmaSmemLayoutB>];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int warp = thread >> 5;
+  const int n64_block = static_cast<int>(blockIdx.x);
+  const int n16_tile_base = n64_block * kP32N16TilesPerBlock;
+  const int n_tiles = size_n / kP32TileColumns;
+  const int k_tiles = size_k / kP32TileRows;
+  const int split = static_cast<int>(blockIdx.z);
+  const int k_tile_begin = (k_tiles * split) / split_count;
+  const int k_tile_end = (k_tiles * (split + 1)) / split_count;
+  const uint32_t alternate_bank_mask = bank_alt_id == 0 ? 0u
+      : bank_alt_id == 1 ? 0x6969u
+      : bank_alt_id == 2 ? 0x5a5au
+      : 0x3c3cu;
+
+  auto sB = cute::make_tensor(cute::make_smem_ptr(shared_input), WgmmaSmemLayoutB{});
+  WgmmaTiledMma tiled_mma;
+  auto thread_mma = tiled_mma.get_thread_slice(thread);
+  auto thread_shared_b = thread_mma.partition_B(sB);
+  auto fragment_b = thread_mma.make_fragment_B(thread_shared_b);
+  static_assert(cute::size<2>(decltype(fragment_b){}) == 16);
+
+  auto coordinate_a = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
+  auto fragment_a0 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  auto fragment_a1 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  static_assert(cute::size(decltype(fragment_a0){}) == 8);
+
+  auto coordinate_c = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_c = thread_mma.partition_C(coordinate_c);
+  auto accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
+  cute::clear(accumulator);
+  tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+
+  for (int kb = k_tile_begin; kb < k_tile_end; kb += kP32K16TilesPerStage) {
+    auto* packed_vectors = reinterpret_cast<uint4*>(&packed_words[0][0][0]);
+    const auto* trellis_vectors = reinterpret_cast<const uint4*>(trellis);
+    constexpr int kVectorsPerTile = kWordsPerP32Tile / 4;
+    constexpr int kStageVectors =
+        kP32K16TilesPerStage * kP32N16TilesPerBlock * kVectorsPerTile;
+    for (int index = thread; index < kStageVectors; index += kThreads) {
+      const int tile_slot = index / kVectorsPerTile;
+      const int vector_in_tile = index - tile_slot * kVectorsPerTile;
+      const int k16_in_stage = tile_slot / kP32N16TilesPerBlock;
+      const int n16_in_block = tile_slot - k16_in_stage * kP32N16TilesPerBlock;
+      const int64_t global_tile =
+          static_cast<int64_t>(kb + k16_in_stage) * n_tiles + n16_tile_base + n16_in_block;
+      packed_vectors[index] = trellis_vectors[global_tile * kVectorsPerTile + vector_in_tile];
+    }
+    for (int index = thread;
+         index < kP32K16TilesPerStage * kP32N16TilesPerBlock;
+         index += kThreads) {
+      const int k16_in_stage = index / kP32N16TilesPerBlock;
+      const int n16_in_block = index - k16_in_stage * kP32N16TilesPerBlock;
+      const int64_t global_tile =
+          static_cast<int64_t>(kb + k16_in_stage) * n_tiles + n16_tile_base + n16_in_block;
+      packed_bank_ids[k16_in_stage][n16_in_block] = bank_ids[global_tile];
+    }
+    for (int index = thread; index < kRows * kKPerStage; index += kThreads) {
+      const int row = index / kKPerStage;
+      const int k_in_stage = index - row * kKPerStage;
+      sB(row, k_in_stage) = input[
+          static_cast<int64_t>(row) * size_k + kb * kP32TileRows + k_in_stage];
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int k_block = 0; k_block < kP32K16TilesPerStage; ++k_block) {
+      auto& fragment_a = (k_block & 1) == 0 ? fragment_a0 : fragment_a1;
+      if (k_block >= 2) {
+        cute::warpgroup_wait<1>();
+      }
+      qvq_p32_window_decode_w3_fragment(
+          fragment_a,
+          &packed_words[k_block][warp][0],
+          packed_bank_ids[k_block][warp],
+          levels,
+          alternate_bank_mask);
+      cute::warpgroup_fence_operand(fragment_a);
+      cute::warpgroup_arrive();
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b(cute::_, cute::_, k_block),
+          accumulator);
+      tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
+      cute::warpgroup_commit_batch();
+    }
+    cute::warpgroup_wait<0>();
+    cute::warpgroup_fence_operand(accumulator);
+    __syncthreads();
+  }
+
+  constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
+#pragma unroll
+  for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
+    const auto coordinate = thread_coordinate_c(index);
+    const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+    const int output_row = static_cast<int>(cute::get<1>(coordinate));
+    const int tile_column = wgmma_column & 15;
+    const int p32_column = (wgmma_column & ~15) + ((tile_column & 7) << 1) + (tile_column >> 3);
+    const int64_t output_index =
+        static_cast<int64_t>(output_row) * size_n + n64_block * kOutputColumns + p32_column;
     partial_output[static_cast<int64_t>(split) * kRows * size_n + output_index] = accumulator(index);
   }
 #endif
@@ -638,6 +826,89 @@ at::Tensor qvq_wgmma_w3_m16(
   return output;
 }
 
+at::Tensor qvq_p32_window_wgmma_w3_m16(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    int64_t split_count) {
+  TORCH_CHECK(input.is_cuda(), "QVQ P32 WGMMA input must be CUDA");
+  c10::cuda::CUDAGuard device_guard(input.device());
+  TORCH_CHECK(trellis.device() == input.device() && levels.device() == input.device() &&
+                  bank_ids.device() == input.device(),
+              "QVQ P32 WGMMA tensors must share one CUDA device");
+  TORCH_CHECK(input.scalar_type() == at::kHalf && levels.scalar_type() == at::kHalf,
+              "QVQ P32 WGMMA prototype requires FP16 input and levels");
+  TORCH_CHECK(trellis.scalar_type() == at::kInt, "QVQ P32 WGMMA trellis must be int32");
+  TORCH_CHECK(bank_ids.scalar_type() == at::kByte, "QVQ P32 WGMMA bank ids must be uint8");
+  TORCH_CHECK(input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() &&
+                  bank_ids.is_contiguous(),
+              "QVQ P32 WGMMA tensors must be contiguous");
+  TORCH_CHECK(input.dim() == 2 && input.size(0) == kRows,
+              "QVQ P32 WGMMA prototype requires M=16");
+  TORCH_CHECK(out_features > 0 && out_features % kOutputColumns == 0,
+              "QVQ P32 WGMMA output features must be a positive multiple of 64");
+  TORCH_CHECK(input.size(1) > 0 && input.size(1) % kKPerStage == 0,
+              "QVQ P32 WGMMA input features must be a positive multiple of 256");
+  TORCH_CHECK(split_count >= 1 && split_count <= 64,
+              "QVQ P32 WGMMA split count must be in [1, 64]");
+  TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3,
+              "QVQ P32 WGMMA alternate bank id must be in [0, 3]");
+
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(properties.major == 9 && properties.minor == 0,
+              "QVQ P32 WGMMA prototype requires an SM90 H100/H200 device");
+
+  const int size_k = static_cast<int>(input.size(1));
+  const int size_n = static_cast<int>(out_features);
+  const int k_tiles = size_k / kP32TileRows;
+  const int n_tiles = size_n / kP32TileColumns;
+  TORCH_CHECK(k_tiles % split_count == 0 &&
+                  (k_tiles / split_count) % kP32K16TilesPerStage == 0,
+              "QVQ P32 WGMMA split partitions must contain a multiple of sixteen K16 tiles");
+  const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * n_tiles;
+  constexpr int kWordsPerP32Tile = 4 * kW3TransitionBits;
+  TORCH_CHECK(trellis.numel() == expected_tiles * kWordsPerP32Tile,
+              "QVQ P32 WGMMA trellis size mismatch");
+  TORCH_CHECK(bank_ids.numel() == expected_tiles,
+              "QVQ P32 WGMMA bank-id size mismatch");
+  TORCH_CHECK(levels.numel() == 256, "QVQ P32 WGMMA requires 256 PGC16 levels");
+
+  auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
+  auto partial_output = split_count == 1
+      ? output
+      : at::empty({split_count, kRows, size_n}, input.options().dtype(at::kFloat));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
+  qvq_p32_window_wgmma_w3_m16_kernel<<<grid, kThreads, 0, stream>>>(
+      reinterpret_cast<const Element*>(input.data_ptr<at::Half>()),
+      reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+      bank_ids.data_ptr<uint8_t>(),
+      reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+      partial_output.data_ptr<float>(),
+      size_k,
+      size_n,
+      static_cast<int>(split_count),
+      static_cast<int>(bank_alt_id));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  if (split_count > 1) {
+    constexpr int kReductionThreads = 256;
+    const int output_values = kRows * size_n;
+    const int reduction_blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    qvq_wgmma_reduce_split_kernel<<<reduction_blocks, kReductionThreads, 0, stream>>>(
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        output_values,
+        static_cast<int>(split_count));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return output;
+}
+
 at::Tensor qvq_wgmma_w3_m16_tma(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -760,9 +1031,11 @@ at::Tensor qvq_wgmma_w3_m16_tma(
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("w3_m16", qvq_wgmma_w3_m16);
   m.impl("w3_m16_tma", qvq_wgmma_w3_m16_tma);
+  m.impl("p32_window_w3_m16", qvq_p32_window_wgmma_w3_m16);
 }
