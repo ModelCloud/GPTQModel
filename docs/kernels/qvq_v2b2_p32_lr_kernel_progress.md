@@ -97,6 +97,7 @@ tables below every row was intentionally measured at M=16.
 | `1f834abf` | H100, W2-W3.5 gate/up M1-M16 | Remove the trailing warp barrier after each private decoded-weight tile; the next uniform warp iteration cannot overwrite shared storage before the prior loads complete | All 20 CUDA-event rows improved to 0.0309-0.0357 ms; 80/80 Hopper correctness cases passed across FP16/FP32 output and split-1/split-3 | accepted and pushed |
 | `f254003d` | H100, W2-W3.5 gate/up M1-M16 | Stop the cooperative decode loop at the runtime tail length instead of executing every compile-time batch slot | All 20 exact CUDA Graph rows improved again to 0.0304-0.0338 ms; 80/80 Hopper correctness cases passed, including split-3 tails | accepted and pushed |
 | `2cc545da` / `22148017` | H200, W3 gate/up M1-M16 | Pair the two split-K CTAs in a Hopper z-cluster, keep one partial accumulator in DSM, and let rank zero write the reduced output directly | Exact merged-head CUDA Graph rows improved 4.45-5.41% to 0.02957-0.03062 ms; 108/108 H200 CUDA tests passed and NCU reports 64 registers with no spilling | accepted, merged, and pushed |
+| `9b96c963` / `90945592` | H100/H200, W3 M1-M16 | Compute all four recurrence/mix indices before issuing level loads so Hopper can overlap the independent lookup dependency chains | H200 gate/up gained another 4.4-4.9% to 0.02826-0.02933 ms, K/V gained 8.0-10.5% to 0.00960-0.00981 ms, all 20 W3 cells were accurate, and 108/108 H200 CUDA tests passed | accepted, merged, validated, and pushed |
 | `a039a97b` uncommitted A/B | H200, W3 down M1-M16 | Generalize DSM reduction from the successful split-2 gate path to split-8 M1 and split-4 M2-M16 clusters | Accurate, but cluster placement plus three/seven remote reductions slowed M1 32.8% (0.02963 to 0.03936 ms) and M2-M16 19.5-20.8% (0.03376-0.03430 to 0.04038-0.04144 ms) | rejected; source restored before next experiment |
 | `2e90588f` uncommitted A/B | H200, W3 down M1-M16 | Keep portable two-block clusters, combine split partitions pairwise through DSM, then launch a reducer over half as many global partial planes | Accurate, but M1 slowed 1.2% and M2-M16 slowed 8.0-10.4%; the cluster fence is only amortized when it eliminates the reduction launch entirely | rejected; source restored before next experiment |
 | `50221f20` uncommitted A/B | H200, W3 gate/up M1-M16 | Load all four remote DSM values into the existing accumulator registers, release rank one, then drain rank-zero global output stores | Accurate, but carrying the updated accumulators across the relocated cluster fence slowed M1-M16 0.3-1.6% to 0.03005-0.03072 ms | rejected; source restored before next experiment |
@@ -748,11 +749,28 @@ is for the one fused kernel and is not compared directly with the older main-
 kernel-only NCU duration; the exact CUDA Graph end-to-end timings above are the
 acceptance evidence.
 
+Commit `9b96c963`, merged and H200-validated at `90945592`, separates W3's
+four dependent recurrence/mix operations from the four level-lookup groups.
+This preserves every decoded value while exposing all lookup addresses before
+their loads. Exact H200 CUDA Graph medians for M1/M2/M4/M8/M16 are:
+
+| Shape | K | N | LR ms | xMachete W4 | Effective payload GB/s | Worst max abs |
+|---|---:|---:|---|---|---|---:|
+| Q/O | 2,048 | 2,048 | 0.013808/0.014704/0.014736/0.014688/0.014896 | 1.140/1.066/1.060/1.057/1.059x | 106.69-115.10 | 1.53e-05 |
+| K/V | 2,048 | 512 | 0.009808/0.009680/0.009600/0.009616/0.009808 | 1.471/1.496/1.503/1.511/1.481x | 40.51-41.39 | 5.72e-06 |
+| gate/up | 2,048 | 8,192 | 0.028256/0.028384/0.028576/0.028768/0.029328 | 0.640/0.639/0.633/0.622/0.617x | 216.76-224.98 | 3.43e-05 |
+| down | 8,192 | 2,048 | 0.029568/0.033728/0.033968/0.034096/0.034400 | 0.761/0.655/0.662/0.657/0.657x | 184.80-215.00 | 1.22e-04 |
+
+Relative to the accepted clustered gate rows, every gate/up M value gains
+4.4-4.9%. Relative to the exact `2c56f0d5` K/V rows, every K/V M value gains
+8.0-10.5%. The full W3 matrix is 60/60 benchmark rows accuracy-clean and the
+H200 LR CUDA suite passes 108/108 cases.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | cluster-fused gate/up is 0.02957-0.03062 ms at up to 215 GB/s; random level-table conflicts and the split-K global partial/reduction launch are eliminated, while down remains 0.0327-0.0390 ms | widen/repack the remaining aligned weight fetch and move toward persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
+| 1 | H200 W3 M1-M16 MLP | lookup-ILP plus clustered reduction reaches 0.02826-0.02933 ms gate/up at up to 224.98 GB/s; down is 0.02957-0.03440 ms | profile the merged lookup schedule, then widen/repack the remaining aligned weight fetch and move toward persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
 | 2 | H200 W3.5 M1-M16 MLP | concurrent native-N8 path now reaches 0.0392 ms for the H200 M16 gate canary | run the full H200 W3.5 matrix from the merged head after the current W3 focus and profile its remaining TB7 arithmetic |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
