@@ -38,6 +38,11 @@ constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
 constexpr int kMaxCachedCudaDevices = 64;
 
+// Hopper WMMA blocks trade activation reuse against grid parallelism. Two N8
+// tiles per block keeps one staged K32 stripe shared by adjacent outputs while
+// providing enough blocks to fill the H200's 132 SMs.
+constexpr int kHopperWmmaOutputTiles = 2;
+
 struct QvqCudaDeviceConfig {
   int major;
   int minor;
@@ -1161,13 +1166,13 @@ __global__ void qvq_reduce_splitk_kernel(
 }
 
 // Hopper-only tensor-core candidate for the W3/M16 regime. One warp owns one
-// N8 output tile; eight warps therefore reuse the staged activation stripe
-// across eight adjacent tiles. The W3 weights are decoded into an 8-column
+// N8 output tile; a small warp group therefore reuses the staged activation
+// stripe across adjacent tiles. The W3 weights are decoded into an 8-column
 // FP16 matrix (padded to N16) and consumed by two FP16->FP32 WMMA operations
 // per K32 tile. The existing scalar LR kernel remains the fallback for other
 // rates, row counts, dtypes, and unaligned views.
-template <typename OutputScalar, bool SplitK>
-__global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
+template <typename OutputScalar, bool SplitK, int OutputTiles>
+__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
@@ -1182,7 +1187,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
   constexpr int kTransitionBits = 6;
   constexpr int kRows = 16;
   constexpr int kBatchTiles = 16;
-  constexpr int kOutputTiles = 8;
+  constexpr int kWmmaThreads = OutputTiles * 32;
+  constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
 
@@ -1205,15 +1211,15 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
   const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
   const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
 
-  if (thread < kPgc16LevelCount) {
-    cached_levels[thread] = levels[thread];
+  for (int index = thread; index < kPgc16LevelCount; index += kWmmaThreads) {
+    cached_levels[index] = levels[index];
   }
   __syncthreads();
 
   // Initialize the padded N16 columns once. The first eight columns are
   // overwritten for every decoded K32 tile below.
   half* decoded_weight_ptr = reinterpret_cast<half*>(decoded_weight);
-  for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kThreads) {
+  for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kWmmaThreads) {
     const int col = index % kPaddedColumns;
     if (col >= kLocalRingTileColumns) {
       decoded_weight_ptr[index] = __float2half(0.0f);
@@ -1231,7 +1237,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
     const int vec_total = tiles_here * kOutputTiles * words_per_vec;
     uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
     const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
-    for (int index = thread; index < vec_total; index += kThreads) {
+    for (int index = thread; index < vec_total; index += kWmmaThreads) {
       const int tile_slot = index / words_per_vec;
       const int w4 = index - tile_slot * words_per_vec;
       const int u = tile_slot / kOutputTiles;
@@ -1254,7 +1260,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
     const int input_vec_total = tiles_here * kRows * input_vecs_per_row;
     uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
     const uint4* input4_base = reinterpret_cast<const uint4*>(input);
-    for (int index = thread; index < input_vec_total; index += kThreads) {
+    for (int index = thread; index < input_vec_total; index += kWmmaThreads) {
       const int u = index / (kRows * input_vecs_per_row);
       const int cell = index - u * (kRows * input_vecs_per_row);
       const int row = cell / input_vecs_per_row;
@@ -1857,7 +1863,8 @@ void launch_qvq_local_ring_wmma_hopper_w3(
     int bank_alt_id,
     cudaStream_t stream) {
   const dim3 grid(
-      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + 7) / 8),
+      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + kHopperWmmaOutputTiles - 1) /
+                                kHopperWmmaOutputTiles),
       static_cast<unsigned int>((input.size(0) + 15) / 16),
       static_cast<unsigned int>(SplitK ? split_count : 1));
   const half* input_ptr = reinterpret_cast<const half*>(input.const_data_ptr());
@@ -1866,8 +1873,8 @@ void launch_qvq_local_ring_wmma_hopper_w3(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_w3_kernel<OutputScalar, SplitK>
-      <<<grid, kThreads, 0, stream>>>(
+  qvq_gemv_local_ring_wmma_hopper_w3_kernel<OutputScalar, SplitK, kHopperWmmaOutputTiles>
+      <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
           bank_ids_ptr,
