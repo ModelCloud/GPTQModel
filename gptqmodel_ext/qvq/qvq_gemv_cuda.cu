@@ -980,6 +980,8 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
   constexpr int kBatchTiles =
       (TransitionBits == 4 || SplitK) && (ROWS == 8 || ROWS == 16) ? 16 : 8;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+  constexpr int kBatchTiles = TransitionBits == 6 && ROWS == 16 ? 24 : (ROWS == 16 ? 16 : 8);
 #else
   constexpr int kBatchTiles = ROWS == 16 ? 16 : 8;
 #endif
