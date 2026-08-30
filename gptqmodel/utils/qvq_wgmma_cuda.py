@@ -69,7 +69,7 @@ def _cuda_flags() -> list[str]:
 _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_WGMMA_NAME,
     namespace=_QVQ_WGMMA_NAMESPACE,
-    required_ops=("w3_m16", "w3_m16_tma", "p32_window_w3_m16"),
+    required_ops=("w3_m16", "w3_m16_tma", "p32_window_w3_m16", "p32_window_w3_m16_tma"),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_wgmma"),
@@ -150,8 +150,32 @@ def qvq_p32_window_wgmma_w3_m16(
     )
 
 
+def qvq_p32_window_wgmma_w3_m16_tma(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    *,
+    out_features: int,
+    bank_alt_id: int = 3,
+    split_count: int = 1,
+) -> torch.Tensor:
+    """Run the two-stage TMA direct-window P32 W3 RS-WGMMA prototype."""
+
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_w3_m16_tma")(
+        input,
+        trellis,
+        levels,
+        bank_ids,
+        out_features,
+        bank_alt_id,
+        split_count,
+    )
+
+
 __all__ = [
     "qvq_p32_window_wgmma_w3_m16",
+    "qvq_p32_window_wgmma_w3_m16_tma",
     "qvq_wgmma_w3_m16",
     "qvq_wgmma_w3_m16_tma",
 ]
