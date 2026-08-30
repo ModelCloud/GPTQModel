@@ -41,7 +41,7 @@ constexpr int kMaxCachedCudaDevices = 64;
 // Hopper WMMA blocks trade activation reuse against grid parallelism. Two N8
 // tiles per block keeps one staged K32 stripe shared by adjacent outputs while
 // providing enough blocks to fill the H200's 132 SMs.
-constexpr int kHopperWmmaOutputTiles = 8;
+constexpr int kHopperWmmaOutputTiles = 4;
 
 struct QvqCudaDeviceConfig {
   int major;
