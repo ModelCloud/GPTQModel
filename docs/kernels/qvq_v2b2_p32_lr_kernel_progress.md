@@ -93,6 +93,7 @@ tables below every row was intentionally measured at M=16.
 | `f24b2227` uncommitted A/B | H200, W3 gate/up | Reuse the merged W3.5-M1 producer-lane permutation for W3 N64 while preserving the stride-40 shared layout and `ldmatrix` addresses | Accurate, but scattered global activation fetches raised M1-M16 from 0.0316-0.0324 to 0.0322-0.0335 ms (1.6-3.3%) | rejected; source restored before next experiment |
 | `1e15b299` uncommitted A/B | H200, W3 gate/up | Sweep split 1/2/4/8 after the read-only level-table change, then set automatic split-1 for an exact CUDA Graph replay | The direct-event diagnostic favored split-1, but the production contract regressed 17-20% to 0.0378-0.0390 ms; split-2's second CTA wave remains necessary | rejected; source restored before next experiment |
 | `11f7f40b` | H200, W3 K/V | Lower the Hopper cooperative dispatch threshold from N2,048 to N512 for every rate, reusing the native-N8 TB6 kernel | K/V M1-M16 fell from 0.0207-0.0244 to 0.01142-0.01165 ms (1.81-2.09x) and reached 1.246-1.306x Machete; 108 CUDA tests passed | accepted and pushed |
+| `ff1a439a` | H200, W3 K/V | Retune automatic split-K after N512 entered the cooperative kernel: 16 base CTAs x split 16 supplies two complete H200 waves instead of one | Exact CUDA Graph A/B across M1/M2/M4/M8/M16 improved 4.4-5.0% versus split 8, with auto matching explicit split 16 and worst max error 6.68e-06 | accepted and pushed |
 | `1f834abf` | H100, W2-W3.5 gate/up M1-M16 | Remove the trailing warp barrier after each private decoded-weight tile; the next uniform warp iteration cannot overwrite shared storage before the prior loads complete | All 20 CUDA-event rows improved to 0.0309-0.0357 ms; 80/80 Hopper correctness cases passed across FP16/FP32 output and split-1/split-3 | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
@@ -481,6 +482,21 @@ are 0.011424/0.011440/0.011504/0.011632/0.011648 ms, respectively, with worst
 max error 1.05e-05. This is 1.81-2.09x faster than the preceding scalar rows
 and 1.246-1.306x the matched Machete W4 throughput. The full W3 matrix remained
 accuracy-clean and the exact-head CUDA suite passed 108/108 cases.
+
+Because that dispatch change replaced the scalar N512 kernel, its old split
+sweep no longer described production. A CUDA Graph sweep at commit `3f8b7043`
+tested split 1/2/4/8/16 for every M1-M16 row. Split 16 was fastest in all five
+rows. Commit `ff1a439a` therefore changes only automatic Hopper W3
+K2,048/N512 dispatch from split 8 to split 16. The modified-source validation
+measured automatic medians of 0.011264/0.011312/0.011264/0.011440/0.011520 ms;
+forced split 8 measured 0.011760/0.011808/0.011824/0.012016/0.012048 ms in the
+same run. Automatic and explicit split 16 agree within timing variance, all
+five rows are 4.4-5.0% faster than split 8, and worst max error is 6.68e-06.
+The exact merged-head `2c56f0d5` QVQ/Marlin/Machete CUDA Graph run, which also
+includes the accepted trailing-barrier removal, measures W3 K/V at
+0.010592/0.010512/0.010544/0.010624/0.010832 ms for M1/M2/M4/M8/M16. These
+rows sustain 36.68-37.80 GB/s of effective compressed-payload bandwidth and
+reach 1.367/1.428/1.411/1.364/1.387x Machete W4, with worst max error 6.68e-06.
 
 ### H100 same-CC regression
 
