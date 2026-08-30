@@ -1269,9 +1269,18 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kInputStride];
-  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kDecodedColumns];
   __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kOutputColumns];
-  __shared__ __align__(16) float cluster_partial[kOutputTiles][32][4];
+  // Decoded B fragments are dead before the clustered split-K epilogue starts.
+  // Overlay both equally sized buffers so a later bank-aware level layout can
+  // use the recovered shared memory without increasing the CTA footprint.
+  union __align__(16) HopperScratch {
+    half decoded_weight[kOutputTiles][kLocalRingTileRows * kDecodedColumns];
+    float cluster_partial[kOutputTiles][32][4];
+  };
+  __shared__ HopperScratch hopper_scratch;
+  half (&decoded_weight)[kOutputTiles][kLocalRingTileRows * kDecodedColumns] =
+      hopper_scratch.decoded_weight;
+  float (&cluster_partial)[kOutputTiles][32][4] = hopper_scratch.cluster_partial;
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
