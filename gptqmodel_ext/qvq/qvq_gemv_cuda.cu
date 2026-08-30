@@ -1284,6 +1284,14 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
   const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
   const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
+  // V2B2/P32 selectors contain one bit per local ring.  For W3, resolve the
+  // launch-uniform alternate-bank id once instead of indexing the four-entry
+  // mask table independently in every lane for every K32 tile.
+  uint32_t w3_alt_bank_mask = 0;
+  if constexpr (kTransitionBits == 6) {
+    w3_alt_bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
+        static_cast<uint32_t>(bank_alt_id));
+  }
 
   if constexpr (!kReadLevelsFromGlobal) {
     for (int index = thread; index < kPgc16LevelCount; index += kWmmaThreads) {
@@ -1468,9 +1476,15 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
               (source_pack >> (pack_index * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
           state = ((state << kTransitionBits) | transition) & 0xffffu;
         }
-        const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
-            static_cast<uint32_t>(bank_alt_id);
-        const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
+        const uint32_t bank_bit =
+            (static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u;
+        uint32_t bank_mask;
+        if constexpr (kTransitionBits == 6) {
+          bank_mask = (0u - bank_bit) & w3_alt_bank_mask;
+        } else {
+          bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
+              bank_bit * static_cast<uint32_t>(bank_alt_id));
+        }
         uint32_t decoded_pairs[4] = {};
         if constexpr (kTransitionBits == 6) {
           uint32_t mixed_indices[4] = {};
