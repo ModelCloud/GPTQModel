@@ -1226,7 +1226,7 @@ __device__ __forceinline__ void qvq_mma_m16n8k16(
 // recurrence, and consumes the decoded FP16 weights through native N8 MMA.
 // The scalar LR kernel remains the
 // fallback for other rates, row counts, dtypes, and unaligned views.
-template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles>
+template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles, bool PermuteInputStaging = false>
 __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -1241,6 +1241,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int bank_alt_id) {
   constexpr int kTransitionBits = TransitionBits;
   static_assert(kTransitionBits >= 4 && kTransitionBits <= 7);
+  static_assert(!PermuteInputStaging || kTransitionBits == 7);
   constexpr int kRows = 16;
   constexpr int kBatchTiles = OutputTiles >= 8 ? 16 : 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
@@ -1329,8 +1330,20 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     for (int index = thread; index < input_vec_total; index += kWmmaThreads) {
       const int u = index / (kRows * input_vecs_per_row);
       const int cell = index - u * (kRows * input_vecs_per_row);
-      const int row = cell / input_vecs_per_row;
-      const int vec = cell - row * input_vecs_per_row;
+      int row;
+      int vec;
+      if constexpr (PermuteInputStaging) {
+        // Preserve the padded row-major tile while assigning each eight-lane
+        // store transaction one chunk from every shared-bank group. The
+        // logical source set is unchanged; only producer-lane ownership is
+        // permuted, so the native matrix-load addresses need no change.
+        const int lane_cell = index & 31;
+        vec = lane_cell >> 3;
+        row = ((cell >> 5) << 3) + ((5 * ((lane_cell & 7) - vec)) & 7);
+      } else {
+        row = cell / input_vecs_per_row;
+        vec = cell - row * input_vecs_per_row;
+      }
       input4[(u * kRows + row) * staged_vecs_per_row + vec] = row < block_rows
           ? input4_base[
                 ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) * sizeof(half) / 16) +
@@ -2066,7 +2079,12 @@ void launch_qvq_local_ring_gemv_impl(
   }
 }
 
-template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles = kHopperWmmaOutputTiles>
+template <
+    int TransitionBits,
+    typename OutputScalar,
+    bool SplitK,
+    int OutputTiles = kHopperWmmaOutputTiles,
+    bool PermuteInputStaging = false>
 void launch_qvq_local_ring_wmma_hopper(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -2087,7 +2105,8 @@ void launch_qvq_local_ring_wmma_hopper(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_kernel<TransitionBits, OutputScalar, SplitK, OutputTiles>
+  qvq_gemv_local_ring_wmma_hopper_kernel<
+      TransitionBits, OutputScalar, SplitK, OutputTiles, PermuteInputStaging>
       <<<grid, OutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
@@ -2142,7 +2161,12 @@ void launch_qvq_local_ring_wmma_hopper_dispatch(
       }
       break;
     case 7:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(7, 4);
+      if (input.size(0) == 1) {
+        launch_qvq_local_ring_wmma_hopper<7, OutputScalar, SplitK, 4, true>(
+            input, trellis, bank_ids, levels, partial_output, output, split_count, bank_alt_id, stream);
+      } else {
+        QVQ_LR_LAUNCH_HOPPER_WMMA(7, 4);
+      }
       break;
     default:
       TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 7]");
