@@ -1186,7 +1186,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int bank_alt_id) {
   constexpr int kTransitionBits = 6;
   constexpr int kRows = 16;
-  constexpr int kBatchTiles = 16;
+  constexpr int kBatchTiles = 32;
   constexpr int kWmmaThreads = OutputTiles * 32;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
