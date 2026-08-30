@@ -1279,9 +1279,9 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       if (row < block_rows) {
         __pipeline_memcpy_async(
             input4 + index,
-            input4_base[
+            input4_base +
                 ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) * sizeof(half) / 16) +
-                vec],
+                vec,
             16);
       } else {
         input4[index] = make_uint4(0u, 0u, 0u, 0u);
