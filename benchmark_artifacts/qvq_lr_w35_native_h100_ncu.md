@@ -35,3 +35,23 @@ shortens the profiled duration by 1.9%. It costs four registers per thread but
 does not change static shared memory or the shared-store conflict count. The
 formal CUDA-event canary independently improved from 0.0384 ms to 0.0367 ms
 before the merge and measured 0.0370 ms after the merge.
+
+## M=1 activation-staging specialization
+
+Instruction-level attribution showed that the 131,072 shared-store conflicts
+came from activation-tile staging, not the decoded-weight vector store. The
+accepted M=1 specialization permutes producer-lane ownership so every
+eight-lane 128-bit store transaction covers all shared-bank groups once. It
+preserves both the logical source set and the padded matrix-load layout.
+
+| Variant | M | Executed instructions | Registers/thread | Static shared KiB | Shared-load conflicts | Shared-store conflicts | Issue active | Active warps | NCU duration us | Better than last |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
+| Fixed plane spreading | 16 | 16,277,504 | 96 | 46.18 | 935,149 | 131,072 | 43.86% | 12.05% | 39.10 | no |
+| M=1 bank-complete staging | 1 | 16,091,136 | 92 | 46.18 | 935,244 | 0 | 44.44% | 12.09% | 37.60 | yes |
+
+The instruction totals and profiler durations also include the different live
+output-row counts, so they are not an isolated M=1-versus-M=16 speed ratio.
+The mechanism result is exact: Nsight Compute reports no conflicted shared
+stores for the specialized kernel, while the random level-table load conflicts
+remain. The merged CUDA-event benchmark measured 0.0360 ms at M=1 versus the
+0.0377 ms pre-specialization production result.
