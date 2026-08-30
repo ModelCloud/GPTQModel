@@ -1,0 +1,1334 @@
+{
+  "results": {
+    "2": {
+      "v2b2-p32": {
+        "bank_selectors": {
+          "count": 1900544,
+          "entropy_bits": 0.9999956967221282,
+          "histogram": [
+            952593,
+            947951,
+            0,
+            0
+          ],
+          "nonzero_fraction": 0.49877877070985993,
+          "selector_bpw": 0.03125
+        },
+        "diagnostic_detail": "primary",
+        "diagnostic_device": "cuda",
+        "diagnostic_streams": 1,
+        "divergence_300": {
+          "eos_policy": "EOS is an ordinary token; exactly token_horizon argmax steps",
+          "protocol": "independent_greedy_rollout",
+          "requested_sequences": 0,
+          "token_horizon": 32,
+          "valid_sequences": 0
+        },
+        "effective_bpw": 2.03125,
+        "evaluation_telemetry": {
+          "gpu_phase_ms": {
+            "dense_forward": 88.68812870979309,
+            "layer_metrics": 5.398303925991058,
+            "live_metrics": 5.635744094848633,
+            "local_metrics": 17.974303781986237,
+            "local_replay": 7.471807971596718,
+            "logit_metrics": 11.280416011810303,
+            "quantized_forward": 10.36246395111084
+          },
+          "materialization_seconds": 0.00031375500111607835,
+          "progress_sync_seconds": 0.0,
+          "rows": 8,
+          "valid_tokens": 983,
+          "wall_seconds": 0.14746796400140738
+        },
+        "hessian_mode": "dense-frozen",
+        "layers": {
+          "0": {
+            "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+            "bias": -2.2050312589730837e-05,
+            "cosine": 0.9935996644765898,
+            "error_std": 0.009076180020502088,
+            "finite": true,
+            "kl_forward": {
+              "max": 0.29834336042404175,
+              "mean": 0.03862895750734538,
+              "p50": 0.024454456614756755,
+              "p95": 0.11841036443004531,
+              "p99": 0.1712137218470006
+            },
+            "mae": 0.006501671120528907,
+            "max_abs_error": 0.3125,
+            "norm_ratio": 0.9832959238481376,
+            "pearson": 0.9935994633974071,
+            "relative_l2": 0.11224626923138484,
+            "rmse": 0.009076252416409327,
+            "shape": [
+              983,
+              2048
+            ],
+            "sign_agreement": 0.9103291105035606,
+            "sqnr_db": 19.08589558918983,
+            "streamed_rows": 983
+          }
+        },
+        "live_modules": {
+          "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+          "bias": 0.0005874680372775303,
+          "cosine": 0.9977811625452847,
+          "error_std": 0.04086629255234226,
+          "finite": true,
+          "kl_forward": {
+            "max": 0.07561790198087692,
+            "mean": 0.00505482190043791,
+            "p50": 0.0007539011238641196,
+            "p95": 0.02671171396606936,
+            "p99": 0.03659635669687272
+          },
+          "mae": 0.026707115544279767,
+          "max_abs_error": 0.701171875,
+          "norm_ratio": 0.994814206228333,
+          "pearson": 0.9977797854348742,
+          "relative_l2": 0.0658941562268208,
+          "rmse": 0.04087085713392402,
+          "shape": [
+            983,
+            23552
+          ],
+          "sign_agreement": 0.9241677125259852,
+          "sqnr_db": 23.722588994792552,
+          "streamed_rows": 983
+        },
+        "local_modules": {
+          "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+          "bias": 8.721638912423754e-05,
+          "cosine": 0.9982299990433462,
+          "error_std": 0.03644012578873559,
+          "finite": true,
+          "kl_forward": {
+            "max": 0.07517600804567337,
+            "mean": 0.005065378548622038,
+            "p50": 0.0007925975218885185,
+            "p95": 0.026612076946247145,
+            "p99": 0.036897488514440836
+          },
+          "mae": 0.02234867576376621,
+          "max_abs_error": 0.5874652862548828,
+          "norm_ratio": 0.995010573067301,
+          "pearson": 0.9982285604119718,
+          "relative_l2": 0.05875429956271605,
+          "rmse": 0.03644027699815013,
+          "shape": [
+            983,
+            23552
+          ],
+          "sign_agreement": 0.9415360465550223,
+          "sqnr_db": 24.73800808908024,
+          "streamed_rows": 983
+        },
+        "logits": {
+          "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+          "bias": -0.050676142038847266,
+          "cosine": 0.9729930986323039,
+          "error_std": 0.5597706840367941,
+          "finite": true,
+          "kl_forward": {
+            "max": 1.6942353248596191,
+            "mean": 0.009550596910883396,
+            "p50": 4.979170372888222e-05,
+            "p95": 0.01449469903802323,
+            "p99": 0.33573845858067003
+          },
+          "mae": 0.4116284572364137,
+          "max_abs_error": 8.65625,
+          "norm_ratio": 1.0117242996248632,
+          "pearson": 0.9652556193578402,
+          "relative_l2": 0.2321730553522175,
+          "rmse": 0.5635593096282566,
+          "shape": [
+            983,
+            128256
+          ],
+          "sign_agreement": 0.931173139796196,
+          "sqnr_db": 12.768569611457636,
+          "streamed_rows": 983
+        },
+        "mlp_acceptance": {
+          "enabled": false
+        },
+        "mlp_effective_bpw": null,
+        "mlp_effective_bpw_by_role": {
+          "down": 2.03125,
+          "gate_up": 2.03125
+        },
+        "mlp_target_resolution": null,
+        "module_alternative_bank_histogram": [
+          0,
+          2,
+          3,
+          2
+        ],
+        "nominal_codec_bpw": 2.03125,
+        "quantization_stages": [
+          {
+            "modules": [
+              "model.layers.0.self_attn.q_proj",
+              "model.layers.0.self_attn.k_proj",
+              "model.layers.0.self_attn.v_proj",
+              "model.layers.0.self_attn.o_proj",
+              "model.layers.0.mlp.gate_proj",
+              "model.layers.0.mlp.up_proj",
+              "model.layers.0.mlp.down_proj"
+            ],
+            "name": "dense_frozen",
+            "sample_counts": {
+              "model.layers.0.mlp.down_proj": 4045,
+              "model.layers.0.mlp.gate_proj": 4045,
+              "model.layers.0.mlp.up_proj": 4045,
+              "model.layers.0.self_attn.k_proj": 4045,
+              "model.layers.0.self_attn.o_proj": 4045,
+              "model.layers.0.self_attn.q_proj": 4045,
+              "model.layers.0.self_attn.v_proj": 4045
+            },
+            "seconds": 16.24334762900253,
+            "yaqa_sketch_b": null
+          }
+        ],
+        "qvq_telemetry": {
+          "counters": {
+            "input_features": 20480,
+            "native_viterbi_launches": 2560,
+            "output_features": 23552,
+            "packed_roundtrip_verifications": 7,
+            "tail_biting_chunks": 1280,
+            "v2_banked_family_chunks": 1280,
+            "viterbi_exact_reuse_candidates": 0,
+            "viterbi_family_grid_calls": 2560,
+            "viterbi_family_grid_sequences": 1425408,
+            "viterbi_family_state_steps": 182452224,
+            "viterbi_logical_solve_ids": 2560,
+            "viterbi_provisional_losses_discarded": 712704,
+            "viterbi_provisional_selectors_discarded": 5701632,
+            "viterbi_provisional_states_consumed": 712704,
+            "viterbi_provisional_states_produced": 91226112,
+            "viterbi_pruning_configured": 7,
+            "viterbi_pruning_exact": 7,
+            "viterbi_pruning_fallback_baseline": 7,
+            "viterbi_pruning_mode_auto": 7,
+            "viterbi_pruning_strategy_norm_band": 7,
+            "viterbi_recurrence_passes": 5120,
+            "viterbi_reselection_revisits": 0,
+            "viterbi_unique_logical_solve_ids": 2560,
+            "weight_elements": 60817408
+          },
+          "phases": {
+            "baseline_encode": {
+              "calls": 7,
+              "gpu_ms": 15098.684387207031,
+              "host_dispatch_ms": 15105.368058008025
+            },
+            "block_ldl_factor": {
+              "calls": 7,
+              "gpu_ms": 44.56662346771918,
+              "host_dispatch_ms": 44.513222004752606
+            },
+            "block_ldl_feedback": {
+              "calls": 1280,
+              "gpu_ms": 60.029247576370835,
+              "host_dispatch_ms": 133.9220708105131
+            },
+            "block_ldl_reconstruct": {
+              "calls": 1280,
+              "gpu_ms": 31.068256000056863,
+              "host_dispatch_ms": 121.27611492178403
+            },
+            "block_ldl_setup": {
+              "calls": 7,
+              "gpu_ms": 0.5082880035042763,
+              "host_dispatch_ms": 0.27130599482916296
+            },
+            "block_ldl_v2_banked": {
+              "calls": 1280,
+              "gpu_ms": 8802.032486200333,
+              "host_dispatch_ms": 3419.010656820319
+            },
+            "block_ldl_viterbi": {
+              "calls": 1280,
+              "gpu_ms": 5954.591910362244,
+              "host_dispatch_ms": 5646.097123062646
+            },
+            "candidate_reconstruct_proxy": {
+              "calls": 7,
+              "gpu_ms": 31.151392102241516,
+              "host_dispatch_ms": 30.951249005738646
+            },
+            "codebook": {
+              "calls": 7,
+              "gpu_ms": 46.602494318271056,
+              "host_dispatch_ms": 46.492694003973156
+            },
+            "pack_trellis": {
+              "calls": 7,
+              "gpu_ms": 59.89459067583084,
+              "host_dispatch_ms": 59.649939998053014
+            },
+            "rht_hessian": {
+              "calls": 7,
+              "gpu_ms": 22.64185587503016,
+              "host_dispatch_ms": 26.687247001973446
+            },
+            "rht_weight": {
+              "calls": 7,
+              "gpu_ms": 21.311232328414917,
+              "host_dispatch_ms": 9.575567994033918
+            }
+          }
+        },
+        "rounding": "block_ldlq",
+        "seconds": 16.446415375998185,
+        "selected_storage": {
+          "dense_fallback_parameter_fraction": 0.0,
+          "dense_fallback_parameters": 0,
+          "quantized_parameter_fraction": 1.0,
+          "quantized_parameters": 60817408,
+          "selected_effective_bpw": 2.03125,
+          "target_parameters": 60817408
+        },
+        "trellis_batch_size": 512,
+        "weight": {
+          "mean_mse": 8.788258479593921e-05,
+          "mean_relative_l2": 0.35987496686697057,
+          "modules": {
+            "model.layers.0.mlp.down_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 2.904304150118625e-05,
+              "parameter_count": 16777216,
+              "proxy_loss": 0.004939463455229998,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 8192,
+                  "native_viterbi_launches": 1024,
+                  "output_features": 2048,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 512,
+                  "v2_banked_family_chunks": 512,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 1024,
+                  "viterbi_family_grid_sequences": 393216,
+                  "viterbi_family_state_steps": 50331648,
+                  "viterbi_logical_solve_ids": 1024,
+                  "viterbi_provisional_losses_discarded": 196608,
+                  "viterbi_provisional_selectors_discarded": 1572864,
+                  "viterbi_provisional_states_consumed": 196608,
+                  "viterbi_provisional_states_produced": 25165824,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 2048,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 1024,
+                  "weight_elements": 16777216
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 4245.94873046875,
+                    "host_dispatch_ms": 4245.857087000331
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 34.86454391479492,
+                    "host_dispatch_ms": 34.88533200288657
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 512,
+                    "gpu_ms": 21.17830402124673,
+                    "host_dispatch_ms": 37.99931891262531
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 512,
+                    "gpu_ms": 12.45929598249495,
+                    "host_dispatch_ms": 36.463212039961945
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.09567999839782715,
+                    "host_dispatch_ms": 0.02872299955924973
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 512,
+                    "gpu_ms": 2483.680160999298,
+                    "host_dispatch_ms": 1173.3714590154705
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 512,
+                    "gpu_ms": 1607.4796478748322,
+                    "host_dispatch_ms": 1526.7647191067226
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 10.874591827392578,
+                    "host_dispatch_ms": 10.85181899543386
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.01532800029963255,
+                    "host_dispatch_ms": 0.007333001121878624
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 5.796512126922607,
+                    "host_dispatch_ms": 5.767720002040733
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 21.24847984313965,
+                    "host_dispatch_ms": 25.3223239997169
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 5.293407917022705,
+                    "host_dispatch_ms": 1.1638450014288537
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 2560,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.31501394574647607,
+              "shape": [
+                2048,
+                8192
+              ],
+              "sqnr_db": 10.033404389180951,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.mlp.gate_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 5.452005546453592e-05,
+              "parameter_count": 16777216,
+              "proxy_loss": 1.8975661993026733,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "native_viterbi_launches": 256,
+                  "output_features": 8192,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 128,
+                  "v2_banked_family_chunks": 128,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 256,
+                  "viterbi_family_grid_sequences": 393216,
+                  "viterbi_family_state_steps": 50331648,
+                  "viterbi_logical_solve_ids": 256,
+                  "viterbi_provisional_losses_discarded": 196608,
+                  "viterbi_provisional_selectors_discarded": 1572864,
+                  "viterbi_provisional_states_consumed": 196608,
+                  "viterbi_provisional_states_produced": 25165824,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 512,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 256,
+                  "weight_elements": 16777216
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 3621.362548828125,
+                    "host_dispatch_ms": 3624.958182001137
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 0.0027199999894946814,
+                    "host_dispatch_ms": 0.0012279997463338077
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 128,
+                    "gpu_ms": 6.010655992664397,
+                    "host_dispatch_ms": 16.013564963941462
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 128,
+                    "gpu_ms": 3.323904000222683,
+                    "host_dispatch_ms": 15.843431021494325
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.1019200012087822,
+                    "host_dispatch_ms": 0.036577999708242714
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 128,
+                    "gpu_ms": 2316.526563644409,
+                    "host_dispatch_ms": 828.1808409446967
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 128,
+                    "gpu_ms": 1264.9075231552124,
+                    "host_dispatch_ms": 1221.4664399798494
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 7.0660481452941895,
+                    "host_dispatch_ms": 7.009294000454247
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.0027520000003278255,
+                    "host_dispatch_ms": 0.008795999747235328
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 5.9020161628723145,
+                    "host_dispatch_ms": 5.832679999002721
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 0.0027199999894946814,
+                    "host_dispatch_ms": 0.011541000276338309
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 5.332320213317871,
+                    "host_dispatch_ms": 1.5130909960134886
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 1280,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.3825356305410559,
+              "shape": [
+                8192,
+                2048
+              ],
+              "sqnr_db": 8.346562142145014,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.mlp.up_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 4.3230986827520894e-05,
+              "parameter_count": 16777216,
+              "proxy_loss": 1.4936292171478271,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "native_viterbi_launches": 256,
+                  "output_features": 8192,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 128,
+                  "v2_banked_family_chunks": 128,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 256,
+                  "viterbi_family_grid_sequences": 393216,
+                  "viterbi_family_state_steps": 50331648,
+                  "viterbi_logical_solve_ids": 256,
+                  "viterbi_provisional_losses_discarded": 196608,
+                  "viterbi_provisional_selectors_discarded": 1572864,
+                  "viterbi_provisional_states_consumed": 196608,
+                  "viterbi_provisional_states_produced": 25165824,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 512,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 256,
+                  "weight_elements": 16777216
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 3615.72265625,
+                    "host_dispatch_ms": 3619.097424001666
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 0.0029440000653266907,
+                    "host_dispatch_ms": 0.0011279989848844707
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 128,
+                    "gpu_ms": 6.051295990124345,
+                    "host_dispatch_ms": 12.895502950414084
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 128,
+                    "gpu_ms": 3.3266559969633818,
+                    "host_dispatch_ms": 15.60705996962497
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.10400000214576721,
+                    "host_dispatch_ms": 0.049198999477084726
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 128,
+                    "gpu_ms": 2316.057191848755,
+                    "host_dispatch_ms": 841.0945999348769
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 128,
+                    "gpu_ms": 1259.9297313690186,
+                    "host_dispatch_ms": 1220.3476909926394
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 6.939743995666504,
+                    "host_dispatch_ms": 6.918543003848754
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.002976000076159835,
+                    "host_dispatch_ms": 0.011785996321123093
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 5.794623851776123,
+                    "host_dispatch_ms": 5.7634190015960485
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 0.002655999967828393,
+                    "host_dispatch_ms": 0.02130600478267297
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 5.377600193023682,
+                    "host_dispatch_ms": 1.7177190020447597
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 1536,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.3818655899744724,
+              "shape": [
+                8192,
+                2048
+              ],
+              "sqnr_db": 8.361789485453077,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.k_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 0.0002864195371584776,
+              "parameter_count": 1048576,
+              "proxy_loss": 0.6560246348381042,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "native_viterbi_launches": 256,
+                  "output_features": 512,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 128,
+                  "v2_banked_family_chunks": 128,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 256,
+                  "viterbi_family_grid_sequences": 24576,
+                  "viterbi_family_state_steps": 3145728,
+                  "viterbi_logical_solve_ids": 256,
+                  "viterbi_provisional_losses_discarded": 12288,
+                  "viterbi_provisional_selectors_discarded": 98304,
+                  "viterbi_provisional_states_consumed": 12288,
+                  "viterbi_provisional_states_produced": 1572864,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 512,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 256,
+                  "weight_elements": 1048576
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 658.505126953125,
+                    "host_dispatch_ms": 658.4635830004117
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 0.016607999801635742,
+                    "host_dispatch_ms": 0.0012730015441775322
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 128,
+                    "gpu_ms": 2.354176003485918,
+                    "host_dispatch_ms": 12.168954955996014
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 128,
+                    "gpu_ms": 2.8592000138014555,
+                    "host_dispatch_ms": 12.115110977902077
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.05087999999523163,
+                    "host_dispatch_ms": 0.03889700019499287
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 128,
+                    "gpu_ms": 223.33433616161346,
+                    "host_dispatch_ms": 73.78695097577292
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 128,
+                    "gpu_ms": 419.0175988674164,
+                    "host_dispatch_ms": 385.4975640642806
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.3885120153427124,
+                    "host_dispatch_ms": 1.3629360037157312
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.019936000928282738,
+                    "host_dispatch_ms": 0.010373005352448672
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 0.9518399834632874,
+                    "host_dispatch_ms": 0.9264079999411479
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 0.031968001276254654,
+                    "host_dispatch_ms": 0.020578998373821378
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.2429440021514893,
+                    "host_dispatch_ms": 1.216147000377532
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 512,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.3621968128022398,
+              "shape": [
+                512,
+                2048
+              ],
+              "sqnr_db": 8.821107512713649,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.o_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 1.6797342618333686e-05,
+              "parameter_count": 4194304,
+              "proxy_loss": 0.0018482068553566933,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "native_viterbi_launches": 256,
+                  "output_features": 2048,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 128,
+                  "v2_banked_family_chunks": 128,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 256,
+                  "viterbi_family_grid_sequences": 98304,
+                  "viterbi_family_state_steps": 12582912,
+                  "viterbi_logical_solve_ids": 256,
+                  "viterbi_provisional_losses_discarded": 49152,
+                  "viterbi_provisional_selectors_discarded": 393216,
+                  "viterbi_provisional_states_consumed": 49152,
+                  "viterbi_provisional_states_produced": 6291456,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 512,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 256,
+                  "weight_elements": 4194304
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 1070.8206787109375,
+                    "host_dispatch_ms": 1070.7712810035446
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 9.644895553588867,
+                    "host_dispatch_ms": 9.618932999728713
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 128,
+                    "gpu_ms": 3.0215999968349934,
+                    "host_dispatch_ms": 9.714710031403229
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 128,
+                    "gpu_ms": 3.1189760006964207,
+                    "host_dispatch_ms": 12.00401898677228
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.0432640016078949,
+                    "host_dispatch_ms": 0.03176600148435682
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 128,
+                    "gpu_ms": 620.8224606513977,
+                    "host_dispatch_ms": 217.44979400682496
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 128,
+                    "gpu_ms": 429.3527686595917,
+                    "host_dispatch_ms": 399.70650601026136
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.757472038269043,
+                    "host_dispatch_ms": 1.7329839974991046
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.018751999363303185,
+                    "host_dispatch_ms": 0.008618997526355088
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 1.822432041168213,
+                    "host_dispatch_ms": 1.7978389951167628
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 1.300320029258728,
+                    "host_dispatch_ms": 1.2799699979950674
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.3426560163497925,
+                    "host_dispatch_ms": 1.3127669953973964
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 1024,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.3571678243567309,
+              "shape": [
+                2048,
+                2048
+              ],
+              "sqnr_db": 8.942553433168069,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.q_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 0.00017462340718958183,
+              "parameter_count": 4194304,
+              "proxy_loss": 1.8509204387664795,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "native_viterbi_launches": 256,
+                  "output_features": 2048,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 128,
+                  "v2_banked_family_chunks": 128,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 256,
+                  "viterbi_family_grid_sequences": 98304,
+                  "viterbi_family_state_steps": 12582912,
+                  "viterbi_logical_solve_ids": 256,
+                  "viterbi_provisional_losses_discarded": 49152,
+                  "viterbi_provisional_selectors_discarded": 393216,
+                  "viterbi_provisional_states_consumed": 49152,
+                  "viterbi_provisional_states_produced": 6291456,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 512,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 256,
+                  "weight_elements": 4194304
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 1227.146728515625,
+                    "host_dispatch_ms": 1227.0899520008243
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 0.0244159996509552,
+                    "host_dispatch_ms": 0.00415400427300483
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 128,
+                    "gpu_ms": 19.088671575300395,
+                    "host_dispatch_ms": 35.0689949846128
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 128,
+                    "gpu_ms": 3.154976001009345,
+                    "host_dispatch_ms": 17.221049944055267
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.06831999868154526,
+                    "host_dispatch_ms": 0.05264399806037545
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 128,
+                    "gpu_ms": 617.9319005012512,
+                    "host_dispatch_ms": 209.7888999269344
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 128,
+                    "gpu_ms": 554.4625606536865,
+                    "host_dispatch_ms": 504.01492194941966
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.769152045249939,
+                    "host_dispatch_ms": 1.7434330002288334
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 46.525726318359375,
+                    "host_dispatch_ms": 46.43760500039207
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 38.70844650268555,
+                    "host_dispatch_ms": 38.66712099988945
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 0.03248000144958496,
+                    "host_dispatch_ms": 0.018703001842368394
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.5006719827651978,
+                    "host_dispatch_ms": 1.4561650023097172
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 256,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.36649684918333086,
+              "shape": [
+                2048,
+                2048
+              ],
+              "sqnr_db": 8.718595093754471,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.v_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 1.0543722811938392e-05,
+              "parameter_count": 1048576,
+              "proxy_loss": 0.020752690732479095,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "native_viterbi_launches": 256,
+                  "output_features": 512,
+                  "packed_roundtrip_verifications": 1,
+                  "tail_biting_chunks": 128,
+                  "v2_banked_family_chunks": 128,
+                  "viterbi_exact_reuse_candidates": 0,
+                  "viterbi_family_grid_calls": 256,
+                  "viterbi_family_grid_sequences": 24576,
+                  "viterbi_family_state_steps": 3145728,
+                  "viterbi_logical_solve_ids": 256,
+                  "viterbi_provisional_losses_discarded": 12288,
+                  "viterbi_provisional_selectors_discarded": 98304,
+                  "viterbi_provisional_states_consumed": 12288,
+                  "viterbi_provisional_states_produced": 1572864,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "viterbi_recurrence_passes": 512,
+                  "viterbi_reselection_revisits": 0,
+                  "viterbi_unique_logical_solve_ids": 256,
+                  "weight_elements": 1048576
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 659.1779174804688,
+                    "host_dispatch_ms": 659.1305490001105
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 0.010495999827980995,
+                    "host_dispatch_ms": 0.0011739975889213383
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 128,
+                    "gpu_ms": 2.3245439967140555,
+                    "host_dispatch_ms": 10.061024011520203
+                  },
+                  "block_ldl_reconstruct": {
+                    "calls": 128,
+                    "gpu_ms": 2.8252480048686266,
+                    "host_dispatch_ms": 12.022231981973164
+                  },
+                  "block_ldl_setup": {
+                    "calls": 1,
+                    "gpu_ms": 0.044224001467227936,
+                    "host_dispatch_ms": 0.03349899634486064
+                  },
+                  "block_ldl_v2_banked": {
+                    "calls": 128,
+                    "gpu_ms": 223.6798723936081,
+                    "host_dispatch_ms": 75.33811201574281
+                  },
+                  "block_ldl_viterbi": {
+                    "calls": 128,
+                    "gpu_ms": 419.44207978248596,
+                    "host_dispatch_ms": 388.2992809594725
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.3558720350265503,
+                    "host_dispatch_ms": 1.3322400045581162
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.017023999243974686,
+                    "host_dispatch_ms": 0.008182003512047231
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 0.918720006942749,
+                    "host_dispatch_ms": 0.894753000466153
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 0.023231999948620796,
+                    "host_dispatch_ms": 0.01282399898627773
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.2216320037841797,
+                    "host_dispatch_ms": 1.19583399646217
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 768,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.3538481154644883,
+              "shape": [
+                512,
+                2048
+              ],
+              "sqnr_db": 9.02366226063769,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "settings": {
+    "all_linear_hessian_mode": "dense-frozen",
+    "arms": [
+      "v2b2-p32",
+      "v2b2-p32-lr"
+    ],
+    "calibration": {
+      "batch_size": 1,
+      "concat_size": null,
+      "dataset_config": "LLM",
+      "dataset_path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "padded_tokens_excluded": 0,
+      "prepared_batches": 8,
+      "prepared_sequences": 8,
+      "source_rows": 8,
+      "valid_tokens": 4045
+    },
+    "calibration_execution": "independent full rows; batch=1; no sequence concatenation",
+    "calibration_hessian_capture": "one dense-frozen model replay",
+    "calibration_samples": {
+      "model.layers.0.mlp.down_proj": 4045,
+      "model.layers.0.mlp.gate_proj": 4045,
+      "model.layers.0.mlp.up_proj": 4045,
+      "model.layers.0.self_attn.k_proj": 4045,
+      "model.layers.0.self_attn.o_proj": 4045,
+      "model.layers.0.self_attn.q_proj": 4045,
+      "model.layers.0.self_attn.v_proj": 4045
+    },
+    "device": "cuda",
+    "evaluation": {
+      "dataset_config": "LLM",
+      "dataset_path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "max_length": 128,
+      "padded_tokens_excluded": 41,
+      "row_end_exclusive": 16,
+      "row_start": 8,
+      "source_rows": 8,
+      "valid_tokens": 983
+    },
+    "evaluation_batch_size": 1,
+    "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
+    "mlp_acceptance": null,
+    "mlp_acceptance_contract": "disabled",
+    "mlp_acceptance_execution": "auto",
+    "mlp_acceptance_kl_regression_limit": 0.05,
+    "mlp_acceptance_topn_regression_limit": 0.05,
+    "mlp_codec": "same",
+    "mlp_down_rate": null,
+    "mlp_gate_up_rate": null,
+    "mlp_rate": null,
+    "mlp_rate_ladder": [],
+    "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+    "module_scope": "all-linear",
+    "module_shapes": {
+      "model.layers.0.mlp.down_proj": [
+        2048,
+        8192
+      ],
+      "model.layers.0.mlp.gate_proj": [
+        8192,
+        2048
+      ],
+      "model.layers.0.mlp.up_proj": [
+        8192,
+        2048
+      ],
+      "model.layers.0.self_attn.k_proj": [
+        512,
+        2048
+      ],
+      "model.layers.0.self_attn.o_proj": [
+        2048,
+        2048
+      ],
+      "model.layers.0.self_attn.q_proj": [
+        2048,
+        2048
+      ],
+      "model.layers.0.self_attn.v_proj": [
+        512,
+        2048
+      ]
+    },
+    "modules": [
+      "model.layers.0.self_attn.q_proj",
+      "model.layers.0.self_attn.k_proj",
+      "model.layers.0.self_attn.v_proj",
+      "model.layers.0.self_attn.o_proj",
+      "model.layers.0.mlp.gate_proj",
+      "model.layers.0.mlp.up_proj",
+      "model.layers.0.mlp.down_proj"
+    ],
+    "performance_qos_requested": false,
+    "python": "3.14.7",
+    "rates": [
+      2
+    ],
+    "seed": 18240,
+    "serialization": "disabled; dense reconstruction comparison",
+    "shared_input_hessian_groups": [
+      [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj"
+      ],
+      [
+        "model.layers.0.mlp.gate_proj",
+        "model.layers.0.mlp.up_proj"
+      ]
+    ],
+    "source_layers": 16,
+    "target_rate_ladders": {},
+    "tested_layers": 1,
+    "torch": "2.15.0.dev20260828+cu130",
+    "yaqa_sketch_b": null,
+    "yaqa_spectral_lambdas": [
+      0.1,
+      0.25,
+      0.5,
+      1.0
+    ],
+    "yaqa_spectral_push_alphas": [
+      0.25,
+      0.5,
+      1.0
+    ],
+    "yaqa_spectral_ranks": [
+      8,
+      16,
+      32
+    ]
+  }
+}

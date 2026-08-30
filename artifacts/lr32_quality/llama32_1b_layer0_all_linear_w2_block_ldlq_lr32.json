@@ -1,0 +1,1093 @@
+{
+  "results": {
+    "2": {
+      "v2b2-p32-lr": {
+        "bank_selectors": {
+          "count": 1900544,
+          "entropy_bits": 0.9999957705651519,
+          "histogram": [
+            947971,
+            952573,
+            0,
+            0
+          ],
+          "nonzero_fraction": 0.5012107059873384,
+          "selector_bpw": 0.03125
+        },
+        "diagnostic_detail": "primary",
+        "diagnostic_device": "cuda",
+        "diagnostic_streams": 1,
+        "divergence_300": {
+          "eos_policy": "EOS is an ordinary token; exactly token_horizon argmax steps",
+          "protocol": "independent_greedy_rollout",
+          "requested_sequences": 0,
+          "token_horizon": 32,
+          "valid_sequences": 0
+        },
+        "effective_bpw": 2.03125,
+        "evaluation_telemetry": {
+          "gpu_phase_ms": {
+            "dense_forward": 87.92508685588837,
+            "layer_metrics": 5.5728320479393005,
+            "live_metrics": 5.632191956043243,
+            "local_metrics": 17.88755214214325,
+            "local_replay": 7.32857620716095,
+            "logit_metrics": 11.172031879425049,
+            "quantized_forward": 9.770112037658691
+          },
+          "materialization_seconds": 0.00030732199957128614,
+          "progress_sync_seconds": 0.0,
+          "rows": 8,
+          "valid_tokens": 983,
+          "wall_seconds": 0.14593057899764972
+        },
+        "hessian_mode": "dense-frozen",
+        "layers": {
+          "0": {
+            "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+            "bias": 2.4532257111000308e-05,
+            "cosine": 0.9915116731575994,
+            "error_std": 0.010747792686735414,
+            "finite": true,
+            "kl_forward": {
+              "max": 0.44668930768966675,
+              "mean": 0.051019661362524796,
+              "p50": 0.033202577029882586,
+              "p95": 0.1512414608093875,
+              "p99": 0.22139424837496613
+            },
+            "mae": 0.007465242567709728,
+            "max_abs_error": 0.859375,
+            "norm_ratio": 0.9588709977404963,
+            "pearson": 0.9915114485353458,
+            "relative_l2": 0.13290369692288664,
+            "rmse": 0.010747836819194643,
+            "shape": [
+              983,
+              2048
+            ],
+            "sign_agreement": 0.8972115812563581,
+            "sqnr_db": 17.602584255358472,
+            "streamed_rows": 983
+          }
+        },
+        "live_modules": {
+          "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+          "bias": 0.0005799927412865888,
+          "cosine": 0.9967778557736611,
+          "error_std": 0.049903831041709035,
+          "finite": true,
+          "kl_forward": {
+            "max": 0.1888180375099182,
+            "mean": 0.009497915452552805,
+            "p50": 0.0037829856040564463,
+            "p95": 0.034082926620301976,
+            "p99": 0.08412195383244225
+          },
+          "mae": 0.03276425947645509,
+          "max_abs_error": 0.859375,
+          "norm_ratio": 0.9847478592278015,
+          "pearson": 0.9967754599141203,
+          "relative_l2": 0.08045142457003243,
+          "rmse": 0.0499075237706397,
+          "shape": [
+            983,
+            23552
+          ],
+          "sign_agreement": 0.9118277531901012,
+          "sqnr_db": 21.960994787271286,
+          "streamed_rows": 983
+        },
+        "local_modules": {
+          "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+          "bias": 1.5150789936633065e-05,
+          "cosine": 0.9973848108686011,
+          "error_std": 0.04502946719656239,
+          "finite": true,
+          "kl_forward": {
+            "max": 0.18778441846370697,
+            "mean": 0.0094781469507211,
+            "p50": 0.003745969259848066,
+            "p95": 0.03403677844413057,
+            "p99": 0.08409752649760076
+          },
+          "mae": 0.02761004195841764,
+          "max_abs_error": 0.7641277313232422,
+          "norm_ratio": 0.9852928139930355,
+          "pearson": 0.9973827310441405,
+          "relative_l2": 0.07259049789746112,
+          "rmse": 0.04502952085386851,
+          "shape": [
+            983,
+            23552
+          ],
+          "sign_agreement": 0.9325203908012296,
+          "sqnr_db": 22.865027969126075,
+          "streamed_rows": 983
+        },
+        "logits": {
+          "aggregation": "exact token-weighted means; row-weighted auxiliary quantiles",
+          "bias": -0.02981945838432176,
+          "cosine": 0.9665902009941059,
+          "error_std": 0.6249438913341772,
+          "finite": true,
+          "kl_forward": {
+            "max": 6.266929626464844,
+            "mean": 0.02722295599272421,
+            "p50": 7.003257186859059e-05,
+            "p95": 0.029286684455124553,
+            "p99": 1.0446829986990651
+          },
+          "mae": 0.46464587676150104,
+          "max_abs_error": 8.6875,
+          "norm_ratio": 1.0115404880949015,
+          "pearson": 0.9570830570776229,
+          "relative_l2": 0.25849336504234166,
+          "rmse": 0.6270764505947061,
+          "shape": [
+            983,
+            128256
+          ],
+          "sign_agreement": 0.922374953805512,
+          "sqnr_db": 11.814958413279975,
+          "streamed_rows": 983
+        },
+        "mlp_acceptance": {
+          "enabled": false
+        },
+        "mlp_effective_bpw": null,
+        "mlp_effective_bpw_by_role": {
+          "down": 2.03125,
+          "gate_up": 2.03125
+        },
+        "mlp_target_resolution": null,
+        "module_alternative_bank_histogram": [
+          0,
+          7,
+          0,
+          0
+        ],
+        "nominal_codec_bpw": 2.03125,
+        "quantization_stages": [
+          {
+            "modules": [
+              "model.layers.0.self_attn.q_proj",
+              "model.layers.0.self_attn.k_proj",
+              "model.layers.0.self_attn.v_proj",
+              "model.layers.0.self_attn.o_proj",
+              "model.layers.0.mlp.gate_proj",
+              "model.layers.0.mlp.up_proj",
+              "model.layers.0.mlp.down_proj"
+            ],
+            "name": "dense_frozen",
+            "sample_counts": {
+              "model.layers.0.mlp.down_proj": 4045,
+              "model.layers.0.mlp.gate_proj": 4045,
+              "model.layers.0.mlp.up_proj": 4045,
+              "model.layers.0.self_attn.k_proj": 4045,
+              "model.layers.0.self_attn.o_proj": 4045,
+              "model.layers.0.self_attn.q_proj": 4045,
+              "model.layers.0.self_attn.v_proj": 4045
+            },
+            "seconds": 58.77112718800345,
+            "yaqa_sketch_b": null
+          }
+        ],
+        "qvq_telemetry": {
+          "counters": {
+            "input_features": 20480,
+            "output_features": 23552,
+            "packed_roundtrip_verifications": 7,
+            "viterbi_pruning_configured": 7,
+            "viterbi_pruning_exact": 7,
+            "viterbi_pruning_fallback_baseline": 7,
+            "viterbi_pruning_mode_auto": 7,
+            "viterbi_pruning_strategy_norm_band": 7,
+            "weight_elements": 60817408
+          },
+          "phases": {
+            "baseline_encode": {
+              "calls": 7,
+              "gpu_ms": 57776.76574707031,
+              "host_dispatch_ms": 57775.75180900021
+            },
+            "block_ldl_factor": {
+              "calls": 7,
+              "gpu_ms": 55.08342361450195,
+              "host_dispatch_ms": 54.9879480022355
+            },
+            "block_ldl_feedback": {
+              "calls": 2560,
+              "gpu_ms": 99.18816003296524,
+              "host_dispatch_ms": 244.46236492076423
+            },
+            "candidate_reconstruct_proxy": {
+              "calls": 7,
+              "gpu_ms": 30.96403157711029,
+              "host_dispatch_ms": 30.79571398848202
+            },
+            "codebook": {
+              "calls": 7,
+              "gpu_ms": 39.65628961101174,
+              "host_dispatch_ms": 39.53327800263651
+            },
+            "lr32_viterbi": {
+              "calls": 4480,
+              "gpu_ms": 57426.78031253815,
+              "host_dispatch_ms": 56307.77823000972
+            },
+            "pack_trellis": {
+              "calls": 7,
+              "gpu_ms": 68.19369500875473,
+              "host_dispatch_ms": 67.97310399997514
+            },
+            "rht_hessian": {
+              "calls": 7,
+              "gpu_ms": 29.05503922700882,
+              "host_dispatch_ms": 40.7778890003101
+            },
+            "rht_weight": {
+              "calls": 7,
+              "gpu_ms": 21.4089275598526,
+              "host_dispatch_ms": 9.2636019908241
+            }
+          }
+        },
+        "rounding": "block_ldlq",
+        "seconds": 58.97442341200076,
+        "selected_storage": {
+          "dense_fallback_parameter_fraction": 0.0,
+          "dense_fallback_parameters": 0,
+          "quantized_parameter_fraction": 1.0,
+          "quantized_parameters": 60817408,
+          "selected_effective_bpw": 2.03125,
+          "target_parameters": 60817408
+        },
+        "trellis_batch_size": 512,
+        "weight": {
+          "mean_mse": 0.00011319448610428271,
+          "mean_relative_l2": 0.4079296199548844,
+          "modules": {
+            "model.layers.0.mlp.down_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 3.748735437386406e-05,
+              "parameter_count": 16777216,
+              "proxy_loss": 0.007263584062457085,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 8192,
+                  "output_features": 2048,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 16777216
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 15918.55859375,
+                    "host_dispatch_ms": 15918.330673994205
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 22.233951568603516,
+                    "host_dispatch_ms": 22.2559989997535
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 1024,
+                    "gpu_ms": 41.83635200653225,
+                    "host_dispatch_ms": 85.41958702699048
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 10.805055618286133,
+                    "host_dispatch_ms": 10.785027996462304
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.014495999552309513,
+                    "host_dispatch_ms": 0.007033006113488227
+                  },
+                  "lr32_viterbi": {
+                    "calls": 1792,
+                    "gpu_ms": 15783.810243606567,
+                    "host_dispatch_ms": 15402.387523950893
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 5.853856086730957,
+                    "host_dispatch_ms": 5.824441002914682
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 21.22172737121582,
+                    "host_dispatch_ms": 25.299093998910394
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 5.2732157707214355,
+                    "host_dispatch_ms": 1.142834997153841
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.3578912896461536,
+              "shape": [
+                2048,
+                8192
+              ],
+              "sqnr_db": 8.924977426703638,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.mlp.gate_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 6.986863911020028e-05,
+              "parameter_count": 16777216,
+              "proxy_loss": 2.619419574737549,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "output_features": 8192,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 16777216
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 15832.533203125,
+                    "host_dispatch_ms": 15832.28152099764
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 5.735743999481201,
+                    "host_dispatch_ms": 5.723163994844072
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 256,
+                    "gpu_ms": 12.971072021871805,
+                    "host_dispatch_ms": 26.123730931431055
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 6.921088218688965,
+                    "host_dispatch_ms": 6.898095998622011
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.030047999694943428,
+                    "host_dispatch_ms": 0.011522002751007676
+                  },
+                  "lr32_viterbi": {
+                    "calls": 448,
+                    "gpu_ms": 15790.452648162842,
+                    "host_dispatch_ms": 15661.348980989715
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 6.168223857879639,
+                    "host_dispatch_ms": 6.138103999546729
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 1.468608021736145,
+                    "host_dispatch_ms": 5.113093997351825
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 5.378047943115234,
+                    "host_dispatch_ms": 1.6459789985674433
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.4330468566209813,
+              "shape": [
+                8192,
+                2048
+              ],
+              "sqnr_db": 7.269302189747523,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.mlp.up_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 5.540919463927002e-05,
+              "parameter_count": 16777216,
+              "proxy_loss": 2.0612735748291016,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "output_features": 8192,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 16777216
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 14908.52734375,
+                    "host_dispatch_ms": 14908.301019000646
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 4.050559997558594,
+                    "host_dispatch_ms": 4.089581001608167
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 256,
+                    "gpu_ms": 11.852927984669805,
+                    "host_dispatch_ms": 16.377678970457055
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 6.8954877853393555,
+                    "host_dispatch_ms": 6.8760189969907515
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.014495999552309513,
+                    "host_dispatch_ms": 0.006593996658921242
+                  },
+                  "lr32_viterbi": {
+                    "calls": 448,
+                    "gpu_ms": 14870.718338012695,
+                    "host_dispatch_ms": 14783.869927916385
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 5.822815895080566,
+                    "host_dispatch_ms": 5.802955995022785
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 0.9453759789466858,
+                    "host_dispatch_ms": 5.038529001467396
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 5.295807838439941,
+                    "host_dispatch_ms": 1.1480120010674
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.4323185493155449,
+              "shape": [
+                8192,
+                2048
+              ],
+              "sqnr_db": 7.283922599409921,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.k_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 0.00036986150746895203,
+              "parameter_count": 1048576,
+              "proxy_loss": 1.4443756341934204,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "output_features": 512,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 1048576
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 1130.889404296875,
+                    "host_dispatch_ms": 1130.8528020017548
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 6.4007039070129395,
+                    "host_dispatch_ms": 6.352420998155139
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 256,
+                    "gpu_ms": 6.982911955565214,
+                    "host_dispatch_ms": 28.35265201429138
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.0634560585021973,
+                    "host_dispatch_ms": 1.044444004946854
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.02223999984562397,
+                    "host_dispatch_ms": 0.011431999155320227
+                  },
+                  "lr32_viterbi": {
+                    "calls": 448,
+                    "gpu_ms": 1103.1999349594116,
+                    "host_dispatch_ms": 986.9503149675438
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 0.8800320029258728,
+                    "host_dispatch_ms": 0.8601470035500824
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 1.3769279718399048,
+                    "host_dispatch_ms": 1.35402700107079
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.3436479568481445,
+                    "host_dispatch_ms": 1.3091279979562387
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.4115881597004704,
+              "shape": [
+                512,
+                2048
+              ],
+              "sqnr_db": 7.710742544601834,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.o_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 2.1499664228794436e-05,
+              "parameter_count": 4194304,
+              "proxy_loss": 0.0026365448720753193,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "output_features": 2048,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 4194304
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 4344.62841796875,
+                    "host_dispatch_ms": 4344.522258004872
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 5.919680118560791,
+                    "host_dispatch_ms": 5.883769998035859
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 256,
+                    "gpu_ms": 5.466495987959206,
+                    "host_dispatch_ms": 28.72430503339274
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.8801599740982056,
+                    "host_dispatch_ms": 1.8489759968360886
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.02163200080394745,
+                    "host_dispatch_ms": 0.010652001947164536
+                  },
+                  "lr32_viterbi": {
+                    "calls": 448,
+                    "gpu_ms": 4319.360222816467,
+                    "host_dispatch_ms": 4168.968312034849
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 1.9887360334396362,
+                    "host_dispatch_ms": 1.9539389977580868
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 1.4517439603805542,
+                    "host_dispatch_ms": 1.4263479970395565
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.5242559909820557,
+                    "host_dispatch_ms": 1.4873519976390526
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.4040804849208856,
+              "shape": [
+                2048,
+                2048
+              ],
+              "sqnr_db": 7.870642466317897,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.q_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 0.00022470499798674,
+              "parameter_count": 4194304,
+              "proxy_loss": 9.209495544433594,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "output_features": 2048,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 4194304
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 4549.61962890625,
+                    "host_dispatch_ms": 4549.508680996951
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 5.388671875,
+                    "host_dispatch_ms": 5.352477004635148
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 256,
+                    "gpu_ms": 15.855328080244362,
+                    "host_dispatch_ms": 38.49881900532637
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.8527679443359375,
+                    "host_dispatch_ms": 1.8246149993501604
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 39.535457611083984,
+                    "host_dispatch_ms": 39.47783599869581
+                  },
+                  "lr32_viterbi": {
+                    "calls": 448,
+                    "gpu_ms": 4488.413196563721,
+                    "host_dispatch_ms": 4339.390381202975
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 46.26006317138672,
+                    "host_dispatch_ms": 46.2081389996456
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 1.3108799457550049,
+                    "host_dispatch_ms": 1.2879280038760044
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.3803520202636719,
+                    "host_dispatch_ms": 1.3429099999484606
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.41574341831480777,
+              "shape": [
+                2048,
+                2048
+              ],
+              "sqnr_db": 7.62349234846766,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            },
+            "model.layers.0.self_attn.v_proj": {
+              "kronecker_proxy_loss": null,
+              "mse": 1.3530044922158117e-05,
+              "parameter_count": 1048576,
+              "proxy_loss": 0.030442334711551666,
+              "qvq_telemetry": {
+                "counters": {
+                  "input_features": 2048,
+                  "output_features": 512,
+                  "packed_roundtrip_verifications": 1,
+                  "viterbi_pruning_configured": 1,
+                  "viterbi_pruning_exact": 1,
+                  "viterbi_pruning_fallback_baseline": 1,
+                  "viterbi_pruning_mode_auto": 1,
+                  "viterbi_pruning_strategy_norm_band": 1,
+                  "weight_elements": 1048576
+                },
+                "phases": {
+                  "baseline_encode": {
+                    "calls": 1,
+                    "gpu_ms": 1092.0091552734375,
+                    "host_dispatch_ms": 1091.9548540041433
+                  },
+                  "block_ldl_factor": {
+                    "calls": 1,
+                    "gpu_ms": 5.354112148284912,
+                    "host_dispatch_ms": 5.330536005203612
+                  },
+                  "block_ldl_feedback": {
+                    "calls": 256,
+                    "gpu_ms": 4.223071996122599,
+                    "host_dispatch_ms": 20.96559193887515
+                  },
+                  "candidate_reconstruct_proxy": {
+                    "calls": 1,
+                    "gpu_ms": 1.546015977859497,
+                    "host_dispatch_ms": 1.5185359952738509
+                  },
+                  "codebook": {
+                    "calls": 1,
+                    "gpu_ms": 0.017920000478625298,
+                    "host_dispatch_ms": 0.008208997314795852
+                  },
+                  "lr32_viterbi": {
+                    "calls": 448,
+                    "gpu_ms": 1070.8257284164429,
+                    "host_dispatch_ms": 964.8627889473573
+                  },
+                  "pack_trellis": {
+                    "calls": 1,
+                    "gpu_ms": 1.2199679613113403,
+                    "host_dispatch_ms": 1.185378001537174
+                  },
+                  "rht_hessian": {
+                    "calls": 1,
+                    "gpu_ms": 1.2797759771347046,
+                    "host_dispatch_ms": 1.2588690005941316
+                  },
+                  "rht_weight": {
+                    "calls": 1,
+                    "gpu_ms": 1.2136000394821167,
+                    "host_dispatch_ms": 1.1873859984916635
+                  }
+                },
+                "viterbi_pruning": {
+                  "baseline_candidates_possible": 0,
+                  "baseline_fallbacks": 0,
+                  "candidate_reduction": 0.0,
+                  "candidates_evaluated": 0,
+                  "candidates_skipped": 0,
+                  "eligible_dispatches": 0,
+                  "exact": true,
+                  "norm_rank_cache_entries": 0,
+                  "strategy": "norm_band"
+                }
+              },
+              "rate": 2,
+              "relative_l2": 0.40083858116534715,
+              "shape": [
+                512,
+                2048
+              ],
+              "sqnr_db": 7.940609675909142,
+              "yaqa_spectral": {
+                "absorption_efficiency": null,
+                "alpha": null,
+                "candidates": null,
+                "concentration": null,
+                "family_changed": null,
+                "lambda": null,
+                "method": null,
+                "oracle_losses": null,
+                "rank": null,
+                "selected": null,
+                "selector_churn": null,
+                "svd_device": null
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "settings": {
+    "all_linear_hessian_mode": "dense-frozen",
+    "arms": [
+      "v2b2-p32-lr"
+    ],
+    "calibration": {
+      "batch_size": 1,
+      "concat_size": null,
+      "dataset_config": "LLM",
+      "dataset_path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "padded_tokens_excluded": 0,
+      "prepared_batches": 8,
+      "prepared_sequences": 8,
+      "source_rows": 8,
+      "valid_tokens": 4045
+    },
+    "calibration_execution": "independent full rows; batch=1; no sequence concatenation",
+    "calibration_hessian_capture": "one dense-frozen model replay",
+    "calibration_samples": {
+      "model.layers.0.mlp.down_proj": 4045,
+      "model.layers.0.mlp.gate_proj": 4045,
+      "model.layers.0.mlp.up_proj": 4045,
+      "model.layers.0.self_attn.k_proj": 4045,
+      "model.layers.0.self_attn.o_proj": 4045,
+      "model.layers.0.self_attn.q_proj": 4045,
+      "model.layers.0.self_attn.v_proj": 4045
+    },
+    "device": "cuda",
+    "evaluation": {
+      "dataset_config": "LLM",
+      "dataset_path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "max_length": 128,
+      "padded_tokens_excluded": 41,
+      "row_end_exclusive": 16,
+      "row_start": 8,
+      "source_rows": 8,
+      "valid_tokens": 983
+    },
+    "evaluation_batch_size": 1,
+    "evaluation_execution": "independent full rows; batch=1; no sequence concatenation",
+    "mlp_acceptance": null,
+    "mlp_acceptance_contract": "disabled",
+    "mlp_acceptance_execution": "auto",
+    "mlp_acceptance_kl_regression_limit": 0.05,
+    "mlp_acceptance_topn_regression_limit": 0.05,
+    "mlp_codec": "same",
+    "mlp_down_rate": null,
+    "mlp_gate_up_rate": null,
+    "mlp_rate": null,
+    "mlp_rate_ladder": [],
+    "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+    "module_scope": "all-linear",
+    "module_shapes": {
+      "model.layers.0.mlp.down_proj": [
+        2048,
+        8192
+      ],
+      "model.layers.0.mlp.gate_proj": [
+        8192,
+        2048
+      ],
+      "model.layers.0.mlp.up_proj": [
+        8192,
+        2048
+      ],
+      "model.layers.0.self_attn.k_proj": [
+        512,
+        2048
+      ],
+      "model.layers.0.self_attn.o_proj": [
+        2048,
+        2048
+      ],
+      "model.layers.0.self_attn.q_proj": [
+        2048,
+        2048
+      ],
+      "model.layers.0.self_attn.v_proj": [
+        512,
+        2048
+      ]
+    },
+    "modules": [
+      "model.layers.0.self_attn.q_proj",
+      "model.layers.0.self_attn.k_proj",
+      "model.layers.0.self_attn.v_proj",
+      "model.layers.0.self_attn.o_proj",
+      "model.layers.0.mlp.gate_proj",
+      "model.layers.0.mlp.up_proj",
+      "model.layers.0.mlp.down_proj"
+    ],
+    "performance_qos_requested": false,
+    "python": "3.14.7",
+    "rates": [
+      2
+    ],
+    "seed": 18240,
+    "serialization": "disabled; dense reconstruction comparison",
+    "shared_input_hessian_groups": [
+      [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj"
+      ],
+      [
+        "model.layers.0.mlp.gate_proj",
+        "model.layers.0.mlp.up_proj"
+      ]
+    ],
+    "source_layers": 16,
+    "target_rate_ladders": {},
+    "tested_layers": 1,
+    "torch": "2.15.0.dev20260828+cu130",
+    "yaqa_sketch_b": null,
+    "yaqa_spectral_lambdas": [
+      0.1,
+      0.25,
+      0.5,
+      1.0
+    ],
+    "yaqa_spectral_push_alphas": [
+      0.25,
+      0.5,
+      1.0
+    ],
+    "yaqa_spectral_ranks": [
+      8,
+      16,
+      32
+    ]
+  }
+}
