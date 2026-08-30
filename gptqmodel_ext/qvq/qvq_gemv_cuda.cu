@@ -1374,8 +1374,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     __syncthreads();
 
 #pragma unroll 1
-    for (int u = 0; u < kBatchTiles; ++u) {
-      if (u < tiles_here) {
+    for (int u = 0; u < tiles_here; ++u) {
+      {
         const int sub = warp;
         // Four lanes cooperate on each ring. Each lane extracts four disjoint
         // transitions once and advances a rate-specific sliding state across
@@ -1508,7 +1508,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       }
       __syncwarp();
 
-      if (u < tiles_here && n_tile_base + warp < n_tiles) {
+      if (n_tile_base + warp < n_tiles) {
         if constexpr (kNativeN8) {
           const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
           const int address_column = (lane >> 4) * 8;

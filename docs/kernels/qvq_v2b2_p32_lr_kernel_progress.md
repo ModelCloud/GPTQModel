@@ -95,6 +95,7 @@ tables below every row was intentionally measured at M=16.
 | `11f7f40b` | H200, W3 K/V | Lower the Hopper cooperative dispatch threshold from N2,048 to N512 for every rate, reusing the native-N8 TB6 kernel | K/V M1-M16 fell from 0.0207-0.0244 to 0.01142-0.01165 ms (1.81-2.09x) and reached 1.246-1.306x Machete; 108 CUDA tests passed | accepted and pushed |
 | `ff1a439a` | H200, W3 K/V | Retune automatic split-K after N512 entered the cooperative kernel: 16 base CTAs x split 16 supplies two complete H200 waves instead of one | Exact CUDA Graph A/B across M1/M2/M4/M8/M16 improved 4.4-5.0% versus split 8, with auto matching explicit split 16 and worst max error 6.68e-06 | accepted and pushed |
 | `1f834abf` | H100, W2-W3.5 gate/up M1-M16 | Remove the trailing warp barrier after each private decoded-weight tile; the next uniform warp iteration cannot overwrite shared storage before the prior loads complete | All 20 CUDA-event rows improved to 0.0309-0.0357 ms; 80/80 Hopper correctness cases passed across FP16/FP32 output and split-1/split-3 | accepted and pushed |
+| `f254003d` | H100, W2-W3.5 gate/up M1-M16 | Stop the cooperative decode loop at the runtime tail length instead of executing every compile-time batch slot | All 20 exact CUDA Graph rows improved again to 0.0304-0.0338 ms; 80/80 Hopper correctness cases passed, including split-3 tails | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
