@@ -117,6 +117,7 @@ tables below every row was intentionally measured at M=16.
 | `4613a5be` uncommitted A/B | H200, W3 gate/up M1-M16 | Pair adjacent K32 tiles so both tiles' independent level loads issue before either decoded fragment is consumed, then overlap the second lookup with the first tile's MMA | Accurate, but all rows regressed 1.7-2.2%; registers rose 63 to 80, instructions rose 7.8% to 11.64M, and long-scoreboard/wait samples increased | rejected; source restored before next experiment |
 | `b3edc2a7` uncommitted A/B | H200, W3 gate/up M16 | Fuse PGC16 mixing and two 512-byte-table level loads into one read-only lookup from a cached 65,536-entry packed decoded-state LUT | Instructions fell 32.1% to 7.34M with unchanged registers, but L1 hit rate collapsed to 7.8%, L2 utilization reached 67.6%, and CUDA-event latency regressed 2.59x to 0.0698 ms | rejected; source restored before next experiment |
 | `7eeaf4da` | H200, Hopper cooperative W2-W3.5 | Overlay the decoded-B fragment scratch with the equally sized clustered split-K epilogue scratch because their lifetimes are disjoint | Static shared memory fell exactly 4 KiB (41.088 to 36.992 KiB for W3 gate/up) with 63 registers and 10.80M instructions unchanged; 60-sample latency was within +0.4-1.1% and 108/108 H200 CUDA tests passed | accepted and pushed as structural headroom for bank-aware level layouts |
+| `24735ba7` uncommitted A/B | H200, W3 gate/up M16 | Replace the read-only/L1 level lookups with eight aligned shared-memory replicas selected by lane, using the scratch overlay's recovered capacity | Accurate, but latency regressed 7.4% to 0.0289 ms; NCU found 1.11M shared-read bank conflicts, 11.39M instructions, and 28.99 us versus production's 10.80M and 26.53 us | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -990,6 +991,18 @@ claimed timing win. All 108 H200 CUDA tests pass. The recovered capacity is a
 measured resource improvement intended for a compact, bank-aware replicated
 512-byte level table; it is not permission to repeat the rejected 256 KiB
 random decoded-state LUT.
+
+An eight-replica follow-up tested that compact shared-table direction without
+changing W3 arithmetic. Each canonical FP16 level was duplicated into an
+aligned 32-bit word and lane-local replicas mapped the 512-byte logical table
+to 8 KiB. Accuracy remained clean, but M16 gate/up regressed 7.4% from 0.02691
+to 0.0289 ms. NCU report
+`/tmp/ncu-h200-w3-gate-replicated-levels-bank1.ncu-rep` measures 1,113,457
+shared-read bank conflicts, 11.39M instructions, and 28.99 us, compared with
+10.80M and 26.53 us for the read-only/L1 production path. Eight replicas still
+map each random index into four bank groups, so MIO serialization outweighs
+the removed cache dependency. The source was restored; future level-table
+work must avoid indexed shared loads rather than add more shared replicas.
 
 ## Coverage and targeting queue
 
