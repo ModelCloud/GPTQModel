@@ -2367,6 +2367,13 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       size_k <= 2048 && out_features >= 8192) {
     split_count = 2;
   }
+  // N512 exposes only 16 cooperative N32 blocks before K partitioning. On
+  // Hopper, 16 partitions provide two complete CTA waves and consistently
+  // beat the previous eight-partition policy across M1-M16.
+  if (split_count_override == 0 && use_hopper_cooperative_wmma && transition_bits == 6 &&
+      size_k <= 2048 && out_features == 512) {
+    split_count = 16;
+  }
   at::Tensor partial_output;
 
   if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
