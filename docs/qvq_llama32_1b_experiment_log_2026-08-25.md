@@ -31,6 +31,9 @@ identical metric digests within each checkpoint. A tensor-level audit found
 different packed representations in all 112 quantized modules, first diverging
 at `model.layers.0.self_attn.q_proj` (`bank_ids`/`trellis`). See
 [`frontier_wave10_checkpoint_hash_audit_20260830.json`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
+No `gptqmodel` implementation file changed between the two recorded commits;
+the commit mismatch therefore establishes provenance mismatch but not yet a
+causal solver-code change.
 The original values remain below only as immutable provenance, not as current
 comparators.
 

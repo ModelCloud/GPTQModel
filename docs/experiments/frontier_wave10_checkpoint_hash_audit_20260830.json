@@ -57,5 +57,10 @@
       "fdbd68.trellis": "a11adcfbea321418fc03582dd62ad65bacf09cca4845838ad7838b27a3cdea6a"
     }
   },
-  "conclusion": "The two checkpoints use identical tracked allocation/config content and identical calibration/YAQA identities, but were produced by different quantizer commits and differ in packed tensors for all 112 quantized projection modules. The first logical data divergence is layer 0 self_attn.q_proj bank_ids/trellis. Wave-10 replay is repeat-stable (541 versus 537), so the historical 551/519 scores are cross-version/provenance records and are superseded for current ranking."
+  "commit_diff_audit": {
+    "quantizer_commits": ["07517d85714a313ea0bf794c4d60783234c1a6ed", "a1e0c50482715c57a7ae076906d78f81d1ec68f9"],
+    "gptqmodel_implementation_files_changed_between_commits": false,
+    "note": "The commits differ in experiment/config/launcher history, but the git diff between them contains no gptqmodel quantizer implementation file. Commit SHA difference alone therefore does not prove a solver algorithm change; runtime package state, uncommitted files, scheduling/order, or another unrecorded input remains possible."
+  },
+  "conclusion": "The two checkpoints use identical tracked allocation/config content and identical calibration/YAQA identities, but differ in packed tensors for all 112 quantized projection modules. The first logical data divergence is layer 0 self_attn.q_proj bank_ids/trellis. Wave-10 replay is repeat-stable (541 versus 537), so the historical 551/519 scores are superseded for current ranking. The differing recorded commit SHAs establish provenance mismatch, not yet the causal solver change; a frozen-input first-module replay is still required to isolate the discrete optimizer/state-selection source."
 }

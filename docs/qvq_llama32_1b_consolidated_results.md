@@ -38,8 +38,10 @@ replay metric digest was identical across all four repeats for each
 checkpoint, ruling out run-to-run evaluator noise.
 
 The checkpoints have the same tracked allocation/config SHA and the same
-calibration/YAQA identities, but were produced by different quantizer
-commits (`07517d85` versus `a1e0c504`).  Tensor comparison finds 268 differing
+calibration/YAQA identities, but carry different recorded quantizer commits
+(`07517d85` versus `a1e0c504`).  A git audit finds no `gptqmodel` implementation
+file changed between those commits, so the SHA mismatch establishes provenance
+mismatch but does **not** yet prove a solver-code change. Tensor comparison finds 268 differing
 serialized keys across all 112 quantized modules; the first logical data
 divergence is `model.layers.0.self_attn.q_proj` (`bank_ids`/`trellis`, with
 `SU`/`SV` equal).  See the machine-readable
@@ -48,7 +50,9 @@ divergence is `model.layers.0.self_attn.q_proj` (`bank_ids`/`trellis`, with
 Accordingly, the old 551/519 values remain in the append-only history only as
 **historical provenance records**.  They must not be compared with current
 scores or used to select a new arm until replayed under the same pinned
-evaluator and code provenance.
+evaluator and code/runtime provenance. A frozen-input first-module replay is
+still required to identify whether the divergence comes from the discrete
+optimizer, runtime package state, ordering, or another unrecorded input.
 
 ## Current budget anchors (updated 2026-08-28 UTC)
 
