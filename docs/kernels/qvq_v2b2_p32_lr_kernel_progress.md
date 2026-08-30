@@ -1234,11 +1234,41 @@ attention/linear output path is 0.337x. The next H200 profiles should therefore
 start with M16 K17408/N5120 and M16 K6144/N5120, then test split-count and K
 batch policies before changing decode algebra.
 
+## CuTe RS-WGMMA W3 proof on Qwen3.8 down (`4459e1b4`, 2026-08-30)
+
+The first transposed LR prototype uses CUTLASS/CuTe 4.7.1 and
+`wgmma.m64n16k16`: decoded W3 weights are the register-sourced A operand and
+the M16 activation is the shared-memory B operand. It therefore removes the
+production kernel's decoded-weight shared-memory store/reload. This proof is
+still synchronously staged by the 128 consumer threads; it does not yet have a
+TMA producer or a multistage pipeline.
+
+The physical H200 (132 SMs, UUID
+`GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea`) measured M16 K17408/N5120 with 10
+warmups and 60 CUDA-graph event timings. Every candidate returned FP32 and
+passed the dense W3 reference with `max_abs <= 0.00127029`.
+
+| Kernel | Split | Median ms | vs production LR | xMachete | Max abs |
+|---|---:|---:|---:|---:|---:|
+| Production LR W3 | auto | 0.21901 | 1.000x | 0.195x | 0.00127029 |
+| CuTe RS-WGMMA W3 | 1 | 0.51997 | 0.421x | 0.082x | 0.00127029 |
+| CuTe RS-WGMMA W3 | 2 | 0.29888 | 0.733x | 0.143x | 0.000598907 |
+| **CuTe RS-WGMMA W3** | **4** | **0.19872** | **1.102x** | **0.215x** | **0.000320435** |
+| Machete W4 | native | 0.04280 | 5.117x | 1.000x | 0.000670671 |
+
+This validates the RS-WGMMA fragment mapping and transposed LR dataflow as a
+real latency win, but not yet as a production dispatch replacement. The split
+curve shows that the current synchronous K256 staging leaves too few CTAs at
+split 1/2 and still dominates at split 4. NCU should now compare split-4
+RS-WGMMA with production LR before adding a producer warp and two-stage TMA;
+the next gate is lower instructions/LSU/scoreboard pressure without losing the
+10.2% latency win.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 Qwen3.8 MLP down K17408/N5120, W2-W3.5, M1-M16 | 0.226x Machete geomean; M>=2 cells are only 0.180-0.207x | NCU M16 W3 alongside split/K-batch sweep; determine why K17408 creates the large M1-to-M2 cliff before changing decode algebra |
+| 1 | H200 Qwen3.8 MLP down K17408/N5120, W2-W3.5, M1-M16 | W3 CuTe RS-WGMMA split4 reaches 0.19872 ms, 1.102x production LR and 0.215x Machete; all-rate production geomean is 0.226x | NCU production versus RS-WGMMA; replace synchronous K256 staging with a producer/TMA pipeline while preserving the validated register-sourced decode |
 | 2 | H200 Qwen3.8 attention/linear out K6144/N5120 | 0.337x Machete; M1 is 0.477-0.592x but M>=2 falls to 0.277-0.311x | NCU M16 W3 and split sweep; compare dispatch against the successful K5120/N1024 path |
 | 3 | H200 Qwen3.8 full Q, linear QKV/Z, and MLP gate/up | 0.346-0.441x Machete overall; W3.5 gate/up is the weakest at 0.290x | profile representative M16 W3 and W3.5; tune split count and batch depth for K5120 before a wider pipeline rewrite |
 | 4 | H200 Qwen3.8 full K/V K5120/N1024 | 1.014x Machete overall; W2-W3 M1 is 1.22-1.31x, with small M>=2 deficits | preserve as the Qwen3.8 no-regression gate while changing general dispatch |
