@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
-#include <type_traits>
 
 namespace {
 
@@ -1166,68 +1165,14 @@ __global__ void qvq_reduce_splitk_kernel(
   output[index] = ScalarTraits<OutputScalar>::from_float(accumulator);
 }
 
-// Register layouts for mma.sync.aligned.m16n8k16.row.col.  These match the
-// native-N8 path used by Amplin and the PTX matrix-fragment specification.
-// Keeping them explicit lets the cooperative decoder feed exactly the eight
-// real output columns instead of materializing a padded N16 WMMA operand.
-struct QvqMmaFragmentA {
-  uint32_t values[4];
-};
-
-struct QvqMmaFragmentB {
-  uint32_t values[2];
-};
-
-struct QvqMmaFragmentC {
-  float values[4];
-};
-
-__device__ __forceinline__ void qvq_load_mma_fragment_a(
-    QvqMmaFragmentA& fragment,
-    const half* shared_source) {
-  const uint32_t shared_address =
-      static_cast<uint32_t>(__cvta_generic_to_shared(shared_source));
-  asm volatile(
-      "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-      : "=r"(fragment.values[0]),
-        "=r"(fragment.values[1]),
-        "=r"(fragment.values[2]),
-        "=r"(fragment.values[3])
-      : "r"(shared_address));
-}
-
-__device__ __forceinline__ void qvq_mma_m16n8k16(
-    const QvqMmaFragmentA& a,
-    const QvqMmaFragmentB& b,
-    QvqMmaFragmentC& c) {
-  asm volatile(
-      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-      : "=f"(c.values[0]),
-        "=f"(c.values[1]),
-        "=f"(c.values[2]),
-        "=f"(c.values[3])
-      : "r"(a.values[0]),
-        "r"(a.values[1]),
-        "r"(a.values[2]),
-        "r"(a.values[3]),
-        "r"(b.values[0]),
-        "r"(b.values[1]),
-        "f"(c.values[0]),
-        "f"(c.values[1]),
-        "f"(c.values[2]),
-        "f"(c.values[3]));
-}
-
-// Hopper-only cooperative tensor-core path for W2/W2.5 at M<=16 and W3 at M16.
+// Isolated Hopper prototype for storage-neutral cooperative W2/W2.5 decode.
 // One warp owns one N8 output tile; a small warp group therefore reuses the
-// staged activation stripe across adjacent tiles. Each rate reconstructs the
-// 16 unique ring transitions cooperatively, advances four adjacent states by
-// recurrence, and consumes the decoded FP16 weights through native N8 MMA for
-// W2/W2.5 or the accepted WMMA path for W3. The scalar LR kernel remains the
-// fallback for other rates, row counts, dtypes, and unaligned views.
+// staged activation stripe across adjacent tiles. The weights are decoded into an 8-column
+// FP16 matrix (padded to N16) and consumed by two FP16->FP32 WMMA operations
+// per K32 tile. This source is compiled only by the benchmark prototype and
+// does not alter the production operator or checkpoint layout.
 template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles>
-__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_kernel(
+__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_proto_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
@@ -1240,20 +1185,19 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int split_count,
     int bank_alt_id) {
   constexpr int kTransitionBits = TransitionBits;
-  static_assert(kTransitionBits >= 4 && kTransitionBits <= 6);
+  static_assert(kTransitionBits == 4 || kTransitionBits == 5);
   constexpr int kRows = 16;
   constexpr int kBatchTiles = 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
-  constexpr bool kNativeN8 = kTransitionBits <= 5;
 
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
-  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kPaddedColumns];
+  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows][kPaddedColumns];
   __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
 
   const int thread = static_cast<int>(threadIdx.x);
@@ -1273,25 +1217,21 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   }
   __syncthreads();
 
-  if constexpr (!kNativeN8) {
-    // TB6 retains the accepted padded N16 WMMA consumer.
-    for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kWmmaThreads) {
-      const int cell = index % (kLocalRingTileRows * kPaddedColumns);
-      const int col = cell % kPaddedColumns;
-      if (col >= kLocalRingTileColumns) {
-        reinterpret_cast<half*>(decoded_weight)[index] = __float2half(0.0f);
-      }
+  // Initialize the padded N16 columns once. The first eight columns are
+  // overwritten for every decoded K32 tile below.
+  half* decoded_weight_ptr = reinterpret_cast<half*>(decoded_weight);
+  for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kWmmaThreads) {
+    const int col = index % kPaddedColumns;
+    if (col >= kLocalRingTileColumns) {
+      decoded_weight_ptr[index] = __float2half(0.0f);
     }
   }
   __syncthreads();
 
-  QvqMmaFragmentC native_accumulator = {};
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> input_fragment;
   wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> weight_fragment;
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
-  if constexpr (!kNativeN8) {
-    wmma::fill_fragment(accumulator, 0.0f);
-  }
+  wmma::fill_fragment(accumulator, 0.0f);
 
   auto stage_batch = [&](int kb, int tiles_here) {
     constexpr int words_per_vec = kWordsPerTile / 4;
@@ -1343,77 +1283,42 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
         const int sub = warp;
-        // Four lanes cooperate on each ring. Each lane extracts four disjoint
-        // transitions once and advances a rate-specific sliding state across
-        // four adjacent pairs. W2/W2.5 load all four transitions together and
-        // exchange only the preceding group with a neighboring lane. W3 keeps
-        // its two-load planar extraction and per-edge lane exchange.
+        // W2/W2.5 pack two adjacent weights from one 16-bit recurrence state.
+        // Four lanes cooperate on each ring. Four consecutive low nibbles are
+        // already contiguous in the planar payload, so load them as one 16-bit
+        // slice. W2.5 adds four consecutive high-plane bits with one load and a
+        // multiply/mask bit spread. Fetch the preceding four-transition group
+        // once; all remaining recurrence transitions are in the lane's pack.
         const int col = lane & 7;
         const int edge_group = lane >> 3;
-        uint32_t edge_pack = 0;
-        if constexpr (kTransitionBits == 6) {
-          // W3 stores each planar block as a four-bit low plane followed by a
-          // two-bit high plane. Four consecutive edges therefore need only
-          // two packed-word loads.
-          const int edge_block = col >> 1;
-          const int edge_in_block = (col & 1) * 16 + edge_group * 4;
-          const uint32_t low_codes =
-              packed_words[u][sub][edge_block * kTransitionBits + edge_in_block / 8] >>
-              (4 * (edge_in_block & 7));
-          const uint32_t high_codes =
-              packed_words[u][sub][edge_block * kTransitionBits + 4 + edge_in_block / 16] >>
-              (2 * (edge_in_block & 15));
-#pragma unroll
-          for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
-            const uint32_t edge = ((low_codes >> (edge_in_group * 4)) & 0xfu) |
-                (((high_codes >> (edge_in_group * 2)) & 0x3u) << 4);
-            edge_pack |= edge << (edge_in_group * kTransitionBits);
-          }
-        } else {
-          const int first_edge = col * kLocalRingSteps + edge_group * 4;
-          const int planar_block = first_edge >> 5;
-          const int planar_lane = first_edge & 31;
-          const uint32_t low_word = packed_words[u][sub][
-              planar_block * kTransitionBits + planar_lane / 8];
-          const uint32_t low_pack = (low_word >> (4 * (planar_lane & 7))) & 0xffffu;
-          edge_pack = low_pack;
-          if constexpr (kTransitionBits == 5) {
-            // Expand four contiguous low nibbles into five-bit slots, then
-            // spread the four high-plane bits into the open slot in each code.
-            edge_pack = (low_pack & 0x000fu) |
-                ((low_pack & 0x00f0u) << 1) |
-                ((low_pack & 0x0f00u) << 2) |
-                ((low_pack & 0xf000u) << 3);
-            const uint32_t high_word = packed_words[u][sub][planar_block * kTransitionBits + 4];
-            const uint32_t high_nibble = (high_word >> planar_lane) & 0xfu;
-            edge_pack |= (high_nibble * 0x11110u) & 0x84210u;
-          }
+        const int first_edge = col * kLocalRingSteps + edge_group * 4;
+        const int planar_block = first_edge >> 5;
+        const int planar_lane = first_edge & 31;
+        const uint32_t low_word = packed_words[u][sub][
+            planar_block * kTransitionBits + planar_lane / 8];
+        const uint32_t low_pack = (low_word >> (4 * (planar_lane & 7))) & 0xffffu;
+        uint32_t edge_pack = low_pack;
+        if constexpr (kTransitionBits == 5) {
+          edge_pack = (low_pack & 0x000fu) |
+              ((low_pack & 0x00f0u) << 1) |
+              ((low_pack & 0x0f00u) << 2) |
+              ((low_pack & 0xf000u) << 3);
+          const uint32_t high_word = packed_words[u][sub][planar_block * kTransitionBits + 4];
+          const uint32_t high_nibble = (high_word >> planar_lane) & 0xfu;
+          edge_pack |= (high_nibble * 0x11110u) & 0x84210u;
         }
-        auto edge_at = [&](int edge_index) {
-          const int source_lane = col + (edge_index >> 2) * 8;
-          const uint32_t source_pack = __shfl_sync(0xffffffffu, edge_pack, source_lane);
-          return (source_pack >> ((edge_index & 3) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-        };
-        uint32_t previous_pack = 0;
-        if constexpr (kTransitionBits <= 5) {
-          const int previous_lane = col + ((edge_group + 3) & 3) * 8;
-          previous_pack = __shfl_sync(0xffffffffu, edge_pack, previous_lane);
-        }
+        const int previous_lane = col + ((edge_group + 3) & 3) * 8;
+        const uint32_t previous_pack = __shfl_sync(0xffffffffu, edge_pack, previous_lane);
+        constexpr uint32_t kTransitionMask = (1u << kTransitionBits) - 1u;
         const int pair_base = edge_group * 4;
         constexpr int kEdgeCount = (15 + kTransitionBits) / kTransitionBits;
         uint32_t state = 0;
 #pragma unroll
         for (int j = 0; j < kEdgeCount; ++j) {
-          uint32_t transition;
-          if constexpr (kTransitionBits == 6) {
-            const int edge_index = (pair_base + kLocalRingSteps - kEdgeCount + 1 + j) & 15;
-            transition = edge_at(edge_index);
-          } else {
-            const int relative_edge = 1 - kEdgeCount + j;
-            const int pack_index = relative_edge < 0 ? 4 + relative_edge : relative_edge;
-            const uint32_t source_pack = relative_edge < 0 ? previous_pack : edge_pack;
-            transition = (source_pack >> (pack_index * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-          }
+          const int relative_edge = 1 - kEdgeCount + j;
+          const int pack_index = relative_edge < 0 ? 4 + relative_edge : relative_edge;
+          const uint32_t source_pack = relative_edge < 0 ? previous_pack : edge_pack;
+          const uint32_t transition = (source_pack >> (pack_index * kTransitionBits)) & kTransitionMask;
           state = ((state << kTransitionBits) | transition) & 0xffffu;
         }
         const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
@@ -1423,25 +1328,10 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         for (int q = 0; q < 4; ++q) {
           const int pair = pair_base + q;
           const uint32_t mixed = pgc16_mix(state ^ bank_mask);
-          if constexpr (kNativeN8) {
-            const uint32_t level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-                (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-            // Transpose producer lanes into the exact native B-fragment
-            // layout. Each consumer lane then reads four contiguous,
-            // conflict-free fragment planes: two for each K16 instruction.
-            reinterpret_cast<uint32_t*>(&decoded_weight[sub][0])[edge_group * 32 + col * 4 + q] =
-                level_pair;
-          } else {
-            decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
-            decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
-          }
+          decoded_weight[sub][pair * 2][col] = cached_levels[mixed >> 8];
+          decoded_weight[sub][pair * 2 + 1][col] = cached_levels[mixed & 0xffu];
           if (q < 3) {
-            uint32_t transition;
-            if constexpr (kTransitionBits == 6) {
-              transition = edge_at((pair + 1) & 15);
-            } else {
-              transition = (edge_pack >> ((q + 1) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-            }
+            const uint32_t transition = (edge_pack >> ((q + 1) * kTransitionBits)) & kTransitionMask;
             state = ((state << kTransitionBits) | transition) & 0xffffu;
           }
         }
@@ -1449,81 +1339,34 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       __syncwarp();
 
       if (u < tiles_here && n_tile_base + warp < n_tiles) {
-        if constexpr (kNativeN8) {
-          const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
-          const int address_column = (lane >> 4) * 8;
-          const uint32_t* fragment_words =
-              reinterpret_cast<const uint32_t*>(&decoded_weight[warp][0]);
-          QvqMmaFragmentA native_a;
-          QvqMmaFragmentB native_b;
-          qvq_load_mma_fragment_a(
-              native_a,
-              input_tile[u] + address_row * kLocalRingTileRows + address_column);
-          native_b.values[0] = fragment_words[lane];
-          native_b.values[1] = fragment_words[32 + lane];
-          qvq_mma_m16n8k16(native_a, native_b, native_accumulator);
-          qvq_load_mma_fragment_a(
-              native_a,
-              input_tile[u] + address_row * kLocalRingTileRows + 16 + address_column);
-          native_b.values[0] = fragment_words[64 + lane];
-          native_b.values[1] = fragment_words[96 + lane];
-          qvq_mma_m16n8k16(native_a, native_b, native_accumulator);
-        } else {
-          wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
-          wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0], kPaddedColumns);
-          wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
-          wmma::load_matrix_sync(
-              input_fragment, input_tile[u] + 16, kLocalRingTileRows);
-          wmma::load_matrix_sync(
-              weight_fragment, &decoded_weight[warp][16 * kPaddedColumns], kPaddedColumns);
-          wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
-        }
+        wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
+        wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0][0], kPaddedColumns);
+        wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
+        wmma::load_matrix_sync(
+            input_fragment, input_tile[u] + 16, kLocalRingTileRows);
+        wmma::load_matrix_sync(
+            weight_fragment, &decoded_weight[warp][16][0], kPaddedColumns);
+        wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
       }
       __syncwarp();
     }
     __syncthreads();
   }
 
-  if constexpr (kNativeN8) {
-    if (n_tile_base + warp < n_tiles) {
-      const int quad = lane >> 2;
-      const int output_column = (n_tile_base + warp) * kLocalRingTileColumns + (lane & 3) * 2;
-      const int output_rows[2] = {quad, quad + 8};
-#pragma unroll
-      for (int row_group = 0; row_group < 2; ++row_group) {
-        const int row = output_rows[row_group];
-        if (row < block_rows) {
-#pragma unroll
-          for (int column_pair = 0; column_pair < 2; ++column_pair) {
-            const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
-                output_column + column_pair;
-            const float value = native_accumulator.values[row_group * 2 + column_pair];
-            if constexpr (SplitK) {
-              partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = value;
-            } else {
-              output[output_index] = ScalarTraits<OutputScalar>::from_float(value);
-            }
-          }
-        }
-      }
-    }
-  } else {
-    if (n_tile_base + warp < n_tiles) {
-      wmma::store_matrix_sync(&output_tile[warp][0][0], accumulator, kPaddedColumns, wmma::mem_row_major);
-    }
-    __syncthreads();
-    if (n_tile_base + warp < n_tiles) {
-      for (int index = lane; index < block_rows * kLocalRingTileColumns; index += 32) {
-        const int row = index / kLocalRingTileColumns;
-        const int col = index % kLocalRingTileColumns;
-        const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
-            (n_tile_base + warp) * kLocalRingTileColumns + col;
-        if constexpr (SplitK) {
-          partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] =
-              output_tile[warp][row][col];
-        } else {
-          output[output_index] = ScalarTraits<OutputScalar>::from_float(output_tile[warp][row][col]);
-        }
+  if (n_tile_base + warp < n_tiles) {
+    wmma::store_matrix_sync(&output_tile[warp][0][0], accumulator, kPaddedColumns, wmma::mem_row_major);
+  }
+  __syncthreads();
+  if (n_tile_base + warp < n_tiles) {
+    for (int index = lane; index < block_rows * kLocalRingTileColumns; index += 32) {
+      const int row = index / kLocalRingTileColumns;
+      const int col = index % kLocalRingTileColumns;
+      const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
+          (n_tile_base + warp) * kLocalRingTileColumns + col;
+      if constexpr (SplitK) {
+        partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = output_tile[warp][row][col];
+      } else {
+        output[output_index] = ScalarTraits<OutputScalar>::from_float(output_tile[warp][row][col]);
       }
     }
   }
@@ -2045,7 +1888,7 @@ void launch_qvq_local_ring_gemv_impl(
 }
 
 template <int TransitionBits, typename OutputScalar, bool SplitK>
-void launch_qvq_local_ring_wmma_hopper(
+void launch_qvq_local_ring_wmma_hopper_proto(
     const at::Tensor& input,
     const at::Tensor& trellis,
     const at::Tensor& bank_ids,
@@ -2066,7 +1909,8 @@ void launch_qvq_local_ring_wmma_hopper(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_kernel<TransitionBits, OutputScalar, SplitK, kHopperWmmaOutputTiles>
+  qvq_gemv_local_ring_wmma_hopper_proto_kernel<
+      TransitionBits, OutputScalar, SplitK, kHopperWmmaOutputTiles>
       <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
@@ -2089,37 +1933,6 @@ void launch_qvq_local_ring_wmma_hopper(
         static_cast<int>(output.size(1)),
         split_count);
   }
-}
-
-template <typename OutputScalar, bool SplitK>
-void launch_qvq_local_ring_wmma_hopper_dispatch(
-    const at::Tensor& input,
-    const at::Tensor& trellis,
-    const at::Tensor& bank_ids,
-    const at::Tensor& levels,
-    at::Tensor* partial_output,
-    at::Tensor& output,
-    int transition_bits,
-    int split_count,
-    int bank_alt_id,
-    cudaStream_t stream) {
-#define QVQ_LR_LAUNCH_HOPPER_WMMA(BITS)                                                                            \
-  launch_qvq_local_ring_wmma_hopper<BITS, OutputScalar, SplitK>(                                                   \
-      input, trellis, bank_ids, levels, partial_output, output, split_count, bank_alt_id, stream)
-  switch (transition_bits) {
-    case 4:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(4);
-      break;
-    case 5:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(5);
-      break;
-    case 6:
-      QVQ_LR_LAUNCH_HOPPER_WMMA(6);
-      break;
-    default:
-      TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 6]");
-  }
-#undef QVQ_LR_LAUNCH_HOPPER_WMMA
 }
 
 // Two adjacent N8 tiles amortize the LR32 input staging and launch overhead
@@ -2281,7 +2094,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       static_cast<int>(size_k),
       static_cast<int>(out_features),
       device_config);
-  int split_count =
+  const int split_count =
       split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
   TORCH_CHECK(split_count >= 1 && split_count <= max_split_count,
               "LR32 split_count must be in [1, min(K/32, 64)]");
@@ -2289,38 +2102,30 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       k_tiles <= std::numeric_limits<int>::max() / split_count,
       "LR32 split_count overflows the int32 kernel partition limit");
 
-  const bool use_hopper_cooperative_wmma = device_config.major == 9 &&
-      transition_bits >= 4 && transition_bits <= 6 &&
-      (transition_bits <= 5 ? size_m <= 16 : rows == 16) &&
-      (transition_bits == 6 ? out_features >= 2048 : out_features >= 512) &&
-      input.scalar_type() == at::kHalf && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
-  // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
-  // projection on a 132-SM H200. Two K partitions supply a second scheduling
-  // wave and are consistently faster than either one or four partitions.
-  if (split_count_override == 0 && use_hopper_cooperative_wmma && transition_bits == 6 &&
-      size_k <= 2048 && out_features >= 8192) {
-    split_count = 2;
-  }
+  const bool use_hopper_proto = device_config.major == 9 &&
+      (transition_bits == 4 || transition_bits == 5) && size_m <= 16 && input.scalar_type() == at::kHalf &&
+      output_fp32 && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
   at::Tensor partial_output;
 
-  if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
+  if (use_hopper_proto && split_count > 1) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
-    launch_qvq_local_ring_wmma_hopper_dispatch<float, true>(
-        input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
-        static_cast<int>(bank_alt_id), stream);
-  } else if (use_hopper_cooperative_wmma && split_count > 1) {
-    partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
-    launch_qvq_local_ring_wmma_hopper_dispatch<half, true>(
-        input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
-        static_cast<int>(bank_alt_id), stream);
-  } else if (use_hopper_cooperative_wmma && output_fp32) {
-    launch_qvq_local_ring_wmma_hopper_dispatch<float, false>(
-        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
-  } else if (use_hopper_cooperative_wmma) {
-    launch_qvq_local_ring_wmma_hopper_dispatch<half, false>(
-        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+    if (transition_bits == 4) {
+      launch_qvq_local_ring_wmma_hopper_proto<4, float, true>(
+          input, trellis, bank_ids, levels, &partial_output, output, split_count,
+          static_cast<int>(bank_alt_id), stream);
+    } else {
+      launch_qvq_local_ring_wmma_hopper_proto<5, float, true>(
+          input, trellis, bank_ids, levels, &partial_output, output, split_count,
+          static_cast<int>(bank_alt_id), stream);
+    }
+  } else if (use_hopper_proto) {
+    if (transition_bits == 4) {
+      launch_qvq_local_ring_wmma_hopper_proto<4, float, false>(
+          input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+    } else {
+      launch_qvq_local_ring_wmma_hopper_proto<5, float, false>(
+          input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+    }
   } else if (split_count > 1) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     if (input.scalar_type() == at::kHalf && output_fp32) {
@@ -2639,13 +2444,13 @@ at::Tensor qvq_gemv_cuda_v4(
 
 }  // namespace
 
-TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
+TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_exp_packed, m) {
   m.def("gemv(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None, int bank_mode=0, int bank_alt_id=0) -> Tensor");
   m.def("gemv_lr(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, int bank_alt_id, int split_count=0) -> Tensor");
   m.def("gemv_v4(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None) -> Tensor");
 }
 
-TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
+TORCH_LIBRARY_IMPL(gptqmodel_qvq_exp_packed, CUDA, m) {
   m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids, int64_t bank_mode, int64_t bank_alt_id) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, bank_mode, bank_alt_id); });
   m.impl("gemv_lr", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, int64_t bank_alt_id, int64_t split_count) { return qvq_gemv_cuda_local_ring_impl(input, trellis, levels, transition_bits, out_features, output_fp32, bank_ids, bank_alt_id, split_count); });
   m.impl("gemv_v4", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids) { return qvq_gemv_cuda_v4(input, trellis, levels, transition_bits, out_features, output_fp32, 4, bank_ids); });

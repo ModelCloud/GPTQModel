@@ -70,14 +70,15 @@ def test_lr32_cuda_matches_local_ring_dense_reference(bits, m, k, n):
 
 
 @pytest.mark.parametrize("bits", (2.0, 2.5))
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize("output_fp32", (False, True))
 @pytest.mark.parametrize("split_count", (1, 3))
-def test_lr32_cuda_hopper_cooperative_m16(bits, output_fp32, split_count):
+def test_lr32_cuda_hopper_cooperative_small_m(bits, m, output_fp32, split_count):
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if properties.major != 9:
         pytest.skip("requires Hopper cooperative WMMA path")
     x, trellis, bank_ids, reference = _lr_case(
-        bits, m=16, k=256, n=512, seed=20260830 + int(bits * 10) + split_count
+        bits, m=m, k=256, n=512, seed=20260830 + int(bits * 10) + m + split_count
     )
     actual = qvq_cuda_gemv(
         x,

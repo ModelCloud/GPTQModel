@@ -9,21 +9,27 @@ from pathlib import Path
 
 def _key(row: dict) -> tuple:
     return (
-        row["name"],
+        row.get("name", row.get("shape")),
         row["m"],
         row["k"],
         row["n"],
-        row["kernel"],
         float(row["bits"]),
     )
 
 
 def render(current: dict, previous: dict) -> str:
-    previous_rows = {
-        _key(row): row
+    previous_candidates = [
+        row
         for row in previous["rows"]
-        if row.get("state") == "complete"
-    }
+        if row.get("state") == "complete" and row.get("kernel") == "qvq_lr"
+    ]
+    if not previous_candidates:
+        # Standalone optimization experiments label the candidate instead of
+        # the production kernel. Exclude their same-run control rows.
+        previous_candidates = [
+            row for row in previous["rows"] if row.get("candidate") not in (None, "last_packed")
+        ]
+    previous_rows = {_key(row): row for row in previous_candidates}
     rows = [
         row
         for row in current["rows"]
