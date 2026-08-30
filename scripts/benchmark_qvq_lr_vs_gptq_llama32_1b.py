@@ -42,7 +42,7 @@ os.environ.setdefault("NVCC_THREADS", "2")
 from scripts import benchmark_qvq_cuda_lr as benchmark_utils
 
 DEFAULT_QVQ_BITS = (2.0, 2.5, 3.0, 3.5)
-DEFAULT_M_VALUES = (1, 2, 4, 8, 16, 32)
+DEFAULT_M_VALUES = (1, 2, 4, 8, 16)
 GPTQ_BITS = 4
 GPTQ_GROUP_SIZE = 128
 
