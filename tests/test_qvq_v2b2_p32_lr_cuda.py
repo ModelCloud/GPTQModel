@@ -98,25 +98,32 @@ def test_lr32_cuda_hopper_cooperative_small_m(bits, m, output_fp32, split_count)
     assert error.max().item() <= (2e-3 if output_fp32 else 2e-2)
 
 
-def test_lr32_cuda_hopper_w3_m16_path_is_unchanged():
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("split_count", (1, 3))
+def test_lr32_cuda_hopper_w3_native_n8_small_m(m, output_fp32, split_count):
     properties = torch.cuda.get_device_properties(torch.cuda.current_device())
     if properties.major != 9:
-        pytest.skip("requires Hopper cooperative WMMA path")
-    x, trellis, bank_ids, reference = _lr_case(3.0, m=16, k=256, n=2048, seed=20260863)
+        pytest.skip("requires Hopper native N8 MMA path")
+    x, trellis, bank_ids, reference = _lr_case(
+        3.0, m=m, k=256, n=2048, seed=20260863 + m + split_count
+    )
     actual = qvq_cuda_gemv(
         x,
         trellis,
         3.0,
         out_features=2048,
-        output_fp32=True,
+        output_fp32=output_fp32,
         bank_ids=bank_ids,
         v2b2_p32_lr=True,
         bank_alt_id=3,
-        lr_split_count=1,
+        lr_split_count=split_count,
     )
-    error = (actual - reference.cuda()).abs()
+    expected = reference.cuda() if output_fp32 else reference.cuda().half().float()
+    error = (actual.float() - expected).abs()
+    assert actual.dtype == (torch.float32 if output_fp32 else torch.float16)
     assert torch.isfinite(actual).all()
-    assert error.max().item() <= 2e-3
+    assert error.max().item() <= (2e-3 if output_fp32 else 2e-2)
 
 
 def test_lr32_cuda_repeated_launches_are_deterministic():
