@@ -19,6 +19,7 @@ from gptqmodel.quantization.config import FORMAT, QVQConfig
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RING_STEPS,
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
+    block_ldlq_inner_v2b2_p32_lr,
     decode_local_ring_states,
     decode_local_ring_tiles,
     decode_trellis_tiles,
@@ -32,6 +33,7 @@ from gptqmodel.quantization.qvq import (
     unpack_trellis_states,
 )
 from gptqmodel.quantization.qvq_codecs import (
+    pgc16_codebook_v2_bank,
     pgc16_decode_states_v2_banked,
     pgc16_levels_for_version,
 )
@@ -112,6 +114,27 @@ def test_lr32_quantizer_requires_k32_n8_geometry():
             v2b2_p32_lr=True,
             rounding="block_ldlq",
         )
+
+
+def test_lr32_quantizer_encodes_noncanonical_ring_bank():
+    bits = 2.0
+    edges = torch.arange(16, dtype=torch.int64).remainder(16).reshape(1, 1, 16).expand(1, 8, 16)
+    states = local_ring_states_from_edges(edges, bits=bits)
+    library = tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in range(4))
+    source = library[2][states].reshape(1, 8, 32).permute(0, 2, 1).reshape(32, 8)
+
+    quantized, encoded_states, selectors, alt_id = block_ldlq_inner_v2b2_p32_lr(
+        source,
+        torch.eye(32),
+        library,
+        bits=bits,
+        trellis_batch_size=8,
+    )
+
+    assert 1 <= int(alt_id.item()) <= 3
+    assert torch.equal(selectors, torch.ones(8, dtype=torch.uint8))
+    assert torch.equal(quantized, source)
+    assert encoded_states.shape == states.shape
 
 
 def test_lr32_same_payload_changes_only_local_history_boundaries_before_matrix_mapping():
