@@ -422,10 +422,15 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
     int bank_alt_id) {
   uint32_t level_pair = 0;
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 1200
-  // TB7 spills its unrolled mask lookup on Ada. Broadcasting the uniform
-  // per-ring value removes that spill, while lower rates retain the direct
-  // lookup that is faster on SM89.
+  // TB7 spills its unrolled mask lookup on Ada. Hopper has the same issue at
+  // TB6, while lower rates retain the direct lookup that is faster on SM89.
+  // Broadcasting the uniform per-ring value keeps the architecture/rate
+  // exceptions local to the decode without adding another kernel variant.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+  constexpr bool kBroadcastBankMask = TransitionBits == 6 || TransitionBits == 7;
+#else
   constexpr bool kBroadcastBankMask = TransitionBits == 7;
+#endif
   uint32_t bank_mask = 0;
   if constexpr (kBroadcastBankMask) {
     if (k_local == 0) {
@@ -1684,12 +1689,14 @@ void launch_qvq_local_ring_gemv(
     int transition_bits,
     int split_count,
     int bank_alt_id,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    bool prefer_tb6_vector) {
   // A 24-word TB=6 tile has a six-vector stride. On SM89/SM120 this access
   // pattern defeats the coalescer for the wider row specializations; scalar
   // staging is measurably faster and avoids the TB=6 occupancy cliff.
   const bool vector_staging =
-      transition_bits != 6 && qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
+      (transition_bits != 6 || prefer_tb6_vector) &&
+      qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
   if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1 && vector_staging) {
     launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, true>(
         input,
@@ -1840,36 +1847,36 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
     if (input.scalar_type() == at::kHalf && output_fp32) {
       launch_qvq_local_ring_gemv<half, float, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
     } else if (input.scalar_type() == at::kHalf) {
       launch_qvq_local_ring_gemv<half, half, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
     } else if (output_fp32) {
       launch_qvq_local_ring_gemv<nv_bfloat16, float, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
     } else {
       launch_qvq_local_ring_gemv<nv_bfloat16, nv_bfloat16, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream);
+          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
     }
   } else if (input.scalar_type() == at::kHalf && output_fp32) {
     launch_qvq_local_ring_gemv<half, float, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
   } else if (input.scalar_type() == at::kHalf) {
     launch_qvq_local_ring_gemv<half, half, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
   } else if (output_fp32) {
     launch_qvq_local_ring_gemv<nv_bfloat16, float, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
   } else {
     launch_qvq_local_ring_gemv<nv_bfloat16, nv_bfloat16, false>(
         input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream);
+        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;

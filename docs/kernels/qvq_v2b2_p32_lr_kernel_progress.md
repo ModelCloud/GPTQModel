@@ -28,6 +28,8 @@ are useful constraints for later optimization work.
 |---|---:|---|---:|---:|---|
 | tested | 0, 1, 3, 4, 5, 6, 7, 8 | RTX 4090 | 8.9 | 128 each | Eight Ada devices; UUID-pinned workers |
 | tested | 2 | RTX 5090 | 12.0 | 170 | One Blackwell device; UUID-pinned worker |
+| tested | 0 (current Hopper host) | H200 | 9.0 | 132 | PCI `00000000:1C:00.0`; UUID `GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea`; 143,771 MiB |
+| tested | 1 (current Hopper host) | H100 | 9.0 | 132 | PCI `00000000:44:00.0`; UUID `GPU-f5ea03cf-efa4-9807-7de5-b174957a1348`; 97,871 MiB |
 | pending | none on host | A100 | 8.0 | query required | Do not assume an SM count from the product name; no A100 result is claimed |
 
 ## Shape matrix
@@ -60,6 +62,11 @@ tables below every row was intentionally measured at M=16.
 | `294f15f4` | 4090/5090, W2-W3.5 | Isolate rate code generation; preserve batch 16 for Blackwell split-K | Higher rates recovered to 4.98-6.50x, but the specialization used TB2 instead of W2's TB4; W2 non-split remained 1.95-2.03x | superseded |
 | `e4b1006c` | 4090/5090, W2-W3.5 | Attach the Blackwell shuffle/broadcast/deep-batch path to W2's actual TB4 width | 5090: all 16 substantial cells pass >=4x, 4.054x geomean including canaries, max error 1.53e-4; 4090 W3.5 remains 2.43-2.53x | accepted source |
 | `18389b4d` | all nine, W2-W3.5 | Final UUID-pinned simultaneous sweep of `e4b1006c` plus the ledger | 180/180 accurate; 4.457x overall geomean; all 144 substantial cells >=2x and 112 >=4x | accepted system gate |
+| `ca4f8039` | H200/H100, W2-W3.5 | Exact merged PR #60 baseline on the two-GPU Hopper host | H200 W3 was 1.00-1.05x versus non-LR on substantial M16 shapes; H100 W3 was 0.98-1.04x. Other requested rates already exceeded 2x | Hopper comparison baseline |
+| `611d249e` | H200, W3 | Select the pre-existing TB6 vector-staging kernel on CC 9.x | Accurate, but only 1-2% faster than `ca4f8039`; W3 remained near parity with non-LR | rejected; reverted by `b7d0e256` |
+| `0080d53e` | H200/H100, W3 | Broadcast the uniform TB6 bank mask once per warp on CC 9.x | H200 LR gained 2.15-2.29x and H100 gained 2.11-2.28x versus `ca4f8039`; all substantial M16 W2-W3.5 cells exceed 2x on both devices | accepted source |
+| `f6e417d9` | H200, W3 M32 | Batch 16 K32 tiles for Hopper ROWS=32 | Wide gained about 2% and down about 3%, but mid regressed about 1.5%; registers rose to 80/thread and shared memory to 36,368 bytes | rejected; reverted by `3aea27bd` |
+| `3aea27bd` | H200/H100, W2-W3.5 | Restore the accepted `0080d53e` source after the M32 experiment | Source-equivalent to `0080d53e`; 28 CUDA tests and 50 host tests passed; NCU access restored for final attribution | accepted validation head before ledger stamp |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -120,6 +127,100 @@ launch-bound canaries.
 | 3.5 | `m16_mid` | 16 | 8,192 | 2,048 | `e4b1006c` | 0.0938 | 0.4973 | 5.30x | pass >=4x |
 | 3.5 | `mlp_down` | 16 | 4,096 | 11,008 | `e4b1006c` | 0.2202 | 1.3554 | 6.15x | pass >=4x |
 
+## Hopper accepted M=16 matrix
+
+The H200 baseline and accepted runs use physical GPU 0, CC 9.0, 132 SMs,
+fingerprints `e7b6a889d9b3ca292743622a7096f5950b677b0fb9ed45fcb87a7e73691efa3e`
+and `70cac1d75faa027f34edb6c420eae3d78f5a72621829222d910b3d604f65b5fc`,
+respectively. The accepted source is `0080d53e`; final validation head
+`3aea27bd` is source-identical after reverting the rejected M32 experiment.
+
+### H200 exact matrix
+
+| W | Shape | M | K | N | Result commit | LR ms | non-LR ms | Speedup | Prior LR ms | LR gain | Gate |
+|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---|
+| 2 | `m1_narrow` | 16 | 2,048 | 256 | `0080d53e` | 0.0293 | 0.0292 | 0.99x | 0.0297 | 1.01x | canary |
+| 2 | `m1_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.1308 | 0.4950 | 3.78x | 0.1307 | 1.00x | pass >=2x |
+| 2 | `m4_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.1309 | 0.4958 | 3.79x | 0.1308 | 1.00x | pass >=2x |
+| 2 | `m16_mid` | 16 | 8,192 | 2,048 | `0080d53e` | 0.1329 | 0.4843 | 3.64x | 0.1329 | 1.00x | pass >=2x |
+| 2 | `mlp_down` | 16 | 4,096 | 11,008 | `0080d53e` | 0.3389 | 1.3177 | 3.89x | 0.3389 | 1.00x | pass >=2x |
+| 2.5 | `m1_narrow` | 16 | 2,048 | 256 | `0080d53e` | 0.0361 | 0.0289 | 0.80x | 0.0342 | 0.95x | canary |
+| 2.5 | `m1_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.1320 | 0.4938 | 3.74x | 0.1320 | 1.00x | pass >=2x |
+| 2.5 | `m4_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.1321 | 0.4983 | 3.77x | 0.1320 | 1.00x | pass >=2x |
+| 2.5 | `m16_mid` | 16 | 8,192 | 2,048 | `0080d53e` | 0.1369 | 0.4842 | 3.54x | 0.1369 | 1.00x | pass >=2x |
+| 2.5 | `mlp_down` | 16 | 4,096 | 11,008 | `0080d53e` | 0.3420 | 1.3439 | 3.93x | 0.3421 | 1.00x | pass >=2x |
+| 3 | `m1_narrow` | 16 | 2,048 | 256 | `0080d53e` | 0.0393 | 0.0288 | 0.73x | 0.0361 | 0.92x | canary |
+| 3 | `m1_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.2213 | 0.4989 | 2.25x | 0.4815 | 2.18x | pass >=2x |
+| 3 | `m4_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.2201 | 0.4917 | 2.23x | 0.4825 | 2.19x | pass >=2x |
+| 3 | `m16_mid` | 16 | 8,192 | 2,048 | `0080d53e` | 0.2254 | 0.4832 | 2.14x | 0.4837 | 2.15x | pass >=2x |
+| 3 | `mlp_down` | 16 | 4,096 | 11,008 | `0080d53e` | 0.5553 | 1.3283 | 2.39x | 1.2693 | 2.29x | pass >=2x |
+| 3.5 | `m1_narrow` | 16 | 2,048 | 256 | `0080d53e` | 0.0400 | 0.0289 | 0.72x | 0.0366 | 0.92x | canary |
+| 3.5 | `m1_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.2167 | 0.4956 | 2.29x | 0.2164 | 1.00x | pass >=2x |
+| 3.5 | `m4_wide` | 16 | 2,048 | 8,192 | `0080d53e` | 0.2098 | 0.4988 | 2.38x | 0.2101 | 1.00x | pass >=2x |
+| 3.5 | `m16_mid` | 16 | 8,192 | 2,048 | `0080d53e` | 0.2136 | 0.4861 | 2.28x | 0.2135 | 1.00x | pass >=2x |
+| 3.5 | `mlp_down` | 16 | 4,096 | 11,008 | `0080d53e` | 0.5420 | 1.3397 | 2.47x | 0.5415 | 1.00x | pass >=2x |
+
+All 20 H200 pairs pass the `2e-3` accuracy gate with worst-case absolute
+error `1.53e-4`. All 16 substantial cells exceed 2x versus non-LR; the four
+narrow cells remain explicitly separated launch canaries.
+
+### H100 same-CC regression
+
+The H100 run uses physical GPU 1, CC 9.0, 132 SMs, and the same accepted
+fingerprint. All 16 substantial cells exceed 2x and worst-case absolute error
+is `1.53e-4`.
+
+| W | Substantial cells | LR ms range | Geomean speedup | Min-max speedup | Gate |
+|---:|---:|---:|---:|---:|---|
+| 2 | 4 | 0.1298-0.3365 | 3.710x | 3.53-3.79x | all >=2x |
+| 2.5 | 4 | 0.1310-0.3396 | 3.660x | 3.45-3.78x | all >=2x |
+| 3 | 4 | 0.2164-0.5380 | 2.239x | 2.13-2.37x | all >=2x |
+| 3.5 | 4 | 0.2053-0.5280 | 2.342x | 2.26-2.41x | all >=2x |
+
+The exact W3 progression, which is the path changed by this branch, is:
+
+| Shape | M | K | N | LR ms | non-LR ms | Speedup | Prior LR ms | LR gain | Gate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `m1_narrow` | 16 | 2,048 | 256 | 0.0340 | 0.0285 | 0.84x | 0.0327 | 0.96x | canary |
+| `m1_wide` | 16 | 2,048 | 8,192 | 0.2234 | 0.4902 | 2.19x | 0.4724 | 2.11x | pass >=2x |
+| `m4_wide` | 16 | 2,048 | 8,192 | 0.2164 | 0.4896 | 2.26x | 0.4700 | 2.17x | pass >=2x |
+| `m16_mid` | 16 | 8,192 | 2,048 | 0.2189 | 0.4663 | 2.13x | 0.4745 | 2.17x | pass >=2x |
+| `mlp_down` | 16 | 4,096 | 11,008 | 0.5380 | 1.2775 | 2.37x | 1.2279 | 2.28x | pass >=2x |
+
+### H200 W3 expanded rows and dtypes
+
+This sweep holds W3 fixed and covers both production input dtypes across all
+compiled row specializations. Each row summarizes the four substantial K/N
+cells; narrow launch canaries are excluded from these geomeans.
+
+| Dtype | M | Cells | LR ms range | Geomean speedup | Min-max speedup | Max abs | Gate |
+|---|---:|---:|---:|---:|---:|---:|---|
+| FP16 | 1 | 4 | 0.2111-0.5864 | 2.225x | 2.05-2.31x | 1.83e-4 | 4/4 >=2x |
+| FP16 | 4 | 4 | 0.2023-0.5242 | 2.418x | 2.37-2.50x | 1.22e-4 | 4/4 >=2x |
+| FP16 | 8 | 4 | 0.2021-0.5278 | 2.420x | 2.38-2.49x | 1.79e-4 | 4/4 >=2x |
+| FP16 | 16 | 4 | 0.2205-0.5516 | 2.257x | 2.16-2.39x | 1.37e-4 | 4/4 >=2x |
+| FP16 | 32 | 4 | 0.2811-0.7353 | 2.026x | 1.76-2.35x | 3.74e-4 | 3/4 >=2x |
+| BF16 | 1 | 4 | 0.2102-0.5816 | 2.223x | 2.05-2.31x | 1.83e-4 | 4/4 >=2x |
+| BF16 | 4 | 4 | 0.2020-0.5269 | 2.423x | 2.38-2.49x | 1.22e-4 | 4/4 >=2x |
+| BF16 | 8 | 4 | 0.2019-0.5286 | 2.418x | 2.37-2.49x | 1.45e-4 | 4/4 >=2x |
+| BF16 | 16 | 4 | 0.2196-0.5507 | 2.241x | 2.12-2.40x | 1.22e-4 | 4/4 >=2x |
+| BF16 | 32 | 4 | 0.2775-0.7253 | 2.042x | 1.76-2.38x | 3.05e-4 | 3/4 >=2x |
+
+The two remaining sub-2x substantial cells are W3 M32/K8192/N2048 in FP16
+and BF16. A split-count sweep found split 4 already optimal; the rejected
+16-tile ROWS=32 batch did not close the gap.
+
+### Hopper validation
+
+- H200 CUDA dispatch/correctness: 28/28 tests passed, covering W1-W3.5,
+  FP16/BF16, M1/M4/M17, split-K, typed output, streams, determinism, and
+  validation errors.
+- Host benchmark/layout/profiler suites: 50 passed and 141 platform skips.
+- H200 accepted M16 sweep: 20/20 LR/non-LR pairs passed accuracy; all 16
+  substantial W2-W3.5 cells passed >=2x.
+- H100 same-CC regression: 20/20 pairs passed accuracy; all 16 substantial
+  W2-W3.5 cells passed >=2x.
+
 ## Final all-device aggregate
 
 The simultaneous run at `18389b4d`, fingerprint
@@ -146,21 +247,63 @@ baseline already ran W2 at roughly 9x versus non-LR; the large Ada gains in this
 series are W2.5 (about 8.6-9.2x versus non-LR), W3 (about 6.7-7.3x), and W3.5
 (about 2.3-2.5x).
 
+## Hopper profiler attribution
+
+Nsight Compute 2026.2.1 access was restored on the Hopper host after the
+initial `ERR_NVGPUCTRPERM` failure. The formal target was the accepted W3
+FP16 M16/K4096/N11008 non-split LR kernel on H200. NCU timings include replay
+and instrumentation overhead and are not used as final latency evidence; the
+CUDA-event matrices above remain authoritative.
+
+| Metric group | Metric | Value | Interpretation |
+|---|---|---:|---|
+| SOL | Compute throughput | 60.05% | substantial compute use, but below the cache-request ceiling |
+| SOL | Memory throughput | 80.27% | primary SOL limiter |
+| SOL | DRAM throughput | 0.90% | not DRAM-bandwidth bound |
+| cache | L1/TEX hit rate | 84.67% | most staged loads hit on chip |
+| cache | L2 hit rate | 98.71% | the 80.94% memory-request rate is almost entirely L2-resident |
+| occupancy | theoretical / achieved | 50.00% / 45.89% | four blocks/SM by registers; shared memory permits six |
+| resources | registers / static shared | 59/thread / 18,960 bytes/block | zero local- or shared-spilling requests |
+| scheduler | issue active | 64.12% | 0.64 issued warp per scheduler per active cycle |
+| scheduler | active / eligible warps | 7.33 / 1.90 per scheduler | enough resident warps, but dependencies reduce eligibility |
+| stalls | long scoreboard / not selected | 1.98 / 1.96 cycles per issued instruction | cache dependency and normal arbitration dominate |
+| stalls | wait / MIO throttle | 1.55 / 1.23 cycles per issued instruction | secondary dependency/shared-memory pressure |
+| stalls | short scoreboard / barrier | 1.14 / 1.04 cycles per issued instruction | staging synchronization remains a smaller target |
+
+The post-broadcast W3 kernel is therefore L2 request/scoreboard limited, not
+launch-bound, DRAM-bound, or spill-bound. The raw local artifacts are
+`artifacts/h200_lr_final_3aea27bd/profiles/h200_w3_m16_down_sol.csv` and
+`artifacts/h200_lr_final_3aea27bd/profiles/h200_w3_m16_down_raw.csv`.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
-| 2 | all nine installed GPUs, W2-W3.5 | `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the branch acceptance gate |
-| 3 | RTX 4090 W3.5 substantial shapes | 2.269-2.520x in the simultaneous run | target the 4x stretch goal |
-| 4 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for this branch head | expanded accuracy/performance regression |
-| 5 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
-| 6 | launch-bound narrow shapes | typically 1.00-1.52x | reduce launch/split overhead without regressing substantial shapes |
-| 7 | hardware-counter attribution | Nsight Systems works; Nsight Compute reports `ERR_NVGPUCTRPERM`, with `RmProfilingAdminOnly: 1` | rerun NCU after the driver exposes counters |
+| 1 | H200/H100 W2-W3.5, all substantial M=16 shapes | `0080d53e`: all 32 cells across both devices pass >=2x | retain as the portable CC 9.x acceptance gate |
+| 2 | H200 W3, FP16/BF16 M1/M4/M8/M16 | all 32 substantial cells pass >=2x | repeat if staging, recurrence, or split policy changes |
+| 3 | H200 W3 M32/K8192/N2048, FP16/BF16 | 1.76x versus non-LR; split 4 is best; 16-tile batch rejected | reduce L2 request/scoreboard pressure without raising ROWS32 registers |
+| 4 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
+| 5 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
+| 6 | RTX 4090 W3.5 substantial shapes | 2.269-2.520x in the simultaneous run | target the 4x stretch goal |
+| 7 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for PR #60 source | expanded accuracy/performance regression |
+| 8 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
+| 9 | launch-bound narrow shapes | 0.72-1.04x on Hopper M16 | reduce launch/split overhead without regressing substantial shapes |
+| 10 | Hopper counter attribution | NCU restored; 80.27% memory SOL, 98.71% L2 hit, 45.89% achieved occupancy | target L2 requests and scoreboard stalls in the next kernel revision |
 
 ## Reproduction
 
-Representative device sweep:
+Current H200 sweep:
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea \
+GPTQMODEL_QVQ_CUDA_BUILD_ROOT=/tmp/qvq-jit-hopper-current \
+python scripts/benchmark_qvq_cuda_lr.py \
+  --physical-gpu 0 --bits 2 2.5 3 3.5 --dtype float16 --m 16 \
+  --warmup 10 --iterations 60 --out-dir artifacts/<stamp>
+```
+
+Prior RTX 5090 representative sweep:
 
 ```bash
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2 \
