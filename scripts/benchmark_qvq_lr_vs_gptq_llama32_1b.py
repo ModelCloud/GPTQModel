@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compare QVQ LR low-rate kernels with W4 GPTQ kernels on Llama 3.2 1B shapes.
+"""Compare QVQ LR low-rate kernels with W4 GPTQ kernels on named model shapes.
 
 This is a kernel-throughput comparison, not a model-quality comparison. QVQ
 V2B2-P32-LR uses its native P32 local-ring layout at W2 through W3.5. Marlin
@@ -83,6 +83,53 @@ LLAMA32_1B_SHAPES = (
     ShapeCase("mlp_down", ("down_proj",), 8192, 2048, 1),
 )
 
+# Qwen3.8-27B keeps the Qwen3.5 hybrid decoder geometry.  Its full-attention
+# q_proj emits both Q and the output gate (24 heads * 256 head dim * 2), while
+# the Gated DeltaNet projections use 16 K/Q heads and 48 V heads at head dim
+# 128.  in_proj_a/in_proj_b and the depthwise conv are deliberately absent:
+# the GPTQModel definition marks those tiny/control projections non-quantized.
+QWEN38_27B_PROJECTIONS = (
+    Projection("self_attn.q_proj", 5120, 12288),
+    Projection("self_attn.k_proj", 5120, 1024),
+    Projection("self_attn.v_proj", 5120, 1024),
+    Projection("self_attn.o_proj", 6144, 5120),
+    Projection("linear_attn.in_proj_qkv", 5120, 10240),
+    Projection("linear_attn.in_proj_z", 5120, 6144),
+    Projection("linear_attn.out_proj", 6144, 5120),
+    Projection("mlp.gate_proj", 5120, 17408),
+    Projection("mlp.up_proj", 5120, 17408),
+    Projection("mlp.down_proj", 17408, 5120),
+)
+
+# Equal M/K/N geometries are measured once even when they occur in different
+# layer types.  This covers every distinct quantized text-decoder projection
+# geometry without treating duplicate module roles as independent samples.
+QWEN38_27B_SHAPES = (
+    ShapeCase("qwen38_full_q_gate", ("self_attn.q_proj",), 5120, 12288, 1),
+    ShapeCase("qwen38_full_kv", ("self_attn.k_proj", "self_attn.v_proj"), 5120, 1024, 2),
+    ShapeCase(
+        "qwen38_attn_out",
+        ("self_attn.o_proj", "linear_attn.out_proj"),
+        6144,
+        5120,
+        2,
+    ),
+    ShapeCase("qwen38_linear_qkv", ("linear_attn.in_proj_qkv",), 5120, 10240, 1),
+    ShapeCase("qwen38_linear_z", ("linear_attn.in_proj_z",), 5120, 6144, 1),
+    ShapeCase("qwen38_mlp_gate_up", ("mlp.gate_proj", "mlp.up_proj"), 5120, 17408, 2),
+    ShapeCase("qwen38_mlp_down", ("mlp.down_proj",), 17408, 5120, 1),
+)
+
+MODEL_SHAPE_SETS = {
+    "llama32_1b": LLAMA32_1B_SHAPES,
+    "qwen38_27b": QWEN38_27B_SHAPES,
+}
+
+MODEL_TITLES = {
+    "llama32_1b": "Llama 3.2 1B",
+    "qwen38_27b": "Qwen3.8-27B",
+}
+
 
 def _positive_int(value: str) -> int:
     parsed = int(value)
@@ -107,10 +154,17 @@ def _parse_args() -> argparse.Namespace:
         help="Physical PCI-ordered GPU index. PR #62's H100 host target is 1.",
     )
     parser.add_argument(
+        "--model-shapes",
+        choices=tuple(MODEL_SHAPE_SETS),
+        default="llama32_1b",
+        help="Named model projection inventory to benchmark.",
+    )
+    parser.add_argument(
         "--shapes",
         nargs="+",
-        choices=tuple(case.name for case in LLAMA32_1B_SHAPES),
-        default=[case.name for case in LLAMA32_1B_SHAPES],
+        choices=tuple(case.name for cases in MODEL_SHAPE_SETS.values() for case in cases),
+        default=None,
+        help="Optional subset of the selected model's distinct projection geometries.",
     )
     parser.add_argument("--m", nargs="+", type=_positive_int, default=list(DEFAULT_M_VALUES))
     parser.add_argument("--qvq-bits", nargs="+", type=float, default=list(DEFAULT_QVQ_BITS))
@@ -144,8 +198,16 @@ def _parse_args() -> argparse.Namespace:
         help="Markdown result table path (defaults to --output with a .md suffix).",
     )
     args = parser.parse_args()
+    selected_shapes = MODEL_SHAPE_SETS[args.model_shapes]
+    if args.shapes is None:
+        args.shapes = [case.name for case in selected_shapes]
+    else:
+        selected_names = {case.name for case in selected_shapes}
+        foreign = sorted(set(args.shapes) - selected_names)
+        if foreign:
+            parser.error(f"--shapes {foreign} do not belong to --model-shapes {args.model_shapes}")
     _validate_contract(
-        shapes=[_shape_by_name(name) for name in args.shapes],
+        shapes=[_shape_by_name(name, args.model_shapes) for name in args.shapes],
         m_values=args.m,
         qvq_bits=args.qvq_bits,
         gptq_group_size=args.gptq_group_size,
@@ -157,8 +219,8 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def _shape_by_name(name: str) -> ShapeCase:
-    return next(case for case in LLAMA32_1B_SHAPES if case.name == name)
+def _shape_by_name(name: str, model_shapes: str = "llama32_1b") -> ShapeCase:
+    return next(case for case in MODEL_SHAPE_SETS[model_shapes] if case.name == name)
 
 
 def _validate_contract(
@@ -169,7 +231,7 @@ def _validate_contract(
     gptq_group_size: int,
 ) -> None:
     if not shapes:
-        raise ValueError("at least one Llama 3.2 1B shape is required")
+        raise ValueError("at least one model projection shape is required")
     if not m_values or any(m <= 0 for m in m_values) or len(set(m_values)) != len(m_values):
         raise ValueError("M values must be unique positive integers")
     normalized_bits = tuple(float(bits) for bits in qvq_bits)
@@ -619,11 +681,13 @@ def _markdown_report(payload: dict) -> str:
     args = payload["args"]
     qvq = payload["qvq"]
     gptq = payload["gptq"]
+    model_shape_set = payload.get("model_shape_set", "llama32_1b")
+    model_title = MODEL_TITLES.get(model_shape_set, model_shape_set)
     lines = [
-        "# QVQ LR versus W4 GPTQ kernels — Llama 3.2 1B shapes",
+        f"# QVQ LR versus W4 GPTQ kernels — {model_title} shapes",
         "",
         (
-            "This is a kernel-throughput comparison on the H100 host from PR #62. "
+            f"This is a kernel-throughput comparison on {device['name']}. "
             "W4 GPTQ is a figurative performance baseline, not a quality-equivalent arm."
         ),
         "",
@@ -670,12 +734,15 @@ def _markdown_report(payload: dict) -> str:
             f"{row['p95_ms']:.4f} | {row['logical_tflops']:.3f} | {row['effective_payload_gbs']:.2f} | "
             f"{x_marlin} | {x_machete} | {row['max_abs']:.3g} |"
         )
+    projection_shapes = payload.get("projection_shapes", [])
+    projection_roles = [role for case in projection_shapes for role in case["roles"]]
+    if not projection_roles:
+        projection_roles = sorted({role for row in payload["rows"] for role in row["roles"]})
     lines.extend([
         "",
         (
-            "The four shape rows preserve all seven Llama 3.2 1B projection roles: "
-            "`q_proj/o_proj` (2048×2048), `k_proj/v_proj` (2048×512), "
-            "`gate_proj/up_proj` (2048×8192), and `down_proj` (8192×2048)."
+            f"The {len(projection_shapes) or len({row['name'] for row in payload['rows']})} distinct shape rows preserve "
+            f"{len(projection_roles)} quantized {model_title} projection roles."
         ),
         "",
     ])
@@ -753,7 +820,7 @@ def _prewarm_extensions(torch, dtype) -> None:
 def _run(args: argparse.Namespace) -> dict:
     commit = benchmark_utils._git_commit()
     fingerprint = benchmark_utils._source_fingerprint()
-    shapes = [_shape_by_name(name) for name in args.shapes]
+    shapes = [_shape_by_name(name, args.model_shapes) for name in args.shapes]
     expected = _expected_rows(shapes, args.m, args.qvq_bits, args.dtype)
     live = _LiveResults(expected, args.progress_interval)
     live.start()
@@ -935,7 +1002,8 @@ def _run(args: argparse.Namespace) -> dict:
         rows = _with_relative_metrics(live.rows)
         benchmark_utils._verify_source(commit, fingerprint, phase="after benchmark completed")
         payload = {
-            "label": "qvq_lr_vs_w4_gptq_llama32_1b",
+            "label": f"qvq_lr_vs_w4_gptq_{args.model_shapes}",
+            "model_shape_set": args.model_shapes,
             "scope": "kernel throughput only; W4 GPTQ is a figurative performance baseline, not a quality match",
             "commit": commit,
             "source_fingerprint": fingerprint,

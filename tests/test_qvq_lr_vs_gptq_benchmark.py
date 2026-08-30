@@ -42,6 +42,55 @@ def test_llama32_1b_unique_shape_matrix_preserves_all_seven_roles():
     assert sum(case.modules_per_layer for case in benchmark.LLAMA32_1B_SHAPES) == 7
 
 
+def test_qwen38_27b_projection_inventory_matches_upstream_text_decoder():
+    actual = {
+        projection.name: (projection.in_features, projection.out_features)
+        for projection in benchmark.QWEN38_27B_PROJECTIONS
+    }
+
+    assert actual == {
+        "self_attn.q_proj": (5120, 12288),
+        "self_attn.k_proj": (5120, 1024),
+        "self_attn.v_proj": (5120, 1024),
+        "self_attn.o_proj": (6144, 5120),
+        "linear_attn.in_proj_qkv": (5120, 10240),
+        "linear_attn.in_proj_z": (5120, 6144),
+        "linear_attn.out_proj": (6144, 5120),
+        "mlp.gate_proj": (5120, 17408),
+        "mlp.up_proj": (5120, 17408),
+        "mlp.down_proj": (17408, 5120),
+    }
+
+
+def test_qwen38_27b_unique_shape_matrix_preserves_all_quantized_roles():
+    roles = [role for case in benchmark.QWEN38_27B_SHAPES for role in case.roles]
+    geometries = {(case.in_features, case.out_features) for case in benchmark.QWEN38_27B_SHAPES}
+
+    assert len(roles) == len(set(roles)) == len(benchmark.QWEN38_27B_PROJECTIONS)
+    assert set(roles) == {projection.name for projection in benchmark.QWEN38_27B_PROJECTIONS}
+    assert geometries == {
+        (5120, 12288),
+        (5120, 1024),
+        (6144, 5120),
+        (5120, 10240),
+        (5120, 6144),
+        (5120, 17408),
+        (17408, 5120),
+    }
+    assert len(benchmark.QWEN38_27B_SHAPES) == 7
+
+
+def test_qwen38_full_matrix_has_210_candidate_rows():
+    rows = benchmark._expected_rows(
+        list(benchmark.QWEN38_27B_SHAPES),
+        list(benchmark.DEFAULT_M_VALUES),
+        list(benchmark.DEFAULT_QVQ_BITS),
+        "float16",
+    )
+
+    assert len(rows) == 210
+
+
 def test_default_matrix_has_requested_rates_and_lr_row_specializations():
     assert benchmark.DEFAULT_QVQ_BITS == (2.0, 2.5, 3.0, 3.5)
     assert benchmark.DEFAULT_M_VALUES == (1, 2, 4, 8, 16)
