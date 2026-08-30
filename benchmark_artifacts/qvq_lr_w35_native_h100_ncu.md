@@ -55,3 +55,21 @@ The mechanism result is exact: Nsight Compute reports no conflicted shared
 stores for the specialized kernel, while the random level-table load conflicts
 remain. The merged CUDA-event benchmark measured 0.0360 ms at M=1 versus the
 0.0377 ms pre-specialization production result.
+
+## Control-flow reduction follow-up
+
+The accepted removal of the trailing warp barrier and the runtime tail loop
+bound were profiled together at the original M=16, K=2,048, N=8,192 geometry.
+This keeps the comparison at the same live row count and output specialization.
+
+| Variant | Executed instructions | Registers/thread | Static shared KiB | Shared-load conflicts | Shared-store conflicts | Issue active | Active warps | NCU duration us | Better than last |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
+| Fixed plane spreading | 16,277,504 | 96 | 46.18 | 935,149 | 131,072 | 43.86% | 12.05% | 39.10 | no |
+| Barrier-free dynamic tail | 14,418,432 | 85 | 46.18 | 936,132 | 131,072 | 45.08% | 11.90% | 35.84 | yes |
+
+The two control-flow changes remove 1,859,072 executed instructions (11.42%)
+and shorten the profiled duration by 8.34%. They do not reduce the random
+level-table load conflicts or the M=16 activation-staging store conflicts, so
+those memory-access patterns remain the next optimization targets. The raw
+`.ncu-rep` is intentionally kept local; CUDA-event benchmark artifacts remain
+the authoritative latency comparison.
