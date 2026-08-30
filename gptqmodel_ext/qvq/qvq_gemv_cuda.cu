@@ -2053,7 +2053,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       "LR32 split_count overflows the int32 kernel partition limit");
 
   const bool use_hopper_w3_wmma = device_config.major == 9 &&
-      transition_bits == 6 && rows == 16 && out_features >= 2048 && input.scalar_type() == at::kHalf &&
+      transition_bits == 6 && rows == 16 && input.scalar_type() == at::kHalf &&
       qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
   at::Tensor partial_output;
 
