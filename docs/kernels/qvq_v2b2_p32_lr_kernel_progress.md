@@ -89,6 +89,7 @@ tables below every row was intentionally measured at M=16.
 | `34aac964` uncommitted A/B | H200, W3 gate/up | Compose the earlier XOR activation-segment swizzle with the accepted stride-40 native-N8 layout | Accurate but 3.2-3.6% slower; NCU shared-load conflicts rose from 0.936M to 1.985M and memory throughput fell from 210.8 to 200.7 GB/s | rejected; source restored before next experiment |
 | `548c5c73` | H200, W3 gate/up | Bypass the random shared level-table lookup in the N64 specialization and use Hopper's read-only/L1 path | All five M1-M16 rows gained 0.3-0.9%; shared-load bank conflicts fell 936,250 to 483 and L1 hit rate rose 11.3% to 93.9%; 108 CUDA tests passed | accepted and pushed |
 | `7788a8f6` uncommitted A/B | H200, W3 gate/up | Replace the decoded-B shared transpose and two warp fences with direct register shuffles into the MMA B-fragment layout | Accurate, but 16 scalar routes per K32 tile raised M1-M16 from 0.0316-0.0324 to 0.0360-0.0368 ms (12-14%) | rejected; source restored before next experiment |
+| `8159988f` uncommitted A/B | H200, W3 gate/up | Widen N64 to N128; reduce K batch 16 to 14 to fit Hopper's 48 KiB static-shared limit; sweep split 2/4 | N128 split-2 was accurate but 4-6% slower at 0.0333-0.0340 ms; split-4 was mixed across M and did not recover N64 | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
