@@ -1364,7 +1364,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
 
 #pragma unroll 1
     for (int u = 0; u < tiles_here; ++u) {
-      const int sub = warp;
+      {
+        const int sub = warp;
         // Four lanes cooperate on each ring. Each lane extracts four disjoint
         // transitions once and advances a rate-specific sliding state across
         // four adjacent pairs. Every rate exchanges the preceding four-edge
@@ -1493,6 +1494,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           reinterpret_cast<uint4*>(&decoded_weight[sub][0])[edge_group * 8 + col] =
               make_uint4(decoded_pairs[0], decoded_pairs[1], decoded_pairs[2], decoded_pairs[3]);
         }
+      }
       __syncwarp();
 
       if (n_tile_base + warp < n_tiles) {
