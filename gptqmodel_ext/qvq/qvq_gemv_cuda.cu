@@ -2358,7 +2358,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   const bool use_hopper_cooperative_wmma = device_config.major == 9 &&
       transition_bits >= 4 && transition_bits <= 7 &&
       size_m <= 16 &&
-      (transition_bits >= 6 ? out_features >= 2048 : out_features >= 512) &&
+      out_features >= 512 &&
       input.scalar_type() == at::kHalf && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
   // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
   // projection on a 132-SM H200. Two K partitions supply a second scheduling
