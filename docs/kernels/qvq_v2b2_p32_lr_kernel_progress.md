@@ -93,6 +93,7 @@ tables below every row was intentionally measured at M=16.
 | `f24b2227` uncommitted A/B | H200, W3 gate/up | Reuse the merged W3.5-M1 producer-lane permutation for W3 N64 while preserving the stride-40 shared layout and `ldmatrix` addresses | Accurate, but scattered global activation fetches raised M1-M16 from 0.0316-0.0324 to 0.0322-0.0335 ms (1.6-3.3%) | rejected; source restored before next experiment |
 | `1e15b299` uncommitted A/B | H200, W3 gate/up | Sweep split 1/2/4/8 after the read-only level-table change, then set automatic split-1 for an exact CUDA Graph replay | The direct-event diagnostic favored split-1, but the production contract regressed 17-20% to 0.0378-0.0390 ms; split-2's second CTA wave remains necessary | rejected; source restored before next experiment |
 | `11f7f40b` | H200, W3 K/V | Lower the Hopper cooperative dispatch threshold from N2,048 to N512 for every rate, reusing the native-N8 TB6 kernel | K/V M1-M16 fell from 0.0207-0.0244 to 0.01142-0.01165 ms (1.81-2.09x) and reached 1.246-1.306x Machete; 108 CUDA tests passed | accepted and pushed |
+| `1f834abf` | H100, W2-W3.5 gate/up M1-M16 | Remove the trailing warp barrier after each private decoded-weight tile; the next uniform warp iteration cannot overwrite shared storage before the prior loads complete | All 20 CUDA-event rows improved to 0.0309-0.0357 ms; 80/80 Hopper correctness cases passed across FP16/FP32 output and split-1/split-3 | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
