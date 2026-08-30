@@ -18,3 +18,20 @@ shifts before they enter the existing state recurrence.
 The NCU duration includes profiler replay overhead and is not the latency used
 for the Marlin/Machete comparison. Benchmark decisions remain based on CUDA
 Graph replay timed by CUDA events.
+
+## Fixed plane-spread follow-up
+
+The accepted fixed mask/shift expansion was profiled at the same W3.5 M=16,
+K=2,048, N=8,192 geometry after merging the concurrent output-tile launch
+changes.
+
+| Variant | Executed instructions | Registers/thread | Static shared KiB | Shared-load conflicts | Shared-store conflicts | Issue active | Active warps | NCU duration us | Better than last |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|:---:|
+| Four scalar edge extracts | 16,527,872 | 92 | 46.18 | 935,250 | 131,072 | 42.55% | 11.86% | 39.87 | no |
+| Fixed plane spreading | 16,277,504 | 96 | 46.18 | 935,149 | 131,072 | 43.86% | 12.05% | 39.10 | yes |
+
+Fixed plane spreading removes 250,368 executed instructions (1.52%) and
+shortens the profiled duration by 1.9%. It costs four registers per thread but
+does not change static shared memory or the shared-store conflict count. The
+formal CUDA-event canary independently improved from 0.0384 ms to 0.0367 ms
+before the merge and measured 0.0370 ms after the merge.
