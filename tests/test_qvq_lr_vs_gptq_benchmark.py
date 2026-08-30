@@ -44,7 +44,7 @@ def test_llama32_1b_unique_shape_matrix_preserves_all_seven_roles():
 
 def test_default_matrix_has_requested_rates_and_lr_row_specializations():
     assert benchmark.DEFAULT_QVQ_BITS == (2.0, 2.5, 3.0, 3.5)
-    assert benchmark.DEFAULT_M_VALUES == (1, 2, 4, 8, 16, 32)
+    assert benchmark.DEFAULT_M_VALUES == (1, 2, 4, 8, 16)
 
 
 def test_common_gptq_contract_rejects_group32_because_machete_cannot_run_it():
@@ -95,7 +95,7 @@ def test_expected_matrix_contains_every_candidate_for_each_mkn():
         * len(benchmark.DEFAULT_M_VALUES)
         * (len(benchmark.DEFAULT_QVQ_BITS) + 2)
     )
-    assert len(rows) == expected == 144
+    assert len(rows) == expected == 120
     assert {row["kernel"] for row in rows} == {"qvq_lr", "gptq_marlin", "gptq_machete"}
 
 
