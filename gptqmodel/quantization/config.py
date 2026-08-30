@@ -6321,9 +6321,8 @@ class QVQConfig(BaseQuantizeConfig):
     # Block-LDLQ. False is an explicit opt-out for A/B comparisons; True is an
     # explicit request and still requires a supplied/derived gate.
     propagated_bank_selection: Optional[bool] = field(default=None)
-    # These fields describe YAQA/Hessian processing geometry and remain 16x16
-    # for LR32. The serialized LR32 codec geometry is fixed independently at
-    # K32 x N8 by FORMAT.QVQ_V2B2_P32_LR.
+    # These legacy integration fields remain 16x16. The LR32 quantizer selects
+    # its fixed K32 x N8 codec and Hessian factor geometry from the format.
     tile_rows: int = field(default=16)
     tile_cols: int = field(default=16)
     # YAQA is the production QVQ lifecycle default; callers that need the
@@ -6519,14 +6518,14 @@ class QVQConfig(BaseQuantizeConfig):
         else:
             raise TypeError("QVQConfig: `viterbi_pruning` must be a ViterbiPruningConfig or dictionary.")
         if (self.yaqa.spectral_refinement or self.yaqa.spectral_push or self.yaqa.spectral_localized) and (
-            self.rounding != "yaqa" or self.format not in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
             raise ValueError(
                 "QVQConfig: YAQA spectral experiment requires `format=qvq_v2b2_p32` "
                 "with YAQA rounding."
             )
         if self.yaqa.sample_strategy != "full" and (
-            self.rounding != "yaqa" or self.format not in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
             raise ValueError(
                 "QVQConfig: sampled YAQA family selection requires `format=qvq_v2b2_p32` with YAQA rounding."
@@ -6637,7 +6636,7 @@ class QVQConfig(BaseQuantizeConfig):
         if self.propagated_bank_selection is not None and not isinstance(self.propagated_bank_selection, bool):
             raise TypeError("QVQConfig: `propagated_bank_selection` must be boolean or None.")
         localized_v2b2_propagation = (
-            self.format in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.format == FORMAT.QVQ_V2B2_P32
             and self.rounding == "yaqa"
             and self.yaqa.spectral_localized
         )
