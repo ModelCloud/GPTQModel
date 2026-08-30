@@ -1303,8 +1303,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           return (source_pack >> ((edge_index & 3) * kTransitionBits)) & 0x3fu;
         };
         const int pair_base = edge_group * 4;
-        uint32_t state = (edge_at((pair_base + 14) & 15) << 12) |
-            (edge_at((pair_base + 15) & 15) << 6) | edge_at(pair_base);
+        uint32_t state = ((edge_at((pair_base + 14) & 15) << 12) |
+            (edge_at((pair_base + 15) & 15) << 6) | edge_at(pair_base)) & 0xffffu;
         const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
             static_cast<uint32_t>(bank_alt_id);
         const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
