@@ -1165,14 +1165,15 @@ __global__ void qvq_reduce_splitk_kernel(
   output[index] = ScalarTraits<OutputScalar>::from_float(accumulator);
 }
 
-// Hopper-only tensor-core candidate for the W3/M16 regime. One warp owns one
-// N8 output tile; a small warp group therefore reuses the staged activation
-// stripe across adjacent tiles. The W3 weights are decoded into an 8-column
-// FP16 matrix (padded to N16) and consumed by two FP16->FP32 WMMA operations
-// per K32 tile. The existing scalar LR kernel remains the fallback for other
-// rates, row counts, dtypes, and unaligned views.
-template <typename OutputScalar, bool SplitK, int OutputTiles>
-__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
+// Hopper-only cooperative tensor-core path for the W2/W2.5/W3 M16 regime.
+// One warp owns one N8 output tile; a small warp group therefore reuses the
+// staged activation stripe across adjacent tiles. Each rate reconstructs the
+// 16 unique ring transitions cooperatively, advances four adjacent states by
+// recurrence, and consumes the decoded FP16 weights through WMMA. The scalar
+// LR kernel remains the fallback for other rates, row counts, dtypes, and
+// unaligned views.
+template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles>
+__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
@@ -1184,7 +1185,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int size_n,
     int split_count,
     int bank_alt_id) {
-  constexpr int kTransitionBits = 6;
+  constexpr int kTransitionBits = TransitionBits;
+  static_assert(kTransitionBits >= 4 && kTransitionBits <= 6);
   constexpr int kRows = 16;
   constexpr int kBatchTiles = 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
@@ -1282,37 +1284,51 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
         const int sub = warp;
-        // W3 packs two adjacent output rows from one 16-bit recurrence state.
-        // Four lanes cooperate on each ring.  Each lane extracts four
-        // disjoint planar edges once, broadcasts the packed 24-bit edge word,
-        // and advances a three-edge sliding state across four adjacent pairs.
-        // The old mapping performed 3 extractions for each of 16 states;
-        // this mapping performs one extraction for each of the 16 edges.
+        // Four lanes cooperate on each ring. Each lane extracts four disjoint
+        // transitions once, broadcasts the packed word, and advances a
+        // rate-specific sliding state across four adjacent pairs.
         const int col = lane & 7;
         const int edge_group = lane >> 3;
-        const int edge_block = col >> 1;
-        const int edge_in_block = (col & 1) * 16 + edge_group * 4;
-        const uint32_t low_codes =
-            packed_words[u][sub][edge_block * kTransitionBits + edge_in_block / 8] >>
-            (4 * (edge_in_block & 7));
-        const uint32_t high_codes =
-            packed_words[u][sub][edge_block * kTransitionBits + 4 + edge_in_block / 16] >>
-            (2 * (edge_in_block & 15));
         uint32_t edge_pack = 0;
+        if constexpr (kTransitionBits == 6) {
+          // W3 stores each planar block as a four-bit low plane followed by a
+          // two-bit high plane. Four consecutive edges therefore need only
+          // two packed-word loads.
+          const int edge_block = col >> 1;
+          const int edge_in_block = (col & 1) * 16 + edge_group * 4;
+          const uint32_t low_codes =
+              packed_words[u][sub][edge_block * kTransitionBits + edge_in_block / 8] >>
+              (4 * (edge_in_block & 7));
+          const uint32_t high_codes =
+              packed_words[u][sub][edge_block * kTransitionBits + 4 + edge_in_block / 16] >>
+              (2 * (edge_in_block & 15));
 #pragma unroll
-        for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
-          const uint32_t edge = ((low_codes >> (edge_in_group * 4)) & 0xfu) |
-              (((high_codes >> (edge_in_group * 2)) & 0x3u) << 4);
-          edge_pack |= edge << (edge_in_group * kTransitionBits);
+          for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
+            const uint32_t edge = ((low_codes >> (edge_in_group * 4)) & 0xfu) |
+                (((high_codes >> (edge_in_group * 2)) & 0x3u) << 4);
+            edge_pack |= edge << (edge_in_group * kTransitionBits);
+          }
+        } else {
+#pragma unroll
+          for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
+            const uint32_t edge = planar_transition<kTransitionBits>(
+                packed_words[u][sub], col * kLocalRingSteps + edge_group * 4 + edge_in_group);
+            edge_pack |= edge << (edge_in_group * kTransitionBits);
+          }
         }
         auto edge_at = [&](int edge_index) {
           const int source_lane = col + (edge_index >> 2) * 8;
           const uint32_t source_pack = __shfl_sync(0xffffffffu, edge_pack, source_lane);
-          return (source_pack >> ((edge_index & 3) * kTransitionBits)) & 0x3fu;
+          return (source_pack >> ((edge_index & 3) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
         };
         const int pair_base = edge_group * 4;
-        uint32_t state = ((edge_at((pair_base + 14) & 15) << 12) |
-            (edge_at((pair_base + 15) & 15) << 6) | edge_at(pair_base)) & 0xffffu;
+        constexpr int kEdgeCount = (15 + kTransitionBits) / kTransitionBits;
+        uint32_t state = 0;
+#pragma unroll
+        for (int j = 0; j < kEdgeCount; ++j) {
+          const int edge_index = (pair_base + kLocalRingSteps - kEdgeCount + 1 + j) & 15;
+          state = ((state << kTransitionBits) | edge_at(edge_index)) & 0xffffu;
+        }
         const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
             static_cast<uint32_t>(bank_alt_id);
         const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
@@ -1878,8 +1894,8 @@ void launch_qvq_local_ring_gemv_impl(
   }
 }
 
-template <typename OutputScalar, bool SplitK>
-void launch_qvq_local_ring_wmma_hopper_w3(
+template <int TransitionBits, typename OutputScalar, bool SplitK>
+void launch_qvq_local_ring_wmma_hopper(
     const at::Tensor& input,
     const at::Tensor& trellis,
     const at::Tensor& bank_ids,
@@ -1900,7 +1916,7 @@ void launch_qvq_local_ring_wmma_hopper_w3(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_w3_kernel<OutputScalar, SplitK, kHopperWmmaOutputTiles>
+  qvq_gemv_local_ring_wmma_hopper_kernel<TransitionBits, OutputScalar, SplitK, kHopperWmmaOutputTiles>
       <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
@@ -1923,6 +1939,37 @@ void launch_qvq_local_ring_wmma_hopper_w3(
         static_cast<int>(output.size(1)),
         split_count);
   }
+}
+
+template <typename OutputScalar, bool SplitK>
+void launch_qvq_local_ring_wmma_hopper_dispatch(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& bank_ids,
+    const at::Tensor& levels,
+    at::Tensor* partial_output,
+    at::Tensor& output,
+    int transition_bits,
+    int split_count,
+    int bank_alt_id,
+    cudaStream_t stream) {
+#define QVQ_LR_LAUNCH_HOPPER_WMMA(BITS)                                                                            \
+  launch_qvq_local_ring_wmma_hopper<BITS, OutputScalar, SplitK>(                                                   \
+      input, trellis, bank_ids, levels, partial_output, output, split_count, bank_alt_id, stream)
+  switch (transition_bits) {
+    case 4:
+      QVQ_LR_LAUNCH_HOPPER_WMMA(4);
+      break;
+    case 5:
+      QVQ_LR_LAUNCH_HOPPER_WMMA(5);
+      break;
+    case 6:
+      QVQ_LR_LAUNCH_HOPPER_WMMA(6);
+      break;
+    default:
+      TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 6]");
+  }
+#undef QVQ_LR_LAUNCH_HOPPER_WMMA
 }
 
 // Two adjacent N8 tiles amortize the LR32 input staging and launch overhead
@@ -2092,31 +2139,37 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       k_tiles <= std::numeric_limits<int>::max() / split_count,
       "LR32 split_count overflows the int32 kernel partition limit");
 
-  const bool use_hopper_w3_wmma = device_config.major == 9 &&
-      transition_bits == 6 && rows == 16 && out_features >= 2048 && input.scalar_type() == at::kHalf &&
-      qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
+  const bool use_hopper_cooperative_wmma = device_config.major == 9 &&
+      transition_bits >= 4 && transition_bits <= 6 && rows == 16 &&
+      (transition_bits == 6 ? out_features >= 2048 : out_features >= 512) &&
+      input.scalar_type() == at::kHalf && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
   // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
   // projection on a 132-SM H200. Two K partitions supply a second scheduling
   // wave and are consistently faster than either one or four partitions.
-  if (split_count_override == 0 && use_hopper_w3_wmma && size_k <= 2048 && out_features >= 8192) {
+  if (split_count_override == 0 && use_hopper_cooperative_wmma && transition_bits == 6 &&
+      size_k <= 2048 && out_features >= 8192) {
     split_count = 2;
   }
   at::Tensor partial_output;
 
-  if (use_hopper_w3_wmma && split_count > 1 && output_fp32) {
+  if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
-    launch_qvq_local_ring_wmma_hopper_w3<float, true>(
-        input, trellis, bank_ids, levels, &partial_output, output, split_count, static_cast<int>(bank_alt_id), stream);
-  } else if (use_hopper_w3_wmma && split_count > 1) {
+    launch_qvq_local_ring_wmma_hopper_dispatch<float, true>(
+        input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_cooperative_wmma && split_count > 1) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
-    launch_qvq_local_ring_wmma_hopper_w3<half, true>(
-        input, trellis, bank_ids, levels, &partial_output, output, split_count, static_cast<int>(bank_alt_id), stream);
-  } else if (use_hopper_w3_wmma && output_fp32) {
-    launch_qvq_local_ring_wmma_hopper_w3<float, false>(
-        input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
-  } else if (use_hopper_w3_wmma) {
-    launch_qvq_local_ring_wmma_hopper_w3<half, false>(
-        input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+    launch_qvq_local_ring_wmma_hopper_dispatch<half, true>(
+        input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_cooperative_wmma && output_fp32) {
+    launch_qvq_local_ring_wmma_hopper_dispatch<float, false>(
+        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_cooperative_wmma) {
+    launch_qvq_local_ring_wmma_hopper_dispatch<half, false>(
+        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
+        static_cast<int>(bank_alt_id), stream);
   } else if (split_count > 1) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     if (input.scalar_type() == at::kHalf && output_fp32) {

@@ -69,6 +69,34 @@ def test_lr32_cuda_matches_local_ring_dense_reference(bits, m, k, n):
     assert error.max().item() <= 2e-3
 
 
+@pytest.mark.parametrize("bits", (2.0, 2.5))
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("split_count", (1, 3))
+def test_lr32_cuda_hopper_cooperative_m16(bits, output_fp32, split_count):
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if properties.major != 9:
+        pytest.skip("requires Hopper cooperative WMMA path")
+    x, trellis, bank_ids, reference = _lr_case(
+        bits, m=16, k=256, n=512, seed=20260830 + int(bits * 10) + split_count
+    )
+    actual = qvq_cuda_gemv(
+        x,
+        trellis,
+        bits,
+        out_features=512,
+        output_fp32=output_fp32,
+        bank_ids=bank_ids,
+        v2b2_p32_lr=True,
+        bank_alt_id=3,
+        lr_split_count=split_count,
+    )
+    expected = reference.cuda() if output_fp32 else reference.cuda().half().float()
+    error = (actual.float() - expected).abs()
+    assert actual.dtype == (torch.float32 if output_fp32 else torch.float16)
+    assert torch.isfinite(actual).all()
+    assert error.max().item() <= (2e-3 if output_fp32 else 2e-2)
+
+
 def test_lr32_cuda_repeated_launches_are_deterministic():
     x, trellis, bank_ids, reference = _lr_case(2.0, m=4, k=512, n=64, seed=20260830)
     outputs = [
