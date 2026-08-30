@@ -52,6 +52,17 @@ shows no solver or runtime nondeterminism for the frozen input.
 See [`frontier_wave11_frozen_solver_results_20260830.json`](experiments/frontier_wave11_frozen_solver_results_20260830.json)
 and the queue manifest [`frontier_wave11_causality_queue_20260830.json`](experiments/frontier_wave11_causality_queue_20260830.json).
 
+### Wave-11 full end-to-end controls (partial, 2026-08-30)
+
+The corrected detached-worktree launcher completed `w11-new-full-a`
+(`a1e0c504`, GPU2).  Under pinned evaluator commit `e45e44f3`,
+`gsm8k_platinum_cot` scored **499/1209 (41.2738%)**, with zero invalid
+answers.  The checkpoint has 112 quantized modules and model-index SHA
+`6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697`; its
+full tensor-hash manifest is recorded in the queue arm.  The other three
+full controls are still running or post-processing, so no old/new
+end-to-end conclusion is drawn yet.
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.
