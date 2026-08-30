@@ -86,6 +86,7 @@ tables below every row was intentionally measured at M=16.
 | `1671e6a5` / `009533a6` | H200, W3 M1-M16 gate/up | Widen the native-N8 output block from four to eight warps only for K2,048/N8,192; compact the otherwise dead padded shared storage in that specialization | All five gate/up rows gained 1.9-3.3% at 0.03184-0.03254 ms; merged-head NCU fell to 14.53M instructions with zero spilling | accepted, merged, and pushed |
 | `65743ae8` | H200, W3/W3.5 | Repair the concurrent W3.5 native-N8 merge by supplying its four-tile launcher argument | Full 20-cell W3 matrix remained accurate; W3.5 M16/K2,048/N8,192 passed at 0.0392 ms with 6.29e-05 max error | accepted integration fix and pushed |
 | `65743ae8` uncommitted A/B | H200, W3 gate/up | Machete-inspired two-stage `cp.async`: split the N64 batch into alternating eight-tile buffers and issue batch i+1 before decoding/MMA of batch i | Accurate, but gate/up regressed from 0.0318-0.0325 ms to 0.0593-0.0641 ms; extra synchronization/bookkeeping could not be amortized by each short split-K partition | rejected; source restored before next experiment |
+| `34aac964` uncommitted A/B | H200, W3 gate/up | Compose the earlier XOR activation-segment swizzle with the accepted stride-40 native-N8 layout | Accurate but 3.2-3.6% slower; NCU shared-load conflicts rose from 0.936M to 1.985M and memory throughput fell from 210.8 to 200.7 GB/s | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -654,6 +655,14 @@ active warps are 14.61/SM, issue availability is 54.98%, and 936,250 shared-load
 plus 65,536 shared-store bank conflicts remain. The local report is
 `/tmp/ncu-h200-w3-gate-out8-65743ae8.ncu-rep`; CUDA-event medians above remain
 the acceptance timing.
+
+The rejected stride-40 plus XOR composition kept 64 registers/thread and the
+same shared allocation, but raised shared-load conflicts from 936,250 to
+1,984,923 (2.12x), increased NCU duration from 30.59 to 32.13 us, reduced
+memory throughput from 210.75 to 200.67 GB/s, and raised no-eligible cycles
+from 45.02% to 48.10%. This proves the two permutations cannot be composed
+blindly: the next activation layout must be solved against the native
+`ldmatrix.x4` lane-to-bank mapping as one transform.
 
 ## Coverage and targeting queue
 
