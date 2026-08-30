@@ -435,6 +435,18 @@ def test_lr32_config_and_format_metadata():
     assert QVQLinear.supported_bits(FORMAT.QVQ_V2B2_P32_LR) == (1, 1.5, 2, 2.5, 3, 3.5)
 
 
+@pytest.mark.parametrize(
+    "yaqa,match",
+    (
+        ({"spectral_refinement": True}, "spectral experiment requires"),
+        ({"sample_strategy": "32_16x16"}, "sampled YAQA family selection requires"),
+    ),
+)
+def test_lr32_config_rejects_p32_specific_yaqa_experiments(yaqa, match):
+    with pytest.raises(ValueError, match=match):
+        QVQConfig(bits=2, format=FORMAT.QVQ_V2B2_P32_LR, bank_count=2, yaqa=yaqa)
+
+
 def test_lr32_make_quant_preserves_layout_format_for_n8_modules():
     class TinyModel(nn.Module):
         def __init__(self):
