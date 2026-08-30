@@ -1160,6 +1160,170 @@ __global__ void qvq_reduce_splitk_kernel(
   output[index] = ScalarTraits<OutputScalar>::from_float(accumulator);
 }
 
+// Hopper-only tensor-core candidate for the W3/M16 regime. One warp owns one
+// N8 output tile; eight warps therefore reuse the staged activation stripe
+// across eight adjacent tiles. The W3 weights are decoded into an 8-column
+// FP16 matrix (padded to N16) and consumed by two FP16->FP32 WMMA operations
+// per K32 tile. The existing scalar LR kernel remains the fallback for other
+// rates, row counts, dtypes, and unaligned views.
+template <typename OutputScalar, bool SplitK>
+__global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
+    const half* __restrict__ input,
+    const int32_t* __restrict__ trellis,
+    const uint8_t* __restrict__ bank_ids,
+    const half* __restrict__ levels,
+    OutputScalar* __restrict__ output,
+    float* __restrict__ partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+  constexpr int kTransitionBits = 6;
+  constexpr int kRows = 16;
+  constexpr int kBatchTiles = 16;
+  constexpr int kOutputTiles = 8;
+  constexpr int kWordsPerTile = 4 * kTransitionBits;
+  constexpr int kPaddedColumns = 16;
+
+  __shared__ half cached_levels[kPgc16LevelCount];
+  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
+  __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
+  __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
+  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows][kPaddedColumns];
+  __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int warp = thread >> 5;
+  const int lane = thread & 31;
+  const int n_tile_base = static_cast<int>(blockIdx.x) * kOutputTiles;
+  const int m0 = static_cast<int>(blockIdx.y) * kRows;
+  const int block_rows = min(kRows, size_m - m0);
+  const int n_tiles = size_n / kLocalRingTileColumns;
+  const int k_tiles = size_k / kLocalRingTileRows;
+  const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
+  const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
+  const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
+
+  if (thread < kPgc16LevelCount) {
+    cached_levels[thread] = levels[thread];
+  }
+  __syncthreads();
+
+  // Initialize the padded N16 columns once. The first eight columns are
+  // overwritten for every decoded K32 tile below.
+  half* decoded_weight_ptr = reinterpret_cast<half*>(decoded_weight);
+  for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kThreads) {
+    const int col = index % kPaddedColumns;
+    if (col >= kLocalRingTileColumns) {
+      decoded_weight_ptr[index] = __float2half(0.0f);
+    }
+  }
+  __syncthreads();
+
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> input_fragment;
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> weight_fragment;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
+  wmma::fill_fragment(accumulator, 0.0f);
+
+  auto stage_batch = [&](int kb, int tiles_here) {
+    constexpr int words_per_vec = kWordsPerTile / 4;
+    const int vec_total = tiles_here * kOutputTiles * words_per_vec;
+    uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
+    const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
+    for (int index = thread; index < vec_total; index += kThreads) {
+      const int tile_slot = index / words_per_vec;
+      const int w4 = index - tile_slot * words_per_vec;
+      const int u = tile_slot / kOutputTiles;
+      const int sub = tile_slot % kOutputTiles;
+      const int n_tile = n_tile_base + sub;
+      words4[tile_slot * words_per_vec + w4] =
+          n_tile < n_tiles
+              ? trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4]
+              : make_uint4(0u, 0u, 0u, 0u);
+    }
+    if (thread < tiles_here * kOutputTiles) {
+      const int u = thread / kOutputTiles;
+      const int sub = thread % kOutputTiles;
+      const int n_tile = n_tile_base + sub;
+      const int tile_index = (kb + u) * n_tiles + n_tile;
+      packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
+    }
+
+    constexpr int input_vecs_per_row = kLocalRingTileRows * sizeof(half) / sizeof(uint4);
+    const int input_vec_total = tiles_here * kRows * input_vecs_per_row;
+    uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
+    const uint4* input4_base = reinterpret_cast<const uint4*>(input);
+    for (int index = thread; index < input_vec_total; index += kThreads) {
+      const int u = index / (kRows * input_vecs_per_row);
+      const int cell = index - u * (kRows * input_vecs_per_row);
+      const int row = cell / input_vecs_per_row;
+      const int vec = cell - row * input_vecs_per_row;
+      input4[index] = row < block_rows
+          ? input4_base[
+                ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) * sizeof(half) / 16) +
+                vec]
+          : make_uint4(0u, 0u, 0u, 0u);
+    }
+  };
+
+  for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
+    const int tiles_here = min(kBatchTiles, k_tile_end - kb);
+    stage_batch(kb, tiles_here);
+    __syncthreads();
+
+#pragma unroll
+    for (int u = 0; u < kBatchTiles; ++u) {
+      if (u < tiles_here) {
+        const int sub = warp;
+        const int n_tile = n_tile_base + sub;
+        for (int j = 0; j < 8; ++j) {
+          const int k_local = (lane >> 3) + (j << 3);
+          const int col = lane & 7;
+          uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[u][sub], col, k_local >> 1);
+          const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
+              static_cast<uint32_t>(bank_alt_id);
+          const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask<kTransitionBits>(bank));
+          const uint32_t level_index = (k_local & 1) == 0 ? mixed >> 8 : mixed & 0xffu;
+          decoded_weight[sub][k_local][col] = cached_levels[level_index];
+        }
+      }
+      __syncwarp();
+
+      if (n_tile_base + warp < n_tiles) {
+        wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
+        wmma::load_matrix_sync(weight_fragment, decoded_weight[warp], kPaddedColumns);
+        wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
+        wmma::load_matrix_sync(
+            input_fragment, input_tile[u] + 16, kLocalRingTileRows);
+        wmma::load_matrix_sync(
+            weight_fragment, decoded_weight[warp] + 16 * kPaddedColumns, kPaddedColumns);
+        wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
+      }
+      __syncwarp();
+    }
+    __syncthreads();
+  }
+
+  if (n_tile_base + warp < n_tiles) {
+    wmma::store_matrix_sync(output_tile[warp], accumulator, kPaddedColumns, wmma::mem_row_major);
+  }
+  __syncthreads();
+  if (n_tile_base + warp < n_tiles) {
+    for (int index = lane; index < block_rows * kLocalRingTileColumns; index += 32) {
+      const int row = index / kLocalRingTileColumns;
+      const int col = index % kLocalRingTileColumns;
+      const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
+          (n_tile_base + warp) * kLocalRingTileColumns + col;
+      if constexpr (SplitK) {
+        partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = output_tile[warp][row][col];
+      } else {
+        output[output_index] = ScalarTraits<OutputScalar>::from_float(output_tile[warp][row][col]);
+      }
+    }
+  }
+}
+
 // M>=32 reuses each decoded tile through Ampere tensor cores. The trellis and
 // PGC16 decode is identical to the scalar kernel; only the 16x16 accumulation is
 // replaced by WMMA with an FP32 accumulator. Partial M tiles are explicitly
@@ -1675,6 +1839,52 @@ void launch_qvq_local_ring_gemv_impl(
   }
 }
 
+template <typename OutputScalar, bool SplitK>
+void launch_qvq_local_ring_wmma_hopper_w3(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& bank_ids,
+    const at::Tensor& levels,
+    at::Tensor* partial_output,
+    at::Tensor& output,
+    int split_count,
+    int bank_alt_id,
+    cudaStream_t stream) {
+  const dim3 grid(
+      static_cast<unsigned int>((output.size(1) / kLocalRingTileColumns + 7) / 8),
+      static_cast<unsigned int>((input.size(0) + 15) / 16),
+      static_cast<unsigned int>(SplitK ? split_count : 1));
+  const half* input_ptr = reinterpret_cast<const half*>(input.const_data_ptr());
+  const half* levels_ptr = reinterpret_cast<const half*>(levels.const_data_ptr());
+  OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
+  float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
+  const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
+  const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
+  qvq_gemv_local_ring_wmma_hopper_w3_kernel<OutputScalar, SplitK>
+      <<<grid, kThreads, 0, stream>>>(
+          input_ptr,
+          trellis_ptr,
+          bank_ids_ptr,
+          levels_ptr,
+          output_ptr,
+          partial_ptr,
+          static_cast<int>(input.size(0)),
+          static_cast<int>(input.size(1)),
+          static_cast<int>(output.size(1)),
+          split_count,
+          bank_alt_id);
+  if constexpr (SplitK) {
+    const int64_t output_values = output.numel();
+    const int reduction_blocks = static_cast<int>((output_values + kThreads - 1) / kThreads);
+    qvq_reduce_splitk_kernel<OutputScalar><<<reduction_blocks, kThreads, 0, stream>>>(
+        partial_ptr,
+        output_ptr,
+        static_cast<int>(output.size(0)),
+        static_cast<int>(output.size(1)),
+        split_count);
+  }
+}
+
 // Two adjacent N8 tiles amortize the LR32 input staging and launch overhead
 // for M=1. For larger row blocks the second accumulator tile increases
 // register pressure enough to regress throughput, so retain one tile/block.
@@ -1842,8 +2052,27 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       k_tiles <= std::numeric_limits<int>::max() / split_count,
       "LR32 split_count overflows the int32 kernel partition limit");
 
-  if (split_count > 1) {
-    at::Tensor partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
+  const bool use_hopper_w3_wmma = device_config.major == 9 &&
+      transition_bits == 6 && rows == 16 && input.scalar_type() == at::kHalf &&
+      qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
+  at::Tensor partial_output;
+
+  if (use_hopper_w3_wmma && split_count > 1 && output_fp32) {
+    partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
+    launch_qvq_local_ring_wmma_hopper_w3<float, true>(
+        input, trellis, bank_ids, levels, &partial_output, output, split_count, static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_w3_wmma && split_count > 1) {
+    partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
+    launch_qvq_local_ring_wmma_hopper_w3<half, true>(
+        input, trellis, bank_ids, levels, &partial_output, output, split_count, static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_w3_wmma && output_fp32) {
+    launch_qvq_local_ring_wmma_hopper_w3<float, false>(
+        input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_w3_wmma) {
+    launch_qvq_local_ring_wmma_hopper_w3<half, false>(
+        input, trellis, bank_ids, levels, nullptr, output, 1, static_cast<int>(bank_alt_id), stream);
+  } else if (split_count > 1) {
+    partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     if (input.scalar_type() == at::kHalf && output_fp32) {
       launch_qvq_local_ring_gemv<half, float, true>(
           input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
