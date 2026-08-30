@@ -1472,30 +1472,57 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
             static_cast<uint32_t>(bank_alt_id);
         const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
         uint32_t decoded_pairs[4] = {};
+        if constexpr (kTransitionBits == 6) {
+          uint32_t mixed_indices[4] = {};
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-          const int pair = pair_base + q;
-          const uint32_t mixed = pgc16_mix(state ^ bank_mask);
-          if constexpr (kNativeN8) {
-            half high_level;
-            half low_level;
-            if constexpr (kReadLevelsFromGlobal) {
-              high_level = __ldg(levels + (mixed >> 8));
-              low_level = __ldg(levels + (mixed & 0xffu));
-            } else {
-              high_level = cached_levels[mixed >> 8];
-              low_level = cached_levels[mixed & 0xffu];
+          for (int q = 0; q < 4; ++q) {
+            mixed_indices[q] = pgc16_mix(state ^ bank_mask);
+            if (q < 3) {
+              const uint32_t transition =
+                  (edge_pack >> ((q + 1) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
+              state = ((state << kTransitionBits) | transition) & 0xffffu;
             }
-            decoded_pairs[q] = static_cast<uint32_t>(__half_as_ushort(high_level)) |
-                (static_cast<uint32_t>(__half_as_ushort(low_level)) << 16);
-          } else {
-            decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
-            decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
           }
-          if (q < 3) {
-            const uint32_t transition =
-                (edge_pack >> ((q + 1) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-            state = ((state << kTransitionBits) | transition) & 0xffffu;
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int pair = pair_base + q;
+            const uint32_t mixed = mixed_indices[q];
+            if constexpr (kNativeN8) {
+              half high_level;
+              half low_level;
+              if constexpr (kReadLevelsFromGlobal) {
+                high_level = __ldg(levels + (mixed >> 8));
+                low_level = __ldg(levels + (mixed & 0xffu));
+              } else {
+                high_level = cached_levels[mixed >> 8];
+                low_level = cached_levels[mixed & 0xffu];
+              }
+              decoded_pairs[q] = static_cast<uint32_t>(__half_as_ushort(high_level)) |
+                  (static_cast<uint32_t>(__half_as_ushort(low_level)) << 16);
+            } else {
+              decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
+              decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
+            }
+          }
+        } else {
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int pair = pair_base + q;
+            const uint32_t mixed = pgc16_mix(state ^ bank_mask);
+            if constexpr (kNativeN8) {
+              const half high_level = cached_levels[mixed >> 8];
+              const half low_level = cached_levels[mixed & 0xffu];
+              decoded_pairs[q] = static_cast<uint32_t>(__half_as_ushort(high_level)) |
+                  (static_cast<uint32_t>(__half_as_ushort(low_level)) << 16);
+            } else {
+              decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
+              decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
+            }
+            if (q < 3) {
+              const uint32_t transition =
+                  (edge_pack >> ((q + 1) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
+              state = ((state << kTransitionBits) | transition) & 0xffffu;
+            }
           }
         }
         if constexpr (kNativeN8) {
