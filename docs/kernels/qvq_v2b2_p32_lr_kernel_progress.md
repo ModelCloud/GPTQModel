@@ -83,6 +83,9 @@ tables below every row was intentionally measured at M=16.
 | `f157104d` | H200, W3 M1-M16 | Feed TB6 decoded half2 pairs to the same direct native-N8 MMA consumer used by W2/W2.5 | All 20 cells accurate; Q/O gained 1.22-1.25x and MLP gained 1.38-1.40x versus `54e2e3ac`; exact-head NCU fell to 17.38M instructions and 33.0 us | accepted and pushed |
 | `e0f55ecb` / `e55997ce` | H200, W3 M1-M16 | Exchange one previous four-edge pack per lane instead of six overlapping per-edge TB6 shuffles | All 20 cells accurate; Q/O gained 3.3-5.1%, gate/up 4.1-4.7%, and down 4.6-6.3%; K/V scalar controls stayed within 0.8% | accepted, merged, and pushed |
 | `a12c1e35` | H200, W3 M1-M16 | Expand four TB6 low nibbles and high dibits with two broadword mask/shift stages instead of four scalar extracts | All 20 cells accurate; Q/O gained up to 3.5%, gate/up 2.1-3.0%, and down 2.9-4.9%; NCU fell to 16.14M instructions and 31.0 us | accepted and pushed |
+| `1671e6a5` / `009533a6` | H200, W3 M1-M16 gate/up | Widen the native-N8 output block from four to eight warps only for K2,048/N8,192; compact the otherwise dead padded shared storage in that specialization | All five gate/up rows gained 1.9-3.3% at 0.03184-0.03254 ms; merged-head NCU fell to 14.53M instructions with zero spilling | accepted, merged, and pushed |
+| `65743ae8` | H200, W3/W3.5 | Repair the concurrent W3.5 native-N8 merge by supplying its four-tile launcher argument | Full 20-cell W3 matrix remained accurate; W3.5 M16/K2,048/N8,192 passed at 0.0392 ms with 6.29e-05 max error | accepted integration fix and pushed |
+| `65743ae8` uncommitted A/B | H200, W3 gate/up | Machete-inspired two-stage `cp.async`: split the N64 batch into alternating eight-tile buffers and issue batch i+1 before decoding/MMA of batch i | Accurate, but gate/up regressed from 0.0318-0.0325 ms to 0.0593-0.0641 ms; extra synchronization/bookkeeping could not be amortized by each short split-K partition | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -427,6 +430,33 @@ from 16.45M to 16.14M instructions and NCU duration from 32.0 to 31.0 us.
 Registers return from 89 to 92/thread, so further scalar decode algebra has
 diminishing returns; wider N reuse is now the higher-impact W3 target.
 
+Commit `1671e6a5`, merged with the concurrent Hopper work at `009533a6`,
+groups eight native N8 output tiles in one W3 gate/up block. The specialization
+halves the block grid while preserving the same total thread count, reuses each
+activation stage across N64, and compacts storage that the native-N8 consumer
+does not address. It is guarded to `K <= 2,048 && N >= 8,192`; the existing
+four-warp path remains selected for Q/O and down projection geometries.
+
+| Shape | M values | K | N | LR ms range | Gain versus `a12c1e35` | Worst max abs |
+|---|---|---:|---:|---:|---:|---:|
+| `mlp_gate_up` | 1,2,4,8,16 | 2,048 | 8,192 | 0.031840-0.032544 | 1.019-1.033x | 3.43e-05 |
+
+The exact merged-head NCU capture at W3 M16/K2048/N8192 reports 14.53M
+executed instructions, 30.59 us, 64 registers/thread, 37.50 KiB static shared
+memory, and zero local spilling. The earlier N32 broadword kernel used 16.14M
+instructions, so output reuse removes another 10.0% of executed work and makes
+W3's instruction count essentially equal to W2's 14.44M. Remaining evidence is
+45.02% cycles with no eligible warp and approximately 1.00M excessive shared
+wavefronts; DRAM throughput is only 4.38%.
+
+An alternating two-stage eight-tile `cp.async` A/B then tested the direct
+Machete pipeline lesson without increasing staged shared capacity. It was
+accurate but nearly doubled gate/up latency to 0.0593-0.0641 ms. Unlike
+Machete's persistent producer/consumer WGMMA mainloop, this warp-synchronous
+MMA kernel paid an extra block barrier per eight K32 tiles, while each split-K
+partition held only 32 tiles. That experiment is rejected; future overlap work
+must avoid increasing block-wide synchronization frequency.
+
 ### H100 same-CC regression
 
 The H100 run uses physical GPU 1, CC 9.0, 132 SMs, and the same accepted
@@ -616,12 +646,21 @@ again. Raw captures are
 `/tmp/ncu_h200_w2_native_n8_swizzle_ac440de3.csv`, plus
 `/tmp/ncu_h200_w2_native_n8_stride40_e944e528.csv` on this host.
 
+The accepted W3 N64 gate/up specialization was profiled at pushed head
+`65743ae8` on physical H200 GPU 0. It executes 14,526,464 instructions in an
+NCU-replayed 30.59 us, uses 64 registers/thread and 37.50 KiB shared/block, and
+has no local spilling. Its 256 total split-K blocks form 0.48 waves/SM; achieved
+active warps are 14.61/SM, issue availability is 54.98%, and 936,250 shared-load
+plus 65,536 shared-store bank conflicts remain. The local report is
+`/tmp/ncu-h200-w3-gate-out8-65743ae8.ncu-rep`; CUDA-event medians above remain
+the acceptance timing.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | fused TB6 is now 0.0326-0.0389 ms and 16.14M instructions, only 11.7% above W2's 14.44M | widen the W3 output tile to reuse activation staging and barriers, with split policy retuned for one H200 scheduling wave |
-| 2 | H200 W3.5 M1-M16 MLP | full matrix: 0.074-0.108x Machete, 0.203-0.244 ms gate/up and 0.205-0.231 ms down | add a TB7-specific cooperative/tensor path after the current W3 focus; profile its instruction/local-memory image before sharing TB6 code |
+| 1 | H200 W3 M1-M16 MLP | gate/up N64 is 0.0318-0.0325 ms and 14.53M instructions; down is 0.0327-0.0390 ms | remove the remaining shared round trip/conflicts or change to persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
+| 2 | H200 W3.5 M1-M16 MLP | concurrent native-N8 path now reaches 0.0392 ms for the H200 M16 gate canary | run the full H200 W3.5 matrix from the merged head after the current W3 focus and profile its remaining TB7 arithmetic |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
 | 5 | H200 W3 M16 and M32 | M16 is 0.361-0.709x Machete by K/N; prior M32 K8192/N2048 is 1.76x versus non-LR | reduce TB6 cache/scoreboard pressure; retain split 4 for the M32 down-like case |
