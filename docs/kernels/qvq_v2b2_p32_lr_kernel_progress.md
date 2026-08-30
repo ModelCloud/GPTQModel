@@ -115,6 +115,7 @@ tables below every row was intentionally measured at M=16.
 | `4b07d5e9` profile | H200, W3 versus Machete W4, M16/K2,048/N8,192 | Capture matched detailed NCU reports at the same pushed QVQ head and physical GPU | QVQ executes 10.80M versus Machete's 3.06M instructions, reaches 242.8 versus 603.6 GB/s DRAM throughput, and records 440 versus 102 long-scoreboard samples | architectural baseline for TMA producer/consumer work |
 | `7f233216` uncommitted A/B | H200, W3 gate/up M1-M16 | Use a dedicated producer warp, two K256 shared stages, SM90 bulk async copies, and transaction barriers to overlap aligned activation/trellis fetch with eight decode/MMA warps | Accurate, but CUDA-event medians regressed 2.7-10.6% to 0.02760-0.02858 ms; instructions rose to 10.95M and barrier/wait stalls outweighed 0.795% TMA-pipe use | rejected; source restored before next experiment |
 | `4613a5be` uncommitted A/B | H200, W3 gate/up M1-M16 | Pair adjacent K32 tiles so both tiles' independent level loads issue before either decoded fragment is consumed, then overlap the second lookup with the first tile's MMA | Accurate, but all rows regressed 1.7-2.2%; registers rose 63 to 80, instructions rose 7.8% to 11.64M, and long-scoreboard/wait samples increased | rejected; source restored before next experiment |
+| `b3edc2a7` uncommitted A/B | H200, W3 gate/up M16 | Fuse PGC16 mixing and two 512-byte-table level loads into one read-only lookup from a cached 65,536-entry packed decoded-state LUT | Instructions fell 32.1% to 7.34M with unchanged registers, but L1 hit rate collapsed to 7.8%, L2 utilization reached 67.6%, and CUDA-event latency regressed 2.59x to 0.0698 ms | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -959,6 +960,23 @@ rise 440 to 531, and wait samples rise 229 to 596. Holding two tiles' random
 lookup results expands live ranges and dependency pressure rather than hiding
 them. Future W3 work must shorten or remove the lookup dependency, not widen
 the number of outstanding scalar results within one warp.
+
+The decoded-state fusion experiment has its exact counter report at
+`/tmp/ncu-h200-w3-gate-decoded-lut1.ncu-rep`. A per-device 256 KiB table mapped
+every bank-adjusted 16-bit state directly to its packed pair of canonical FP16
+levels. This replaced four PGC mixers and eight 16-bit level loads per K32 tile
+with four 32-bit read-only loads, while leaving checkpoint storage unchanged.
+It is the first post-cooperative experiment to reach 7.34M instructions
+(-32.1% from 10.80M) with the same 63 registers/thread and no spill.
+
+The memory trade is prohibitive: the M16 CUDA-event median rises from 0.02691
+to 0.0698 ms, L1 hit rate falls from 94.6% to 7.8%, L2 utilization rises to
+67.6%, eligible-warp availability falls from 46.9% to 11.3%, and NCU duration
+rises from 26.53 to 73.47 us. The original mixer is cheaper than expanding a
+512-byte hot level table into a random 256 KiB state table. This is direct
+evidence that future instruction fusion must preserve the tiny lookup working
+set and conflict-light access pattern; recomputation wins over random L2
+traffic for this codec on H200.
 
 ## Coverage and targeting queue
 
