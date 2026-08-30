@@ -1366,6 +1366,46 @@ bank-selector tile to the same TMA transaction, removing its long-scoreboard
 dependency without changing recurrence or level algebra. The random 256-entry
 PGC lookup remains the dominant 2.785M-load problem after that.
 
+### TMA-staged bank selectors (`be020336`)
+
+The aligned selector path loads a 16-N8-by-8-K32 byte box through the same TMA
+transaction. Adjacent N64 CTAs select opposite halves of that shared tile, so
+every TMA box is 16-byte aligned and the last output CTA needs no boundary
+special case. Four K1024 correctness cases pass on H200. On M16
+K17408/N5120, 10 warmups and 100 CUDA-graph timings measured:
+
+| Kernel | Split | Median ms | vs production LR | xMachete | Max abs |
+|---|---:|---:|---:|---:|---:|
+| Production LR W3 | auto | 0.21901 | 1.000x | 0.196x | 0.00127029 |
+| Synchronous CuTe RS-WGMMA W3 | 4 | 0.19899 | 1.101x | 0.216x | 0.000320435 |
+| **TMA activation/trellis/selectors + RS-WGMMA W3** | **4** | **0.14501** | **1.510x** | **0.297x** | **0.000320435** |
+| Machete W4 | native | 0.04301 | 5.092x | 1.000x | 0.000670671 |
+
+Matched NCU at `be020336` confirms that the intended selector stream vanished:
+
+| NCU metric | TMA activation/trellis | + selector TMA | Change |
+|---|---:|---:|---:|
+| Replay duration | 193.38 us | **180.51 us** | **1.071x faster** |
+| Executed instructions | 60.779M | **59.640M** | -1.87% |
+| Global-load instructions | 3.4816M | **2.78528M** | **-696,320 exactly** |
+| Shared-load instructions | 1.39264M | 1.74080M | selector reads move on chip |
+| ALU instructions | 34.739M | 35.132M | +1.13% |
+| LSU instructions | 7.696M | **7.325M** | -4.82% |
+| TMA instructions | 27.2K | 32.64K | one extra transaction/stage |
+| Registers/thread | 78 | **64** | compiler removes selector address state |
+| Theoretical occupancy | 31.25% | **46.88%** | register limit relaxes |
+| Achieved occupancy | 18.43% | 17.82% | tail/grid limited |
+| No eligible scheduler cycles | 49.57% | **44.93%** | improved |
+| Long-scoreboard stall | 28.54% | **24.22%** | selector dependency removed |
+| Short-scoreboard stall | 8.89% | **5.92%** | no shared conflict penalty |
+| Fixed-latency wait stall | 25.63% | **20.76%** | improved |
+| Shared-bank conflicts | 7,687 | **6,855** | negligible |
+
+The remaining 2.78528M global loads are exactly the eight FP16 PGC values
+loaded per lane for every WGMMA K16 fragment. That read-only level lookup—not
+TMA, HBM, selector staging, or shared-bank conflicts—is now the primary
+measured data dependency.
+
 The JIT cache key now excludes the build-only `--threads` and
 `--split-compile` settings (`3408cea6`). The monolithic production QVQ binary
 took 254 seconds and Machete's eight generated translation units took 531
