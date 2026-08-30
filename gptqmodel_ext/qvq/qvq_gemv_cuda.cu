@@ -1252,6 +1252,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kDecodedColumns = kCompactNativeN8Storage ? kLocalRingTileColumns : kPaddedColumns;
   constexpr int kOutputColumns = kCompactNativeN8Storage ? 1 : kPaddedColumns;
   constexpr int kInputStride = kNativeN8 ? 40 : kLocalRingTileRows;
+  constexpr bool kReadLevelsFromGlobal = kTransitionBits == 6 && OutputTiles >= 8;
 
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
@@ -1272,10 +1273,12 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
   const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
 
-  for (int index = thread; index < kPgc16LevelCount; index += kWmmaThreads) {
-    cached_levels[index] = levels[index];
+  if constexpr (!kReadLevelsFromGlobal) {
+    for (int index = thread; index < kPgc16LevelCount; index += kWmmaThreads) {
+      cached_levels[index] = levels[index];
+    }
+    __syncthreads();
   }
-  __syncthreads();
 
   if constexpr (!kNativeN8) {
     // TB6 retains the accepted padded N16 WMMA consumer.
@@ -1287,7 +1290,9 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       }
     }
   }
-  __syncthreads();
+  if constexpr (!kReadLevelsFromGlobal || !kNativeN8) {
+    __syncthreads();
+  }
 
   QvqMmaFragmentC native_accumulator = {};
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> input_fragment;
@@ -1448,8 +1453,17 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           const int pair = pair_base + q;
           const uint32_t mixed = pgc16_mix(state ^ bank_mask);
           if constexpr (kNativeN8) {
-            decoded_pairs[q] = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-                (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
+            half high_level;
+            half low_level;
+            if constexpr (kReadLevelsFromGlobal) {
+              high_level = __ldg(levels + (mixed >> 8));
+              low_level = __ldg(levels + (mixed & 0xffu));
+            } else {
+              high_level = cached_levels[mixed >> 8];
+              low_level = cached_levels[mixed & 0xffu];
+            }
+            decoded_pairs[q] = static_cast<uint32_t>(__half_as_ushort(high_level)) |
+                (static_cast<uint32_t>(__half_as_ushort(low_level)) << 16);
           } else {
             decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
             decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
