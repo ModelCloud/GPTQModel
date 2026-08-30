@@ -1223,8 +1223,8 @@ __device__ __forceinline__ void qvq_mma_m16n8k16(
 // One warp owns one N8 output tile; a small warp group therefore reuses the
 // staged activation stripe across adjacent tiles. Each rate reconstructs the
 // 16 unique ring transitions cooperatively, advances four adjacent states by
-// recurrence, and consumes the decoded FP16 weights through native N8 MMA for
-// W2/W2.5 or the accepted WMMA path for W3. The scalar LR kernel remains the
+// recurrence, and consumes the decoded FP16 weights through native N8 MMA.
+// The scalar LR kernel remains the
 // fallback for other rates, row counts, dtypes, and unaligned views.
 template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles>
 __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_kernel(
@@ -1247,7 +1247,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
-  constexpr bool kNativeN8 = kTransitionBits <= 5;
+  constexpr bool kNativeN8 = true;
   constexpr int kInputStride = kNativeN8 ? 40 : kLocalRingTileRows;
 
   __shared__ half cached_levels[kPgc16LevelCount];
