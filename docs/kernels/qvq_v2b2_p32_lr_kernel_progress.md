@@ -92,6 +92,7 @@ tables below every row was intentionally measured at M=16.
 | `8159988f` uncommitted A/B | H200, W3 gate/up | Widen N64 to N128; reduce K batch 16 to 14 to fit Hopper's 48 KiB static-shared limit; sweep split 2/4 | N128 split-2 was accurate but 4-6% slower at 0.0333-0.0340 ms; split-4 was mixed across M and did not recover N64 | rejected; source restored before next experiment |
 | `f24b2227` uncommitted A/B | H200, W3 gate/up | Reuse the merged W3.5-M1 producer-lane permutation for W3 N64 while preserving the stride-40 shared layout and `ldmatrix` addresses | Accurate, but scattered global activation fetches raised M1-M16 from 0.0316-0.0324 to 0.0322-0.0335 ms (1.6-3.3%) | rejected; source restored before next experiment |
 | `1e15b299` uncommitted A/B | H200, W3 gate/up | Sweep split 1/2/4/8 after the read-only level-table change, then set automatic split-1 for an exact CUDA Graph replay | The direct-event diagnostic favored split-1, but the production contract regressed 17-20% to 0.0378-0.0390 ms; split-2's second CTA wave remains necessary | rejected; source restored before next experiment |
+| `11f7f40b` | H200, W3 K/V | Lower the Hopper cooperative dispatch threshold from N2,048 to N512 for every rate, reusing the native-N8 TB6 kernel | K/V M1-M16 fell from 0.0207-0.0244 to 0.01142-0.01165 ms (1.81-2.09x) and reached 1.246-1.306x Machete; 108 CUDA tests passed | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -471,6 +472,14 @@ read-only/L1 path for W3 N64 only and removes its two now-unneeded setup
 barriers. Across M1/M2/M4/M8/M16, gate/up medians become
 0.031600/0.031792/0.031792/0.032032/0.032416 ms, a consistent 0.3-0.9% gain
 from the merged N64 baseline with worst max error 3.43e-05.
+
+Commit `11f7f40b` removes the obsolete N2,048 minimum for Hopper's TB6/TB7
+cooperative path. W3 K/V at K2,048/N512 now uses the same native-N8 tensor-core
+consumer instead of the scalar LR kernel. Exact H200 M1/M2/M4/M8/M16 medians
+are 0.011424/0.011440/0.011504/0.011632/0.011648 ms, respectively, with worst
+max error 1.05e-05. This is 1.81-2.09x faster than the preceding scalar rows
+and 1.246-1.306x the matched Machete W4 throughput. The full W3 matrix remained
+accuracy-clean and the exact-head CUDA suite passed 108/108 cases.
 
 ### H100 same-CC regression
 
