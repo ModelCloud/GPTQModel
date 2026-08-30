@@ -113,6 +113,7 @@ tables below every row was intentionally measured at M=16.
 | `a3fb8c55` | H200, W2/W2.5 M1-M16 | Extend the launch-uniform alternate-mask hoist to TB4/TB5 while retaining TB7's prior code generation | 80/80 LR cells accurate; exact NCU gate/up instructions fell 24.8% for W2 and 23.3% for W2.5, NCU duration fell 6.5% and 4.0%, and 108/108 H200 CUDA tests passed | accepted and pushed |
 | `f98ceb36` | H200, W3.5 M1-M16 | Extend the same launch-uniform alternate-mask hoist to TB7 after an exact-head counter A/B | Gate/up instructions fell 21.9% and NCU duration 6.4% with unchanged registers/shared memory; 20/20 W3.5 cells and 108/108 CUDA tests passed | accepted and pushed |
 | `4b07d5e9` profile | H200, W3 versus Machete W4, M16/K2,048/N8,192 | Capture matched detailed NCU reports at the same pushed QVQ head and physical GPU | QVQ executes 10.80M versus Machete's 3.06M instructions, reaches 242.8 versus 603.6 GB/s DRAM throughput, and records 440 versus 102 long-scoreboard samples | architectural baseline for TMA producer/consumer work |
+| `7f233216` uncommitted A/B | H200, W3 gate/up M1-M16 | Use a dedicated producer warp, two K256 shared stages, SM90 bulk async copies, and transaction barriers to overlap aligned activation/trellis fetch with eight decode/MMA warps | Accurate, but CUDA-event medians regressed 2.7-10.6% to 0.02760-0.02858 ms; instructions rose to 10.95M and barrier/wait stalls outweighed 0.795% TMA-pipe use | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -923,6 +924,26 @@ between fetch, dequantization, and MMA. The next structural experiment must
 therefore resemble Machete's elected TMA producer plus multistage consumer
 pipeline. An immediate `cp.async` followed by a wait and whole-block barrier is
 already known to regress and is not a valid substitute for overlap.
+
+The first true overlap prototype is retained as
+`artifacts/h200_lr_next4x/w3_bulk_pipeline_candidate.json`, with its exact NCU
+report at `/tmp/ncu-h200-w3-gate-bulk-pipeline1.ncu-rep`. It dedicated a ninth
+warp to an elected bulk-copy producer and ping-ponged two K256 stages. Each
+stage used 16 aligned 512-byte activation transfers and eight aligned 768-byte
+trellis transfers; consumers released the stage through an mbarrier without a
+whole-CTA barrier in the stage loop. The staged-row stride was congruent to the
+accepted stride-40 shared-bank mapping.
+
+All five M1-M16 rows were accurate, but their 0.028576/0.028368/0.028288/
+0.027904/0.027600 ms medians regress 2.7-10.6% from production. NCU reports
+25.76 us, 10,950,468 instructions, 40 registers/thread, 39.71 KiB static shared
+memory, and 0.795% TMA-pipe utilization. Relative to the matched production
+capture, long-scoreboard samples increase 440 to 490, barrier samples 164 to
+221, and wait samples 229 to 484. The gate split gives each clustered CTA only
+32 K32 tiles, so four K256 stages cannot amortize a ninth warp and two
+transaction-barrier round trips. The source was restored. Future asynchronous
+work must increase persistent work per CTA or move to WGMMA warpgroup-scale
+consumption; adding finer stages to the current short split is ruled out.
 
 ## Coverage and targeting queue
 
