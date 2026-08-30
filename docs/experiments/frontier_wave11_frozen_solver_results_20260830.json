@@ -4,7 +4,7 @@
   "status": "complete",
   "module": "model.layers.0.self_attn.q_proj",
   "snapshot": "/root/qvq-results/w11-frozen-source/l0_q_proj_snapshot.pt",
-  "snapshot_sha256": "ded019fc704f7e00",
+  "snapshot_sha256": "ded019fc704f7e009de84b29b9d1d0227002ad1ec652c605faad61ec6cdaecf6",
   "input_hashes_equal_all_replicates": true,
   "replicate_artifact_sha256": "a9f121ed14827e53",
   "replicates_byte_identical": {
