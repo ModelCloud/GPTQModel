@@ -111,6 +111,7 @@ tables below every row was intentionally measured at M=16.
 | `c57b0f48` uncommitted A/B | H200, W3 output-four paths M1-M16 | Exploit the exact sign symmetry of the fixed PGC16-v1 table: keep its 128 positive FP16 values in two 32-bit registers/lane and gather each mirrored signed lookup with two shuffles | Bit-exact decoded output, but 16 shuffle routes per K32 tile slowed Q/O 17-19% and down 34-40% to 0.0413-0.0461 ms; K/V was also slightly slower | rejected; source restored before next experiment |
 | `93e135d7` | H200, W3 M1-M16 | Resolve the launch-uniform alternate bank mask once outside the K loop, then apply each tile's ring selector with a branch-free bit mask | All 20 W3 cells improved (1.047x latency geomean); gate/up gained 1.090-1.094x, NCU instructions fell 22.4% to 10.80M, and 108/108 H200 CUDA tests passed | accepted and pushed |
 | `a3fb8c55` | H200, W2/W2.5 M1-M16 | Extend the launch-uniform alternate-mask hoist to TB4/TB5 while retaining TB7's prior code generation | 80/80 LR cells accurate; exact NCU gate/up instructions fell 24.8% for W2 and 23.3% for W2.5, NCU duration fell 6.5% and 4.0%, and 108/108 H200 CUDA tests passed | accepted and pushed |
+| `f98ceb36` | H200, W3.5 M1-M16 | Extend the same launch-uniform alternate-mask hoist to TB7 after an exact-head counter A/B | Gate/up instructions fell 21.9% and NCU duration 6.4% with unchanged registers/shared memory; 20/20 W3.5 cells and 108/108 CUDA tests passed | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -841,8 +842,9 @@ lookup and resulting lack of eligible warps. The full H200 CUDA suite passes
 108/108 cases at this pushed source head.
 
 Commit `a3fb8c55` extends the same invariant-mask algebra to TB4/W2 and
-TB5/W2.5. TB7/W3.5 remains on its previous path because the all-rate prototype
-was mixed on that register-heavy specialization. The source-equivalent full
+TB5/W2.5. Its initial conservative guard left TB7/W3.5 on the previous path
+until exact NCU counters could separate the signal from clock noise. The
+source-equivalent full
 matrix is
 `artifacts/h200_lr_next4x/lowrate_mask_hoist_candidate.json` (source
 fingerprint `ed727fae6bdcb33fcea38a928f7cccd053a783561eb7f1df1bdce37d0b77afbd`).
@@ -863,10 +865,10 @@ the comparison column is the per-shape QVQ/Machete throughput geomean.
 | 3 | K/V | 2,048 | 512 | 0.009472/0.009536/0.009616/0.009664/0.009760 | 1.498x | 5.72e-06 |
 | 3 | gate/up | 2,048 | 8,192 | 0.025792/0.025968/0.026144/0.026464/0.026976 | 0.678x | 3.43e-05 |
 | 3 | down | 8,192 | 2,048 | 0.026704/0.032992/0.033136/0.033264/0.033696 | 0.695x | 1.22e-04 |
-| 3.5 | Q/O | 2,048 | 2,048 | 0.013440/0.014400/0.014608/0.014832/0.015488 | 1.057x | 1.53e-05 |
-| 3.5 | K/V | 2,048 | 512 | 0.010224/0.010304/0.010384/0.010384/0.010608 | 1.386x | 7.63e-06 |
-| 3.5 | gate/up | 2,048 | 8,192 | 0.032464/0.032640/0.032992/0.033792/0.034080 | 0.537x | 6.68e-05 |
-| 3.5 | down | 8,192 | 2,048 | 0.030544/0.035648/0.035824/0.036640/0.038272 | 0.627x | 1.03e-04 |
+| 3.5 | Q/O | 2,048 | 2,048 | 0.013440/0.014048/0.014256/0.014560/0.015088 | 1.097x | 1.53e-05 |
+| 3.5 | K/V | 2,048 | 512 | 0.010672/0.010768/0.010784/0.010832/0.011040 | 1.420x | 7.63e-06 |
+| 3.5 | gate/up | 2,048 | 8,192 | 0.031328/0.031392/0.031808/0.032704/0.031872 | 0.582x | 6.68e-05 |
+| 3.5 | down | 8,192 | 2,048 | 0.028224/0.033648/0.034032/0.034544/0.036048 | 0.683x | 1.03e-04 |
 
 The exact pre/post NCU reports are
 `/tmp/ncu-h200-w2-gate-mask-hoist-baseline-0ba0f2ee.ncu-rep`,
@@ -880,12 +882,24 @@ at 85 registers/thread. Both retain their static shared-memory footprint and
 report no local-memory spilling. All 120 benchmark rows and all 108 H200 CUDA
 tests pass.
 
+Commit `f98ceb36` removes the temporary TB7 guard. The exact report pair is
+`/tmp/ncu-h200-w35-gate-mask-hoist-baseline-a3fb8c55.ncu-rep` and
+`/tmp/ncu-h200-w35-gate-mask-hoist-candidate.ncu-rep`: W3.5 gate/up falls from
+14,418,432 to 11,256,320 executed instructions (-21.9%) and from 34.91 to 32.67
+us (-6.4%) while remaining at 85 registers/thread and 46.18 KiB static shared
+memory. The exact 60-row matrix is
+`artifacts/h200_lr_next4x/w35_mask_hoist_candidate.json` (source fingerprint
+`f704955c14c6f677e90a194fc30a6e55dd88dde263ea102dbaa147b8d7dfbf62`). All
+20 W3.5 LR cells pass with 1.03e-04 worst max error; the W3.5 throughput
+geomean is 0.887x Machete W4, including 1.097x Q/O, 1.420x K/V, 0.582x
+gate/up, and 0.683x down. The full H200 CUDA suite again passes 108/108 cases.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
 | 1 | H200 W3 M1-M16 MLP | invariant bank-mask hoisting reaches 0.02587-0.02691 ms gate/up at up to 245.71 GB/s and 0.02675-0.03357 ms down; both paths now execute about 10.5-10.8M instructions, while down retains its 936,528 shared-load-conflict baseline | keep four-output scheduling depth while overlapping or replacing its random shared level lookups; then move toward persistent producer/consumer TMA/WGMMA without added whole-block barriers |
-| 2 | H200 W3.5 M1-M16 MLP | exact full matrix reaches 0.03246-0.03408 ms gate/up (0.537x Machete) and 0.03054-0.03827 ms down (0.627x); TB7 retained its prior selector path | profile the remaining TB7 arithmetic and test a pressure-neutral uniform-mask formulation before any wider pipeline change |
+| 2 | H200 W3.5 M1-M16 MLP | uniform-mask hoisting reaches 0.03133-0.03270 ms gate/up (0.582x Machete) and 0.02822-0.03605 ms down (0.683x), with 11.26M gate/up instructions | profile the remaining TB7 arithmetic and shared-conflict stalls before any wider pipeline change |
 | 3 | H200 W2/W2.5 M1-M16 MLP | gate/up is 0.603x/0.579x Machete and down is 0.727x/0.691x; mask hoisting reduces gate/up to 9.57M/10.39M instructions while shared conflicts remain | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.125x/1.099x and K/V is 1.434x/1.389x Machete by per-shape M1-M16 geomean | enforce as the rate-specific latency/no-regression gate |
 | 5 | H200 W3 M16 and M32 | M16 is 0.361-0.709x Machete by K/N; prior M32 K8192/N2048 is 1.76x versus non-LR | reduce TB6 cache/scoreboard pressure; retain split 4 for the M32 down-like case |
