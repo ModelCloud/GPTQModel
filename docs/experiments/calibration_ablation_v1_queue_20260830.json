@@ -1,8 +1,9 @@
 {
   "schema": "qvq.calibration-ablation.v1",
-  "status": "prepared",
+  "status": "running",
   "prepared_at_utc": "2026-08-30T06:07:35Z",
-  "launch_commit": null,
+  "launched_at_utc": "2026-08-30T06:09:55Z",
+  "launch_commit": "487c28c3034fb132ddb511ba6807ed549e1ffddc",
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "Measure lifecycle-calibration and YAQA-Fisher corpus effects independently using one fixed W3.2 allocation and a clean pinned runtime.",
   "fixed_model": "/monster/data/model/Llama-3.2-1B-Instruct",
@@ -59,7 +60,7 @@
       "lifecycle": "nm128",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c2_nm512__yaqa182",
@@ -67,7 +68,7 @@
       "lifecycle": "nm512",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c3_yaqa182__yaqa182",
@@ -75,7 +76,7 @@
       "lifecycle": "yaqa182",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c4_union694__yaqa182",
@@ -83,7 +84,7 @@
       "lifecycle": "union694",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c5_nm128__union694",
@@ -91,7 +92,7 @@
       "lifecycle": "nm128",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c6_nm512__union694",
@@ -99,7 +100,7 @@
       "lifecycle": "nm512",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c7_yaqa182__union694",
@@ -107,7 +108,7 @@
       "lifecycle": "yaqa182",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "prepared"
+      "state": "quantizing"
     },
     {
       "arm_id": "c8_union694__union694",
@@ -115,7 +116,7 @@
       "lifecycle": "union694",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "prepared"
+      "state": "quantizing"
     }
   ],
   "evaluation": {

@@ -66,6 +66,26 @@ checkpoint remains distinct from the historical 551/519 checkpoints, so that
 cross-wave discrepancy remains provenance-sensitive.  See the queue manifest
 for all checkpoint/report/hash paths.
 
+### Calibration union ablation v1 (running, 2026-08-30)
+
+Eight pinned end-to-end arms now separate lifecycle-corpus effects from YAQA
+Fisher-corpus effects on the fixed `Up4 L6,L8` W3.2 allocation. `NM-full` is
+defined as train rows `0..511`; the historical control remains `NM[0:128]`.
+The immutable `calibration_union_v1` artifact is the normalized-user-turn
+deduplication of those 512 NM rows and all 182 YAQA sequences. It contains 694
+independent sequences and 490,449 valid input/Fisher-output token samples;
+there were zero duplicate groups. The Parquet SHA-256 is
+`05288e83a8ce4cc7a607d7d19bfd48eeb0b45055ca7cc4f4b20d5f037266f2dc`,
+and its ordered row-manifest SHA-256 is
+`143570311180630b6039569992ba0709e8268ef9c73491b2cf8f756b3aca343e`.
+
+The arm matrix is lifecycle `{NM128, NM512, YAQA182, union694}` crossed with
+YAQA Fisher `{YAQA182, union694}`. All eight started at `2026-08-30T06:09:55Z`
+on physical GPUs 0--7 from pinned commit `487c28c3`; each immediately runs full
+GSM8K Platinum and canonical D300 after quantization. See
+[`calibration_union_v1.json`](experiments/calibration_union_v1.json) and
+[`calibration_ablation_v1_queue_20260830.json`](experiments/calibration_ablation_v1_queue_20260830.json).
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.
