@@ -71,6 +71,11 @@ tables below every row was intentionally measured at M=16.
 | `41ffd8db` | H200, W2/W2.5 M16 | Pulled prototype head reproduced on physical GPU 0 before production integration | All eight shape/rate cells accurate; 1.28-2.26x faster than production. NCU gate/up W2: 105.48M to 18.48M instructions (-82.5%) | authoritative new-head baseline |
 | `f7f29083` | H200, W2/W2.5 M16 | Integrate cooperative TB4/TB5 reconstruction into the production Hopper WMMA path; retain compile-time-specialized TB6 unpack | Production matches the isolated prototype within 0.1%; 36 CUDA cases pass, including FP16/FP32 output and split-1/split-3; W3 timing unchanged | accepted and pushed |
 | `f7ae7daf` | H200, W2/W2.5 M16 | Store each decoded half2 pair contiguously in a TB4/TB5-only column-major WMMA tile; TB6 remains row-major | All eight cells gain 1-3%; shared-store conflicts halve; 36 CUDA tests pass and W3 remains unchanged | accepted and pushed |
+| `8b659d41` | H100, W2/W2.5 M1-M16 | Extract four contiguous packed transitions once and derive the cooperative states without repeated planar extraction | Remote H100 evidence reduced the remaining TB4/TB5 integer decode work without changing checkpoint storage or arithmetic | accepted upstream evidence |
+| `2a71cad5` | H100, W2/W2.5 M16 | Replace the padded N16 WMMA consumer with a row-major native-N8 MMA path using `ldmatrix.x2.trans` | Improved many H100 cells but retained a shared decoded-weight round trip and regressed some H100 geometries | superseded by direct-fragment path |
+| `6844450b` | H200, W2/W2.5 M16 | Map the exact Amplin `m16n8k16` fragments, store four decoded half2 planes, load B fragments directly, and store accumulator fragments without padding/reduction | All eight cells accurate; isolated medians fell to 0.0128-0.0518 ms before the packed-transition merge | accepted and pushed |
+| `1521292b` | H200, W2/W2.5 M16 | Merge packed transition extraction with the direct native-N8 fragment consumer | 0.0113-0.0448 ms, 14.20M executed instructions on gate/up W2, zero shared-store conflicts, and 69/69 CUDA tests | accepted and pushed |
+| `3997021c` / `ac440de3` | H200, W2/W2.5 M16 | XOR-swizzle the four 16-byte activation segments by row and remap native-N8 A-fragment loads | 0.0115-0.0400 ms; `ldmatrix` conflicts fell 66.7% and total load conflicts 42.8%; 69/69 CUDA tests | accepted, merged, and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -213,6 +218,28 @@ All eight cells improve by 1-3% and the K/V no-regression gate now exceeds
 Machete W4 for both rates. The MLP gap remains 2.6-3.3x, so this is an accepted
 layout improvement rather than the final consumer architecture.
 
+The current H200 path combines the packed-transition extractor, direct native
+N8 MMA fragments, and activation-row XOR swizzle. These are the exact medians
+at merged/pushed head `ac440de3`; `Prior LR` is the unswizzled direct-fragment
+head `1521292b`. The W3/TB6 specialization is compile-time unchanged.
+
+| W | Shape | M | K | N | Result commit | LR ms | Prior LR ms | LR gain | xMarlin W4 | xMachete W4 | Max abs |
+|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| 2 | `attn_qo` | 16 | 2,048 | 2,048 | `ac440de3` | 0.015584 | 0.016032 | 1.029x | 1.016x | 0.995x | 1.43e-5 |
+| 2.5 | `attn_qo` | 16 | 2,048 | 2,048 | `ac440de3` | 0.015920 | 0.017152 | 1.077x | 0.995x | 0.974x | 1.43e-5 |
+| 2 | `attn_kv` | 16 | 2,048 | 512 | `ac440de3` | 0.011488 | 0.011328 | 0.986x | 2.047x | 1.259x | 7.63e-6 |
+| 2.5 | `attn_kv` | 16 | 2,048 | 512 | `ac440de3` | 0.011680 | 0.012128 | 1.038x | 2.014x | 1.238x | 8.11e-6 |
+| 2 | `mlp_gate_up` | 16 | 2,048 | 8,192 | `ac440de3` | 0.037424 | 0.038864 | 1.038x | 0.295x | 0.478x | 7.63e-5 |
+| 2.5 | `mlp_gate_up` | 16 | 2,048 | 8,192 | `ac440de3` | 0.037808 | 0.042912 | 1.135x | 0.292x | 0.473x | 6.29e-5 |
+| 2 | `mlp_down` | 16 | 8,192 | 2,048 | `ac440de3` | 0.039200 | 0.040768 | 1.040x | 0.461x | 0.564x | 9.92e-5 |
+| 2.5 | `mlp_down` | 16 | 8,192 | 2,048 | `ac440de3` | 0.040000 | 0.044832 | 1.121x | 0.452x | 0.552x | 1.09e-4 |
+
+Relative to the first packed-pair production head `f7ae7daf`, the complete
+native-N8 path is 1.17-1.56x faster on K/V and MLP and 1.31-1.37x faster on
+Q/O. Q/O is now within 2.6% of Machete W4 and K/V is 1.24-1.26x faster. The
+remaining MLP gap is 1.77-2.11x, making async staging, shared-load pressure,
+and the much narrower N tile the next structural targets.
+
 ### H100 same-CC regression
 
 The H100 run uses physical GPU 1, CC 9.0, 132 SMs, and the same accepted
@@ -261,14 +288,18 @@ and BF16. A split-count sweep found split 4 already optimal; the rejected
 
 ### Hopper validation
 
-- H200 CUDA dispatch/correctness: 36/36 tests passed, covering W1-W3.5,
-  FP16/BF16, M1/M4/M16/M17, split-K, typed output, streams, determinism,
-  validation errors, and the cooperative W2/W2.5 Hopper path at split 1/3.
+- H200 CUDA dispatch/correctness: 69/69 tests passed at the current swizzled
+  native-N8 source, covering W1-W3.5, FP16/BF16, M1/M2/M4/M8/M16/M17,
+  split-K, typed output, streams, determinism, validation errors, the
+  cooperative W2/W2.5 Hopper path at split 1/3, and an explicit W3 unchanged
+  regression.
 - Host benchmark/layout/profiler suites: 50 passed and 141 platform skips.
 - H200 accepted M16 sweep: 20/20 LR/non-LR pairs passed accuracy; all 16
   substantial W2-W3.5 cells passed >=2x.
-- H100 same-CC regression: 20/20 pairs passed accuracy; all 16 substantial
-  W2-W3.5 cells passed >=2x.
+- H100 rows in this document are retained historical/upstream evidence. After
+  the H200-only instruction, every new local benchmark, CUDA test, and NCU
+  capture uses physical GPU 0 only; no current acceptance claim depends on the
+  installed H100.
 
 ## Final all-device aggregate
 
@@ -364,12 +395,40 @@ The net latency win is accepted, but the increased load conflicts rule out
 further blind layout permutations. The next consumer change must be validated
 against a dense native-N8 MMA microtest before replacing production WMMA.
 
+The direct native-N8 consumer removes N16 padding, the WMMA B-fragment load,
+and the accumulator reduction. The subsequent activation XOR swizzle targets
+the native A `ldmatrix` addresses. The table compares the exact gate/up W2
+M16/K2048/N8192 H200 captures at `1521292b` and pushed head `ac440de3`:
+
+| Metric | Direct native N8 | + activation XOR swizzle | Delta |
+|---|---:|---:|---:|
+| executed instructions | 14,197,760 | 14,480,384 | +1.99% |
+| NCU duration | 39.136 us | 39.296 us | +0.41% |
+| registers/thread | 70 | 80 | +10 |
+| static shared/block | 35,424 B | 35,424 B | unchanged |
+| achieved / theoretical occupancy | 12.10% / 37.50% | 12.09% / 37.50% | unchanged |
+| issue active | 41.05% | 40.74% | -0.31 points |
+| shared-load bank conflicts | 2,553,359 | 1,459,994 | -42.82% |
+| shared-store bank conflicts | 0 | 0 | unchanged |
+| shared-load wavefronts | 3,995,151 | 2,901,786 | -27.37% |
+| `ldmatrix` load conflicts | 1,572,864 | 524,288 | -66.67% |
+| `ldmatrix` load wavefronts | 2,097,152 | 1,048,576 | -50.00% |
+
+NCU replay duration is flat because the swizzle exchanges conflict stalls for
+address instructions and ten registers. Normal CUDA-event medians nevertheless
+improve on every substantial throughput path except the 0.16-us K/V W2 run-to-
+run variation. The accepted result removes one million excess load wavefronts
+per gate/up invocation; the remaining 1.46M conflicts are now the evidence-
+backed shared-memory target. Raw captures are
+`/tmp/ncu_h200_w2_native_n8_packed_1521292b.csv` and
+`/tmp/ncu_h200_w2_native_n8_swizzle_ac440de3.csv` on this host.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W2/W2.5 M16 MLP | `f7ae7daf`: decode remains reduced 82.5%, but only 0.301-0.387x Machete W4 on MLP | preserve cooperative recurrence; prove native N8 MMA mapping, then eliminate padded N16/shared decoded-weight consumer conflicts |
-| 2 | H200 W2/W2.5 M16 attention/KV | K/V reaches 1.047-1.117x Machete; Q/O reaches 0.690-0.734x | keep K/V as a no-regression parity gate while replacing the padded consumer |
+| 1 | H200 W2/W2.5 M16 MLP | `ac440de3`: direct native N8 reaches 0.473-0.564x Machete W4; NCU still reports 14.48M instructions and 1.46M shared-load conflicts | remove the remaining activation/level-table conflicts, then overlap fetch/dequant/MMA with a Hopper TMA or staged pipeline and wider N tile |
+| 2 | H200 W2/W2.5 M16 attention/KV | Q/O reaches 0.974-0.995x Machete; K/V reaches 1.238-1.259x | enforce as the latency/no-regression gate while changing shared stride or pipeline depth |
 | 3 | H200 W3 M32/K8192/N2048, FP16/BF16 | 1.76x versus non-LR; split 4 is best; 16-tile batch rejected | reduce L2 request/scoreboard pressure without raising ROWS32 registers |
 | 4 | RTX 5090 W2-W3.5, all substantial M=16 shapes | `e4b1006c`: all 16 pass >=4x | retain in expanded row/dtype coverage |
 | 5 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
@@ -377,7 +436,7 @@ against a dense native-N8 MMA microtest before replacing production WMMA.
 | 7 | RTX 4090/5090, M=1/4/8/32 and BF16 | earlier full matrix exists at `bd625c15`, not yet repeated for PR #60 source | expanded accuracy/performance regression |
 | 8 | A100 W2-W3.5, all M/K/N cells | no A100 installed; SM count unknown | query properties once by device ordinal, then run the same matrix |
 | 9 | launch-bound narrow shapes | 0.72-1.04x on Hopper M16 | reduce launch/split overhead without regressing substantial shapes |
-| 10 | H200 W3, FP16/BF16 M1/M4/M8/M16 | accepted TB6 path remains unchanged at `f7f29083`; all prior substantial cells pass >=2x | retain as a rate-specific no-regression gate while optimizing TB4/TB5 |
+| 10 | H200 W3, FP16/BF16 M1/M4/M8/M16 | accepted TB6 path remains compile-time unchanged at `ac440de3`; explicit W3 regression passes | retain as a rate-specific no-regression gate while optimizing TB4/TB5 |
 
 ## Reproduction
 
