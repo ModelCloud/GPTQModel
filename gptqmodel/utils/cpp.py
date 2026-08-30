@@ -63,6 +63,32 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
+_CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE = frozenset(("--threads", "--split-compile"))
+_CUDA_BUILD_SCHEDULING_FLAG_PREFIXES = ("--threads=", "--split-compile=")
+
+
+def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
+    """Drop NVCC scheduling knobs that cannot change generated device code.
+
+    ``--threads`` and ``--split-compile`` only control compiler parallelism.
+    Keeping their worker counts in the binary fingerprint created independent
+    six-minute QVQ caches for tests, benchmarks, and profilers even when all
+    source and code-generation options were identical.
+    """
+
+    relevant: list[str] = []
+    skip_value = False
+    for flag in flags:
+        if skip_value:
+            skip_value = False
+            continue
+        if flag in _CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE:
+            skip_value = True
+            continue
+        if flag.startswith(_CUDA_BUILD_SCHEDULING_FLAG_PREFIXES):
+            continue
+        relevant.append(flag)
+    return relevant
 
 
 def _ensure_ninja_on_path() -> None:
@@ -871,7 +897,7 @@ class TorchOpsJitExtension:
             payload.extend(self._source_cache_fingerprint_payload(source, include_paths))
 
         payload.extend(extra_cflags)
-        payload.extend(extra_cuda_cflags)
+        payload.extend(_cuda_cache_relevant_flags(extra_cuda_cflags))
         payload.extend(include_paths)
         payload.extend(extra_ldflags)
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
