@@ -1561,6 +1561,20 @@ payloads are stored in
 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 3.195582 | 530/1209 (43.8379%) | 6.25% | +0.283112 | −0.399024 | evaluation_complete |
 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 3.195582 | 528/1209 (43.6725%) | 6.25% | +0.273898 | −0.297230 | evaluation_complete |
 
+## Wave-10 determinism canary replays (2026-08-30 UTC)
+
+Before launching new quantization, four repeated GSM8K evaluations per canary
+checkpoint are running with identical task settings. This isolates evaluator
+variance from the historical 551/1209 versus 519/1209 checkpoint discrepancy.
+Normalized metrics digests are written beside each immutable report. See
+`docs/experiments/frontier_wave10_determinism_queue_20260830.json` and
+`scripts/run_llama32_wave10_canary_replays.sh`.
+
+| Arm IDs | Source checkpoint | GPUs | state |
+| --- | --- | --- | --- |
+| `w10-8980aa-r1` … `r4` | `8980aa` | 0–3 | running |
+| `w10-fdbd68-r1` … `r4` | `fdbd68` | 4–7 | running |
+
 ## Wave-7 evaluation results snapshot (2026-08-29 UTC)
 
 All sixteen full single-layer Up4 sweep arms completed both held-out GSM8K

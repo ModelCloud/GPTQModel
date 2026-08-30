@@ -680,3 +680,18 @@ micro-math metrics (including answer-logprob and answer-margin deltas):
 | `370c3a` | Up4 L8 + L11 + L12 | 3.186961 | **535/1209 (44.2514%)** | 6.25% | +0.458041 | −0.030357 | evaluation complete |
 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 3.195582 | **530/1209 (43.8379%)** | 6.25% | +0.283112 | −0.399024 | evaluation complete |
 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 3.195582 | **528/1209 (43.6725%)** | 6.25% | +0.273898 | −0.297230 | evaluation complete |
+
+## Wave-10 determinism canary replays (2026-08-30 UTC)
+
+Eight repeated GSM8K evaluations are running before any new quantization. The
+canary compares the historical `8980aa` checkpoint (551/1209) with the
+Wave-8 `fdbd68` repeat (519/1209), four times each, using the same task,
+batch size, and greedy decoding. Each run writes an immutable aggregate report
+and a normalized metrics digest. Queue manifest and launcher:
+`docs/experiments/frontier_wave10_determinism_queue_20260830.json`,
+`scripts/run_llama32_wave10_canary_replays.sh`.
+
+| Arm IDs | Checkpoint | GPUs | State |
+| --- | --- | --- | --- |
+| `w10-8980aa-r1` … `r4` | `8980aa` (W3.2 Up4 L6,L8) | 0–3 | running |
+| `w10-fdbd68-r1` … `r4` | `fdbd68` (W3.2 Up4 L6,L8) | 4–7 | running |
