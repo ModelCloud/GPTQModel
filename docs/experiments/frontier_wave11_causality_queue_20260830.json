@@ -1,7 +1,7 @@
 {
   "schema": "qvq.frontier-wave11-causality.v1",
   "wave": 11,
-  "status": "full_end_to_end_running",
+  "status": "frozen_canary_complete_full_end_to_end_running",
   "queued_at_utc": "2026-08-30T01:10:00Z",
   "queue_branch": "feat/qvq-frontier-score-updates",
   "purpose": "Separate upstream calibration/Hessian drift from discrete QVQ bank/trellis solver drift using one frozen W3.2 Up4 L6,L8 canary.",
@@ -43,16 +43,18 @@
     ]
   },
   "frozen_first_module": {
-    "state": "blocked_instrumentation",
+    "state": "complete",
     "module": "model.layers.0.self_attn.q_proj",
     "requirement": "Feed byte-identical W, H, SU, SV, and resolved config to the solver; bypass model forward, calibration, and data loading.",
+    "snapshot": "/root/qvq-results/w11-frozen-source/l0_q_proj_snapshot.pt",
+    "result_artifact": "docs/experiments/frontier_wave11_frozen_solver_results_20260830.json",
     "arms": [
-      {"arm_id":"w11-old-frozen-a","gpu":4,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"blocked_instrumentation"},
-      {"arm_id":"w11-old-frozen-b","gpu":5,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"blocked_instrumentation"},
-      {"arm_id":"w11-new-frozen-a","gpu":6,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"blocked_instrumentation"},
-      {"arm_id":"w11-new-frozen-b","gpu":7,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"blocked_instrumentation"}
+      {"arm_id":"w11-old-frozen-a","gpu":5,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"complete","result":"/root/qvq-results/w11-old-frozen-a.json"},
+      {"arm_id":"w11-old-frozen-b","gpu":6,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"complete","result":"/root/qvq-results/w11-old-frozen-b.json"},
+      {"arm_id":"w11-new-frozen-a","gpu":7,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"complete","result":"/root/qvq-results/w11-new-frozen-a.json"},
+      {"arm_id":"w11-new-frozen-b","gpu":4,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"complete","result":"/root/qvq-results/w11-new-frozen-b.json"}
     ],
-    "blocker": "Existing checkpoints retain packed outputs and run telemetry but do not retain the exact first-module H/Gram inputs or solver candidate/state tables. Add a snapshot exporter and frozen-input solver entry point before launching these four canaries."
+    "blocker": null
   },
   "interpretation": {
     "full_replicates_equal_old_and_new_different": "within-commit deterministic; commit/runtime provenance drift",
