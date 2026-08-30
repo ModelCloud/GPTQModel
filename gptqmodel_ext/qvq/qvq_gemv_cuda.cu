@@ -1174,7 +1174,7 @@ __global__ void qvq_reduce_splitk_kernel(
 // per K32 tile. The existing scalar LR kernel remains the fallback for other
 // rates, row counts, dtypes, and unaligned views.
 template <typename OutputScalar, bool SplitK, int OutputTiles>
-__global__ __launch_bounds__((2 * OutputTiles) * 32) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
+__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
@@ -1190,8 +1190,11 @@ __global__ __launch_bounds__((2 * OutputTiles) * 32) void qvq_gemv_local_ring_wm
   constexpr int kRows = 16;
   constexpr int kBatchTiles = 16;
   constexpr int kConsumerWarps = OutputTiles;
+  // The consumer warps also issue cp.async copies.  Keeping one logical warp
+  // group avoids the extra producer registers and block-wide barrier tail of
+  // a dedicated producer group while preserving asynchronous stage overlap.
   constexpr int kProducerWarps = OutputTiles;
-  constexpr int kWmmaThreads = (kConsumerWarps + kProducerWarps) * 32;
+  constexpr int kWmmaThreads = kConsumerWarps * 32;
   constexpr int kStageCount = 2;
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
@@ -1208,7 +1211,7 @@ __global__ __launch_bounds__((2 * OutputTiles) * 32) void qvq_gemv_local_ring_wm
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
   const int lane = thread & 31;
-  const int loader_thread = thread - kConsumerWarps * 32;
+  const int loader_thread = thread;
   const int n_tile_base = static_cast<int>(blockIdx.x) * kOutputTiles;
   const int m0 = static_cast<int>(blockIdx.y) * kRows;
   const int block_rows = min(kRows, size_m - m0);
@@ -1291,17 +1294,15 @@ __global__ __launch_bounds__((2 * OutputTiles) * 32) void qvq_gemv_local_ring_wm
 
   int stage = 0;
   const int first_tiles = min(kBatchTiles, k_tile_end - k_tile_begin);
-  if (warp >= kConsumerWarps) {
-    stage_batch(k_tile_begin, first_tiles, stage);
-    __pipeline_commit();
-    __pipeline_wait_prior(0);
-  }
+  stage_batch(k_tile_begin, first_tiles, stage);
+  __pipeline_commit();
+  __pipeline_wait_prior(0);
   __syncthreads();
 
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
     const int tiles_here = min(kBatchTiles, k_tile_end - kb);
     const bool has_next = kb + kBatchTiles < k_tile_end;
-    if (has_next && warp >= kConsumerWarps) {
+    if (has_next) {
       stage_batch(kb + kBatchTiles, min(kBatchTiles, k_tile_end - kb - kBatchTiles), stage ^ 1);
       __pipeline_commit();
     }
@@ -1342,7 +1343,7 @@ __global__ __launch_bounds__((2 * OutputTiles) * 32) void qvq_gemv_local_ring_wm
       }
       __syncwarp();
     }
-    if (has_next && warp >= kConsumerWarps) {
+    if (has_next) {
       __pipeline_wait_prior(0);
     }
     __syncthreads();
@@ -1906,7 +1907,7 @@ void launch_qvq_local_ring_wmma_hopper_w3(
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
   qvq_gemv_local_ring_wmma_hopper_w3_kernel<OutputScalar, SplitK, kHopperWmmaOutputTiles>
-      <<<grid, (2 * kHopperWmmaOutputTiles) * 32, 0, stream>>>(
+      <<<grid, kHopperWmmaOutputTiles * 32, 0, stream>>>(
           input_ptr,
           trellis_ptr,
           bank_ids_ptr,
