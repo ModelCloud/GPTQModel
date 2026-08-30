@@ -1288,7 +1288,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   // launch-uniform alternate-bank id once instead of indexing the four-entry
   // mask table independently in every lane for every K32 tile.
   uint32_t alt_bank_mask = 0;
-  if constexpr (kTransitionBits <= 6) {
+  if constexpr (kTransitionBits <= 7) {
     alt_bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
         static_cast<uint32_t>(bank_alt_id));
   }
@@ -1479,7 +1479,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const uint32_t bank_bit =
             (static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u;
         uint32_t bank_mask;
-        if constexpr (kTransitionBits <= 6) {
+        if constexpr (kTransitionBits <= 7) {
           bank_mask = (0u - bank_bit) & alt_bank_mask;
         } else {
           bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
