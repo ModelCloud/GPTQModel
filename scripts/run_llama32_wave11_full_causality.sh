@@ -50,7 +50,7 @@ run_one() {
     env PYTHONHASHSEED=0 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
       CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
       python "$wt/scripts/qvq_quantize.py" \
-        --model "$MODEL" --output "$out" --quant-config "$wt/$CONFIG_REL" \
+        --model "$MODEL" --output "$out" --quant-config "$ROOT/$CONFIG_REL" \
         --calibration-dataset "$CAL" --calibration-row-start 0 --calibration-rows 128 \
         --yaqa-dataset "$YAQA" --yaqa-row-start 0 --yaqa-rows 182 --device cuda:0 \
         --disjointness-manifest "$DISJOINTNESS" --require-disjointness --qvq-telemetry

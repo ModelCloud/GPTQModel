@@ -1,7 +1,7 @@
 {
   "schema": "qvq.frontier-wave11-causality.v1",
   "wave": 11,
-  "status": "queued",
+  "status": "full_end_to_end_running",
   "queued_at_utc": "2026-08-30T01:10:00Z",
   "queue_branch": "feat/qvq-frontier-score-updates",
   "purpose": "Separate upstream calibration/Hessian drift from discrete QVQ bank/trellis solver drift using one frozen W3.2 Up4 L6,L8 canary.",
@@ -33,13 +33,13 @@
     "per-question evaluator predictions"
   ],
   "full_end_to_end": {
-    "state": "queued",
+    "state": "running",
     "requirement": "Run each recorded quantizer commit normally, one process per physical GPU, then evaluate all checkpoints with evaluator_commit.",
     "arms": [
-      {"arm_id":"w11-old-full-a","gpu":0,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"queued","checkpoint":"/root/qvq-results/wave11-old-full-a"},
-      {"arm_id":"w11-old-full-b","gpu":1,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"queued","checkpoint":"/root/qvq-results/wave11-old-full-b"},
-      {"arm_id":"w11-new-full-a","gpu":2,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"queued","checkpoint":"/root/qvq-results/wave11-new-full-a"},
-      {"arm_id":"w11-new-full-b","gpu":3,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"queued","checkpoint":"/root/qvq-results/wave11-new-full-b"}
+      {"arm_id":"w11-old-full-a","gpu":0,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"A","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-old-full-a-anchor_up4_l6_l8"},
+      {"arm_id":"w11-old-full-b","gpu":1,"quantizer_commit":"07517d85714a313ea0bf794c4d60783234c1a6ed","replicate":"B","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-old-full-b-anchor_up4_l6_l8"},
+      {"arm_id":"w11-new-full-a","gpu":2,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"A","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-new-full-a-anchor_up4_l6_l8"},
+      {"arm_id":"w11-new-full-b","gpu":3,"quantizer_commit":"a1e0c50482715c57a7ae076906d78f81d1ec68f9","replicate":"B","state":"running","checkpoint":"/root/qvq-results/llama32-1b-w11-new-full-b-anchor_up4_l6_l8"}
     ]
   },
   "frozen_first_module": {
