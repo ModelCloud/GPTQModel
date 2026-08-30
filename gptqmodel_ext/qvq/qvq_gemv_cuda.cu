@@ -1284,12 +1284,12 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
   const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
   const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
-  // V2B2/P32 selectors contain one bit per local ring.  For W3, resolve the
+  // V2B2/P32 selectors contain one bit per local ring. Resolve the
   // launch-uniform alternate-bank id once instead of indexing the four-entry
   // mask table independently in every lane for every K32 tile.
-  uint32_t w3_alt_bank_mask = 0;
-  if constexpr (kTransitionBits == 6) {
-    w3_alt_bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
+  uint32_t alt_bank_mask = 0;
+  if constexpr (kTransitionBits <= 6) {
+    alt_bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
         static_cast<uint32_t>(bank_alt_id));
   }
 
@@ -1479,8 +1479,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const uint32_t bank_bit =
             (static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u;
         uint32_t bank_mask;
-        if constexpr (kTransitionBits == 6) {
-          bank_mask = (0u - bank_bit) & w3_alt_bank_mask;
+        if constexpr (kTransitionBits <= 6) {
+          bank_mask = (0u - bank_bit) & alt_bank_mask;
         } else {
           bank_mask = pgc16_v2_bank_mask<kTransitionBits>(
               bank_bit * static_cast<uint32_t>(bank_alt_id));
