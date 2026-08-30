@@ -965,6 +965,191 @@ def unpack_trellis_states(
     return (bits_i64.to(torch.int64) << state_shifts).sum(dim=-1).contiguous()
 
 
+_QVQ_P32_TILE_EDGES = QVQ_V2B2_P32_SEGMENTS_PER_TILE * QVQ_V2B2_P32_STEPS_PER_SEGMENT
+_QVQ_UINT32_MASK = (1 << 32) - 1
+
+
+def _validate_p32_window_words(trellis: torch.Tensor, *, bits: float, layout: str) -> tuple[int, int]:
+    """Validate one canonical or continuous-window P32 payload tensor."""
+
+    transition_bits = _validate_trellis_shape(bits=bits, vector_size=2, trellis_window=16)
+    if transition_bits > 7:
+        raise ValueError("QVQ P32 continuous-window layout supports only rates W1 through W3.5.")
+    if trellis.dtype != torch.int32:
+        raise TypeError(f"QVQ P32 {layout} words must use torch.int32, got {trellis.dtype}.")
+    if trellis.ndim < 1:
+        raise ValueError(f"QVQ P32 {layout} words must have at least one dimension.")
+    expected_words = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
+    if trellis.shape[-1] != expected_words:
+        raise ValueError(
+            f"QVQ P32 {layout} payload must contain {expected_words} words per 256-weight tile, "
+            f"got shape {tuple(trellis.shape)}."
+        )
+    return transition_bits, expected_words
+
+
+def repack_p32_planar_to_window(trellis: torch.Tensor, *, bits: float) -> torch.Tensor:
+    """Losslessly repack canonical planar P32 into direct state-window words.
+
+    The logical P32 path remains one circular 128-transition history. Physical
+    transitions are stored in reverse chronological order, low bits first, so
+    every logical 16-bit state is one circular 16-bit window beginning at the
+    current transition. The payload has exactly the same word count as planar
+    P32 and carries no initial-state or segment-boundary trailer.
+
+    Non-contiguous inputs are accepted at this high-level boundary; the
+    returned inference payload is always contiguous for low-level consumers.
+    """
+
+    transition_bits, words_per_tile = _validate_p32_window_words(trellis, bits=bits, layout="planar")
+    flat = trellis.reshape(-1, words_per_tile).contiguous()
+    columns = flat.transpose(0, 1).contiguous()
+    edges = planar_unpack_rows(columns, transition_bits).transpose(0, 1).to(torch.int64)
+    reversed_edges = edges.flip(1)
+
+    bit_positions = torch.arange(_QVQ_P32_TILE_EDGES, device=trellis.device, dtype=torch.int64) * transition_bits
+    word_ids = bit_positions >> 5
+    shifts = bit_positions & 31
+    packed = torch.zeros((flat.shape[0], words_per_tile), device=trellis.device, dtype=torch.int64)
+    expanded_word_ids = word_ids.unsqueeze(0).expand(flat.shape[0], -1)
+    packed.scatter_add_(1, expanded_word_ids, (reversed_edges << shifts) & _QVQ_UINT32_MASK)
+
+    crosses_word = shifts + transition_bits > 32
+    crossing_word_ids = word_ids[crosses_word] + 1
+    crossing_shifts = 32 - shifts[crosses_word]
+    packed.scatter_add_(
+        1,
+        crossing_word_ids.unsqueeze(0).expand(flat.shape[0], -1),
+        reversed_edges[:, crosses_word] >> crossing_shifts,
+    )
+    return (packed & _QVQ_UINT32_MASK).to(torch.int32).reshape(trellis.shape).contiguous()
+
+
+def repack_p32_window_to_planar(window_words: torch.Tensor, *, bits: float) -> torch.Tensor:
+    """Restore canonical planar P32 words from the continuous-window layout."""
+
+    transition_bits, words_per_tile = _validate_p32_window_words(
+        window_words,
+        bits=bits,
+        layout="continuous-window",
+    )
+    flat = window_words.reshape(-1, words_per_tile).contiguous().to(torch.int64) & _QVQ_UINT32_MASK
+    bit_positions = torch.arange(_QVQ_P32_TILE_EDGES, device=window_words.device, dtype=torch.int64) * transition_bits
+    word_ids = bit_positions >> 5
+    shifts = bit_positions & 31
+    reversed_edges = flat[:, word_ids] >> shifts
+
+    crosses_word = shifts + transition_bits > 32
+    crossing_word_ids = word_ids[crosses_word] + 1
+    crossing_shifts = 32 - shifts[crosses_word]
+    reversed_edges[:, crosses_word] |= flat[:, crossing_word_ids] << crossing_shifts
+    edges = (reversed_edges & ((1 << transition_bits) - 1)).flip(1)
+    packed = planar_pack_rows(edges.transpose(0, 1).contiguous(), transition_bits)
+    return packed.transpose(0, 1).reshape(window_words.shape).contiguous()
+
+
+def unpack_p32_window_states(window_words: torch.Tensor, *, bits: float) -> torch.Tensor:
+    """Decode every standard P32 state directly from circular bit windows."""
+
+    transition_bits, words_per_tile = _validate_p32_window_words(
+        window_words,
+        bits=bits,
+        layout="continuous-window",
+    )
+    flat = window_words.reshape(-1, words_per_tile).contiguous().to(torch.int64) & _QVQ_UINT32_MASK
+    pair_ids = torch.arange(_QVQ_P32_TILE_EDGES, device=window_words.device, dtype=torch.int64)
+    bit_positions = (_QVQ_P32_TILE_EDGES - 1 - pair_ids) * transition_bits
+    word_ids = bit_positions >> 5
+    shifts = bit_positions & 31
+    states = flat[:, word_ids] >> shifts
+
+    crosses_word = shifts > 16
+    next_word_ids = (word_ids[crosses_word] + 1) % words_per_tile
+    states[:, crosses_word] |= flat[:, next_word_ids] << (32 - shifts[crosses_word])
+    return (states & 0xffff).reshape(*window_words.shape[:-1], _QVQ_P32_TILE_EDGES).contiguous()
+
+
+def decode_p32_window_tiles(
+    window_words: torch.Tensor,
+    *,
+    bits: float,
+    bank_ids: torch.Tensor,
+    bank_alt_id: torch.Tensor,
+    codebook_version: str = PGC16_CODEBOOK_VERSION,
+) -> torch.Tensor:
+    """Reference-decode continuous-window P32 tiles to 256 row-major values."""
+
+    states = unpack_p32_window_states(window_words, bits=bits)
+    if bank_ids.device != window_words.device or bank_alt_id.device != window_words.device:
+        raise ValueError("QVQ P32 continuous-window payload and bank metadata must share one device.")
+    if bank_alt_id.numel() != 1 or bank_alt_id.dtype not in (
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    ):
+        raise ValueError("QVQ P32 continuous-window alternative bank ID must be one integer scalar.")
+    alt_id = int(bank_alt_id.item())
+    if not 1 <= alt_id < 4:
+        raise ValueError("QVQ P32 continuous-window alternative bank ID must be in [1, 3].")
+
+    tile_count = states.numel() // _QVQ_P32_TILE_EDGES
+    binary_ids = unpack_qvq_binary_bank_ids(
+        bank_ids,
+        tile_count * QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+    )
+    state_bank_ids = (
+        binary_ids.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)
+        .repeat_interleave(QVQ_V2B2_P32_STEPS_PER_SEGMENT, dim=1)
+        .mul(alt_id)
+    )
+    levels = pgc16_levels_for_version(codebook_version).to(device=window_words.device)
+    decoded = pgc16_decode_states_v2_banked(
+        states.reshape(tile_count, _QVQ_P32_TILE_EDGES),
+        state_bank_ids,
+        bits=bits,
+        levels=levels,
+    )
+    return decoded.reshape(*window_words.shape[:-1], 256).to(torch.float32).contiguous()
+
+
+def reconstruct_p32_window_inner_weight(
+    window_words: torch.Tensor,
+    *,
+    bits: float,
+    in_features: int,
+    out_features: int,
+    bank_ids: torch.Tensor,
+    bank_alt_id: torch.Tensor,
+    codebook_version: str = PGC16_CODEBOOK_VERSION,
+) -> torch.Tensor:
+    """Materialize the standard K16-by-N16 P32 matrix from window words."""
+
+    if in_features <= 0 or out_features <= 0 or in_features % 16 or out_features % 16:
+        raise ValueError("QVQ P32 continuous-window dimensions must be positive and divisible by 16.")
+    tile_count = (in_features // 16) * (out_features // 16)
+    expected_words = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
+    if window_words.ndim != 2 or tuple(window_words.shape) != (tile_count, expected_words):
+        raise ValueError(
+            f"QVQ P32 continuous-window words must have shape {(tile_count, expected_words)}, "
+            f"got {tuple(window_words.shape)}."
+        )
+    decoded = decode_p32_window_tiles(
+        window_words,
+        bits=bits,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+        codebook_version=codebook_version,
+    )
+    return (
+        decoded.view(in_features // 16, out_features // 16, 16, 16)
+        .permute(0, 2, 1, 3)
+        .reshape(in_features, out_features)
+        .contiguous()
+    )
+
+
 def unpack_local_ring_edges(
     trellis: torch.Tensor,
     *,
