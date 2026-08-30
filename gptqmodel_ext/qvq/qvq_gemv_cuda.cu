@@ -1347,9 +1347,9 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const int sub = warp;
         // Four lanes cooperate on each ring. Each lane extracts four disjoint
         // transitions once and advances a rate-specific sliding state across
-        // four adjacent pairs. W2/W2.5 load all four transitions together and
-        // exchange only the preceding group with a neighboring lane. W3 keeps
-        // its two-load planar extraction and per-edge lane exchange.
+        // four adjacent pairs. Every rate exchanges the preceding four-edge
+        // group once; W3 retains only its rate-specific two-load planar
+        // extraction before sharing the same recurrence.
         const int col = lane & 7;
         const int edge_group = lane >> 3;
         uint32_t edge_pack = 0;
@@ -1391,31 +1391,18 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
             edge_pack |= (high_nibble * 0x11110u) & 0x84210u;
           }
         }
-        auto edge_at = [&](int edge_index) {
-          const int source_lane = col + (edge_index >> 2) * 8;
-          const uint32_t source_pack = __shfl_sync(0xffffffffu, edge_pack, source_lane);
-          return (source_pack >> ((edge_index & 3) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-        };
-        uint32_t previous_pack = 0;
-        if constexpr (kTransitionBits <= 5) {
-          const int previous_lane = col + ((edge_group + 3) & 3) * 8;
-          previous_pack = __shfl_sync(0xffffffffu, edge_pack, previous_lane);
-        }
+        const int previous_lane = col + ((edge_group + 3) & 3) * 8;
+        const uint32_t previous_pack = __shfl_sync(0xffffffffu, edge_pack, previous_lane);
         const int pair_base = edge_group * 4;
         constexpr int kEdgeCount = (15 + kTransitionBits) / kTransitionBits;
         uint32_t state = 0;
 #pragma unroll
         for (int j = 0; j < kEdgeCount; ++j) {
-          uint32_t transition;
-          if constexpr (kTransitionBits == 6) {
-            const int edge_index = (pair_base + kLocalRingSteps - kEdgeCount + 1 + j) & 15;
-            transition = edge_at(edge_index);
-          } else {
-            const int relative_edge = 1 - kEdgeCount + j;
-            const int pack_index = relative_edge < 0 ? 4 + relative_edge : relative_edge;
-            const uint32_t source_pack = relative_edge < 0 ? previous_pack : edge_pack;
-            transition = (source_pack >> (pack_index * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-          }
+          const int relative_edge = 1 - kEdgeCount + j;
+          const int pack_index = relative_edge < 0 ? 4 + relative_edge : relative_edge;
+          const uint32_t source_pack = relative_edge < 0 ? previous_pack : edge_pack;
+          const uint32_t transition =
+              (source_pack >> (pack_index * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
           state = ((state << kTransitionBits) | transition) & 0xffffu;
         }
         const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
@@ -1434,12 +1421,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
             decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
           }
           if (q < 3) {
-            uint32_t transition;
-            if constexpr (kTransitionBits == 6) {
-              transition = edge_at((pair + 1) & 15);
-            } else {
-              transition = (edge_pack >> ((q + 1) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
-            }
+            const uint32_t transition =
+                (edge_pack >> ((q + 1) * kTransitionBits)) & ((1u << kTransitionBits) - 1u);
             state = ((state << kTransitionBits) | transition) & 0xffffu;
           }
         }
