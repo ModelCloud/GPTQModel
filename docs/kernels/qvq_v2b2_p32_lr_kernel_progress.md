@@ -110,6 +110,7 @@ tables below every row was intentionally measured at M=16.
 | `3ed40c56` uncommitted A/B | H200, W3 output-four paths M1-M16 | Route each decoded pair's high level through read-only/L1 and low level through the shared table so the two independent memory pipelines can overlap | Shared-load conflicts halved from 936,528 to 468,131, but down regressed 1.7-3.3% to 0.03006-0.03554 ms; NCU duration rose 33.06 to 34.18 us as long-scoreboard stalls increased | rejected; source restored before next experiment |
 | `c57b0f48` uncommitted A/B | H200, W3 output-four paths M1-M16 | Exploit the exact sign symmetry of the fixed PGC16-v1 table: keep its 128 positive FP16 values in two 32-bit registers/lane and gather each mirrored signed lookup with two shuffles | Bit-exact decoded output, but 16 shuffle routes per K32 tile slowed Q/O 17-19% and down 34-40% to 0.0413-0.0461 ms; K/V was also slightly slower | rejected; source restored before next experiment |
 | `93e135d7` | H200, W3 M1-M16 | Resolve the launch-uniform alternate bank mask once outside the K loop, then apply each tile's ring selector with a branch-free bit mask | All 20 W3 cells improved (1.047x latency geomean); gate/up gained 1.090-1.094x, NCU instructions fell 22.4% to 10.80M, and 108/108 H200 CUDA tests passed | accepted and pushed |
+| `a3fb8c55` | H200, W2/W2.5 M1-M16 | Extend the launch-uniform alternate-mask hoist to TB4/TB5 while retaining TB7's prior code generation | 80/80 LR cells accurate; exact NCU gate/up instructions fell 24.8% for W2 and 23.3% for W2.5, NCU duration fell 6.5% and 4.0%, and 108/108 H200 CUDA tests passed | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -839,14 +840,54 @@ removal confirms its next limiter remains the conflict-heavy shared level
 lookup and resulting lack of eligible warps. The full H200 CUDA suite passes
 108/108 cases at this pushed source head.
 
+Commit `a3fb8c55` extends the same invariant-mask algebra to TB4/W2 and
+TB5/W2.5. TB7/W3.5 remains on its previous path because the all-rate prototype
+was mixed on that register-heavy specialization. The source-equivalent full
+matrix is
+`artifacts/h200_lr_next4x/lowrate_mask_hoist_candidate.json` (source
+fingerprint `ed727fae6bdcb33fcea38a928f7cccd053a783561eb7f1df1bdce37d0b77afbd`).
+The slash-separated medians below are M1/M2/M4/M8/M16 on physical H200 GPU 0;
+the comparison column is the per-shape QVQ/Machete throughput geomean.
+
+| W | Shape | K | N | LR ms | xMachete W4 | Worst max abs |
+|---:|---|---:|---:|---|---:|---:|
+| 2 | Q/O | 2,048 | 2,048 | 0.012752/0.013760/0.013808/0.013968/0.014080 | 1.125x | 1.43e-05 |
+| 2 | K/V | 2,048 | 512 | 0.009968/0.009984/0.009984/0.010064/0.010176 | 1.434x | 7.63e-06 |
+| 2 | gate/up | 2,048 | 8,192 | 0.029120/0.029248/0.029312/0.030128/0.029984 | 0.603x | 7.63e-05 |
+| 2 | down | 8,192 | 2,048 | 0.026016/0.031280/0.031472/0.031760/0.032176 | 0.727x | 1.01e-04 |
+| 2.5 | Q/O | 2,048 | 2,048 | 0.012544/0.014240/0.014272/0.014368/0.014608 | 1.099x | 1.43e-05 |
+| 2.5 | K/V | 2,048 | 512 | 0.010160/0.010368/0.010352/0.010416/0.010512 | 1.389x | 9.54e-06 |
+| 2.5 | gate/up | 2,048 | 8,192 | 0.030304/0.030336/0.030432/0.031328/0.031312 | 0.579x | 6.87e-05 |
+| 2.5 | down | 8,192 | 2,048 | 0.026480/0.033152/0.033376/0.033696/0.034064 | 0.691x | 1.13e-04 |
+| 3 | Q/O | 2,048 | 2,048 | 0.012656/0.014032/0.014160/0.014192/0.014608 | 1.105x | 1.53e-05 |
+| 3 | K/V | 2,048 | 512 | 0.009472/0.009536/0.009616/0.009664/0.009760 | 1.498x | 5.72e-06 |
+| 3 | gate/up | 2,048 | 8,192 | 0.025792/0.025968/0.026144/0.026464/0.026976 | 0.678x | 3.43e-05 |
+| 3 | down | 8,192 | 2,048 | 0.026704/0.032992/0.033136/0.033264/0.033696 | 0.695x | 1.22e-04 |
+| 3.5 | Q/O | 2,048 | 2,048 | 0.013440/0.014400/0.014608/0.014832/0.015488 | 1.057x | 1.53e-05 |
+| 3.5 | K/V | 2,048 | 512 | 0.010224/0.010304/0.010384/0.010384/0.010608 | 1.386x | 7.63e-06 |
+| 3.5 | gate/up | 2,048 | 8,192 | 0.032464/0.032640/0.032992/0.033792/0.034080 | 0.537x | 6.68e-05 |
+| 3.5 | down | 8,192 | 2,048 | 0.030544/0.035648/0.035824/0.036640/0.038272 | 0.627x | 1.03e-04 |
+
+The exact pre/post NCU reports are
+`/tmp/ncu-h200-w2-gate-mask-hoist-baseline-0ba0f2ee.ncu-rep`,
+`/tmp/ncu-h200-w2-gate-lowrate-mask-hoist-inst.ncu-rep`,
+`/tmp/ncu-h200-w25-gate-mask-hoist-baseline-0ba0f2ee.ncu-rep`, and
+`/tmp/ncu-h200-w25-gate-lowrate-mask-hoist-inst.ncu-rep`. W2 falls from
+12,733,440 to 9,572,352 executed instructions (-24.8%) and 33.18 to 31.01 us
+(-6.5%); registers rise from 88 to 92/thread. W2.5 falls from 13,554,176 to
+10,392,064 instructions (-23.3%) and 33.66 to 32.32 us (-4.0%) while remaining
+at 85 registers/thread. Both retain their static shared-memory footprint and
+report no local-memory spilling. All 120 benchmark rows and all 108 H200 CUDA
+tests pass.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
 | 1 | H200 W3 M1-M16 MLP | invariant bank-mask hoisting reaches 0.02587-0.02691 ms gate/up at up to 245.71 GB/s and 0.02675-0.03357 ms down; both paths now execute about 10.5-10.8M instructions, while down retains its 936,528 shared-load-conflict baseline | keep four-output scheduling depth while overlapping or replacing its random shared level lookups; then move toward persistent producer/consumer TMA/WGMMA without added whole-block barriers |
-| 2 | H200 W3.5 M1-M16 MLP | concurrent native-N8 path now reaches 0.0392 ms for the H200 M16 gate canary | run the full H200 W3.5 matrix from the merged head after the current W3 focus and profile its remaining TB7 arithmetic |
-| 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
-| 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
+| 2 | H200 W3.5 M1-M16 MLP | exact full matrix reaches 0.03246-0.03408 ms gate/up (0.537x Machete) and 0.03054-0.03827 ms down (0.627x); TB7 retained its prior selector path | profile the remaining TB7 arithmetic and test a pressure-neutral uniform-mask formulation before any wider pipeline change |
+| 3 | H200 W2/W2.5 M1-M16 MLP | gate/up is 0.603x/0.579x Machete and down is 0.727x/0.691x; mask hoisting reduces gate/up to 9.57M/10.39M instructions while shared conflicts remain | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
+| 4 | H200 W2/W2.5 attention/KV | Q/O is 1.125x/1.099x and K/V is 1.434x/1.389x Machete by per-shape M1-M16 geomean | enforce as the rate-specific latency/no-regression gate |
 | 5 | H200 W3 M16 and M32 | M16 is 0.361-0.709x Machete by K/N; prior M32 K8192/N2048 is 1.76x versus non-LR | reduce TB6 cache/scoreboard pressure; retain split 4 for the M32 down-like case |
 | 6 | RTX 5090 W2-W3.5, all substantial M=16 shapes | historical `e4b1006c`: all 16 pass >=4x | retain as historical coverage; current local work remains H200-only |
 | 7 | all nine prior Ada/Blackwell GPUs, W2-W3.5 | historical `18389b4d`: all 144 substantial cells >=2x, 112 >=4x | retain as the prior-host acceptance gate |
