@@ -1290,12 +1290,16 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         // this mapping performs one extraction for each of the 16 edges.
         const int col = lane & 7;
         const int edge_group = lane >> 3;
+        const int word = col >> 1;
+        const int bit_base = (col & 1) * 16 + edge_group * 4;
         uint32_t edge_pack = 0;
 #pragma unroll
-        for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
-          const uint32_t edge = planar_transition<kTransitionBits>(
-              packed_words[u][sub], col * kLocalRingSteps + edge_group * 4 + edge_in_group);
-          edge_pack |= edge << (edge_in_group * kTransitionBits);
+        for (int plane = 0; plane < kTransitionBits; ++plane) {
+          const uint32_t nibble =
+              (packed_words[u][sub][plane * 4 + word] >> bit_base) & 0xfu;
+          const uint32_t spread = (nibble & 1u) | ((nibble & 2u) << 5) |
+              ((nibble & 4u) << 10) | ((nibble & 8u) << 15);
+          edge_pack |= spread << plane;
         }
         auto edge_at = [&](int edge_index) {
           const int source_lane = col + (edge_index >> 2) * 8;
