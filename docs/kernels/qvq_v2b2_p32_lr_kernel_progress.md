@@ -81,6 +81,8 @@ tables below every row was intentionally measured at M=16.
 | `e0c29e60` | H200, W2-W3.5 M1/M2/M4/M8/M16 | Full four-rate, four-K/N projection matrix against matched Machete/Marlin W4 | 120/120 rows passed their dense-reference gates; QVQ/Machete geomeans were 0.787x, 0.790x, 0.241x, and 0.197x from W2 through W3.5 | accepted full-M/K/N targeting baseline |
 | `54e2e3ac` / `efe8ae70` | H200, W3 M1-M16 | Permit the existing cooperative Hopper TB6 kernel for every M<=16 instead of only the ROWS16 dispatch | All 20 W3 cells accurate; Q/O M1-M8 gained 2.74-2.99x and MLP M1-M8 gained 3.51-4.37x versus `e0c29e60`; K/V and M16 stayed within normal variance | accepted, merged, and pushed |
 | `f157104d` | H200, W3 M1-M16 | Feed TB6 decoded half2 pairs to the same direct native-N8 MMA consumer used by W2/W2.5 | All 20 cells accurate; Q/O gained 1.22-1.25x and MLP gained 1.38-1.40x versus `54e2e3ac`; exact-head NCU fell to 17.38M instructions and 33.0 us | accepted and pushed |
+| `e0f55ecb` / `e55997ce` | H200, W3 M1-M16 | Exchange one previous four-edge pack per lane instead of six overlapping per-edge TB6 shuffles | All 20 cells accurate; Q/O gained 3.3-5.1%, gate/up 4.1-4.7%, and down 4.6-6.3%; K/V scalar controls stayed within 0.8% | accepted, merged, and pushed |
+| `a12c1e35` | H200, W3 M1-M16 | Expand four TB6 low nibbles and high dibits with two broadword mask/shift stages instead of four scalar extracts | All 20 cells accurate; Q/O gained up to 3.5%, gate/up 2.1-3.0%, and down 2.9-4.9%; NCU fell to 16.14M instructions and 31.0 us | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -381,6 +383,50 @@ consumer. Both use 92 registers/thread and 31.25% theoretical occupancy. The
 remaining rate gap is therefore the TB6 two-plane extraction and its repeated
 per-edge shuffles, not tensor compute or accumulator materialization.
 
+Commit `e0f55ecb`, merged/pushed as `e55997ce`, replaces those six overlapping
+TB6 shuffles with one exchange of the previous four-edge pack. The same packed
+recurrence is now shared by W2, W2.5, and W3; only TB6's two-plane extraction
+remains rate-specific.
+
+| Shape | M | K | N | LR ms | Prior ms | LR gain | xMachete W4 | Max abs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `attn_qo` | 1 | 2,048 | 2,048 | 0.015408 | 0.016192 | 1.051x | 1.001x | 8.58e-06 |
+| `attn_qo` | 2 | 2,048 | 2,048 | 0.016320 | 0.017008 | 1.042x | 0.966x | 1.24e-05 |
+| `attn_qo` | 4 | 2,048 | 2,048 | 0.016480 | 0.017136 | 1.040x | 0.938x | 1.34e-05 |
+| `attn_qo` | 8 | 2,048 | 2,048 | 0.016544 | 0.017152 | 1.037x | 0.952x | 1.53e-05 |
+| `attn_qo` | 16 | 2,048 | 2,048 | 0.016752 | 0.017312 | 1.033x | 0.926x | 1.34e-05 |
+| `attn_kv` | 1 | 2,048 | 512 | 0.021520 | 0.021392 | 0.994x | 0.684x | 1.91e-06 |
+| `attn_kv` | 2 | 2,048 | 512 | 0.020720 | 0.020720 | 1.000x | 0.712x | 3.81e-06 |
+| `attn_kv` | 4 | 2,048 | 512 | 0.021248 | 0.021072 | 0.992x | 0.694x | 4.77e-06 |
+| `attn_kv` | 8 | 2,048 | 512 | 0.021984 | 0.022080 | 1.004x | 0.672x | 4.77e-06 |
+| `attn_kv` | 16 | 2,048 | 512 | 0.024544 | 0.024592 | 1.002x | 0.606x | 3.81e-06 |
+| `mlp_gate_up` | 1 | 2,048 | 8,192 | 0.033424 | 0.034992 | 1.047x | 0.535x | 2.48e-05 |
+| `mlp_gate_up` | 2 | 2,048 | 8,192 | 0.033648 | 0.035040 | 1.041x | 0.532x | 2.67e-05 |
+| `mlp_gate_up` | 4 | 2,048 | 8,192 | 0.033712 | 0.035120 | 1.042x | 0.531x | 2.57e-05 |
+| `mlp_gate_up` | 8 | 2,048 | 8,192 | 0.033936 | 0.035456 | 1.045x | 0.527x | 3.43e-05 |
+| `mlp_gate_up` | 16 | 2,048 | 8,192 | 0.034528 | 0.035936 | 1.041x | 0.517x | 3.05e-05 |
+| `mlp_down` | 1 | 8,192 | 2,048 | 0.033520 | 0.035056 | 1.046x | 0.660x | 4.58e-05 |
+| `mlp_down` | 2 | 8,192 | 2,048 | 0.040224 | 0.042592 | 1.059x | 0.554x | 8.58e-05 |
+| `mlp_down` | 4 | 8,192 | 2,048 | 0.040224 | 0.042752 | 1.063x | 0.551x | 8.58e-05 |
+| `mlp_down` | 8 | 8,192 | 2,048 | 0.040320 | 0.042736 | 1.060x | 0.558x | 9.35e-05 |
+| `mlp_down` | 16 | 8,192 | 2,048 | 0.040480 | 0.042928 | 1.060x | 0.547x | 1.22e-04 |
+
+Commit `a12c1e35` fuses each four-edge TB6 planar expansion. Exact per-cell
+results remain in the preserved benchmark JSON; this compact table identifies
+the M/K/N ranges and progression without repeating the unchanged K/V controls.
+
+| Shape | M values | K | N | LR ms range | Gain versus `e0f55ecb` | xMachete range | Worst max abs |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `attn_qo` | 1,2,4,8,16 | 2,048 | 2,048 | 0.015264-0.016224 | 1.009-1.035x | 0.963-1.020x | 1.53e-05 |
+| `attn_kv` | 1,2,4,8,16 | 2,048 | 512 | 0.020624-0.024464 | 0.994-1.008x | 0.602-0.714x | 4.77e-06 |
+| `mlp_gate_up` | 1,2,4,8,16 | 2,048 | 8,192 | 0.032704-0.033760 | 1.021-1.030x | 0.536-0.547x | 3.43e-05 |
+| `mlp_down` | 1,2,4,8,16 | 8,192 | 2,048 | 0.032576-0.038928 | 1.029-1.049x | 0.570-0.678x | 1.22e-04 |
+
+On the same M16/K2048/N8192 counter gate, broadword expansion reduces W3
+from 16.45M to 16.14M instructions and NCU duration from 32.0 to 31.0 us.
+Registers return from 89 to 92/thread, so further scalar decode algebra has
+diminishing returns; wider N reuse is now the higher-impact W3 target.
+
 ### H100 same-CC regression
 
 The H100 run uses physical GPU 1, CC 9.0, 132 SMs, and the same accepted
@@ -574,7 +620,7 @@ again. Raw captures are
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | native-N8 TB6 is now 0.0350-0.0429 ms, 1.38-1.40x faster than padded WMMA, and executes 17.38M instructions versus W2's 14.44M | replace six repeated per-edge shuffles with one previous-pack exchange, then profile the remaining two-plane extraction |
+| 1 | H200 W3 M1-M16 MLP | fused TB6 is now 0.0326-0.0389 ms and 16.14M instructions, only 11.7% above W2's 14.44M | widen the W3 output tile to reuse activation staging and barriers, with split policy retuned for one H200 scheduling wave |
 | 2 | H200 W3.5 M1-M16 MLP | full matrix: 0.074-0.108x Machete, 0.203-0.244 ms gate/up and 0.205-0.231 ms down | add a TB7-specific cooperative/tensor path after the current W3 focus; profile its instruction/local-memory image before sharing TB6 code |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
