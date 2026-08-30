@@ -1389,13 +1389,19 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
               0xffu;
           const uint32_t top_pack =
               (packed_words[u][sub][word_base + 6] >> edge_in_block) & 0xfu;
-#pragma unroll
-          for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
-            const uint32_t edge = ((low_pack >> (edge_in_group * 4)) & 0xfu) |
-                (((middle_pack >> (edge_in_group * 2)) & 0x3u) << 4) |
-                (((top_pack >> edge_in_group) & 0x1u) << 6);
-            edge_pack |= edge << (edge_in_group * kTransitionBits);
-          }
+          // Spread the packed planes directly into four adjacent seven-bit
+          // slots. This is bit-equivalent to four scalar extract/shift/or
+          // iterations but keeps the Hopper integer instruction stream short.
+          uint32_t low_spread = (low_pack & 0x00ffu) | ((low_pack & 0xff00u) << 6);
+          low_spread = (low_spread & 0x0003c00fu) | ((low_spread & 0x003c00f0u) << 3);
+          uint32_t middle_spread =
+              (middle_pack & 0x0fu) | ((middle_pack & 0xf0u) << 10);
+          middle_spread =
+              ((middle_spread & 0x0000c003u) | ((middle_spread & 0x0003000cu) << 5)) << 4;
+          uint32_t top_spread = (top_pack & 0x3u) | ((top_pack & 0xcu) << 12);
+          top_spread =
+              ((top_spread & 0x00004001u) | ((top_spread & 0x00008002u) << 6)) << 6;
+          edge_pack = low_spread | middle_spread | top_spread;
         } else {
           const int first_edge = col * kLocalRingSteps + edge_group * 4;
           const int planar_block = first_edge >> 5;
