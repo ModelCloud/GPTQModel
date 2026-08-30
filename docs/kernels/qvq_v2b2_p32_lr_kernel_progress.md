@@ -98,6 +98,7 @@ tables below every row was intentionally measured at M=16.
 | `f254003d` | H100, W2-W3.5 gate/up M1-M16 | Stop the cooperative decode loop at the runtime tail length instead of executing every compile-time batch slot | All 20 exact CUDA Graph rows improved again to 0.0304-0.0338 ms; 80/80 Hopper correctness cases passed, including split-3 tails | accepted and pushed |
 | `2cc545da` / `22148017` | H200, W3 gate/up M1-M16 | Pair the two split-K CTAs in a Hopper z-cluster, keep one partial accumulator in DSM, and let rank zero write the reduced output directly | Exact merged-head CUDA Graph rows improved 4.45-5.41% to 0.02957-0.03062 ms; 108/108 H200 CUDA tests passed and NCU reports 64 registers with no spilling | accepted, merged, and pushed |
 | `a039a97b` uncommitted A/B | H200, W3 down M1-M16 | Generalize DSM reduction from the successful split-2 gate path to split-8 M1 and split-4 M2-M16 clusters | Accurate, but cluster placement plus three/seven remote reductions slowed M1 32.8% (0.02963 to 0.03936 ms) and M2-M16 19.5-20.8% (0.03376-0.03430 to 0.04038-0.04144 ms) | rejected; source restored before next experiment |
+| `2e90588f` uncommitted A/B | H200, W3 down M1-M16 | Keep portable two-block clusters, combine split partitions pairwise through DSM, then launch a reducer over half as many global partial planes | Accurate, but M1 slowed 1.2% and M2-M16 slowed 8.0-10.4%; the cluster fence is only amortized when it eliminates the reduction launch entirely | rejected; source restored before next experiment |
 
 ## RTX 4090 accepted M=16 matrix
 
