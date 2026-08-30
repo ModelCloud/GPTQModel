@@ -1272,7 +1272,7 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
     stage_batch(kb, tiles_here);
     __syncthreads();
 
-#pragma unroll
+#pragma unroll 1
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
         const int sub = warp;
