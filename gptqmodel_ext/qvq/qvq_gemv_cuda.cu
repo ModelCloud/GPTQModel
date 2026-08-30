@@ -1321,7 +1321,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       }
       __syncwarp();
 
-      if (n_tile_base + warp < n_tiles) {
+      if (u < tiles_here && n_tile_base + warp < n_tiles) {
         wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
         wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0][0], kPaddedColumns);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
