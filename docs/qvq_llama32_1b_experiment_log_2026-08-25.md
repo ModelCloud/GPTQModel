@@ -118,6 +118,19 @@ All eight arms launched at `2026-08-30T09:03:39Z` from pinned commit
 `3ebcf9a3`. The current host exposes four 96 GiB physical GPUs, so two
 small-model pipelines run per GPU with the two NM-full replicas separated.
 
+Six arms have completed full GSM8K and D300 evaluation. The current partial
+curve is non-monotonic: YAQA182/NM128/NM256 score 499/494/486, NM512 recovers
+to 520, and NM1024 is the current leader at **535/1209 (44.2514%)**. The
+token-matched random-NM control scores 513, below the ordered NM512 prefix's
+520 despite essentially identical Fisher-token count (490,481 versus
+490,449). Full exact results remain pending for NM-full seed 0/1.
+
+The original interactive launcher session ended before the two long NM-full
+arms published checkpoints. There was no CUDA/model exception and no partial
+checkpoint to preserve. Both were restarted from their immutable inputs at
+`2026-08-30T19:56:28Z` under detached `tmux` supervisor `qvq-fisher-v2`, still
+pinned to `3ebcf9a3`; the interruption is retained in the queue manifest.
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.

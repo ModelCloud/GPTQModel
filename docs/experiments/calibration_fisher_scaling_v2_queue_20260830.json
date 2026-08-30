@@ -4,6 +4,14 @@
   "prepared_at_utc": "2026-08-30T09:00:01Z",
   "launched_at_utc": "2026-08-30T09:03:39Z",
   "launch_commit": "3ebcf9a307231187178e29ae7ad91e156a84d6ef",
+  "restart_history": [
+    {
+      "restarted_at_utc": "2026-08-30T19:56:28Z",
+      "arms": ["f6_yaqa182_nm10000", "f8_yaqa182_nm10000_seed1"],
+      "reason": "The original interactive launcher session ended before these long NM-full arms published checkpoints; no CUDA/model error was present and no partial checkpoint existed, so both arms restarted from their immutable inputs under detached tmux supervisor qvq-fisher-v2.",
+      "launch_commit": "3ebcf9a307231187178e29ae7ad91e156a84d6ef"
+    }
+  ],
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "Measure GSM8K response to YAQA Fisher sequence/token coverage while holding lifecycle calibration and the W3.2 allocation fixed.",
   "fixed_model": "/monster/data/model/Llama-3.2-1B-Instruct",
@@ -29,14 +37,14 @@
     ]
   },
   "arms": [
-    {"arm_id": "f1_yaqa182", "gpu": 0, "slot": 0, "fisher_rows": 182, "fisher_tokens": 302193, "seed": 0, "state": "running"},
-    {"arm_id": "f2_yaqa182_nm128", "gpu": 1, "slot": 0, "fisher_rows": 310, "fisher_tokens": 351918, "seed": 0, "state": "running"},
-    {"arm_id": "f3_yaqa182_nm256", "gpu": 2, "slot": 0, "fisher_rows": 438, "fisher_tokens": 397132, "seed": 0, "state": "running"},
-    {"arm_id": "f4_yaqa182_nm512", "gpu": 3, "slot": 0, "fisher_rows": 694, "fisher_tokens": 490449, "seed": 0, "state": "running"},
-    {"arm_id": "f5_yaqa182_nm1024", "gpu": 2, "slot": 1, "fisher_rows": 1206, "fisher_tokens": 677908, "seed": 0, "state": "running"},
-    {"arm_id": "f6_yaqa182_nm10000", "gpu": 0, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 0, "state": "running"},
-    {"arm_id": "f7_yaqa182_nmrandom_token188256_seed20260830", "gpu": 3, "slot": 1, "fisher_rows": 704, "fisher_tokens": 490481, "seed": 0, "state": "running"},
-    {"arm_id": "f8_yaqa182_nm10000_seed1", "gpu": 1, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 1, "state": "running"}
+    {"arm_id": "f1_yaqa182", "gpu": 0, "slot": 0, "fisher_rows": 182, "fisher_tokens": 302193, "seed": 0, "state": "complete", "gsm8k_correct": 499, "d300_aligned_accuracy": 0.34552083333333333},
+    {"arm_id": "f2_yaqa182_nm128", "gpu": 1, "slot": 0, "fisher_rows": 310, "fisher_tokens": 351918, "seed": 0, "state": "complete", "gsm8k_correct": 494, "d300_aligned_accuracy": 0.36083333333333334},
+    {"arm_id": "f3_yaqa182_nm256", "gpu": 2, "slot": 0, "fisher_rows": 438, "fisher_tokens": 397132, "seed": 0, "state": "complete", "gsm8k_correct": 486, "d300_aligned_accuracy": 0.34760416666666666},
+    {"arm_id": "f4_yaqa182_nm512", "gpu": 3, "slot": 0, "fisher_rows": 694, "fisher_tokens": 490449, "seed": 0, "state": "complete", "gsm8k_correct": 520, "d300_aligned_accuracy": 0.3465625},
+    {"arm_id": "f5_yaqa182_nm1024", "gpu": 2, "slot": 1, "fisher_rows": 1206, "fisher_tokens": 677908, "seed": 0, "state": "complete", "gsm8k_correct": 535, "d300_aligned_accuracy": 0.3421875},
+    {"arm_id": "f6_yaqa182_nm10000", "gpu": 0, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 0, "state": "restarted"},
+    {"arm_id": "f7_yaqa182_nmrandom_token188256_seed20260830", "gpu": 3, "slot": 1, "fisher_rows": 704, "fisher_tokens": 490481, "seed": 0, "state": "complete", "gsm8k_correct": 513, "d300_aligned_accuracy": 0.34489583333333335},
+    {"arm_id": "f8_yaqa182_nm10000_seed1", "gpu": 1, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 1, "state": "restarted"}
   ],
   "evaluation": {
     "primary": "gsm8k_platinum_cot: madrylab/gsm8k-platinum main/test, 1209 rows",
