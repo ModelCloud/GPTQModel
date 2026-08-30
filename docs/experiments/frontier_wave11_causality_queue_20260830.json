@@ -4,6 +4,14 @@
   "status": "frozen_canary_complete_full_end_to_end_running",
   "queued_at_utc": "2026-08-30T01:10:00Z",
   "queue_branch": "feat/qvq-frontier-score-updates",
+  "worktree_bootstrap_commit": "044c507f",
+  "invalidated_attempts": [
+    {
+      "attempt": "initial full/frozen launch",
+      "reason": "historical scripts could resolve the editable gptqmodel installation from the current checkout; no scores from that attempt are attributable",
+      "status": "invalid"
+    }
+  ],
   "purpose": "Separate upstream calibration/Hessian drift from discrete QVQ bank/trellis solver drift using one frozen W3.2 Up4 L6,L8 canary.",
   "canary": {
     "allocation": "Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3, with Up4 at layers 6 and 8",
