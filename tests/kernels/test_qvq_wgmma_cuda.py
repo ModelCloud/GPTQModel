@@ -74,6 +74,6 @@ def test_qvq_wgmma_w3_m16_matches_dense_reference(split_count):
     )
     torch.cuda.synchronize()
     error = (actual.float() - reference).abs()
-    assert actual.dtype == torch.float16
+    assert actual.dtype == torch.float32
     assert torch.isfinite(actual).all()
     assert error.max().item() <= 4e-2

@@ -286,7 +286,7 @@ __global__ __launch_bounds__(kThreads) void qvq_wgmma_w3_m16_kernel(
 
 __global__ void qvq_wgmma_reduce_split_kernel(
     const float* __restrict__ partial_output,
-    at::Half* __restrict__ output,
+    float* __restrict__ output,
     int output_values,
     int split_count) {
   const int index = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
@@ -298,7 +298,7 @@ __global__ void qvq_wgmma_reduce_split_kernel(
   for (int split = 0; split < split_count; ++split) {
     value += partial_output[static_cast<int64_t>(split) * output_values + index];
   }
-  output[index] = static_cast<at::Half>(value);
+  output[index] = value;
 }
 
 at::Tensor qvq_wgmma_w3_m16(
@@ -350,10 +350,13 @@ at::Tensor qvq_wgmma_w3_m16(
               "QVQ WGMMA bank-id size mismatch");
   TORCH_CHECK(levels.numel() == 256, "QVQ WGMMA requires 256 PGC16 levels");
 
-  auto output = at::empty({kRows, size_n}, input.options());
-  auto partial_output = at::empty(
-      {split_count, kRows, size_n},
-      input.options().dtype(at::kFloat));
+  auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
+  // A single K partition already produces the final FP32 result.  Alias the
+  // output directly so the common split=1 path does not pay for a redundant
+  // conversion/reduction kernel launch.
+  auto partial_output = split_count == 1
+      ? output
+      : at::empty({split_count, kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
   qvq_wgmma_w3_m16_kernel<<<grid, kThreads, 0, stream>>>(
@@ -368,15 +371,17 @@ at::Tensor qvq_wgmma_w3_m16(
       static_cast<int>(bank_alt_id));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  constexpr int kReductionThreads = 256;
-  const int output_values = kRows * size_n;
-  const int reduction_blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
-  qvq_wgmma_reduce_split_kernel<<<reduction_blocks, kReductionThreads, 0, stream>>>(
-      partial_output.data_ptr<float>(),
-      output.data_ptr<at::Half>(),
-      output_values,
-      static_cast<int>(split_count));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (split_count > 1) {
+    constexpr int kReductionThreads = 256;
+    const int output_values = kRows * size_n;
+    const int reduction_blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    qvq_wgmma_reduce_split_kernel<<<reduction_blocks, kReductionThreads, 0, stream>>>(
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        output_values,
+        static_cast<int>(split_count));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
   return output;
 }
 
