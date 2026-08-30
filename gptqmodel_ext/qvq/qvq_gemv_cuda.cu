@@ -1528,7 +1528,6 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
         }
       }
-      __syncwarp();
     }
     __syncthreads();
   }
