@@ -1166,7 +1166,7 @@ __global__ void qvq_reduce_splitk_kernel(
 // and reuses it for two adjacent output tiles. This is deliberately fixed to
 // TB=6/M=16/CC9; other rates and architectures retain their tuned mapping.
 template <typename Scalar, typename OutputScalar, bool SplitK>
-__global__ __launch_bounds__(2 * kThreads, 2) void qvq_gemv_local_ring_fused2_hopper_w3_kernel(
+__global__ __launch_bounds__(2 * kThreads) void qvq_gemv_local_ring_fused2_hopper_w3_kernel(
     const Scalar* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
