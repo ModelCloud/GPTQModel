@@ -96,6 +96,7 @@ tables below every row was intentionally measured at M=16.
 | `ff1a439a` | H200, W3 K/V | Retune automatic split-K after N512 entered the cooperative kernel: 16 base CTAs x split 16 supplies two complete H200 waves instead of one | Exact CUDA Graph A/B across M1/M2/M4/M8/M16 improved 4.4-5.0% versus split 8, with auto matching explicit split 16 and worst max error 6.68e-06 | accepted and pushed |
 | `1f834abf` | H100, W2-W3.5 gate/up M1-M16 | Remove the trailing warp barrier after each private decoded-weight tile; the next uniform warp iteration cannot overwrite shared storage before the prior loads complete | All 20 CUDA-event rows improved to 0.0309-0.0357 ms; 80/80 Hopper correctness cases passed across FP16/FP32 output and split-1/split-3 | accepted and pushed |
 | `f254003d` | H100, W2-W3.5 gate/up M1-M16 | Stop the cooperative decode loop at the runtime tail length instead of executing every compile-time batch slot | All 20 exact CUDA Graph rows improved again to 0.0304-0.0338 ms; 80/80 Hopper correctness cases passed, including split-3 tails | accepted and pushed |
+| `2cc545da` / `22148017` | H200, W3 gate/up M1-M16 | Pair the two split-K CTAs in a Hopper z-cluster, keep one partial accumulator in DSM, and let rank zero write the reduced output directly | Exact merged-head CUDA Graph rows improved 4.45-5.41% to 0.02957-0.03062 ms; 108/108 H200 CUDA tests passed and NCU reports 64 registers with no spilling | accepted, merged, and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -716,11 +717,37 @@ The report is `/tmp/ncu-h200-w3-global-levels-09ab284a.ncu-rep`. This is the
 desired Machete-style trade: spend cheap cache-resident instructions to remove
 serialized shared-memory traffic.
 
+Commit `2cc545da`, merged with the concurrent decode-tail change at
+`22148017`, removes W3 gate/up split-K's global partial-output round trip and
+separate reduction launch. The two z partitions launch as a Hopper block
+cluster. Rank one stores its four FP32 accumulator values per lane in local
+shared memory, rank zero reads them through DSM and writes the reduced output,
+and both blocks remain resident until the remote read is complete.
+
+The exact `22148017` CUDA Graph medians for W3 M1/M2/M4/M8/M16 gate/up are
+0.029568/0.029664/0.029920/0.030176/0.030624 ms. The locked `12284743`
+pre-cluster baseline was
+0.031168/0.031248/0.031264/0.031520/0.032048 ms, so every row gains
+4.45-5.41%. Effective QVQ payload bandwidth rises to 207.58-215.00 GB/s and
+the same-run throughput reaches 0.583-0.606x Machete W4. Worst max error is
+3.34e-05, and the full H200 LR CUDA suite passes 108/108 cases.
+
+The source-correlated pre-merge cluster NCU report is
+`/tmp/ncu-h200-w3-gate-cluster-candidate.ncu-rep`. The fused kernel executes
+14.56M instructions in an NCU-replayed 31.26 us, uses 64 registers/thread and
+41.09 KiB static shared memory, and has zero local or shared spilling. It
+performs 4,096 DSM loads and only 4,096 global stores (the final M16xN8192
+output); the old path wrote both partial tensors before launching its reducer.
+Shared-load/store conflicts remain small at 4,160/65,536. The counter duration
+is for the one fused kernel and is not compared directly with the older main-
+kernel-only NCU duration; the exact CUDA Graph end-to-end timings above are the
+acceptance evidence.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | gate/up N64 is 0.0316-0.0324 ms; random level-table conflicts are eliminated, but only 212 GB/s is measured and down remains 0.0327-0.0390 ms | widen/repack the remaining aligned weight fetch and move toward persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
+| 1 | H200 W3 M1-M16 MLP | cluster-fused gate/up is 0.02957-0.03062 ms at up to 215 GB/s; random level-table conflicts and the split-K global partial/reduction launch are eliminated, while down remains 0.0327-0.0390 ms | widen/repack the remaining aligned weight fetch and move toward persistent producer/consumer WGMMA without adding per-eight-tile block barriers |
 | 2 | H200 W3.5 M1-M16 MLP | concurrent native-N8 path now reaches 0.0392 ms for the H200 M16 gate canary | run the full H200 W3.5 matrix from the merged head after the current W3 focus and profile its remaining TB7 arithmetic |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |

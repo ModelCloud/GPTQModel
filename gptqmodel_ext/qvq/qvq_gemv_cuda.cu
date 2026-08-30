@@ -6,6 +6,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cooperative_groups.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
 #include <mma.h>
@@ -22,6 +23,7 @@
 namespace {
 
 namespace wmma = nvcuda::wmma;
+namespace cg = cooperative_groups;
 
 constexpr int kTileRows = 16;
 constexpr int kTileColumns = 16;
@@ -1226,7 +1228,13 @@ __device__ __forceinline__ void qvq_mma_m16n8k16(
 // recurrence, and consumes the decoded FP16 weights through native N8 MMA.
 // The scalar LR kernel remains the
 // fallback for other rates, row counts, dtypes, and unaligned views.
-template <int TransitionBits, typename OutputScalar, bool SplitK, int OutputTiles, bool PermuteInputStaging = false>
+template <
+    int TransitionBits,
+    typename OutputScalar,
+    bool SplitK,
+    int OutputTiles,
+    bool PermuteInputStaging = false,
+    bool ClusterSplitK = false>
 __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
@@ -1242,6 +1250,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kTransitionBits = TransitionBits;
   static_assert(kTransitionBits >= 4 && kTransitionBits <= 7);
   static_assert(!PermuteInputStaging || kTransitionBits == 7);
+  static_assert(!ClusterSplitK || SplitK);
+  static_assert(!ClusterSplitK || (kTransitionBits == 6 && OutputTiles == 8));
   constexpr int kRows = 16;
   constexpr int kBatchTiles = OutputTiles >= 8 ? 16 : 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
@@ -1261,6 +1271,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kInputStride];
   __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kDecodedColumns];
   __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kOutputColumns];
+  __shared__ __align__(16) float cluster_partial[kOutputTiles][32][4];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -1533,7 +1544,41 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   }
 
   if constexpr (kNativeN8) {
-    if (n_tile_base + warp < n_tiles) {
+    if constexpr (ClusterSplitK) {
+      const cg::cluster_group cluster = cg::this_cluster();
+      const unsigned int cluster_rank = cluster.block_rank();
+      if (cluster_rank != 0) {
+#pragma unroll
+        for (int value = 0; value < 4; ++value) {
+          cluster_partial[warp][lane][value] = native_accumulator.values[value];
+        }
+      }
+      cluster.sync();
+      if (cluster_rank == 0 && n_tile_base + warp < n_tiles) {
+        const float* remote_partial =
+            cluster.map_shared_rank(&cluster_partial[0][0][0], 1);
+        const int quad = lane >> 2;
+        const int output_column = (n_tile_base + warp) * kLocalRingTileColumns + (lane & 3) * 2;
+        const int output_rows[2] = {quad, quad + 8};
+#pragma unroll
+        for (int row_group = 0; row_group < 2; ++row_group) {
+          const int row = output_rows[row_group];
+          if (row < block_rows) {
+#pragma unroll
+            for (int column_pair = 0; column_pair < 2; ++column_pair) {
+              const int value_index = row_group * 2 + column_pair;
+              const int64_t output_index = static_cast<int64_t>(m0 + row) * size_n +
+                  output_column + column_pair;
+              const float value = native_accumulator.values[value_index] +
+                  remote_partial[(warp * 32 + lane) * 4 + value_index];
+              output[output_index] = ScalarTraits<OutputScalar>::from_float(value);
+            }
+          }
+        }
+      }
+      // Keep the remote block resident until rank zero has consumed its DSM.
+      cluster.sync();
+    } else if (n_tile_base + warp < n_tiles) {
       const int quad = lane >> 2;
       const int output_column = (n_tile_base + warp) * kLocalRingTileColumns + (lane & 3) * 2;
       const int output_rows[2] = {quad, quad + 8};
@@ -2097,7 +2142,8 @@ template <
     typename OutputScalar,
     bool SplitK,
     int OutputTiles = kHopperWmmaOutputTiles,
-    bool PermuteInputStaging = false>
+    bool PermuteInputStaging = false,
+    bool ClusterSplitK = false>
 void launch_qvq_local_ring_wmma_hopper(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -2118,21 +2164,52 @@ void launch_qvq_local_ring_wmma_hopper(
   float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
   const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
   const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-  qvq_gemv_local_ring_wmma_hopper_kernel<
-      TransitionBits, OutputScalar, SplitK, OutputTiles, PermuteInputStaging>
-      <<<grid, OutputTiles * 32, 0, stream>>>(
-          input_ptr,
-          trellis_ptr,
-          bank_ids_ptr,
-          levels_ptr,
-          output_ptr,
-          partial_ptr,
-          static_cast<int>(input.size(0)),
-          static_cast<int>(input.size(1)),
-          static_cast<int>(output.size(1)),
-          split_count,
-          bank_alt_id);
-  if constexpr (SplitK) {
+  if constexpr (ClusterSplitK) {
+    cudaLaunchAttribute attribute{};
+    attribute.id = cudaLaunchAttributeClusterDimension;
+    attribute.val.clusterDim.x = 1;
+    attribute.val.clusterDim.y = 1;
+    attribute.val.clusterDim.z = 2;
+    cudaLaunchConfig_t config{};
+    config.gridDim = grid;
+    config.blockDim = dim3(OutputTiles * 32);
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+    config.attrs = &attribute;
+    config.numAttrs = 1;
+    auto kernel = qvq_gemv_local_ring_wmma_hopper_kernel<
+        TransitionBits, OutputScalar, SplitK, OutputTiles, PermuteInputStaging, ClusterSplitK>;
+    C10_CUDA_CHECK(cudaLaunchKernelEx(
+        &config,
+        kernel,
+        input_ptr,
+        trellis_ptr,
+        bank_ids_ptr,
+        levels_ptr,
+        output_ptr,
+        partial_ptr,
+        static_cast<int>(input.size(0)),
+        static_cast<int>(input.size(1)),
+        static_cast<int>(output.size(1)),
+        split_count,
+        bank_alt_id));
+  } else {
+    qvq_gemv_local_ring_wmma_hopper_kernel<
+        TransitionBits, OutputScalar, SplitK, OutputTiles, PermuteInputStaging, ClusterSplitK>
+        <<<grid, OutputTiles * 32, 0, stream>>>(
+            input_ptr,
+            trellis_ptr,
+            bank_ids_ptr,
+            levels_ptr,
+            output_ptr,
+            partial_ptr,
+            static_cast<int>(input.size(0)),
+            static_cast<int>(input.size(1)),
+            static_cast<int>(output.size(1)),
+            split_count,
+            bank_alt_id);
+  }
+  if constexpr (SplitK && !ClusterSplitK) {
     const int64_t output_values = output.numel();
     const int reduction_blocks = static_cast<int>((output_values + kThreads - 1) / kThreads);
     qvq_reduce_splitk_kernel<OutputScalar><<<reduction_blocks, kThreads, 0, stream>>>(
@@ -2375,7 +2452,17 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
   }
   at::Tensor partial_output;
 
-  if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
+  const bool use_hopper_cluster_split = use_hopper_cooperative_wmma &&
+      transition_bits == 6 && size_k == 2048 && out_features == 8192 && split_count == 2;
+  if (use_hopper_cluster_split && output_fp32) {
+    launch_qvq_local_ring_wmma_hopper<6, float, true, 8, false, true>(
+        input, trellis, bank_ids, levels, nullptr, output, split_count,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_cluster_split) {
+    launch_qvq_local_ring_wmma_hopper<6, half, true, 8, false, true>(
+        input, trellis, bank_ids, levels, nullptr, output, split_count,
+        static_cast<int>(bank_alt_id), stream);
+  } else if (use_hopper_cooperative_wmma && split_count > 1 && output_fp32) {
     partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
     launch_qvq_local_ring_wmma_hopper_dispatch<float, true>(
         input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits), split_count,
