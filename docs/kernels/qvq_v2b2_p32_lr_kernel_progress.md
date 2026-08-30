@@ -109,6 +109,7 @@ tables below every row was intentionally measured at M=16.
 | `0aee81ed` uncommitted A/B | H200, W3 down M1-M16 | Dispatch K8,192/N2,048 to the existing N64/output-eight specialization so each CTA has eight lookup/MMA warps and uses read-only/L1 levels instead of the conflicting shared table | M1 improved 0.9% to 0.02931 ms, but M2-M16 regressed 9.4-10.5% to 0.03701-0.03755 ms; halving the block count exposes global lookup latency despite removing shared conflicts | rejected; source restored before next experiment |
 | `3ed40c56` uncommitted A/B | H200, W3 output-four paths M1-M16 | Route each decoded pair's high level through read-only/L1 and low level through the shared table so the two independent memory pipelines can overlap | Shared-load conflicts halved from 936,528 to 468,131, but down regressed 1.7-3.3% to 0.03006-0.03554 ms; NCU duration rose 33.06 to 34.18 us as long-scoreboard stalls increased | rejected; source restored before next experiment |
 | `c57b0f48` uncommitted A/B | H200, W3 output-four paths M1-M16 | Exploit the exact sign symmetry of the fixed PGC16-v1 table: keep its 128 positive FP16 values in two 32-bit registers/lane and gather each mirrored signed lookup with two shuffles | Bit-exact decoded output, but 16 shuffle routes per K32 tile slowed Q/O 17-19% and down 34-40% to 0.0413-0.0461 ms; K/V was also slightly slower | rejected; source restored before next experiment |
+| `93e135d7` | H200, W3 M1-M16 | Resolve the launch-uniform alternate bank mask once outside the K loop, then apply each tile's ring selector with a branch-free bit mask | All 20 W3 cells improved (1.047x latency geomean); gate/up gained 1.090-1.094x, NCU instructions fell 22.4% to 10.80M, and 108/108 H200 CUDA tests passed | accepted and pushed |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -806,11 +807,43 @@ no-eligible cycles rise 53.81% to 55.01%, and NCU duration rises 33.06 to 34.18
 us. A successful replacement must keep table latency on chip or overlap it with
 substantial independent work rather than merely moving requests to L1.
 
+Commit `93e135d7` removes another common W3 decode redundancy. The packed bank
+selector has one bit per local ring, while `bank_alt_id` and the corresponding
+rate-specific PGC mask are launch-uniform. Previously every lane multiplied the
+ring bit by `bank_alt_id` and re-ran the compiler's four-way mask-selection
+ladder inside every K32 tile. The accepted path resolves the alternate mask once
+outside the K loop and applies `(-bank_bit) & alternate_mask` per tile.
+
+The exact H200 CUDA Graph medians for M1/M2/M4/M8/M16 are:
+
+| Shape | K | N | LR ms | xMachete W4 | Effective payload GB/s | Worst max abs |
+|---|---:|---:|---|---|---|---:|
+| Q/O | 2,048 | 2,048 | 0.012896/0.014112/0.014128/0.014160/0.014384 | 1.184/1.075/1.072/1.071/1.065x | 110.49-123.24 | 1.53e-05 |
+| K/V | 2,048 | 512 | 0.009536/0.009472/0.009584/0.009568/0.009744 | 1.525/1.525/1.504/1.512/1.488x | 40.78-41.95 | 5.72e-06 |
+| gate/up | 2,048 | 8,192 | 0.025872/0.025936/0.026144/0.026336/0.026912 | 0.704/0.692/0.688/0.684/0.670x | 236.21-245.71 | 3.43e-05 |
+| down | 8,192 | 2,048 | 0.026752/0.033152/0.033072/0.033248/0.033568 | 0.837/0.666/0.674/0.670/0.670x | 189.38-237.63 | 1.22e-04 |
+
+All 60 benchmark rows passed their dense-reference gates, and the W3 LR
+latency geomean improves 1.047x versus `90945592`. Gate/up improves
+1.090-1.094x, while the four-output down path improves 1.017-1.105x.
+
+The exact-head reports are
+`/tmp/ncu-h200-w3-gate-mask-hoist-93e135d7.ncu-rep` and
+`/tmp/ncu-h200-w3-down-mask-hoist-93e135d7.ncu-rep`. Gate/up falls from 13.92M
+to 10.80M executed instructions (-22.4%) and from 28.38 to 26.46 us while
+retaining 63 registers/thread, 41.09 KiB shared memory, and zero spilling. Down
+falls from 13,658,112 to 10,493,952 instructions (-23.2%) and from 33.06 to
+32.64 us while retaining 83 registers/thread, 44.64 KiB shared memory, and zero
+spilling. The much smaller down latency response despite equal instruction
+removal confirms its next limiter remains the conflict-heavy shared level
+lookup and resulting lack of eligible warps. The full H200 CUDA suite passes
+108/108 cases at this pushed source head.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 W3 M1-M16 MLP | lookup-ILP plus clustered reduction reaches 0.02826-0.02933 ms gate/up at up to 224.98 GB/s; down is 0.02957-0.03440 ms and current NCU attributes 936,528 shared-load conflicts plus 53.81% no-eligible cycles | keep four-output scheduling depth while overlapping or replacing its random shared level lookups; then move toward persistent producer/consumer TMA/WGMMA without added whole-block barriers |
+| 1 | H200 W3 M1-M16 MLP | invariant bank-mask hoisting reaches 0.02587-0.02691 ms gate/up at up to 245.71 GB/s and 0.02675-0.03357 ms down; both paths now execute about 10.5-10.8M instructions, while down retains its 936,528 shared-load-conflict baseline | keep four-output scheduling depth while overlapping or replacing its random shared level lookups; then move toward persistent producer/consumer TMA/WGMMA without added whole-block barriers |
 | 2 | H200 W3.5 M1-M16 MLP | concurrent native-N8 path now reaches 0.0392 ms for the H200 M16 gate canary | run the full H200 W3.5 matrix from the merged head after the current W3 focus and profile its remaining TB7 arithmetic |
 | 3 | H200 W2/W2.5 M1-M16 MLP | 0.499-0.608x Machete geomean; stride 40 reports 14.45M instructions and 1.07M total excessive shared wavefronts | preserve native N8; use a truly overlapped TMA/async design or wider N tile, not immediate `cp.async` wait |
 | 4 | H200 W2/W2.5 attention/KV | Q/O is 1.002-1.010x and K/V 1.255-1.260x Machete across M | enforce as the rate-specific latency/no-regression gate |
