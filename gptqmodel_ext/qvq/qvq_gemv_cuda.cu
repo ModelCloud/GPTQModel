@@ -1172,7 +1172,7 @@ __global__ void qvq_reduce_splitk_kernel(
 // per K32 tile. The existing scalar LR kernel remains the fallback for other
 // rates, row counts, dtypes, and unaligned views.
 template <typename OutputScalar, bool SplitK, int OutputTiles>
-__global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
+__global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_kernel(
     const half* __restrict__ input,
     const int32_t* __restrict__ trellis,
     const uint8_t* __restrict__ bank_ids,
