@@ -1326,7 +1326,10 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
       const int cell = index - u * (kRows * input_vecs_per_row);
       const int row = cell / input_vecs_per_row;
       const int vec = cell - row * input_vecs_per_row;
-      input4[index] = row < block_rows
+      const int destination_vec = kNativeN8 ? (vec ^ (row & 3)) : vec;
+      const int destination_index =
+          u * kRows * input_vecs_per_row + row * input_vecs_per_row + destination_vec;
+      input4[destination_index] = row < block_rows
           ? input4_base[
                 ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) * sizeof(half) / 16) +
                 vec]
@@ -1452,19 +1455,23 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         if constexpr (kNativeN8) {
           const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
           const int address_column = (lane >> 4) * 8;
+          const int first_swizzled_column =
+              (((address_column >> 3) ^ (address_row & 3)) << 3);
+          const int second_swizzled_column =
+              ((((16 + address_column) >> 3) ^ (address_row & 3)) << 3);
           const uint32_t* fragment_words =
               reinterpret_cast<const uint32_t*>(&decoded_weight[warp][0]);
           QvqMmaFragmentA native_a;
           QvqMmaFragmentB native_b;
           qvq_load_mma_fragment_a(
               native_a,
-              input_tile[u] + address_row * kLocalRingTileRows + address_column);
+              input_tile[u] + address_row * kLocalRingTileRows + first_swizzled_column);
           native_b.values[0] = fragment_words[lane];
           native_b.values[1] = fragment_words[32 + lane];
           qvq_mma_m16n8k16(native_a, native_b, native_accumulator);
           qvq_load_mma_fragment_a(
               native_a,
-              input_tile[u] + address_row * kLocalRingTileRows + 16 + address_column);
+              input_tile[u] + address_row * kLocalRingTileRows + second_swizzled_column);
           native_b.values[0] = fragment_words[64 + lane];
           native_b.values[1] = fragment_words[96 + lane];
           qvq_mma_m16n8k16(native_a, native_b, native_accumulator);
