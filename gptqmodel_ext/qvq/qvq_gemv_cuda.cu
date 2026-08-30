@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <type_traits>
 
 namespace {
 
@@ -1193,12 +1194,15 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kOutputTiles = OutputTiles;
   constexpr int kWordsPerTile = 4 * kTransitionBits;
   constexpr int kPaddedColumns = 16;
+  constexpr bool kPackDecodedPairs = kTransitionBits <= 5;
+  constexpr int kWeightLdm = kPackDecodedPairs ? kLocalRingTileRows : kPaddedColumns;
+  constexpr int kSecondWeightOffset = kPackDecodedPairs ? 16 : 16 * kPaddedColumns;
 
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
-  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows][kPaddedColumns];
+  __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows * kPaddedColumns];
   __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
 
   const int thread = static_cast<int>(threadIdx.x);
@@ -1220,17 +1224,18 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
 
   // Initialize the padded N16 columns once. The first eight columns are
   // overwritten for every decoded K32 tile below.
-  half* decoded_weight_ptr = reinterpret_cast<half*>(decoded_weight);
   for (int index = thread; index < kOutputTiles * kLocalRingTileRows * kPaddedColumns; index += kWmmaThreads) {
-    const int col = index % kPaddedColumns;
+    const int cell = index % (kLocalRingTileRows * kPaddedColumns);
+    const int col = kPackDecodedPairs ? cell / kLocalRingTileRows : cell % kPaddedColumns;
     if (col >= kLocalRingTileColumns) {
-      decoded_weight_ptr[index] = __float2half(0.0f);
+      reinterpret_cast<half*>(decoded_weight)[index] = __float2half(0.0f);
     }
   }
   __syncthreads();
 
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> input_fragment;
-  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> weight_fragment;
+  using WeightLayout = std::conditional_t<kPackDecodedPairs, wmma::col_major, wmma::row_major>;
+  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, WeightLayout> weight_fragment;
   wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
   wmma::fill_fragment(accumulator, 0.0f);
 
@@ -1336,8 +1341,14 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         for (int q = 0; q < 4; ++q) {
           const int pair = pair_base + q;
           const uint32_t mixed = pgc16_mix(state ^ bank_mask);
-          decoded_weight[sub][pair * 2][col] = cached_levels[mixed >> 8];
-          decoded_weight[sub][pair * 2 + 1][col] = cached_levels[mixed & 0xffu];
+          if constexpr (kPackDecodedPairs) {
+            const uint32_t level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
+                (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
+            *reinterpret_cast<uint32_t*>(&decoded_weight[sub][col * kLocalRingTileRows + pair * 2]) = level_pair;
+          } else {
+            decoded_weight[sub][pair * 2 * kPaddedColumns + col] = cached_levels[mixed >> 8];
+            decoded_weight[sub][(pair * 2 + 1) * kPaddedColumns + col] = cached_levels[mixed & 0xffu];
+          }
           if (q < 3) {
             state = ((state << kTransitionBits) | edge_at((pair + 1) & 15)) & 0xffffu;
           }
@@ -1347,12 +1358,12 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
 
       if (u < tiles_here && n_tile_base + warp < n_tiles) {
         wmma::load_matrix_sync(input_fragment, input_tile[u], kLocalRingTileRows);
-        wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0][0], kPaddedColumns);
+        wmma::load_matrix_sync(weight_fragment, &decoded_weight[warp][0], kWeightLdm);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
         wmma::load_matrix_sync(
             input_fragment, input_tile[u] + 16, kLocalRingTileRows);
         wmma::load_matrix_sync(
-            weight_fragment, &decoded_weight[warp][16][0], kPaddedColumns);
+            weight_fragment, &decoded_weight[warp][kSecondWeightOffset], kWeightLdm);
         wmma::mma_sync(accumulator, input_fragment, weight_fragment, accumulator);
       }
       __syncwarp();
