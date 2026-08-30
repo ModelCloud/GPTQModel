@@ -98,6 +98,34 @@ causality controls, not a new allocation winner; the machine-readable arm
 paths and hash-manifest digests are in the
 [`Wave-11 queue`](experiments/frontier_wave11_causality_queue_20260830.json).
 
+## Calibration union ablation v1 (complete, 2026-08-30 UTC)
+
+Eight pinned end-to-end arms crossed four ordinary lifecycle corpora
+(`NM128`, `NM512`, `YAQA182`, and `union694`) with two YAQA Fisher corpora
+(`YAQA182` and `union694`) while holding the W3.2 `Up4 L6,L8` allocation fixed
+at 3.178340 effective BPW.
+
+| YAQA Fisher corpus | Lifecycle variants | Packed result | GSM8K Platinum | D300 Top-1 | Exact / 300 | Mean first divergence |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| YAQA182 | NM128 / NM512 / YAQA182 / union694 | identical within group | 41.2738% (499/1209) | 34.5521% (3317/9600) | **25** | **9.9933** |
+| union694 | NM128 / NM512 / YAQA182 / union694 | identical within group | **43.0108% (520/1209)** | **34.6563% (3327/9600)** | 15 | 9.8500 |
+
+Within a fixed Fisher corpus, all four lifecycle choices produced byte-identical
+packed module/tensor digests and identical evaluations. In this no-module-replay
+YAQA path, the ordinary lifecycle corpus therefore did not affect the saved
+weights. Expanding the Fisher evidence from 182 YAQA sequences (302,193 valid
+Fisher output-token samples) to the immutable 694-sequence union (490,449
+samples) changed all 112 quantized modules and improved GSM8K by **21 questions
+(+1.7370 pp)**. D300 aligned agreement improved by only 10/9600 positions,
+while exact-32 survival fell by 10 prompts and mean first divergence fell by
+0.1433. This is a protocol result, not a new budget anchor, and should not be
+generalized to module replay or non-YAQA rounding paths.
+
+Exact report/checkpoint hashes and per-arm completion data are recorded in the
+[`calibration ablation result`](experiments/calibration_ablation_v1_results_20260830.json),
+with the immutable source union in
+[`calibration_union_v1.json`](experiments/calibration_union_v1.json).
+
 ## Current budget anchors (updated 2026-08-28 UTC)
 
 The following anchors are the comparison points for every future allocation

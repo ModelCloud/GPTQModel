@@ -1,8 +1,9 @@
 {
   "schema": "qvq.calibration-ablation.v1",
-  "status": "running",
+  "status": "complete",
   "prepared_at_utc": "2026-08-30T06:07:35Z",
   "launched_at_utc": "2026-08-30T06:09:55Z",
+  "completed_at_utc": "2026-08-30T07:38:53Z",
   "launch_commit": "487c28c3034fb132ddb511ba6807ed549e1ffddc",
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "Measure lifecycle-calibration and YAQA-Fisher corpus effects independently using one fixed W3.2 allocation and a clean pinned runtime.",
@@ -60,7 +61,8 @@
       "lifecycle": "nm128",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "yaqa182_fisher"
     },
     {
       "arm_id": "c2_nm512__yaqa182",
@@ -68,7 +70,8 @@
       "lifecycle": "nm512",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "yaqa182_fisher"
     },
     {
       "arm_id": "c3_yaqa182__yaqa182",
@@ -76,7 +79,8 @@
       "lifecycle": "yaqa182",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "yaqa182_fisher"
     },
     {
       "arm_id": "c4_union694__yaqa182",
@@ -84,7 +88,8 @@
       "lifecycle": "union694",
       "yaqa_fisher": "yaqa182",
       "minimum_sequences": 182,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "yaqa182_fisher"
     },
     {
       "arm_id": "c5_nm128__union694",
@@ -92,7 +97,8 @@
       "lifecycle": "nm128",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "union694_fisher"
     },
     {
       "arm_id": "c6_nm512__union694",
@@ -100,7 +106,8 @@
       "lifecycle": "nm512",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "union694_fisher"
     },
     {
       "arm_id": "c7_yaqa182__union694",
@@ -108,7 +115,8 @@
       "lifecycle": "yaqa182",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "union694_fisher"
     },
     {
       "arm_id": "c8_union694__union694",
@@ -116,7 +124,8 @@
       "lifecycle": "union694",
       "yaqa_fisher": "union694",
       "minimum_sequences": 694,
-      "state": "quantizing"
+      "state": "complete",
+      "result_group": "union694_fisher"
     }
   ],
   "evaluation": {
@@ -134,5 +143,6 @@
       "tokens_per_prompt": 32
     }
   },
-  "launcher": "scripts/run_llama32_calibration_ablation_v1.sh"
+  "launcher": "scripts/run_llama32_calibration_ablation_v1.sh",
+  "results": "docs/experiments/calibration_ablation_v1_results_20260830.json"
 }

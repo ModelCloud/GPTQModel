@@ -66,7 +66,7 @@ checkpoint remains distinct from the historical 551/519 checkpoints, so that
 cross-wave discrepancy remains provenance-sensitive.  See the queue manifest
 for all checkpoint/report/hash paths.
 
-### Calibration union ablation v1 (running, 2026-08-30)
+### Calibration union ablation v1 (complete, 2026-08-30)
 
 Eight pinned end-to-end arms now separate lifecycle-corpus effects from YAQA
 Fisher-corpus effects on the fixed `Up4 L6,L8` W3.2 allocation. `NM-full` is
@@ -79,12 +79,24 @@ there were zero duplicate groups. The Parquet SHA-256 is
 and its ordered row-manifest SHA-256 is
 `143570311180630b6039569992ba0709e8268ef9c73491b2cf8f756b3aca343e`.
 
-The arm matrix is lifecycle `{NM128, NM512, YAQA182, union694}` crossed with
-YAQA Fisher `{YAQA182, union694}`. All eight started at `2026-08-30T06:09:55Z`
-on physical GPUs 0--7 from pinned commit `487c28c3`; each immediately runs full
-GSM8K Platinum and canonical D300 after quantization. See
+The arm matrix crossed lifecycle `{NM128, NM512, YAQA182, union694}` with YAQA
+Fisher `{YAQA182, union694}`. All eight ran on physical GPUs 0--7 from pinned
+commit `487c28c3` and completed by `2026-08-30T07:38:53Z`.
+
+| YAQA Fisher corpus | Lifecycle corpora | Packed checkpoint identity | GSM8K Platinum | D300 aligned | Exact32 | Mean divergence |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| YAQA182 | NM128, NM512, YAQA182, union694 | byte-identical within group | 499/1209 (41.2738%) | 3317/9600 (34.5521%) | 25/300 | 9.9933 |
+| union694 | NM128, NM512, YAQA182, union694 | byte-identical within group | **520/1209 (43.0108%)** | **3327/9600 (34.6563%)** | 15/300 | 9.8500 |
+
+For this fixed no-module-replay YAQA path, changing the lifecycle corpus alone
+did not change any saved quantized tensor. Expanding the Fisher corpus changed
+all 112 quantized modules and improved GSM8K by 21 questions (+1.7370 pp),
+while D300 aligned agreement moved only +10/9600 and exact trajectories fell
+from 25 to 15. This conclusion is scoped to this YAQA path; it does not imply
+that lifecycle data is irrelevant to module-replay or non-YAQA quantization.
+See
 [`calibration_union_v1.json`](experiments/calibration_union_v1.json) and
-[`calibration_ablation_v1_queue_20260830.json`](experiments/calibration_ablation_v1_queue_20260830.json).
+[`calibration_ablation_v1_results_20260830.json`](experiments/calibration_ablation_v1_results_20260830.json).
 
 ## Frozen data and evaluation protocol
 
