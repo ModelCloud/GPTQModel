@@ -17,6 +17,17 @@ This is a kernel-throughput comparison on the H100 host from PR #62. W4 GPTQ is 
 
 For the focused M sweep, the per-row comparison against the previous CUDA-Graph run (including the required `yes`/`no` regression flag) is in [qvq_lr_vs_gptq_llama32_1b_h100_M1_2_4_8_16_comparison.md](qvq_lr_vs_gptq_llama32_1b_h100_M1_2_4_8_16_comparison.md).
 
+## Latest PR-tip validation
+
+After the report above, PR tip `31e2f142` (kernel change `1d0c8d19`) was checked on the same H100. W3 at M=16 is not publishable: all four geometries fail the dense-reference gate. This is recorded separately from the last complete matrix so the valid timings are not mixed with invalid output.
+
+| Shape | M | K | N | W | Result |
+|---|---:|---:|---:|---:|---|
+| attn_qo | 16 | 2048 | 2048 | 3 | fail: non-finite output |
+| attn_kv | 16 | 2048 | 512 | 3 | fail: max abs 7.37 |
+| mlp_gate_up | 16 | 2048 | 8192 | 3 | fail: max abs 7.58 |
+| mlp_down | 16 | 8192 | 2048 | 3 | fail: max abs 14.76 |
+
 | Shape | Roles | M | K | N | Kernel | W | Group | Median ms | P95 ms | Logical TFLOP/s | Payload GB/s | xMarlin | xMachete | Max abs |
 |---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | attn_qo | q_proj/o_proj | 1 | 2048 | 2048 | qvq_lr | 2 | P32 | 0.1349 | 0.1358 | 0.062 | 7.90 | 0.108x | 0.113x | 3.93e-06 |
