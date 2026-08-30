@@ -1049,6 +1049,74 @@ paths are now ruled out for the scalar `mma.sync` architecture; the remaining
 wider-CTA opportunity requires producer/decode/consumer warp specialization
 and asynchronous WGMMA consumption.
 
+## Exact-head H200 full LR versus Machete matrix (`826497db`, 2026-08-30)
+
+This matrix was measured on the physical H200 (132 SMs, UUID
+`GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea`) from kernel-source commit
+`826497db05ff4584605866b1af14daabba83b2f9`, using FP16, 10 warmups, and 60
+timed iterations. All 80 QVQ cells passed the dense-reference accuracy gate;
+the maximum absolute error was 0.0001220703125. Machete is its W4 FP16 path.
+Each QVQ cell below is `median ms / xMachete`, where values above 1.0 mean
+QVQ is faster.
+
+| Rate | Q/O K2048 N2048 | K/V K2048 N512 | Gate/up K2048 N8192 | Down K8192 N2048 | All 20 cells |
+|---|---:|---:|---:|---:|---:|
+| W2 | 1.132x | 1.429x | 0.610x | 0.726x | 0.920x |
+| W2.5 | 1.076x | 1.369x | 0.587x | 0.691x | 0.879x |
+| W3 | 1.087x | 1.485x | 0.688x | 0.696x | 0.938x |
+| W3.5 | 1.102x | 1.375x | 0.573x | 0.682x | 0.877x |
+| **All rates** | **1.099x** | **1.414x** | **0.611x** | **0.699x** | **0.903x** |
+
+Machete W4 medians used by every rate:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Q/O (2048,2048) | 0.01542 | 0.01581 | 0.01536 | 0.01581 | 0.01552 |
+| K/V (2048,512) | 0.01498 | 0.01494 | 0.01494 | 0.01488 | 0.01491 |
+| Gate/up (2048,8192) | 0.01800 | 0.01800 | 0.01803 | 0.01798 | 0.01802 |
+| Down (8192,2048) | 0.02227 | 0.02208 | 0.02216 | 0.02195 | 0.02230 |
+
+W2 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Q/O (2048,2048) | 0.01286 / 1.199x | 0.01387 / 1.140x | 0.01389 / 1.106x | 0.01403 / 1.127x | 0.01422 / 1.091x |
+| K/V (2048,512) | 0.01048 / 1.429x | 0.01014 / 1.473x | 0.01050 / 1.424x | 0.01042 / 1.429x | 0.01072 / 1.391x |
+| Gate/up (2048,8192) | 0.02910 / 0.618x | 0.02918 / 0.617x | 0.02934 / 0.615x | 0.03002 / 0.599x | 0.02998 / 0.601x |
+| Down (8192,2048) | 0.02613 / 0.852x | 0.03141 / 0.703x | 0.03158 / 0.702x | 0.03170 / 0.693x | 0.03219 / 0.693x |
+
+W2.5 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Q/O (2048,2048) | 0.01322 / 1.167x | 0.01480 / 1.068x | 0.01470 / 1.045x | 0.01474 / 1.073x | 0.01501 / 1.034x |
+| K/V (2048,512) | 0.01070 / 1.399x | 0.01086 / 1.376x | 0.01091 / 1.370x | 0.01101 / 1.352x | 0.01106 / 1.349x |
+| Gate/up (2048,8192) | 0.03024 / 0.595x | 0.03024 / 0.595x | 0.03043 / 0.593x | 0.03123 / 0.576x | 0.03130 / 0.576x |
+| Down (8192,2048) | 0.02648 / 0.841x | 0.03322 / 0.665x | 0.03338 / 0.664x | 0.03365 / 0.652x | 0.03421 / 0.652x |
+
+W3 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Q/O (2048,2048) | 0.01304 / 1.183x | 0.01454 / 1.087x | 0.01461 / 1.051x | 0.01474 / 1.073x | 0.01482 / 1.048x |
+| K/V (2048,512) | 0.00998 / 1.500x | 0.00995 / 1.502x | 0.01002 / 1.492x | 0.01006 / 1.479x | 0.01026 / 1.454x |
+| Gate/up (2048,8192) | 0.02579 / 0.698x | 0.02590 / 0.695x | 0.02611 / 0.691x | 0.02627 / 0.685x | 0.02672 / 0.674x |
+| Down (8192,2048) | 0.02666 / 0.836x | 0.03298 / 0.670x | 0.03307 / 0.670x | 0.03328 / 0.660x | 0.03366 / 0.663x |
+
+W3.5 QVQ LR:
+
+| Shape (K,N) | M1 | M2 | M4 | M8 | M16 |
+|---|---:|---:|---:|---:|---:|
+| Q/O (2048,2048) | 0.01301 / 1.186x | 0.01410 / 1.121x | 0.01419 / 1.082x | 0.01438 / 1.099x | 0.01507 / 1.030x |
+| K/V (2048,512) | 0.01075 / 1.393x | 0.01072 / 1.394x | 0.01080 / 1.384x | 0.01091 / 1.364x | 0.01114 / 1.339x |
+| Gate/up (2048,8192) | 0.03088 / 0.583x | 0.03104 / 0.580x | 0.03139 / 0.574x | 0.03229 / 0.557x | 0.03142 / 0.573x |
+| Down (8192,2048) | 0.02760 / 0.807x | 0.03306 / 0.668x | 0.03330 / 0.666x | 0.03368 / 0.652x | 0.03531 / 0.632x |
+
+The combined sweep has 40/80 cells faster than Machete: every Q/O and K/V
+cell. All 40 MLP cells remain below Machete. W3 is the best aggregate rate at
+0.938x Machete, and its K/V path is the strongest shape at 1.485x. The primary
+remaining target is MLP, especially W3.5 gate/up (0.573x) and down (0.682x).
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
