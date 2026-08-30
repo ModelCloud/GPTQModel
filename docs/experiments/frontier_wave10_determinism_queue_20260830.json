@@ -1,0 +1,26 @@
+{
+  "schema": "qvq.frontier-wave10-determinism.v1",
+  "wave": 10,
+  "status": "evaluation_running",
+  "queued_at_utc": "2026-08-30T00:00:00Z",
+  "purpose": "Repeated evaluation of the W3.2 Up4 L6,L8 canaries before new quantization runs.",
+  "protocol": {
+    "task": "gsm8k_platinum_cot",
+    "batch_size": 8,
+    "decode": "do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
+    "repeats_per_checkpoint": 4,
+    "checkpoint_comparison": ["8980aa", "fdbd68"],
+    "note": "qvq_evaluate task reports contain aggregate metrics; per-question prediction export remains a follow-up instrumentation item."
+  },
+  "arms": [
+    {"arm_id":"w10-8980aa-r1","gpu":0,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":1,"state":"queued"},
+    {"arm_id":"w10-8980aa-r2","gpu":1,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":2,"state":"queued"},
+    {"arm_id":"w10-8980aa-r3","gpu":2,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":3,"state":"queued"},
+    {"arm_id":"w10-8980aa-r4","gpu":3,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":4,"state":"queued"},
+    {"arm_id":"w10-fdbd68-r1","gpu":4,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":1,"state":"queued"},
+    {"arm_id":"w10-fdbd68-r2","gpu":5,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":2,"state":"queued"},
+    {"arm_id":"w10-fdbd68-r3","gpu":6,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":3,"state":"queued"},
+    {"arm_id":"w10-fdbd68-r4","gpu":7,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":4,"state":"queued"}
+  ],
+  "results": {}
+}
