@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""One-kernel NCU harness for Qwen3.8 W3 production or RS-WGMMA variants."""
+"""One-kernel NCU harness for Qwen3.8 W3 LR32 or standard-P32 variants."""
 
 from __future__ import annotations
 
@@ -23,16 +23,27 @@ from gptqmodel.quantization.qvq import (
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
+    repack_p32_planar_to_window,
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
-from gptqmodel.utils.qvq_wgmma_cuda import qvq_wgmma_w3_m16, qvq_wgmma_w3_m16_tma
+from gptqmodel.utils.planar_packing import planar_pack_rows
+from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_p32_window_wgmma_w3_m16,
+    qvq_p32_window_wgmma_w3_m16_tma,
+    qvq_wgmma_w3_m16,
+    qvq_wgmma_w3_m16_tma,
+)
 from scripts.benchmark_qvq_lr_vs_gptq_llama32_1b import QWEN38_27B_SHAPES
 
 
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kernel", choices=("production", "wgmma", "tma_wgmma"), required=True)
+    parser.add_argument(
+        "--kernel",
+        choices=("production", "wgmma", "tma_wgmma", "p32_wgmma", "p32_tma_wgmma"),
+        required=True,
+    )
     parser.add_argument(
         "--shape",
         choices=tuple(case.name for case in QWEN38_27B_SHAPES),
@@ -65,22 +76,24 @@ def main() -> None:
 
     case = next(case for case in QWEN38_27B_SHAPES if case.name == args.shape)
     generator = torch.Generator().manual_seed(20260830)
-    tiles = (case.in_features // 32) * (case.out_features // 8)
-    edges = torch.randint(
-        0,
-        1 << 6,
-        (tiles, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
-        generator=generator,
-        dtype=torch.int64,
-    )
-    trellis = pack_local_ring_states(local_ring_states_from_edges(edges, bits=3.0), bits=3.0).cuda()
-    selectors = torch.randint(
-        0,
-        2,
-        (tiles * QVQ_V2B2_P32_LR_RINGS_PER_TILE,),
-        generator=generator,
-        dtype=torch.uint8,
-    )
+    if args.kernel.startswith("p32_"):
+        tiles = (case.in_features // 16) * (case.out_features // 16)
+        edges = torch.randint(0, 1 << 6, (128, tiles), generator=generator, dtype=torch.int32)
+        planar = planar_pack_rows(edges, 6).T.contiguous()
+        trellis = repack_p32_planar_to_window(planar, bits=3.0).cuda()
+        selector_count = tiles * 8
+    else:
+        tiles = (case.in_features // 32) * (case.out_features // 8)
+        edges = torch.randint(
+            0,
+            1 << 6,
+            (tiles, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
+            generator=generator,
+            dtype=torch.int64,
+        )
+        trellis = pack_local_ring_states(local_ring_states_from_edges(edges, bits=3.0), bits=3.0).cuda()
+        selector_count = tiles * QVQ_V2B2_P32_LR_RINGS_PER_TILE
+    selectors = torch.randint(0, 2, (selector_count,), generator=generator, dtype=torch.uint8)
     bank_ids = pack_qvq_binary_bank_ids(selectors).cuda()
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
     x = (torch.randn((16, case.in_features), generator=generator, dtype=torch.float32) * 0.1).half().cuda()
@@ -111,9 +124,31 @@ def main() -> None:
                 bank_alt_id=3,
                 split_count=args.split,
             )
-    else:
+    elif args.kernel == "tma_wgmma":
         def call():
             return qvq_wgmma_w3_m16_tma(
+                x,
+                trellis,
+                levels,
+                bank_ids,
+                out_features=case.out_features,
+                bank_alt_id=3,
+                split_count=args.split,
+            )
+    elif args.kernel == "p32_wgmma":
+        def call():
+            return qvq_p32_window_wgmma_w3_m16(
+                x,
+                trellis,
+                levels,
+                bank_ids,
+                out_features=case.out_features,
+                bank_alt_id=3,
+                split_count=args.split,
+            )
+    else:
+        def call():
+            return qvq_p32_window_wgmma_w3_m16_tma(
                 x,
                 trellis,
                 levels,
