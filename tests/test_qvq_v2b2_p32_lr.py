@@ -21,12 +21,15 @@ from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
     decode_local_ring_states,
     decode_local_ring_tiles,
+    decode_trellis_tiles,
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
+    quantize_qvq_linear,
     reconstruct_local_ring_inner_weight,
     unpack_local_ring_edges,
     unpack_local_ring_states,
+    unpack_trellis_states,
 )
 from gptqmodel.quantization.qvq_codecs import (
     pgc16_decode_states_v2_banked,
@@ -36,6 +39,55 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import hf_gptqmodel_prepare_model_for_load, make_quant
 
 LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
+
+
+def test_lr32_quantization_fails_closed_until_encoder_exists():
+    weight = torch.zeros((16, 16), dtype=torch.float32)
+    hessian = torch.eye(16, dtype=torch.float32)
+
+    with pytest.raises(NotImplementedError, match="V2B2-P32-LR encoding is not implemented"):
+        quantize_qvq_linear(
+            weight,
+            hessian,
+            bits=2,
+            bank_count=2,
+            v2b2_p32_lr=True,
+        )
+
+
+def test_lr32_same_payload_changes_only_local_history_boundaries_before_matrix_mapping():
+    bits = 2.0
+    ring = torch.arange(8, dtype=torch.int64)[:, None]
+    step = torch.arange(16, dtype=torch.int64)[None, :]
+    edges = ((step + 3 * ring + (step // 5) * ring) % 16).unsqueeze(0)
+    local_states = local_ring_states_from_edges(edges, bits=bits)
+    trellis = pack_local_ring_states(local_states, bits=bits)
+    global_states = unpack_trellis_states(trellis, bits=bits).reshape(1, 8, 16)
+    packed_selectors = pack_qvq_binary_bank_ids(torch.zeros(8, dtype=torch.uint8))
+    bank_alt_id = torch.tensor([1], dtype=torch.uint8)
+
+    global_values = decode_trellis_tiles(
+        trellis,
+        bits=bits,
+        bank_ids=packed_selectors,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    ).reshape(1, 8, 16, 2)
+    local_values = decode_trellis_tiles(
+        trellis,
+        bits=bits,
+        bank_ids=packed_selectors,
+        v2b2_p32_lr=True,
+        bank_alt_id=bank_alt_id,
+    )
+
+    # At W2, a 16-bit state remembers four 4-bit transitions. The first
+    # three states of every P32 group therefore depend on the preceding
+    # group in the global format but wrap to the same group in LR32.
+    assert torch.count_nonzero(global_states[:, :, :3] != local_states[:, :, :3]).item() == 24
+    assert torch.equal(global_states[:, :, 3:], local_states[:, :, 3:])
+    assert not torch.equal(global_values[:, :, :3], local_values[:, :, :3])
+    assert torch.equal(global_values[:, :, 3:], local_values[:, :, 3:])
 
 
 @pytest.mark.parametrize(

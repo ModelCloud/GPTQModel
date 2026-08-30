@@ -13,6 +13,7 @@ from gptqmodel.quantization.qvq import (
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
     reconstruct_local_ring_inner_weight,
+    reconstruct_qvq_inner_weight,
 )
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits
 from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv, qvq_cuda_supported
@@ -48,6 +49,72 @@ def _lr_case(bits: float, *, m: int, k: int, n: int, seed: int, dtype=torch.floa
         bank_alt_id=torch.tensor([3], dtype=torch.uint8),
     )
     return x.cuda(), trellis.cuda(), packed_selectors.cuda(), x.float() @ inner.float()
+
+
+def test_lr32_cuda_same_payload_has_format_specific_output():
+    bits = 2.0
+    m, k, n = 1, 32, 16
+    generator = torch.Generator().manual_seed(20260830)
+    edges = torch.randint(
+        0,
+        1 << qvq_transition_bits(bits, vector_size=2),
+        (2, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
+        generator=generator,
+        dtype=torch.int64,
+    )
+    trellis = pack_local_ring_states(local_ring_states_from_edges(edges, bits=bits), bits=bits)
+    packed_selectors = pack_qvq_binary_bank_ids(torch.zeros(16, dtype=torch.uint8))
+    bank_alt_id = torch.tensor([1], dtype=torch.uint8)
+    x = torch.randn((m, k), generator=generator, dtype=torch.float16)
+
+    global_inner = reconstruct_qvq_inner_weight(
+        trellis,
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_ids=packed_selectors,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    local_inner = reconstruct_local_ring_inner_weight(
+        trellis,
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_ids=packed_selectors,
+        bank_alt_id=bank_alt_id,
+    )
+    global_reference = x.float() @ global_inner
+    local_reference = x.float() @ local_inner
+
+    x_cuda = x.cuda()
+    trellis_cuda = trellis.cuda()
+    selectors_cuda = packed_selectors.cuda()
+    global_actual = qvq_cuda_gemv(
+        x_cuda,
+        trellis_cuda,
+        bits,
+        out_features=n,
+        output_fp32=True,
+        bank_ids=selectors_cuda,
+        v2b2_p32=True,
+        bank_alt_id=1,
+    )
+    local_actual = qvq_cuda_gemv(
+        x_cuda,
+        trellis_cuda,
+        bits,
+        out_features=n,
+        output_fp32=True,
+        bank_ids=selectors_cuda,
+        v2b2_p32_lr=True,
+        bank_alt_id=1,
+    )
+
+    torch.testing.assert_close(global_actual.cpu(), global_reference, rtol=0, atol=2e-3)
+    torch.testing.assert_close(local_actual.cpu(), local_reference, rtol=0, atol=2e-3)
+    assert not torch.equal(global_inner, local_inner)
+    assert (global_actual - local_actual).abs().max().item() > 1e-3
 
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
