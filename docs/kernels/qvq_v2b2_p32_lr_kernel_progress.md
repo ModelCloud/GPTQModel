@@ -766,6 +766,16 @@ Relative to the accepted clustered gate rows, every gate/up M value gains
 8.0-10.5%. The full W3 matrix is 60/60 benchmark rows accuracy-clean and the
 H200 LR CUDA suite passes 108/108 cases.
 
+The exact-head full NCU capture is
+`/tmp/ncu-h200-w3-gate-lookup-ilp-cab41742.ncu-rep`. Against the pre-ILP
+cluster report, kernel duration falls 31.26 to 28.38 us, executed instructions
+fall 14.56M to 13.92M, registers fall 64 to 63/thread, issue-slot utilization
+rises 47.91% to 50.63%, no-eligible cycles fall 46.68% to 43.45%, and measured
+memory throughput rises 206.03 to 226.91 GB/s. Static shared memory remains
+41.09 KiB and local/shared spilling remains zero. The remaining 65,536 shared-
+store conflicts are the activation staging stores; read-only level loads retain
+a 94.44% L1 hit rate.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
