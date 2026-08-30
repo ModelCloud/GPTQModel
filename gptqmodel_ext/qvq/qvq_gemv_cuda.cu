@@ -422,10 +422,15 @@ __device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
     int bank_alt_id) {
   uint32_t level_pair = 0;
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 1200
-  // TB7 spills its unrolled mask lookup on Ada. Broadcasting the uniform
-  // per-ring value removes that spill, while lower rates retain the direct
-  // lookup that is faster on SM89.
+  // TB7 spills its unrolled mask lookup on Ada. Hopper has the same issue at
+  // TB6, while lower rates retain the direct lookup that is faster on SM89.
+  // Broadcasting the uniform per-ring value keeps the architecture/rate
+  // exceptions local to the decode without adding another kernel variant.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+  constexpr bool kBroadcastBankMask = TransitionBits == 6 || TransitionBits == 7;
+#else
   constexpr bool kBroadcastBankMask = TransitionBits == 7;
+#endif
   uint32_t bank_mask = 0;
   if constexpr (kBroadcastBankMask) {
     if (k_local == 0) {
