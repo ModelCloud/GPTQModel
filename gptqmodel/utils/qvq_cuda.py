@@ -14,7 +14,7 @@ from pathlib import Path
 
 import torch
 
-from ..quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version, pgc16_mix_states
+from ..quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from ..quantization.qvq_pruning import VITERBI_PRUNING_AUTO
 from ..quantization.qvq_rates import (
     QVQ_BITS,
@@ -75,8 +75,6 @@ _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
 _PGC16_LEVELS: dict[tuple[torch.device, str], torch.Tensor] = {}
 _PGC16_LEVELS_LOCK = threading.Lock()
-_PGC16_PAIR_LUTS: dict[tuple[torch.device, str], torch.Tensor] = {}
-_PGC16_PAIR_LUTS_LOCK = threading.Lock()
 
 
 def _qvq_cuda_root() -> Path:
@@ -727,24 +725,6 @@ def _pgc16_levels(
     return levels
 
 
-def _pgc16_pair_lut(device: torch.device, codebook_version: str) -> torch.Tensor:
-    """Return packed FP16 level pairs indexed by an unmixed PGC16 state."""
-
-    key = (device, str(codebook_version).strip().lower())
-    pair_lut = _PGC16_PAIR_LUTS.get(key)
-    if pair_lut is None:
-        with _PGC16_PAIR_LUTS_LOCK:
-            pair_lut = _PGC16_PAIR_LUTS.get(key)
-            if pair_lut is None:
-                states = torch.arange(1 << 16, dtype=torch.int64)
-                mixed = pgc16_mix_states(states)
-                level_bits = pgc16_levels_for_version(key[1]).view(torch.int16).to(torch.int64) & 0xFFFF
-                packed = level_bits[mixed >> 8] | (level_bits[mixed & 0xFF] << 16)
-                pair_lut = packed.to(torch.int32).to(device=device).contiguous()
-                _PGC16_PAIR_LUTS[key] = pair_lut
-    return pair_lut
-
-
 def qvq_cuda_gemv(
     x: torch.Tensor,
     trellis: torch.Tensor,
@@ -841,9 +821,8 @@ def qvq_cuda_gemv(
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA requires a compute capability >= 8.0 device")
     if v2b2_p32_lr:
-        pair_lut = _pgc16_pair_lut(x.device, codebook_version)
         return _qvq_cuda_lr_op()(
-            x, trellis, levels, pair_lut, transition_bits, n, output_fp32, bank_ids, bank_alt_id, lr_split_count
+            x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_alt_id, lr_split_count
         )
     op = _qvq_cuda_op()
     if vector_size == 4:
