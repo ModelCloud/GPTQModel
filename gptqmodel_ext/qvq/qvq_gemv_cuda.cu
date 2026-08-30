@@ -1193,6 +1193,8 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   constexpr int kPaddedColumns = 16;
 
   __shared__ half cached_levels[kPgc16LevelCount];
+  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTiles][kWordsPerTile];
+  __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTiles];
   __shared__ __align__(16) half input_tile[kBatchTiles][kRows * kLocalRingTileRows];
   __shared__ __align__(16) half decoded_weight[kOutputTiles][kLocalRingTileRows][kPaddedColumns];
   __shared__ __align__(16) float output_tile[kOutputTiles][kRows][kPaddedColumns];
@@ -1231,6 +1233,29 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
   wmma::fill_fragment(accumulator, 0.0f);
 
   auto stage_batch = [&](int kb, int tiles_here) {
+    constexpr int words_per_vec = kWordsPerTile / 4;
+    const int vec_total = tiles_here * kOutputTiles * words_per_vec;
+    uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
+    const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
+    for (int index = thread; index < vec_total; index += kWmmaThreads) {
+      const int tile_slot = index / words_per_vec;
+      const int w4 = index - tile_slot * words_per_vec;
+      const int u = tile_slot / kOutputTiles;
+      const int sub = tile_slot % kOutputTiles;
+      const int n_tile = n_tile_base + sub;
+      words4[tile_slot * words_per_vec + w4] =
+          n_tile < n_tiles
+              ? trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4]
+              : make_uint4(0u, 0u, 0u, 0u);
+    }
+    if (thread < tiles_here * kOutputTiles) {
+      const int u = thread / kOutputTiles;
+      const int sub = thread % kOutputTiles;
+      const int n_tile = n_tile_base + sub;
+      const int tile_index = (kb + u) * n_tiles + n_tile;
+      packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
+    }
+
     constexpr int input_vecs_per_row = kLocalRingTileRows * sizeof(half) / sizeof(uint4);
     const int input_vec_total = tiles_here * kRows * input_vecs_per_row;
     uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
@@ -1257,13 +1282,6 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     for (int u = 0; u < kBatchTiles; ++u) {
       if (u < tiles_here) {
         const int sub = warp;
-        const int n_tile = n_tile_base + sub;
-        const int64_t tile_index = static_cast<int64_t>(kb + u) * n_tiles + n_tile;
-        const uint32_t packed_word = lane < kWordsPerTile && n_tile < n_tiles
-            ? static_cast<uint32_t>(trellis[tile_index * kWordsPerTile + lane])
-            : 0u;
-        uint32_t packed_bank_id = lane == 0 && n_tile < n_tiles ? bank_ids[tile_index] : 0u;
-        packed_bank_id = __shfl_sync(0xffffffffu, packed_bank_id, 0);
         // W3 packs two adjacent output rows from one 16-bit recurrence state.
         // Four lanes cooperate on each ring.  Each lane extracts four
         // disjoint planar edges once, broadcasts the packed 24-bit edge word,
@@ -1274,11 +1292,11 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const int edge_group = lane >> 3;
         const int edge_block = col >> 1;
         const int edge_in_block = (col & 1) * 16 + edge_group * 4;
-        const uint32_t low_codes = __shfl_sync(
-            0xffffffffu, packed_word, edge_block * kTransitionBits + edge_in_block / 8) >>
+        const uint32_t low_codes =
+            packed_words[u][sub][edge_block * kTransitionBits + edge_in_block / 8] >>
             (4 * (edge_in_block & 7));
-        const uint32_t high_codes = __shfl_sync(
-            0xffffffffu, packed_word, edge_block * kTransitionBits + 4 + edge_in_block / 16) >>
+        const uint32_t high_codes =
+            packed_words[u][sub][edge_block * kTransitionBits + 4 + edge_in_block / 16] >>
             (2 * (edge_in_block & 15));
         uint32_t edge_pack = 0;
 #pragma unroll
@@ -1295,7 +1313,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
         const int pair_base = edge_group * 4;
         uint32_t state = ((edge_at((pair_base + 14) & 15) << 12) |
             (edge_at((pair_base + 15) & 15) << 6) | edge_at(pair_base)) & 0xffffu;
-        const uint32_t bank = ((packed_bank_id >> col) & 1u) *
+        const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
             static_cast<uint32_t>(bank_alt_id);
         const uint32_t bank_mask = pgc16_v2_bank_mask<kTransitionBits>(bank);
 #pragma unroll
