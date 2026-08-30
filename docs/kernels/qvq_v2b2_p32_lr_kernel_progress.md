@@ -119,6 +119,7 @@ tables below every row was intentionally measured at M=16.
 | `7eeaf4da` | H200, Hopper cooperative W2-W3.5 | Overlay the decoded-B fragment scratch with the equally sized clustered split-K epilogue scratch because their lifetimes are disjoint | Static shared memory fell exactly 4 KiB (41.088 to 36.992 KiB for W3 gate/up) with 63 registers and 10.80M instructions unchanged; 60-sample latency was within +0.4-1.1% and 108/108 H200 CUDA tests passed | accepted and pushed as structural headroom for bank-aware level layouts |
 | `24735ba7` uncommitted A/B | H200, W3 gate/up M16 | Replace the read-only/L1 level lookups with eight aligned shared-memory replicas selected by lane, using the scratch overlay's recovered capacity | Accurate, but latency regressed 7.4% to 0.0289 ms; NCU found 1.11M shared-read bank conflicts, 11.39M instructions, and 28.99 us versus production's 10.80M and 26.53 us | rejected; source restored before next experiment |
 | `59d94659` uncommitted A/B | H200, W3 down M16 | Pack mirrored level pairs and replicate them once per warp lane so every random lookup maps to bank `lane`; reduce K batching from 24 to 17 tiles to fit the 48 KiB static limit | Shared-read conflicts fell 936K to 163K, but latency regressed about 20% to 0.0404 ms as instructions rose 44% to 15.11M and an extra K-batch barrier was required | rejected; source restored; conflict-free lookup requires persistent setup amortization |
+| `acc56453` uncommitted A/B | H200, W3 down M16 | Convert the existing four-warp N32 kernel to 132 persistent grid-stride CTAs (33 per split), reusing level-table setup across almost two N work units per CTA | Accurate, but latency regressed 61% to 0.0541 ms; NCU measured only 1.00 active and 0.22 eligible warp/scheduler with 77.8% no-eligible cycles versus production's 1.91/0.44 and 63.4% | rejected; source restored; persistence requires a wider warp-specialized CTA |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -1018,6 +1019,20 @@ ms. The table setup and added fourth K batch outweigh the removed serialization
 when repeated per N32 CTA. The source was restored. This layout should only be
 reconsidered inside a persistent CTA that reuses its setup across multiple N
 work units without shrinking the K batch.
+
+The next experiment isolated persistence with the accepted W3 down table,
+24-tile batch, and decode/MMA path unchanged. It replaced the 256-CTA
+two-wave launch with 132 grid-stride CTAs (33 per split), so 124 CTAs processed
+a second N32 work unit while retaining shared setup. Accuracy passed, but the
+M16 median regressed 61% from 0.03357 to 0.0541 ms. NCU report
+`/tmp/ncu-h200-w3-down-persistent1.ncu-rep` measures 55.81 us and exposes the
+cause: a 128-thread persistent CTA provides only 1.00 active and 0.22 eligible
+warp per scheduler, with 77.78% no-eligible cycles. Production's 256 CTAs
+provide 1.91 active and 0.44 eligible warps/scheduler with 63.35% no-eligible
+cycles. Machete's one-CTA/SM policy is not transferable by itself; its 384
+threads and warp-specialized WGMMA pipeline supply the concurrency that this
+four-warp QVQ CTA lacks. The source was restored. Any later persistent design
+must first widen the CTA and separate producer/decode/consumer roles.
 
 ## Coverage and targeting queue
 
