@@ -1296,11 +1296,53 @@ replacing the 3.558M distributed global loads and their address ALU with a
 producer-initiated, two-stage TMA pipeline. Success requires lower instructions
 and long-scoreboard/wait stalls in addition to event latency.
 
+## Two-stage TMA + RS-WGMMA W3 (`ba03b8bc`, 2026-08-30)
+
+The first real Hopper producer/consumer version keeps the transposed
+register-sourced WGMMA A operand, but replaces the distributed activation and
+trellis loads with two TMA transactions per K256 stage. Physical warps 0-3 are
+one aligned 128-thread WGMMA consumer warpgroup; warp 4 is the TMA producer.
+Both the CuTe-swizzled M16xK256 activation tile and the packed 8x8 W3 trellis
+tile are double buffered behind `PipelineTmaAsync<2>` transaction barriers.
+The decoded weights remain in registers and are never materialized in shared
+memory.
+
+The first K512 test only filled the two stages and therefore missed pipeline
+reuse. The Qwen run exposed that gap as a launch failure; `ba03b8bc` adds the
+required post-initialization CTA rendezvous and moves the correctness fixture to
+K1024, which cycles the ping-pong buffer. All four H200 cases pass: synchronous
+and TMA RS-WGMMA at split 1 and split 2.
+
+The physical H200 (132 SMs, UUID
+`GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea`) measured M16 K17408/N5120 with 10
+warmups and 60 CUDA-graph event timings:
+
+| Kernel | Split | Median ms | vs production LR | xMachete | Max abs |
+|---|---:|---:|---:|---:|---:|
+| Production LR W3 | auto | 0.21870 | 1.000x | 0.194x | 0.00127029 |
+| Synchronous CuTe RS-WGMMA W3 | 4 | 0.19850 | 1.102x | 0.213x | 0.000320435 |
+| **Two-stage TMA + RS-WGMMA W3** | **4** | **0.15394** | **1.421x** | **0.275x** | **0.000320435** |
+| Machete W4 | native | 0.04237 | 5.162x | 1.000x | 0.000670671 |
+
+TMA is 1.289x faster than synchronous RS-WGMMA and 1.421x faster than the
+production LR kernel, so the architectural change is accepted as a prototype
+checkpoint. It is not yet a production dispatch replacement: the remaining
+3.63x gap to Machete and exact instruction/stall changes must be explained by a
+matched NCU capture first.
+
+The JIT cache key now excludes the build-only `--threads` and
+`--split-compile` settings (`3408cea6`). The monolithic production QVQ binary
+took 254 seconds and Machete's eight generated translation units took 531
+seconds for their one-time normalized-cache migration. Subsequent loads reused
+both binaries. The isolated RS-WGMMA/TMA translation unit compiled in 31-33
+seconds, which is the required development path until a candidate passes its
+correctness, event-latency, and NCU gates.
+
 ## Coverage and targeting queue
 
 | Priority | Device/rate/shape | Current state | Next evidence needed |
 |---:|---|---|---|
-| 1 | H200 Qwen3.8 MLP down K17408/N5120, W2-W3.5, M1-M16 | W3 CuTe RS-WGMMA split4 reaches 0.19872 ms, 1.102x production LR and 0.215x Machete; all-rate production geomean is 0.226x | NCU production versus RS-WGMMA; replace synchronous K256 staging with a producer/TMA pipeline while preserving the validated register-sourced decode |
+| 1 | H200 Qwen3.8 MLP down K17408/N5120, W2-W3.5, M1-M16 | W3 two-stage TMA + RS-WGMMA split4 reaches 0.15394 ms, 1.421x production LR and 0.275x Machete; all-rate production geomean is 0.226x | matched NCU TMA versus synchronous RS and production; reduce residual decode ALU/long-scoreboard/wait before production dispatch |
 | 2 | H200 Qwen3.8 attention/linear out K6144/N5120 | 0.337x Machete; M1 is 0.477-0.592x but M>=2 falls to 0.277-0.311x | NCU M16 W3 and split sweep; compare dispatch against the successful K5120/N1024 path |
 | 3 | H200 Qwen3.8 full Q, linear QKV/Z, and MLP gate/up | 0.346-0.441x Machete overall; W3.5 gate/up is the weakest at 0.290x | profile representative M16 W3 and W3.5; tune split count and batch depth for K5120 before a wider pipeline rewrite |
 | 4 | H200 Qwen3.8 full K/V K5120/N1024 | 1.014x Machete overall; W2-W3 M1 is 1.22-1.31x, with small M>=2 deficits | preserve as the Qwen3.8 no-regression gate while changing general dispatch |
