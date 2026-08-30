@@ -21,6 +21,19 @@ and the serialized run config/data provenance must match this ledger. A repeated
 those identities are checked. Local result paths are retained for auditability; they are not claimed to be stored in
 Git.
 
+### Wave-10 provenance correction (2026-08-30)
+
+The archived GSM8K scores for `8980aa` (551/1209) and `fdbd68` (519/1209)
+are historical records from different quantizer-code provenance and are
+**superseded for current arm ranking**. Four deterministic replays per
+checkpoint under the pinned evaluator returned 541/1209 and 537/1209 with
+identical metric digests within each checkpoint. A tensor-level audit found
+different packed representations in all 112 quantized modules, first diverging
+at `model.layers.0.self_attn.q_proj` (`bank_ids`/`trellis`). See
+[`frontier_wave10_checkpoint_hash_audit_20260830.json`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
+The original values remain below only as immutable provenance, not as current
+comparators.
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.
@@ -1334,6 +1347,11 @@ and 3.
 
 ## Wave-5 sparse Up-layer isolation queue (2026-08-28 UTC)
 
+> **Historical-score notice:** the `8980aa` GSM8K value of 551/1209 in this
+> append-only section was produced under older quantizer/evaluator provenance.
+> It is retained for traceability but is superseded by the current pinned
+> replay at 541/1209; do not use it for arm ranking.
+
 | arm_id | allocation | estimated effective BPW | GSM8K Platinum | Mini exact | answer-logprob Δ | state | config | checkpoint |
 | --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
 | `a91f6c` | W3.2 anchor + Up4 layer 9 | 3.169720 | **44.0033% (532/1209)** | 4.6875% | +0.124061 | complete | `scripts/configs/llama32_1b_frontier_w5_anchor_up4_l9.json` | `/root/qvq-results/llama32-1b-w2-w5queued_a91f6c_llama32_1b_frontier_w5_anchor_up4_l9` |
@@ -1434,7 +1452,7 @@ held-out reports are verified.
 | --- | --- | --- | ---: | ---: |
 | ~2.02 | `b5283c` | Flat W2, reg 0.15 | 2.0232 | 23.8213% (288/1209) |
 | ~3.02 | `1040a5` | Flat W3 | 3.0232 | 42.9280% (519/1209) |
-| ~3.18 | `8980aa` | W3.2 anchor + Up4 L6,L8 | 3.178340 | **45.5749% (551/1209)** |
+| ~3.18 | `8980aa` | W3.2 anchor + Up4 L6,L8 | 3.178340 | **45.5749% (551/1209, historical; superseded by current replay 541/1209)** |
 | ~3.52 | `9769b1` | Flat W3.5, seed 1 | 3.5232 | **46.65% (564/1209)** |
 | ~3.56 | `4e7424` | Flat W3.5 + Up4 L12–15, seed 1 | 3.5577 | 46.15% (558/1209) |
 | ~3.63 | `049d0c` | Flat W3.5 + V4 all + Up4 L9–15 | 3.6266 | 45.9884% (556/1209) |
@@ -1474,6 +1492,11 @@ until the checkpoint and both held-out reports are complete. Queue manifest:
 `docs/experiments/frontier_wave7_queue_20260828.json`.
 
 ## Wave-8 pair-interaction mapping completed (2026-08-29 UTC)
+
+> **Historical-score notice:** the `fdbd68` GSM8K value of 519/1209 in this
+> append-only section was produced under older quantizer/evaluator provenance.
+> It is retained for traceability but is superseded by the current pinned
+> replay at 537/1209; do not use it for arm ranking.
 
 Sixteen matched-budget pair arms were queued from the corrected W3.2 anchor.
 Each promotes two `mlp.up_proj` modules from W3.5 to W4, giving 3.178340
@@ -1562,6 +1585,12 @@ payloads are stored in
 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 3.195582 | 528/1209 (43.6725%) | 6.25% | +0.273898 | −0.297230 | evaluation_complete |
 
 ## Wave-10 determinism canary replays (2026-08-30 UTC)
+
+**Provenance correction:** the archived 551/1209 (`8980aa`) and 519/1209
+(`fdbd68`) values below are historical records and are **superseded for arm
+ranking**. Four current-protocol replays are stable at 541/1209 and 537/1209;
+the checkpoint tensor/hash comparison is recorded in
+[`frontier_wave10_checkpoint_hash_audit_20260830.json`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
 
 Before launching new quantization, four repeated GSM8K evaluations per canary
 checkpoint are running with identical task settings. This isolates evaluator

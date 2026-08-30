@@ -27,6 +27,29 @@ The 128-row Mini-GSM train slice is cryptographically bound and disjoint from
 calibration, replay, D300 development/locked, and GSM8K Platinum test rows.
 These are screening proxies; full GSM8K Platinum remains the promotion metric.
 
+## Wave-10 checkpoint provenance audit (2026-08-30)
+
+The historical GSM8K scores for the two nominally identical W3.2
+`Up4 L6,L8` checkpoints are **superseded for current ranking**.  Wave-10
+replayed each checkpoint four times with the pinned evaluator and obtained
+repeat-stable scores of **541/1209** for `8980aa` and **537/1209** for
+`fdbd68`; the archived scores were 551/1209 and 519/1209 respectively.  The
+replay metric digest was identical across all four repeats for each
+checkpoint, ruling out run-to-run evaluator noise.
+
+The checkpoints have the same tracked allocation/config SHA and the same
+calibration/YAQA identities, but were produced by different quantizer
+commits (`07517d85` versus `a1e0c504`).  Tensor comparison finds 268 differing
+serialized keys across all 112 quantized modules; the first logical data
+divergence is `model.layers.0.self_attn.q_proj` (`bank_ids`/`trellis`, with
+`SU`/`SV` equal).  See the machine-readable
+[`Wave-10 checkpoint hash audit`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
+
+Accordingly, the old 551/519 values remain in the append-only history only as
+**historical provenance records**.  They must not be compared with current
+scores or used to select a new arm until replayed under the same pinned
+evaluator and code provenance.
+
 ## Current budget anchors (updated 2026-08-28 UTC)
 
 The following anchors are the comparison points for every future allocation
@@ -38,13 +61,15 @@ effective serialized BPW, and full GSM8K report have been verified.
 | --- | --- | --- | ---: | ---: | --- |
 | ~2.02 | `b5283c` | Flat W2, reg 0.15 | 2.0232 | 23.8213% (288/1209) | flat-W2 reference |
 | ~3.02 | `1040a5` | Flat W3 | 3.0232 | 42.9280% (519/1209) | flat-W3 reference |
-| ~3.18 | `8980aa` | W3.2 anchor + Up4 layers 6 and 8 | 3.178340 | **45.5749% (551/1209)** | **best ~3.2 anchor** |
+| ~3.18 | `8980aa` | W3.2 anchor + Up4 layers 6 and 8 | 3.178340 | **44.7477% (541/1209 current replay)** | historical 551 superseded; provenance canary |
 | ~3.52 | `9769b1` | Flat W3.5, seed 1 | 3.5232 | **46.65% (564/1209)** | current high-rate reference |
 | ~3.56 | `4e7424` | Flat W3.5 + Up4 layers 12–15, seed 1 | 3.5577 | 46.15% (558/1209) | late-Up control |
 | ~3.63 | `049d0c` | Flat W3.5 + V4 all + Up4 layers 9–15 | 3.6266 | 45.9884% (556/1209) | V/Up mixed control |
 
-The ~3.2 anchor is the current Wave-5 `L6+L8` result; Wave-6's best
-`L8+L9` arm reached 543/1209 at 3.178340 BPW and did not replace it. The
+The historical ~3.2 anchor was the Wave-5 `L6+L8` result; its current pinned
+replay is 541/1209 and is not directly comparable to the archived 551/1209.
+Wave-6's best `L8+L9` arm reached 543/1209 at 3.178340 BPW under its own
+provenance and should likewise be compared only within that protocol. The
 ~3.52 seed-1 result remains the highest completed GSM8K count in the current
 ledger, while the ~3.6 rows are useful allocation controls rather than an
 automatic improvement over flat W3.5.
@@ -502,7 +527,7 @@ serialized checkpoint accounting.
 | `a91f6c` | 0 | Anchor + Up4 layer 9 | 3.169720 | **44.0033% (532/1209)** | 4.6875% | +0.124061 | complete |
 | `3d7e42` | 1 | Anchor + Up4 layers 6 and 9 | 3.178340 | **43.5070% (526/1209)** | 3.1250% | +0.106767 | complete |
 | `e8b5a0` | 2 | Anchor + Up4 layers 7 and 8 (matched negative control) | 3.178340 | **45.1613% (546/1209)** | 6.2500% | −0.036569 | complete |
-| `8980aa` | 3 | Anchor + Up4 layers 6 and 8 | 3.178340 | **45.5749% (551/1209)** | 4.6875% | −0.019751 | complete |
+| `8980aa` | 3 | Anchor + Up4 layers 6 and 8 | 3.178340 | **45.5749% (551/1209, historical; superseded by current replay 541/1209)** | 4.6875% | −0.019751 | historical provenance; do not rank |
 | `1450c0` | 4 | Anchor + Up4 layers 6 and 10 | 3.178340 | **43.7552% (529/1209)** | 4.6875% | −0.025394 | complete |
 | `a63cf6` | 5 | Anchor + Up4 layers 5 and 9 | 3.178340 | **44.5823% (539/1209)** | 4.6875% | +0.086033 | complete |
 | `aeb16f` | 6 | Anchor + Up4 layers 6, 9, and 12 | 3.186961 | **43.8379% (530/1209)** | 3.1250% | +0.137476 | complete |
@@ -633,7 +658,7 @@ All sixteen arms completed both full GSM8K Platinum and Mini-GSM evaluations.
 | `4e58f5` | L5 + L6 | **42.2663% (511/1209)** | 4.6875% | +0.338698 | −0.105156 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_4e58f5_llama32_1b_frontier_anchor_up4_l5_l6-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_4e58f5_llama32_1b_frontier_anchor_up4_l5_l6-micro-math-v1.json) |
 | `735365` | L5 + L15 | **42.8453% (518/1209)** | 6.25% | +0.391713 | +0.076822 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_735365_llama32_1b_frontier_anchor_up4_l5_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_735365_llama32_1b_frontier_anchor_up4_l5_l15-micro-math-v1.json) |
 | `e5488a` | L12 + L15 | **43.4243% (525/1209)** | 4.6875% | +0.456282 | +0.012602 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_e5488a_llama32_1b_frontier_anchor_up4_l12_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_e5488a_llama32_1b_frontier_anchor_up4_l12_l15-micro-math-v1.json) |
-| `fdbd68` | L6 + L8 | **42.9280% (519/1209)** | 4.6875% | +0.362137 | −0.217387 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8-micro-math-v1.json) |
+| `fdbd68` | L6 + L8 | **42.9280% (519/1209, historical; superseded by current replay 537/1209)** | 4.6875% | +0.362137 | −0.217387 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8-micro-math-v1.json) |
 | `91a008` | L8 + L12 | **44.8304% (542/1209)** | 1.5625% | +0.430909 | −0.022157 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_91a008_llama32_1b_frontier_anchor_up4_l8_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_91a008_llama32_1b_frontier_anchor_up4_l8_l12-micro-math-v1.json) |
 | `c4cc84` | L6 + L12 | **44.4169% (537/1209)** | 6.25% | +0.407893 | −0.164052 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_c4cc84_llama32_1b_frontier_anchor_up4_l6_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_c4cc84_llama32_1b_frontier_anchor_up4_l6_l12-micro-math-v1.json) |
 | `fe2ba7` | L5 + L7 | **42.8453% (518/1209)** | 4.6875% | +0.257663 | −0.178204 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_fe2ba7_llama32_1b_frontier_anchor_up4_l5_l7-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_fe2ba7_llama32_1b_frontier_anchor_up4_l5_l7-micro-math-v1.json) |
@@ -701,9 +726,12 @@ and a normalized metrics digest. Queue manifest and launcher:
 All eight repeated evaluations completed. Each checkpoint produced the same
 normalized metric digest on all four repeats, so evaluator execution is
 deterministic for this protocol. The current evaluator reports differ from
-the historical records (551 for `8980aa`, 519 for `fdbd68`), indicating a
-cross-version/checkpoint provenance issue rather than run-to-run evaluation
-noise.
+the historical records (551 for `8980aa`, 519 for `fdbd68`). Those historical
+values are retained for auditability but are **invalid for current arm
+ranking**; the tensor-level comparison is recorded in the
+[`Wave-10 checkpoint hash audit`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
+The remaining discrepancy is checkpoint/code provenance, not run-to-run
+evaluation noise.
 
 | Checkpoint | Repeats | GSM8K each | Digest SHA-256 | Result |
 | --- | ---: | ---: | --- | --- |
