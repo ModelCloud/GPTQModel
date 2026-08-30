@@ -1365,12 +1365,14 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           const uint32_t high_codes =
               packed_words[u][sub][edge_block * kTransitionBits + 4 + edge_in_block / 16] >>
               (2 * (edge_in_block & 15));
-#pragma unroll
-          for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
-            const uint32_t edge = ((low_codes >> (edge_in_group * 4)) & 0xfu) |
-                (((high_codes >> (edge_in_group * 2)) & 0x3u) << 4);
-            edge_pack |= edge << (edge_in_group * kTransitionBits);
-          }
+          // Expand four low nibbles and four high dibits into adjacent six-bit
+          // slots with two mask/shift stages instead of four scalar extracts.
+          uint32_t low_spread = (low_codes & 0x00ffu) | ((low_codes & 0xff00u) << 4);
+          low_spread = (low_spread & 0x0000f00fu) | ((low_spread & 0x000f00f0u) << 2);
+          uint32_t high_spread = (high_codes & 0x0fu) | ((high_codes & 0xf0u) << 8);
+          high_spread =
+              ((high_spread & 0x00003003u) | ((high_spread & 0x0000c00cu) << 4)) << 4;
+          edge_pack = low_spread | high_spread;
         } else {
           const int first_edge = col * kLocalRingSteps + edge_group * 4;
           const int planar_block = first_edge >> 5;
