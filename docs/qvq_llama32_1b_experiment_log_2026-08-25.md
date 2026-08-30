@@ -37,6 +37,21 @@ causal solver-code change.
 The original values remain below only as immutable provenance, not as current
 comparators.
 
+### Wave-11 frozen solver causality canary (2026-08-30)
+
+The first end-to-end launch was invalidated because the environment's editable
+package finder resolved the current checkout from historical worktree scripts.
+The corrected run uses `scripts/run_in_worktree.py` to bind the requested
+commit's package explicitly. The frozen canary uses one snapshot of
+`model.layers.0.self_attn.q_proj` and runs the direct QVQ solver with identical
+inputs under two replicas of each commit. All four result JSON artifacts are
+byte-identical. Candidate proxy/Kronecker costs and discrete bank/trellis
+hashes are identical across old/new and A/B replicas; this canary therefore
+shows no solver or runtime nondeterminism for the frozen input.
+
+See [`frontier_wave11_frozen_solver_results_20260830.json`](experiments/frontier_wave11_frozen_solver_results_20260830.json)
+and the queue manifest [`frontier_wave11_causality_queue_20260830.json`](experiments/frontier_wave11_causality_queue_20260830.json).
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.

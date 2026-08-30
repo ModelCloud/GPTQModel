@@ -54,6 +54,33 @@ evaluator and code/runtime provenance. A frozen-input first-module replay is
 still required to identify whether the divergence comes from the discrete
 optimizer, runtime package state, ordering, or another unrecorded input.
 
+## Wave-11 frozen solver causality canary (2026-08-30 UTC)
+
+The first Wave-11 attempt was invalidated before recording scores: historical
+worktree launches resolved the editable package from the current checkout.
+The corrected launcher now explicitly imports each detached worktree package
+(`scripts/run_in_worktree.py`).
+
+The frozen L0 `self_attn.q_proj` canary then fed byte-identical `W`, input and
+output Hessians, RHT sign vectors, transformed tensors, and solver settings to
+both recorded quantizer commits (`07517d85` and `a1e0c504`), with two replicas
+per commit. All four artifacts are byte-identical, including candidate costs,
+bank selectors, trellises, reconstructed weights, and serialized hashes.
+
+| Candidate | Proxy loss | Kronecker loss | Selected family | Trellis prefix |
+| --- | ---: | ---: | ---: | --- |
+| canonical reselect | 1.021233439 | 0.000961478 | 1 | `8ad316dd8538` |
+| fixed family 0 | 1.099056482 | 0.001032234 | 1 | `7762afe4794c` |
+| fixed family 1 | 1.021233439 | 0.000961478 | 1 | `8ad316dd8538` |
+| fixed family 2 | 1.025190473 | 0.000969684 | 2 | `9d1debdcd4de` |
+| fixed family 3 | 1.026627779 | 0.000966786 | 3 | `847e1fb6c50e` |
+
+This rules out an old/new discrete-solver divergence for this frozen input;
+the full end-to-end controls remain necessary to locate the upstream source
+of the historical checkpoint differences. See the machine-readable
+[`Wave-11 frozen solver result`](experiments/frontier_wave11_frozen_solver_results_20260830.json)
+and [`Wave-11 queue`](experiments/frontier_wave11_causality_queue_20260830.json).
+
 ## Current budget anchors (updated 2026-08-28 UTC)
 
 The following anchors are the comparison points for every future allocation
