@@ -120,6 +120,7 @@ tables below every row was intentionally measured at M=16.
 | `24735ba7` uncommitted A/B | H200, W3 gate/up M16 | Replace the read-only/L1 level lookups with eight aligned shared-memory replicas selected by lane, using the scratch overlay's recovered capacity | Accurate, but latency regressed 7.4% to 0.0289 ms; NCU found 1.11M shared-read bank conflicts, 11.39M instructions, and 28.99 us versus production's 10.80M and 26.53 us | rejected; source restored before next experiment |
 | `59d94659` uncommitted A/B | H200, W3 down M16 | Pack mirrored level pairs and replicate them once per warp lane so every random lookup maps to bank `lane`; reduce K batching from 24 to 17 tiles to fit the 48 KiB static limit | Shared-read conflicts fell 936K to 163K, but latency regressed about 20% to 0.0404 ms as instructions rose 44% to 15.11M and an extra K-batch barrier was required | rejected; source restored; conflict-free lookup requires persistent setup amortization |
 | `acc56453` uncommitted A/B | H200, W3 down M16 | Convert the existing four-warp N32 kernel to 132 persistent grid-stride CTAs (33 per split), reusing level-table setup across almost two N work units per CTA | Accurate, but latency regressed 61% to 0.0541 ms; NCU measured only 1.00 active and 0.22 eligible warp/scheduler with 77.8% no-eligible cycles versus production's 1.91/0.44 and 63.4% | rejected; source restored; persistence requires a wider warp-specialized CTA |
+| `8e0a90f4` uncommitted A/B | H200, W3 down M16 | Widen N32/four-warp CTAs to N64/eight warps while retaining the shared 512-byte level table, unlike the prior read-only-level N64 rejection | Instructions fell 5% to 9.97M and registers fell 83 to 48, but shared-read conflicts reached 1.01M and latency regressed 17% to 0.0392 ms | rejected; source restored; wider scalar-MMA scheduling cannot replace warp specialization |
 
 ## RTX 4090 accepted M=16 matrix
 
@@ -1033,6 +1034,20 @@ cycles. Machete's one-CTA/SM policy is not transferable by itself; its 384
 threads and warp-specialized WGMMA pipeline supply the concurrency that this
 four-warp QVQ CTA lacks. The source was restored. Any later persistent design
 must first widen the CTA and separate producer/decode/consumer roles.
+
+An N64/eight-warp W3 down bridge then tested whether a wider CTA could recover
+that missing scheduler concurrency without a full WGMMA rewrite. Unlike the
+earlier N64-down rejection, this variant kept the local 512-byte shared level
+table. It preserved accuracy and NCU report
+`/tmp/ncu-h200-w3-down-out8-shared1.ncu-rep` shows useful common-work
+amortization: instructions fell from 10.49M to 9.97M and registers/thread from
+83 to 48. However, shared-read conflicts rose to 1,006,957, the 16-tile batch
+requires four barriers per split instead of three, and profile duration rose
+32.64 to 41.34 us. M16 CUDA-event latency regressed about 17% from 0.03357 to
+0.0392 ms. The source was restored. Both shared- and read-only-level N64 down
+paths are now ruled out for the scalar `mma.sync` architecture; the remaining
+wider-CTA opportunity requires producer/decode/consumer warp specialization
+and asynchronous WGMMA consumption.
 
 ## Coverage and targeting queue
 
