@@ -1277,15 +1277,21 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_wmma_hopper_w3_k
       if (u < tiles_here) {
         const int sub = warp;
         const int n_tile = n_tile_base + sub;
+        // W3 packs two adjacent output rows from one 16-bit recurrence state.
+        // Decode each state once (lanes 0..15) and materialize both levels;
+        // the previous row-wise mapping recomputed every state twice.
         for (int j = 0; j < 8; ++j) {
-          const int k_local = (lane >> 3) + (j << 2);
+          const int pair = (lane >> 3) + (j << 1);
           const int col = lane & 7;
-          uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[u][sub], col, k_local >> 1);
+          if (lane >= 16) {
+            continue;
+          }
+          uint32_t state = qvq_local_ring_state<kTransitionBits>(packed_words[u][sub], col, pair);
           const uint32_t bank = ((static_cast<uint32_t>(packed_bank_ids[u][sub]) >> col) & 1u) *
               static_cast<uint32_t>(bank_alt_id);
           const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask<kTransitionBits>(bank));
-          const uint32_t level_index = (k_local & 1) == 0 ? mixed >> 8 : mixed & 0xffu;
-          decoded_weight[sub][k_local][col] = cached_levels[level_index];
+          decoded_weight[sub][pair * 2][col] = cached_levels[mixed >> 8];
+          decoded_weight[sub][pair * 2 + 1][col] = cached_levels[mixed & 0xffu];
         }
       }
       __syncwarp();
