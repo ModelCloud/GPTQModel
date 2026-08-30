@@ -1,0 +1,194 @@
+{
+  "args": {
+    "dtype": "float16",
+    "gptq_group_size": 128,
+    "idle_interval": 1.0,
+    "idle_memory_tolerance_mib": 8,
+    "idle_samples": 3,
+    "iterations": 60,
+    "m": [
+      16
+    ],
+    "markdown_output": "benchmark_artifacts/qvq_lr_w35_native_n8_merged_h100_canary.md",
+    "output": "benchmark_artifacts/qvq_lr_w35_native_n8_merged_h100_canary.json",
+    "physical_gpu": 1,
+    "progress_interval": 0.0,
+    "qvq_bits": [
+      3.5
+    ],
+    "shapes": [
+      "mlp_gate_up"
+    ],
+    "warmup": 20
+  },
+  "benchmark_sha256": "ae13dac8f763d972716bba127790a3bffea2c83f7d2e91d7479728527011b6ca",
+  "commit": "b6470e5b9eabca8f2f49fe0fb4b0354fca1930fb",
+  "device": {
+    "compute_capability": "9.0",
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "total_memory_bytes": 102077169664
+  },
+  "gptq": {
+    "bits": 4,
+    "desc_act": false,
+    "group_size": 128,
+    "kernels": [
+      "marlin",
+      "machete"
+    ],
+    "sym": true
+  },
+  "hardware": {
+    "index": "1",
+    "memory.total": "97871",
+    "memory.used": "0",
+    "name": "NVIDIA H100",
+    "pci.bus_id": "00000000:44:00.0",
+    "utilization.gpu": "0",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "label": "qvq_lr_vs_w4_gptq_llama32_1b",
+  "physical_gpu": 1,
+  "projection_shapes": [
+    {
+      "in_features": 2048,
+      "modules_per_layer": 2,
+      "name": "mlp_gate_up",
+      "out_features": 8192,
+      "roles": [
+        "gate_proj",
+        "up_proj"
+      ]
+    }
+  ],
+  "qvq": {
+    "format": "qvq_v2b2_p32_lr",
+    "group_size": -1,
+    "note": "P32 is LR packing geometry, not a GPTQ affine scale group.",
+    "output_dtype": "float32",
+    "rates": [
+      3.5
+    ]
+  },
+  "rows": [
+    {
+      "bits": 3.5,
+      "effective_payload_gbs": 188.60961237769115,
+      "finite": true,
+      "group_size": null,
+      "in_features": 2048,
+      "input_dtype": "float16",
+      "k": 2048,
+      "kernel": "qvq_lr",
+      "logical_tflops": 13.673362341575627,
+      "m": 16,
+      "mae": 8.69387986313086e-06,
+      "max_abs": 6.29425048828125e-05,
+      "max_ms": 0.05027199909090996,
+      "mean_ms": 0.03946720007807016,
+      "median_ms": 0.039264000952243805,
+      "min_ms": 0.038943998515605927,
+      "modules_per_layer": 2,
+      "n": 8192,
+      "name": "mlp_gate_up",
+      "out_features": 8192,
+      "output_dtype": "float32",
+      "p95_ms": 0.0395519994199276,
+      "packing": "V2B2-P32-LR",
+      "payload_bytes": 7405568,
+      "payload_mib": 7.0625,
+      "rel_l2": 2.4611349545011763e-06,
+      "rmse": 1.1084149264206644e-05,
+      "roles": [
+        "gate_proj",
+        "up_proj"
+      ],
+      "speedup_vs_machete": 0.4763651048164822,
+      "speedup_vs_marlin": 0.2893235435039398,
+      "state": "complete"
+    },
+    {
+      "bits": 4.0,
+      "effective_payload_gbs": 761.5098666865541,
+      "finite": true,
+      "group_size": 128,
+      "in_features": 2048,
+      "input_dtype": "float16",
+      "k": 2048,
+      "kernel": "gptq_marlin",
+      "logical_tflops": 47.25976384769887,
+      "m": 16,
+      "mae": 3.381371789146215e-05,
+      "max_abs": 0.00031888484954833984,
+      "max_ms": 0.020896000787615776,
+      "mean_ms": 0.011508266689876716,
+      "median_ms": 0.011359999887645245,
+      "min_ms": 0.011008000001311302,
+      "modules_per_layer": 2,
+      "n": 8192,
+      "name": "mlp_gate_up",
+      "out_features": 8192,
+      "output_dtype": "float16",
+      "p95_ms": 0.011680000461637974,
+      "packing": "GPTQ",
+      "payload_bytes": 8650752,
+      "payload_mib": 8.25,
+      "rel_l2": 0.0002745672536548227,
+      "rmse": 4.4097938371123746e-05,
+      "roles": [
+        "gate_proj",
+        "up_proj"
+      ],
+      "speedup_vs_machete": 1.6464788832851944,
+      "speedup_vs_marlin": 1.0,
+      "state": "complete"
+    },
+    {
+      "bits": 4.0,
+      "effective_payload_gbs": 462.9461095385455,
+      "finite": true,
+      "group_size": 128,
+      "in_features": 2048,
+      "input_dtype": "float16",
+      "k": 2048,
+      "kernel": "gptq_machete",
+      "logical_tflops": 28.70353475375413,
+      "m": 16,
+      "mae": 3.380754787940532e-05,
+      "max_abs": 0.0002810955047607422,
+      "max_ms": 0.028416000306606293,
+      "mean_ms": 0.019037866685539483,
+      "median_ms": 0.018703999929130077,
+      "min_ms": 0.01817600056529045,
+      "modules_per_layer": 2,
+      "n": 8192,
+      "name": "mlp_gate_up",
+      "out_features": 8192,
+      "output_dtype": "float16",
+      "p95_ms": 0.019807999953627586,
+      "packing": "GPTQ",
+      "payload_bytes": 8658944,
+      "payload_mib": 8.2578125,
+      "rel_l2": 0.00027454685186967254,
+      "rmse": 4.4094664190197363e-05,
+      "roles": [
+        "gate_proj",
+        "up_proj"
+      ],
+      "speedup_vs_machete": 1.0,
+      "speedup_vs_marlin": 0.6073567114354452,
+      "state": "complete"
+    }
+  ],
+  "scope": "kernel throughput only; W4 GPTQ is a figurative performance baseline, not a quality match",
+  "software": {
+    "cuda": "13.0",
+    "torch": "2.15.0.dev20260828+cu130"
+  },
+  "source_fingerprint": "b948efa08ad0f2dc5da1e3f43822686f7a0c729f47ff373d2e6e4089e4bb864a",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "mode": "single_cuda_graph_replay_with_internal_external_events"
+  }
+}

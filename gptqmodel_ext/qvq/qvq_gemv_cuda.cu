@@ -1219,7 +1219,7 @@ __device__ __forceinline__ void qvq_mma_m16n8k16(
         "f"(c.values[3]));
 }
 
-// Hopper-only cooperative tensor-core path for W2/W2.5/W3 at M<=16.
+// Hopper-only cooperative tensor-core path for W2/W2.5/W3/W3.5 at M<=16.
 // One warp owns one N8 output tile; a small warp group therefore reuses the
 // staged activation stripe across adjacent tiles. Each rate reconstructs the
 // 16 unique ring transitions cooperatively, advances four adjacent states by
@@ -1240,7 +1240,7 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
     int split_count,
     int bank_alt_id) {
   constexpr int kTransitionBits = TransitionBits;
-  static_assert(kTransitionBits >= 4 && kTransitionBits <= 6);
+  static_assert(kTransitionBits >= 4 && kTransitionBits <= 7);
   constexpr int kRows = 16;
   constexpr int kBatchTiles = OutputTiles >= 8 ? 16 : 24;
   constexpr int kWmmaThreads = OutputTiles * 32;
@@ -1376,6 +1376,29 @@ __global__ __launch_bounds__(OutputTiles * 32) void qvq_gemv_local_ring_wmma_hop
           high_spread =
               ((high_spread & 0x00003003u) | ((high_spread & 0x0000c00cu) << 4)) << 4;
           edge_pack = low_spread | high_spread;
+        } else if constexpr (kTransitionBits == 7) {
+          // W3.5 stores four-bit low, two-bit middle, and one-bit top
+          // planes. Four adjacent edges fit in one word from every plane.
+          const int edge_block = col >> 1;
+          const int edge_in_block = (col & 1) * 16 + edge_group * 4;
+          const int word_base = edge_block * kTransitionBits;
+          const uint32_t low_pack =
+              (packed_words[u][sub][word_base + edge_in_block / 8] >>
+               (4 * (edge_in_block & 7))) &
+              0xffffu;
+          const uint32_t middle_pack =
+              (packed_words[u][sub][word_base + 4 + edge_in_block / 16] >>
+               (2 * (edge_in_block & 15))) &
+              0xffu;
+          const uint32_t top_pack =
+              (packed_words[u][sub][word_base + 6] >> edge_in_block) & 0xfu;
+#pragma unroll
+          for (int edge_in_group = 0; edge_in_group < 4; ++edge_in_group) {
+            const uint32_t edge = ((low_pack >> (edge_in_group * 4)) & 0xfu) |
+                (((middle_pack >> (edge_in_group * 2)) & 0x3u) << 4) |
+                (((top_pack >> edge_in_group) & 0x1u) << 6);
+            edge_pack |= edge << (edge_in_group * kTransitionBits);
+          }
         } else {
           const int first_edge = col * kLocalRingSteps + edge_group * 4;
           const int planar_block = first_edge >> 5;
@@ -2112,8 +2135,11 @@ void launch_qvq_local_ring_wmma_hopper_dispatch(
         QVQ_LR_LAUNCH_HOPPER_WMMA(6, 4);
       }
       break;
+    case 7:
+      QVQ_LR_LAUNCH_HOPPER_WMMA(7);
+      break;
     default:
-      TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 6]");
+      TORCH_CHECK(false, "Hopper cooperative WMMA requires transition_bits in [4, 7]");
   }
 #undef QVQ_LR_LAUNCH_HOPPER_WMMA
 }
@@ -2286,9 +2312,9 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
       "LR32 split_count overflows the int32 kernel partition limit");
 
   const bool use_hopper_cooperative_wmma = device_config.major == 9 &&
-      transition_bits >= 4 && transition_bits <= 6 &&
+      transition_bits >= 4 && transition_bits <= 7 &&
       size_m <= 16 &&
-      (transition_bits == 6 ? out_features >= 2048 : out_features >= 512) &&
+      (transition_bits >= 6 ? out_features >= 2048 : out_features >= 512) &&
       input.scalar_type() == at::kHalf && qvq_vec_aligned(input.const_data_ptr(), trellis.const_data_ptr());
   // Four-output-tile WMMA leaves only 256 blocks for the Llama gate/up
   // projection on a 132-SM H200. Two K partitions supply a second scheduling
