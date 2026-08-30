@@ -69,6 +69,9 @@ using TrellisTmaSmemLayout = decltype(cute::make_layout(
         cute::Int<kWordsPerTile>{},
         cute::Int<kWordsPerTile * kN8TilesPerBlock>{},
         cute::Int<kWordsPerTile * kN8TilesPerBlock * kK32TilesPerStage>{})));
+using BankTmaSmemLayout = decltype(cute::make_layout(
+    cute::make_shape(cute::_16{}, cute::_8{}, cute::Int<kTmaStages>{}),
+    cute::make_stride(cute::_1{}, cute::_16{}, cute::_128{})));
 using WgmmaTmaPipeline = cutlass::PipelineTmaAsync<kTmaStages>;
 using WgmmaTmaPipelineState = cutlass::PipelineState<kTmaStages>;
 
@@ -76,6 +79,7 @@ struct alignas(128) WgmmaTmaSharedStorage {
   typename WgmmaTmaPipeline::SharedStorage pipeline;
   alignas(128) cute::ArrayEngine<Element, cute::cosize_v<WgmmaTmaSmemLayoutB>> input;
   alignas(128) cute::ArrayEngine<uint32_t, cute::cosize_v<TrellisTmaSmemLayout>> trellis;
+  alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<BankTmaSmemLayout>> bank_ids;
 };
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
@@ -310,11 +314,11 @@ __global__ __launch_bounds__(kThreads) void qvq_wgmma_w3_m16_kernel(
 #endif
 }
 
-template <class InputTma, class TrellisTma>
+template <class InputTma, class TrellisTma, class BankTma>
 __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
     CUTE_GRID_CONSTANT InputTma const input_tma,
     CUTE_GRID_CONSTANT TrellisTma const trellis_tma,
-    const uint8_t* __restrict__ bank_ids,
+    CUTE_GRID_CONSTANT BankTma const bank_tma,
     const Element* __restrict__ levels,
     float* __restrict__ partial_output,
     int size_k,
@@ -350,7 +354,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
   pipeline_params.num_consumers = kThreads;
   pipeline_params.transaction_bytes =
       kRows * kKPerStage * sizeof(Element) +
-      kWordsPerTile * kN8TilesPerBlock * kK32TilesPerStage * sizeof(uint32_t);
+      kWordsPerTile * kN8TilesPerBlock * kK32TilesPerStage * sizeof(uint32_t) +
+      16 * kK32TilesPerStage * sizeof(uint8_t);
   WgmmaTmaPipeline pipeline(
       shared.pipeline,
       pipeline_params,
@@ -360,6 +365,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
       cute::make_smem_ptr(shared.input.begin()), WgmmaTmaSmemLayoutB{});
   auto s_trellis = cute::make_tensor(
       cute::make_smem_ptr(shared.trellis.begin()), TrellisTmaSmemLayout{});
+  auto s_bank_ids = cute::make_tensor(
+      cute::make_smem_ptr(shared.bank_ids.begin()), BankTmaSmemLayout{});
 
   auto full_input = input_tma.get_tma_tensor(cute::make_shape(cute::_16{}, size_k));
   auto tiled_input = cute::local_tile(
@@ -389,6 +396,18 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
       cute::group_modes<0, 3>(s_trellis),
       cute::group_modes<0, 3>(tiled_trellis));
 
+  auto full_bank_ids = bank_tma.get_tma_tensor(cute::make_shape(n_tiles, k_tiles));
+  auto tiled_bank_ids = cute::local_tile(
+      full_bank_ids,
+      cute::make_shape(cute::_16{}, cute::_8{}),
+      cute::make_coord(n64_block >> 1, cute::_));
+  auto [tma_global_bank_ids, tma_shared_bank_ids] = cute::tma_partition(
+      bank_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 2>(s_bank_ids),
+      cute::group_modes<0, 2>(tiled_bank_ids));
+
   // PipelineTmaAsync initializes its transaction and empty barriers from warp
   // zero.  All roles must observe that initialization before the producer and
   // consumer control flows diverge, especially once a two-stage buffer wraps.
@@ -411,6 +430,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
             trellis_tma.with(*barrier),
             tma_global_trellis(cute::_, global_stage),
             tma_shared_trellis(cute::_, write_stage));
+        cute::copy(
+            bank_tma.with(*barrier),
+            tma_global_bank_ids(cute::_, global_stage),
+            tma_shared_bank_ids(cute::_, write_stage));
         ++write_state;
       }
       pipeline.producer_tail(write_state);
@@ -441,6 +464,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
   const int column_in_n8 = lane >> 2;
   const int first_n8_tile = warp * 2;
   const int second_n8_tile = first_n8_tile + 1;
+  const int bank_n8_offset = (n64_block & 1) * kN8TilesPerBlock;
   WgmmaTmaPipelineState read_state;
   WgmmaTmaPipelineState release_state;
 
@@ -448,7 +472,6 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
     auto wait_token = pipeline.consumer_try_wait(read_state);
     pipeline.consumer_wait(read_state, wait_token);
     const int read_stage = read_state.index();
-    const int global_k32_base = k_tile_begin + stage_offset * kK32TilesPerStage;
 
 #pragma unroll
     for (int k_block = 0; k_block < 16; ++k_block) {
@@ -458,10 +481,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_wgmma_w3_m16_tma_kernel(
       uint32_t first_bank_id = 0;
       uint32_t second_bank_id = 0;
       if (lane == 0) {
-        const int64_t global_tile_base =
-            static_cast<int64_t>(global_k32_base + k32_in_stage) * n_tiles + n8_tile_base;
-        first_bank_id = bank_ids[global_tile_base + first_n8_tile];
-        second_bank_id = bank_ids[global_tile_base + second_n8_tile];
+        first_bank_id = s_bank_ids(
+            bank_n8_offset + first_n8_tile, k32_in_stage, read_stage);
+        second_bank_id = s_bank_ids(
+            bank_n8_offset + second_n8_tile, k32_in_stage, read_stage);
       }
       first_bank_id = __shfl_sync(0xffffffffu, first_bank_id, 0);
       second_bank_id = __shfl_sync(0xffffffffu, second_bank_id, 0);
@@ -677,6 +700,10 @@ at::Tensor qvq_wgmma_w3_m16_tma(
           cute::_1{},
           cute::Int<kWordsPerTile>{},
           static_cast<int64_t>(n_tiles) * kWordsPerTile));
+  auto bank_tensor = cute::make_tensor(
+      bank_ids.data_ptr<uint8_t>(),
+      cute::make_shape(n_tiles, k_tiles),
+      cute::make_stride(cute::_1{}, static_cast<int64_t>(n_tiles)));
   auto input_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{},
       input_tensor,
@@ -690,6 +717,11 @@ at::Tensor qvq_wgmma_w3_m16_tma(
           cute::Int<kWordsPerTile>{},
           cute::Int<kN8TilesPerBlock>{},
           cute::Int<kK32TilesPerStage>{}));
+  auto bank_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      bank_tensor,
+      BankTmaSmemLayout{}(cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::_16{}, cute::_8{}));
 
   auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
   auto partial_output = split_count == 1
@@ -700,7 +732,7 @@ at::Tensor qvq_wgmma_w3_m16_tma(
   qvq_wgmma_w3_m16_tma_kernel<<<grid, kTmaThreads, 0, stream>>>(
       input_tma,
       trellis_tma,
-      bank_ids.data_ptr<uint8_t>(),
+      bank_tma,
       reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
       partial_output.data_ptr<float>(),
       size_k,
