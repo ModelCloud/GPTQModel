@@ -1572,8 +1572,21 @@ Normalized metrics digests are written beside each immutable report. See
 
 | Arm IDs | Source checkpoint | GPUs | state |
 | --- | --- | --- | --- |
-| `w10-8980aa-r1` … `r4` | `8980aa` | 0–3 | running |
-| `w10-fdbd68-r1` … `r4` | `fdbd68` | 4–7 | running |
+| `w10-8980aa-r1` … `r4` | `8980aa` | 0–3 | evaluation_complete |
+| `w10-fdbd68-r1` … `r4` | `fdbd68` | 4–7 | evaluation_complete |
+
+### Wave-10 canary replay results (2026-08-30 UTC)
+
+All four repeats for each canary checkpoint completed with identical
+normalized GSM8K metric digests. The current evaluator therefore has no
+within-checkpoint variance; its scores are 541/1209 for `8980aa` and 537/1209
+for `fdbd68`, versus historical records of 551 and 519 respectively. This
+remaining discrepancy is checkpoint/code provenance, not evaluator randomness.
+
+| source arm | repeats | GSM8K each | digest SHA-256 | state |
+| --- | ---: | ---: | --- | --- |
+| `8980aa` | 4 | 541/1209 (44.7477%) | `5b154128…e8529c` | evaluation_complete |
+| `fdbd68` | 4 | 537/1209 (44.4169%) | `ef896c0a…51d202` | evaluation_complete |
 
 ## Wave-7 evaluation results snapshot (2026-08-29 UTC)
 

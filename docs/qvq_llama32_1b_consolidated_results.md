@@ -693,5 +693,19 @@ and a normalized metrics digest. Queue manifest and launcher:
 
 | Arm IDs | Checkpoint | GPUs | State |
 | --- | --- | --- | --- |
-| `w10-8980aa-r1` … `r4` | `8980aa` (W3.2 Up4 L6,L8) | 0–3 | running |
-| `w10-fdbd68-r1` … `r4` | `fdbd68` (W3.2 Up4 L6,L8) | 4–7 | running |
+| `w10-8980aa-r1` … `r4` | `8980aa` (W3.2 Up4 L6,L8) | 0–3 | evaluation complete |
+| `w10-fdbd68-r1` … `r4` | `fdbd68` (W3.2 Up4 L6,L8) | 4–7 | evaluation complete |
+
+### Wave-10 canary replay results (2026-08-30 UTC)
+
+All eight repeated evaluations completed. Each checkpoint produced the same
+normalized metric digest on all four repeats, so evaluator execution is
+deterministic for this protocol. The current evaluator reports differ from
+the historical records (551 for `8980aa`, 519 for `fdbd68`), indicating a
+cross-version/checkpoint provenance issue rather than run-to-run evaluation
+noise.
+
+| Checkpoint | Repeats | GSM8K each | Digest SHA-256 | Result |
+| --- | ---: | ---: | --- | --- |
+| `8980aa` | 4 | **541/1209 (44.7477%)** | `5b154128…e8529c` | repeat-stable |
+| `fdbd68` | 4 | **537/1209 (44.4169%)** | `ef896c0a…51d202` | repeat-stable |
