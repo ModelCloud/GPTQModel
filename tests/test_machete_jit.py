@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -419,7 +420,8 @@ def test_ensure_cutlass_source_rejects_mismatched_configured_checkout(monkeypatc
     monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path / "project")
     monkeypatch.setenv("GPTQMODEL_CUTLASS_DIR", str(wrong_cutlass))
 
-    with pytest.raises(RuntimeError, match=r"CUTLASS v3\.5\.0.*requires v4\.4\.2"):
+    expected_version = re.escape(machete_utils._CUTLASS_VERSION)
+    with pytest.raises(RuntimeError, match=rf"CUTLASS v3\.5\.0.*requires v{expected_version}"):
         machete_utils._ensure_cutlass_source()
 
 
