@@ -41,17 +41,76 @@ from gptqmodel.utils.model import hf_gptqmodel_prepare_model_for_load, make_quan
 LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
 
 
-def test_lr32_quantization_fails_closed_until_encoder_exists():
-    weight = torch.zeros((16, 16), dtype=torch.float32)
-    hessian = torch.eye(16, dtype=torch.float32)
+@pytest.mark.parametrize("bits", LR_RATES)
+def test_lr32_block_ldlq_quantizer_pack_roundtrip(bits):
+    generator = torch.Generator().manual_seed(20260831 + int(bits * 10))
+    weight = torch.randn((8, 32), generator=generator) * 0.1
+    result = quantize_qvq_linear(
+        weight,
+        torch.eye(32),
+        bits=bits,
+        bank_count=2,
+        v2b2_p32_lr=True,
+        rounding="block_ldlq",
+        trellis_batch_size=8,
+    )
+    tensors = result.serialized_tensors()
 
-    with pytest.raises(NotImplementedError, match="V2B2-P32-LR encoding is not implemented"):
+    assert result.trellis.shape == (1, int(bits * 8))
+    assert result.bank_ids is not None and result.bank_ids.shape == (8,)
+    assert tensors["bank_ids"].shape == (1,)
+    assert tensors["bank_alt_id"].shape == (1,)
+    assert 1 <= int(tensors["bank_alt_id"].item()) <= 3
+    decoded = reconstruct_local_ring_inner_weight(
+        result.trellis,
+        bits=bits,
+        in_features=32,
+        out_features=8,
+        bank_ids=tensors["bank_ids"],
+        bank_alt_id=tensors["bank_alt_id"],
+    )
+    assert torch.equal(decoded, result.inner_weight)
+    assert torch.isfinite(result.weight).all()
+    assert torch.isfinite(result.proxy_loss)
+
+
+def test_lr32_yaqa_quantizer_pack_roundtrip():
+    generator = torch.Generator().manual_seed(20260832)
+    weight = torch.randn((16, 64), generator=generator) * 0.1
+    result = quantize_qvq_linear(
+        weight,
+        torch.eye(64),
+        bits=2,
+        output_hessian=torch.eye(16),
+        bank_count=2,
+        v2b2_p32_lr=True,
+        rounding="yaqa",
+        trellis_batch_size=16,
+    )
+    tensors = result.serialized_tensors()
+    decoded = reconstruct_local_ring_inner_weight(
+        result.trellis,
+        bits=2,
+        in_features=64,
+        out_features=16,
+        bank_ids=tensors["bank_ids"],
+        bank_alt_id=tensors["bank_alt_id"],
+    )
+
+    assert torch.equal(decoded, result.inner_weight)
+    assert result.kronecker_proxy_loss is not None
+    assert torch.isfinite(result.kronecker_proxy_loss)
+
+
+def test_lr32_quantizer_requires_k32_n8_geometry():
+    with pytest.raises(ValueError, match="divisible by K32 and N8"):
         quantize_qvq_linear(
-            weight,
-            hessian,
+            torch.zeros((16, 16), dtype=torch.float32),
+            torch.eye(16, dtype=torch.float32),
             bits=2,
             bank_count=2,
             v2b2_p32_lr=True,
+            rounding="block_ldlq",
         )
 
 

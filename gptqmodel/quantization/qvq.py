@@ -6612,6 +6612,421 @@ def optimize_qvq_module_scale(
     return candidate_SV, candidate, candidate_loss, exact_multiplier, True
 
 
+def _quantize_lr32_sequences(
+    sequences: torch.Tensor,
+    codebooks: tuple[torch.Tensor, ...],
+    *,
+    bits: float,
+    trellis_batch_size: int,
+    tail_biting_candidates: int,
+    step_weights: torch.Tensor | None = None,
+    telemetry: QVQQuantizationTelemetry | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize independent LR32 rings and choose one bank per ring.
+
+    ``sequences`` is ring-major ``[ring, 16, 2]`` data.  Each ring owns its
+    tail-biting history, so no recurrence or bank decision may cross a ring
+    boundary.  Canonical bank zero wins exact ties.
+    """
+
+    if sequences.ndim != 3 or tuple(sequences.shape[1:]) != (
+        QVQ_V2B2_P32_LR_RING_STEPS,
+        2,
+    ):
+        raise ValueError("QVQ LR32 sequences must have shape [rings, 16, 2].")
+    if len(codebooks) not in (1, 2):
+        raise ValueError("QVQ LR32 ring quantization requires one or two codebooks.")
+    if any(
+        tuple(codebook.shape) != (1 << 16, 2)
+        or codebook.device != sequences.device
+        or not codebook.is_floating_point()
+        for codebook in codebooks
+    ):
+        raise ValueError("QVQ LR32 codebooks must be floating-point [65536, 2] tensors on the ring device.")
+    if step_weights is not None and tuple(step_weights.shape) != tuple(sequences.shape[:2]):
+        raise ValueError("QVQ LR32 step weights must have shape [rings, 16].")
+
+    bank_values = []
+    bank_states = []
+    bank_losses = []
+    for codebook in codebooks:
+        values = []
+        states = []
+        losses = []
+        sequence_chunks = sequences.split(trellis_batch_size)
+        weight_chunks = (
+            (None,) * len(sequence_chunks)
+            if step_weights is None
+            else step_weights.split(trellis_batch_size)
+        )
+        with _qvq_phase(telemetry, "lr32_viterbi", sequences.device):
+            for chunk, weight_chunk in zip(sequence_chunks, weight_chunks, strict=True):
+                result = tail_biting_viterbi_quantize(
+                    chunk.contiguous(),
+                    codebook,
+                    bits=bits,
+                    step_weights=None if weight_chunk is None else weight_chunk.contiguous(),
+                    candidate_count=tail_biting_candidates,
+                )
+                values.append(result.values)
+                states.append(result.states)
+                losses.append(result.squared_error)
+        bank_values.append(torch.cat(values))
+        bank_states.append(torch.cat(states))
+        bank_losses.append(torch.cat(losses))
+
+    if len(codebooks) == 1:
+        selectors = torch.zeros(sequences.shape[0], dtype=torch.uint8, device=sequences.device)
+        return bank_values[0], bank_states[0], selectors
+
+    losses = torch.stack(bank_losses)
+    selectors_long = losses.argmin(dim=0)
+    ring_indices = torch.arange(sequences.shape[0], device=sequences.device)
+    values = torch.stack(bank_values)[selectors_long, ring_indices]
+    states = torch.stack(bank_states)[selectors_long, ring_indices]
+    return values, states, selectors_long.to(torch.uint8)
+
+
+def _block_ldlq_inner_v2b2_p32_lr_candidate(
+    inner_weight: torch.Tensor,
+    H: torch.Tensor,
+    codebooks: tuple[torch.Tensor, ...],
+    *,
+    bits: float,
+    trellis_batch_size: int,
+    viterbi_objective: str,
+    tail_biting_candidates: int,
+    telemetry: QVQQuantizationTelemetry | None,
+    factorization: tuple[torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Encode one complete LR32 BlockLDLQ artifact for a fixed bank family."""
+
+    in_features, out_features = inner_weight.shape
+    tile_rows = QVQ_V2B2_P32_LR_TILE_ROWS
+    tile_cols = QVQ_V2B2_P32_LR_TILE_COLS
+    input_blocks = in_features // tile_rows
+    output_blocks = out_features // tile_cols
+    L, D = factorization
+    feedback = L.clone()
+    feedback.diagonal().sub_(1)
+    source = inner_weight.to(device=L.device, dtype=torch.float32)
+    error = source.clone()
+    quantized = torch.zeros_like(source)
+    tile_states = torch.empty(
+        (input_blocks, output_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
+        dtype=torch.long,
+        device=source.device,
+    )
+    selectors = torch.empty(
+        (input_blocks, output_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE),
+        dtype=torch.uint8,
+        device=source.device,
+    )
+
+    for block in range(input_blocks - 1, -1, -1):
+        start = block * tile_rows
+        stop = start + tile_rows
+        with _qvq_phase(telemetry, "block_ldl_feedback", source.device):
+            corrected = source[start:stop] + feedback[start:, start:stop].transpose(0, 1) @ error[start:]
+            sequences = (
+                corrected.reshape(tile_rows, output_blocks, tile_cols)
+                .permute(1, 2, 0)
+                .reshape(output_blocks * QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS, 2)
+            )
+        step_weights = None
+        if viterbi_objective == "hessian_diagonal":
+            diagonal_weights = D[start:stop, start:stop].diagonal().clamp_min(0)
+            diagonal_mean = diagonal_weights.mean()
+            if not torch.isfinite(diagonal_mean) or diagonal_mean <= torch.finfo(diagonal_weights.dtype).eps:
+                raise RuntimeError("QVQ conditioned Hessian diagonal must have positive finite mean.")
+            ring_weights = (diagonal_weights / diagonal_mean).reshape(-1, 2).mean(dim=1)
+            step_weights = ring_weights.unsqueeze(0).expand(sequences.shape[0], -1)
+        values, states, ring_selectors = _quantize_lr32_sequences(
+            sequences,
+            codebooks,
+            bits=bits,
+            trellis_batch_size=trellis_batch_size,
+            tail_biting_candidates=tail_biting_candidates,
+            step_weights=step_weights,
+            telemetry=telemetry,
+        )
+        reconstructed = (
+            values.reshape(output_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE, tile_rows)
+            .permute(2, 0, 1)
+            .reshape(tile_rows, out_features)
+            .to(torch.float32)
+        )
+        quantized[start:stop] = reconstructed
+        error[start:stop] = source[start:stop] - reconstructed
+        tile_states[block] = states.reshape(
+            output_blocks,
+            QVQ_V2B2_P32_LR_RINGS_PER_TILE,
+            QVQ_V2B2_P32_LR_RING_STEPS,
+        )
+        selectors[block] = ring_selectors.reshape(output_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE)
+    return quantized.to(inner_weight.dtype), tile_states.reshape(-1, 8, 16), selectors.reshape(-1)
+
+
+def block_ldlq_inner_v2b2_p32_lr(
+    inner_weight: torch.Tensor,
+    H: torch.Tensor,
+    codebook_library: tuple[torch.Tensor, ...],
+    *,
+    bits: float,
+    trellis_batch_size: int = 16,
+    viterbi_objective: str = "euclidean",
+    tail_biting_candidates: int = 1,
+    telemetry: QVQQuantizationTelemetry | None = None,
+    factorization: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Choose one module-wide alternative family for LR32 BlockLDLQ."""
+
+    if len(codebook_library) != 4:
+        raise ValueError("QVQ V2B2-P32-LR requires canonical V2 plus three complementary candidates.")
+    if factorization is None:
+        factorization = block_ldl_factor(H.to(torch.float32), block_size=QVQ_V2B2_P32_LR_TILE_ROWS)
+    canonical_weight, canonical_states, canonical_selectors = _block_ldlq_inner_v2b2_p32_lr_candidate(
+        inner_weight,
+        H,
+        (codebook_library[0],),
+        bits=bits,
+        trellis_batch_size=trellis_batch_size,
+        viterbi_objective=viterbi_objective,
+        tail_biting_candidates=tail_biting_candidates,
+        telemetry=telemetry,
+        factorization=factorization,
+    )
+    source = inner_weight.to(torch.float32)
+    hessian = H.to(torch.float32)
+
+    def full_loss(candidate: torch.Tensor) -> torch.Tensor:
+        candidate_error = candidate.to(torch.float32) - source
+        return torch.sum((hessian @ candidate_error) * candidate_error)
+
+    best_weight = canonical_weight
+    best_states = canonical_states
+    best_selectors = canonical_selectors
+    best_alt_id = 1
+    best_loss = full_loss(canonical_weight)
+    for alt_id in range(1, 4):
+        candidate_weight, candidate_states, candidate_selectors = _block_ldlq_inner_v2b2_p32_lr_candidate(
+            inner_weight,
+            H,
+            (codebook_library[0], codebook_library[alt_id]),
+            bits=bits,
+            trellis_batch_size=trellis_batch_size,
+            viterbi_objective=viterbi_objective,
+            tail_biting_candidates=tail_biting_candidates,
+            telemetry=telemetry,
+            factorization=factorization,
+        )
+        candidate_loss = full_loss(candidate_weight)
+        if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
+            best_weight = candidate_weight
+            best_states = candidate_states
+            best_selectors = candidate_selectors
+            best_alt_id = alt_id
+            best_loss = candidate_loss
+    return (
+        best_weight,
+        best_states,
+        best_selectors,
+        torch.tensor([best_alt_id], dtype=torch.uint8, device=inner_weight.device),
+    )
+
+
+def _yaqa_inner_v2b2_p32_lr_candidate(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    codebooks: tuple[torch.Tensor, ...],
+    *,
+    bits: float,
+    trellis_batch_size: int,
+    tail_biting_candidates: int,
+    telemetry: QVQQuantizationTelemetry | None,
+    factorization: tuple[BlockLDLFactorization, BlockLDLFactorization],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Encode one complete K32-by-N8 YAQA history for an LR32 bank family."""
+
+    tile_rows = QVQ_V2B2_P32_LR_TILE_ROWS
+    tile_cols = QVQ_V2B2_P32_LR_TILE_COLS
+    in_features, out_features = inner_weight.shape
+    input_blocks = in_features // tile_rows
+    output_blocks = out_features // tile_cols
+    input_L = factorization[0].L
+    output_L = factorization[1].L
+    source = inner_weight.to(torch.float32)
+    quantized = torch.zeros_like(source)
+    quantized_blocks = quantized.view(input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 2, 1, 3)
+    tile_states = torch.empty(
+        (input_blocks, output_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
+        dtype=torch.long,
+        device=source.device,
+    )
+    selectors = torch.empty(
+        (input_blocks, output_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE),
+        dtype=torch.uint8,
+        device=source.device,
+    )
+    transformed_error = input_L.transpose(0, 1) @ source @ output_L
+    schedule = _yaqa_anti_diagonal_schedule(
+        source.device,
+        input_blocks,
+        output_blocks,
+        tile_rows,
+        tile_cols,
+    )
+    for _, input_indices, output_indices, _, input_rows, output_rows in schedule:
+        with _qvq_phase(telemetry, "yaqa_feedback", source.device):
+            transformed_blocks = transformed_error.view(
+                input_blocks,
+                tile_rows,
+                output_blocks,
+                tile_cols,
+            ).permute(0, 2, 1, 3)
+            corrected_tiles = transformed_blocks[input_indices, output_indices]
+            sequences = (
+                corrected_tiles.permute(0, 2, 1)
+                .reshape(-1, QVQ_V2B2_P32_LR_RING_STEPS, 2)
+                .contiguous()
+            )
+        values, states, ring_selectors = _quantize_lr32_sequences(
+            sequences,
+            codebooks,
+            bits=bits,
+            trellis_batch_size=trellis_batch_size,
+            tail_biting_candidates=tail_biting_candidates,
+            telemetry=telemetry,
+        )
+        diagonal_blocks = input_indices.numel()
+        reconstructed = (
+            values.reshape(diagonal_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE, tile_rows)
+            .permute(0, 2, 1)
+            .to(torch.float32)
+        )
+        with _qvq_phase(telemetry, "yaqa_commit", source.device):
+            quantized_blocks[input_indices, output_indices] = reconstructed
+            tile_states[input_indices, output_indices] = states.reshape(diagonal_blocks, 8, 16)
+            selectors[input_indices, output_indices] = ring_selectors.reshape(diagonal_blocks, 8)
+        with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
+            left_factor = input_L[input_rows].transpose(0, 1)
+            right_factor = torch.bmm(reconstructed, output_L[output_rows]).reshape(
+                diagonal_blocks * tile_rows,
+                out_features,
+            )
+            transformed_error.addmm_(left_factor, right_factor, alpha=-1)
+    return quantized.to(inner_weight.dtype), tile_states.reshape(-1, 8, 16), selectors.reshape(-1)
+
+
+def yaqa_inner_v2b2_p32_lr(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    codebook_library: tuple[torch.Tensor, ...],
+    *,
+    bits: float,
+    trellis_batch_size: int = 16,
+    tail_biting_candidates: int = 1,
+    family_mode: str = "reselect",
+    block_family_id: int | None = None,
+    block_input_hessian: torch.Tensor | None = None,
+    diagnostics: dict[str, object] | None = None,
+    factorization: tuple[BlockLDLFactorization, BlockLDLFactorization] | None = None,
+    telemetry: QVQQuantizationTelemetry | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Choose one module-wide alternative family for the LR32 YAQA codec."""
+
+    if len(codebook_library) != 4:
+        raise ValueError("YAQA V2B2-P32-LR requires canonical V2 plus three complementary candidates.")
+    if family_mode not in {"fixed_block_ldlq", "reselect"}:
+        raise ValueError("YAQA V2B2-P32-LR family mode must be `fixed_block_ldlq` or `reselect`.")
+    if factorization is None:
+        input_factor = stabilized_block_ldl_factor(
+            input_hessian,
+            block_size=QVQ_V2B2_P32_LR_TILE_ROWS,
+            retry_damping=torch.tensor(torch.finfo(torch.float32).eps, device=input_hessian.device),
+        )
+        output_factor = stabilized_block_ldl_factor(
+            output_hessian,
+            block_size=QVQ_V2B2_P32_LR_TILE_COLS,
+            retry_damping=torch.tensor(torch.finfo(torch.float32).eps, device=output_hessian.device),
+        )
+        factorization = input_factor, output_factor
+
+    canonical_weight, canonical_states, canonical_selectors = _yaqa_inner_v2b2_p32_lr_candidate(
+        inner_weight,
+        input_hessian,
+        output_hessian,
+        (codebook_library[0],),
+        bits=bits,
+        trellis_batch_size=trellis_batch_size,
+        tail_biting_candidates=tail_biting_candidates,
+        telemetry=telemetry,
+        factorization=factorization,
+    )
+    if block_family_id is None and family_mode == "fixed_block_ldlq":
+        _, _, _, block_alt_id = block_ldlq_inner_v2b2_p32_lr(
+            inner_weight,
+            input_hessian if block_input_hessian is None else block_input_hessian,
+            codebook_library,
+            bits=bits,
+            trellis_batch_size=trellis_batch_size,
+            tail_biting_candidates=tail_biting_candidates,
+        )
+        block_family_id = int(block_alt_id.item())
+    if block_family_id is not None and block_family_id not in range(4):
+        raise ValueError("YAQA V2B2-P32-LR fixed family ID must be 0, 1, 2, or 3.")
+    alternative_ids = (
+        (1, 2, 3)
+        if family_mode == "reselect" and block_family_id is None
+        else ()
+        if block_family_id == 0
+        else (block_family_id,)
+    )
+    source = inner_weight.to(torch.float32)
+    input_fp32 = input_hessian.to(torch.float32)
+    output_fp32 = output_hessian.to(torch.float32)
+
+    def full_loss(candidate: torch.Tensor) -> torch.Tensor:
+        candidate_error = candidate.to(torch.float32) - source
+        return torch.einsum("ij,ik,kl,lj->", candidate_error, input_fp32, candidate_error, output_fp32)
+
+    best_weight = canonical_weight
+    best_states = canonical_states
+    best_selectors = canonical_selectors
+    best_alt_id = 1 if block_family_id in (None, 0) else block_family_id
+    best_loss = full_loss(canonical_weight)
+    for alt_id in alternative_ids:
+        candidate_weight, candidate_states, candidate_selectors = _yaqa_inner_v2b2_p32_lr_candidate(
+            inner_weight,
+            input_hessian,
+            output_hessian,
+            (codebook_library[0], codebook_library[alt_id]),
+            bits=bits,
+            trellis_batch_size=trellis_batch_size,
+            tail_biting_candidates=tail_biting_candidates,
+            telemetry=telemetry,
+            factorization=factorization,
+        )
+        candidate_loss = full_loss(candidate_weight)
+        if torch.isfinite(candidate_loss) and candidate_loss < best_loss:
+            best_weight = candidate_weight
+            best_states = candidate_states
+            best_selectors = candidate_selectors
+            best_alt_id = alt_id
+            best_loss = candidate_loss
+    if diagnostics is not None:
+        diagnostics["fallback_to_v2"] = not bool(torch.count_nonzero(best_selectors))
+        diagnostics["block_family_id"] = int(best_alt_id if block_family_id is None else block_family_id)
+    return (
+        best_weight,
+        best_states,
+        best_selectors,
+        torch.tensor([best_alt_id], dtype=torch.uint8, device=inner_weight.device),
+    )
+
+
 def quantize_qvq_linear(
     weight: torch.Tensor,
     H: torch.Tensor,
@@ -6681,11 +7096,6 @@ def quantize_qvq_linear(
         raise TypeError("QVQ `v2b2_p32_lr` must be a bool.")
     if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
         raise ValueError("QVQ Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive.")
-    if v2b2_p32_lr:
-        raise NotImplementedError(
-            "QVQ V2B2-P32-LR encoding is not implemented yet; use the Torch oracle and MLX inference path "
-            "with an externally encoded LR32 checkpoint."
-        )
     if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
         raise ValueError("QVQ `vector_size` must be 2, or 4 for rates W1-W4.")
     if trellis_window not in (16, 18):
@@ -6702,12 +7112,19 @@ def quantize_qvq_linear(
         raise ValueError("QVQ V2B4-P64 requires vector_size=2, trellis_window=16, bank_count=4, and W1-W3.5.")
     if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or bits > 3.5):
         raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5.")
+    if v2b2_p32_lr and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or bits > 3.5):
+        raise ValueError(
+            "QVQ V2B2-P32-LR requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5."
+        )
     if weight.ndim != 2 or not weight.is_floating_point():
         raise ValueError("QVQ weight must be a floating-point matrix.")
     out_features, in_features = weight.shape
     if in_features < 1 or out_features < 1:
         raise ValueError("QVQ linear dimensions must be positive.")
-    if in_features % 16 or out_features % 16:
+    if v2b2_p32_lr:
+        if in_features % QVQ_V2B2_P32_LR_TILE_ROWS or out_features % QVQ_V2B2_P32_LR_TILE_COLS:
+            raise ValueError("QVQ V2B2-P32-LR dimensions must be divisible by K32 and N8.")
+    elif in_features % 16 or out_features % 16:
         raise ValueError("QVQ linear dimensions must be divisible by 16.")
     if tuple(H.shape) != (in_features, in_features):
         raise ValueError("QVQ Hessian shape must match the linear input dimension.")
@@ -6885,7 +7302,7 @@ def quantize_qvq_linear(
             raise ValueError("YAQA input/output factors are module-specific and cannot use shared input preparation.")
     if yaqa_v2b2_fixed_family_id is not None and (
         rounding != "yaqa"
-        or not v2b2_p32
+        or not (v2b2_p32 or v2b2_p32_lr)
         or yaqa_v2b2_family_mode != "fixed_block_ldlq"
         or yaqa_sample_strategy != "full"
         or yaqa_spectral_refinement
@@ -6894,7 +7311,7 @@ def quantize_qvq_linear(
         or propagated_inputs is not None
     ):
         raise ValueError(
-            "QVQ YAQA V2B2 fixed-family encoding requires V2B2-P32 YAQA, "
+            "QVQ YAQA V2B2 fixed-family encoding requires V2B2-P32 or V2B2-P32-LR YAQA, "
             "`fixed_block_ldlq` mode, full family scoring, and no subsequent candidate refinement."
         )
     if (yaqa_spectral_refinement or yaqa_spectral_push or yaqa_spectral_localized) and (
@@ -6907,10 +7324,18 @@ def quantize_qvq_linear(
         raise ValueError("QVQ four-bank selection currently excludes scale-search controls.")
     if bank_count == 4 and experimental_codebook is not None:
         raise ValueError("QVQ four-bank selection requires the canonical rate-keyed PGC16 codebooks.")
-    if bank_count == 2 and not v2b2_p32:
-        raise ValueError("QVQ two-bank selection requires V2B2-P32.")
+    if bank_count == 2 and not (v2b2_p32 or v2b2_p32_lr):
+        raise ValueError("QVQ two-bank selection requires V2B2-P32 or V2B2-P32-LR.")
     if bank_count == 2 and (module_scale_search or output_channel_scale_optimization or experimental_codebook is not None):
-        raise ValueError("QVQ V2B2-P32 requires canonical codebooks and excludes scale-search controls.")
+        raise ValueError("QVQ V2B2-P32 formats require canonical codebooks and exclude scale-search controls.")
+    if v2b2_p32_lr and input_hessian_preparation is not None:
+        raise ValueError("QVQ V2B2-P32-LR does not accept shared K16 input-Hessian preparation.")
+    if v2b2_p32_lr and yaqa_sample_strategy != "full":
+        raise ValueError("QVQ V2B2-P32-LR YAQA currently requires full module family scoring.")
+    if v2b2_p32_lr and (yaqa_spectral_refinement or yaqa_spectral_push or yaqa_spectral_localized):
+        raise ValueError("QVQ V2B2-P32-LR does not support P32-specific YAQA spectral experiments.")
+    if v2b2_p32_lr and propagated_inputs is not None:
+        raise ValueError("QVQ V2B2-P32-LR propagated replay is not implemented.")
     if (propagated_inputs is None) != (propagated_target_output is None):
         raise ValueError("QVQ propagated bank selection requires both held-out inputs and target outputs.")
     if propagated_inputs is not None:
@@ -7002,7 +7427,7 @@ def quantize_qvq_linear(
             transformed_H = rht_preprocess_hessian(H.to(device=device), SU)
             transformed_H = (transformed_H + transformed_H.transpose(0, 1)) * 0.5
             mean_diagonal = transformed_H.diagonal().abs().mean()
-            if rounding == "yaqa" and (v2b4_p64 or v2b2_p32):
+            if rounding == "yaqa" and (v2b4_p64 or v2b2_p32 or v2b2_p32_lr):
                 block_ldlq_control_H = transformed_H.clone()
                 block_control_damping = torch.maximum(
                     mean_diagonal * 0.01,
@@ -7034,12 +7459,12 @@ def quantize_qvq_linear(
         with _qvq_phase(telemetry, "yaqa_factorization", device):
             input_factor = stabilized_block_ldl_factor(
                 transformed_H,
-                block_size=16,
+                block_size=QVQ_V2B2_P32_LR_TILE_ROWS if v2b2_p32_lr else 16,
                 retry_damping=damping,
             )
             output_factor = stabilized_block_ldl_factor(
                 transformed_output_hessian,
-                block_size=16,
+                block_size=QVQ_V2B2_P32_LR_TILE_COLS if v2b2_p32_lr else 16,
                 retry_damping=output_damping,
             )
             transformed_H = input_factor.hessian
@@ -7083,7 +7508,7 @@ def quantize_qvq_linear(
                 codebook_version=codebook_version,
                 dtype=codebook.dtype,
             )
-            if v2b4_p64 or v2b2_p32
+            if v2b4_p64 or v2b2_p32 or v2b2_p32_lr
             else _canonical_qvq_v4_banks(
                 device=device,
                 bits=bits,
@@ -7098,7 +7523,7 @@ def quantize_qvq_linear(
                 codebook_version=codebook_version,
                 dtype=codebook.dtype,
             )
-        elif v2b2_p32:
+        elif v2b2_p32 or v2b2_p32_lr:
             bank_codebook_pair_stacks = _canonical_qvq_v2b2_pair_stacks(
                 device=device,
                 bits=bits,
@@ -7108,6 +7533,7 @@ def quantize_qvq_linear(
         elif (
             not v2b4_p64
             and not v2b2_p32
+            and not v2b2_p32_lr
             and rounding in {"yaqa", "block_ldlq"}
             and device.type == "cuda"
             and tail_biting_candidates == 1
@@ -7126,10 +7552,17 @@ def quantize_qvq_linear(
             prepared_block_factors = (
                 input_hessian_preparation.factorization
                 if input_hessian_preparation is not None
-                else block_ldl_factor(transformed_H.to(torch.float32), block_size=16)
+                else block_ldl_factor(
+                    transformed_H.to(torch.float32),
+                    block_size=QVQ_V2B2_P32_LR_TILE_ROWS if v2b2_p32_lr else 16,
+                )
             )
     needs_bank0_oracle = (
-        bank_codebooks is not None and rounding == "block_ldlq" and not v2b4_p64 and not v2b2_p32
+        bank_codebooks is not None
+        and rounding == "block_ldlq"
+        and not v2b4_p64
+        and not v2b2_p32
+        and not v2b2_p32_lr
     )
     yaqa_bank_diagnostics: dict[str, object] = {}
     def encode_at_scale(
@@ -7173,6 +7606,23 @@ def quantize_qvq_linear(
                     _incremental_cuda_factored_feedback=incremental_cuda_factored_feedback,
                     _incremental_cpu_factored_feedback=incremental_cpu_factored_feedback,
                     _trusted_inputs=True,
+                )
+            if v2b2_p32_lr:
+                assert bank_codebooks is not None
+                return yaqa_inner_v2b2_p32_lr(
+                    normalized_weight,
+                    transformed_H,
+                    transformed_output_hessian,
+                    bank_codebooks,
+                    bits=bits,
+                    trellis_batch_size=trellis_batch_size,
+                    tail_biting_candidates=tail_biting_candidates,
+                    family_mode=yaqa_v2b2_family_mode,
+                    block_family_id=yaqa_v2b2_fixed_family_id,
+                    block_input_hessian=block_ldlq_control_H,
+                    diagnostics=yaqa_bank_diagnostics,
+                    factorization=prepared_yaqa_factorization,
+                    telemetry=telemetry,
                 )
             if v2b2_p32:
                 assert bank_codebooks is not None
@@ -7277,6 +7727,19 @@ def quantize_qvq_linear(
                 telemetry=telemetry,
                 factorization=prepared_block_factors,
                 bank_codebook_pair_stacks=bank_codebook_pair_stacks,
+            )
+        if v2b2_p32_lr:
+            assert bank_codebooks is not None and prepared_block_factors is not None
+            return block_ldlq_inner_v2b2_p32_lr(
+                normalized_weight,
+                transformed_H,
+                bank_codebooks,
+                bits=bits,
+                trellis_batch_size=trellis_batch_size,
+                viterbi_objective=objective,
+                tail_biting_candidates=tail_biting_candidates,
+                telemetry=telemetry,
+                factorization=prepared_block_factors,
             )
         if bank_codebooks is not None:
             if propagated_inputs is not None and rounding == "block_ldlq":
@@ -7500,7 +7963,7 @@ def quantize_qvq_linear(
     if bank_codebooks is None:
         baseline_inner, baseline_states = baseline_encoded
         baseline_bank_ids = None
-    elif v2b2_p32:
+    elif v2b2_p32 or v2b2_p32_lr:
         baseline_inner, baseline_states, baseline_bank_ids, baseline_bank_alt_id = baseline_encoded
     elif needs_bank0_oracle:
         baseline_inner, baseline_states, baseline_bank_ids, bank0_inner, bank0_states = baseline_encoded
@@ -7622,7 +8085,7 @@ def quantize_qvq_linear(
         if bank_codebooks is None:
             hessian_inner, hessian_states = hessian_encoded
             hessian_bank_ids = None
-        elif v2b2_p32:
+        elif v2b2_p32 or v2b2_p32_lr:
             hessian_inner, hessian_states, hessian_bank_ids, hessian_bank_alt_id = hessian_encoded
         elif needs_bank0_oracle:
             hessian_inner, hessian_states, hessian_bank_ids, hessian_bank0_inner, hessian_bank0_states = hessian_encoded
@@ -7643,7 +8106,7 @@ def quantize_qvq_linear(
             quantized_inner = hessian_inner
             states = hessian_states
             selected_bank_ids = hessian_bank_ids if bank_codebooks is not None else None
-            if v2b2_p32:
+            if v2b2_p32 or v2b2_p32_lr:
                 selected_bank_alt_id = hessian_bank_alt_id
             SV = hessian_SV
             reconstructed_weight = hessian_weight
@@ -7921,16 +8384,17 @@ def quantize_qvq_linear(
         # expressed entirely with device-native tensor operations and is
         # bit-exact with the CPU implementation. Keeping it local avoids a
         # full state-stream D2H copy, CPU pack, and packed-word H2D copy.
-        trellis = (
-            pack_dual_v2_states(states, bits=bits)
-            if dual_v2
-            else pack_trellis_states(
+        if v2b2_p32_lr:
+            trellis = pack_local_ring_states(states, bits=bits)
+        elif dual_v2:
+            trellis = pack_dual_v2_states(states, bits=bits)
+        else:
+            trellis = pack_trellis_states(
                 states,
                 bits=bits,
                 vector_size=vector_size,
                 trellis_window=trellis_window,
             )
-        )
     if propagated_inputs is not None and selected_bank_ids is not None:
         roundtrip_inner = reconstruct_qvq_inner_weight(
             trellis,
@@ -7996,6 +8460,22 @@ def quantize_qvq_linear(
             raise RuntimeError("QVQ V2B2-P32 packed trellis/selectors do not reproduce the selected inner weight.")
         if telemetry is not None:
             telemetry.count("packed_roundtrip_verifications")
+    if v2b2_p32_lr:
+        if selected_bank_ids is None or selected_bank_alt_id is None:
+            raise RuntimeError("QVQ V2B2-P32-LR quantization did not produce selectors and an alternative bank ID.")
+        roundtrip_inner = reconstruct_local_ring_inner_weight(
+            trellis,
+            bits=bits,
+            in_features=in_features,
+            out_features=out_features,
+            codebook_version=codebook_version,
+            bank_ids=selected_bank_ids,
+            bank_alt_id=selected_bank_alt_id,
+        )
+        if not torch.equal(roundtrip_inner.to(dtype=quantized_inner.dtype), quantized_inner):
+            raise RuntimeError("QVQ V2B2-P32-LR packed trellis/selectors do not reproduce the selected inner weight.")
+        if telemetry is not None:
+            telemetry.count("packed_roundtrip_verifications")
     kronecker_proxy_loss = None
     if output_hessian is not None:
         kronecker_proxy_loss = yaqa_proxy_loss(
@@ -8026,7 +8506,7 @@ def quantize_qvq_linear(
         telemetry=telemetry_result,
         serialization_allowed=experimental_codebook is None,
         bank_ids=None if selected_bank_ids is None else selected_bank_ids.detach().clone(),
-        bank_selector_bits=1 if v2b2_p32 else 2,
+        bank_selector_bits=1 if v2b2_p32 or v2b2_p32_lr else 2,
         bank_alt_id=None if selected_bank_alt_id is None else selected_bank_alt_id.detach().clone(),
         yaqa_bank_fallback_to_v2=(
             None if "fallback_to_v2" not in yaqa_bank_diagnostics else bool(yaqa_bank_diagnostics["fallback_to_v2"])

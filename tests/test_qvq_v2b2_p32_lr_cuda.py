@@ -6,12 +6,14 @@
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RING_STEPS,
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
+    quantize_qvq_linear,
     reconstruct_local_ring_inner_weight,
     reconstruct_qvq_inner_weight,
 )
@@ -49,6 +51,39 @@ def _lr_case(bits: float, *, m: int, k: int, n: int, seed: int, dtype=torch.floa
         bank_alt_id=torch.tensor([3], dtype=torch.uint8),
     )
     return x.cuda(), trellis.cuda(), packed_selectors.cuda(), x.float() @ inner.float()
+
+
+@pytest.mark.parametrize("rounding", ("block_ldlq", "yaqa"))
+def test_lr32_cuda_quantizer_payload_runs_production_kernel(rounding):
+    generator = torch.Generator().manual_seed(20260831)
+    weight = (torch.randn((8, 32), generator=generator) * 0.1).cuda()
+    kwargs = {}
+    if rounding == "yaqa":
+        kwargs["output_hessian"] = torch.eye(8, device="cuda")
+    result = quantize_qvq_linear(
+        weight,
+        torch.eye(32, device="cuda"),
+        bits=2,
+        bank_count=2,
+        v2b2_p32_lr=True,
+        rounding=rounding,
+        trellis_batch_size=8,
+        **kwargs,
+    )
+    layer = QVQLinear(
+        bits=2,
+        in_features=32,
+        out_features=8,
+        bank_count=2,
+        v2b2_p32_lr=True,
+        tensors=result.serialized_tensors(),
+    ).cuda().eval()
+    x = torch.randn((4, 32), generator=generator, dtype=torch.float16).cuda()
+    actual = layer(x)
+    expected = (x.float() @ result.weight.float().transpose(0, 1)).to(actual.dtype)
+
+    assert actual.dtype == torch.float16
+    torch.testing.assert_close(actual, expected, rtol=0, atol=2e-2)
 
 
 def test_lr32_cuda_same_payload_has_format_specific_output():
