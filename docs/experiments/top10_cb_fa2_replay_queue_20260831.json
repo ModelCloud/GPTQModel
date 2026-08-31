@@ -1,0 +1,32 @@
+{
+  "experiment": "top10_cb_fa2_replay_v1",
+  "model": "meta-llama/Llama-3.2-1B-Instruct",
+  "quantization": "replay existing checkpoints; no re-quantization",
+  "selection": "ten highest recorded unique frontier checkpoints with a saved config; duplicate Wave-10 provenance replicas excluded",
+  "pinned_evaluator_commit": "da2cef4f583f29d3ac55e5ad0e069db5124b037f",
+  "task": "gsm8k_platinum_cot",
+  "dataset": {"name": "madrylab/gsm8k-platinum", "config": "main", "split": "test", "rows": 1209},
+  "settings": {
+    "batch_size": 64,
+    "attention_implementation": "paged|flash_attention_2",
+    "generation_backend": "continuous_batching",
+    "cuda_graph_modes": ["off", "decode"],
+    "use_async_batching": false,
+    "max_blocks_per_request": 32,
+    "max_batch_tokens": 8192,
+    "device_policy": "one process per physical GPU; GPUs 0-3"
+  },
+  "results_root": "/root/qvq-results/top10-cb-fa2-replay-v1",
+  "arms": [
+    {"rank": 1, "name": "w2_flat35_seed1", "arm_id": "9769b1", "historical_correct": 564, "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_9769b1_llama32_1b_frontier_w2_flat35_seed1", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_seed1.json", "gpu": 0, "state": "queued"},
+    {"rank": 2, "name": "w3_flat35_up4_l12_15_seed1", "arm_id": "4e7424", "historical_correct": 558, "checkpoint": "/root/qvq-results/llama32-1b-w2-w3queued_4e7424_llama32_1b_frontier_w3_flat35_up4_l12_15_seed1", "config": "scripts/configs/llama32_1b_frontier_w3_flat35_up4_l12_15_seed1.json", "gpu": 1, "state": "queued"},
+    {"rank": 3, "name": "w2_flat35_up4_v4_l9_15", "arm_id": "049d0c", "historical_correct": 556, "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_049d0c_llama32_1b_frontier_w2_flat35_up4_v4_l9_15", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_v4_l9_15.json", "gpu": 2, "state": "queued"},
+    {"rank": 4, "name": "w2_flat35_up4_l6_15", "arm_id": "e55f4d", "historical_correct": 554, "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_e55f4d_llama32_1b_frontier_w2_flat35_up4_l6_15", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l6_15.json", "gpu": 3, "state": "queued"},
+    {"rank": 5, "name": "w2_flat35_up4_l4_15", "arm_id": "428e4d", "historical_correct": 551, "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_428e4d_llama32_1b_frontier_w2_flat35_up4_l4_15", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l4_15.json", "gpu": 0, "state": "queued"},
+    {"rank": 6, "name": "w4_anchor_up4_l6_9", "arm_id": "5a0dce", "historical_correct": 544, "checkpoint": "/root/qvq-results/llama32-1b-w2-w4queued_5a0dce_llama32_1b_frontier_w4_anchor_up4_l6_9", "config": "scripts/configs/llama32_1b_frontier_w4_anchor_up4_l6_9.json", "gpu": 1, "state": "queued"},
+    {"rank": 7, "name": "w2_flat35_up4_o4_all", "arm_id": "f7f157", "historical_correct": 537, "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_f7f157_llama32_1b_frontier_w2_flat35_up4_o4_all", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_o4_all.json", "gpu": 2, "state": "queued"},
+    {"rank": 8, "name": "w9_anchor_up4_l8_l11_l12", "arm_id": "370c3a", "historical_correct": 535, "checkpoint": "/root/qvq-results/llama32-1b-w2-w9queued_370c3a_llama32_1b_frontier_anchor_up4_l8_l11_l12", "config": "scripts/configs/llama32_1b_frontier_w9_anchor_up4_l8_l11_l12.json", "gpu": 3, "state": "queued"},
+    {"rank": 9, "name": "w4_anchor_up4_l6", "arm_id": "7b6e2a", "historical_correct": 535, "checkpoint": "/root/qvq-results/llama32-1b-w2-w4queued_7b6e2a_llama32_1b_frontier_w4_anchor_up4_l6", "config": "scripts/configs/llama32_1b_frontier_w4_anchor_up4_l6.json", "gpu": 0, "state": "queued"},
+    {"rank": 10, "name": "w2_flat35_up4_l8_15", "arm_id": "42c2fc", "historical_correct": 535, "checkpoint": "/root/qvq-results/llama32-1b-w2-w2fixed_42c2fc_llama32_1b_frontier_w2_flat35_up4_l8_15", "config": "scripts/configs/llama32_1b_frontier_w2_flat35_up4_l8_15.json", "gpu": 1, "state": "queued"}
+  ]
+}
