@@ -712,6 +712,16 @@ the CUDA operator on every launch. The Python stub path falls from 1.24 us to
 0.032760 ms (`1.109x`) with identical numerical error. The result is stored in
 `artifacts/a100_p32_window/v13_m1_fullkv_cached_op.json`.
 
+The final clean refresh at `eee8ad01` clears the cumulative target. Ampere
+median latency geomeans fall from 0.061476 ms to 0.059119 ms for M1 (3.83%),
+0.066533 ms to 0.064939 ms for M2 (2.40%), 0.075695 ms to 0.074193 ms for M4
+(1.98%), 0.088012 ms to 0.086353 ms for M8 (1.88%), and 0.091889 ms to
+0.089759 ms for M16 (2.32%). Across all 140 cases, the geomean falls from
+0.075809 ms on fetched `db785848` main to 0.073925 ms: `1.025x`, or 2.486%
+lower latency. Maximum absolute error remains 0.000080109. Planar timings are
+excluded from every improvement figure. The result is stored in
+`artifacts/a100_p32_window/qwen38_v13_cached_op_all_eee8ad01.json`.
+
 ## Reproduction
 
 ```bash
