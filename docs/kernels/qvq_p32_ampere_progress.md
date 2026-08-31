@@ -47,7 +47,7 @@ Hopper-only hardware:
    amount and a compile-time word distance.
 5. Accumulate in FP32 and use bounded split-K to expose enough CTA work. The
    tensor-core route remains capped at eight slices; the short M=1 scalar route
-   uses up to sixteen slices to fill more of the A100's 124 SMs.
+   uses up to thirty-two slices to fill more of the A100's 124 SMs.
 6. Use an explicit block barrier after MMA before reusing a stage buffer.
 7. For M=1 and K<=6144, use a Marlin-style scalar route: one 128-thread
    CTA covers sixteen N16 tiles, each warp owns four tiles, and each lane
@@ -93,6 +93,7 @@ Artifacts (the `_v2` pair is this post-merge tuning cycle):
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v2.json`
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v3.json`
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v4.json`
+- `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v6.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -105,6 +106,7 @@ same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 | M1 (v2) | 28 | 7.701x | 0.952x-29.848x | 2.632e-4 |
 | M1 (v3, eight-way scalar split) | 28 | 7.918x | 0.952x-29.839x | 2.632e-4 |
 | M1 (v4, sixteen-way scalar split) | 28 | 9.330x | 1.020x-31.519x | 2.632e-4 |
+| M1 (v6, thirty-two-way scalar split) | 28 | 10.133x | 1.214x-35.168x | 2.632e-4 |
 
 M16 per-shape speedup ranges across W2-W3.5:
 
@@ -126,8 +128,10 @@ regression. The v3 scalar split update lowers M1 geometric-mean latency again
 to 0.090268 ms (`1.028x` over v2, `1.110x` over the prior checkpoint); full-Q
 W2 reaches 0.084992 ms. The v4 sixteen-way scalar split lowers the geometric
 mean again to 0.076604 ms (`1.178x` over v3), with full-Q W2 at 0.072704 ms.
-This is accepted forward progress, but the additional `2x` Ampere stretch
-target remains open.
+The v6 thirty-two-way scalar split lowers the geometric mean again to
+0.070489 ms (`1.087x` over v4), with full-Q W2 at 0.065536 ms. This is
+accepted forward progress, but the additional `2x` Ampere stretch target
+remains open.
 
 ## Profiler diagnosis
 
@@ -158,7 +162,8 @@ more decode instructions without expanding the compact state representation.
 |---|---|---|
 | WMMA shared operands with 16-byte/natural alignment | M1 failed with `cudaErrorMisalignedAddress` before comparison. | Rejected. All WMMA shared operands and stores now have explicit 32-byte alignment. |
 | Double buffering without a post-MMA block barrier | Some low-occupancy cases passed, but denser split grids produced multi-unit output corruption. Fast warps could overwrite a stage still consumed by slower warps under independent thread scheduling. | Rejected and all timings discarded. Added `__syncthreads()` at the producer/consumer handoff. |
-| Split counts above eight during the unsafe-buffer experiment | Long-K splits 9-16 showed increasing corruption before the producer/consumer barrier fix. | Rejected for that unsafe revision; the corrected kernel was revalidated separately before enabling sixteen-way M=1 scalar splits. |
+| Split counts above eight during the unsafe-buffer experiment | Long-K splits 9-16 showed increasing corruption before the producer/consumer barrier fix. | Rejected for that unsafe revision; the corrected kernel was revalidated separately before enabling wider M=1 scalar split waves. |
+| Sixty-four-way split | Correct in the 28-case M=1 matrix, but geomean latency was 0.065112 ms versus 0.064857 ms for thirty-two-way splitting; larger reduction work provided no net gain. | Rejected; retain thirty-two-way scalar splitting. |
 | Generic two-wave split heuristic | Correct on the first formal matrix but left substantial performance unused on long-K and wide-N shapes. | Replaced by measured Qwen3.8 splits plus a live-SM fallback for unknown shapes. |
 | Cached 512 KiB state-to-FP16-pair LUT | Exact, but representative latency rose from 0.115-0.221 ms to 0.288-0.451 ms because random cache traffic cost more than compact PGC16 arithmetic. | Rejected and reverted. |
 | Three-stage K16 pipeline without the post-MMA barrier | Exact, but M16 regressed 3-6% and M1 did not improve; the extra footprint/bookkeeping outweighed the removed barrier. | Rejected and reverted. |
