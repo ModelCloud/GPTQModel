@@ -1,15 +1,20 @@
-# QVQ YAQA best ~W3.2 reproducibility record
+# QVQ YAQA best configurations log
 
-This document pins the best protocol-valid ~W3.2 Llama 3.2 1B result known as
-of 2026-08-31. It records the quantizer revision, complete mixed-format
+This document records the best protocol-valid QVQ YAQA configurations by
+model. Each model section pins its quantizer revision, mixed-format
 configuration, source-model and dataset bindings, corpus construction, data
 splits, quantization command, and score-producing evaluation commands.
+
+## Llama 3.2 1B Instruct
+
+The following record pins the best known ~W3.2 result for Llama 3.2 1B
+Instruct as of 2026-08-31.
 
 The experiment is `f6_yaqa182_nm10000`. It must not be confused with the
 historical `551/1209` result whose evaluator/code provenance was subsequently
 superseded by the Wave-10 audit.
 
-## Result
+### Result
 
 | Field | Value |
 | --- | ---: |
@@ -61,7 +66,7 @@ Serialized tensor count: 558
 Quantized projection modules: 112
 ```
 
-## Effective allocation
+### Effective allocation
 
 There are 16 transformer layers. The following rates apply to all layers
 unless a layer exception is stated.
@@ -83,7 +88,7 @@ V2B2-P32 supports rates only through W3.5. Dynamic rules are resolved using
 first-match-wins semantics, so specific layer rules must precede broad role
 rules.
 
-## Complete quantization input config
+### Complete quantization input config
 
 Canonical repository path:
 
@@ -176,7 +181,7 @@ The fully expanded saved configuration is the checkpoint's
 `quantize_config.json`; that file, rather than defaults from a later checkout,
 is authoritative for inspecting the serialized model.
 
-## Dense source model
+### Dense source model
 
 ```text
 Path: /monster/data/model/Llama-3.2-1B-Instruct
@@ -198,9 +203,9 @@ File bindings:
 | `tokenizer_config.json` | `9823dcfdc1121869029da45192238e85cf44f0b232a6d9dc20e4fe6f4242a14e` |
 | `special_tokens_map.json` | `6f38c73729248f6c127296386e3cdde96e254636cc58b4169d3fd32328d9a8ec` |
 
-## Quantization datasets and splits
+### Quantization datasets and splits
 
-### Lifecycle-forward stream
+#### Lifecycle-forward stream
 
 ```text
 Dataset name: NM calibration
@@ -215,7 +220,7 @@ For `rounding="yaqa"`, this is a lifecycle-forward stream. The actual QVQ
 module input/output Fisher factors come from the YAQA stream below. No module
 replay, replay-search, replay-confirmation, or validation dataset was used.
 
-### YAQA full-model Fisher stream
+#### YAQA full-model Fisher stream
 
 ```text
 Dataset name: yaqa182_nm10000
@@ -263,7 +268,7 @@ Four duplicate groups occur within NM, yielding `182 + 9,996 = 10,178`
 independent sequences. The artifact's stored order is YAQA first and NM
 second; YAQA capture subsequently uses `sequence_sort="desc"`.
 
-### Disjointness binding
+#### Disjointness binding
 
 ```text
 Path: /root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.json
@@ -275,7 +280,7 @@ Strict required: true
 The manifest binds both calibration sources and the generated Fisher artifact
 to GSM8K Platinum and both D300 manifests.
 
-## Software and runtime provenance
+### Software and runtime provenance
 
 Quantization:
 
@@ -309,7 +314,7 @@ Pin the historical commit when reproducing the checkpoint. Do not quantize
 from a moving checkout: the Wave-10 audit demonstrated that quantizer code
 drift changes discrete bank/trellis selections across the entire model.
 
-## Hash preflight
+### Hash preflight
 
 Run before quantization:
 
@@ -327,7 +332,7 @@ f283eca649cbf1d2dcc160c202bc131c2462d4b3485b34c0d4bb5237d85a9d4e  /root/qvq-data
 EOF
 ```
 
-## Exact quantization CLI
+### Exact quantization CLI
 
 `run_in_worktree.py` is required because the development environment may have
 an editable GPTQModel installation. Directly running the historical script can
@@ -375,7 +380,7 @@ python "$ROOT/scripts/run_in_worktree.py" \
 For the cleanest scientific replication, use one quantizer on an otherwise
 idle physical GPU even though the 1B model can fit multiple sessions.
 
-## Exact GSM8K Platinum score CLI
+### Exact GSM8K Platinum score CLI
 
 Dataset and task:
 
@@ -424,7 +429,7 @@ metric at higher throughput, but it is not the provenance of the published
 547 result. Use the command above when validating literal reproduction, then
 run the fast evaluator as a parity-checked secondary report.
 
-## Exact D300 diagnostic CLI
+### Exact D300 diagnostic CLI
 
 Dataset:
 
@@ -474,7 +479,7 @@ used to produce the score above:
 SHA-256 17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58
 ```
 
-## Rebuild the Fisher corpus from its sources
+### Rebuild the Fisher corpus from its sources
 
 The canonical artifact should be reused when reproducing the score. To audit
 or rebuild it from its two immutable source Parquets, run the builder at the
@@ -507,7 +512,7 @@ The rebuilt `yaqa182_nm10000.parquet` must produce:
 5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39
 ```
 
-## Repository records
+### Repository records
 
 The authoritative tracked experiment records are:
 
@@ -517,4 +522,3 @@ docs/experiments/calibration_fisher_scaling_v2_registry_20260830.json
 scripts/run_llama32_calibration_fisher_scaling_v2.sh
 scripts/build_calibration_fisher_scaling.py
 ```
-
