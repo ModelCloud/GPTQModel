@@ -175,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     divergence.add_argument(
         "--attn-implementation",
-        choices=("eager", "sdpa", "flash_attention_2", "flash_attention_3"),
+        choices=("eager", "sdpa", "flash_attention_2"),
         default="sdpa",
         help="Attention implementation used identically by dense and quantized models.",
     )
@@ -198,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
     micro_math.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
     micro_math.add_argument(
         "--attn-implementation",
-        choices=("eager", "sdpa", "flash_attention_2", "flash_attention_3"),
+        choices=("eager", "sdpa", "flash_attention_2"),
         default="sdpa",
     )
     micro_math.add_argument("--trust-remote-code", action="store_true")
@@ -219,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     tasks.add_argument(
         "--attn-implementation",
         default="paged|flash_attention_2",
-        choices=("paged|flash_attention_2", "paged|flash_attention_3", "paged|sdpa"),
+        choices=("paged|flash_attention_2", "paged|sdpa"),
         help="Paged attention backend; paged mode also activates native continuous batching.",
     )
     tasks.add_argument(
