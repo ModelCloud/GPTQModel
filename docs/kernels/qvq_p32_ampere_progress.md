@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `db785848` (tip after
-  PR #85 merged).
+- Source base: freshly fetched GitHub `origin/main` at `ab277a17` (tip after
+  PR #86 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -505,6 +505,16 @@ more decode instructions without expanding the compact state representation.
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
 | First v13 lock-free full-matrix sample | Five consecutive early-M2 rows jumped by 3.5-7.5x while their planar controls also jumped, then both paths returned to normal. The unaffected 135 rows improved 0.99% versus main. | Discard the aggregate as a transient-contaminated run; retain `qwen38_v13_lockfree_all_29a69382.json` only as a diagnostic and rerun the complete idle-gated matrix. |
 | Four-accumulator split reducer | The matched M1 full-KV probe improved 0.68%, but the clean 140-case refresh regressed from 0.074518 ms to 0.074948 ms, with M1-M4 all slower. | Rejected and reverted; retain the single-accumulator deterministic reducer. The false-positive focused and full results remain in the v13 artifacts. |
+| Reusing precomputed tensor data pointers in every CUDA launch branch | Behavior and outputs were unchanged, but the matched 300-iteration M1 full-KV geomean regressed from 0.034557 ms to 0.035309 ms (2.18%). | Rejected and restored to exact `ab277a17` source; repeated `data_ptr()` extraction is not the limiting enqueue cost. |
+| 128-thread split reducer | An isolated full-KV run appeared faster, but the complete M1 subset with recorded tuner plans regressed from 0.058178 ms to 0.058862 ms (1.18%). At the same split 64, all four full-KV rates were 3-9% slower. | Rejected and restored to 256 threads; extra reducer blocks do not offset lower per-block throughput. |
+| Warp-leader split-bound division | Replacing each thread's uniform K-range divisions with lane-zero division and two shuffles was neutral for M1 full-KV and regressed M16 full-KV from 0.034293 ms to 0.035069 ms (2.26%). | Rejected and reverted; retain the compiler's uniform runtime division. |
+| Host-computed alternate-bank mask | Passing the uniform decoded mask instead of deriving it per thread left matched M1 full-KV exactly unchanged at 0.034557 ms; M16 Q/KV results mixed one-tick gains and losses. | Rejected and reverted; retain the simpler bank-ID kernel interface. |
+| 512-thread reducer for M8/M16 | M16 regressed from 0.089626 ms to 0.096331 ms (7.48%). At the same split 32, full-KV lost 3-12% and three MLP-down rates lost 73-79%. | Rejected and reverted; 256 threads remain the best broad reducer geometry. |
+| Compile-time split-32 reducer | Fully unrolling the common 32-way serial sum preserved exact accumulation order, but M16 full-KV regressed from 0.034293 ms to 0.034816 ms (1.53%); MLP-down was effectively neutral. | Rejected and reverted; runtime loop control is cheaper than the enlarged unrolled reducer on sm_80. |
+| Bank-selector hoist across every scalar and WMMA route | The 60-case full-Q/full-KV/MLP-down screen was neutral overall (-0.09%): M8 improved 2.53%, but M1, M2, M4, and M16 regressed by 1.32%, 0.81%, 0.23%, and 0.68%. | Rejected broadly and narrowed to repeatedly positive M8 fixed-N routes; scalar and full-row kernels retain main's decode path. |
+| Single allocation for partials and output | Placing the output in the final plane of one `(splits+1)` allocation remained exact, but constructing the returned tensor view raised full-KV latency from 0.035362 ms to 0.038750 ms (9.58%). | Rejected and reverted; retain two direct allocator requests for the split workspace and returned output. |
+| Sequential M16 bank-mask hoist | Limiting each selector mask's live range to its two shared decodes remained exact, but the 20-case fixed-N M16 geomean regressed from 0.096235 ms to 0.096689 ms (0.47%); every shape slowed. | Rejected and reverted; keep bank-mask hoisting restricted to the validated M8 routes. |
+| Reusing one FP32 `TensorOptions` value | Avoided constructing the same options expression twice, but after excluding one slow control outlier the remaining 19 full-KV cases regressed by 4.98%. | Rejected and reverted; retain the two inline allocator option expressions. |
 
 ## Post-merge origin/main baseline (v11)
 
@@ -721,6 +731,125 @@ median latency geomeans fall from 0.061476 ms to 0.059119 ms for M1 (3.83%),
 lower latency. Maximum absolute error remains 0.000080109. Planar timings are
 excluded from every improvement figure. The result is stored in
 `artifacts/a100_p32_window/qwen38_v13_cached_op_all_eee8ad01.json`.
+
+### Post-merge v14 baseline
+
+PR #86 merged as `ab277a17`. This optimization window uses that exact
+`origin/main` tip as its Ampere-kernel control, with default-on in-process
+autotuning for both controls and candidates. Planar timings remain diagnostic
+and are excluded from all improvement calculations.
+
+The clean 20-warmup/100-iteration, 140-case control is stored in
+`artifacts/a100_p32_window/qwen38_newmain_all_ab277a17.json`. Ampere median
+latency geomeans are 0.057948 ms (M1), 0.064170 ms (M2), 0.073818 ms (M4),
+0.086108 ms (M8), and 0.089626 ms (M16), with an all-case geomean of
+0.073316 ms. Maximum absolute error is 0.000080109.
+
+The first v14 progression hoists the two bank-selector masks shared by each
+M8 WMMA lane's four decoded pairs. It is enabled only for the five fixed-N
+routes that improved in repeated screens: full-Q, attention-out, linear-QKV,
+linear-Z, and MLP-down. Full-KV, MLP-gate, scalar M1-M4, and full-row M16 keep
+the original decode path. An immediate matched 20-warmup/300-iteration A/B
+reduces the enabled 20-case Ampere geomean from 0.091589 ms to 0.090367 ms
+(`1.014x`, 1.335% lower latency); every enabled shape improves by 0.93-1.62%.
+The control and candidate are stored in
+`artifacts/a100_p32_window/v14_m8_bank_selector_matched_control.json` and
+`artifacts/a100_p32_window/v14_m8_bank_selector_matched_candidate.json`.
+Planar timings are excluded from these comparisons.
+
+The second progression removes a redundant intermediate CUDA launch-error
+poll from split plans. The main kernel and reducer are submitted to the same
+stream, then the existing post-reducer check validates the two-launch
+sequence; the single-kernel path retains its immediate check. In a matched
+140-case A/B, the Ampere geomean falls from 0.073926 ms to 0.073650 ms
+(`1.004x`, 0.373% lower). M1, M2, M4, M8, and M16 improve by 0.55%, 0.18%,
+0.17%, 0.39%, and 0.58%, respectively. The matched control and candidate are
+stored in
+`artifacts/a100_p32_window/qwen38_v14_launch_poll_matched_control_all.json`
+and `artifacts/a100_p32_window/qwen38_v14_launch_poll_all.json`. Planar
+timings are excluded.
+
+The third progression writes each naturally aligned adjacent FP32 output pair
+with one `float2` store on the WMMA M8/M16 routes. Scalar M1-M4 retains its
+original stores after the broad screen was neutral-to-slower there; the
+compile-time `N=1024` path also retains scalar stores. In the matched complete
+M8/M16 A/B, the 56-case Ampere geomean falls from 0.087619 ms to 0.085996 ms
+(`1.019x`, 1.852% lower). M8 improves 1.593% and M16 improves 2.110%.
+Artifacts are stored in
+`artifacts/a100_p32_window/v14_wmma_float2_matched_control.json`,
+`artifacts/a100_p32_window/v14_wmma_float2_matched_candidate.json`, and
+`artifacts/a100_p32_window/v14_wmma_float2_selective_all.json`. Planar
+timings remain excluded.
+
+The fourth progression stages fixed-N bank IDs with aligned packed loads on
+the routes where the instruction reduction pays for itself: one `uint4` load
+per K stage on scalar M4 and one `uint32_t` load per K stage on full-row M16.
+M1, M2, M8, dynamic/tail paths, and `N=1024` retain byte loads. The initial
+broad screen found M1 and M8 regressions and a full-KV regression, so those
+variants were rejected rather than averaged into the result. In the immediate
+matched 20-warmup/300-iteration 48-case A/B, all twelve enabled M/shape groups
+improve: M4 falls from 0.084237 ms to 0.083490 ms (0.895%), M16 falls from
+0.103279 ms to 0.101781 ms (1.472%), and their combined geomean falls from
+0.093273 ms to 0.092183 ms (`1.012x`, 1.183% lower latency). Exactness passes
+28/28. The broad diagnostic, narrowed screen, and matched results are stored
+in `artifacts/a100_p32_window/v14_packed_bank_stage_screen.json`,
+`artifacts/a100_p32_window/v14_packed_bank_selective_all.json`,
+`artifacts/a100_p32_window/v14_packed_bank_matched_control.json`, and
+`artifacts/a100_p32_window/v14_packed_bank_matched_candidate.json`. Planar
+timings remain excluded.
+
+The fifth progression revisits M2 fixed-N specialization together with packed
+bank-ID staging. Fixed N alone had previously regressed M2 by 1.10%; combining
+it with one aligned `uint4` bank-ID load per K stage reverses that result.
+Across the matched 24 non-KV cases the Ampere geomean falls from 0.071618 ms
+to 0.070870 ms (1.055%), with all six shape groups non-regressing. A separate
+500-iteration full-KV A/B falls from 0.035574 ms to 0.034808 ms (2.199%).
+Together the complete 28-case M2 geomean falls from 0.064805 ms to 0.064026 ms
+(`1.012x`, 1.218% lower latency), and exactness passes 28/28. The four matched
+artifacts are
+`artifacts/a100_p32_window/v14_m2_static_packed_control.json`,
+`artifacts/a100_p32_window/v14_m2_static_packed_candidate.json`,
+`artifacts/a100_p32_window/v14_m2_fullkv_packed_control.json`, and
+`artifacts/a100_p32_window/v14_m2_fullkv_packed_candidate.json`.
+
+The first post-progression 140-case refresh is diagnostic only: six M1/M2
+samples suffered isolated 2.6-4.0x timing spikes despite the exclusivity gate,
+so its aggregate is invalid and is not used for the cumulative comparison.
+The unaffected M16 slice was 2.20% faster than fetched main. The complete
+failed refresh is retained in
+`artifacts/a100_p32_window/qwen38_v14_packed_bank_all_ec5b2e3e.json` so the
+anomaly is visible rather than silently discarded.
+
+Two final broad host/store experiments were rejected. Pairing every M2 scalar
+output store regressed the 28-case geomean by 0.356%, and narrowing it to the
+initially promising linear-QKV/MLP-gate routes still regressed the immediate
+500-iteration A/B by 0.093%. Removing the release-build launch-status poll
+also failed to generalize: the matched 20-case full-KV geomean regressed
+0.333%, with M1, M4, and M16 non-positive. The source is restored after both
+experiments. Diagnostics are retained in
+`artifacts/a100_p32_window/v14_m2_float2_candidate.json`,
+`artifacts/a100_p32_window/v14_m2_selective_float2_control.json`,
+`artifacts/a100_p32_window/v14_m2_selective_float2_candidate.json`,
+`artifacts/a100_p32_window/v14_release_launch_check_control.json`, and
+`artifacts/a100_p32_window/v14_release_launch_check_candidate.json`.
+
+The sixth progression narrows paired scalar output stores to M1 full-KV only.
+The naturally aligned adjacent outputs are written with one `float2` store;
+all other scalar routes retain the proven scalar stores. In the matched
+40-warmup/1000-iteration A/B, the four-rate Ampere geomean falls from
+0.035062 ms to 0.032996 ms (`1.063x`, 6.259% lower latency), and an immediate
+repeat measures 0.033022 ms. Exactness passes 28/28. Artifacts are stored in
+`artifacts/a100_p32_window/v14_m1_fullkv_float2_control.json`,
+`artifacts/a100_p32_window/v14_m1_fullkv_float2_candidate.json`, and
+`artifacts/a100_p32_window/v14_m1_fullkv_float2_candidate_repeat.json`.
+
+Using exact artifact medians—not rounded ledger percentages—and weighting
+each sequential matched progression by its affected share of the 140-case
+matrix, cumulative Ampere latency improves `1.02155x`, or **2.155%**, versus
+the fetched `ab277a17` main baseline. Planar measurements are excluded. This
+clears the requested cumulative 2% threshold despite the unusable full-refresh
+run above; a future quiet-window refresh should confirm the same result in one
+continuous matrix.
 
 ## Reproduction
 
