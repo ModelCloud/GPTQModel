@@ -30,12 +30,14 @@ from scripts import benchmark_qvq_lr_vs_gptq_llama32_1b as comparison
 
 
 RATES = (2.0, 2.5, 3.0, 3.5)
+M_VALUES = (1, 2, 4, 8, 16)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--physical-gpu", type=int, default=0)
     parser.add_argument("--rates", nargs="+", type=float, default=RATES)
+    parser.add_argument("--m-values", nargs="+", type=int, default=M_VALUES)
     parser.add_argument(
         "--shapes",
         nargs="+",
@@ -56,6 +58,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("the standard-P32 benchmark is pinned to physical H200 GPU 0")
     if any(rate not in RATES for rate in args.rates):
         parser.error("--rates supports only 2, 2.5, 3, and 3.5")
+    if any(m not in M_VALUES for m in args.m_values):
+        parser.error("--m-values supports only 1, 2, 4, 8, and 16")
     if args.warmup <= 0 or args.iterations <= 0 or args.idle_samples <= 0:
         parser.error("warmup, iterations, and idle-samples must be positive")
     return args
@@ -73,7 +77,9 @@ def _print_table(rows: list[dict]) -> None:
         matching = [
             row
             for row in rows
-            if row["shape"] == candidate["shape"] and row["bits"] == candidate["bits"]
+            if row["shape"] == candidate["shape"]
+            and row["bits"] == candidate["bits"]
+            and row["m"] == candidate["m"]
         ]
         planar = next(row for row in matching if row["kernel"] == "planar_p32")
         machete = next(row for row in matching if row["kernel"] == "machete_w4")
@@ -133,15 +139,23 @@ def _run(args: argparse.Namespace) -> dict:
         comparison._shape_by_name(name, "qwen38_27b") for name in args.shapes
     ]
     rows: list[dict] = []
-    for shape_index, case in enumerate(selected_shapes):
-        generator = torch.Generator().manual_seed(20260904 + shape_index)
-        x = (torch.randn((16, case.in_features), generator=generator) * 0.1).half().cuda()
+    benchmark_cases = [
+        (m, case)
+        for m in args.m_values
+        for case in selected_shapes
+    ]
+    for case_index, (m, case) in enumerate(benchmark_cases):
+        generator = torch.Generator().manual_seed(20260904 + case_index)
+        x = (torch.randn((m, case.in_features), generator=generator) * 0.1).half().cuda()
+        window_input = x if m == 16 else torch.zeros(
+            (16, case.in_features), dtype=torch.float16, device="cuda"
+        )
 
         gptq_source = comparison._gptq_source(
             torch,
             case,
             group_size=comparison.GPTQ_GROUP_SIZE,
-            seed=20260940 + shape_index,
+            seed=20260940 + case_index,
             dtype=torch.float16,
         )
         dense_gptq = comparison._dense_gptq_weight(
@@ -170,7 +184,7 @@ def _run(args: argparse.Namespace) -> dict:
             kernel="Machete W4",
             actual=machete_output,
             reference=gptq_reference,
-            expected_shape=(16, case.out_features),
+            expected_shape=(m, case.out_features),
             expected_dtype=torch.float16,
             atol=2e-2,
             rtol=2e-2,
@@ -182,7 +196,7 @@ def _run(args: argparse.Namespace) -> dict:
 
         for rate_index, bits in enumerate(args.rates):
             rate_generator = torch.Generator().manual_seed(
-                20261000 + shape_index * len(RATES) + rate_index
+                20261000 + case_index * len(RATES) + rate_index
             )
             tile_count = (case.in_features // 16) * (case.out_features // 16)
             words_per_tile = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
@@ -226,8 +240,10 @@ def _run(args: argparse.Namespace) -> dict:
                 )
 
             def window_call():
-                return qvq_p32_window_wgmma_m16_tma(
-                    x,
+                if m < 16:
+                    window_input[:m].copy_(x)
+                output = qvq_p32_window_wgmma_m16_tma(
+                    window_input,
                     window,
                     levels,
                     bank_ids,
@@ -235,6 +251,7 @@ def _run(args: argparse.Namespace) -> dict:
                     out_features=case.out_features,
                     bank_alt_id=3,
                 )
+                return output if m == 16 else output[:m]
 
             planar_output = planar_call()
             window_output = window_call()
@@ -243,7 +260,7 @@ def _run(args: argparse.Namespace) -> dict:
                 kernel=f"planar P32 W{bits:g}",
                 actual=planar_output,
                 reference=p32_reference,
-                expected_shape=(16, case.out_features),
+                expected_shape=(m, case.out_features),
                 expected_dtype=torch.float32,
                 atol=2e-3,
                 rtol=0.0,
@@ -252,7 +269,7 @@ def _run(args: argparse.Namespace) -> dict:
                 kernel=f"window P32 W{bits:g}",
                 actual=window_output,
                 reference=p32_reference,
-                expected_shape=(16, case.out_features),
+                expected_shape=(m, case.out_features),
                 expected_dtype=torch.float32,
                 atol=2e-3,
                 rtol=0.0,
@@ -260,7 +277,7 @@ def _run(args: argparse.Namespace) -> dict:
             fields = {
                 "bits": bits,
                 "shape": case.name,
-                "m": 16,
+                "m": m,
                 "k": case.in_features,
                 "n": case.out_features,
             }
@@ -298,11 +315,11 @@ def _run(args: argparse.Namespace) -> dict:
             torch.cuda.empty_cache()
             candidate = rows[-2]
             print(
-                f"complete W{bits:g} {case.name}: window={candidate['median_ms']:.5f} ms "
+                f"complete M{m} W{bits:g} {case.name}: window={candidate['median_ms']:.5f} ms "
                 f"machete={machete_timing['median_ms']:.5f} ms max_abs={candidate['max_abs']:.7g}",
                 flush=True,
             )
-        del x, machete, gptq_source
+        del x, window_input, machete, gptq_source
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -318,6 +335,8 @@ def _run(args: argparse.Namespace) -> dict:
             "sm_count": properties.multi_processor_count,
         },
         "model_shapes": "qwen38_27b",
+        "m_values": args.m_values,
+        "small_m_policy": "copy live rows into persistent zero-padded M16 input inside timed graph",
         "warmup": args.warmup,
         "iterations": args.iterations,
         "rows": rows,
