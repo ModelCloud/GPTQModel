@@ -851,6 +851,43 @@ clears the requested cumulative 2% threshold despite the unusable full-refresh
 run above; a future quiet-window refresh should confirm the same result in one
 continuous matrix.
 
+### Post-merge v15 baseline
+
+PR #87 merged as `3de3fb05`. This window uses that exact `origin/main` tip as
+its Ampere control. Its clean 20-warmup/100-iteration, 140-case result is
+`artifacts/a100_p32_window/qwen38_newmain_all_3de3fb05.json`: Ampere median
+latency geomeans are 0.058310 ms (M1), 0.063643 ms (M2), 0.073368 ms (M4),
+0.084338 ms (M8), and 0.086899 ms (M16), with an all-case geomean of
+0.072445 ms. Maximum absolute error is 0.000080109. Planar timings remain
+diagnostic and are excluded from all improvement figures.
+
+The first v15 progression distributes each M1 full-KV stage's 16 bank-ID
+bytes across four lanes as four aligned `uint32_t` loads. The previous
+single-lane `uint4` attempt serialized this work and regressed M1; spreading
+the loads retains the instruction reduction without that bottleneck. The
+specialization is deliberately limited to compile-time `N=1024`, M1, and 16
+tiles per block. In a reversal test with 50 warmups and 1,000 iterations, the
+four-rate Ampere geomean falls 3.078% by median and 5.234% by mean. W2, W2.5,
+and W3 improve by 6.25%, 6.25%, and 2.94% by median; W3.5 selects split 48
+instead of 64 and is one timer quantum slower. Exactness is unchanged. The
+candidate and restored-control artifacts are
+`artifacts/a100_p32_window/v15_m1_fullkv_bankid_u32x4_repeat.json` and
+`artifacts/a100_p32_window/v15_m1_fullkv_bankid_clean_repeat.json`.
+
+Rejected v15 experiments are retained as diagnostics. Explicit
+`cp.async.cg` input staging improved the broad screen by only 0.055%, while
+the scalar-only form regressed 0.204%. WMMA `__launch_bounds__(128, 10)` and
+`(128, 9)` caused large regressions; the scalar min-blocks variant was
+neutral. Wave-aligned fixed M16 splits were slower for all seven model
+shapes. A compile-time scalar split-40 specialization produced only one timer
+quantum in one rate and no repeatable aggregate gain. The broad four-lane M1
+bank-ID variant was positive overall but mixed outside full-KV, so it was
+narrowed rather than accepted broadly. Relevant artifacts use the `v15_`
+prefix in `artifacts/a100_p32_window/`, including `v15_input_cg_*`,
+`v15_wmma_minblocks*`, `v15_wave_m16_*`,
+`v15_m1_fullq_static_split40.json`, and
+`v15_m1_bankid_u32x4_matched_*`.
+
 ## Reproduction
 
 ```bash

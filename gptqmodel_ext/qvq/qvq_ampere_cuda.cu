@@ -600,6 +600,20 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       }
     }
     if constexpr (
+        StaticN == 1024 && TilesPerBlock == 16 && Rows == 1) {
+      if (thread < StageKTiles * 4) {
+        const int stage_k_tile = thread >> 2;
+        const int word = thread & 3;
+        const int k_tile = k_tile_base + stage_k_tile;
+        auto* destination_ids = reinterpret_cast<uint32_t*>(
+            packed_bank_ids[destination][stage_k_tile]);
+        destination_ids[word] = k_tile < k_tiles
+            ? __ldg(reinterpret_cast<const uint32_t*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles +
+                      block_n_tile_base) + word)
+            : 0u;
+      }
+    } else if constexpr (
         StaticN > 0 && TilesPerBlock == 16 &&
         (Rows == 2 || (Rows == 4 && StaticN != 1024))) {
       if (thread < StageKTiles) {
