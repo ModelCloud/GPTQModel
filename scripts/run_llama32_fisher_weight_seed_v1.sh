@@ -136,12 +136,13 @@ run_arm() {
           --batch-size 1 --concat-size 0 --calibration-sort desc --device cuda:0 \
           --disjointness-manifest "$DISJOINTNESS" --require-disjointness --qvq-telemetry
     fi
+    # Keep this scientific comparison on the canonical evaluator. The
+    # paged-FA2/batch-64/CUDA-graph canary changed the score and was slower.
     if [ ! -f "$gsm" ]; then
       env PYTHONHASHSEED=0 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
         python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
           --checkpoint "$out" --output "$gsm" --task gsm8k_platinum_cot \
-          --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-          --use-cuda-graph
+          --batch-size 8 --device cuda:0 --attn-implementation 'paged|sdpa'
     fi
     if [ ! -f "$d300" ]; then
       env PYTHONHASHSEED=0 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \

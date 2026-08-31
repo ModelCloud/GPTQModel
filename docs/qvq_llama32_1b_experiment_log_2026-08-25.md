@@ -139,7 +139,7 @@ checkpoint to preserve. Both were restarted from their immutable inputs at
 `2026-08-30T19:56:28Z` under detached `tmux` supervisor `qvq-fisher-v2`, still
 pinned to `3ebcf9a3`; the interruption is retained in the queue manifest.
 
-### Fisher composition and seed follow-up (running, 2026-08-31)
+### Fisher composition and seed follow-up (complete, 2026-08-31)
 
 The first four composition arms completed a 2x2 test at NM prefixes 2,048 and
 4,096 with YAQA Fisher weights 1x and 2x. They reuse immutable deduplicated
@@ -157,18 +157,34 @@ The YAQA-weight effect changes sign with NM coverage: 2x loses 12 GSM questions
 at NM2048 but gains 10 at NM4096. D300 again does not select the GSM winner;
 the best-GSM NM2048/1x arm has the lowest aligned score in its pair.
 
-Four follow-up NM4096 arms are now quantizing independently: YAQA
-weights 1.5x and 3x at seed 0, plus exact 2x replicas at YAQA seeds 1 and 2.
-Together with the running seed-0 2x arm, these provide a 1x/1.5x/2x/3x weight
-curve and three-seed robustness estimate. The launcher also produces pairwise
-seed reports containing logical bank-ID and trellis disagreement, packed-field
-disagreement, reconstructed-weight relative L2, and disagreement concentration
-by layer. See
+The four NM4096 follow-ups are complete:
+
+| Arm | YAQA weight | YAQA seed | GSM8K | D300 aligned | Exact32 | Mean divergence |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| F13 | **1.5x** | 0 | **538/1209 (44.4996%)** | 3203/9600 (33.3646%) | **23** | **10.0133** |
+| F14 | 3x | 0 | 529/1209 (43.7552%) | 3127/9600 (32.5729%) | 18 | 9.8267 |
+| F15 | 2x | 1 | 528/1209 (43.6725%) | 3274/9600 (34.1042%) | 22 | 9.9300 |
+| F16 | 2x | 2 | 533/1209 (44.0860%) | **3382/9600 (35.2292%)** | 16 | 9.6633 |
+
+Together with F11/F12, the seed-0 NM4096 weight curve is 525, 538, 535,
+and 529 correct at 1x, 1.5x, 2x, and 3x respectively. The best observed
+NM4096 weight is therefore **1.5x**; 3x overweights the optimized YAQA stream.
+The 2x recipe scores 535, 528, and 533 over seeds 0--2, with mean 532/1209
+(44.0033%) and population standard deviation 2.94 questions. This is much
+more stable than the earlier two-seed NM10k spread, but it still argues for
+reporting a seed distribution rather than promoting one peak.
+
+The pinned supervisor completed and hashed all checkpoints and both evaluation
+reports, then exited before the optional checkpoint-distance phase. No
+seed-distance artifact is claimed by this result set. Exact report digests and
+machine-readable scores are in
+[`calibration_fisher_weight_seed_results_20260831.json`](experiments/calibration_fisher_weight_seed_results_20260831.json).
+See also
 [`calibration_fisher_weight_seed_queue_20260831.json`](experiments/calibration_fisher_weight_seed_queue_20260831.json)
 and
 [`calibration_fisher_weight_seed_registry_20260831.json`](experiments/calibration_fisher_weight_seed_registry_20260831.json).
 
-### Fast held-out evaluator transition (canary queued, 2026-08-31)
+### Fast held-out evaluator transition (canary rejected, 2026-08-31)
 
 The score branch now includes `origin/main` commit `201897eb`, including the
 latest exact-P32 inference kernels. Future task evaluations request paged
@@ -179,9 +195,12 @@ metadata so a silent fixed-batch fallback is visible.
 
 This is an evaluation-runtime change, not a quantization-protocol change.
 F13--F16 remain quantized from pinned commit `0d9589ba` for exact comparability
-with F12. A separate F9 canary will compare the new runtime against the legacy
-543/1209 result and will only promote it after exact metric parity plus resolved
-paged/continuous execution are verified. See
+with F12. The F9 canary did verify paged attention, continuous batching, and a
+CUDA-graph request, but it changed GSM8K from 543 to 545 and slowed evaluation
+from 1069.33 seconds to 1427.00 seconds (`0.749x`). The fast path therefore
+failed both correctness and performance gates. No F13--F16 fast-v2 report was
+published; their canonical paged-SDPA batch-8 reports remain authoritative.
+See
 [`qvq_fast_eval_protocol_20260831.json`](experiments/qvq_fast_eval_protocol_20260831.json).
 
 ## Frozen data and evaluation protocol

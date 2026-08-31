@@ -1,9 +1,10 @@
 {
   "schema": "qvq.calibration-fisher-weight-seed-queue.v1",
-  "status": "running",
+  "status": "complete",
   "prepared_at_utc": "2026-08-31T01:41:02Z",
   "launched_at_utc": "2026-08-31T01:51:41Z",
-  "launch_commit": "0d9589ba",
+  "completed_at_utc": "2026-08-31T05:39:55Z",
+  "launch_commit": "0d9589ba1c4e3dc209168742807bb2b02d3f7b8b",
   "supervisor": "tmux:qvq-fisher-weight-seed-v1",
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "Resolve the NM4096 YAQA-weight optimum and measure YAQA seed variance at the 2x recipe.",
@@ -22,7 +23,7 @@
     "sha256": "98ce63d2eb3eb7542fae55ffc849b29b6fb0a9dd92d4687181e905f73fb26d53"
   },
   "fixed_allocation": "Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3, with Up4 at layers 6 and 8",
-  "effective_bpw": 3.17834,
+  "effective_bpw": 3.1783404137931034,
   "gpu_policy": {
     "physical_gpu_count": 4,
     "pipelines_per_gpu": 1,
@@ -30,14 +31,72 @@
     "launch_condition": "each arm waits for three consecutive exclusive-idle samples on its assigned GPU"
   },
   "arms": [
-    {"arm_id": "f13_yaqa182_nm4096_yaqa15x", "gpu": 0, "YAQA_weight": 1.5, "YAQA_seed": 0, "state": "quantizing"},
-    {"arm_id": "f14_yaqa182_nm4096_yaqa3x", "gpu": 1, "YAQA_weight": 3.0, "YAQA_seed": 0, "state": "quantizing"},
-    {"arm_id": "f15_yaqa182_nm4096_yaqa2x_seed1", "gpu": 2, "YAQA_weight": 2.0, "YAQA_seed": 1, "state": "quantizing"},
-    {"arm_id": "f16_yaqa182_nm4096_yaqa2x_seed2", "gpu": 3, "YAQA_weight": 2.0, "YAQA_seed": 2, "state": "quantizing"}
+    {
+      "arm_id": "f13_yaqa182_nm4096_yaqa15x",
+      "gpu": 0,
+      "YAQA_weight": 1.5,
+      "YAQA_seed": 0,
+      "state": "complete",
+      "gsm8k_correct": 538,
+      "gsm8k_total": 1209,
+      "gsm8k_accuracy": 0.44499586435070304,
+      "d300_aligned_matches": 3203,
+      "d300_aligned_total": 9600,
+      "d300_aligned_accuracy": 0.3336458333333333,
+      "d300_exact32": 23,
+      "d300_mean_first_divergence": 10.013333333333334
+    },
+    {
+      "arm_id": "f14_yaqa182_nm4096_yaqa3x",
+      "gpu": 1,
+      "YAQA_weight": 3.0,
+      "YAQA_seed": 0,
+      "state": "complete",
+      "gsm8k_correct": 529,
+      "gsm8k_total": 1209,
+      "gsm8k_accuracy": 0.43755169561621177,
+      "d300_aligned_matches": 3127,
+      "d300_aligned_total": 9600,
+      "d300_aligned_accuracy": 0.3257291666666667,
+      "d300_exact32": 18,
+      "d300_mean_first_divergence": 9.826666666666666
+    },
+    {
+      "arm_id": "f15_yaqa182_nm4096_yaqa2x_seed1",
+      "gpu": 2,
+      "YAQA_weight": 2.0,
+      "YAQA_seed": 1,
+      "state": "complete",
+      "gsm8k_correct": 528,
+      "gsm8k_total": 1209,
+      "gsm8k_accuracy": 0.43672456575682383,
+      "d300_aligned_matches": 3274,
+      "d300_aligned_total": 9600,
+      "d300_aligned_accuracy": 0.3410416666666667,
+      "d300_exact32": 22,
+      "d300_mean_first_divergence": 9.93
+    },
+    {
+      "arm_id": "f16_yaqa182_nm4096_yaqa2x_seed2",
+      "gpu": 3,
+      "YAQA_weight": 2.0,
+      "YAQA_seed": 2,
+      "state": "complete",
+      "gsm8k_correct": 533,
+      "gsm8k_total": 1209,
+      "gsm8k_accuracy": 0.44086021505376344,
+      "d300_aligned_matches": 3382,
+      "d300_aligned_total": 9600,
+      "d300_aligned_accuracy": 0.35229166666666667,
+      "d300_exact32": 16,
+      "d300_mean_first_divergence": 9.663333333333334
+    }
   ],
   "seed_distance": {
     "reference": "f12_yaqa182_nm4096_yaqa2x (seed 0)",
     "pairs": ["f12_vs_f15", "f12_vs_f16", "f15_vs_f16"],
+    "state": "not_produced",
+    "reason": "The pinned supervisor exited after all evaluations completed but before the optional checkpoint-distance phase; no distance artifact is claimed by this result set.",
     "metrics": [
       "bank_id_disagreement_fraction",
       "trellis_disagreement_fraction",
@@ -47,21 +106,41 @@
     ]
   },
   "fast_evaluation": {
-    "state": "launched_waiting_for_canary",
+    "state": "rejected_canary_failed",
     "runtime_commit": "5ffbae36",
     "launched_at": "2026-08-31T03:07:32Z",
     "supervisor": "qvq-fisher-weight-seed-fast-eval-v1",
-    "attn_implementation": "paged|flash_attention_2",
-    "continuous_batching": true,
-    "use_cuda_graph": true,
+    "requested_attn_implementation": "paged|flash_attention_2",
+    "continuous_batching_verified": true,
+    "paged_attention_verified": true,
+    "cuda_graph_requested": true,
     "batch_size": 64,
+    "canary_legacy_correct": 543,
+    "canary_fast_correct": 545,
+    "metric_parity": false,
+    "legacy_seconds": 1069.3343269173056,
+    "fast_seconds": 1427.0023499075323,
+    "speedup": 0.7493570889961021,
+    "decision": "Do not publish fast-v2 results. F13-F16 retain the pinned canonical paged-SDPA batch-8 reports.",
     "launcher": "scripts/run_fisher_weight_seed_fast_eval_v1.sh",
-    "policy": "retain pinned legacy reports and publish separate fast-v2 reports; require exact aggregate metric parity"
+    "policy": "retain pinned canonical reports unless a canary proves exact metric parity and non-regressing speed"
   },
-  "evaluation": {
+  "canonical_evaluation": {
+    "attn_implementation": "paged|sdpa",
+    "continuous_batching_required": true,
+    "use_cuda_graph": false,
+    "batch_size": 8,
+    "package_versions": {
+      "evalution": "0.0.14",
+      "gptqmodel": "7.3.3+ultra",
+      "torch": "2.13.0",
+      "transformers": "5.15.1"
+    },
     "primary": "gsm8k_platinum_cot: madrylab/gsm8k-platinum main/test, 1209 rows",
     "diagnostic": "canonical D300 development, 300 prompts x 32 tokens"
   },
+  "completion_note": "The pinned supervisor reported a post-completion shell-control error after all four checkpoints and both evaluations were written and hashed. Current main passes bash -n; the optional seed-distance phase did not run.",
   "registry": "docs/experiments/calibration_fisher_weight_seed_registry_20260831.json",
+  "results": "docs/experiments/calibration_fisher_weight_seed_results_20260831.json",
   "launcher": "scripts/run_llama32_fisher_weight_seed_v1.sh"
 }
