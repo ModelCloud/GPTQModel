@@ -901,6 +901,8 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
     assert config.yaqa.activation_checkpointing is True
     assert config.yaqa.mps_cleanup_interval == 8
     assert config.yaqa.sequence_sort == "desc"
+    assert config.yaqa.source_weight_column is None
+    assert config.yaqa.source_weights == ()
     assert config.yaqa.max_factor_bytes_per_pass is None
     for rate in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
         assert config.yaqa.regularization_for_rate(rate) == pytest.approx(0.1)
@@ -924,6 +926,35 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
 )
 def test_yaqa_config_rejects_invalid_collection_controls(kwargs, exception, message):
     with pytest.raises(exception, match=message):
+        YaqaConfig(**kwargs)
+
+
+def test_yaqa_source_weights_round_trip_without_row_duplication_controls():
+    config = QVQConfig(
+        rounding="yaqa",
+        yaqa=YaqaConfig(
+            source_weight_column="source_name",
+            source_weights={"yaqa": 2, "nm": 1},
+        ),
+        offload_to_disk=False,
+    )
+    reloaded = QuantizeConfig.from_quant_config(config.to_dict())
+
+    assert reloaded.yaqa.source_weight_column == "source_name"
+    assert reloaded.yaqa.source_weights == (("yaqa", 2.0), ("nm", 1.0))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"source_weight_column": "source_name"},
+        {"source_weights": (("yaqa", 2.0),)},
+        {"source_weight_column": "source_name", "source_weights": (("yaqa", 0.0),)},
+        {"source_weight_column": "source_name", "source_weights": (("yaqa", 1.0), ("yaqa", 2.0))},
+    ),
+)
+def test_yaqa_config_rejects_incomplete_or_invalid_source_weights(kwargs):
+    with pytest.raises((TypeError, ValueError)):
         YaqaConfig(**kwargs)
 
 

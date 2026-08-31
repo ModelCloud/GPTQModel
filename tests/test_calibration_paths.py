@@ -8,9 +8,16 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+import pytest
+import torch
+
 from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.config import META_FIELD_CALIBRATION_PATHS
-from gptqmodel.utils.calibration import _extract_calibration_paths, _record_calibration_source
+from gptqmodel.utils.calibration import (
+    _extract_calibration_paths,
+    _record_calibration_source,
+    prepare_calibration_dataset,
+)
 
 
 class TestCalibrationPaths(unittest.TestCase):
@@ -175,6 +182,50 @@ class TestCalibrationPaths(unittest.TestCase):
 
         _record_calibration_source(qmodel, ["hello world", "and/or", "10/12/2020"])
         self.assertNotIn(META_FIELD_CALIBRATION_PATHS, qcfg.meta)
+
+
+def test_prepare_calibration_preserves_source_weights_without_duplicating_rows():
+    qmodel = SimpleNamespace(
+        tokenizer=None,
+        support_batch_quantize=True,
+        quantize_config=QuantizeConfig(bits=4, group_size=128),
+        model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=32)),
+    )
+    rows = [
+        {"input_ids": list(range(12)), "source_name": "yaqa"},
+        {"input_ids": list(range(13)), "source_name": "nm"},
+    ]
+
+    batches = prepare_calibration_dataset(
+        qmodel,
+        rows,
+        batch_size=2,
+        source_weight_column="source_name",
+        source_weights=(("yaqa", 2.0), ("nm", 1.0)),
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].shape[0] == 2
+    torch.testing.assert_close(
+        batches[0]["fisher_sequence_weight"],
+        torch.tensor([2.0, 1.0], dtype=torch.float64),
+    )
+
+
+def test_prepare_calibration_source_weights_fail_closed_on_unmapped_source():
+    qmodel = SimpleNamespace(
+        tokenizer=None,
+        support_batch_quantize=True,
+        quantize_config=QuantizeConfig(bits=4, group_size=128),
+        model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=32)),
+    )
+    with pytest.raises(ValueError, match="unmapped source"):
+        prepare_calibration_dataset(
+            qmodel,
+            [{"input_ids": list(range(12)), "source_name": "other"}],
+            source_weight_column="source_name",
+            source_weights=(("yaqa", 2.0), ("nm", 1.0)),
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,70 @@
+{
+  "schema": "qvq.calibration-fisher-composition-queue.v1",
+  "status": "prepared",
+  "prepared_at_utc": "2026-08-30T23:57:00Z",
+  "branch": "feat/qvq-frontier-score-updates",
+  "purpose": "2x2 test of NM Fisher coverage and YAQA source importance without physical row duplication.",
+  "fixed_model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "fixed_lifecycle": {
+    "path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "split": "train",
+    "row_start": 0,
+    "rows": 128
+  },
+  "fixed_allocation": "Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3, with Up4 at layers 6 and 8",
+  "effective_bpw": 3.17834,
+  "gpu_policy": {
+    "physical_gpu_count": 4,
+    "pipelines_per_gpu": 1,
+    "exclusive": true,
+    "launch_condition": "three consecutive idle samples on all GPUs 0-3"
+  },
+  "arms": [
+    {
+      "arm_id": "f9_yaqa182_nm2048_yaqa1x",
+      "gpu": 0,
+      "unique_sequences": 2229,
+      "raw_valid_tokens": 1051958,
+      "effective_weighted_tokens": 1051958,
+      "YAQA_weight": 1.0,
+      "NM_weight": 1.0,
+      "state": "queued"
+    },
+    {
+      "arm_id": "f10_yaqa182_nm2048_yaqa2x",
+      "gpu": 1,
+      "unique_sequences": 2229,
+      "raw_valid_tokens": 1051958,
+      "effective_weighted_tokens": 1354151,
+      "YAQA_weight": 2.0,
+      "NM_weight": 1.0,
+      "state": "queued"
+    },
+    {
+      "arm_id": "f11_yaqa182_nm4096_yaqa1x",
+      "gpu": 2,
+      "unique_sequences": 4277,
+      "raw_valid_tokens": 1794387,
+      "effective_weighted_tokens": 1794387,
+      "YAQA_weight": 1.0,
+      "NM_weight": 1.0,
+      "state": "queued"
+    },
+    {
+      "arm_id": "f12_yaqa182_nm4096_yaqa2x",
+      "gpu": 3,
+      "unique_sequences": 4277,
+      "raw_valid_tokens": 1794387,
+      "effective_weighted_tokens": 2096580,
+      "YAQA_weight": 2.0,
+      "NM_weight": 1.0,
+      "state": "queued"
+    }
+  ],
+  "registry": "docs/experiments/calibration_fisher_composition_registry_20260830.json",
+  "launcher": "scripts/run_llama32_fisher_composition_v1.sh",
+  "evaluation": {
+    "primary": "gsm8k_platinum_cot: madrylab/gsm8k-platinum main/test, 1209 rows",
+    "diagnostic": "canonical D300 development, 300 prompts x 32 tokens"
+  }
+}

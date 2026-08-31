@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import gc
+import math
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
@@ -180,6 +181,7 @@ def _sketch_b_gram_updates(
     *,
     strategy: str,
     projections: tuple[torch.Tensor, torch.Tensor] | None = None,
+    sequence_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return the two exact Sketch-B Gram sums without changing their objective.
 
@@ -200,6 +202,19 @@ def _sketch_b_gram_updates(
 
     batch_sequences, _, out_features = gradient.shape
     in_features = activation.shape[-1]
+    if sequence_weights is not None:
+        if sequence_weights.ndim != 1 or sequence_weights.shape[0] != batch_sequences:
+            raise ValueError("YAQA sequence weights must have one scalar per independent sequence")
+        if sequence_weights.device != gradient.device:
+            raise ValueError("YAQA sequence weights must share the gradient device")
+        if sequence_weights.device.type == "cpu" and (
+            not bool(torch.isfinite(sequence_weights).all()) or not bool(sequence_weights.gt(0).all())
+        ):
+            raise ValueError("YAQA sequence weights must be finite and positive")
+        # Sketch-B accumulates G_b.T@G_b and G_b@G_b.T. Scaling the
+        # per-token score gradient by sqrt(alpha_b) therefore contributes
+        # exactly alpha_b times each sequence Gram without duplicating rows.
+        gradient = gradient * sequence_weights.to(dtype=gradient.dtype).sqrt().view(-1, 1, 1)
     if strategy == "projected":
         if projections is None or len(projections) != 2:
             raise ValueError("Projected YAQA Gram collection requires output and input projections")
@@ -339,6 +354,13 @@ def capture_yaqa_sketch_b(
         valid_by_sequence = attention_mask.ne(0).sum(dim=1)
         if not bool(valid_by_sequence.gt(0).all()):
             raise ValueError("every YAQA calibration sequence must contain at least one valid token")
+        sequence_weights = batch.get("fisher_sequence_weight")
+        if sequence_weights is not None:
+            sequence_weights = torch.as_tensor(sequence_weights, dtype=torch.float64).reshape(-1)
+            if sequence_weights.shape[0] != attention_mask.shape[0]:
+                raise ValueError("YAQA Fisher weights must provide one scalar per independent sequence")
+            if not bool(torch.isfinite(sequence_weights).all()) or not bool(sequence_weights.gt(0).all()):
+                raise ValueError("YAQA Fisher weights must be finite and positive")
         available_sequences += attention_mask.shape[0]
     if available_sequences < minimum_sequences:
         if available_sequences == 0:
@@ -392,7 +414,10 @@ def capture_yaqa_sketch_b(
     sequence_counts = dict.fromkeys(modules, 0)
     total_sequences = 0
     total_valid_tokens = 0
+    total_effective_sequence_weight = 0.0
+    total_effective_weighted_tokens = 0.0
     active_mask: torch.Tensor | None = None
+    active_sequence_weights: torch.Tensor | None = None
     active_calls: set[str] = set()
     tensor_hook_handles = []
     module_hook_handles = []
@@ -459,6 +484,7 @@ def capture_yaqa_sketch_b(
             gradient,
             strategy=gram_strategy,
             projections=gram_projections.get(module_name),
+            sequence_weights=active_sequence_weights,
         )
         if nonfinite_update is None:
             if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
@@ -543,6 +569,24 @@ def capture_yaqa_sketch_b(
                 valid_by_sequence = active_mask.ne(0).sum(dim=1)
                 if not bool(valid_by_sequence.gt(0).all()):
                     raise ValueError("every YAQA calibration sequence must contain at least one valid token")
+                batch_sequence_weights = batch.get("fisher_sequence_weight")
+                if batch_sequence_weights is None:
+                    active_sequence_weights = None
+                    effective_weights = torch.ones(
+                        active_mask.shape[0], dtype=torch.float64, device=active_mask.device
+                    )
+                else:
+                    raw_sequence_weights = torch.as_tensor(
+                        batch_sequence_weights, dtype=torch.float64, device="cpu"
+                    ).reshape(-1)
+                    if raw_sequence_weights.shape[0] != active_mask.shape[0]:
+                        raise ValueError("YAQA Fisher weights must provide one scalar per independent sequence")
+                    if not bool(torch.isfinite(raw_sequence_weights).all()) or not bool(
+                        raw_sequence_weights.gt(0).all()
+                    ):
+                        raise ValueError("YAQA Fisher weights must be finite and positive")
+                    active_sequence_weights = raw_sequence_weights.to(device=device, dtype=torch.float32)
+                    effective_weights = raw_sequence_weights
                 active_calls.clear()
                 phase_started = time.perf_counter()
                 outputs = model(**encoded, use_cache=False)
@@ -584,6 +628,10 @@ def capture_yaqa_sketch_b(
                 batch_sequences = active_mask.shape[0]
                 total_sequences += batch_sequences
                 total_valid_tokens += valid_tokens
+                total_effective_sequence_weight += float(effective_weights.sum().item())
+                total_effective_weighted_tokens += float(
+                    (effective_weights * valid_by_sequence.to(dtype=torch.float64)).sum().item()
+                )
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -597,6 +645,7 @@ def capture_yaqa_sketch_b(
                     handle.remove()
                 tensor_hook_handles.clear()
                 active_mask = None
+                active_sequence_weights = None
                 # Explicitly drop the autograd graph before the next sequence.
                 # MPS command buffers are asynchronous and otherwise keep the
                 # logits/loss graph live until allocator pressure forces a flush.
@@ -616,6 +665,7 @@ def capture_yaqa_sketch_b(
                     mps_cleanup_count += 1
     finally:
         active_mask = None
+        active_sequence_weights = None
         decoder_seed_handle.remove()
         for handle in tensor_hook_handles:
             handle.remove()
@@ -630,6 +680,8 @@ def capture_yaqa_sketch_b(
 
     if total_sequences < 1:
         raise ValueError("YAQA Sketch B observed no independent calibration sequences")
+    if not math.isfinite(total_effective_sequence_weight) or total_effective_sequence_weight <= 0:
+        raise ValueError("YAQA Sketch B observed no positive effective sequence weight")
     for name in modules:
         if sequence_counts[name] != total_sequences or name not in input_accumulators:
             raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
@@ -669,8 +721,12 @@ def capture_yaqa_sketch_b(
         if sequence_counts[name] != total_sequences or name not in input_accumulators:
             raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
         out_features, in_features = module.weight.shape
-        input_hessians[name] = input_accumulators[name].div(total_sequences * out_features).contiguous()
-        output_hessians[name] = output_accumulators[name].div(total_sequences * in_features).contiguous()
+        input_hessians[name] = input_accumulators[name].div(
+            total_effective_sequence_weight * out_features
+        ).contiguous()
+        output_hessians[name] = output_accumulators[name].div(
+            total_effective_sequence_weight * in_features
+        ).contiguous()
 
     input_factor_elements = sum(factor.numel() for factor in input_hessians.values())
     output_factor_elements = sum(factor.numel() for factor in output_hessians.values())
@@ -681,7 +737,11 @@ def capture_yaqa_sketch_b(
             "method": "YAQA-v3 Sketch B real Fisher",
             "full_model_backward": True,
             "independent_sequences": total_sequences,
+            "unique_sequences": total_sequences,
             "valid_output_samples": total_valid_tokens,
+            "raw_valid_tokens": total_valid_tokens,
+            "effective_weighted_sequences": total_effective_sequence_weight,
+            "effective_weighted_tokens": total_effective_weighted_tokens,
             "monte_carlo_samples_per_output": 1,
             "sequence_loss_reduction": "per_sequence_token_sum",
             "activation_checkpointing": bool(checkpoint_modules),
