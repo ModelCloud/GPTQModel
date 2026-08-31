@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Four exclusive-GPU Fisher-composition arms. The supervisor waits until all
-# four physical GPUs are idle before starting so the 2x2 scientific comparison
-# is never mixed with another quantization/evaluation workload.
+# Four exclusive-GPU Fisher-composition arms. Each arm waits independently for
+# its assigned physical GPU, preserving quant/eval overlap across idle GPUs
+# while still enforcing exactly one process per GPU.
 
 ROOT="${QVQ_FISHER_COMPOSITION_ROOT:-/root/QvQ-score-updates}"
 PINNED_COMMIT="${QVQ_FISHER_COMPOSITION_COMMIT:-$(git -C "$ROOT" rev-parse HEAD)}"
@@ -67,23 +67,17 @@ gpu_idle() {
   [ "$utilization" -eq 0 ] && [ "$memory" -le "$DRIVER_MEMORY_ALLOWANCE_MIB" ]
 }
 
-wait_for_exclusive_gpus() {
-  local stable=0 gpu all_idle
+wait_for_exclusive_gpu() {
+  local gpu="$1" stable=0
   while [ "$stable" -lt 3 ]; do
-    all_idle=1
-    for gpu in 0 1 2 3; do
-      if ! gpu_idle "$gpu"; then
-        all_idle=0
-      fi
-    done
-    if [ "$all_idle" -eq 1 ]; then
+    if gpu_idle "$gpu"; then
       stable=$((stable + 1))
-      echo "[$(date -u +%FT%TZ)] exclusive GPU preflight sample=$stable/3 passed"
+      echo "[$(date -u +%FT%TZ)] GPU $gpu exclusive preflight sample=$stable/3 passed"
       sleep 1
     else
       stable=0
-      echo "[$(date -u +%FT%TZ)] waiting for GPUs 0-3 to become exclusively idle"
-      nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader,nounits
+      echo "[$(date -u +%FT%TZ)] arm assigned to GPU $gpu is waiting for exclusive idle"
+      nvidia-smi --id="$gpu" --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader,nounits
       sleep 60
     fi
   done
@@ -99,7 +93,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wait_for_exclusive_gpus
 mkdir -p "$RESULTS"
 WORKBASE="$(mktemp -d /tmp/qvq-fisher-composition-v1.XXXXXX)"
 WORKTREE="$WORKBASE/source"
@@ -125,6 +118,8 @@ run_arm() {
   log="$RESULTS/${arm}.log"
   gsm="$out/post_quant_eval_gsm8k_platinum.json"
   d300="$out/post_quant_eval_divergence300.json"
+
+  wait_for_exclusive_gpu "$gpu"
 
   if [ "$(sha256sum "$artifact" | awk '{print $1}')" != "$expected_artifact_sha" ]; then
     echo "refusing arm $arm: Fisher artifact SHA-256 mismatch" >&2
