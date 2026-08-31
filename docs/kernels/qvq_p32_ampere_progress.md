@@ -82,11 +82,12 @@ Hopper-only hardware:
 13. Cache the immutable live SM count per CUDA device in the Python dispatch;
     this removes repeated driver-property queries from the timed auto-split
     path, which is material for sub-50-microsecond small-N projections.
-14. For the full-row M16 full-Q, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
-    projections, use a compile-time N-tile count in the WMMA path. The fixed
-    Qwen3.8 shapes let trellis staging remove the per-vector N-bound predicate
-    while preserving the K-bound check and the exact generic fallback for all
-    other shapes. The `N=5120` case is shared by attention-out and MLP-down.
+14. For the full-row M16 full-Q, `N=5120`, `N=10240`, `N=6144`, `N=1024`,
+    and `N=17408` projections, use a compile-time N-tile count in the WMMA
+    path. The fixed Qwen3.8 shapes let trellis staging remove the per-vector
+    N-bound predicate while preserving the K-bound check and the exact generic
+    fallback for all other shapes. The `N=5120` case is shared by attention-out
+    and MLP-down, while `N=17408` covers MLP-gate/up.
 15. For M8 full-Q (`N=12288`), combine the compile-time eight-live-row path
     with a compile-time N-tile count. This removes both row and N predicates
     from the measured wide projection while retaining the generic M8 fallback.
@@ -114,9 +115,10 @@ register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are fifty-six WMMA device specializations: four transition widths
+There are sixty WMMA device specializations: four transition widths
 times full-M16, generic partial-row, compile-time M8 partial-row, and
-compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
+compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, `N=1024`, and
+`N=17408`
 paths, plus the compile-time M8 `N=12288`, `N=5120`, `N=10240`, and `N=6144`
 paths, plus the compile-time M8 `N=1024` and `N=17408` paths. The
 scalar M1-M4 rows add four exact transition-width specializations, while one
@@ -1004,6 +1006,18 @@ eliding inactive lower-row activation staging was broadly slower. Retain the
 128-thread/N64 CTA and zero-filled inactive rows. Diagnostics are
 `v16_m8_wide_cta_candidate.json` and
 `v16_m8_live_rows_stage_candidate.json`.
+
+The fourth v16 progression adds the missing full-row M16 fixed-N route for
+MLP-gate/up (`N=17408`). In the matched 40-warmup/1000-iteration pair, all
+four rates improve by 5.263-5.960%; the median geomean gain is 5.473% and the
+mean geomean gain is 5.348%. Exactness passes 28/28. Artifacts are
+`artifacts/a100_p32_window/v16_m16_mlpgate_static_control.json` and
+`artifacts/a100_p32_window/v16_m16_mlpgate_static_candidate.json`.
+
+Packing each fixed-N M8 stage's four bank IDs into one cached 32-bit load was
+also rejected. It regressed the 24-case median and mean geomeans by 0.506%
+and 0.490%, with five of six shape buckets slower; retain distributed byte
+loads on partial-row kernels. Diagnostics are `v16_m8_bankid_u32_*.json`.
 
 ## Reproduction
 
