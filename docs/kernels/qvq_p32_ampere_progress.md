@@ -6,7 +6,7 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: GitHub `main` at `d290c56d1d6fac4e6bbd9a9dc02795bb2e02658f`.
+- Source base: GitHub `main` at `af1c66cf` (merged Ampere checkpoint).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -47,6 +47,13 @@ Hopper-only hardware:
    amount and a compile-time word distance.
 5. Accumulate in FP32 and use bounded split-K to expose enough CTA work.
 6. Use an explicit block barrier after MMA before reusing a stage buffer.
+7. For M=1 and K<=6144, use a Marlin-style scalar route: one 128-thread
+   CTA covers sixteen N16 tiles, each warp owns four tiles, and each lane
+   accumulates its two output columns directly. This avoids executing the
+   fifteen inactive rows of every `m16n8k16` instruction.
+8. Keep the 512-byte codebook in Ampere's read-only cache (`__ldg`) and issue
+   streaming trellis copies as `cp.async.cg`; use 32-bit funnel shifts for
+   state extraction instead of 64-bit window promotion.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -76,18 +83,22 @@ Qwen3.8-27B projection shapes, four rates, and M1/M16. All 56 pass.
 
 ## Accepted performance
 
-Artifacts:
+Artifacts (the `_v2` pair is this post-merge tuning cycle):
 
 - `artifacts/a100_p32_window/qwen38_m16_p32_ampere.json`
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere.json`
+- `artifacts/a100_p32_window/qwen38_m16_p32_ampere_v2.json`
+- `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v2.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 
 | Regime | Cases | Geomean speedup vs planar P32 | Speedup range | Worst max abs |
 |---|---:|---:|---:|---:|
-| M16 | 28 | 15.651x | 4.094x-21.478x | 2.823e-4 |
-| M1 | 28 | 7.130x | 1.010x-21.149x | 2.632e-4 |
+| M16 (previous) | 28 | 15.651x | 4.094x-21.478x | 2.823e-4 |
+| M16 (v2) | 28 | 15.710x | 4.212x-21.543x | 2.823e-4 |
+| M1 (previous) | 28 | 7.130x | 1.010x-21.149x | 2.632e-4 |
+| M1 (v2) | 28 | 7.701x | 0.952x-29.848x | 2.632e-4 |
 
 M16 per-shape speedup ranges across W2-W3.5:
 
@@ -101,14 +112,12 @@ M16 per-shape speedup ranges across W2-W3.5:
 | MLP gate/up | 5120 | 17408 | 8 | 20.452x-21.478x |
 | MLP down | 17408 | 5120 | 8 | 17.503x-18.783x |
 
-The prior M1/W2 full K/V regression is cleared: the Ampere path now measures
-0.051712 ms versus planar's 0.052224 ms (`1.010x`).
-
-Against the previous Ampere checkpoint, the locked eight-case representative
-matrix improves by `1.047x` geometric mean and reaches `1.119x` on long-K
-M16/W3.5. The full 28-case artifacts improve from 15.134x to 15.651x at M16
-and from 6.933x to 7.130x at M1 versus planar. This is accepted forward
-progress, but it remains below the `2x` additional-Ampere stretch target.
+The v2 M1 artifact reduces geometric-mean Ampere latency from 0.100193 ms to
+0.092794 ms (`1.080x`), while M16 changes from 0.102317 ms to 0.101903 ms
+(`1.004x`). M1 full-Q+gate W2 improves from roughly 0.116 ms to 0.091 ms;
+the long-K MLP-down route remains on WMMA and avoids the scalar route's
+regression. This is accepted forward progress, but the additional `2x`
+Ampere stretch target remains open.
 
 ## Profiler diagnosis
 
@@ -146,6 +155,9 @@ more decode instructions without expanding the compact state representation.
 | Eight-warp N128 CTA | Exact, but representative latency regressed 8-12% because the larger block reduced scheduling flexibility. | Rejected and reverted; retain four-warps/N64. |
 | Four-K16/K64 staged group | Exact, but regressed 7-16% versus the accepted K32 group as the larger shared footprint dominated further barrier savings. | Rejected and reverted; retain two-K16/K32. |
 | Full repository QVQ comparator build | Failed because unrelated YAQA translation units require cuBLAS/cuSPARSE developer headers absent from this local toolkit. | Benchmark builds the current `qvq_gemv_cuda.cu` alone. The GEMV file now uses the lightweight current-stream header and remains source-identical to production GEMV. |
+| 256-thread/32-tile M=1 scalar CTA | Correct across the formal M=1 cases, but full-KV latency regressed to 0.058-0.070 ms versus 0.053-0.063 ms for the 128-thread route. | Rejected; retain 128 threads, four warps, and sixteen N16 tiles per CTA. |
+| Scalar M=1 on K=17408 | Correct, but W3.5 MLP-down rose to about 0.229 ms versus 0.196 ms for WMMA. | Rejected by dispatch; scalar M=1 is limited to K<=6144. |
+| Shared codebook copy | Exact, but the `__ldg` read-only path was consistently lower in the representative matrix and removes a 512-byte per-CTA copy. | Replaced by read-only levels; keep the experiment in history as the prior checkpoint. |
 
 ## Reproduction
 
