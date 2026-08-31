@@ -514,6 +514,7 @@ more decode instructions without expanding the compact state representation.
 | Bank-selector hoist across every scalar and WMMA route | The 60-case full-Q/full-KV/MLP-down screen was neutral overall (-0.09%): M8 improved 2.53%, but M1, M2, M4, and M16 regressed by 1.32%, 0.81%, 0.23%, and 0.68%. | Rejected broadly and narrowed to repeatedly positive M8 fixed-N routes; scalar and full-row kernels retain main's decode path. |
 | Single allocation for partials and output | Placing the output in the final plane of one `(splits+1)` allocation remained exact, but constructing the returned tensor view raised full-KV latency from 0.035362 ms to 0.038750 ms (9.58%). | Rejected and reverted; retain two direct allocator requests for the split workspace and returned output. |
 | Sequential M16 bank-mask hoist | Limiting each selector mask's live range to its two shared decodes remained exact, but the 20-case fixed-N M16 geomean regressed from 0.096235 ms to 0.096689 ms (0.47%); every shape slowed. | Rejected and reverted; keep bank-mask hoisting restricted to the validated M8 routes. |
+| Reusing one FP32 `TensorOptions` value | Avoided constructing the same options expression twice, but after excluding one slow control outlier the remaining 19 full-KV cases regressed by 4.98%. | Rejected and reverted; retain the two inline allocator option expressions. |
 
 ## Post-merge origin/main baseline (v11)
 
