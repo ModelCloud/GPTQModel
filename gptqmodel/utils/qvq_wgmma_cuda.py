@@ -201,13 +201,53 @@ def qvq_p32_window_wgmma_m16_tma(
     *,
     out_features: int,
     bank_alt_id: int = 3,
-    split_count: int = 1,
+    split_count: int = 0,
 ) -> torch.Tensor:
     """Run the two-stage TMA direct-window P32 RS-WGMMA kernel at W2-W3.5."""
 
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 TMA WGMMA supports W2 through W3.5")
+    if split_count == 0:
+        shape = (int(input.shape[1]), int(out_features))
+        split_count = {
+            4: {
+                (5120, 1024): 20,
+                (5120, 6144): 20,
+                (5120, 10240): 10,
+                (5120, 12288): 10,
+                (5120, 17408): 10,
+                (6144, 5120): 8,
+                (17408, 5120): 34,
+            },
+            5: {
+                (5120, 1024): 20,
+                (5120, 6144): 20,
+                (5120, 10240): 10,
+                (5120, 12288): 10,
+                (5120, 17408): 10,
+                (6144, 5120): 8,
+                (17408, 5120): 34,
+            },
+            6: {
+                (5120, 1024): 20,
+                (5120, 6144): 20,
+                (5120, 10240): 4,
+                (5120, 12288): 10,
+                (5120, 17408): 10,
+                (6144, 5120): 8,
+                (17408, 5120): 34,
+            },
+            7: {
+                (5120, 1024): 20,
+                (5120, 6144): 4,
+                (5120, 10240): 4,
+                (5120, 12288): 4,
+                (5120, 17408): 5,
+                (6144, 5120): 8,
+                (17408, 5120): 34,
+            },
+        }[transition_bits].get(shape, 1)
     return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")(
         input,
         trellis,
