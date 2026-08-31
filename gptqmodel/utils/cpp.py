@@ -96,7 +96,10 @@ def _python_abi_tag() -> str:
     soabi = sysconfig.get_config_var("SOABI")
     if soabi:
         return str(soabi)
-    return f"cpython-{sys.version_info.major}.{sys.version_info.minor}{sys.abiflags}"
+    # ``sys.abiflags`` is a Unix-only attribute on some supported Python
+    # builds (for example, Windows).  The SOABI fallback must still produce a
+    # stable key there instead of raising while constructing the cache path.
+    return f"cpython-{sys.version_info.major}.{sys.version_info.minor}{getattr(sys, 'abiflags', '')}"
 
 
 def _torch_cpu_cache_version() -> str:
@@ -1218,7 +1221,11 @@ class TorchOpsJitExtension:
         try:
             torch_major_minor = tuple(int(part) for part in torch_public.split(".")[:2])
         except (TypeError, ValueError):
-            return ""
+            major, minor = self.torch_stable_abi_target
+            return (
+                f"{self.display_name}: cannot verify torch stable ABI requirement >= {major}.{minor}; "
+                f"unrecognized torch version {torch.__version__!r}"
+            )
         if torch_major_minor < self.torch_stable_abi_target:
             major, minor = self.torch_stable_abi_target
             return (

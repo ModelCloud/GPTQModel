@@ -111,6 +111,14 @@ def test_torch_ops_jit_extension_python_abi_falls_back_without_soabi(monkeypatch
     assert cpp_module._python_abi_tag() == "cpython-3.13t"
 
 
+def test_torch_ops_jit_extension_python_abi_fallback_handles_missing_abiflags(monkeypatch):
+    monkeypatch.setattr(cpp_module.sysconfig, "get_config_var", lambda name: None)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13))
+    monkeypatch.delattr(cpp_module.sys, "abiflags", raising=False)
+
+    assert cpp_module._python_abi_tag() == "cpython-3.13"
+
+
 def test_torch_ops_jit_extension_detects_conservative_python_abi_markers(tmp_path):
     markers = (
         "#include <Python.h>\n",
@@ -208,6 +216,18 @@ def test_torch_ops_jit_extension_stable_target_rejects_older_torch(monkeypatch, 
     assert prebuilt_calls == []
 
 
+def test_torch_ops_jit_extension_stable_target_rejects_unparseable_torch(monkeypatch, tmp_path):
+    loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
+    monkeypatch.setattr(cpp_module.torch, "__version__", "nightly")
+    prebuilt_calls = []
+
+    monkeypatch.setattr(loader, "_try_load_prebuilt_library", lambda _build_root: prebuilt_calls.append(True))
+
+    assert loader.load() is False
+    assert "cannot verify torch stable ABI requirement" in loader.last_error_message()
+    assert prebuilt_calls == []
+
+
 def test_torch_ops_jit_extension_resolves_angle_bracket_local_includes(tmp_path):
     source = tmp_path / "unit_test.cpp"
     include_root = tmp_path / "include"
@@ -245,6 +265,14 @@ def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
     error = swordfish._swordfish_static_runtime_error()
 
     assert "requires torch >= 2.10" in error
+
+
+def test_swordfish_static_runtime_error_rejects_unparseable_torch(monkeypatch):
+    monkeypatch.setattr(swordfish.torch, "__version__", "nightly")
+
+    error = swordfish._swordfish_static_runtime_error()
+
+    assert "cannot verify torch stable ABI requirement" in error
 
 
 def test_torch_stable_abi_target_define_matches_libtorch_encoding():

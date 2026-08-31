@@ -233,7 +233,11 @@ def _swordfish_static_runtime_error() -> str:
     try:
         torch_major_minor = tuple(int(part) for part in torch_public.split(".")[:2])
     except (TypeError, ValueError):
-        torch_major_minor = _SWORDFISH_TORCH_STABLE_ABI_TARGET
+        major, minor = _SWORDFISH_TORCH_STABLE_ABI_TARGET
+        return (
+            f"Swordfish kernel cannot verify torch stable ABI requirement >= {major}.{minor}; "
+            f"unrecognized torch version {torch.__version__}."
+        )
     if torch_major_minor < _SWORDFISH_TORCH_STABLE_ABI_TARGET:
         major, minor = _SWORDFISH_TORCH_STABLE_ABI_TARGET
         return (
