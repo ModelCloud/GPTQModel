@@ -630,7 +630,15 @@ def capture_yaqa_sketch_b(
                 total_valid_tokens += valid_tokens
                 total_effective_sequence_weight += float(effective_weights.sum().item())
                 total_effective_weighted_tokens += float(
-                    (effective_weights * valid_by_sequence.to(dtype=torch.float64)).sum().item()
+                    (
+                        effective_weights
+                        * valid_by_sequence.to(
+                            device=effective_weights.device,
+                            dtype=torch.float64,
+                        )
+                    )
+                    .sum()
+                    .item()
                 )
                 if progress_callback is not None:
                     progress_callback(
