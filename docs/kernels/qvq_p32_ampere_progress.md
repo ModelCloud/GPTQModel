@@ -535,6 +535,16 @@ the remaining formal `linear_z` projection `(K,N)=(5120,6144)`. A matched
 refresh remains exact and measures 0.064973 ms by median geomean. This is a
 dispatch-only change: all other shapes retain their previous route.
 
+The second progression applies the same compile-time-N scalar body to M2
+full-KV `(K,N)=(5120,1024)`, while retaining M2's measured three-tile stage.
+The focused four-rate screen improves 0.044529 ms to 0.043002 ms (`1.036x`),
+and the full M2 refresh improves 0.069963 ms to 0.069192 ms (`1.011x`) by
+median geomean, with exact outputs.
+
+The first M2 screen tried fixed-N dispatch for full-Q with the same stage. It
+was correct but measured 0.080950 ms versus the 0.080699 ms control (`0.997x`),
+so that route was rejected and remains on the generic launcher.
+
 ## Reproduction
 
 ```bash
