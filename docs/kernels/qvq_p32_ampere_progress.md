@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `5f45eb2e` (tip after
-  PR #71 merged).
+- Source base: freshly fetched GitHub `origin/main` at `b7d68545` (tip after
+  PR #73 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -50,7 +50,7 @@ Hopper-only hardware:
 5. Accumulate in FP32 and use bounded split-K to expose enough CTA work. The
    generic fallback remains capped at eight slices; measured short-K policies
    use up to thirty-two slices, while the long-K M1/M2 scalar MLP-down route
-   uses a measured 64-way wave to fill more of the A100's 124 SMs.
+   uses a measured 128-way wave to fill more of the A100's 124 SMs.
 6. Use an explicit block barrier after MMA before reusing a stage buffer.
 7. For M=1 and M=2, use a Marlin-style scalar route even on the measured
    long-K MLP-down shape; for M=3-M4, keep that route for K<=6144. One
@@ -62,7 +62,7 @@ Hopper-only hardware:
    state extraction instead of 64-bit window promotion.
 9. For M3-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
    carrying exactly the live rows in FP32 accumulators. M1-M2 also use this
-   schedule for the long-K MLP-down shape after its 64-way wave was measured
+   schedule for the long-K MLP-down shape after its 128-way wave was measured
    to overcome the old WMMA advantage. The short-K dispatch uses up to
    thirty-two K splits, except attention-out (K=6144, N=5120), where a
    measured 24-way wave reduces split-reduction overhead; M4 long-K and M8+
@@ -122,13 +122,15 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v8.json`
 - `artifacts/a100_p32_window/qwen38_origin_main_5f45eb2e.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v10.json`
+- `artifacts/a100_p32_window/qwen38_origin_main_b7d68545.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v11.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 
 The planar numbers below are oracle context only. The progress target for this
 post-merge cycle is speedup versus the freshly fetched `origin/main` control at
-`5f45eb2e`, measured with the same 140-case matrix and the same CUDA-event
+`b7d68545`, measured with the same 140-case matrix and the same CUDA-event
 protocol.
 
 | Regime | Cases | Geomean speedup vs planar P32 | Speedup range | Worst max abs |
@@ -186,27 +188,27 @@ waves 5.7-19.4% faster than 32-way waves on this shape.
 
 ## Post-merge versus-main progress
 
-The exact control is `qwen38_origin_main_5f45eb2e.json`, produced from
-`origin/main` at `5f45eb2e` before this branch. The candidate is
-`qwen38_mixed_p32_ampere_v10.json` at `da6e9833`. Each row is the
+The exact control is `qwen38_origin_main_b7d68545.json`, produced from
+`origin/main` at `b7d68545` before this branch. The candidate is
+`qwen38_mixed_p32_ampere_v11.json` at `e795df74`. Each row is the
 geometric mean of the 28 cases for that M, using each case's Ampere event
 median; this deliberately excludes planar-oracle timing from the target.
 
 | M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
 |---:|---:|---:|---:|
-| 1 | 0.066753 | 0.065007 | 1.027x |
-| 2 | 0.072737 | 0.070686 | 1.029x |
-| 4 | 0.084564 | 0.084241 | 1.004x |
-| 8 | 0.092143 | 0.091994 | 1.002x |
-| 16 | 0.095817 | 0.095727 | 1.001x |
+| 1 | 0.067228 | 0.065009 | 1.034x |
+| 2 | 0.072805 | 0.070585 | 1.032x |
+| 4 | 0.085102 | 0.084324 | 1.009x |
+| 8 | 0.093966 | 0.092538 | 1.015x |
+| 16 | 0.096349 | 0.095344 | 1.011x |
 
 The accepted changes are deliberately narrow: the measured long-K Qwen3.8
 MLP-down shape (K=17408, N=5120) moves from main's eight-way split to a
-64-way split, M1-M2 use the scalar route on that shape, and M16
+128-way split, M1-M2 use the scalar route on that shape, and M16
 attention-out (K=6144, N=5120) uses a measured 12-way split. The focused
-MLP-down rows improve 1.123x, 1.133x, 1.002x, 1.002x, and 0.999x for
+MLP-down rows improve 1.010x, 1.013x, 1.003x, 1.000x, and 1.000x for
 M1/M2/M4/M8/M16 respectively; M16 attention-out is 1.000x. Because MLP-down
-is only one of seven shapes, the complete matrix is currently 1.001-1.029x
+is only one of seven shapes, the complete matrix is currently 1.009-1.034x
 versus fetched main in this timing sample, so the requested 2x target remains
 open.
 
@@ -262,7 +264,9 @@ more decode instructions without expanding the compact state representation.
 | Two-warps-per-tile M8 scalar cooperative mapping | Correct after fixing an initial tile-coverage bug, but reducing each CTA to two N16 tiles raised full-Q/attention to about 0.399/0.207 ms versus 0.117/0.073 ms for WMMA. | Rejected; preserve the four-warp WMMA CTA and tune only its split wave. |
 | Four-K16/K64 WMMA stage for short-K M8/M16 | Correct, but the larger stage regressed representative W2 full-Q to about 0.126 ms (M8) and 0.140 ms (M16), versus about 0.117 ms and 0.119 ms for K32 staging. | Rejected; retain K32 staging and shape-specific split tuning. |
 | Conditional final post-MMA barrier elision | Correct, but changing the unconditional handoff to a `has_next` branch regressed representative M16 full-Q to about 0.141 ms versus 0.120 ms; the altered control flow changed compiler scheduling. | Rejected and reverted; retain the unconditional producer/consumer barrier. |
-| Forty-eight-way long-K wave for M4/M8/M16 | Correct, but MLP-down was slower than the accepted 32-way wave (about 0.159/0.163/0.171 ms versus 0.158/0.160/0.165 ms). | Rejected; keep 32-way for M4/M8/M16 and 64-way only for long-K M1/M2. |
+| Forty-eight-way long-K wave for M4/M8/M16 | Correct, but MLP-down was slower than the accepted 32-way wave (about 0.159/0.163/0.171 ms versus 0.158/0.160/0.165 ms). | Rejected; keep 32-way for M4/M8/M16 and 128-way only for long-K M1/M2. |
+| 256-way long-K wave for M1/M2 | Correct, but the reduction wave turned upward: M1/M2 MLP-down were about 0.105/0.121 ms versus about 0.100/0.114 ms for 128-way splitting. | Rejected; retain the 128-way M1/M2 exception. |
+| Vectorized four-output split reducer | Correct, but it under-filled the small-output reducer (M1 MLP-down about 0.116 ms versus about 0.100 ms with one output per thread). | Rejected; retain the scalar reducer to preserve enough reduction blocks. |
 
 ## Reproduction
 
