@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `1fa22740` (tip after
-  PR #78 merged).
+- Source base: freshly fetched GitHub `origin/main` at `db785848` (tip after
+  PR #85 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -503,6 +503,8 @@ more decode instructions without expanding the compact state representation.
 | M8 full-KV compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=1024` tile bound for every staged vector. | Accepted after a 6.62% matched gain; all seven formal M8 shapes now use fixed-N paths. |
 | Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
+| First v13 lock-free full-matrix sample | Five consecutive early-M2 rows jumped by 3.5-7.5x while their planar controls also jumped, then both paths returned to normal. The unaffected 135 rows improved 0.99% versus main. | Discard the aggregate as a transient-contaminated run; retain `qwen38_v13_lockfree_all_29a69382.json` only as a diagnostic and rerun the complete idle-gated matrix. |
+| Four-accumulator split reducer | The matched M1 full-KV probe improved 0.68%, but the clean 140-case refresh regressed from 0.074518 ms to 0.074948 ms, with M1-M4 all slower. | Rejected and reverted; retain the single-accumulator deterministic reducer. The false-positive focused and full results remain in the v13 artifacts. |
 
 ## Post-merge origin/main baseline (v11)
 
@@ -569,7 +571,7 @@ bumped so stale entries cannot mask this update during a long-lived process.
 The Python dispatch now runs a first-use tuner by default for new shapes. It
 benchmarks up to 12 split waves around the measured fallback on the active CUDA
 stream; the selected plan is keyed by
-device UUID/SM80 capability, dtype, M, K, N, transition bits, and bank variant.
+integer CUDA device index, dtype, M, K, N, transition bits, and bank variant.
 Entries are memoized only in the current process; no autotune data is read from
 or written to disk while the kernel is under active development.
 Set `QVQ_AMPERE_AUTOTUNE=0` for the zero-overhead measured/static fallback.
@@ -633,6 +635,92 @@ microbenchmark lowers key construction plus dictionary lookup from 289.9 ns to
 250.8 ns (`1.156x`). The matched M1 full-KV GPU retry remains within timer
 resolution at 0.038912 ms, with the same split-64 plans and exact outputs; it is
 stored in `artifacts/a100_p32_window/v12_m1_fullkv_int_device_key_retry.json`.
+
+### Post-merge v13 baseline
+
+PR #85 merged as `db785848`. This optimization window uses that exact
+`origin/main` tip as its Ampere-kernel control. Planar measurements remain
+diagnostic and are not used in the improvement calculation. Default-on,
+process-memory-only autotuning is enabled for the control and candidates.
+
+The clean 20-warmup/100-iteration, 140-case run is stored in
+`artifacts/a100_p32_window/qwen38_newmain_all_db785848.json`. Ampere median
+latency geomeans are 0.061476 ms (M1), 0.066533 ms (M2), 0.075695 ms (M4),
+0.088012 ms (M8), and 0.091889 ms (M16), with an all-case geomean of
+0.075809 ms. The maximum absolute error across the matrix is 0.000080109.
+
+The first v13 progression removes the Python reentrant lock from process-local
+autotune cache hits. Cold calls still acquire the lock and recheck the entry
+before timing, so concurrent misses tune once. In a matched 20-warmup,
+300-iteration M1 full-KV screen, the four-rate latency geomean falls from
+0.040170 ms with the lock to 0.037096 ms without it (`1.083x`), with exact
+outputs. The candidate and control are stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_lockfree.json` and
+`artifacts/a100_p32_window/v13_m1_fullkv_locked_control.json`.
+
+The second progression reads the default-on autotune setting once per
+process-local cache lifetime instead of querying `os.environ` on every launch.
+Calling `clear_qvq_ampere_autotune_cache()` refreshes the setting, preserving
+an explicit runtime opt-out without charging cache hits for it. A host-only
+stub launch drops from 2.78 us on merged main to 1.66 us with both v13 dispatch
+changes. The matched M1 full-KV geomean improves again from 0.037096 ms to
+0.036836 ms (`1.007x`), with exact outputs; the result is stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_cached_env.json`.
+
+The third progression represents M and K directly with the tensor's immutable
+`torch.Size` in the in-memory key, while retaining the integer CUDA device
+index, dtype, N, rate, and bank variant. It also maps the four supported P32
+rates directly on the hot path and removes a redundant cached-split clamp; the
+cold and uncommon-rate paths retain full validation. The host stub launch
+falls from 1.66 us to 1.24 us. The matched M1 full-KV screen improves from
+0.036836 ms to 0.036605 ms (`1.006x`) with exact outputs, stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_shape_key.json`.
+
+The clean five-M refresh at `90a686cf` measures 0.060537 ms (M1), 0.065913 ms
+(M2), 0.075263 ms (M4), 0.087170 ms (M8), and 0.091496 ms (M16). Its 140-case
+geomean is 0.075140 ms, `1.009x` or 0.88% lower latency than the `db785848`
+Ampere control. The exact result is stored in
+`artifacts/a100_p32_window/qwen38_v13_shape_key_all_90a686cf.json`.
+
+The fourth progression removes a remaining hot-path device query inside the
+CUDA operator. Compute capability is immutable for the process lifetime, so
+the first launch records it in a lock-free array indexed by integer CUDA device
+index and later launches perform only a relaxed atomic load. The matched M1
+full-KV screen improves from 0.036605 ms to 0.036334 ms (`1.007x`) with exact
+outputs, stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_cached_capability.json`.
+
+The corresponding five-M refresh measures 0.059416 ms (M1), 0.065454 ms (M2),
+0.074897 ms (M4), 0.086870 ms (M8), and 0.090808 ms (M16). Across all 140
+cases, latency falls from 0.075809 ms on `db785848` to 0.074518 ms: `1.017x`,
+or 1.70% lower. The result is stored in
+`artifacts/a100_p32_window/qwen38_v13_cached_capability_all_c23a15f0.json`.
+
+The attempted fifth progression exposed split-reduction load-level parallelism
+with four independent FP32 accumulators. Its M1 full-KV probe improved from
+0.036334 ms to 0.036086 ms, but that result did not generalize: the clean
+140-case geomean regressed from 0.074518 ms to 0.074948 ms, with M1-M4 all
+slower. The experiment is reverted. Its focused and full diagnostic results
+are stored in `artifacts/a100_p32_window/v13_m1_fullkv_reducer_ilp4.json` and
+`artifacts/a100_p32_window/qwen38_v13_reducer_ilp4_all_09515686.json`.
+
+The fifth accepted progression caches the resolved `torch.ops` callable,
+retains already-typed integers in the M/K/N plan key, and defers the explicit
+CUDA-input check until a real plan-cache miss. Full validation still occurs in
+the CUDA operator on every launch. The Python stub path falls from 1.24 us to
+0.99 us, while the matched M1 full-KV geomean falls from 0.036334 ms to
+0.032760 ms (`1.109x`) with identical numerical error. The result is stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_cached_op.json`.
+
+The final clean refresh at `eee8ad01` clears the cumulative target. Ampere
+median latency geomeans fall from 0.061476 ms to 0.059119 ms for M1 (3.83%),
+0.066533 ms to 0.064939 ms for M2 (2.40%), 0.075695 ms to 0.074193 ms for M4
+(1.98%), 0.088012 ms to 0.086353 ms for M8 (1.88%), and 0.091889 ms to
+0.089759 ms for M16 (2.32%). Across all 140 cases, the geomean falls from
+0.075809 ms on fetched `db785848` main to 0.073925 ms: `1.025x`, or 2.486%
+lower latency. Maximum absolute error remains 0.000080109. Planar timings are
+excluded from every improvement figure. The result is stored in
+`artifacts/a100_p32_window/qwen38_v13_cached_op_all_eee8ad01.json`.
 
 ## Reproduction
 

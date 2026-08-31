@@ -11,6 +11,8 @@
 #include <torch/types.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace {
@@ -32,6 +34,26 @@ constexpr int kPairsPerTile = 128;
 constexpr int kLevels = 256;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
+constexpr int kMaxCachedCudaDevices = 64;
+std::array<std::atomic<int>, kMaxCachedCudaDevices> device_capability_cache{};
+
+int cached_device_capability(int device_index) {
+  int encoded_capability = 0;
+  if (device_index >= 0 && device_index < kMaxCachedCudaDevices) {
+    encoded_capability =
+        device_capability_cache[device_index].load(std::memory_order_relaxed);
+  }
+  if (encoded_capability == 0) {
+    cudaDeviceProp properties{};
+    C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, device_index));
+    encoded_capability = properties.major * 10 + properties.minor + 1;
+    if (device_index >= 0 && device_index < kMaxCachedCudaDevices) {
+      device_capability_cache[device_index].store(
+          encoded_capability, std::memory_order_relaxed);
+    }
+  }
+  return encoded_capability - 1;
+}
 
 __device__ __forceinline__ uint32_t pgc16_mix(uint32_t state) {
   uint32_t mixed = state ^ (state >> 8);
@@ -736,14 +758,13 @@ at::Tensor p32_window_ampere_impl(
   TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3, "QVQ P32 Ampere bank ID must be in [0, 3]");
 
   const c10::cuda::CUDAGuard device_guard(input.device());
-  cudaDeviceProp properties{};
-  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  const int capability = cached_device_capability(input.get_device());
   TORCH_CHECK(
-      properties.major == 8 && properties.minor == 0,
+      capability == 80,
       "QVQ P32 Ampere WMMA requires compute capability 8.0, got ",
-      properties.major,
+      capability / 10,
       ".",
-      properties.minor);
+      capability % 10);
 
   const int size_m = static_cast<int>(input.size(0));
   const int size_k = static_cast<int>(input.size(1));
