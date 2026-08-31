@@ -204,6 +204,19 @@ __device__ __forceinline__ uint32_t pack_high_halves(uint32_t first, uint32_t se
   return (first >> 16) | (second & 0xffff0000u);
 }
 
+template <bool Vectorized>
+__device__ __forceinline__ void store_output_pair(
+    float* destination,
+    float first,
+    float second) {
+  if constexpr (Vectorized) {
+    *reinterpret_cast<float2*>(destination) = make_float2(first, second);
+  } else {
+    destination[0] = first;
+    destination[1] = second;
+  }
+}
+
 // Trellis words are consumed once by the owning CTA.  Bypass L1 for this
 // streaming payload so the read-only codebook path and staged activations do
 // not compete with it for the small Ampere L1/TEX pipe.
@@ -434,39 +447,51 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const int output_column =
         (n_tile_base + warp) * kTileColumns + (lane & 3) * 2;
     if constexpr (FullRows) {
-      target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
-      target[static_cast<int64_t>(output_row_0) * size_n + output_column + 1] = accumulator_0.values[1];
-      target[static_cast<int64_t>(output_row_1) * size_n + output_column] = accumulator_0.values[2];
-      target[static_cast<int64_t>(output_row_1) * size_n + output_column + 1] = accumulator_0.values[3];
-      target[static_cast<int64_t>(output_row_0) * size_n + output_column + 8] = accumulator_1.values[0];
-      target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
-      target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
-      target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+      store_output_pair<StaticN != 1024>(
+          target + static_cast<int64_t>(output_row_0) * size_n + output_column,
+          accumulator_0.values[0], accumulator_0.values[1]);
+      store_output_pair<StaticN != 1024>(
+          target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+          accumulator_0.values[2], accumulator_0.values[3]);
+      store_output_pair<StaticN != 1024>(
+          target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
+          accumulator_1.values[0], accumulator_1.values[1]);
+      store_output_pair<StaticN != 1024>(
+          target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+          accumulator_1.values[2], accumulator_1.values[3]);
     } else if constexpr (ActiveRows > 0) {
       if (output_row_0 < ActiveRows) {
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 1] = accumulator_0.values[1];
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 8] = accumulator_1.values[0];
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
+        store_output_pair<StaticN != 1024>(
+            target + static_cast<int64_t>(output_row_0) * size_n + output_column,
+            accumulator_0.values[0], accumulator_0.values[1]);
+        store_output_pair<StaticN != 1024>(
+            target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
+            accumulator_1.values[0], accumulator_1.values[1]);
       }
       if (output_row_1 < ActiveRows) {
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column] = accumulator_0.values[2];
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 1] = accumulator_0.values[3];
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+        store_output_pair<StaticN != 1024>(
+            target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+            accumulator_0.values[2], accumulator_0.values[3]);
+        store_output_pair<StaticN != 1024>(
+            target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+            accumulator_1.values[2], accumulator_1.values[3]);
       }
     } else {
       if (output_row_0 < size_m) {
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 1] = accumulator_0.values[1];
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 8] = accumulator_1.values[0];
-        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
+        store_output_pair<false>(
+            target + static_cast<int64_t>(output_row_0) * size_n + output_column,
+            accumulator_0.values[0], accumulator_0.values[1]);
+        store_output_pair<false>(
+            target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
+            accumulator_1.values[0], accumulator_1.values[1]);
       }
       if (output_row_1 < size_m) {
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column] = accumulator_0.values[2];
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 1] = accumulator_0.values[3];
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
-        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+        store_output_pair<false>(
+            target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+            accumulator_0.values[2], accumulator_0.values[3]);
+        store_output_pair<false>(
+            target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+            accumulator_1.values[2], accumulator_1.values[3]);
       }
     }
   }

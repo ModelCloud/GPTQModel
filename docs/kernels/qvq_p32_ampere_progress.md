@@ -768,6 +768,18 @@ stored in
 and `artifacts/a100_p32_window/qwen38_v14_launch_poll_all.json`. Planar
 timings are excluded.
 
+The third progression writes each naturally aligned adjacent FP32 output pair
+with one `float2` store on the WMMA M8/M16 routes. Scalar M1-M4 retains its
+original stores after the broad screen was neutral-to-slower there; the
+compile-time `N=1024` path also retains scalar stores. In the matched complete
+M8/M16 A/B, the 56-case Ampere geomean falls from 0.087619 ms to 0.085996 ms
+(`1.019x`, 1.852% lower). M8 improves 1.593% and M16 improves 2.110%.
+Artifacts are stored in
+`artifacts/a100_p32_window/v14_wmma_float2_matched_control.json`,
+`artifacts/a100_p32_window/v14_wmma_float2_matched_candidate.json`, and
+`artifacts/a100_p32_window/v14_wmma_float2_selective_all.json`. Planar
+timings remain excluded.
+
 ## Reproduction
 
 ```bash
