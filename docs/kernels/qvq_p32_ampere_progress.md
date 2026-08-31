@@ -96,8 +96,9 @@ Hopper-only hardware:
 17. For M8 linear-QKV (`N=10240`) and linear-Z (`N=6144`), use compile-time
     N-tile counts with the eight-live-row path after matched screens confirmed
     repeatable gains.
-18. For M8 full-KV (`N=1024`), use the compile-time N-tile count as well. This
-    completes fixed-N dispatch coverage for every formal M8 projection shape.
+18. For M8 full-KV (`N=1024`) and MLP-gate/up (`N=17408`), use compile-time
+    N-tile counts as well. This completes fixed-N dispatch coverage for every
+    formal M8 projection shape.
 19. For scalar M1 and M4, use the fixed-N launcher on the proven shape subset
     while retaining each row count's K-stage policy. M1 specializes the
     N=12288, 1024, 10240, and 17408 short-K projections; M4 specializes all
@@ -113,11 +114,11 @@ register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are fifty-two WMMA device specializations: four transition widths
+There are fifty-six WMMA device specializations: four transition widths
 times full-M16, generic partial-row, compile-time M8 partial-row, and
 compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
 paths, plus the compile-time M8 `N=12288`, `N=5120`, `N=10240`, and `N=6144`
-paths, plus the compile-time M8 `N=1024` path. The
+paths, plus the compile-time M8 `N=1024` and `N=17408` paths. The
 scalar M1-M4 rows add four exact transition-width specializations, while one
 runtime split reducer is shared by all rates.
 Unknown shapes use a live-SM-derived fallback; the seven measured Qwen3.8-27B
@@ -987,6 +988,22 @@ Further scalar depth reductions were rejected. M2 two-stage staging regressed
 its 28-case median and mean geomeans by 1.053% and 1.119%, with W3 about 4%
 slower. One-stage M1 was visibly slower across the short-K shapes. Their
 diagnostics are `v16_m2_stage2_*.json` and `v16_m1_stage1_*.json`.
+
+The third v16 progression completes the M8 fixed-N/live-row coverage for
+MLP-gate/up (`N=17408`). The prior generic route could not combine its static
+N geometry with the newly reduced 56-register accumulator state. In a matched
+40-warmup/1000-iteration reversal, every rate improves: 1.399%, 2.721%,
+4.110%, and 4.762% for W2 through W3.5. The median geomean gain is 3.240%
+and the mean geomean gain is 3.360%. Artifacts are
+`artifacts/a100_p32_window/v16_m8_mlpgate_static_live_control.json` and
+`artifacts/a100_p32_window/v16_m8_mlpgate_static_live_candidate.json`.
+
+Two additional M8 variants were rejected after the live-accumulator change.
+A 256-thread/N128 CTA regressed representative cases by roughly 6-12%, and
+eliding inactive lower-row activation staging was broadly slower. Retain the
+128-thread/N64 CTA and zero-filled inactive rows. Diagnostics are
+`v16_m8_wide_cta_candidate.json` and
+`v16_m8_live_rows_stage_candidate.json`.
 
 ## Reproduction
 
