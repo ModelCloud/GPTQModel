@@ -138,6 +138,19 @@ __device__ __forceinline__ void load_mma_fragment_a(
       : "r"(shared_address));
 }
 
+__device__ __forceinline__ void load_mma_fragment_a_upper(
+    MmaFragmentA& fragment,
+    const void* shared_source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(shared_source));
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+      : "=r"(fragment.values[0]), "=r"(fragment.values[2])
+      : "r"(shared_address));
+  fragment.values[1] = 0;
+  fragment.values[3] = 0;
+}
+
 template <bool UpperRowsOnly>
 __device__ __forceinline__ void mma_m16n8k16(
     const MmaFragmentA& input,
@@ -463,15 +476,26 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         weight_fragment_1.values[0] = select_high ? high_01_1 : low_01_1;
         weight_fragment_1.values[1] = select_high ? high_89_1 : low_89_1;
 
-        const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
-        const int address_column = (lane >> 4) * 8;
         MmaFragmentA input_fragment;
-        load_mma_fragment_a(
-            input_fragment,
-            input_tile[parity] +
-                address_row * kStageColumns +
-                stage_k_tile * kTileRows +
-                address_column);
+        if constexpr (kUpperRowsOnly && StaticN != 1024) {
+          const int address_row = lane & 7;
+          const int address_column = ((lane >> 3) & 1) * 8;
+          load_mma_fragment_a_upper(
+              input_fragment,
+              input_tile[parity] +
+                  address_row * kStageColumns +
+                  stage_k_tile * kTileRows +
+                  address_column);
+        } else {
+          const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+          const int address_column = (lane >> 4) * 8;
+          load_mma_fragment_a(
+              input_fragment,
+              input_tile[parity] +
+                  address_row * kStageColumns +
+                  stage_k_tile * kTileRows +
+                  address_column);
+        }
         mma_m16n8k16(input_fragment, weight_fragment_0, accumulator_0);
         mma_m16n8k16(input_fragment, weight_fragment_1, accumulator_1);
       }

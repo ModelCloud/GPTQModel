@@ -109,6 +109,11 @@ Hopper-only hardware:
     attention-out, where 24-way remains faster. M1/M2 retain the 32-way
     short-K wave; this shape-specific policy fills more SMs on the four-row
     scalar route without changing the other row counts.
+21. On fixed-N M8 shapes other than full-KV, load only the two live upper-row
+    A submatrices with `ldmatrix.x2`. The lower A registers are explicitly
+    zeroed to preserve the `m16n8k16` contract, while the matching lower FP32
+    outputs remain transient. Full-KV retains `ldmatrix.x4`, which is faster
+    once its small launch/reduction overhead dominates.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -1018,6 +1023,23 @@ Packing each fixed-N M8 stage's four bank IDs into one cached 32-bit load was
 also rejected. It regressed the 24-case median and mean geomeans by 0.506%
 and 0.490%, with five of six shape buckets slower; retain distributed byte
 loads on partial-row kernels. Diagnostics are `v16_m8_bankid_u32_*.json`.
+
+The fifth v16 progression applies the Marlin-style fragment lesson directly
+to M8: because only rows 0-7 are live, `ldmatrix.x2` loads the two required
+8x8 A submatrices into operand registers 0 and 2, while registers 1 and 3 are
+zeroed. This removes half of the shared-matrix load work without changing the
+`m16n8k16` arithmetic or output. Across the matched 30-warmup/500-iteration
+24-case non-KV screen, every shape improves; the median and mean geomean gains
+are 4.775% and 4.836%, with per-shape median gains from 3.060% to 6.594%.
+Exactness passes 28/28. The control and candidate are
+`artifacts/a100_p32_window/v16_m8_bankid_u32_control.json` and
+`artifacts/a100_p32_window/v16_m8_ldmatrix_x2_candidate.json`.
+
+Applying `ldmatrix.x2` to M8 full-KV was rejected and narrowed out. Its four
+rates were neutral-to-slower, with roughly a 2.0% median geomean regression
+against the matched live-accumulator control; retain `ldmatrix.x4` for
+compile-time `N=1024`. The diagnostic is
+`v16_m8_ldmatrix_x2_fullkv_candidate.json`.
 
 ## Reproduction
 
