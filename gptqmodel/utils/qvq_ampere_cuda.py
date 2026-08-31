@@ -32,7 +32,7 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
 _SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
-_AutotuneCacheKey = tuple[torch.device, torch.dtype, int, int, int, int, int]
+_AutotuneCacheKey = tuple[int, torch.dtype, int, int, int, int, int]
 _AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 
@@ -135,12 +135,11 @@ def _autotune_cache_key(
     out_features: int,
     bank_alt_id: int,
 ) -> _AutotuneCacheKey:
-    # Plans never leave this process, so the tensor's logical device is enough
-    # to distinguish GPUs. Avoid querying CUDA device properties on every hot
-    # cache hit: that host-side driver call delays the kernel after a timing or
-    # dependency event has already been enqueued on the stream.
+    # Plans never leave this process, and CUDA device indices remain stable for
+    # its lifetime. Use the raw integer index rather than hashing a
+    # ``torch.device`` or querying hardware properties on every hot cache hit.
     return (
-        input.device,
+        input.get_device(),
         input.dtype,
         int(input.shape[0]),
         int(input.shape[1]),
