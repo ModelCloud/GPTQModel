@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `eb0eefff` (tip after
-  PR #75 merged).
+- Source base: freshly fetched GitHub `origin/main` at `492f1f58` (tip after
+  PR #76 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -65,26 +65,63 @@ Hopper-only hardware:
    carrying exactly the live rows in FP32 accumulators. M1-M4 also use this
    schedule for the long-K MLP-down shape after a scalar four-K16 stage was
    measured to overcome the old WMMA advantage. M4 also uses that four-K16
-   stage on the measured short-K shapes; the remaining short-K dispatch uses up to
-   thirty-two K splits, except attention-out (K=6144, N=5120), where a
-   measured 24-way wave reduces split-reduction overhead; M4 long-K and M8+
-   remain on the tensor-core path.
+   stage on the measured short-K shapes; M1-M2 use up to thirty-two K splits,
+   while M4 uses a measured 40-way wave on short-K shapes. Attention-out
+   (K=6144, N=5120) retains a 24-way wave to reduce split-reduction overhead;
+   M4 long-K and M8+ remain on the tensor-core path.
 10. For M8 and M16, retain WMMA arithmetic but choose the K split by M/N shape:
     M8 uses 16-way splits for wide QKV/MLP projections and 32-way splits for
     small-N KV/attention/Z projections; M16 uses 16-way splits for the latter
     group and 32-way splits for full K/V.
+11. M8 uses a compile-time eight-live-row WMMA specialization. It preserves
+    the full `m16n8k16` arithmetic contract while removing runtime row-count
+    masking from activation staging and output stores.
+12. M2 short-K scalar projections use a measured three-K16 software stage,
+    reducing barrier/commit overhead while retaining the two-K16 stage for M1
+    and the four-K16 stage only where it was already proven.
+13. Cache the immutable live SM count per CUDA device in the Python dispatch;
+    this removes repeated driver-property queries from the timed auto-split
+    path, which is material for sub-50-microsecond small-N projections.
+14. For the full-row M16 full-Q, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
+    projections, use a compile-time N-tile count in the WMMA path. The fixed
+    Qwen3.8 shapes let trellis staging remove the per-vector N-bound predicate
+    while preserving the K-bound check and the exact generic fallback for all
+    other shapes. The `N=5120` case is shared by attention-out and MLP-down.
+15. For M8 full-Q (`N=12288`), combine the compile-time eight-live-row path
+    with a compile-time N-tile count. This removes both row and N predicates
+    from the measured wide projection while retaining the generic M8 fallback.
+16. For M8 attention-out and MLP-down (`N=5120`), use the same compile-time
+    N-tile count with the eight-live-row path. The two shapes share the N tile
+    geometry despite different K lengths.
+17. For M8 linear-QKV (`N=10240`) and linear-Z (`N=6144`), use compile-time
+    N-tile counts with the eight-live-row path after matched screens confirmed
+    repeatable gains.
+18. For M8 full-KV (`N=1024`), use the compile-time N-tile count as well. This
+    completes fixed-N dispatch coverage for every formal M8 projection shape.
+19. For scalar M1 and M4, use the fixed-N launcher on the proven shape subset
+    while retaining each row count's K-stage policy. M1 specializes the
+    N=12288, 1024, 10240, and 17408 short-K projections; M4 specializes all
+    formal shapes with its measured four-K16 stage. M2 remains on the cached
+    generic scalar dispatch after a matched regression screen.
+20. For M4 short-K projections, use a 40-way split wave except for
+    attention-out, where 24-way remains faster. M1/M2 retain the 32-way
+    short-K wave; this shape-specific policy fills more SMs on the four-row
+    scalar route without changing the other row counts.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are eight WMMA device specializations: four transition widths times
-full-M16 and partial-row paths. The scalar M1-M4 rows add four exact
-transition-width specializations, while one runtime split reducer is shared
-by all rates. Unknown shapes use a live-SM-derived fallback; the seven
-measured Qwen3.8-27B shapes use recorded split counts without embedding the
-local 124-SM inventory.
+There are fifty-two WMMA device specializations: four transition widths
+times full-M16, generic partial-row, compile-time M8 partial-row, and
+compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
+paths, plus the compile-time M8 `N=12288`, `N=5120`, `N=10240`, and `N=6144`
+paths, plus the compile-time M8 `N=1024` path. The
+scalar M1-M4 rows add four exact transition-width specializations, while one
+runtime split reducer is shared by all rates.
+Unknown shapes use a live-SM-derived fallback; the seven measured Qwen3.8-27B
+shapes use recorded split counts without embedding the local 124-SM inventory.
 
 ## Accepted correctness
 
@@ -130,6 +167,25 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_origin_main_eb0eefff.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v13.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v14.json`
+- `artifacts/a100_p32_window/qwen38_origin_main_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v15_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m1_m2_stage3_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m1_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m2_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m4_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m8_cached_sm_492f1f58_retry.json`
+- `artifacts/a100_p32_window/qwen38_m16_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/screen_m16_static_n_fullq.json`
+- `artifacts/a100_p32_window/screen_m16_static_n_5120.json`
+- `artifacts/a100_p32_window/screen_m16_static_n_10240_6144.json`
+- `artifacts/a100_p32_window/screen_m16_static_n_1024.json`
+- `artifacts/a100_p32_window/screen_m8_static_n_fullq.json`
+- `artifacts/a100_p32_window/screen_m8_static_n_5120.json`
+- `artifacts/a100_p32_window/screen_m8_static_n_10240_6144.json`
+- `artifacts/a100_p32_window/screen_m8_static_n_1024.json`
+- `artifacts/a100_p32_window/qwen38_m4_final_split40_6bc83e5a.json`
+- `artifacts/a100_p32_window/screen_m1_m4_static_n_scalar_narrow.json`
+- `artifacts/a100_p32_window/screen_m1_m4_static_n_selective.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -241,6 +297,120 @@ software stage for M4's measured short-K shapes. The proven two-tile WMMA stage
 remains in place for other shapes and M8/M16. The complete matrix is currently
 1.006-1.036x versus the fetched main, so the requested 2x target remains open.
 
+## Current fetched-main checkpoint
+
+The control is `qwen38_origin_main_492f1f58.json`, measured immediately after
+fetching the merged PR #76 tip. The v15 candidate is
+`qwen38_mixed_p32_ampere_v15_492f1f58.json`; both use the same 140-case matrix,
+20 warmups, 100 CUDA-event iterations, and idle/foreign-process gates. Values
+are geometric means of the 28 Ampere event medians for each M; planar timing is
+excluded from this comparison.
+
+| M | Fetched-main geomean ms | v15 geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.064880 | 0.065866 | 0.985x |
+| 2 | 0.070273 | 0.071145 | 0.988x |
+| 4 | 0.081726 | 0.082350 | 0.992x |
+| 8 | 0.092139 | 0.089172 | 1.033x |
+| 16 | 0.095486 | 0.096163 | 0.993x |
+| All 140 cases | 0.080007 | 0.080157 | 0.998x |
+
+The accepted v15 change is the compile-time M8 partial-row specialization.
+Matched W2 probes improved full-Q, attention-out, linear-QKV, and MLP gate/up
+by approximately 5.7%, 3.2%, 4.2%, and 3.3%, respectively, with all 140 cases
+remaining within the exactness gate. The one-pass all-case aggregate is within
+timing noise because M8 is only one of five row counts; the cumulative 3%
+versus-main target remains open and further row-count-specific work continues.
+
+The next focused checkpoint is `qwen38_m1_m2_stage3_492f1f58.json`. It covers
+all 28 cases for M1 and M2. The measured M2 geomean is `0.069539 ms` versus
+`0.070273 ms` for the fetched-main control (`1.011x`); M1 is effectively flat
+at `1.001x`, so the three-stage policy is narrowed to M2 rather than applied
+broadly.
+
+## Isolated row-count checkpoint
+
+The cache checkpoint was validated as separate 28-case runs per row count to
+avoid the clock/scheduling excursions seen in one long 140-case process. The
+comparison remains against `qwen38_origin_main_492f1f58.json` and excludes
+planar timing.
+
+| M | Fetched-main geomean ms | Cached-dispatch geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.064880 | 0.063994 | 1.014x |
+| 2 | 0.070273 | 0.067885 | 1.035x |
+| 4 | 0.081726 | 0.081302 | 1.005x |
+| 8 | 0.092139 | 0.088444 | 1.042x |
+| 16 | 0.095486 | 0.094271 | 1.013x |
+| Equal-weight all M | 0.080007 | 0.078309 | 1.022x |
+
+All isolated runs passed the exactness contract; the M8 retry is the artifact
+used for the table after an earlier contaminated process was discarded.
+
+The focused M16 fixed-N screen is `screen_m16_static_n_fullq.json`. For the
+four full-Q rate cases, compile-time `N=12288` staging lowers the geomean from
+0.120576 ms to 0.117728 ms (`1.028x`, or 2.84%) versus the matching rows in
+`qwen38_origin_main_492f1f58.json`. The complete 22-case exactness suite still
+passes; this is a shape-local checkpoint and does not yet establish a 3%
+all-row-count aggregate.
+
+The follow-on `N=5120` screen covers M16 attention-out and MLP-down. It lowers
+their geomeans from 0.067327/0.165489 ms on the fetched-main control to
+0.065536/0.160763 ms (`1.027x`/`1.029x`) with maximum error `<= 9.6e-5`.
+The complete exactness suite is rerun before this checkpoint is retained.
+
+The companion `N=10240`/`N=6144` screen covers M16 linear-QKV and linear-Z.
+Their geomeans fall from 0.103680/0.068096 ms to 0.100480/0.066304 ms
+(`1.032x`/`1.027x`) against the same fetched-main rows. The exactness suite
+passes 22/22 after adding these dispatches.
+
+The remaining M16 full-KV screen (`N=1024`) lowers its geomean from 0.045312
+ms to 0.043008 ms (`1.048x`) versus fetched main, with maximum error
+`<= 1.8e-5`; the 22-case exactness suite remains green.
+
+The M8 full-Q fixed-N screen lowers its four-rate geomean from 0.115712 ms on
+fetched main to 0.110592 ms (`1.046x`), with maximum error `<= 3.5e-5`.
+
+The M8 `N=5120` screen lowers attention-out and MLP-down geomeans from
+0.065280/0.159744 ms to 0.062848/0.153344 ms (`1.039x`/`1.042x`) versus
+fetched main. Maximum error is `<= 7.3e-5`, and the 22-case exactness suite
+passes after the dispatch addition.
+
+The M8 `N=10240`/`N=6144` screen lowers linear-QKV and linear-Z geomeans from
+0.098304/0.065280 ms to 0.094464/0.062720 ms (`1.041x`/`1.041x`) versus
+fetched main, with maximum error `<= 2.9e-5`; exactness remains 22/22.
+
+The final M8 full-KV (`N=1024`) screen lowers its geomean from 0.045312 ms to
+0.042496 ms (`1.066x`) versus fetched main, with maximum error `<= 1.8e-5`.
+This completes the fixed-N M8 shape set with the exactness suite still at
+22/22.
+
+The final selective scalar fixed-N screen covers all 28 M1 and M4 cases. M1
+lowers its geomean from 0.064880 ms on fetched main to 0.063510 ms (`1.022x`),
+and M4 lowers 0.081726 ms to 0.080089 ms (`1.020x`). Maximum error is
+`<= 4.8e-5`; M2 and M3 remain on their prior dispatches.
+
+The final M4 auto-policy artifact applies 40-way splitting to six short-K
+shapes and retains 24-way for attention-out. Its geomean is 0.078690 ms
+(`1.039x` versus fetched main); all 28 cases remain within the exactness
+gate.
+
+Combining the clean isolated row-count artifacts gives the current cumulative
+checkpoint below. The comparator is the fetched `origin/main` control, not the
+planar oracle kernel.
+
+| M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.064880 | 0.063510 | 1.022x |
+| 2 | 0.070273 | 0.067885 | 1.035x |
+| 4 | 0.081726 | 0.078690 | 1.039x |
+| 8 | 0.092139 | 0.088308 | 1.043x |
+| 16 | 0.095486 | 0.092902 | 1.028x |
+| All 140 cases | 0.080007 | 0.077431 | 1.033x |
+
+This exceeds the requested cumulative 3% improvement while preserving the
+22/22 exactness result and the documented M2/M3 scalar rejection.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
@@ -303,6 +473,17 @@ more decode instructions without expanding the compact state representation.
 | Vectorized four-output split reducer | Correct, but it under-filled the small-output reducer (M1 MLP-down about 0.116 ms versus about 0.100 ms with one output per thread). | Rejected; retain the scalar reducer to preserve enough reduction blocks. |
 | Eight-lane shared-activation broadcast | Correct, but replacing repeated shared loads with a packed-half2 shuffle made the scalar M1/M2 probes 1.5-2x slower (full-Q/MLP-down about 0.089/0.130 ms versus about 0.068/0.10 ms). | Rejected; the extra lane-control and shuffle cost outweighs shared-load reuse on sm_80. |
 | SM80 `m8n8k4` M1-M4 route | Correct, but the smaller tensor-core instruction still required four K4 slices and extra pair shuffles; M1 full-Q was about 0.261 ms versus about 0.067 ms for the scalar route. | Rejected; retain the scalar M1/M2 and WMMA M4+ dispatch. |
+| Adaptive vectorized split reducer | Correct, but large-output rows were neutral at the event-sample resolution and small-output cases lost reducer parallelism; no repeatable full-matrix gain. | Rejected; retain the scalar deterministic reducer. |
+| Ordinary/explicit `.ca` level loads | Correct, but matched probes were neutral-to-slower than the `__ldg` read-only path. | Rejected; retain `__ldg` for the 512-byte codebook. |
+| M8 dead-row staging elision | Correct, but removing the eight inactive activation rows was slower or neutral versus the compile-time-row specialization alone. | Rejected; retain zero-filled inactive rows for stable pipeline scheduling. |
+| Three-K16 scalar stage for M1 | Correct and near-neutral in the full M1 subset (`1.001x`), without a repeatable gain over the two-K16 stage. | Narrowed to M2, where the matched subset measured `1.011x`; M1 retains two-K16 staging. |
+| Runtime-N WMMA staging on M16 fixed-N shapes | Correct, but the generic `n_tile < n_tiles` predicate remains on every staged vector even though the measured shapes are fixed at `N=12288`, `N=5120`, `N=10240`, `N=6144`, or `N=1024`. | Replaced by compile-time N specializations, which lower the focused M16 full-Q, attention-out, MLP-down, linear-QKV, linear-Z, and full-KV geomeans by 2.84%, 2.73%, 2.94%, 3.19%, 2.70%, and 4.81%; the remaining N values stay on the generic path pending matched screens. |
+| M8 full-Q compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=12288` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after a 4.63% matched full-Q gain; other M8 N values remain generic pending screens. |
+| M8 attention-out/MLP-down compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=5120` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after 3.87% and 4.18% matched gains; other M8 N values remain generic pending screens. |
+| M8 linear-QKV/linear-Z compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=10240`/`N=6144` tile bounds for every staged vector. | Accepted after 4.07%/4.08% matched gains; the M8 full-KV (`N=1024`) screen followed separately. |
+| M8 full-KV compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=1024` tile bound for every staged vector. | Accepted after a 6.62% matched gain; all seven formal M8 shapes now use fixed-N paths. |
+| Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
+| Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
 
 ## Reproduction
 
