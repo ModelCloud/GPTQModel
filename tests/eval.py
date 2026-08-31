@@ -95,6 +95,164 @@ def import_evalution():
         ) from None
 
 
+def _install_buffered_loglikelihood_d2h(evalution: Any) -> None:
+    """Avoid one GPU synchronization per scored continuation in Evalution.
+
+    Evalution 0.0.16's transformer scorer converts each row's reduction with
+    ``Tensor.item()`` while it is still inside the batch loop.  ``item()`` is
+    synchronous for CUDA tensors, so continuous MMLU scoring serializes every
+    choice on a host round trip.  Keep the patch in this integration adapter
+    (rather than editing a site-package) so QVQ evaluations remain reproducible
+    from a clean environment.  The batched values are copied once per model
+    forward, preserving output ordering and numerical dtype.
+    """
+
+    try:
+        transformers_common = importlib.import_module("evalution.engines.transformers_common")
+        session_cls = transformers_common.BaseTransformerSession
+        original = session_cls._score_chunks
+    except (AttributeError, ImportError):
+        # Non-transformer Evalution engines do not use this path.
+        return
+
+    if getattr(original, "_qvq_buffered_d2h", False):
+        return
+
+    def _score_chunks_buffered(
+        self: Any,
+        chunks: list[Any],
+        *,
+        batch_size: int,
+    ) -> list[Any]:
+        """Score chunks with one D2H transfer per forward batch."""
+
+        import torch
+
+        scored_chunks: list[Any] = []
+        if not chunks:
+            return scored_chunks
+
+        progress_disabled = bool(
+            chunks[0].metadata.get(
+                getattr(
+                    transformers_common,
+                    "_LOGLIKELIHOOD_DISABLE_CHUNK_PROGRESS_METADATA_KEY",
+                    "_evalution_disable_loglikelihood_chunk_progress",
+                ),
+            )
+        )
+        score_bar = None
+        if not progress_disabled:
+            progress_title = (
+                transformers_common.loglikelihood_progress_title(chunks[0].metadata)
+                or "loglikelihood: scoring continuations"
+            )
+            total_batches = (len(chunks) + batch_size - 1) // batch_size
+            score_bar = transformers_common.manual_progress(
+                len(chunks),
+                title=progress_title,
+                subtitle=f"batch_size={batch_size}",
+            )
+
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start : start + batch_size]
+            if score_bar is not None:
+                batch_index = (start // batch_size) + 1
+                score_bar.subtitle(f"batch={batch_index}/{total_batches} batch_size={batch_size}")
+            encoded = None
+            logits = None
+            try:
+                pad_token_id = getattr(self.tokenizer, "pad_token_id", None)
+                if pad_token_id is None:
+                    pad_token_id = self._prefix_token_id()
+                padded_length = max(len(chunk.input_ids) for chunk in batch)
+                padded_rows = [
+                    list(chunk.input_ids)
+                    + ([int(pad_token_id)] * (padded_length - len(chunk.input_ids)))
+                    for chunk in batch
+                ]
+                encoded = {
+                    "input_ids": torch.tensor(
+                        padded_rows,
+                        dtype=torch.long,
+                        device=self.input_device,
+                    )
+                }
+                logits_to_keep = batch[0].score_count + 1 if len(batch) == 1 else None
+
+                with self._scoring_attention_context(), torch.inference_mode():
+                    model_kwargs = {"input_ids": encoded["input_ids"]}
+                    if logits_to_keep is not None:
+                        model_kwargs["logits_to_keep"] = logits_to_keep
+                    try:
+                        outputs = self.model(**model_kwargs)
+                    except TypeError as exc:
+                        if logits_to_keep is None or "logits_to_keep" not in str(exc):
+                            raise
+                        model_kwargs.pop("logits_to_keep", None)
+                        logits_to_keep = None
+                        outputs = self.model(**model_kwargs)
+                logits = outputs.logits
+                shift_log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)
+                if logits_to_keep is not None:
+                    shift_labels = encoded["input_ids"][:, -batch[0].score_count :]
+                else:
+                    shift_labels = encoded["input_ids"][:, 1:]
+
+                # Keep reductions and greedy checks on device until every row in
+                # this forward has been assembled.  The single packed copy below
+                # replaces one synchronizing ``.item()``/``torch.equal`` pair per
+                # scored continuation.
+                batch_logprobs: list[Any] = []
+                batch_greedy: list[Any] = []
+                for row_index, chunk in enumerate(batch):
+                    if logits_to_keep is not None:
+                        sample_log_probs = shift_log_probs[row_index, -chunk.score_count :, :]
+                        sample_targets = shift_labels[row_index, -chunk.score_count :]
+                    else:
+                        target_start = chunk.score_start
+                        shift_start = target_start - 1
+                        shift_end = shift_start + chunk.score_count
+                        sample_log_probs = shift_log_probs[row_index, shift_start:shift_end, :]
+                        sample_targets = shift_labels[row_index, shift_start:shift_end]
+                    gathered = sample_log_probs.gather(-1, sample_targets.unsqueeze(-1)).squeeze(-1)
+                    greedy_tokens = sample_log_probs.argmax(dim=-1)
+                    batch_logprobs.append(gathered.sum())
+                    batch_greedy.append(torch.all(greedy_tokens == sample_targets))
+
+                # Preserve the original reduction dtype while packing the bool
+                # flag into the same transfer.  ``tolist`` performs one stream
+                # synchronization and one contiguous D2H copy for the batch.
+                packed = torch.stack(
+                    [
+                        torch.stack(batch_logprobs),
+                        torch.stack(batch_greedy).to(dtype=batch_logprobs[0].dtype),
+                    ],
+                    dim=1,
+                )
+                host_rows = packed.detach().cpu().tolist()
+                for chunk, (logprob, is_greedy) in zip(batch, host_rows, strict=True):
+                    scored_chunks.append(
+                        transformers_common.LoglikelihoodOutput(
+                            logprob=float(logprob),
+                            is_greedy=bool(is_greedy),
+                            token_count=chunk.score_count,
+                            metadata=dict(chunk.metadata),
+                        )
+                    )
+                    if score_bar is not None:
+                        score_bar.next().draw()
+            finally:
+                if logits is not None:
+                    del logits
+                if encoded is not None:
+                    del encoded
+        return scored_chunks
+
+    _score_chunks_buffered._qvq_buffered_d2h = True
+    session_cls._score_chunks = _score_chunks_buffered
+
+
 def list_supported_tasks() -> tuple[str, ...]:
     return SUPPORTED_TASKS
 
@@ -251,6 +409,7 @@ def run_evalution(
         suite_kwargs: Dict[str, Any],
 ) -> dict[str, Any]:
     evalution = import_evalution()
+    _install_buffered_loglikelihood_d2h(evalution)
     engine_config, model_config, session = _build_evalution_runtime(
         evalution=evalution,
         model_or_id_or_path=model_or_id_or_path,
