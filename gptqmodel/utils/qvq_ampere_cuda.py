@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 from pathlib import Path
@@ -35,7 +34,6 @@ _TORCH_NVCC_UNDEFINES = (
 _SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
 _AUTOTUNE_CACHE_VERSION = 2
 _AUTOTUNE_CACHE: dict[str, int] = {}
-_AUTOTUNE_CACHE_LOADED = False
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 
 
@@ -128,17 +126,6 @@ def _autotune_enabled() -> bool:
     }
 
 
-def _autotune_cache_path() -> Path | None:
-    """Resolve the optional persistent M/K/N launch-plan cache path."""
-
-    value = os.environ.get("QVQ_AMPERE_AUTOTUNE_CACHE")
-    if value is not None:
-        if value.lower() in {"", "0", "none", "off"}:
-            return None
-        return Path(value).expanduser()
-    return Path.home() / ".cache" / "gptqmodel" / "qvq_ampere_launch.json"
-
-
 def _autotune_cache_key(
     input: torch.Tensor,
     *,
@@ -163,50 +150,6 @@ def _autotune_cache_key(
             str(bank_alt_id),
         )
     )
-
-
-def _load_autotune_cache_locked() -> None:
-    global _AUTOTUNE_CACHE_LOADED
-    if _AUTOTUNE_CACHE_LOADED:
-        return
-    _AUTOTUNE_CACHE_LOADED = True
-    path = _autotune_cache_path()
-    if path is None or not path.is_file():
-        return
-    try:
-        payload = json.loads(path.read_text())
-        if payload.get("version") != _AUTOTUNE_CACHE_VERSION:
-            return
-        entries = payload.get("entries", {})
-        if isinstance(entries, dict):
-            for key, value in entries.items():
-                if isinstance(key, str) and isinstance(value, int) and value > 0:
-                    _AUTOTUNE_CACHE[key] = value
-    except (OSError, ValueError, TypeError):
-        # A corrupt or concurrently replaced cache must never disable the
-        # kernel; simply fall back to the measured/static policy.
-        return
-
-
-def _save_autotune_cache_locked() -> None:
-    path = _autotune_cache_path()
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(
-                {"version": _AUTOTUNE_CACHE_VERSION, "entries": _AUTOTUNE_CACHE},
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
-        temporary.replace(path)
-    except OSError:
-        # Read-only home directories and ephemeral containers are supported;
-        # the in-process cache remains useful when persistence is unavailable.
-        return
 
 
 def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 6) -> list[int]:
@@ -238,20 +181,10 @@ def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 6
 
 
 def clear_qvq_ampere_autotune_cache() -> None:
-    """Clear in-process and persistent Ampere launch-plan entries."""
+    """Clear the in-process Ampere launch-plan entries."""
 
-    global _AUTOTUNE_CACHE_LOADED
     with _AUTOTUNE_CACHE_LOCK:
         _AUTOTUNE_CACHE.clear()
-        _AUTOTUNE_CACHE_LOADED = True
-        path = _autotune_cache_path()
-        if path is not None:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
 
 
 def _autotune_split_count(
@@ -274,7 +207,6 @@ def _autotune_split_count(
         bank_alt_id=bank_alt_id,
     )
     with _AUTOTUNE_CACHE_LOCK:
-        _load_autotune_cache_locked()
         cached = _AUTOTUNE_CACHE.get(key)
         if cached is not None:
             return min(cached, int(input.shape[1]) // 16)
@@ -308,10 +240,10 @@ def _autotune_split_count(
                     del output
                 samples = []
                 for _ in range(repeats):
-                    start = torch.cuda.Event(enable_timing=True)
-                    end = torch.cuda.Event(enable_timing=True)
-                    start.record(stream)
-                    for _ in range(iterations):
+                    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+                    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+                    for iteration in range(iterations):
+                        starts[iteration].record(stream)
                         output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
                             input,
                             trellis,
@@ -323,9 +255,12 @@ def _autotune_split_count(
                             candidate,
                         )
                         del output
-                    end.record(stream)
-                    end.synchronize()
-                    samples.append(start.elapsed_time(end) / iterations)
+                        ends[iteration].record(stream)
+                    ends[-1].synchronize()
+                    samples.extend(
+                        start.elapsed_time(end)
+                        for start, end in zip(starts, ends, strict=True)
+                    )
                 elapsed_ms = median(samples)
                 if elapsed_ms < best_ms:
                     best_ms = elapsed_ms
@@ -335,7 +270,6 @@ def _autotune_split_count(
                 # not make a new model unusable; retain the known-good policy.
                 continue
         _AUTOTUNE_CACHE[key] = int(best_split)
-        _save_autotune_cache_locked()
         return int(best_split)
 
 

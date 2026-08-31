@@ -570,9 +570,8 @@ The Python dispatch now runs a first-use tuner by default for new shapes. It
 benchmarks a bounded set of split waves around the measured fallback on the
 active CUDA stream; the selected plan is keyed by
 device UUID/SM80 capability, dtype, M, K, N, transition bits, and bank variant.
-Entries are memoized in-process and persisted to
-`~/.cache/gptqmodel/qvq_ampere_launch.json` (override with
-`QVQ_AMPERE_AUTOTUNE_CACHE`, or set it to `off` to keep the cache in memory).
+Entries are memoized only in the current process; no autotune data is read from
+or written to disk while the kernel is under active development.
 Set `QVQ_AMPERE_AUTOTUNE=0` for the zero-overhead measured/static fallback.
 Tuning can be made shorter or broader with `QVQ_AMPERE_AUTOTUNE_WARMUP`,
 `QVQ_AMPERE_AUTOTUNE_ITERATIONS`, and `QVQ_AMPERE_AUTOTUNE_CANDIDATES`; clear
