@@ -1168,6 +1168,7 @@ def pack_model(
     quant_linear_cls = make_quant(
         model,
         qcfg=qcfg,
+        quant_result=quant_result,
         backend=backend,
         lm_head_name=lm_head_name,
         pack=True,
