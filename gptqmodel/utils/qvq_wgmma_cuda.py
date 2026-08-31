@@ -158,9 +158,16 @@ def qvq_p32_window_wgmma_w3_m16_tma(
     *,
     out_features: int,
     bank_alt_id: int = 3,
-    split_count: int = 1,
+    split_count: int = 0,
 ) -> torch.Tensor:
     """Run the two-stage TMA direct-window P32 W3 RS-WGMMA prototype."""
+
+    if split_count == 0:
+        shape = (int(input.shape[1]), int(out_features))
+        split_count = {
+            (5120, 17408): 10,
+            (17408, 5120): 34,
+        }.get(shape, 1)
 
     return _QVQ_WGMMA_EXTENSION.op("p32_window_w3_m16_tma")(
         input,
