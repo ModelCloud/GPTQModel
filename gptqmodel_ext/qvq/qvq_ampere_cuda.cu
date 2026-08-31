@@ -630,8 +630,11 @@ at::Tensor p32_window_ampere_impl(
       : at::empty({split_count, size_m, size_n}, input.options().dtype(at::kFloat));
   // The scalar M<=4 route pays one decode loop per K16 row and reuses each
   // decoded pair across the live output rows. It wins for the common 5-6K K
-  // projections, while very long-K projections are better left on WMMA.
-  const bool use_small_m_scalar = size_m <= 4 && size_k <= 6144;
+  // projections; with the wider long-K wave it also wins for M1-M2, while
+  // M4 and larger long-K projections remain on WMMA.
+  const bool use_small_m_scalar =
+      (size_m <= 4 && size_k <= 6144) ||
+      (size_m <= 2 && size_k == 17408 && size_n == 5120);
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
