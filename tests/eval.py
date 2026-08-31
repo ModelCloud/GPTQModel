@@ -22,6 +22,7 @@ _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
 _ENGINE_OPTION_KEYS = {
     "attn_implementation",
     "attention_backend",
+    "allow_block_sharing",
     "base_url",
     "context_length",
     "dp_size",
@@ -32,6 +33,10 @@ _ENGINE_OPTION_KEYS = {
     "gpu_memory_utilization",
     "llm_kwargs",
     "load_format",
+    "manual_eviction",
+    "max_batch_tokens",
+    "max_blocks_per_request",
+    "max_cached_graphs",
     "max_model_len",
     "max_running_requests",
     "max_total_tokens",
@@ -49,7 +54,10 @@ _ENGINE_OPTION_KEYS = {
     "tokenizer_revision",
     "tp_size",
     "trust_remote_code",
+    "use_async_batching",
     "use_cuda_graph",
+    "q_padding_interval_size",
+    "kv_padding_interval_size",
     "vllm_path",
 }
 _DROPPED_MODEL_ARG_KEYS = {
@@ -274,11 +282,18 @@ def run_evalution(
         engine_payload = {}
         if hasattr(engine_config, "to_dict"):
             engine_payload = engine_config.to_dict()
+        execution = {}
         try:
-            engine_payload["execution"] = session.describe_execution()
+            execution = session.describe_execution()
         except Exception:
             # Best-effort metadata only; evaluation should continue if unavailable.
             pass
+        if not isinstance(execution, dict):
+            execution = {}
+        continuous_batching_config = _describe_continuous_batching_config(session)
+        if continuous_batching_config is not None:
+            execution["continuous_batching_config"] = continuous_batching_config
+        engine_payload["execution"] = execution
 
         result = evalution.RunResult(
             model=model_config.to_dict(),
@@ -290,6 +305,54 @@ def run_evalution(
 
     _maybe_write_evalution_output(output_path, result)
     return result
+
+
+def _describe_continuous_batching_config(session: Any) -> dict[str, Any] | None:
+    """Return JSON-safe resolved Transformers continuous-batching settings.
+
+    The requested graph flag is not sufficient evidence that Transformers used a
+    CUDA graph: Evalution may normalize a boolean into separate varlen/decode
+    paths and the manager may disable a path at runtime.  Read the config owned
+    by the live manager after it has been built so evaluation reports capture the
+    actual setting used by the scheduler.
+    """
+
+    manager = getattr(session, "continuous_batching_manager", None)
+    config = getattr(manager, "continuous_batching_config", None) if manager is not None else None
+    if config is None:
+        return None
+
+    fields = (
+        "block_size",
+        "num_blocks",
+        "max_batch_tokens",
+        "max_requests_per_batch",
+        "max_blocks_per_request",
+        "allow_block_sharing",
+        "use_async_batching",
+        "use_cuda_graph",
+        "q_padding_interval_size",
+        "kv_padding_interval_size",
+        "max_cached_graphs",
+    )
+    payload: dict[str, Any] = {}
+    for field in fields:
+        if not hasattr(config, field):
+            continue
+        value = getattr(config, field)
+        if isinstance(value, tuple):
+            value = list(value)
+        elif isinstance(value, set):
+            value = sorted(value)
+        if isinstance(value, (str, int, float, bool, list, dict)) or value is None:
+            payload[field] = value
+
+    graph_booleans = getattr(config, "cuda_graph_booleans", None)
+    if graph_booleans is not None:
+        if isinstance(graph_booleans, tuple):
+            graph_booleans = list(graph_booleans)
+        payload["cuda_graph_booleans"] = graph_booleans
+    return payload
 
 
 @dataclass(slots=True)
@@ -548,8 +611,23 @@ def _build_evalution_runtime(
             "padding_side": engine_padding_side,
             "backend": _normalize_backend_name(backend),
             "gptqmodel_path": str(Path(__file__).resolve().parents[2]),
-            "use_cuda_graph": engine_options.get("use_cuda_graph"),
         }
+        # Keep continuous-batching policy in the engine/Transformers
+        # ContinuousBatchingConfig.  Do not put these values in model_kwargs:
+        # the model loader must not silently rewrite graph policy.
+        for key in (
+            "manual_eviction",
+            "allow_block_sharing",
+            "max_batch_tokens",
+            "max_blocks_per_request",
+            "use_async_batching",
+            "use_cuda_graph",
+            "q_padding_interval_size",
+            "kv_padding_interval_size",
+            "max_cached_graphs",
+        ):
+            if key in engine_options:
+                engine_kwargs[key] = engine_options[key]
         engine = safe_kwargs_call(evalution.GPTQModel, kwargs=engine_kwargs)
         model_config = evalution.Model(
             path=model_or_id_or_path,

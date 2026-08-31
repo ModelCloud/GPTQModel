@@ -225,8 +225,30 @@ def build_parser() -> argparse.ArgumentParser:
     tasks.add_argument(
         "--use-cuda-graph",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Capture continuous-batching prefill/decode graphs (enabled by default).",
+        default=None,
+        help="Legacy alias: capture both continuous-batching varlen and decode graphs.",
+    )
+    tasks.add_argument(
+        "--cuda-graph-mode",
+        choices=("auto", "off", "varlen", "decode", "both"),
+        default=None,
+        help=(
+            "Transformers ContinuousBatchingConfig graph policy. The default is decode-only "
+            "(varlen prefill eager, decode captured); use auto to let the engine decide."
+        ),
+    )
+    tasks.add_argument("--allow-block-sharing", action=argparse.BooleanOptionalAction, default=None)
+    tasks.add_argument("--max-batch-tokens", type=int, default=None)
+    tasks.add_argument("--max-blocks-per-request", type=int, default=None)
+    tasks.add_argument("--use-async-batching", action=argparse.BooleanOptionalAction, default=None)
+    tasks.add_argument("--q-padding-interval-size", type=int, default=None)
+    tasks.add_argument("--kv-padding-interval-size", type=int, default=None)
+    tasks.add_argument("--max-cached-graphs", type=int, default=None)
+    tasks.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Limit rows for a smoke/canary run; omit for the complete task split.",
     )
     tasks.add_argument("--task", action="append", choices=tuple(TASKS), help="Repeat to select tasks.")
     return parser
@@ -1431,6 +1453,19 @@ def _tasks(args: argparse.Namespace) -> int:
 
     from tests.eval import evaluate, format_eval_result_table, get_eval_task_results
 
+    evalution_version = package_version("evalution")
+    try:
+        version_tuple = tuple(int(part) for part in evalution_version.split(".")[:3])
+    except ValueError as exc:
+        raise RuntimeError(f"Cannot validate Evalution version {evalution_version!r}") from exc
+    if version_tuple < (0, 0, 16):
+        raise RuntimeError(
+            "tasks evaluation requires Evalution>=0.0.16 for Transformers ContinuousBatchingConfig "
+            f"graph routing; found Evalution=={evalution_version}"
+        )
+
+    graph_request, graph_mode = _resolve_cuda_graph_request(args)
+
     selected = args.task or list(TASKS)
     expected_payload: dict[str, Any] = {
         "checkpoint": str(checkpoint),
@@ -1441,7 +1476,9 @@ def _tasks(args: argparse.Namespace) -> int:
         "attn_implementation": args.attn_implementation,
         "continuous_batching_required": True,
         "paged_attention_required": True,
-        "cuda_graph_requested": args.use_cuda_graph,
+        "cuda_graph_mode": graph_mode,
+        "cuda_graph_requested": list(graph_request) if graph_request is not None else None,
+        "max_rows": args.max_rows,
         "package_versions": {
             "evalution": package_version("evalution"),
             "gptqmodel": package_version("gptqmodel"),
@@ -1478,6 +1515,9 @@ def _tasks(args: argparse.Namespace) -> int:
             print(f"Skipping completed task {label} from resumed report {args.output}", flush=True)
             continue
         task, apply_chat_template, suite_kwargs = TASKS[label]
+        suite_kwargs = dict(suite_kwargs)
+        if args.max_rows is not None:
+            suite_kwargs["max_rows"] = args.max_rows
         started = time.perf_counter()
         with _mmlu_question_row_progress(task.startswith("mmlu")):
             output = evaluate(
@@ -1488,7 +1528,20 @@ def _tasks(args: argparse.Namespace) -> int:
                     "dtype": "float16",
                     "device": args.device,
                     "attn_implementation": args.attn_implementation,
-                    "use_cuda_graph": args.use_cuda_graph,
+                    "use_cuda_graph": graph_request,
+                    **{
+                        key: value
+                        for key, value in {
+                            "allow_block_sharing": args.allow_block_sharing,
+                            "max_batch_tokens": args.max_batch_tokens,
+                            "max_blocks_per_request": args.max_blocks_per_request,
+                            "use_async_batching": args.use_async_batching,
+                            "q_padding_interval_size": args.q_padding_interval_size,
+                            "kv_padding_interval_size": args.kv_padding_interval_size,
+                            "max_cached_graphs": args.max_cached_graphs,
+                        }.items()
+                        if value is not None
+                    },
                 },
                 batch_size=args.batch_size,
                 apply_chat_template=apply_chat_template,
@@ -1510,6 +1563,26 @@ def _tasks(args: argparse.Namespace) -> int:
     if not args.output.exists():
         publish()
     return 0
+
+
+def _resolve_cuda_graph_request(args: argparse.Namespace) -> tuple[tuple[bool, bool] | None, str]:
+    """Resolve the CLI graph policy into Transformers' (varlen, decode) tuple."""
+
+    legacy = getattr(args, "use_cuda_graph", None)
+    mode = getattr(args, "cuda_graph_mode", None)
+    if legacy is not None and mode is not None:
+        raise ValueError("pass only one of --use-cuda-graph/--no-use-cuda-graph or --cuda-graph-mode")
+    if legacy is not None:
+        return (bool(legacy), bool(legacy)), "both" if legacy else "off"
+    mode = mode or "decode"
+    requests = {
+        "auto": None,
+        "off": (False, False),
+        "varlen": (True, False),
+        "decode": (False, True),
+        "both": (True, True),
+    }
+    return requests[mode], mode
 
 
 def main(argv: list[str] | None = None) -> int:

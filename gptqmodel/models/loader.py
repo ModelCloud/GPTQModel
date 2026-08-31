@@ -263,44 +263,6 @@ def _override_attn_implementation(config: PretrainedConfig, attn_implementation:
             pass
 
 
-def _set_paged_attention_safe_cuda_graphs(model) -> None:
-    """Disable CUDA graph capture for paged attention by default.
-
-    ``transformers`` continuous batching defaults ``use_cuda_graph=True`` for flash-attention
-    paths, but ``flash_attn_with_kvcache`` is not currently CUDA-graph capture-safe. Setting
-    the model's default ``continuous_batching_config`` keeps paged Flash Attention working for
-    direct ``generate_batch`` / ``init_continuous_batching`` callers without requiring a monkey
-    patch.
-    """
-    if not hasattr(model, "config") or not isinstance(model.config, PretrainedConfig):
-        return
-
-    attn = getattr(model.config, "_attn_implementation", None) or getattr(
-        model.config, "attn_implementation", None
-    )
-    if not isinstance(attn, str) or "paged" not in [part.strip() for part in attn.split("|")]:
-        return
-
-    try:
-        from transformers import ContinuousBatchingConfig, GenerationConfig
-    except Exception:
-        return
-
-    gen_config = getattr(model, "generation_config", None)
-    if gen_config is None:
-        try:
-            gen_config = GenerationConfig.from_model_config(model.config)
-        except Exception:
-            return
-        model.generation_config = gen_config
-
-    cb_config = getattr(gen_config, "continuous_batching_config", None)
-    if not isinstance(cb_config, ContinuousBatchingConfig):
-        gen_config.continuous_batching_config = ContinuousBatchingConfig(use_cuda_graph=(False, False))
-    elif getattr(cb_config, "use_cuda_graph", None) is None:
-        cb_config.use_cuda_graph = (False, False)
-
-
 def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
     """Attach online Hadamard transform state to QuantLinear modules for rotation inference.
 
@@ -920,8 +882,6 @@ def ModelLoader(cls):
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
             )
-            _set_paged_attention_safe_cuda_graphs(instance.model)
-
             return instance
 
         load_start = time.perf_counter()
@@ -1078,8 +1038,6 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
         )
-        _set_paged_attention_safe_cuda_graphs(instance.model)
-
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
@@ -1351,7 +1309,6 @@ def ModelLoader(cls):
                 model_local_path=model_local_path,
             )
             instance._runtime_generate = runtime_generate
-            _set_paged_attention_safe_cuda_graphs(instance.model)
             return instance
 
         if format_code == FORMAT.MARLIN:
@@ -2094,7 +2051,6 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
         )
         _setup_rotation_online_had(instance.model, qcfg.rotation)
-        _set_paged_attention_safe_cuda_graphs(instance.model)
         return instance
 
     cls.from_quantized = from_quantized

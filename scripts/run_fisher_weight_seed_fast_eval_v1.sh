@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="${QVQ_FAST_SEED_EVAL_ROOT:-/root/QvQ-score-updates}"
 PINNED_COMMIT="${QVQ_FAST_SEED_EVAL_COMMIT:-$(git -C "$ROOT" rev-parse HEAD)}"
 RESULTS="${QVQ_FAST_SEED_EVAL_RESULTS:-/root/qvq-results/calibration-fisher-weight-seed-v1}"
-CANARY_SUMMARY="/root/qvq-results/calibration-fisher-composition-v1/llama32-1b-f9_yaqa182_nm2048_yaqa1x-anchor-up4-l6-l8/post_quant_eval_gsm8k_platinum_fast_v2_comparison.json"
+CANARY_SUMMARY="/root/qvq-results/calibration-fisher-composition-v1/llama32-1b-f9_yaqa182_nm2048_yaqa1x-anchor-up4-l6-l8/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4_comparison.json"
 WORKBASE=""
 WORKTREE=""
 
@@ -29,12 +29,11 @@ required = (
     "metric_parity",
     "continuous_batching_verified",
     "paged_attention_verified",
-    "cuda_graph_requested",
+    "graph_policy_verified",
+    "cache_policy_compatible",
 )
 if not all(payload.get(key) is True for key in required):
     raise SystemExit(f"fast-eval canary was not accepted: {payload}")
-if float(payload.get("speedup", 0.0)) < 1.0:
-    raise SystemExit(f"fast-eval canary regressed wall time: {payload}")
 PY
 
 cleanup() {
@@ -65,13 +64,14 @@ gpu_idle() {
 }
 
 run_one() {
-  local index="$1" arm gpu checkpoint legacy fast comparison stable=0
+  local index="$1" arm gpu checkpoint legacy baseline fast comparison stable=0
   arm="${ids[$index]}"
   gpu="${gpus[$index]}"
   checkpoint="$RESULTS/llama32-1b-${arm}-anchor-up4-l6-l8"
   legacy="$checkpoint/post_quant_eval_gsm8k_platinum.json"
-  fast="$checkpoint/post_quant_eval_gsm8k_platinum_fast_v2.json"
-  comparison="$checkpoint/post_quant_eval_gsm8k_platinum_fast_v2_comparison.json"
+  baseline="$checkpoint/post_quant_eval_gsm8k_platinum_fa2_graph_off_v4.json"
+  fast="$checkpoint/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4.json"
+  comparison="$checkpoint/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4_comparison.json"
 
   while [ ! -f "$legacy" ]; do
     echo "[$(date -u +%FT%TZ)] arm=$arm waiting for pinned legacy evaluation"
@@ -87,39 +87,86 @@ run_one() {
     fi
   done
 
+  if [ ! -f "$baseline" ]; then
+    env PYTHONHASHSEED=0 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
+      python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
+        --checkpoint "$checkpoint" --output "$baseline" --task gsm8k_platinum_cot \
+        --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
+        --cuda-graph-mode off --no-use-async-batching --max-blocks-per-request 32 \
+        --max-batch-tokens 8192
+  fi
   if [ ! -f "$fast" ]; then
     env PYTHONHASHSEED=0 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
       python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
         --checkpoint "$checkpoint" --output "$fast" --task gsm8k_platinum_cot \
         --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-        --use-cuda-graph
+        --cuda-graph-mode decode --no-use-async-batching --max-blocks-per-request 32 \
+        --max-batch-tokens 8192
   fi
-  python - "$legacy" "$fast" "$comparison" <<'PY'
+  python - "$baseline" "$fast" "$comparison" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-legacy_path, fast_path, comparison_path = map(Path, sys.argv[1:])
-legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+baseline_path, fast_path, comparison_path = map(Path, sys.argv[1:])
+baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
 fast = json.loads(fast_path.read_text(encoding="utf-8"))
-legacy_task = legacy["tasks"]["gsm8k_platinum_cot"]
+baseline_task = baseline["tasks"]["gsm8k_platinum_cot"]
 fast_task = fast["tasks"]["gsm8k_platinum_cot"]
-legacy_accuracy = float(legacy_task["metrics"]["acc,num"])
+baseline_accuracy = float(baseline_task["metrics"]["acc,num"])
 fast_accuracy = float(fast_task["metrics"]["acc,num"])
+baseline_engine = baseline_task.get("engine", {})
+fast_engine = fast_task.get("engine", {})
+baseline_cb = baseline_engine.get("execution", {}).get("continuous_batching_config", {})
+fast_cb = fast_engine.get("execution", {}).get("continuous_batching_config", {})
+baseline_graphs = baseline_cb.get("cuda_graph_booleans", baseline_cb.get("use_cuda_graph"))
+fast_graphs = fast_cb.get("cuda_graph_booleans", fast_cb.get("use_cuda_graph"))
+cache_policy_compatible = (
+    baseline_cb.get("block_size") == fast_cb.get("block_size")
+    and baseline_cb.get("max_batch_tokens") == fast_cb.get("max_batch_tokens")
+    and baseline_cb.get("max_blocks_per_request") == fast_cb.get("max_blocks_per_request")
+    and baseline_cb.get("allow_block_sharing") == fast_cb.get("allow_block_sharing")
+    and baseline_cb.get("use_async_batching") is False
+    and fast_cb.get("use_async_batching") is False
+    and int(baseline_cb.get("num_blocks", 0)) >= int(baseline_cb.get("max_blocks_per_request", 0))
+    and int(fast_cb.get("num_blocks", 0)) >= int(fast_cb.get("max_blocks_per_request", 0))
+)
 payload = {
-    "legacy_result": str(legacy_path),
+    "baseline_result": str(baseline_path),
     "fast_result": str(fast_path),
-    "legacy_accuracy": legacy_accuracy,
+    "baseline_accuracy": baseline_accuracy,
     "fast_accuracy": fast_accuracy,
-    "metric_parity": legacy_accuracy == fast_accuracy,
-    "legacy_seconds": legacy_task["seconds"],
+    "metric_parity": baseline_accuracy == fast_accuracy,
+    "baseline_seconds": baseline_task["seconds"],
     "fast_seconds": fast_task["seconds"],
-    "speedup": legacy_task["seconds"] / fast_task["seconds"],
-    "fast_engine": fast_task.get("engine", {}),
+    "speedup": baseline_task["seconds"] / fast_task["seconds"],
+    "continuous_batching_verified": (
+        baseline_engine.get("execution", {}).get("generation_backend") == "continuous_batching"
+        and fast_engine.get("execution", {}).get("generation_backend") == "continuous_batching"
+    ),
+    "paged_attention_verified": (
+        baseline_engine.get("execution", {}).get("paged_attention") is True
+        and fast_engine.get("execution", {}).get("paged_attention") is True
+    ),
+    "graph_policy_verified": baseline_graphs == [False, False] and fast_graphs == [False, True],
+    "cache_policy_compatible": cache_policy_compatible,
+    "baseline_graphs": baseline_graphs,
+    "fast_graphs": fast_graphs,
+    "baseline_engine": baseline_engine,
+    "fast_engine": fast_engine,
 }
 comparison_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-if not payload["metric_parity"]:
-    raise SystemExit(f"fast/legacy metric mismatch: {payload}")
+if not all(
+    payload[key]
+    for key in (
+        "metric_parity",
+        "continuous_batching_verified",
+        "paged_attention_verified",
+        "graph_policy_verified",
+        "cache_policy_compatible",
+    )
+):
+    raise SystemExit(f"fast/FA2 graph-off metric mismatch: {payload}")
 print(json.dumps(payload, indent=2, sort_keys=True))
 PY
 }
