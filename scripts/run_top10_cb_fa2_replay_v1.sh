@@ -52,7 +52,10 @@ wait_idle() {
 
 run_arm() {
   local index="$1" gpu="$2" name="${names[$index]}" arm="${arm_ids[$index]}" checkpoint="${checkpoints[$index]}"
-  local out="$RESULTS/$name" baseline="$out/post_quant_eval_gsm8k_platinum_fa2_graph_off_v4.json" fast="$out/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4.json" summary="$out/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4_comparison.json"
+  local out="$RESULTS/$name"
+  local baseline="$out/post_quant_eval_gsm8k_platinum_fa2_graph_off_v4.json"
+  local fast="$out/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4.json"
+  local summary="$out/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4_comparison.json"
   mkdir -p "$out"
   [ -f "$checkpoint/model.safetensors.index.json" ] || { echo "missing checkpoint $checkpoint" >&2; return 1; }
   wait_idle "$gpu"
