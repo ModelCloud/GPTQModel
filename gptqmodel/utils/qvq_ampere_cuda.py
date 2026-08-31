@@ -32,9 +32,10 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
 _SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
-_AutotuneCacheKey = tuple[int, torch.dtype, int, int, int, int, int]
+_AutotuneCacheKey = tuple[int, torch.dtype, torch.Size, int, int, int]
 _AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
+_P32_TRANSITION_BITS = {2: 4, 2.5: 5, 3: 6, 3.5: 7}
 
 
 def _project_root() -> Path:
@@ -144,8 +145,7 @@ def _autotune_cache_key(
     return (
         input.get_device(),
         input.dtype,
-        int(input.shape[0]),
-        int(input.shape[1]),
+        input.shape,
         int(out_features),
         int(transition_bits),
         int(bank_alt_id),
@@ -308,7 +308,12 @@ def qvq_p32_window_ampere(
 ) -> torch.Tensor:
     """Run exact continuous-window P32 with FP16 WMMA and FP32 accumulation."""
 
-    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    try:
+        transition_bits = None if isinstance(bits, bool) else _P32_TRANSITION_BITS[bits]
+    except (KeyError, TypeError):
+        transition_bits = None
+    if transition_bits is None:
+        transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
     if split_count == 0:
@@ -340,7 +345,7 @@ def qvq_p32_window_ampere(
                     transition_bits,
                     out_features,
                     bank_alt_id,
-                    min(cached, int(input.shape[1]) // 16),
+                    cached,
                 )
 
         if split_count == 0:

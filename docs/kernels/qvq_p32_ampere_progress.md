@@ -666,6 +666,15 @@ changes. The matched M1 full-KV geomean improves again from 0.037096 ms to
 0.036836 ms (`1.007x`), with exact outputs; the result is stored in
 `artifacts/a100_p32_window/v13_m1_fullkv_cached_env.json`.
 
+The third progression represents M and K directly with the tensor's immutable
+`torch.Size` in the in-memory key, while retaining the integer CUDA device
+index, dtype, N, rate, and bank variant. It also maps the four supported P32
+rates directly on the hot path and removes a redundant cached-split clamp; the
+cold and uncommon-rate paths retain full validation. The host stub launch
+falls from 1.66 us to 1.24 us. The matched M1 full-KV screen improves from
+0.036836 ms to 0.036605 ms (`1.006x`) with exact outputs, stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_shape_key.json`.
+
 ## Reproduction
 
 ```bash
