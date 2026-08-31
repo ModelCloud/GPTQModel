@@ -74,7 +74,8 @@ run_arm() {
   python - "$baseline" "$fast" "$summary" "$name" "$arm" "$gpu" "$checkpoint" <<'PY'
 import json, sys
 from pathlib import Path
-bpath, fpath, spath, name, arm, gpu, checkpoint = map(Path, sys.argv[1:])
+bpath, fpath, spath = map(Path, sys.argv[1:4])
+name, arm, gpu, checkpoint = sys.argv[4:]
 b = json.loads(bpath.read_text()); f = json.loads(fpath.read_text())
 bt = b['tasks']['gsm8k_platinum_cot']; ft = f['tasks']['gsm8k_platinum_cot']
 be = bt.get('engine', {}); fe = ft.get('engine', {}); bx = be.get('execution', {}); fx = fe.get('execution', {})
@@ -83,7 +84,7 @@ bg = bc.get('cuda_graph_booleans', bc.get('use_cuda_graph')); fg = fc.get('cuda_
 def accuracy(t): return float(t['metrics']['acc,num'])
 def correct(t): return round(accuracy(t) * 1209)
 payload = {
-  'arm_name': str(name), 'arm_id': str(arm), 'gpu': int(gpu), 'checkpoint': str(checkpoint), 'task': 'gsm8k_platinum_cot', 'rows': 1209,
+  'arm_name': name, 'arm_id': arm, 'gpu': int(gpu), 'checkpoint': checkpoint, 'task': 'gsm8k_platinum_cot', 'rows': 1209,
   'baseline_result': str(bpath), 'decode_graph_result': str(fpath), 'graph_off_correct': correct(bt), 'graph_off_accuracy': accuracy(bt),
   'decode_graph_correct': correct(ft), 'decode_graph_accuracy': accuracy(ft), 'graph_off_seconds': bt['seconds'], 'decode_graph_seconds': ft['seconds'],
   'speedup': bt['seconds'] / ft['seconds'], 'metric_parity': accuracy(bt) == accuracy(ft),
