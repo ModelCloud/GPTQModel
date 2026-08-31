@@ -114,9 +114,10 @@ Hopper-only hardware:
     zeroed to preserve the `m16n8k16` contract, while the matching lower FP32
     outputs remain transient. Full-KV retains `ldmatrix.x4`, which is faster
     once its small launch/reduction overhead dominates.
-22. On M16 MLP-gate/up, specialize both `N=17408` and `K=5120`. The fixed K
-    makes the activation row stride and K-tile geometry compile-time values;
-    unknown K values retain the runtime fallback.
+22. On the M16 full-Q, full-KV, linear-QKV, linear-Z, and MLP-gate/up routes,
+    specialize both N and `K=5120`. The fixed K makes the activation row
+    stride and K-tile geometry compile-time values; unknown K values retain
+    the runtime fallback.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -1050,6 +1051,15 @@ control, all four rates improve; the median and mean geomean gains are 0.835%
 and 0.726%. Exactness passes 28/28. The candidate is
 `artifacts/a100_p32_window/v16_m16_mlpgate_statick_candidate.json`; its control
 is `v16_m16_mlpgate_static_candidate.json` from the fourth progression.
+
+The seventh v16 progression expands compile-time `K=5120` to the other four
+unambiguous M16 N routes: full-Q, full-KV, linear-QKV, and linear-Z. In the
+matched 30-warmup/500-iteration five-shape screen (including the already
+specialized MLP-gate control), the median and mean geomeans improve 1.575%
+and 1.254%. Every newly changed shape improves by median; full-KV gains
+5.206%, full-Q 1.136%, linear-QKV 0.806%, and linear-Z 0.810%. Exactness
+passes 28/28. The artifact is
+`artifacts/a100_p32_window/v16_m16_statick_short_candidate.json`.
 
 Further v16 experiments rejected after the x2 checkpoint are retained as
 untracked diagnostics. Omitting lower shared rows regressed 0.740%, async
