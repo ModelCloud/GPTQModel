@@ -106,7 +106,7 @@ same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 | M1 (v2) | 28 | 7.701x | 0.952x-29.848x | 2.632e-4 |
 | M1 (v3, eight-way scalar split) | 28 | 7.918x | 0.952x-29.839x | 2.632e-4 |
 | M1 (v4, sixteen-way scalar split) | 28 | 9.330x | 1.020x-31.519x | 2.632e-4 |
-| M1 (v6, thirty-two-way scalar split) | 28 | 10.133x | 1.214x-35.168x | 2.632e-4 |
+| M1 (v6, thirty-two-way scalar split) | 28 | 9.620x | 1.041x-35.168x | 2.632e-4 |
 
 M16 per-shape speedup ranges across W2-W3.5:
 
@@ -129,7 +129,7 @@ to 0.090268 ms (`1.028x` over v2, `1.110x` over the prior checkpoint); full-Q
 W2 reaches 0.084992 ms. The v4 sixteen-way scalar split lowers the geometric
 mean again to 0.076604 ms (`1.178x` over v3), with full-Q W2 at 0.072704 ms.
 The v6 thirty-two-way scalar split lowers the geometric mean again to
-0.070489 ms (`1.087x` over v4), with full-Q W2 at 0.065536 ms. This is
+0.074286 ms (`1.031x` over v4), with full-Q W2 at 0.066560 ms. This is
 accepted forward progress, but the additional `2x` Ampere stretch target
 remains open.
 
