@@ -714,25 +714,9 @@ __global__ void reduce_split_kernel(
   if (index >= output_values) {
     return;
   }
-  float accumulator0 = 0.0f;
-  float accumulator1 = 0.0f;
-  float accumulator2 = 0.0f;
-  float accumulator3 = 0.0f;
-  int split = 0;
-  for (; split + 3 < split_count; split += 4) {
-    accumulator0 +=
-        partial_output[static_cast<int64_t>(split) * output_values + index];
-    accumulator1 +=
-        partial_output[static_cast<int64_t>(split + 1) * output_values + index];
-    accumulator2 +=
-        partial_output[static_cast<int64_t>(split + 2) * output_values + index];
-    accumulator3 +=
-        partial_output[static_cast<int64_t>(split + 3) * output_values + index];
-  }
-  float accumulator = (accumulator0 + accumulator1) + (accumulator2 + accumulator3);
-  for (; split < split_count; ++split) {
-    accumulator +=
-        partial_output[static_cast<int64_t>(split) * output_values + index];
+  float accumulator = 0.0f;
+  for (int split = 0; split < split_count; ++split) {
+    accumulator += partial_output[static_cast<int64_t>(split) * output_values + index];
   }
   output[index] = accumulator;
 }

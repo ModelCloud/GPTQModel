@@ -504,6 +504,7 @@ more decode instructions without expanding the compact state representation.
 | Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
 | First v13 lock-free full-matrix sample | Five consecutive early-M2 rows jumped by 3.5-7.5x while their planar controls also jumped, then both paths returned to normal. The unaffected 135 rows improved 0.99% versus main. | Discard the aggregate as a transient-contaminated run; retain `qwen38_v13_lockfree_all_29a69382.json` only as a diagnostic and rerun the complete idle-gated matrix. |
+| Four-accumulator split reducer | The matched M1 full-KV probe improved 0.68%, but the clean 140-case refresh regressed from 0.074518 ms to 0.074948 ms, with M1-M4 all slower. | Rejected and reverted; retain the single-accumulator deterministic reducer. The false-positive focused and full results remain in the v13 artifacts. |
 
 ## Post-merge origin/main baseline (v11)
 
@@ -695,13 +696,13 @@ cases, latency falls from 0.075809 ms on `db785848` to 0.074518 ms: `1.017x`,
 or 1.70% lower. The result is stored in
 `artifacts/a100_p32_window/qwen38_v13_cached_capability_all_c23a15f0.json`.
 
-The fifth progression exposes split-reduction load-level parallelism with four
-independent deterministic FP32 accumulators before their fixed-order final
-sum. The output mapping and coalesced split-plane reads are unchanged. The
-matched M1 full-KV geomean improves from 0.036334 ms to 0.036086 ms (`1.007x`),
-while maximum absolute error decreases from 0.000009537 to 0.000007868. The
-result is stored in
-`artifacts/a100_p32_window/v13_m1_fullkv_reducer_ilp4.json`.
+The attempted fifth progression exposed split-reduction load-level parallelism
+with four independent FP32 accumulators. Its M1 full-KV probe improved from
+0.036334 ms to 0.036086 ms, but that result did not generalize: the clean
+140-case geomean regressed from 0.074518 ms to 0.074948 ms, with M1-M4 all
+slower. The experiment is reverted. Its focused and full diagnostic results
+are stored in `artifacts/a100_p32_window/v13_m1_fullkv_reducer_ilp4.json` and
+`artifacts/a100_p32_window/qwen38_v13_reducer_ilp4_all_09515686.json`.
 
 ## Reproduction
 
