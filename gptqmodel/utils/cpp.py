@@ -13,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 import traceback
@@ -61,6 +62,19 @@ _LOCAL_INCLUDE_PATTERN = pcre.compile(
     r'^\s*#\s*include\s+"([^"]+)"',
     flags=pcre.Flag.MULTILINE,
 )
+_SOURCE_INCLUDE_PATTERN = pcre.compile(
+    r'^\s*#\s*include\s+([<"])([^">]+)[">]',
+    flags=pcre.Flag.MULTILINE,
+)
+_TORCH_INCLUDE_PATTERN = pcre.compile(
+    r'^\s*#\s*include\s+[<"]([^">]+)[">]',
+    flags=pcre.Flag.MULTILINE,
+)
+_TORCH_ACCELERATOR_LOCAL_TAG_PATTERN = pcre.compile(r"^(?:cpu|cu\d+|rocm[\d.]+|xpu)$")
+_C_COMMENT_PATTERN = pcre.compile(r"//[^\n]*|/\*[\s\S]*?\*/")
+_PYTHON_ABI_USAGE_PATTERN = pcre.compile(r"\b(?:Py[A-Z]\w*|PYBIND11_\w+)\b|\bpy::")
+_REGISTER_EXTENSION_PATTERN = pcre.compile(r"(?m)\bREGISTER_EXTENSION\s*\(")
+_STABLE_TORCH_REGISTRATION_PATTERN = pcre.compile(r"\bSTABLE_TORCH_LIBRARY(?:_[A-Z]+)?\s*\(")
 _NVCC_RELEASE_PATTERN = pcre.compile(r"release\s+(\d+)\.(\d+)")
 _NVCC_VERSION_LOCK = threading.Lock()
 _NVCC_VERSION_CACHE: tuple[int, int] | None = None
@@ -78,6 +92,32 @@ _CUDA_BUILD_SCHEDULING_FLAG_PREFIXES = ("--threads=", "--split-compile=")
 _TORCH_OPS_FILE_LOCK_TIMEOUT_ENV = "GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT"
 _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS = 600.0
 _TORCH_OPS_FILE_LOCK_POLL_SECONDS = 0.1
+
+
+def _python_abi_tag() -> str:
+    """Return the interpreter's extension-module ABI tag."""
+
+    soabi = sysconfig.get_config_var("SOABI")
+    if soabi:
+        return str(soabi)
+    return f"cpython-{sys.version_info.major}.{sys.version_info.minor}{sys.abiflags}"
+
+
+def _torch_cpu_cache_version() -> str:
+    """Return torch.__version__ with only accelerator-wheel local tags removed."""
+
+    version = torch.__version__
+    public, sep, local = version.partition("+")
+    if sep and _TORCH_ACCELERATOR_LOCAL_TAG_PATTERN.match(local):
+        return public
+    return version
+
+
+def torch_stable_abi_target_define(major: int, minor: int) -> str:
+    """Return the stable-ABI target define for a minimum torch major/minor version."""
+
+    encoded_version = (int(major) << 56) | (int(minor) << 48)
+    return f"-DTORCH_TARGET_VERSION=0x{encoded_version:016X}"
 
 
 def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
@@ -732,6 +772,8 @@ class TorchOpsJitExtension:
         requires_cuda: bool = False,
         merge_visible_cuda_arch_override: bool = True,
         binary_names: Optional[Sequence[str]] = None,
+        python_abi_dependent: bool | None = None,
+        torch_stable_abi_target: tuple[int, int] | None = None,
     ) -> None:
         self.name = name
         self.namespace = namespace
@@ -749,12 +791,18 @@ class TorchOpsJitExtension:
         self.requires_cuda = bool(requires_cuda)
         self.merge_visible_cuda_arch_override = bool(merge_visible_cuda_arch_override)
         self.binary_names = tuple(binary_names or (name,))
+        self.python_abi_dependent = python_abi_dependent
+        self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
         self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
         self._load_result = False
         self._last_error = ""
         self._namespace_cache: Optional[object] = None
         self._op_cache: dict[str, object] = {}
+        self._source_abi_detection_cache: dict[
+            tuple[tuple[tuple[str, str], ...], tuple[str, ...]],
+            tuple[bool, bool, tuple[str, ...]],
+        ] = {}
         self._lock = self._get_shared_lock()
 
     @classmethod
@@ -782,6 +830,20 @@ class TorchOpsJitExtension:
         if not self.requires_cuda:
             return _dedupe_path_strings(include_paths)
         return cuda_include_paths_with_fallback(include_paths)
+
+    def _with_stable_abi_target(self, flags: Sequence[str]) -> list[str]:
+        resolved = list(flags)
+        if self.torch_stable_abi_target is not None:
+            target_define = torch_stable_abi_target_define(*self.torch_stable_abi_target)
+            if target_define not in resolved:
+                resolved.append(target_define)
+        return resolved
+
+    def _resolved_extra_cflags(self) -> list[str]:
+        return self._with_stable_abi_target(self._resolve_sequence(self.extra_cflags))
+
+    def _resolved_extra_cuda_cflags(self) -> list[str]:
+        return self._with_stable_abi_target(self._resolve_sequence(self.extra_cuda_cflags))
 
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""
@@ -835,7 +897,7 @@ class TorchOpsJitExtension:
             pass
 
     def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
-        """Hash one source file plus recursively discovered quoted local includes."""
+        """Hash one source file plus recursively discovered local includes."""
 
         payload: list[str] = []
         visited: set[Path] = set()
@@ -861,34 +923,163 @@ class TorchOpsJitExtension:
             payload.append(hashlib.sha256(source_bytes).hexdigest())
 
             source_text = source_bytes.decode("utf-8", errors="ignore")
-            for include_name in _LOCAL_INCLUDE_PATTERN.findall(source_text):
+            for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
                 included_path = _resolve_local_include_path(
                     include_name,
                     including_path=normalized,
                     include_search_roots=include_search_roots,
                 )
                 if included_path is None:
-                    payload.append(f"missing_include={normalized}:{include_name}")
+                    if delimiter == '"':
+                        payload.append(f"missing_include={normalized}:{include_name}")
                     continue
                 visit(included_path)
 
         visit(Path(source))
         return payload
 
+    def _source_texts(self, source: str, include_paths: Sequence[str]) -> list[tuple[Path, str]]:
+        """Collect source text and recursively discovered local includes."""
+
+        texts: list[tuple[Path, str]] = []
+        visited: set[Path] = set()
+        include_search_roots = [Path(path).expanduser().resolve(strict=False) for path in include_paths]
+
+        def visit(path: Path) -> None:
+            normalized = path.expanduser().resolve(strict=False)
+            if normalized in visited or not normalized.exists():
+                return
+            visited.add(normalized)
+            try:
+                source_text = normalized.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return
+            texts.append((normalized, source_text))
+            for _, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
+                included_path = _resolve_local_include_path(
+                    include_name,
+                    including_path=normalized,
+                    include_search_roots=include_search_roots,
+                )
+                if included_path is not None:
+                    visit(included_path)
+
+        visit(Path(source))
+        return texts
+
+    def _source_abi_details(
+        self,
+        sources: Sequence[str],
+        include_paths: Sequence[str],
+    ) -> tuple[bool, bool, tuple[str, ...]]:
+        """Detect ABI requirements and report non-stable headers."""
+
+        source_texts = [
+            item
+            for source in sources
+            for item in self._source_texts(source, include_paths)
+        ]
+        source_key = tuple(
+            (str(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
+            for path, text in source_texts
+        )
+        cache_key = (source_key, tuple(include_paths))
+        cached = self._source_abi_detection_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        python_dependent = False
+        stable_registration = False
+        stable_torch_headers = True
+        non_stable_headers: set[str] = set()
+        for _, source_text in source_texts:
+            marker_text = _C_COMMENT_PATTERN.sub("", source_text)
+            if _PYTHON_ABI_USAGE_PATTERN.search(marker_text) or _REGISTER_EXTENSION_PATTERN.search(marker_text):
+                python_dependent = True
+            if _STABLE_TORCH_REGISTRATION_PATTERN.search(marker_text):
+                stable_registration = True
+            for include_name in _TORCH_INCLUDE_PATTERN.findall(marker_text):
+                python_include = (
+                    include_name == "Python.h"
+                    or include_name.startswith("pybind11/")
+                    or include_name in {"torch/extension.h", "torch/python.h"}
+                )
+                if python_include:
+                    python_dependent = True
+                is_non_stable = (
+                    include_name.startswith("ATen/")
+                    or include_name.startswith("c10/")
+                    or include_name.startswith("caffe2/")
+                    or (
+                        include_name.startswith("torch/")
+                        and not (
+                            include_name.startswith("torch/csrc/stable/")
+                            or include_name.startswith("torch/headeronly/")
+                        )
+                    )
+                )
+                if is_non_stable:
+                    stable_torch_headers = False
+                    non_stable_headers.add(include_name)
+
+        detected = (
+            python_dependent,
+            stable_registration and stable_torch_headers,
+            tuple(sorted(non_stable_headers)),
+        )
+        self._source_abi_detection_cache[cache_key] = detected
+        return detected
+
+    def _source_abi_flags(self, sources: Sequence[str], include_paths: Sequence[str]) -> tuple[bool, bool]:
+        """Detect Python and torch ABI requirements from sources and local includes."""
+
+        detected = self._source_abi_details(sources, include_paths)
+        return detected[:2]
+
+    def _resolved_abi_flags(self, sources: Sequence[str], include_paths: Sequence[str]) -> tuple[bool, bool]:
+        detected_python_abi_dependent, _, non_stable_headers = self._source_abi_details(
+            sources,
+            include_paths,
+        )
+        if self.torch_stable_abi_target is not None and non_stable_headers:
+            raise RuntimeError(
+                f"{self.display_name} explicitly requests the Torch stable ABI but uses non-stable header "
+                f"{non_stable_headers[0]!r}"
+            )
+        return (
+            self.python_abi_dependent
+            if self.python_abi_dependent is not None
+            else detected_python_abi_dependent,
+            self.torch_stable_abi_target is not None,
+        )
+
     def _cache_fingerprint(self) -> str:
         """Hash the effective op surface and source metadata to avoid stale cache reuse."""
 
         payload: list[str] = [self.name, self.namespace, *self.required_ops]
-        payload.append(f"python={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
-        payload.append(f"torch={torch.__version__}")
-        payload.append(f"torch_cuda={torch.version.cuda or 'none'}")
-        payload.extend(self._cuda_cache_fingerprint_payload())
+        sources = self._resolve_sequence(self.sources)
+        extra_cflags = self._resolved_extra_cflags()
+        extra_cuda_cflags = self._resolved_extra_cuda_cflags()
         include_paths = self._resolved_extra_include_paths()
-        for source in self._resolve_sequence(self.sources):
+        python_abi_dependent, torch_stable_abi = self._resolved_abi_flags(sources, include_paths)
+        if python_abi_dependent:
+            payload.append(f"python_abi={_python_abi_tag()}")
+        else:
+            payload.append("python_abi=agnostic")
+        if torch_stable_abi:
+            major, minor = self.torch_stable_abi_target
+            payload.append(f"torch_abi=stable-{major}.{minor}")
+        else:
+            torch_version = torch.__version__ if self.requires_cuda else _torch_cpu_cache_version()
+            payload.append(f"torch={torch_version}")
+        if self.requires_cuda:
+            payload.append(f"torch_cuda={torch.version.cuda or 'none'}")
+        payload.extend(self._cuda_cache_fingerprint_payload())
+        for source in sources:
             payload.extend(self._source_cache_fingerprint_payload(source, include_paths))
 
-        payload.extend(self._resolve_sequence(self.extra_cflags))
-        payload.extend(_cuda_cache_relevant_flags(self._resolve_sequence(self.extra_cuda_cflags)))
+        payload.extend(extra_cflags)
+        payload.extend(_cuda_cache_relevant_flags(extra_cuda_cflags))
         payload.extend(include_paths)
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
@@ -1024,8 +1215,31 @@ class TorchOpsJitExtension:
 
         return self._last_error
 
+    def _stable_abi_runtime_error(self) -> str:
+        if self.torch_stable_abi_target is None:
+            return ""
+        torch_public = torch.__version__.partition("+")[0]
+        try:
+            torch_major_minor = tuple(int(part) for part in torch_public.split(".")[:2])
+        except (TypeError, ValueError):
+            return ""
+        if torch_major_minor < self.torch_stable_abi_target:
+            major, minor = self.torch_stable_abi_target
+            return (
+                f"{self.display_name}: requires torch >= {major}.{minor} "
+                f"(compiled against the torch {major}.{minor} stable ABI); found torch {torch.__version__}"
+            )
+        return ""
+
     def load(self) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
+
+        stable_abi_error = self._stable_abi_runtime_error()
+        if stable_abi_error:
+            self._load_attempted = True
+            self._load_result = False
+            self._last_error = stable_abi_error
+            return False
 
         if self._load_attempted and self._load_result and not self.force_rebuild_enabled():
             return True
@@ -1122,10 +1336,10 @@ class TorchOpsJitExtension:
                         "is_python_module": False,
                         "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
                     }
-                    extra_cflags = self._resolve_sequence(self.extra_cflags)
+                    extra_cflags = self._resolved_extra_cflags()
                     if extra_cflags:
                         kwargs["extra_cflags"] = extra_cflags
-                    extra_cuda_cflags = self._resolve_sequence(self.extra_cuda_cflags)
+                    extra_cuda_cflags = self._resolved_extra_cuda_cflags()
                     if extra_cuda_cflags:
                         kwargs["extra_cuda_cflags"] = extra_cuda_cflags
                     if extra_include_paths:
@@ -1301,6 +1515,7 @@ def _pack_block_extension() -> TorchOpsJitExtension:
             extra_ldflags=[],
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
+            python_abi_dependent=False,
         )
     return _PACK_BLOCK_TORCH_OPS_EXTENSION
 
@@ -1322,6 +1537,7 @@ def _floatx_cpu_extension() -> TorchOpsJitExtension:
             extra_ldflags=[],
             verbose_env="GPTQMODEL_EXT_VERBOSE",
             requires_cuda=False,
+            python_abi_dependent=False,
         )
     return _FLOATX_CPU_TORCH_OPS_EXTENSION
 

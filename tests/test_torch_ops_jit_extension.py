@@ -8,11 +8,13 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from gptqmodel.utils import cpp as cpp_module
+from gptqmodel.utils import swordfish
 
 
 class _FakeSpinner:
@@ -58,6 +60,195 @@ def _make_loader(tmp_path: Path, **overrides) -> cpp_module.TorchOpsJitExtension
     }
     params.update(overrides)
     return cpp_module.TorchOpsJitExtension(**params)
+
+
+def test_torch_ops_jit_extension_fingerprint_uses_python_abi_only_when_dependent(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text("PYBIND11_MODULE(unit_test, m) {}\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)])
+    payloads = []
+    real_sha256 = cpp_module.hashlib.sha256
+
+    def capture_sha256(data=b""):
+        payloads.append(data)
+        return real_sha256(data)
+
+    monkeypatch.setattr(cpp_module.hashlib, "sha256", capture_sha256)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=12, micro=9))
+    monkeypatch.setattr(
+        cpp_module.sysconfig,
+        "get_config_var",
+        lambda name: "cpython-312-x86_64-linux-gnu" if name == "SOABI" else None,
+    )
+
+    first_fingerprint = loader._cache_fingerprint()
+    first_payload = payloads[-1].decode()
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+    second_fingerprint = loader._cache_fingerprint()
+
+    assert first_fingerprint == second_fingerprint
+    assert "python_abi=cpython-312-x86_64-linux-gnu" in first_payload
+    assert "python=3." not in first_payload
+
+
+def test_torch_ops_jit_extension_agnostic_fingerprint_ignores_python_version(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text("int kernel() { return 1; }\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)])
+
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=12, micro=9))
+    first_fingerprint = loader._cache_fingerprint()
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+
+    assert loader._cache_fingerprint() == first_fingerprint
+
+
+def test_torch_ops_jit_extension_python_abi_falls_back_without_soabi(monkeypatch):
+    monkeypatch.setattr(cpp_module.sysconfig, "get_config_var", lambda name: None)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13))
+    monkeypatch.setattr(cpp_module.sys, "abiflags", "t")
+
+    assert cpp_module._python_abi_tag() == "cpython-3.13t"
+
+
+def test_torch_ops_jit_extension_detects_conservative_python_abi_markers(tmp_path):
+    markers = (
+        "#include <Python.h>\n",
+        '#include "Python.h"\n',
+        "#include <pybind11/pybind11.h>\n",
+        '#include "pybind11/pybind11.h"\n',
+        "#include <torch/extension.h>\n",
+        '#include "torch/python.h"\n',
+        "PyObject *object;\n",
+        "PyErr_Clear();\n",
+        "py::handle object;\n",
+        'PYBIND11_TYPE_CASTER(int, _("int"));\n',
+    )
+    for index, marker in enumerate(markers):
+        source = tmp_path / f"marker_{index}.cpp"
+        source.write_text(marker, encoding="utf-8")
+        loader = _make_loader(tmp_path, sources=[str(source)])
+
+        assert loader._source_abi_flags([str(source)], []) == (True, False)
+
+
+@pytest.mark.parametrize("header", ("c10/util/SmallVector.h", "caffe2/utils/TypeCast.h"))
+def test_torch_ops_jit_extension_explicit_stable_abi_rejects_nonstable_headers(tmp_path, header):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(f"#include <{header}>\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 10))
+
+    with pytest.raises(RuntimeError, match=header.replace("/", r"\/")):
+        loader._cache_fingerprint()
+
+
+def test_torch_ops_jit_extension_cpu_and_cuda_fingerprints_handle_wheel_switch(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text("int kernel() { return 1; }\n", encoding="utf-8")
+    cpu_loader = _make_loader(tmp_path, sources=[str(source)])
+    cuda_loader = _make_loader(tmp_path, sources=[str(source)], requires_cuda=True)
+
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+cpu")
+    cpu_fingerprint = cpu_loader._cache_fingerprint()
+    cuda_fingerprint = cuda_loader._cache_fingerprint()
+    for accelerator_tag in ("cu128", "rocm6.2", "xpu"):
+        monkeypatch.setattr(cpp_module.torch, "__version__", f"2.8.0+{accelerator_tag}")
+        assert cpu_loader._cache_fingerprint() == cpu_fingerprint
+        assert cuda_loader._cache_fingerprint() != cuda_fingerprint
+
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0")
+    plain_fingerprint = cpu_loader._cache_fingerprint()
+    assert plain_fingerprint == cpu_fingerprint
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+gitabc1234")
+    assert cpu_loader._cache_fingerprint() != cpu_fingerprint
+
+
+def test_torch_ops_jit_extension_fingerprint_includes_stable_abi_target(tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(
+        '#include <torch/csrc/stable/library.h>\nSTABLE_TORCH_LIBRARY(unit_test, m) {}\n',
+        encoding="utf-8",
+    )
+    loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 10))
+    first_fingerprint = loader._cache_fingerprint()
+    target_211_loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 11))
+
+    assert target_211_loader._cache_fingerprint() != first_fingerprint
+    assert "-DTORCH_TARGET_VERSION=0x020A000000000000" in loader._resolved_extra_cflags()
+    assert "-DTORCH_TARGET_VERSION=0x020A000000000000" in loader._resolved_extra_cuda_cflags()
+
+
+def test_torch_ops_jit_extension_auto_detected_stable_sources_keep_torch_version(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(
+        '#include <torch/csrc/stable/library.h>\nSTABLE_TORCH_LIBRARY(unit_test, m) {}\n',
+        encoding="utf-8",
+    )
+    loader = _make_loader(tmp_path, sources=[str(source)])
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+cpu")
+    first_fingerprint = loader._cache_fingerprint()
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.13.0+cpu")
+
+    assert loader._cache_fingerprint() != first_fingerprint
+
+
+def test_torch_ops_jit_extension_stable_target_rejects_older_torch(monkeypatch, tmp_path):
+    loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.9.0")
+    prebuilt_calls = []
+
+    def unexpected_prebuilt_load(_build_root):
+        prebuilt_calls.append(True)
+        raise AssertionError("stable ABI floor must prevent cache lookup")
+
+    monkeypatch.setattr(loader, "_try_load_prebuilt_library", unexpected_prebuilt_load)
+
+    assert loader.load() is False
+    assert "requires torch >= 2.10" in loader.last_error_message()
+    assert prebuilt_calls == []
+
+
+def test_torch_ops_jit_extension_resolves_angle_bracket_local_includes(tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    include_root = tmp_path / "include"
+    include_root.mkdir()
+    wrapper = include_root / "wrapper.h"
+    source.write_text(
+        "#include <wrapper.h>\n#include <nonexistent_sys.h>\nint kernel() { return 1; }\n",
+        encoding="utf-8",
+    )
+    wrapper.write_text("#include <Python.h>\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)], extra_include_paths=[str(include_root)])
+
+    assert loader._source_abi_flags([str(source)], [str(include_root)]) == (True, False)
+    first_fingerprint = loader._cache_fingerprint()
+    first_payload = loader._source_cache_fingerprint_payload(str(source), [str(include_root)])
+    assert not any("missing_include" in entry and "nonexistent_sys.h" in entry for entry in first_payload)
+
+    wrapper.write_text("#include <c10/util/SmallVector.h>\n", encoding="utf-8")
+    second_fingerprint = loader._cache_fingerprint()
+
+    assert second_fingerprint != first_fingerprint
+    stable_loader = _make_loader(
+        tmp_path,
+        sources=[str(source)],
+        extra_include_paths=[str(include_root)],
+        torch_stable_abi_target=(2, 10),
+    )
+    with pytest.raises(RuntimeError, match=r"c10/util/SmallVector\.h"):
+        stable_loader._cache_fingerprint()
+
+
+def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
+    monkeypatch.setattr(swordfish.torch, "__version__", "2.9.1+cpu")
+
+    error = swordfish._swordfish_static_runtime_error()
+
+    assert "requires torch >= 2.10" in error
+
+
+def test_torch_stable_abi_target_define_matches_libtorch_encoding():
+    assert cpp_module.torch_stable_abi_target_define(2, 10) == "-DTORCH_TARGET_VERSION=0x020A000000000000"
 
 
 def test_default_jit_cflags_allow_noopt(monkeypatch):
