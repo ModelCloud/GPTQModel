@@ -689,6 +689,20 @@ full-KV screen improves from 0.036605 ms to 0.036334 ms (`1.007x`) with exact
 outputs, stored in
 `artifacts/a100_p32_window/v13_m1_fullkv_cached_capability.json`.
 
+The corresponding five-M refresh measures 0.059416 ms (M1), 0.065454 ms (M2),
+0.074897 ms (M4), 0.086870 ms (M8), and 0.090808 ms (M16). Across all 140
+cases, latency falls from 0.075809 ms on `db785848` to 0.074518 ms: `1.017x`,
+or 1.70% lower. The result is stored in
+`artifacts/a100_p32_window/qwen38_v13_cached_capability_all_c23a15f0.json`.
+
+The fifth progression exposes split-reduction load-level parallelism with four
+independent deterministic FP32 accumulators before their fixed-order final
+sum. The output mapping and coalesced split-plane reads are unchanged. The
+matched M1 full-KV geomean improves from 0.036334 ms to 0.036086 ms (`1.007x`),
+while maximum absolute error decreases from 0.000009537 to 0.000007868. The
+result is stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_reducer_ilp4.json`.
+
 ## Reproduction
 
 ```bash
