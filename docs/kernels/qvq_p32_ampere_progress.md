@@ -647,6 +647,15 @@ latency geomeans are 0.061476 ms (M1), 0.066533 ms (M2), 0.075695 ms (M4),
 0.088012 ms (M8), and 0.091889 ms (M16), with an all-case geomean of
 0.075809 ms. The maximum absolute error across the matrix is 0.000080109.
 
+The first v13 progression removes the Python reentrant lock from process-local
+autotune cache hits. Cold calls still acquire the lock and recheck the entry
+before timing, so concurrent misses tune once. In a matched 20-warmup,
+300-iteration M1 full-KV screen, the four-rate latency geomean falls from
+0.040170 ms with the lock to 0.037096 ms without it (`1.083x`), with exact
+outputs. The candidate and control are stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_lockfree.json` and
+`artifacts/a100_p32_window/v13_m1_fullkv_locked_control.json`.
+
 ## Reproduction
 
 ```bash

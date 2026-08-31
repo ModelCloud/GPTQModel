@@ -318,8 +318,11 @@ def qvq_p32_window_ampere(
                 out_features=int(out_features),
                 bank_alt_id=int(bank_alt_id),
             )
-            with _AUTOTUNE_CACHE_LOCK:
-                cached = _AUTOTUNE_CACHE.get(autotune_key)
+            # A cache hit only reads one process-local dictionary entry. Keep
+            # that overwhelmingly common path out of the tuning lock; the
+            # cold helper acquires the lock and rechecks before benchmarking,
+            # so concurrent misses still tune exactly once.
+            cached = _AUTOTUNE_CACHE.get(autotune_key)
             if cached is not None:
                 return _QVQ_AMPERE_EXTENSION.op("p32_window")(
                     input,
